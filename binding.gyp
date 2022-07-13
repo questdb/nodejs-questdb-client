@@ -12,10 +12,7 @@
             "conditions": [
                 [ "OS=='mac'",
                     {
-                        "libraries": ["<(module_root_dir)/lib/<(OS)/<!(node -e \"console.log('%s',require('process').arch);\")/libquestdb_client.dylib"],
-                        "link_settings": {
-                            "libraries": ["-Wl,-rpath,@loader_path/../../lib/<(OS)/<!(node -e \"console.log('%s',require('process').arch);\")"]
-                        }
+                        "libraries": ["<(module_root_dir)/lib/<(OS)/<!(node -e \"console.log('%s',require('process').arch);\")/libquestdb_client.a"]
                     }
                 ]
             ]
