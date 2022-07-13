@@ -1,0 +1,21 @@
+{
+  "name": "@questdb/nodejs-client",
+  "version": "0.0.17",
+  "description": "QuestDB Node.js Client",
+  "main": "index.js",
+  "scripts": {
+    "build": "node-gyp clean configure build",
+    "rebuild": "node-gyp rebuild"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/questdb/node-questdb-client.git"
+  },
+  "keywords": [
+    "QuestDB"
+  ],
+  "author": "QuestDB",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/questdb/node-questdb-client#readme",
+  "gypfile": true
+}
