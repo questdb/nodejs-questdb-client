@@ -9,13 +9,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/questdb/node-questdb-client.git"
+    "url": "git+ssh://git@github.com/questdb/nodejs-questdb-client.git"
   },
   "keywords": [
     "QuestDB"
   ],
   "author": "QuestDB",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/questdb/node-questdb-client#readme",
+  "homepage": "https://github.com/questdb/nodejs-questdb-client#readme",
   "gypfile": true
 }
