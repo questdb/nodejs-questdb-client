@@ -4,6 +4,7 @@
   "description": "QuestDB Node.js Client",
   "main": "index.js",
   "scripts": {
+    "postinstall": "node scripts/postinstall.js",
     "build": "node-gyp clean configure build",
     "rebuild": "node-gyp rebuild"
   },
