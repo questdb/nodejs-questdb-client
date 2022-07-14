@@ -1,9 +1,7 @@
 #include <node.h>
-#include <iostream>
-#include <string>
-#include <stdio.h>
 #include <sender.h>
 #include <questdb/ilp/line_sender.h>
+#include <iostream>
 
 namespace questdb {
 
@@ -15,11 +13,22 @@ Sender::Sender() {
 Sender::~Sender() {
 }
 
+// assumes that 'value' is either a Number or a BigInt, caller has to check before the call
+int64_t extract_int(Local<Value> value) {
+    int64_t x;
+	if (value->IsNumber()) {
+        x = value.As<Number>()->Value();
+    } else {
+        x = value.As<BigInt>()->Int64Value();
+    }
+    return x;
+}
+
 void Sender::HandleErr(Isolate* isolate, const Sender* instance) {
     size_t err_len = 0;
     const char* err_msg = line_sender_error_msg(instance->err, &err_len);
 
-    isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, err_msg).ToLocalChecked()));
+    isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, err_msg, NewStringType::kNormal, err_len).ToLocalChecked()));
 
     line_sender_opts_free(instance->opts);
     line_sender_error_free(instance->err);
@@ -138,249 +147,209 @@ void Sender::AddSymbol(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, symbol name and value expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, symbol name and value expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (symbol name) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (symbol name) should be a string")));
         return;
     }
-    const Local<String> symbolStr = args[0].As<String>();
-    const int symbolUtf8Length = symbolStr->Utf8Length(isolate);
-    char* symbol = new char[symbolUtf8Length];
-    symbolStr->WriteUtf8(isolate, symbol);
+    const String::Utf8Value symbol(isolate, args[0]);
 
 	if (!args[1]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Second argument (symbol value) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (symbol value) should be a string")));
         return;
     }
-    const Local<String> valueStr = args[1].As<String>();
-    const int valueUtf8Length = valueStr->Utf8Length(isolate);
-    char* value = new char[valueUtf8Length];
-    valueStr->WriteUtf8(isolate, value);
+    const String::Utf8Value value(isolate, args[1]);
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    DoAddSymbol(isolate, instance, symbol, value);
+    DoAddSymbol(isolate, instance, *symbol, *value);
 	args.GetReturnValue().Set(holder);
-    std::cout << "symbol=" << symbol << ", value=" << value << std::endl;
+    std::cout << "symbol=" << *symbol << ", value=" << *value << std::endl;
 }
 
 void Sender::AddString(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, column name and value expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, column name and value expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (column name) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (column name) should be a string")));
         return;
     }
-    const Local<String> columnStr = args[0].As<String>();
-    const int colUtf8Length = columnStr->Utf8Length(isolate);
-    char* column = new char[colUtf8Length];
-    columnStr->WriteUtf8(isolate, column);
+    const String::Utf8Value column(isolate, args[0]);
 
 	if (!args[1]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Second argument (string value) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (string value) should be a string")));
         return;
     }
-    const Local<String> valueStr = args[1].As<String>();
-    const int valueUtf8Length = valueStr->Utf8Length(isolate);
-    char* value = new char[valueUtf8Length];
-    valueStr->WriteUtf8(isolate, value);
+    const String::Utf8Value value(isolate, args[1]);
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    DoAddString(isolate, instance, column, value);
+    DoAddString(isolate, instance, *column, *value);
 	args.GetReturnValue().Set(holder);
-    std::cout << "column=" << column << ", value=" << value << std::endl;
+    std::cout << "column=" << *column << ", value=" << *value << std::endl;
 }
 
 void Sender::AddBool(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, column name and value expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, column name and value expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (column name) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (column name) should be a string")));
         return;
     }
-    const Local<String> columnStr = args[0].As<String>();
-    const int colUtf8Length = columnStr->Utf8Length(isolate);
-    char* column = new char[colUtf8Length];
-    columnStr->WriteUtf8(isolate, column);
+    const String::Utf8Value column(isolate, args[0]);
 
 	if (!args[1]->IsBoolean()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Second argument (boolean value) should be a boolean").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (boolean value) should be a boolean")));
         return;
     }
     const bool value = args[1].As<Boolean>()->Value();
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    DoAddBool(isolate, instance, column, value);
+    DoAddBool(isolate, instance, *column, value);
 	args.GetReturnValue().Set(holder);
-    std::cout << "column=" << column << ", value=" << value << std::endl;
+    std::cout << "column=" << *column << ", value=" << value << std::endl;
 }
 
 void Sender::AddFloat64(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, column name and value expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, column name and value expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (column name) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (column name) should be a string")));
         return;
     }
-    const Local<String> columnStr = args[0].As<String>();
-    const int colUtf8Length = columnStr->Utf8Length(isolate);
-    char* column = new char[colUtf8Length];
-    columnStr->WriteUtf8(isolate, column);
+    const String::Utf8Value column(isolate, args[0]);
 
 	if (!args[1]->IsNumber()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Second argument (float64 value) should be a number").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (float64 value) should be a number")));
         return;
     }
     const double value = args[1].As<Number>()->Value();
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    DoAddFloat64(isolate, instance, column, value);
+    DoAddFloat64(isolate, instance, *column, value);
 	args.GetReturnValue().Set(holder);
-    std::cout << "column=" << column << ", value=" << value << std::endl;
+    std::cout << "column=" << *column << ", value=" << value << std::endl;
 }
 
 void Sender::AddInt64(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, column name and value expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, column name and value expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (column name) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (column name) should be a string")));
         return;
     }
-    const Local<String> columnStr = args[0].As<String>();
-    const int colUtf8Length = columnStr->Utf8Length(isolate);
-    char* column = new char[colUtf8Length];
-    columnStr->WriteUtf8(isolate, column);
+    const String::Utf8Value column(isolate, args[0]);
 
 	if (!args[1]->IsNumber() && !args[1]->IsBigInt()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Second argument (int64 value) should be an integer").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (int64 value) should be an integer")));
         return;
     }
-    int64_t value;
-	if (args[1]->IsNumber()) {
-        value = args[1].As<Number>()->Value();
-    } else {
-        value = args[1].As<BigInt>()->Int64Value();
-    }
+    const int64_t value = extract_int(args[1]);
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    DoAddInt64(isolate, instance, column, value);
+    DoAddInt64(isolate, instance, *column, value);
 	args.GetReturnValue().Set(holder);
-    std::cout << "column=" << column << ", value=" << value << std::endl;
+    std::cout << "column=" << *column << ", value=" << value << std::endl;
 }
 
 void Sender::AddTimestamp(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, column name and value expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, column name and value expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (column name) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (column name) should be a string")));
         return;
     }
-    const Local<String> columnStr = args[0].As<String>();
-    const int colUtf8Length = columnStr->Utf8Length(isolate);
-    char* column = new char[colUtf8Length];
-    columnStr->WriteUtf8(isolate, column);
+    const String::Utf8Value column(isolate, args[0]);
 
 	if (!args[1]->IsNumber() && !args[1]->IsBigInt()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Second argument (timestamp value) should be an integer").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (timestamp value) should be an integer")));
         return;
     }
-    int64_t micros;
-	if (args[1]->IsNumber()) {
-        micros = args[1].As<Number>()->Value();
-    } else {
-        micros = args[1].As<BigInt>()->Int64Value();
-    }
+    const int64_t micros = extract_int(args[1]);
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    DoAddTimestamp(isolate, instance, column, micros);
+    DoAddTimestamp(isolate, instance, *column, micros);
 	args.GetReturnValue().Set(holder);
-    std::cout << "column=" << column << ", micros=" << micros << std::endl;
+    std::cout << "column=" << *column << ", micros=" << micros << std::endl;
 }
 
 void Sender::SetTable(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 1) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, table name expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, table name expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (table name) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (table name) should be a string")));
         return;
     }
-    const Local<String> tableStr = args[0].As<String>();
-    const int utf8Length = tableStr->Utf8Length(isolate);
-    char* table = new char[utf8Length];
-    tableStr->WriteUtf8(isolate, table);
+    const String::Utf8Value table(isolate, args[0]);
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    DoSetTable(isolate, instance, table);
+    DoSetTable(isolate, instance, *table);
 	args.GetReturnValue().Set(holder);
-    std::cout << "table=" << table << std::endl;
+    std::cout << "table=" << *table << std::endl;
 }
 
 void Sender::Connect(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, host and port expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, host and port expected")));
         return;
     }
 
 	if (!args[0]->IsString()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (host) should be a string").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (host) should be a string")));
         return;
     }
-    const Local<String> hostStr = args[0].As<String>();
-    const int utf8Length = hostStr->Utf8Length(isolate);
-    char* host = new char[utf8Length];
-    hostStr->WriteUtf8(isolate, host);
+    const String::Utf8Value host(isolate, args[0]);
 
 	if (!args[1]->IsNumber()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Second argument (port) should be an integer").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (port) should be an integer")));
         return;
     }
     const int port = args[1].As<Number>()->Value();
-    std::cout << "host=" << host << ", port=" << port << std::endl;
+    std::cout << "host=" << *host << ", port=" << port << std::endl;
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    const bool connected = DoConnect(isolate, instance, host, port);
+    const bool connected = DoConnect(isolate, instance, *host, port);
 
 	const Local<Boolean> output = Boolean::New(isolate, connected);
 	args.GetReturnValue().Set(output);
@@ -390,22 +359,15 @@ void Sender::At(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 1) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "Wrong number of arguments, timestamp value expected").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, timestamp value expected")));
         return;
     }
 
 	if (!args[0]->IsNumber() && !args[0]->IsBigInt()) {
-        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "First argument (timestamp value) should be an integer").ToLocalChecked()));
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (timestamp value) should be an integer")));
         return;
     }
-    int64_t nanos;
-	if (args[0]->IsNumber()) {
-        nanos = args[0].As<Number>()->Value();
-        std::cout << "at, number=" << nanos << std::endl;
-    } else {
-        nanos = args[0].As<BigInt>()->Int64Value();
-        std::cout << "at, bigint=" << nanos << std::endl;
-    }
+    const int64_t nanos = extract_int(args[0]);
 
     Sender* instance = ObjectWrap::Unwrap<Sender>(args.Holder());
     if (!line_sender_buffer_at(instance->buffer, nanos, &(instance->err))) {
@@ -449,7 +411,7 @@ void Sender::Init(Local<Object> exports) {
 
     // Prepare constructor template
     Local<FunctionTemplate> function_tpl = FunctionTemplate::New(isolate, New, clazz);
-    function_tpl->SetClassName(String::NewFromUtf8(isolate, "Sender").ToLocalChecked());
+    function_tpl->SetClassName(String::NewFromUtf8Literal(isolate, "Sender"));
     function_tpl->InstanceTemplate()->SetInternalFieldCount(1);
 
     // Javascript prototype
@@ -468,7 +430,7 @@ void Sender::Init(Local<Object> exports) {
 
     Local<Function> constructor = function_tpl->GetFunction(context).ToLocalChecked();
     clazz->SetInternalField(0, constructor);
-    exports->Set(context, String::NewFromUtf8(isolate, "Sender").ToLocalChecked(), constructor).FromJust();
+    exports->Set(context, String::NewFromUtf8Literal(isolate, "Sender"), constructor).FromJust();
 }
 
 void Sender::New(const FunctionCallbackInfo<Value>& args) {

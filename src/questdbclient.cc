@@ -1,7 +1,4 @@
 #include <node.h>
-#include <iostream>
-#include <string>
-#include <stdio.h>
 #include <sender.h>
 
 namespace questdb {
