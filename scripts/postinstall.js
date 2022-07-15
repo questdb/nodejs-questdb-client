@@ -63,7 +63,7 @@ switch (process.arch) {
 
 if (process.platform === "darwin" && process.arch === "arm64") {
     const commands = [
-        'cp lib/mac/arm64/libquestdb_client.dylib libquestdb_client.node'
+        'cp lib/mac/arm64/questdbclient.node .'
     ];
 
     const executedCommands = exec(commands.join('&&'), error => {

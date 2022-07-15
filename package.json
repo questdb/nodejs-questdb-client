@@ -1,11 +1,10 @@
 {
   "name": "@questdb/nodejs-client",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "description": "QuestDB Node.js Client",
   "main": "index.js",
   "scripts": {
-      "install": "cmake-js compile",
-      "test": "node index.js"
+    "postinstall": "node scripts/postinstall.js"
   },
   "repository": {
     "type": "git",

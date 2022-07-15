@@ -1,4 +1,4 @@
-const questdbclient = require('./build/Release/questdbclient');
+const questdbclient = require('./questdbclient');
 
 exports.createSender = function() {
     return new questdbclient.Sender();
