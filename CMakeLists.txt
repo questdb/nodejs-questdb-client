@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15.0)
-project(questdbclient VERSION 2.0.0)
+project(questdbclient VERSION 0.0.18)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
