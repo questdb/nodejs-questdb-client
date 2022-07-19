@@ -21,7 +21,14 @@ class Sender : public node::ObjectWrap {
         static void Close(const FunctionCallbackInfo<Value>& args);
         static void Flush(const FunctionCallbackInfo<Value>& args);
         static void Connect(const FunctionCallbackInfo<Value>& args);
-        static bool DoConnect(Isolate* isolate, Sender* instance, const char* host, const int port);
+        static bool DoConnect(Isolate* isolate, Sender* instance);
+        static void EnableTLS(const FunctionCallbackInfo<Value>& args);
+        static void EnableTLSWithCA(const FunctionCallbackInfo<Value>& args);
+        static void DoEnableTLSWithCA(Isolate* isolate, Sender* instance, const char* ca_path);
+        static void WithAuth(const FunctionCallbackInfo<Value>& args);
+        static void DoWithAuth(Isolate* isolate, Sender* instance, const char* user_id, const char* private_key, const char* public_key_x, const char* public_key_y);
+        static void EndPoint(const FunctionCallbackInfo<Value>& args);
+        static void DoEndPoint(Isolate* isolate, Sender* instance, const char* host, const int port);
         static void SetTable(const FunctionCallbackInfo<Value>& args);
         static void DoSetTable(Isolate* isolate, Sender* instance, const char* table);
         static void AddSymbol(const FunctionCallbackInfo<Value>& args);

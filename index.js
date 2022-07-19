@@ -1,4 +1,4 @@
-const questdbclient = require('./questdbclient');
+const questdbclient = require('./build/Release/questdbclient');
 
 exports.createSender = function() {
     return new questdbclient.Sender();
@@ -6,7 +6,11 @@ exports.createSender = function() {
 
 // a mock sender just to declare interface
 class Sender {
-    connect(host, port) { return true; }
+    connect() { return true; }
+    endpoint(host, port) { return this; }
+    enableTLS() { return this; }
+    enableTLSWithCA(ca_path) { return this; }
+    withAuth(user_id, private_key, public_key_x, public_key_y) { return this; }
     table(table) { return this; }
     symbol(colName, symbol) { return this; }
     boolean(colName, value) { return this; }

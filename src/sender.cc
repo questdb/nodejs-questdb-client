@@ -36,15 +36,18 @@ void Sender::HandleErr(Isolate* isolate, const Sender* instance) {
     line_sender_close(instance->sender);
 }
 
-bool Sender::DoConnect(Isolate* isolate, Sender* instance, const char* host, const int port) {
+void Sender::DoEndPoint(Isolate* isolate, Sender* instance, const char* host, const int port) {
     line_sender_utf8 host_utf8 = { 0, NULL };
     if (!line_sender_utf8_init(&host_utf8, strlen(host), host, &(instance->err))) {
         HandleErr(isolate, instance);
-        return false;
     }
 
     instance->opts = line_sender_opts_new(host_utf8, port);
+}
+
+bool Sender::DoConnect(Isolate* isolate, Sender* instance) {
     instance->sender = line_sender_connect(instance->opts, &(instance->err));
+
     line_sender_opts_free(instance->opts);
     instance->opts = NULL;
     if (!instance->sender) {
@@ -54,6 +57,39 @@ bool Sender::DoConnect(Isolate* isolate, Sender* instance, const char* host, con
     instance->buffer = line_sender_buffer_new();
     line_sender_buffer_reserve(instance->buffer, 64 * 1024);
     return true;
+}
+
+void Sender::DoEnableTLSWithCA(Isolate* isolate, Sender* instance, const char* ca_path) {
+    line_sender_utf8 ca_path_utf8 = { 0, NULL };
+    if (!line_sender_utf8_init(&ca_path_utf8, strlen(ca_path), ca_path, &(instance->err))) {
+        HandleErr(isolate, instance);
+    }
+
+    line_sender_opts_tls_ca(instance->opts, ca_path_utf8);
+}
+
+void Sender::DoWithAuth(Isolate* isolate, Sender* instance, const char* user_id, const char* private_key, const char* public_key_x, const char* public_key_y) {
+    line_sender_utf8 user_id_utf8 = { 0, NULL };
+    if (!line_sender_utf8_init(&user_id_utf8, strlen(user_id), user_id, &(instance->err))) {
+        HandleErr(isolate, instance);
+    }
+
+    line_sender_utf8 private_key_utf8 = { 0, NULL };
+    if (!line_sender_utf8_init(&private_key_utf8, strlen(private_key), private_key, &(instance->err))) {
+        HandleErr(isolate, instance);
+    }
+
+    line_sender_utf8 public_key_x_utf8 = { 0, NULL };
+    if (!line_sender_utf8_init(&public_key_x_utf8, strlen(public_key_x), public_key_x, &(instance->err))) {
+        HandleErr(isolate, instance);
+    }
+
+    line_sender_utf8 public_key_y_utf8 = { 0, NULL };
+    if (!line_sender_utf8_init(&public_key_y_utf8, strlen(public_key_y), public_key_y, &(instance->err))) {
+        HandleErr(isolate, instance);
+    }
+
+    line_sender_opts_auth(instance->opts, user_id_utf8, private_key_utf8, public_key_x_utf8, public_key_y_utf8);
 }
 
 void Sender::DoAddFloat64(Isolate* isolate, Sender* instance, const char* column, const double value) {
@@ -326,7 +362,7 @@ void Sender::SetTable(const FunctionCallbackInfo<Value>& args) {
     std::cout << "table=" << *table << std::endl;
 }
 
-void Sender::Connect(const FunctionCallbackInfo<Value>& args) {
+void Sender::EndPoint(const FunctionCallbackInfo<Value>& args) {
 	Isolate* isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
@@ -345,14 +381,99 @@ void Sender::Connect(const FunctionCallbackInfo<Value>& args) {
         return;
     }
     const int port = args[1].As<Number>()->Value();
-    std::cout << "host=" << *host << ", port=" << port << std::endl;
 
     const Local<Object> holder = args.Holder();
     Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
-    const bool connected = DoConnect(isolate, instance, *host, port);
+    DoEndPoint(isolate, instance, *host, port);
+	args.GetReturnValue().Set(holder);
+    std::cout << "host=" << *host << ", port=" << port << std::endl;
+}
+
+void Sender::Connect(const FunctionCallbackInfo<Value>& args) {
+	Isolate* isolate = args.GetIsolate();
+
+	if (args.Length() > 0) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "No arguments expected")));
+        return;
+    }
+
+    const Local<Object> holder = args.Holder();
+    Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
+    const bool connected = DoConnect(isolate, instance);
 
 	const Local<Boolean> output = Boolean::New(isolate, connected);
 	args.GetReturnValue().Set(output);
+    std::cout << "connected=" << connected << std::endl;
+}
+
+void Sender::EnableTLS(const FunctionCallbackInfo<Value>& args) {
+	Isolate* isolate = args.GetIsolate();
+
+    const Local<Object> holder = args.Holder();
+    Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
+    line_sender_opts_tls(instance->opts);
+	args.GetReturnValue().Set(holder);
+    std::cout << "enabled TLS" << std::endl;
+}
+
+void Sender::EnableTLSWithCA(const FunctionCallbackInfo<Value>& args) {
+	Isolate* isolate = args.GetIsolate();
+
+	if (args.Length() < 1) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, CA path expected")));
+        return;
+    }
+
+	if (!args[0]->IsString()) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (CA path) should be a string")));
+        return;
+    }
+    const String::Utf8Value ca_path(isolate, args[0]);
+
+    const Local<Object> holder = args.Holder();
+    Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
+    DoEnableTLSWithCA(isolate, instance, *ca_path);
+	args.GetReturnValue().Set(holder);
+    std::cout << "enabled TLS with CA path=" << *ca_path << std::endl;
+}
+
+void Sender::WithAuth(const FunctionCallbackInfo<Value>& args) {
+	Isolate* isolate = args.GetIsolate();
+
+	if (args.Length() < 4) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Wrong number of arguments, user_id, private_key, public_key_x and public_key_y expected")));
+        return;
+    }
+
+	if (!args[0]->IsString()) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "First argument (user id) should be a string")));
+        return;
+    }
+    const String::Utf8Value user_id(isolate, args[0]);
+
+	if (!args[1]->IsString()) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Second argument (private key) should be a string")));
+        return;
+    }
+    const String::Utf8Value private_key(isolate, args[1]);
+
+	if (!args[2]->IsString()) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Third argument (public key x) should be a string")));
+        return;
+    }
+    const String::Utf8Value public_key_x(isolate, args[2]);
+
+	if (!args[3]->IsString()) {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(isolate, "Fourth argument (public key y) should be a string")));
+        return;
+    }
+    const String::Utf8Value public_key_y(isolate, args[3]);
+
+    const Local<Object> holder = args.Holder();
+    Sender* instance = ObjectWrap::Unwrap<Sender>(holder);
+    DoWithAuth(isolate, instance, *user_id, *private_key, *public_key_x, *public_key_y);
+	args.GetReturnValue().Set(holder);
+    std::cout << "with auth, user_id=" << *user_id << ", private_key=" << *private_key << ", public_key_x=" << *public_key_x << ", public_key_y=" << *public_key_y << std::endl;
 }
 
 void Sender::At(const FunctionCallbackInfo<Value>& args) {
@@ -373,6 +494,7 @@ void Sender::At(const FunctionCallbackInfo<Value>& args) {
     if (!line_sender_buffer_at(instance->buffer, nanos, &(instance->err))) {
         HandleErr(isolate, instance);
     }
+    std::cout << "at=" << nanos << std::endl;
 }
 
 void Sender::AtNow(const FunctionCallbackInfo<Value>& args) {
@@ -415,6 +537,10 @@ void Sender::Init(Local<Object> exports) {
     function_tpl->InstanceTemplate()->SetInternalFieldCount(1);
 
     // Javascript prototype
+    NODE_SET_PROTOTYPE_METHOD(function_tpl, "endpoint", EndPoint);
+    NODE_SET_PROTOTYPE_METHOD(function_tpl, "enableTLS", EnableTLS);
+    NODE_SET_PROTOTYPE_METHOD(function_tpl, "enableTLSWithCA", EnableTLSWithCA);
+    NODE_SET_PROTOTYPE_METHOD(function_tpl, "withAuth", WithAuth);
     NODE_SET_PROTOTYPE_METHOD(function_tpl, "connect", Connect);
     NODE_SET_PROTOTYPE_METHOD(function_tpl, "close", Close);
     NODE_SET_PROTOTYPE_METHOD(function_tpl, "flush", Flush);
