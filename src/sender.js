@@ -7,6 +7,10 @@ class Sender {
         this.jwk = jwk;
         this.socket = new Socket();
 
+        this.socket.on("close", async function () {
+            console.log("connection closed")
+        });
+
         this.socket.on("error", async err => {
             console.error(err);
             process.exit(1);
