@@ -7,11 +7,7 @@ class Sender {
         this.jwk = jwk;
         this.socket = new Socket();
 
-        this.socket.on("close", async function () {
-            console.log("connection closed")
-        });
-
-        this.socket.on("error", async function (err) {
+        this.socket.on("error", async err => {
             console.error(err);
             process.exit(1);
         });
@@ -32,22 +28,12 @@ class Sender {
             await this.write(`${Buffer.from(signature).toString("base64")}\n`);
             return true;
         }
-
         return false;
     }
 
-    async connect(port, host, millis) {
+    async connect(port, host) {
         let self = this;
         let authenticated = false;
-        let data;
-
-        this.socket.on("data", async function (raw) {
-            data = !data ? raw : Buffer.concat([data, raw]);
-            console.log('received: ' + data);
-            if (!authenticated) {
-                authenticated = await self.authenticate(self.jwk, data);
-            }
-        });
 
         this.socket.on("ready", async function () {
             console.log("connection ready");
@@ -61,19 +47,17 @@ class Sender {
         });
 
         return new Promise((resolve, reject) => {
-            this.socket.connect(port, host, async () => {
-                const interval = 200;
-                const num = millis / interval;
-                for (let i = 0; i < num; i++) {
-                    if (authenticated) {
-                        console.log("authenticated");
-                        break;
-                    }
-                    console.log("not authenticated yet");
-                    await sleep(interval);
+            let data;
+            this.socket.on("data", async function (raw) {
+                data = !data ? raw : Buffer.concat([data, raw]);
+                console.log('received: ' + data);
+                if (!authenticated) {
+                    authenticated = await self.authenticate(self.jwk, data);
+                    authenticated ? resolve(true) : reject(false);
                 }
-                authenticated ? resolve(true) : reject(false);
             });
+
+            this.socket.connect(port, host);
         });
     }
 
@@ -115,10 +99,6 @@ class Sender {
         }
         return len;
     }
-}
-
-async function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 exports.Sender = Sender;

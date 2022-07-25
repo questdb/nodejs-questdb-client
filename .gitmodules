@@ -1,0 +1,3 @@
+[submodule "questdb-client-test"]
+	path = questdb-client-test
+	url = https://github.com/questdb/questdb-client-test.git

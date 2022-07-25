@@ -3,6 +3,9 @@
   "version": "0.0.20",
   "description": "QuestDB Node.js Client",
   "main": "index.js",
+  "scripts": {
+    "test": "jest"
+  },
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/questdb/nodejs-questdb-client.git"
@@ -12,5 +15,8 @@
   ],
   "author": "QuestDB",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/questdb/nodejs-questdb-client#readme"
+  "homepage": "https://github.com/questdb/nodejs-questdb-client#readme",
+  "devDependencies": {
+    "jest": "^28.1.3"
+  }
 }
