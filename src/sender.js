@@ -1,14 +1,14 @@
 const { Socket } = require("net");
 const { Buffer } = require("buffer");
-const crypto = require('crypto')
+const crypto = require('crypto');
 
 class Sender {
     constructor(jwk = null) {
         this.jwk = jwk;
         this.socket = new Socket();
 
-        this.socket.on("close", async function () {
-            console.log("connection closed")
+        this.socket.on("close", async () => {
+            console.log("connection closed");
         });
 
         this.socket.on("error", async err => {
@@ -39,7 +39,7 @@ class Sender {
         let self = this;
         let authenticated = false;
 
-        this.socket.on("ready", async function () {
+        this.socket.on("ready", async () => {
             console.log("connection ready");
             if (self.jwk) {
                 console.log("authenticating with server");

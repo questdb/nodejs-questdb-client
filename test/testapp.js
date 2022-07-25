@@ -1,5 +1,7 @@
+const { Proxy } = require("./proxy");
 const { Sender, Builder } = require("../index");
 
+const PROXY_PORT = 9099;
 const PORT = 9009;
 const HOST = "127.0.0.1";
 
@@ -22,8 +24,11 @@ const rows = [
 ];
 
 async function run () {
+    const proxy = new Proxy();
+    await proxy.start(PROXY_PORT, PORT, HOST);
+
     const sender = new Sender(JWK);
-    const connected = await sender.connect(PORT, HOST, 3000);
+    const connected = await sender.connect(PROXY_PORT, HOST);
     console.log("connected=" + connected);
     if (connected) {
         const builder = new Builder(1024);
@@ -64,6 +69,8 @@ async function run () {
         await sender.send(buffer);
     }
     await sender.close();
+
+    await proxy.shutdown();
     return 0;
 }
 
