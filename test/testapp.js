@@ -18,17 +18,13 @@ const JWK = {
     crv: "P-256",
 }
 
-const rows = [
-    `test,location=us temperature=22.4,hoppa="hoppa str" ${Date.now() * 1e6}`,
-    `test,location=us temperature=22.4,hoppa="hoppa string" ${Date.now() * 1e6}`
-];
-
 async function run () {
     const proxy = new Proxy();
     await proxy.start(PROXY_PORT, PORT, HOST);
 
     const sender = new Sender(JWK);
     const connected = await sender.connect(PROXY_PORT, HOST);
+    //const connected = await sender.connect(PORT, HOST); //direct connection without proxy
     console.log("connected=" + connected);
     if (connected) {
         const builder = new Builder(1024);
@@ -53,8 +49,6 @@ async function run () {
         console.log("sending:\n" + buffer.toString());
         await sender.send(buffer);
 
-        await sender.sendRows(rows);
-
         builder.reset().addTable("test")
             .addSymbol("location", "emea")
             .addSymbol("city", "miskolc")
@@ -70,7 +64,7 @@ async function run () {
     }
     await sender.close();
 
-    await proxy.shutdown();
+    await proxy.stop();
     return 0;
 }
 

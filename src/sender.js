@@ -17,47 +17,30 @@ class Sender {
         });
     }
 
-    async authenticate(jwk, challenge) {
-        // Check for trailing \n which ends the challenge
-        if (challenge.slice(-1).readInt8() === 10) {
-            const keyObject = await crypto.createPrivateKey(
-                {'key': jwk, 'format': 'jwk'}
-            );
-            const signature = await crypto.sign(
-                "RSA-SHA256",
-                challenge.slice(0, challenge.length - 1),
-                keyObject
-            );
-
-            await this.write(`${Buffer.from(signature).toString("base64")}\n`);
-            return true;
-        }
-        return false;
-    }
-
     async connect(port, host) {
         let self = this;
         let authenticated = false;
 
-        this.socket.on("ready", async () => {
-            console.log("connection ready");
-            if (self.jwk) {
-                console.log("authenticating with server");
-                await self.write(`${self.jwk.kid}\n`);
-            } else {
-                console.log("no authentication");
-                authenticated = true;
-            }
-        });
-
         return new Promise((resolve, reject) => {
             let data;
-            this.socket.on("data", async function (raw) {
+            this.socket.on("data", async raw => {
                 data = !data ? raw : Buffer.concat([data, raw]);
-                console.log('received: ' + data);
+                //console.log(`received: ${data}`);
                 if (!authenticated) {
-                    authenticated = await self.authenticate(self.jwk, data);
+                    authenticated = await authenticate(self, data);
                     authenticated ? resolve(true) : reject(false);
+                }
+            });
+
+            this.socket.on("ready", async () => {
+                console.log("connection ready");
+                if (self.jwk) {
+                    console.log("authenticating with server");
+                    await write(self, `${self.jwk.kid}\n`);
+                } else {
+                    console.log("no authentication");
+                    authenticated = true;
+                    resolve(true);
                 }
             });
 
@@ -73,36 +56,38 @@ class Sender {
         });
     }
 
-    // data can be a buffer or a string
-    async write(data) {
-        return new Promise(resolve => {
-            this.socket.write(data, 'utf8', () => {
-                resolve();
-            });
-        });
-    }
-
     // writes the buffer's content to the socket
     // a Builder should be used to construct the buffer's content
     async send(buffer) {
-        await this.write(buffer);
+        await write(this, buffer);
     }
+}
 
-    // writes a single row to the socket
-    // row is passed as a string without EOL char
-    async sendRow(row) {
-        await this.write(`${row}\n`);
-    }
+async function authenticate(sender, challenge) {
+    // Check for trailing \n which ends the challenge
+    if (challenge.slice(-1).readInt8() === 10) {
+        const keyObject = await crypto.createPrivateKey(
+            {'key': sender.jwk, 'format': 'jwk'}
+        );
+        const signature = await crypto.sign(
+            "RSA-SHA256",
+            challenge.slice(0, challenge.length - 1),
+            keyObject
+        );
 
-    // writes a list of rows to the socket
-    // rows are passed in a string array without EOL char
-    async sendRows(rows) {
-        const len = rows.length;
-        for (let i = 0; i < len; i++) {
-            await this.sendRow(rows[i]);
-        }
-        return len;
+        await write(sender, `${Buffer.from(signature).toString("base64")}\n`);
+        return true;
     }
+    return false;
+}
+
+// data can be a buffer or a string
+async function write(sender, data) {
+    return new Promise(resolve => {
+        sender.socket.write(data, 'utf8', () => {
+            resolve();
+        });
+    });
 }
 
 exports.Sender = Sender;

@@ -3,8 +3,11 @@ QuestDB Node.js Client
 
 TODO:
  - TLS support
- - Sender unit tests, requires mock and TLS support in proxy
- - Sender to take a json object and send it?
- - support for BigInt in Builder
- - typescript
+ - typescript, create .d.ts files
  - documentation
+
+Optional, nice-to-have:
+ - Sender to take a json object and send it
+ - support for BigInt in Builder
+ - setup CI?
+ - npm unpublish old versions?
