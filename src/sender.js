@@ -36,7 +36,7 @@ class Sender {
                 console.log("connection ready");
                 if (self.jwk) {
                     console.log("authenticating with server");
-                    await write(self, `${self.jwk.kid}\n`);
+                    await self.send(`${self.jwk.kid}\n`);
                 } else {
                     console.log("no authentication");
                     authenticated = true;
@@ -56,10 +56,12 @@ class Sender {
         });
     }
 
-    // writes the buffer's content to the socket
-    // a Builder should be used to construct the buffer's content
-    async send(buffer) {
-        await write(this, buffer);
+    async send(data) {
+        return new Promise(resolve => {
+            this.socket.write(data, 'utf8', () => {
+                resolve();
+            });
+        });
     }
 }
 
@@ -75,19 +77,10 @@ async function authenticate(sender, challenge) {
             keyObject
         );
 
-        await write(sender, `${Buffer.from(signature).toString("base64")}\n`);
+        await sender.send(`${Buffer.from(signature).toString("base64")}\n`);
         return true;
     }
     return false;
-}
-
-// data can be a buffer or a string
-async function write(sender, data) {
-    return new Promise(resolve => {
-        sender.socket.write(data, 'utf8', () => {
-            resolve();
-        });
-    });
 }
 
 exports.Sender = Sender;
