@@ -1,9 +1,15 @@
 const QuestDBMaxFileNameLength = 127;
 
+/**
+ * Validates a table name. <br>
+ * Throws an error if table name is invalid.
+ *
+ * @param {string} name - The table name to validate.
+ */
 function validateTableName(name) {
     const len = name.length;
     if (len > QuestDBMaxFileNameLength) {
-        throw "Table name is too long, max length is " + QuestDBMaxFileNameLength;
+        throw `Table name is too long, max length is ${QuestDBMaxFileNameLength}`;
     }
     if (len === 0) {
         throw "Empty string is not allowed as table name";
@@ -52,20 +58,26 @@ function validateTableName(name) {
             case '\u000f':
             case '\u007f':
             case '\ufeff': // UTF-8 BOM (Byte Order Mark) can appear at the beginning of a character stream
-                throw "Invalid character in table name: " + ch;
+                throw `Invalid character in table name: ${ch}`;
         }
     }
 }
 
+/**
+ * Validates a column name. <br>
+ * Throws an error if column name is invalid.
+ *
+ * @param {string} name - The column name to validate.
+ */
 function validateColumnName(name) {
     const len = name.length;
     if (len > QuestDBMaxFileNameLength) {
-        throw "Column name is too long, max length is " + QuestDBMaxFileNameLength;
+        throw `Column name is too long, max length is ${QuestDBMaxFileNameLength}`;
     }
     if (len === 0) {
         throw "Empty string is not allowed as column name";
     }
-    for (let ch of name) {
+    for (const ch of name) {
         switch (ch) {
             case '?':
             case '.':
@@ -100,7 +112,7 @@ function validateColumnName(name) {
             case '\u000f':
             case '\u007f':
             case '\ufeff': // UTF-8 BOM (Byte Order Mark) can appear at the beginning of a character stream
-                throw "Invalid character in column name: " + ch;
+                throw `Invalid character in column name: ${ch}`;
         }
     }
 }

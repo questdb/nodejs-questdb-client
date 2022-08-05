@@ -1,5 +1,4 @@
 const { write, listen, shutdown } = require("./proxyfunctions");
-//const crypto = require('crypto');
 
 const CHALLENGE_LENGTH = 512;
 
@@ -12,7 +11,7 @@ class MockProxy {
         this.dataSentToRemote = [];
     }
 
-    async start(listenPort) {
+    async start(listenPort, tlsOptions = null) {
         await listen(this, listenPort, async data => {
             console.log(`received from client: ${data}`);
             if (this.mockConfig.assertions) {
@@ -22,7 +21,7 @@ class MockProxy {
                 await write(this.client, mockChallenge());
                 this.hasSentChallenge = true;
             }
-        });
+        }, tlsOptions);
     }
 
     async stop() {

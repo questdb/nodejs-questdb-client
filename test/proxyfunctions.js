@@ -1,5 +1,5 @@
-const { createServer } = require("net");
-//const crypto = require('crypto');
+const net = require("net");
+const tls = require('tls');
 
 const LOCALHOST = '127.0.0.1';
 
@@ -11,9 +11,9 @@ async function write(socket, data) {
     });
 }
 
-async function listen(proxy, listenPort, dataHandler) {
+async function listen(proxy, listenPort, dataHandler, tlsOptions) {
     return new Promise(resolve => {
-        proxy.server = createServer(client => {
+        const clientConnHandler = client => {
             console.log('client connected');
             if (proxy.client) {
                 console.error("There is already a client connected");
@@ -26,7 +26,11 @@ async function listen(proxy, listenPort, dataHandler) {
             client.on("close", async () => {
                 console.log("client connection closed");
             });
-        });
+        }
+
+        proxy.server = tlsOptions
+            ? tls.createServer(tlsOptions, clientConnHandler)
+            : net.createServer(clientConnHandler);
 
         proxy.server.on('error', err => {
             console.error(`server error: ${err}`);

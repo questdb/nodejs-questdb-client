@@ -1,5 +1,6 @@
 const { Buffer } = require("buffer");
-const { validateTableName, validateColumnName } = require("./util");
+const { Micros, Nanos } = require("./timestamp");
+const { validateTableName, validateColumnName } = require("./validation");
 
 class Builder {
     constructor(bufferSize) {
@@ -48,50 +49,50 @@ class Builder {
     }
 
     addString(name, value) {
-        addColumn(this, name, value, "string", false, () => {
+        addColumn(this, name, value, () => {
             write(this, '"');
             writeEscaped(this, value, true);
             write(this, '"');
-        });
+        }, "string");
         return this;
     }
 
     addBoolean(name, value) {
-        addColumn(this, name, value, "boolean", false, () => {
+        addColumn(this, name, value, () => {
             write(this, value ? 't' : 'f');
-        });
+        }, "boolean");
         return this;
     }
 
     addFloat(name, value) {
-        addColumn(this, name, value, "number", false, () => {
+        addColumn(this, name, value, () => {
             write(this, value.toString());
-        });
+        }, "number");
         return this;
     }
 
     addInteger(name, value) {
-        addColumn(this, name, value, "number", true, () => {
+        addColumn(this, name, value, () => {
             write(this, value.toString());
             write(this, 'i');
-        });
+        }, "bigint");
         return this;
     }
 
     addTimestamp(name, value) {
-        addColumn(this, name, value, "number", true, () => {
+        addColumn(this, name, value, () => {
             write(this, value.toString());
             write(this, 't');
-        });
+        }, "object", Micros.name);
         return this;
     }
 
     at(timestamp) {
-        if (typeof timestamp !== "number") {
-            throw `Timestamp must be a number, received ${typeof timestamp}`;
+        if (typeof timestamp !== "object") {
+            throw `The designated timestamp must be Nanos, received ${typeof timestamp}`;
         }
-        if (!Number.isInteger(timestamp)) {
-            throw `Timestamp must be an integer, received ${timestamp}`;
+        if (!(timestamp instanceof Nanos)) {
+            throw `The designated timestamp must be Nanos, received ${timestamp.constructor.name}`;
         }
         if (!this.hasSymbols && !this.hasColumns) {
             throw "The row must have a symbol or field set before it is closed";
@@ -108,6 +109,71 @@ class Builder {
         }
         write(this, '\n');
         startNewRow(this);
+    }
+
+    addRows(rows) {
+        if (Array.isArray(rows)) {
+            for (const row of rows) {
+                this.addRow(row);
+            }
+        } else {
+            // not an array, assumed that it is a single row
+            this.addRow(rows);
+        }
+    }
+
+    addRow(row) {
+        this.addTable(row.table);
+        if (row.symbols) {
+            for (const [name, value] of Object.entries(row.symbols)) {
+                this.addSymbol(name, value);
+            }
+        }
+        if (row.columns) {
+            for (const [name, value] of Object.entries(row.columns)) {
+                switch (typeof value) {
+                    case "string":
+                        this.addString(name, value);
+                        break;
+                    case "boolean":
+                        this.addBoolean(name, value);
+                        break;
+                    case "number":
+                        this.addFloat(name, value);
+                        break;
+                    case "bigint":
+                        this.addInteger(name, value);
+                        break;
+                    case "object":
+                        if (value instanceof Micros) {
+                            this.addTimestamp(name, value);
+                            break;
+                        }
+                        throw `Unsupported column type: ${value.constructor.name}`;
+                    default:
+                        throw `Unsupported column type: ${typeof value}`;
+                }
+            }
+        }
+        if (row.timestamp) {
+            switch (typeof row.timestamp) {
+                case "string":
+                case "number":
+                case "bigint":
+                    this.at(new Nanos(row.timestamp));
+                    break;
+                case "object":
+                    if (row.timestamp instanceof Nanos) {
+                        this.at(row.timestamp);
+                        break;
+                    }
+                    throw `Unsupported designated timestamp type: ${row.timestamp.constructor.name}`;
+                default:
+                    throw `Unsupported designated timestamp type: ${typeof row.timestamp}`;
+            }
+        } else {
+            this.atNow();
+        }
     }
 
     toBuffer() {
@@ -127,15 +193,15 @@ function startNewRow(builder) {
     builder.hasColumns = false;
 }
 
-function addColumn(builder, name, value, valueType, valueShouldBeInteger, writeValue) {
+function addColumn(builder, name, value, writeValue, valueType, instanceType = undefined) {
     if (typeof name !== "string") {
         throw `Field name must be a string, received ${typeof name}`;
     }
     if (typeof value !== valueType) {
         throw `Field value must be a ${valueType}, received ${typeof value}`;
     }
-    if (valueShouldBeInteger && !Number.isInteger(value)) {
-        throw `Field value must be an integer, received ${value}`;
+    if (instanceType && value.constructor.name !== instanceType) {
+        throw `Field value must be ${valueType}, received ${value.prototype.name}`;
     }
     if (!builder.hasTable) {
         throw "Field can be added only after table name is set";
@@ -156,7 +222,7 @@ function write(builder, data) {
 }
 
 function writeEscaped(builder, data, quoted = false) {
-    for (let ch of data) {
+    for (const ch of data) {
         if (ch > '\\') {
             write(builder, ch);
             continue;

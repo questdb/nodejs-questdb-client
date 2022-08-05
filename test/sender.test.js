@@ -1,4 +1,4 @@
-const { Builder, Sender} = require("../index");
+const { Sender } = require("../index");
 const { MockProxy } = require("./mockproxy");
 
 const PROXY_PORT = 9099;
@@ -26,19 +26,20 @@ async function createProxy(mockConfig = { "auth": true, "assertions": true }) {
 }
 
 async function createSender(jwk = null) {
-    const sender = new Sender(jwk);
+    const sender = new Sender(1024, jwk);
     const connected = await sender.connect(PROXY_PORT, PROXY_HOST);
     expect(connected).toBe(true);
     return sender;
 }
 
-async function sendData(sender, fillData = builder => builder.addTable("test")
-                                                    .addSymbol("location", "us")
-                                                    .addFloat("temperature", 17.1)
-                                                    .at(1658484765000000000)) {
-    const builder = new Builder(1024);
-    fillData(builder);
-    await sender.send(builder.toBuffer());
+async function sendData(sender, rows = [{
+                "table": "test",
+                "symbols": { "location": "us" },
+                "columns": { "temperature": 17.1 },
+                "timestamp": 1658484765000000000
+            }]) {
+    sender.rows(rows);
+    await sender.flush();
 }
 
 async function assertSentData(proxy, authenticated, expected, timeout = 60000) {

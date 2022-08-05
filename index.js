@@ -1,5 +1,20 @@
-const { Sender } = require('./src/sender');
-const { Builder } = require('./src/builder');
+/**
+ * A Node.js client for QuestDB.
+ * <p>
+ * A Node.js client for QuestDB.
+ * </p>
+ *
+ * @example
+ * const sender = new Sender(16384);
+ * sender.connect(...);
+ * sender.rows(...);
+ * sender.flush();
+ * sender.close();
+ *
+ * @module @questdb/nodejs-client
+ */
 
-module.exports.Sender = Sender;
-module.exports.Builder = Builder;
+const { Sender } = require('./src/sender');
+const { Micros, Nanos } = require('./src/timestamp');
+
+module.exports = { Sender, Micros, Nanos };

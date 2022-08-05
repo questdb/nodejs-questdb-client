@@ -1,26 +1,27 @@
 const fs = require('fs')
-const { Builder } = require("../index");
+const { Builder } = require("../src/builder");
+const { Micros, Nanos } = require("../index");
 
 describe('Client interop test suite', function () {
     it('runs client tests as per json test config', function () {
         let testCases = JSON.parse(fs.readFileSync('./questdb-client-test/ilp-client-interop-test.json').toString());
 
         loopTestCase:
-        for (let testCase of testCases) {
+        for (const testCase of testCases) {
             //console.log("Scenario: " + testCase.testName);
             const builder = new Builder(1024);
             try {
                 builder.addTable(testCase.table);
-                for (let symbol of testCase.symbols) {
+                for (const symbol of testCase.symbols) {
                     builder.addSymbol(symbol.name, symbol.value);
                 }
-                for (let column of testCase.columns) {
+                for (const column of testCase.columns) {
                     switch (column.type) {
                         case "STRING":
                             builder.addString(column.name, column.value);
                             break;
                         case "LONG":
-                            builder.addInteger(column.name, column.value);
+                            builder.addInteger(column.name, BigInt(column.value));
                             break;
                         case "DOUBLE":
                             builder.addFloat(column.name, column.value);
@@ -29,10 +30,10 @@ describe('Client interop test suite', function () {
                             builder.addBoolean(column.name, column.value);
                             break;
                         case "TIMESTAMP":
-                            builder.addTimestamp(column.name, column.value);
+                            builder.addTimestamp(column.name, new Micros(column.value));
                             break;
                         default:
-                            throw "Unsupported field type";
+                            throw "Unsupported column type";
                     }
                 }
                 builder.atNow();
@@ -49,7 +50,7 @@ describe('Client interop test suite', function () {
                 if (testCase.result.line) {
                     expect(buffer.toString()).toBe(testCase.result.line + '\n');
                 } else {
-                    for (let line of testCase.result.anyLines) {
+                    for (const line of testCase.result.anyLines) {
                         if (buffer.toString() === line + '\n') {
                             // test passed
                             continue loopTestCase;
@@ -70,7 +71,7 @@ describe('Builder test suite (anything not covered in client interop test suite)
         const builder = new Builder(1024);
         builder.addTable("tableName")
             .addBoolean("boolCol", true)
-            .addTimestamp("timestampCol", 1658484765000000)
+            .addTimestamp("timestampCol", new Micros(1658484765000000n))
             .atNow();
         expect(builder.toBuffer().toString()).toBe(
             "tableName boolCol=t,timestampCol=1658484765000000t\n"
@@ -81,10 +82,10 @@ describe('Builder test suite (anything not covered in client interop test suite)
         const builder = new Builder(1024);
         builder.addTable("tableName")
             .addBoolean("boolCol", true)
-            .addTimestamp("timestampCol", 1658484765000000)
-            .at(1658484769000000000);
+            .addTimestamp("timestampCol", new Micros(1658484765000000n))
+            .at(new Nanos(1658484769000000123n));
         expect(builder.toBuffer().toString()).toBe(
-            "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n"
+            "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n"
         );
     });
 
@@ -205,32 +206,32 @@ describe('Builder test suite (anything not covered in client interop test suite)
         expect(
             () => builder.addTable("tableName")
                 .addInteger("intField", 123.222)
-        ).toThrow("Field value must be an integer, received 123.222");
+        ).toThrow("Field value must be a bigint, received number");
     });
 
-    it('throws exception if designated timestamp is not a number', function () {
+    it('throws exception if designated timestamp is not an object', function () {
         const builder = new Builder(1024);
         expect(
             () => builder.addTable("tableName")
                 .addSymbol("name", "value")
-                .at("34567878")
-        ).toThrow("Timestamp must be a number, received string");
+                .at(Date.now())
+        ).toThrow("The designated timestamp must be Nanos, received number");
     });
 
-    it('throws exception if designated timestamp is not an integer', function () {
+    it('throws exception if designated timestamp is not Nanos object', function () {
         const builder = new Builder(1024);
         expect(
             () => builder.addTable("tableName")
                 .addSymbol("name", "value")
-                .at(2345.06)
-        ).toThrow("Timestamp must be an integer, received 2345.06");
+                .at(new Date())
+        ).toThrow("The designated timestamp must be Nanos, received Date");
     });
 
     it('throws exception if designated timestamp is set without any fields added', function () {
         const builder = new Builder(1024);
         expect(
             () => builder.addTable("tableName")
-                .at(123456)
+                .at(new Nanos(12345678))
         ).toThrow("The row must have a symbol or field set before it is closed");
     });
 
@@ -238,7 +239,7 @@ describe('Builder test suite (anything not covered in client interop test suite)
         const builder = new Builder(16);
         expect(
             () => builder.addTable("tableName")
-                .addInteger("intField", 123)
+                .addInteger("intField", BigInt(123))
         ).toThrow("Buffer overflow [position=17, bufferSize=16]");
     });
 
@@ -246,15 +247,15 @@ describe('Builder test suite (anything not covered in client interop test suite)
         const builder = new Builder(16);
         expect(
             () => builder.addTable("tableName")
-                .addInteger("intField", 123)
+                .addFloat("floatField", 123.34)
         ).toThrow("Buffer overflow [position=17, bufferSize=16]");
 
         builder.resize(1024);
         builder.addTable("tableName")
-            .addInteger("intField", 123)
+            .addFloat("floatField", 123.34)
             .atNow();
         expect(builder.toBuffer().toString()).toBe(
-            "tableName intField=123i\n"
+            "tableName floatField=123.34\n"
         );
     });
 
@@ -262,11 +263,11 @@ describe('Builder test suite (anything not covered in client interop test suite)
         const builder = new Builder(1024);
         builder.addTable("tableName")
             .addBoolean("boolCol", true)
-            .addTimestamp("timestampCol", 1658484765000000)
+            .addTimestamp("timestampCol", new Micros(1658484765000000n))
             .atNow();
         builder.addTable("tableName")
             .addBoolean("boolCol", false)
-            .addTimestamp("timestampCol", 1658484766000000)
+            .addTimestamp("timestampCol", new Micros(1658484766000000n))
             .atNow();
         expect(builder.toBuffer().toString()).toBe(
             "tableName boolCol=t,timestampCol=1658484765000000t\n"
@@ -275,11 +276,11 @@ describe('Builder test suite (anything not covered in client interop test suite)
 
         builder.reset();
         builder.addTable("tableName")
-            .addInteger("intCol", 1234567890)
-            .addTimestamp("timestampCol", 1658484767000000)
+            .addFloat("floatCol", 1234567890)
+            .addTimestamp("timestampCol", new Micros(1658484767000000n))
             .atNow();
         expect(builder.toBuffer().toString()).toBe(
-            "tableName intCol=1234567890i,timestampCol=1658484767000000t\n"
+            "tableName floatCol=1234567890,timestampCol=1658484767000000t\n"
         );
     });
 });
