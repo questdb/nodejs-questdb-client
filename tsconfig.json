@@ -1,0 +1,16 @@
+{
+  "include": ["index.js"],
+  "compilerOptions": {
+    // Tells TypeScript to read .js files, normally they are ignored as source files
+    "allowJs": true,
+    // Generate .d.ts files
+    "declaration": true,
+    // This compiler run should only output .d.ts files
+    "emitDeclarationOnly": true,
+    // Types should go into this directory
+    // Removing this would place the .d.ts files next to the .js files
+    "outDir": "types",
+    // Go to .js file when using IDE functions like "Go to Definition" in VSCode
+    "declarationMap": true
+  }
+}

@@ -3,6 +3,7 @@
   "version": "0.0.20",
   "description": "QuestDB Node.js Client",
   "main": "index.js",
+  "types": "types/index.d.ts",
   "scripts": {
     "test": "jest"
   },
