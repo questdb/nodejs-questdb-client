@@ -1,4 +1,5 @@
 /// <reference types="node" />
+/// <reference types="node" />
 /** @classdesc Sender QuestDB client. */
 export class Sender {
     /**
@@ -22,14 +23,10 @@ export class Sender {
     /**
      * Creates a connection to the database.
      *
-     * @param {{host: string, port: number, ca: Buffer}} options - Connection options, host and port are required.
+     * @param {NetConnectOpts | ConnectionOptions} options - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
-    connect(options: {
-        host: string;
-        port: number;
-        ca: Buffer;
-    }, secure?: boolean): Promise<any>;
+    connect(options: NetConnectOpts | ConnectionOptions, secure?: boolean): Promise<any>;
     /** @private */
     private socket;
     /**
@@ -47,6 +44,7 @@ export class Sender {
      */
     rows(rows: Row[] | Row): void;
 }
-import { Buffer } from "buffer";
+import { NetConnectOpts } from "net";
+import { ConnectionOptions } from "tls";
 import { Row } from "./row";
 //# sourceMappingURL=sender.d.ts.map

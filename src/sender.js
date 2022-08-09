@@ -1,8 +1,8 @@
 const { Buffer } = require("buffer");
 const { Builder } = require("./builder");
 const { Row } = require("./row");
-const net = require("net");
-const tls = require("tls");
+const { connect, NetConnectOpts } = require("net");
+const { connect: connectTLS, ConnectionOptions} = require("tls");
 const crypto = require('crypto');
 
 /** @classdesc Sender QuestDB client. */
@@ -24,7 +24,7 @@ class Sender {
     /**
      * Creates a connection to the database.
      *
-     * @param {{host: string, port: number, ca: Buffer}} options - Connection options, host and port are required.
+     * @param {NetConnectOpts | ConnectionOptions} options - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
     async connect(options, secure = false) {
@@ -36,8 +36,8 @@ class Sender {
 
             /** @private */
             this.socket = !secure
-                ? net.connect(options)
-                : tls.connect(options, async () => {
+                ? connect(options)
+                : connectTLS(options, async () => {
                     if (!self.socket.authorized) {
                         reject("Problem with server's certificate");
                         await self.close();
