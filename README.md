@@ -1,6 +1,4 @@
 ## QuestDB Node.js Client
---------------------------
-<br>
 
 ## Installation
 ```shell
