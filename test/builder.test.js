@@ -1,5 +1,5 @@
 const fs = require('fs')
-const { Builder } = require("../src/builder");
+const { Builder, Row } = require("../src/builder");
 const { Micros, Nanos } = require("../index");
 
 describe('Client interop test suite', function () {
@@ -281,6 +281,62 @@ describe('Builder test suite (anything not covered in client interop test suite)
             .atNow();
         expect(builder.toBuffer().toString()).toBe(
             "tableName floatCol=1234567890,timestampCol=1658484767000000t\n"
+        );
+    });
+
+    it('can take an entire row', function () {
+        const builder = new Builder(1024);
+        builder.addRow({table: "tableName", symbols: {}, columns: {"floatField": 123.34}, timestamp: new Nanos(555n)});
+        builder.addRow(new Row("tableName", {}, {"floatField": 67.67}, new Nanos(888n)));
+        expect(builder.toBuffer().toString()).toBe(
+            "tableName floatField=123.34 555\n" +
+            "tableName floatField=67.67 888\n"
+        );
+    });
+
+    it('can take a list of rows', function () {
+        const builder = new Builder(1024);
+        builder.addRows([
+            {table: "tableName", symbols: {}, columns: {"floatField": 123.34}, timestamp: 555n},
+            {table: "tableName", symbols: {"symField": "sym1"}, columns: {"floatField": 88.88}, timestamp: 666n}
+        ]);
+        builder.addRows([
+            new Row("tableName", {"symField": "sym2"}, {"floatField": 55.55}, 777n),
+            new Row("tableName", {}, {"floatField": 888.33}, 888n)
+        ]);
+        expect(builder.toBuffer().toString()).toBe(
+            "tableName floatField=123.34 555\n" +
+            "tableName,symField=sym1 floatField=88.88 666\n" +
+            "tableName,symField=sym2 floatField=55.55 777\n" +
+            "tableName floatField=888.33 888\n"
+        );
+    });
+
+    it('can take string, float, int, boolean and timestamp in a row', function () {
+        const builder = new Builder(1024);
+        builder.addRows(new Row("tableName", {}, {
+            "stringField": "something",
+            "floatField": 67.67,
+            "intField": 678n,
+            "boolField": true,
+            "tsField": new Micros(19191919n)
+        }, new Nanos(888n)));
+        expect(builder.toBuffer().toString()).toBe(
+            "tableName stringField=\"something\",floatField=67.67,intField=678i,boolField=t,tsField=19191919t 888\n"
+        );
+    });
+
+    it('can take a row without specifying designated timestamp', function () {
+        const builder = new Builder(1024);
+        builder.addRows(new Row("tableName", {}, {
+            "stringField": "something",
+            "floatField": 67.67,
+            "intField": 678n,
+            "boolField": true,
+            "tsField": new Micros(19191919n)
+        }));
+        expect(builder.toBuffer().toString()).toBe(
+            "tableName stringField=\"something\",floatField=67.67,intField=678i,boolField=t,tsField=19191919t\n"
         );
     });
 });
