@@ -1,6 +1,18 @@
 /// <reference types="node" />
 /// <reference types="node" />
-/** @classdesc Sender QuestDB client. */
+/** @classdesc
+ * The QuestDB client's API provides methods to connect to the database, ingest data and close the connection.
+ * <p>
+ * The client supports authentication. <br>
+ * A JsonWebKey can be passed to the Sender in its constructor, the JsonWebKey will be used for authentication. <br>
+ * If no JsonWebKey specified the client will not attempt to authenticate itself with the server. <br>
+ * Details on how to configure QuestDB authentication: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
+ * </p>
+ * <p>
+ * The client also supports TLS encryption to provide a secure connection. <br>
+ * However, QuestDB does not support TLS yet and requires an external reverse-proxy, such as Nginx to enable encryption.
+ * </p>
+ */
 export class Sender {
     /**
      * Creates an instance of Sender.

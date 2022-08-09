@@ -1,6 +1,6 @@
 const { Sender } = require("../index");
 const { MockProxy } = require("./mockproxy");
-const { readFileSync } = require("fs");
+const { readFileSync} = require("fs");
 
 const PROXY_PORT = 9099;
 const PROXY_HOST = '127.0.0.1';

@@ -5,14 +5,26 @@ const { connect, NetConnectOpts } = require("net");
 const { connect: connectTLS, ConnectionOptions} = require("tls");
 const crypto = require('crypto');
 
-/** @classdesc Sender QuestDB client. */
+/** @classdesc
+ * The QuestDB client's API provides methods to connect to the database, ingest data and close the connection.
+ * <p>
+ * The client supports authentication. <br>
+ * A JsonWebKey can be passed to the Sender in its constructor, the JsonWebKey will be used for authentication. <br>
+ * If no JsonWebKey specified the client will not attempt to authenticate itself with the server. <br>
+ * Details on how to configure QuestDB authentication: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
+ * </p>
+ * <p>
+ * The client also supports TLS encryption to provide a secure connection. <br>
+ * However, QuestDB does not support TLS yet and requires an external reverse-proxy, such as Nginx to enable encryption.
+ * </p>
+ */
 class Sender {
 
     /**
      * Creates an instance of Sender.
      *
      * @param {number} bufferSize - Size of the buffer used by the sender to collect rows, provided in bytes.
-     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. Server might reject the connection depending on configuration.
+     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. <br> Server might reject the connection depending on configuration.
      */
     constructor(bufferSize, jwk = undefined) {
         /** @private */
