@@ -15,6 +15,7 @@
  */
 
 const { Sender } = require('./src/sender');
+const { Row } = require("./src/builder");
 const { Micros, Nanos } = require('./src/timestamp');
 
-module.exports = { Sender, Micros, Nanos };
+module.exports = { Sender, Row, Micros, Nanos };

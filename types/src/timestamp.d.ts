@@ -11,7 +11,7 @@ export class Micros extends Timestamp {
     /**
      * Creates an instance of Micros.
      *
-     * @param {bigint | number | string} [micros=Current time in micros, i.e. Date.now() * 1000] - Timestamp in microseconds.
+     * @param {bigint | number | string} [micros = Current time in micros, i.e. Date.now() * 1000] - Timestamp in microseconds.
      */
     constructor(micros?: bigint | number | string);
 }
@@ -28,7 +28,7 @@ export class Nanos extends Timestamp {
     /**
      * Creates an instance of Nanos.
      *
-     * @param {bigint | number | string} [nanos=Current time in nanos, i.e. Date.now() * 1000000] - Timestamp in nanoseconds.
+     * @param {bigint | number | string} [nanos = Current time in nanos, i.e. Date.now() * 1000000] - Timestamp in nanoseconds.
      */
     constructor(nanos?: bigint | number | string);
 }

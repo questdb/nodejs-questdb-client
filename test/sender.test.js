@@ -25,7 +25,7 @@ async function createProxy(mockConfig = { "auth": true, "assertions": true }) {
     return proxy;
 }
 
-async function createSender(jwk = null) {
+async function createSender(jwk = undefined) {
     const sender = new Sender(1024, jwk);
     const connected = await sender.connect(PROXY_PORT, PROXY_HOST);
     expect(connected).toBe(true);

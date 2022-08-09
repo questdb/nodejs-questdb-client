@@ -1,6 +1,5 @@
 const { Buffer } = require("buffer");
-const { Builder } = require("./builder");
-const { Nanos } = require("./timestamp");
+const { Builder, Row } = require("./builder");
 const net = require("net");
 const tls = require("tls");
 const crypto = require('crypto');
@@ -12,9 +11,9 @@ class Sender {
      * Creates an instance of Sender.
      *
      * @param {number} bufferSize - Size of the buffer used by the sender to collect rows, provided in bytes.
-     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk=null] - JWK for authentication, client is not authenticated if not provided. Server might reject the connection depending on configuration.
+     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. Server might reject the connection depending on configuration.
      */
-    constructor(bufferSize, jwk = null) {
+    constructor(bufferSize, jwk = undefined) {
         /** @private */
         this.builder = new Builder(bufferSize);
         /** @private */
@@ -26,9 +25,9 @@ class Sender {
      *
      * @param {number} port - Port number of endpoint.
      * @param {string} host - Host name or IP address of endpoint.
-     * @param {{host: string, port: number, ca: Buffer}} [tlsOptions=null] - TLS CA for encryption, connection is not encrypted if not provided.
+     * @param {{host: string, port: number, ca: Buffer}} [tlsOptions = undefined] - TLS CA for encryption, connection is not encrypted if not provided.
      */
-    async connect(port, host, tlsOptions = null) {
+    async connect(port, host, tlsOptions = undefined) {
         let self = this;
 
         return new Promise((resolve, reject) => {
@@ -103,7 +102,7 @@ class Sender {
     /**
      * Writes rows into the buffer.
      *
-     * @param {{table: string, symbols: any[], columns: any[], timestamp: Nanos | bigint | number | string}} rows - The row or a list of rows to ingest.
+     * @param {Row[] | Row} rows - The row or a list of rows to ingest.
      */
     rows(rows) {
         this.builder.addRows(rows);

@@ -41,7 +41,7 @@ const proxyTLS = {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function run () {
+async function run() {
     const proxy = new Proxy();
     //await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
     await proxy.start(PROXY_PORT, PORT, HOST);

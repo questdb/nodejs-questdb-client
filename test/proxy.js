@@ -23,7 +23,7 @@ class Proxy {
         });
     }
 
-    async start(listenPort, remotePort, remoteHost, tlsOptions = null) {
+    async start(listenPort, remotePort, remoteHost, tlsOptions = undefined) {
         return new Promise(resolve => {
             this.remote.on("ready", async () => {
                 console.log("remote connection ready");

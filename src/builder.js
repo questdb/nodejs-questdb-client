@@ -111,6 +111,11 @@ class Builder {
         startNewRow(this);
     }
 
+    /**
+     * Writes rows into the buffer.
+     *
+     * @param {Row[] | Row} rows - The row or a list of rows to ingest.
+     */
     addRows(rows) {
         if (Array.isArray(rows)) {
             for (const row of rows) {
@@ -122,6 +127,11 @@ class Builder {
         }
     }
 
+    /**
+     * Writes a row into the buffer.
+     *
+     * @param {Row} row - The row to ingest.
+     */
     addRow(row) {
         this.addTable(row.table);
         if (row.symbols) {
@@ -258,4 +268,30 @@ function writeEscaped(builder, data, quoted = false) {
     }
 }
 
+/** @classdesc Represents a database row. */
+class Row {
+
+    /**
+     * Creates a Row object.
+     *
+     * @param {string} table - The name of the table.
+     * @param {object} [symbols = undefined] - Symbols of the row in the form of {colName1: value1, colName2: value2...}.
+     * @param {object} [columns = undefined] - Columns of the row in the form of {colName1: value1, colName2: value2...}.
+     * @param {Nanos | bigint | number | string} [timestamp = undefined] - The designated timestamp.
+     */
+    constructor(table, symbols= undefined, columns = undefined, timestamp= undefined) {
+        this.table = table;
+        if (symbols) {
+            this.symbols = symbols;
+        }
+        if (columns) {
+            this.columns = columns;
+        }
+        if (timestamp) {
+            this.timestamp = timestamp;
+        }
+    }
+}
+
+exports.Row = Row;
 exports.Builder = Builder;
