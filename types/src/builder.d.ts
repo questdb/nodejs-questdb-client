@@ -1,20 +1,4 @@
 /// <reference types="node" />
-/** @classdesc Represents a database row. */
-export class Row {
-    /**
-     * Creates a Row object.
-     *
-     * @param {string} table - The name of the table.
-     * @param {object} [symbols = undefined] - Symbols of the row in the form of {colName1: value1, colName2: value2...}.
-     * @param {object} [columns = undefined] - Columns of the row in the form of {colName1: value1, colName2: value2...}.
-     * @param {Nanos | bigint | number | string} [timestamp = undefined] - The designated timestamp.
-     */
-    constructor(table: string, symbols?: object, columns?: object, timestamp?: Nanos | bigint | number | string);
-    table: string;
-    symbols: any;
-    columns: any;
-    timestamp: string | number | bigint | Nanos;
-}
 export class Builder {
     constructor(bufferSize: any);
     resize(bufferSize: any): void;
@@ -47,6 +31,6 @@ export class Builder {
     addRow(row: Row): void;
     toBuffer(): Buffer;
 }
-import { Nanos } from "./timestamp";
 import { Buffer } from "buffer";
+import { Row } from "./row";
 //# sourceMappingURL=builder.d.ts.map

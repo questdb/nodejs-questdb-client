@@ -22,15 +22,14 @@ export class Sender {
     /**
      * Creates a connection to the database.
      *
-     * @param {number} port - Port number of endpoint.
-     * @param {string} host - Host name or IP address of endpoint.
-     * @param {{host: string, port: number, ca: Buffer}} [tlsOptions = undefined] - TLS CA for encryption, connection is not encrypted if not provided.
+     * @param {{host: string, port: number, ca: Buffer}} options - Connection options, host and port are required.
+     * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
-    connect(port: number, host: string, tlsOptions?: {
+    connect(options: {
         host: string;
         port: number;
         ca: Buffer;
-    }): Promise<any>;
+    }, secure?: boolean): Promise<any>;
     /** @private */
     private socket;
     /**
@@ -49,5 +48,5 @@ export class Sender {
     rows(rows: Row[] | Row): void;
 }
 import { Buffer } from "buffer";
-import { Row } from "./builder";
+import { Row } from "./row";
 //# sourceMappingURL=sender.d.ts.map

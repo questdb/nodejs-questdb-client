@@ -1,5 +1,6 @@
 const { Buffer } = require("buffer");
-const { Builder, Row } = require("./builder");
+const { Builder } = require("./builder");
+const { Row } = require("./row");
 const net = require("net");
 const tls = require("tls");
 const crypto = require('crypto');
@@ -23,11 +24,10 @@ class Sender {
     /**
      * Creates a connection to the database.
      *
-     * @param {number} port - Port number of endpoint.
-     * @param {string} host - Host name or IP address of endpoint.
-     * @param {{host: string, port: number, ca: Buffer}} [tlsOptions = undefined] - TLS CA for encryption, connection is not encrypted if not provided.
+     * @param {{host: string, port: number, ca: Buffer}} options - Connection options, host and port are required.
+     * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
-    async connect(port, host, tlsOptions = undefined) {
+    async connect(options, secure = false) {
         let self = this;
 
         return new Promise((resolve, reject) => {
@@ -35,9 +35,9 @@ class Sender {
             let data;
 
             /** @private */
-            this.socket = !tlsOptions
-                ? net.connect(port, host)
-                : tls.connect(tlsOptions, async () => {
+            this.socket = !secure
+                ? net.connect(options)
+                : tls.connect(options, async () => {
                     if (!self.socket.authorized) {
                         reject("Problem with server's certificate");
                         await self.close();

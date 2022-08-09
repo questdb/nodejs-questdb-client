@@ -1,5 +1,5 @@
 import { Sender } from "./src/sender";
-import { Row } from "./src/builder";
+import { Row } from "./src/row";
 import { Micros } from "./src/timestamp";
 import { Nanos } from "./src/timestamp";
 export { Sender, Row, Micros, Nanos };

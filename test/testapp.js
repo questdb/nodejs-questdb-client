@@ -43,15 +43,15 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function run() {
     const proxy = new Proxy();
-    //await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
-    await proxy.start(PROXY_PORT, PORT, HOST);
+    await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
+    //await proxy.start(PROXY_PORT, PORT, HOST);
 
     const sender = new Sender(1024, JWK); //with authentication
     //const sender = new Sender(1024); // without authentication
 
-    const connected = await sender.connect(PROXY_PORT, HOST, senderTLS); //connection through proxy with encryption
-    //const connected = await sender.connect(PROXY_PORT, HOST); //connection through proxy without encryption
-    //const connected = await sender.connect(PORT, HOST); //direct connection without proxy
+    const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
+    //const connected = await sender.connect({"port": PROXY_PORT, "host": HOST}); //connection through proxy without encryption
+    //const connected = await sender.connect({"port": PORT, "host": HOST}); //direct connection without proxy
     console.log("connected=" + connected);
     if (connected) {
         const rows1 = [

@@ -1,6 +1,6 @@
 const fs = require('fs')
-const { Builder, Row } = require("../src/builder");
-const { Micros, Nanos } = require("../index");
+const { Builder } = require("../src/builder");
+const { Row, Micros, Nanos } = require("../index");
 
 describe('Client interop test suite', function () {
     it('runs client tests as per json test config', function () {
