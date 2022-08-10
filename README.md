@@ -84,7 +84,7 @@ async function run() {
 run().then(value => console.log(value)).catch(err => console.log(err));
 ```
 
-### Typescript example
+### TypeScript example
 ```typescript
 import { Sender, Row } from "@questdb/nodejs-client";
 
