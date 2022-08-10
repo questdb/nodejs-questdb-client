@@ -42,7 +42,8 @@ export class Sender {
     /** @private */
     private socket;
     /**
-     * Closes the connection to the database.
+     * Closes the connection to the database. <br>
+     * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     close(): Promise<any>;
     /**

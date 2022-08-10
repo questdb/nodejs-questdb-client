@@ -87,7 +87,8 @@ class Sender {
     }
 
     /**
-     * Closes the connection to the database.
+     * Closes the connection to the database. <br>
+     * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
         return new Promise(resolve => {

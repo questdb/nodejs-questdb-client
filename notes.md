@@ -23,7 +23,7 @@ otherwise number maps to float.
 - Test the client against a real QuestDB instance, not only mock. The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
 - authenticate() function doesn't await for sender.socket.write() to happen and doesn't check for errors
 - The client should throw Error instances instead of strings.
-- sender.close() doesn't flush pending data to the socket. We should document this.
+- ~~sender.close() doesn't flush pending data to the socket. We should document this.~~
 - Would be nice to accept alternative logger implementations to be used instead of console
 - ~~Add 'use strict'; since we are using JS + CommonJS~~
 - ~~"Typescript" should be "TypeScript" in the readme~~
