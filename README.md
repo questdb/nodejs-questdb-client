@@ -46,7 +46,7 @@ run().then(value => console.log(value)).catch(err => console.log(err));
 
 ### Authentication and secure connection
 ```javascript
-const { Sender } = require("@questdb/nodejs-client");
+const { Sender, Row } = require("@questdb/nodejs-client");
 
 async function run() {
     // construct a JsonWebKey
