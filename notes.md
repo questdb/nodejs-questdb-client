@@ -25,7 +25,7 @@ otherwise number maps to float.
 - The client should throw Error instances instead of strings.
 - sender.close() doesn't flush pending data to the socket. We should document this.
 - Would be nice to accept alternative logger implementations to be used instead of console
-- Add 'use strict'; since we are using JS + CommonJS
+- ~~Add 'use strict'; since we are using JS + CommonJS~~
 - ~~"Typescript" should be "TypeScript" in the readme~~
 - ~~Remove commented code from test/testapp.js~~
 - Remove notes.md file
