@@ -22,36 +22,22 @@ const JWK = {
 const senderTLS = {
     host: HOST,
     port: PROXY_PORT,
-
-    // Necessary only if using the client certificate authentication
-    //key: readFileSync('../certs/client/client.key'),
-    //cert: readFileSync('../certs/client/client.crt'),
-
-    // Necessary only if the server uses the self-signed certificate
-    ca: readFileSync('../certs/ca/ca.crt')
+    ca: readFileSync('../certs/ca/ca.crt') // necessary only if the server uses self-signed certificate
 };
 
 const proxyTLS = {
     key: readFileSync('../certs/server/server.key'),
     cert: readFileSync('../certs/server/server.crt'),
-    ca: readFileSync('../certs/ca/ca.crt'), // authority chain for the clients
-    //requestCert: true, // ask for a client cert
-    //rejectUnauthorized: false, // act on unauthorized clients at the app level
+    ca: readFileSync('../certs/ca/ca.crt') // authority chain for the clients
 };
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function run() {
     const proxy = new Proxy();
     await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
-    //await proxy.start(PROXY_PORT, PORT, HOST);
 
     const sender = new Sender(1024, JWK); //with authentication
-    //const sender = new Sender(1024); // without authentication
 
     const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
-    //const connected = await sender.connect({"port": PROXY_PORT, "host": HOST}); //connection through proxy without encryption
-    //const connected = await sender.connect({"port": PORT, "host": HOST}); //direct connection without proxy
     console.log("connected=" + connected);
     if (connected) {
         const rows1 = [
@@ -85,7 +71,6 @@ async function run() {
         sender.rows(rows2);
 
         await sender.flush();
-        //await sleep(3000); //wait for proxy to forward data
     }
     await sender.close();
 
