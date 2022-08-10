@@ -8,7 +8,6 @@ describe('Client interop test suite', function () {
 
         loopTestCase:
         for (const testCase of testCases) {
-            //console.log("Scenario: " + testCase.testName);
             const builder = new Builder(1024);
             try {
                 builder.addTable(testCase.table);

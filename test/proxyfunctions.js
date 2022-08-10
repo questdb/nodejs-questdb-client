@@ -14,7 +14,7 @@ async function write(socket, data) {
 async function listen(proxy, listenPort, dataHandler, tlsOptions) {
     return new Promise(resolve => {
         const clientConnHandler = client => {
-            console.log('client connected');
+            console.info('client connected');
             if (proxy.client) {
                 console.error("There is already a client connected");
                 process.exit(1);
@@ -24,7 +24,7 @@ async function listen(proxy, listenPort, dataHandler, tlsOptions) {
             client.on("data", dataHandler);
 
             client.on("close", async () => {
-                console.log("client connection closed");
+                console.info("client connection closed");
             });
         }
 
@@ -34,18 +34,17 @@ async function listen(proxy, listenPort, dataHandler, tlsOptions) {
 
         proxy.server.on('error', err => {
             console.error(`server error: ${err}`);
-            process.exit(1);
         });
 
         proxy.server.listen(listenPort, LOCALHOST, () => {
-            console.log(`listening for clients on ${listenPort}`);
+            console.info(`listening for clients on ${listenPort}`);
             resolve();
         });
     });
 }
 
 async function shutdown(proxy, onServerClose = async () => {}) {
-    console.log("closing proxy")
+    console.info("closing proxy")
     return new Promise(resolve => {
         proxy.server.close(async () => {
             await onServerClose();
@@ -55,14 +54,14 @@ async function shutdown(proxy, onServerClose = async () => {}) {
 }
 
 async function connect(proxy, remotePort, remoteHost) {
-    console.log(`opening remote connection to ${remoteHost}:${remotePort}`)
+    console.info(`opening remote connection to ${remoteHost}:${remotePort}`)
     return new Promise(resolve => {
         proxy.remote.connect(remotePort, remoteHost, () => resolve());
     });
 }
 
 async function close(proxy) {
-    console.log("closing remote connection")
+    console.info("closing remote connection")
     return new Promise(resolve => {
         proxy.remote.destroy();
         resolve();

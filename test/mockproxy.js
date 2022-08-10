@@ -13,7 +13,7 @@ class MockProxy {
 
     async start(listenPort, tlsOptions = undefined) {
         await listen(this, listenPort, async data => {
-            console.log(`received from client: ${data}`);
+            console.info(`received from client: ${data}`);
             if (this.mockConfig.assertions) {
                 this.dataSentToRemote.push(data.toString());
             }

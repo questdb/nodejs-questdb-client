@@ -1,11 +1,12 @@
 {
   "name": "@questdb/nodejs-client",
-  "version": "0.0.29",
+  "version": "0.0.30",
   "description": "QuestDB Node.js Client",
   "main": "index.js",
   "types": "types/index.d.ts",
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "docs": "jsdoc index.js src/sender.js src/row.js src/timestamp.js README.md -d docs"
   },
   "repository": {
     "type": "git",
@@ -16,7 +17,7 @@
   ],
   "author": "QuestDB",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/questdb/nodejs-questdb-client#readme",
+  "homepage": "https://questdb.github.io/nodejs-questdb-client",
   "jest": {
     "testRunner": "jest-jasmine2"
   },

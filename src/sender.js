@@ -59,30 +59,27 @@ class Sender {
             this.socket.on("data", async raw => {
                 data = !data ? raw : Buffer.concat([data, raw]);
                 if (!authenticated) {
-                    //console.log(`received: ${data}`);
                     authenticated = await authenticate(self, data);
                     authenticated ? resolve(true) : reject("Could not authenticate");
                 } else {
-                    console.warn(`received unexpected data: ${data}`);
+                    console.warn(`Received unexpected data: ${data}`);
                 }
             })
             .on("ready", async () => {
-                console.log("connection ready");
+                console.info(`Successfully connected to ${options.host}:${options.port}`);
                 if (self.jwk) {
-                    console.log("authenticating with server");
+                    console.info(`Authenticating with ${options.host}:${options.port}`);
                     self.socket.write(`${self.jwk.kid}\n`);
                 } else {
-                    console.log("no authentication");
                     authenticated = true;
                     resolve(true);
                 }
             })
             .on("close", () => {
-                console.log("connection closed");
+                console.info(`Connection to ${options.host}:${options.port} is closed`);
             })
             .on("error", err => {
                 console.error(err);
-                process.exit(1);
             });
         });
     }
@@ -91,7 +88,6 @@ class Sender {
      * Closes the connection to the database.
      */
     async close() {
-        console.log("closing connection")
         return new Promise(resolve => {
             this.socket.destroy();
             resolve();
