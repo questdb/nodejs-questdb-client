@@ -13,15 +13,14 @@ The bufferSize parameter in the constructor can also be optional if this is done
   - raise a PR, get it merged
   - create a tag with the version number and use a github action to do npm publish (the action acts on tags matching with the pattern "v.*")
 - Github action to run tests on each commit
-- Add an optional “type” property to the Row API which you need to specify if you use integer and/or timestamp fields,
-otherwise number maps to float.
-  - Only integer and timestamp columns have to be listed in the “type” property, if missing it is assumed that it is float.
-  - Also make sure that the Builder can be requested from the Sender so both kind of APIs are available to the user:
+- Provide a builder style API:
   builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();
 - The project lacks a linter. Use ESLint (https://eslint.org) or standard (https://standardjs.com)
-- Move certs/ under test/ since these are test specific files. Possibly generate certs from test.
+- ~~Move certs/ under test/ since these are test specific files. Possibly generate certs from test.~~
 - Test the client against a real QuestDB instance, not only mock. The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
 - authenticate() function doesn't await for sender.socket.write() to happen and doesn't check for errors
+- Avoid resource leaks on await sender.connect(); await sender.connect();.
+  As a bonus, we could even protect from concurrent connect calls, e.g. await Promise.all(sender.connect(), sender.connect());
 - ~~The client should throw Error instances instead of strings.~~
 - ~~sender.close() doesn't flush pending data to the socket. We should document this.~~
 - Would be nice to accept alternative logger implementations to be used instead of console

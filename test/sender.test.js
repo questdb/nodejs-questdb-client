@@ -10,13 +10,13 @@ const PROXY_HOST = '127.0.0.1';
 const senderOptions = {
     port: PROXY_PORT,
     host: PROXY_HOST,
-    ca: readFileSync('certs/ca/ca.crt')
+    ca: readFileSync('test/certs/ca/ca.crt')
 }
 
 const proxyOptions = {
-    key: readFileSync('certs/server/server.key'),
-    cert: readFileSync('certs/server/server.crt'),
-    ca: readFileSync('certs/ca/ca.crt')
+    key: readFileSync('test/certs/server/server.key'),
+    cert: readFileSync('test/certs/server/server.crt'),
+    ca: readFileSync('test/certs/ca/ca.crt')
 };
 
 const PRIVATE_KEY = "9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8"

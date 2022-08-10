@@ -24,13 +24,13 @@ const JWK = {
 const senderTLS = {
     host: HOST,
     port: PROXY_PORT,
-    ca: readFileSync('../certs/ca/ca.crt') // necessary only if the server uses self-signed certificate
+    ca: readFileSync('certs/ca/ca.crt') // necessary only if the server uses self-signed certificate
 };
 
 const proxyTLS = {
-    key: readFileSync('../certs/server/server.key'),
-    cert: readFileSync('../certs/server/server.crt'),
-    ca: readFileSync('../certs/ca/ca.crt') // authority chain for the clients
+    key: readFileSync('certs/server/server.key'),
+    cert: readFileSync('certs/server/server.crt'),
+    ca: readFileSync('certs/ca/ca.crt') // authority chain for the clients
 };
 
 async function run() {
