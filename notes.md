@@ -2,5 +2,30 @@
 > ./scripts/generateCerts.sh . questdbPwd123
 
 ### TODO:
-- setup CI to run tests?
-- npm unpublish old versions?
+- The client should grow the buffer and call flush() immediately instead of throwing on insufficient buffer size,
+like other clients do.
+Alternatively, the sender could be growing the buffer on row writes and shrinking it on a subsequent flush() call.
+The bufferSize parameter in the constructor can also be optional if this is done.
+- Config object for Sender
+- Setup a release process:
+  - create a branch
+  - update package.json and regen js docs manually
+  - raise a PR, get it merged
+  - create a tag with the version number and use a github action to do npm publish (the action acts on tags matching with the pattern "v.*")
+- Github action to run tests on each commit
+- Add an optional “type” property to the Row API which you need to specify if you use integer and/or timestamp fields,
+otherwise number maps to float.
+  - Only integer and timestamp columns have to be listed in the “type” property, if missing it is assumed that it is float.
+  - Also make sure that the Builder can be requested from the Sender so both kind of APIs are available to the user:
+  builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();
+- The project lacks a linter. Use ESLint (https://eslint.org) or standard (https://standardjs.com)
+- Move certs/ under test/ since these are test specific files. Possibly generate certs from test.
+- Test the client against a real QuestDB instance, not only mock. The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
+- authenticate() function doesn't await for sender.socket.write() to happen and doesn't check for errors
+- The client should throw Error instances instead of strings.
+- sender.close() doesn't flush pending data to the socket. We should document this.
+- Would be nice to accept alternative logger implementations to be used instead of console
+- Add 'use strict'; since we are using JS + CommonJS
+- "Typescript" should be "TypeScript" in the readme
+- Remove commented code from test/testapp.js
+- Remove notes.md file
