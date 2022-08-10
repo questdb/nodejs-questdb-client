@@ -7,7 +7,7 @@ const CHALLENGE_LENGTH = 512;
 class MockProxy {
     constructor(mockConfig) {
         if (!mockConfig) {
-            throw "Missing mock config";
+            throw new Error("Missing mock config");
         }
         this.mockConfig = mockConfig;
         this.dataSentToRemote = [];
@@ -32,7 +32,7 @@ class MockProxy {
 
     getDataSentToRemote() {
         if (!this.mockConfig.assertions) {
-            throw "Should be called only when assertions switched on"
+            throw new Error("Should be called only when assertions switched on");
         }
         return this.dataSentToRemote;
     }

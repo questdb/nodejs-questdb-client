@@ -27,7 +27,7 @@ class Timestamp {
                 this.timestamp = BigInt(timestamp);
                 break;
             default:
-                throw `BigInt, string or number expected, received ${typeof timestamp}`;
+                throw new Error(`BigInt, string or number expected, received ${typeof timestamp}`);
         }
     }
 

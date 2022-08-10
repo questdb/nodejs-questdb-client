@@ -11,10 +11,10 @@ const QuestDBMaxFileNameLength = 127;
 function validateTableName(name) {
     const len = name.length;
     if (len > QuestDBMaxFileNameLength) {
-        throw `Table name is too long, max length is ${QuestDBMaxFileNameLength}`;
+        throw new Error(`Table name is too long, max length is ${QuestDBMaxFileNameLength}`);
     }
     if (len === 0) {
-        throw "Empty string is not allowed as table name";
+        throw new Error("Empty string is not allowed as table name");
     }
     for (let i = 0; i < len; i++) {
         let ch = name[i];
@@ -27,7 +27,7 @@ function validateTableName(name) {
                     // double or triple dot looks suspicious
                     // single dot allowed as compatibility,
                     // when someone uploads 'file_name.csv' the file name used as the table name
-                    throw "Table name cannot start or end with a dot and only a single dot allowed";
+                    throw new Error("Table name cannot start or end with a dot and only a single dot allowed");
                 break;
             case '?':
             case ',':
@@ -60,7 +60,7 @@ function validateTableName(name) {
             case '\u000f':
             case '\u007f':
             case '\ufeff': // UTF-8 BOM (Byte Order Mark) can appear at the beginning of a character stream
-                throw `Invalid character in table name: ${ch}`;
+                throw new Error(`Invalid character in table name: ${ch}`);
         }
     }
 }
@@ -74,10 +74,10 @@ function validateTableName(name) {
 function validateColumnName(name) {
     const len = name.length;
     if (len > QuestDBMaxFileNameLength) {
-        throw `Column name is too long, max length is ${QuestDBMaxFileNameLength}`;
+        throw new Error(`Column name is too long, max length is ${QuestDBMaxFileNameLength}`);
     }
     if (len === 0) {
-        throw "Empty string is not allowed as column name";
+        throw new Error("Empty string is not allowed as column name");
     }
     for (const ch of name) {
         switch (ch) {
@@ -114,7 +114,7 @@ function validateColumnName(name) {
             case '\u000f':
             case '\u007f':
             case '\ufeff': // UTF-8 BOM (Byte Order Mark) can appear at the beginning of a character stream
-                throw `Invalid character in column name: ${ch}`;
+                throw new Error(`Invalid character in column name: ${ch}`);
         }
     }
 }

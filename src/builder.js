@@ -49,10 +49,10 @@ class Builder {
      */
     addTable(table) {
         if (typeof table !== "string") {
-            throw `Table name must be a string, received ${typeof table}`;
+            throw new Error(`Table name must be a string, received ${typeof table}`);
         }
         if (this.hasTable) {
-            throw "Table name has already been set";
+            throw new Error("Table name has already been set");
         }
         validateTableName(table);
         writeEscaped(this, table);
@@ -69,10 +69,10 @@ class Builder {
      */
     addSymbol(name, value) {
         if (typeof name !== "string") {
-            throw `Symbol name must be a string, received ${typeof name}`;
+            throw new Error(`Symbol name must be a string, received ${typeof name}`);
         }
         if (!this.hasTable || this.hasColumns) {
-            throw "Symbol can be added only after table name is set and before any column added";
+            throw new Error("Symbol can be added only after table name is set and before any column added");
         }
         write(this, ',');
         validateColumnName(name);
@@ -164,13 +164,13 @@ class Builder {
      */
     at(timestamp) {
         if (typeof timestamp !== "object") {
-            throw `The designated timestamp must be Nanos, received ${typeof timestamp}`;
+            throw new Error(`The designated timestamp must be Nanos, received ${typeof timestamp}`);
         }
         if (!(timestamp instanceof Nanos)) {
-            throw `The designated timestamp must be Nanos, received ${timestamp.constructor.name}`;
+            throw new Error(`The designated timestamp must be Nanos, received ${timestamp.constructor.name}`);
         }
         if (!this.hasSymbols && !this.hasColumns) {
-            throw "The row must have a symbol or field set before it is closed";
+            throw new Error("The row must have a symbol or field set before it is closed");
         }
         write(this, ' ');
         write(this, timestamp.toString());
@@ -184,7 +184,7 @@ class Builder {
      */
     atNow() {
         if (!this.hasSymbols && !this.hasColumns) {
-            throw "The row must have a symbol or field set before it is closed";
+            throw new Error("The row must have a symbol or field set before it is closed");
         }
         write(this, '\n');
         startNewRow(this);
@@ -238,9 +238,9 @@ class Builder {
                             this.addTimestamp(name, value);
                             break;
                         }
-                        throw `Unsupported column type: ${value.constructor.name}`;
+                        throw new Error(`Unsupported column type: ${value.constructor.name}`);
                     default:
-                        throw `Unsupported column type: ${typeof value}`;
+                        throw new Error(`Unsupported column type: ${typeof value}`);
                 }
             }
         }
@@ -256,9 +256,9 @@ class Builder {
                         this.at(row.timestamp);
                         break;
                     }
-                    throw `Unsupported designated timestamp type: ${row.timestamp.constructor.name}`;
+                    throw new Error(`Unsupported designated timestamp type: ${row.timestamp.constructor.name}`);
                 default:
-                    throw `Unsupported designated timestamp type: ${typeof row.timestamp}`;
+                    throw new Error(`Unsupported designated timestamp type: ${typeof row.timestamp}`);
             }
         } else {
             this.atNow();
@@ -270,10 +270,10 @@ class Builder {
      */
     toBuffer() {
         if (this.hasTable) {
-            throw "The builder's content is invalid, row needs to be closed by calling at() or atNow()";
+            throw new Error("The builder's content is invalid, row needs to be closed by calling at() or atNow()");
         }
         if (this.position < 1) {
-            throw "The builder is empty";
+            throw new Error("The builder is empty");
         }
         return this.buffer.subarray(0, this.position);
     }
@@ -287,16 +287,16 @@ function startNewRow(builder) {
 
 function addColumn(builder, name, value, writeValue, valueType, instanceType = undefined) {
     if (typeof name !== "string") {
-        throw `Field name must be a string, received ${typeof name}`;
+        throw new Error(`Field name must be a string, received ${typeof name}`);
     }
     if (typeof value !== valueType) {
-        throw `Field value must be a ${valueType}, received ${typeof value}`;
+        throw new Error(`Field value must be a ${valueType}, received ${typeof value}`);
     }
     if (instanceType && value.constructor.name !== instanceType) {
-        throw `Field value must be ${valueType}, received ${value.prototype.name}`;
+        throw new Error(`Field value must be ${valueType}, received ${value.prototype.name}`);
     }
     if (!builder.hasTable) {
-        throw "Field can be added only after table name is set";
+        throw new Error("Field can be added only after table name is set");
     }
     write(builder, builder.hasColumns ? ',' : ' ');
     validateColumnName(name);
@@ -309,7 +309,7 @@ function addColumn(builder, name, value, writeValue, valueType, instanceType = u
 function write(builder, data) {
     builder.position += builder.buffer.write(data, builder.position);
     if (builder.position > builder.bufferSize) {
-        throw `Buffer overflow [position=${builder.position}, bufferSize=${builder.bufferSize}]`;
+        throw new Error(`Buffer overflow [position=${builder.position}, bufferSize=${builder.bufferSize}]`);
     }
 }
 

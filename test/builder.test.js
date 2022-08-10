@@ -34,7 +34,7 @@ describe('Client interop test suite', function () {
                             builder.addTimestamp(column.name, new Micros(column.value));
                             break;
                         default:
-                            throw "Unsupported column type";
+                            throw new Error("Unsupported column type");
                     }
                 }
                 builder.atNow();
