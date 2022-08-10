@@ -18,7 +18,7 @@ export class Sender {
      * Creates an instance of Sender.
      *
      * @param {number} bufferSize - Size of the buffer used by the sender to collect rows, provided in bytes.
-     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. Server might reject the connection depending on configuration.
+     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. <br> Server might reject the connection depending on configuration.
      */
     constructor(bufferSize: number, jwk?: {
         x: string;
