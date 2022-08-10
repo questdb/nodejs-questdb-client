@@ -1,3 +1,5 @@
+'use strict';
+
 const fs = require('fs')
 const { Builder } = require("../src/builder");
 const { Row, Micros, Nanos } = require("../index");

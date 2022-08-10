@@ -1,3 +1,5 @@
+'use strict';
+
 const { Nanos } = require("./timestamp");
 
 /** @classdesc Represents a database row. */
@@ -11,7 +13,7 @@ class Row {
      * @param {object} [columns = undefined] - Columns of the row in the form of {colName1: value1, colName2: value2...}.
      * @param {Nanos | bigint | number | string} [timestamp = undefined] - The designated timestamp.
      */
-    constructor(table, symbols= undefined, columns = undefined, timestamp= undefined) {
+    constructor(table, symbols = undefined, columns = undefined, timestamp = undefined) {
         this.table = table;
         if (symbols) {
             this.symbols = symbols;

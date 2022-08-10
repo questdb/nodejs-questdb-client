@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * A Node.js client for QuestDB.
  *

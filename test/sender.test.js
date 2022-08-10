@@ -1,3 +1,5 @@
+'use strict';
+
 const { Sender } = require("../index");
 const { MockProxy } = require("./mockproxy");
 const { readFileSync} = require("fs");

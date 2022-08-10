@@ -1,3 +1,5 @@
+'use strict';
+
 const { Buffer } = require("buffer");
 const { Row } = require("./row");
 const { Micros, Nanos } = require("./timestamp");

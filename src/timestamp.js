@@ -1,3 +1,5 @@
+'use strict';
+
 /** @classdesc Abstract class representing a timestamp. <br>
  * Intended to be used as a base class of more specific Timestamp representations.
  * <p>

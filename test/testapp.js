@@ -1,3 +1,5 @@
+'use strict';
+
 const { Proxy } = require("./proxy");
 const { Sender, Micros } = require("../index");
 const { readFileSync } = require('fs');

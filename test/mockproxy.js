@@ -1,3 +1,5 @@
+'use strict';
+
 const { write, listen, shutdown } = require("./proxyfunctions");
 
 const CHALLENGE_LENGTH = 512;

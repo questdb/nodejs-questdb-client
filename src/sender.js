@@ -1,3 +1,5 @@
+'use strict';
+
 const { Buffer } = require("buffer");
 const { Builder } = require("./builder");
 const { Row } = require("./row");

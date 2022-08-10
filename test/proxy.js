@@ -1,3 +1,5 @@
+'use strict';
+
 const { Socket } = require("net");
 const { write, listen, shutdown, connect, close } = require("./proxyfunctions");
 
