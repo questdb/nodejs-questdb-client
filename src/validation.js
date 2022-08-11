@@ -32,7 +32,7 @@ function validateTableName(name) {
             case '?':
             case ',':
             case '\'':
-            case '\"':
+            case '"':
             case '\\':
             case '/':
             case ':':
@@ -85,7 +85,7 @@ function validateColumnName(name) {
             case '.':
             case ',':
             case '\'':
-            case '\"':
+            case '"':
             case '\\':
             case '/':
             case ':':

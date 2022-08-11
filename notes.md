@@ -15,7 +15,7 @@ The bufferSize parameter in the constructor can also be optional if this is done
 - Github action to run tests on each commit
 - Provide a builder style API:
   builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();
-- The project lacks a linter. Use ESLint (https://eslint.org) or standard (https://standardjs.com)
+- ~~The project lacks a linter. Use ESLint (https://eslint.org) or standard (https://standardjs.com)~~
 - ~~Move certs/ under test/ since these are test specific files. Possibly generate certs from test.~~
 - Test the client against a real QuestDB instance, not only mock. The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
 - authenticate() function doesn't await for sender.socket.write() to happen and doesn't check for errors
