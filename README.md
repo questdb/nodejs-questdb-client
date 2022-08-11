@@ -20,20 +20,19 @@ async function run() {
     // host and port are required in connect options
     await sender.connect({port: 9009, host: "127.0.0.1"});
 
-    // add rows to the buffer of the sender either in JSON format or as Row objects
-    // if adding a single row no need to pass it as an array
-    sender.rows([
-        new Row("prices", {"instrument": "EURUSD"}, {"bid": 1.0195, "ask": 1.0221}),
-        new Row("prices", {"instrument": "GBPUSD"}, {"bid": 1.2076, "ask": 1.2082})
-    ]);
-    sender.rows({
-        "table": "prices",
-        "symbols": {"instrument": "USDJPY"},
-        "columns": {"bid": 134.9730, "ask": 135.1450}
-    });
+    // add rows to the buffer of the sender
+    sender.table("prices").symbol("instrument", "EURUSD")
+        .floatColumn("bid", 1.0195).floatColumn("ask", 1.0221).atNow();
+    sender.table("prices").symbol("instrument", "GBPUSD")
+        .floatColumn("bid", 1.2076).floatColumn("ask", 1.2082).atNow();
 
     // flush the buffer of the sender, sending the data to QuestDB
     // the buffer is cleared after the data is sent and the sender is ready to accept new data
+    await sender.flush();
+
+    // add rows to the buffer again and send it to the server
+    sender.table("prices").symbol("instrument", "EURUSD")
+        .floatColumn("bid", 1.0197).floatColumn("ask", 1.0224).atNow();
     await sender.flush();
 
     // close the connection after all rows ingested
@@ -46,7 +45,7 @@ run().then(value => console.log(value)).catch(err => console.log(err));
 
 ### Authentication and secure connection
 ```javascript
-const { Sender, Row } = require("@questdb/nodejs-client");
+const { Sender } = require("@questdb/nodejs-client");
 
 async function run() {
     // construct a JsonWebKey
@@ -73,7 +72,8 @@ async function run() {
     await sender.connect({port: 9009, host: "127.0.0.1"}, true);
 
     // send the data over the authenticated and secure connection
-    sender.rows(new Row("prices", { "instrument": "EURUSD" }, { "bid": 1.0195, "ask": 1.0221 }));
+    sender.table("prices").symbol("instrument", "EURUSD")
+        .floatColumn("bid", 1.0197).floatColumn("ask", 1.0224).atNow();
     await sender.flush();
 
     // close the connection after all rows ingested
@@ -86,7 +86,7 @@ run().then(value => console.log(value)).catch(err => console.log(err));
 
 ### TypeScript example
 ```typescript
-import { Sender, Row } from "@questdb/nodejs-client";
+import { Sender } from "@questdb/nodejs-client";
 
 async function run(): Promise<number> {
     // construct a JsonWebKey
@@ -113,7 +113,8 @@ async function run(): Promise<number> {
     await sender.connect({port: 9009, host: "127.0.0.1"}, true);
 
     // send the data over the authenticated and secure connection
-    sender.rows(new Row("prices", { "instrument": "EURUSD" }, { "bid": 1.0195, "ask": 1.0221 }));
+    sender.table("prices").symbol("instrument", "EURUSD")
+        .floatColumn("bid", 1.0197).floatColumn("ask", 1.0224).atNow();
     await sender.flush();
 
     // close the connection after all rows ingested

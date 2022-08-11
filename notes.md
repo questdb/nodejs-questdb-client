@@ -13,8 +13,8 @@ The bufferSize parameter in the constructor can also be optional if this is done
   - raise a PR, get it merged
   - create a tag with the version number and use a github action to do npm publish (the action acts on tags matching with the pattern "v.*")
 - Github action to run tests on each commit
-- Provide a builder style API:
-  builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();
+- ~~Provide a builder style API:
+  builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();~~
 - ~~The project lacks a linter. Use ESLint (https://eslint.org) or standard (https://standardjs.com)~~
 - ~~Move certs/ under test/ since these are test specific files. Possibly generate certs from test.~~
 - Test the client against a real QuestDB instance, not only mock. The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
@@ -27,4 +27,5 @@ The bufferSize parameter in the constructor can also be optional if this is done
 - ~~Add 'use strict'; since we are using JS + CommonJS~~
 - ~~"Typescript" should be "TypeScript" in the readme~~
 - ~~Remove commented code from test/testapp.js~~
+- Update node.js examples in QuestDB documentation
 - Remove notes.md file

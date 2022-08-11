@@ -7,7 +7,5 @@
  */
 
 const { Sender } = require('./src/sender');
-const { Row } = require("./src/row");
-const { Micros, Nanos } = require('./src/timestamp');
 
-module.exports = { Sender, Row, Micros, Nanos };
+module.exports = { Sender };

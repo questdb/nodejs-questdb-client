@@ -1,7 +1,7 @@
 'use strict';
 
 const { Proxy } = require("./proxy");
-const { Sender, Micros } = require("../index");
+const { Sender } = require("../index");
 const { readFileSync } = require('fs');
 
 const PROXY_PORT = 9099;
@@ -38,40 +38,29 @@ async function run() {
     await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
 
     const sender = new Sender(1024, JWK); //with authentication
-
     const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
-    console.log("connected=" + connected);
     if (connected) {
-        const rows1 = [
-            {
-                "table": "test",
-                "symbols": { "location": "emea", "city": "budapest" },
-                "columns": { "hoppa": "hello", "hippi": "hello", "hippo": "haho", "temperature": 14.1, "intcol": 56n, "tscol": new Micros() }
-            },
-            {
-                "table": "test",
-                "symbols": { "location": "asia", "city": "singapore" },
-                "columns": { "hoppa": "hi", "hippi": "hopp", "hippo": "huhu", "temperature": 7.1 },
-                "timestamp": 1658484765000555000n
-            }
-        ];
+        sender.table("test")
+            .symbol("location", "emea").symbol("city", "budapest")
+            .stringColumn("hoppa", "hello").stringColumn("hippi", "hello").stringColumn("hippo", "haho")
+            .floatColumn("temperature", 14.1).intColumn("intcol", 56).timestampColumn("tscol", Date.now() * 1000)
+            .atNow();
+        sender.table("test")
+            .symbol("location", "asia").symbol("city", "singapore")
+            .stringColumn("hoppa", "hi").stringColumn("hopp", "hello").stringColumn("hippo", "huhu")
+            .floatColumn("temperature", 7.1)
+            .at("1658484765000555000");
 
-        console.log("sending: " + JSON.stringify(rows1, (key, value) =>
-            typeof value === 'bigint' ? value.toString() : value
-        ));
-        sender.rows(rows1);
+        console.log("sending:\n" + sender.toBuffer().toString());
+        await sender.flush();
 
-        const rows2 = {
-            "table": "test",
-            "symbols": { "location": "emea", "city": "miskolc"},
-            "columns": { "hoppa": "hello", "hippi": "hello", "hippo": "lalalala", "temperature": 13.1 }
-        };
+        sender.table("test")
+            .symbol("location", "emea").symbol("city", "miskolc")
+            .stringColumn("hoppa", "hello").stringColumn("hippi", "hello").stringColumn("hippo", "lalalala")
+            .floatColumn("temperature", 13.1).intColumn("intcol", 333)
+            .atNow();
 
-        console.log("sending: " + JSON.stringify(rows2, (key, value) =>
-            typeof value === 'bigint' ? value.toString() : value
-        ));
-        sender.rows(rows2);
-
+        console.log("sending:\n" + sender.toBuffer().toString());
         await sender.flush();
     }
     await sender.close();

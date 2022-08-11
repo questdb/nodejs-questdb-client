@@ -119,5 +119,37 @@ function validateColumnName(name) {
     }
 }
 
+/**
+ * Validates a designated timestamp. The value must contain only digits.<br>
+ * Throws an error if the value is invalid.
+ *
+ * @param {string} timestamp - The table name to validate.
+ */
+function validateDesignatedTimestamp(timestamp) {
+    const len = timestamp.length;
+    if (len === 0) {
+        throw new Error("Empty string is not allowed as designated timestamp");
+    }
+    for (let i = 0; i < len; i++) {
+        let ch = timestamp[i];
+        switch (ch) {
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+                break;
+            default:
+                throw new Error(`Invalid character in designated timestamp: ${ch}`);
+        }
+    }
+}
+
 exports.validateTableName = validateTableName;
 exports.validateColumnName = validateColumnName;
+exports.validateDesignatedTimestamp = validateDesignatedTimestamp;

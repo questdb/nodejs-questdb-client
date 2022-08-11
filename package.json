@@ -1,12 +1,12 @@
 {
   "name": "@questdb/nodejs-client",
-  "version": "0.0.30",
+  "version": "0.0.32",
   "description": "QuestDB Node.js Client",
   "main": "index.js",
   "types": "types/index.d.ts",
   "scripts": {
     "test": "jest",
-    "docs": "jsdoc index.js src/sender.js src/row.js src/timestamp.js README.md -d docs"
+    "docs": "jsdoc index.js src/sender.js README.md -d docs"
   },
   "repository": {
     "type": "git",

@@ -1,5 +1,6 @@
 /// <reference types="node" />
 /// <reference types="node" />
+/// <reference types="node" />
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data and close the connection.
  * <p>
@@ -29,9 +30,33 @@ export class Sender {
         crv: string;
     });
     /** @private */
-    private builder;
-    /** @private */
     private jwk;
+    /**
+     * Reinitializes the buffer of the sender. <br>
+     * Can be used to increase the size of buffer if overflown.
+     *
+     * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
+     */
+    resize(bufferSize: number): void;
+    /** @private */
+    private bufferSize;
+    /** @private */
+    private buffer;
+    /**
+     * Resets the buffer, data added to the buffer will be lost. <br>
+     * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
+     *
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    reset(): Sender;
+    /** @private */
+    private position;
+    /** @private */
+    private hasTable;
+    /** @private */
+    private hasSymbols;
+    /** @private */
+    private hasColumns;
     /**
      * Creates a connection to the database.
      *
@@ -51,13 +76,78 @@ export class Sender {
      */
     flush(): Promise<any>;
     /**
-     * Writes rows into the buffer.
-     *
-     * @param {Row[] | Row} rows - The row or a list of rows to ingest.
+     * @ignore
+     * @return {Buffer} Returns a cropped buffer ready to send to the server.
      */
-    rows(rows: Row[] | Row): void;
+    toBuffer(): Buffer;
+    /**
+     * Write the table name into the buffer of the sender.
+     *
+     * @param {string} table - Table name.
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    table(table: string): Sender;
+    /**
+     * Write a symbol name and value into the buffer of the sender.
+     *
+     * @param {string} name - Symbol name.
+     * @param {any} value - Symbol value, toString() will be called to extract the actual symbol value from the parameter.
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    symbol(name: string, value: any): Sender;
+    /**
+     * Write a string column with its value into the buffer of the sender.
+     *
+     * @param {string} name - Column name.
+     * @param {string} value - Column value, accepts only string values.
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    stringColumn(name: string, value: string): Sender;
+    /**
+     * Write a boolean column with its value into the buffer of the sender.
+     *
+     * @param {string} name - Column name.
+     * @param {boolean} value - Column value, accepts only boolean values.
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    booleanColumn(name: string, value: boolean): Sender;
+    /**
+     * Write a float column with its value into the buffer of the sender.
+     *
+     * @param {string} name - Column name.
+     * @param {number} value - Column value, accepts only number values.
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    floatColumn(name: string, value: number): Sender;
+    /**
+     * Write an integer column with its value into the buffer of the sender.
+     *
+     * @param {string} name - Column name.
+     * @param {number} value - Column value, accepts only number values.
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    intColumn(name: string, value: number): Sender;
+    /**
+     * Write a timestamp column with its value into the buffer of the sender.
+     *
+     * @param {string} name - Column name.
+     * @param {number} value - Column value, accepts only number objects.
+     * @return {Sender} Returns with a reference to this sender.
+     */
+    timestampColumn(name: string, value: number): Sender;
+    /**
+     * Closing the row after writing the designated timestamp into the buffer of the sender.
+     *
+     * @param {string} timestamp - A string represents the designated timestamp in nanoseconds.
+     */
+    at(timestamp: string): void;
+    /**
+     * Closing the row without writing designated timestamp into the buffer of the sender. <br>
+     * Designated timestamp will be populated by the server on this record.
+     */
+    atNow(): void;
 }
 import { NetConnectOpts } from "net";
 import { ConnectionOptions } from "tls";
-import { Row } from "./row";
+import { Buffer } from "buffer";
 //# sourceMappingURL=sender.d.ts.map

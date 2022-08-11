@@ -48,13 +48,8 @@ async function createSender(jwk = undefined, secure = false) {
     return sender;
 }
 
-async function sendData(sender, rows = [{
-                "table": "test",
-                "symbols": { "location": "us" },
-                "columns": { "temperature": 17.1 },
-                "timestamp": 1658484765000000000
-            }]) {
-    sender.rows(rows);
+async function sendData(sender) {
+    sender.table("test").symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
     await sender.flush();
 }
 
@@ -80,7 +75,7 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-describe('Sender test suite', function () {
+describe('Sender connection suite', function () {
     it('can authenticate', async function () {
         const proxy = await createProxy(true);
         const sender = await createSender(JWK);
@@ -131,5 +126,287 @@ describe('Sender test suite', function () {
         await sender.close();
         await assertSentData(proxy, false, "test,location=us temperature=17.1 1658484765000000000\n");
         await proxy.stop();
+    });
+});
+
+describe('Client interop test suite', function () {
+    it('runs client tests as per json test config', function () {
+        let testCases = JSON.parse(readFileSync('./questdb-client-test/ilp-client-interop-test.json').toString());
+
+        loopTestCase:
+            for (const testCase of testCases) {
+                const sender = new Sender(1024);
+                try {
+                    sender.table(testCase.table);
+                    for (const symbol of testCase.symbols) {
+                        sender.symbol(symbol.name, symbol.value);
+                    }
+                    for (const column of testCase.columns) {
+                        switch (column.type) {
+                            case "STRING":
+                                sender.stringColumn(column.name, column.value);
+                                break;
+                            case "LONG":
+                                sender.intColumn(column.name, column.value);
+                                break;
+                            case "DOUBLE":
+                                sender.floatColumn(column.name, column.value);
+                                break;
+                            case "BOOLEAN":
+                                sender.booleanColumn(column.name, column.value);
+                                break;
+                            case "TIMESTAMP":
+                                sender.timestampColumn(column.name, column.value);
+                                break;
+                            default:
+                                throw new Error("Unsupported column type");
+                        }
+                    }
+                    sender.atNow();
+                } catch (e) {
+                    if (testCase.result.status !== "ERROR") {
+                        fail("Did not expect error: " + e.message);
+                        break;
+                    }
+                    continue;
+                }
+
+                const buffer = sender.toBuffer();
+                if (testCase.result.status === "SUCCESS") {
+                    if (testCase.result.line) {
+                        expect(buffer.toString()).toBe(testCase.result.line + '\n');
+                    } else {
+                        for (const line of testCase.result.anyLines) {
+                            if (buffer.toString() === line + '\n') {
+                                // test passed
+                                continue loopTestCase;
+                            }
+                        }
+                        fail("Line is not matching any of the expected results: " + buffer.toString());
+                    }
+                } else {
+                    fail("Expected error missing, instead we have a line: " + buffer.toString());
+                    break;
+                }
+            }
+    });
+});
+
+describe('Sender message builder test suite (anything not covered in client interop test suite)', function () {
+    it('supports timestamp fields', function () {
+        const sender = new Sender(1024);
+        sender.table("tableName")
+            .booleanColumn("boolCol", true)
+            .timestampColumn("timestampCol", 1658484765000000)
+            .atNow();
+        expect(sender.toBuffer().toString()).toBe(
+            "tableName boolCol=t,timestampCol=1658484765000000t\n"
+        );
+    });
+
+    it('supports setting designated timestamp from client', function () {
+        const sender = new Sender(1024);
+        sender.table("tableName")
+            .booleanColumn("boolCol", true)
+            .timestampColumn("timestampCol", 1658484765000000)
+            .at("1658484769000000123");
+        expect(sender.toBuffer().toString()).toBe(
+            "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n"
+        );
+    });
+
+    it('throws exception if table name is not a string', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table(23456)
+        ).toThrow("Table name must be a string, received number");
+    });
+
+    it('throws exception if table name is too long', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("123456789012345678901234567890123456789012345678901234567890"
+                + "12345678901234567890123456789012345678901234567890123456789012345678")
+        ).toThrow("Table name is too long, max length is 127");
+    });
+
+    it('throws exception if table name is set more times', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .symbol("name", "value")
+                .table("newTableName")
+        ).toThrow("Table name has already been set");
+    });
+
+    it('throws exception if symbol name is not a string', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .symbol(12345.5656, "value")
+        ).toThrow("Symbol name must be a string, received number");
+    });
+
+    it('throws exception if symbol name is empty string', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .symbol("", "value")
+        ).toThrow("Empty string is not allowed as column name");
+    });
+
+    it('throws exception if column name is not a string', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .stringColumn(12345.5656, "value")
+        ).toThrow("Column name must be a string, received number");
+    });
+
+    it('throws exception if column name is empty string', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .stringColumn("", "value")
+        ).toThrow("Empty string is not allowed as column name");
+    });
+
+    it('throws exception if column name is too long', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .stringColumn("123456789012345678901234567890123456789012345678901234567890"
+                    + "12345678901234567890123456789012345678901234567890123456789012345678", "value")
+        ).toThrow("Column name is too long, max length is 127");
+    });
+
+    it('throws exception if column value is not the right type', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .stringColumn("columnName", false)
+        ).toThrow("Column value must be of type string, received boolean");
+    });
+
+    it('throws exception if adding column without setting table name', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.floatColumn("name", 12.459)
+        ).toThrow("Column can be set only after table name is set");
+    });
+
+    it('throws exception if adding symbol without setting table name', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.symbol("name", "value")
+        ).toThrow("Symbol can be added only after table name is set and before any column added");
+    });
+
+    it('throws exception if adding symbol after columns', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .stringColumn("name", "value")
+                .symbol("symbolName", "symbolValue")
+        ).toThrow("Symbol can be added only after table name is set and before any column added");
+    });
+
+    it('throws exception if preparing an empty buffer for send', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.toBuffer()
+        ).toThrow("The buffer is empty");
+    });
+
+    it('throws exception if preparing a buffer with an unclosed row for send', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .symbol("name", "value")
+                .toBuffer()
+        ).toThrow("The buffer's content is invalid, row needs to be closed by calling at() or atNow()");
+    });
+
+    it('throws exception if a float is passed as integer field', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .intColumn("intField", 123.222)
+        ).toThrow("Value must be an integer, received 123.222");
+    });
+
+    it('throws exception if designated timestamp is not a string', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .symbol("name", "value")
+                .at(23232322323)
+        ).toThrow("The designated timestamp must be of type string, received number");
+    });
+
+    it('throws exception if designated timestamp is invalid', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .symbol("name", "value")
+                .at("343434.5656")
+        ).toThrow("Invalid character in designated timestamp: .");
+    });
+
+    it('throws exception if designated timestamp is set without any fields added', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .at("12345678")
+        ).toThrow("The row must have a symbol or column set before it is closed");
+    });
+
+    it('throws exception if buffer overflows', function () {
+        const sender = new Sender(16);
+        expect(
+            () => sender.table("tableName")
+                .intColumn("intField", 123)
+        ).toThrow("Buffer overflow [position=17, bufferSize=16]");
+    });
+
+    it('can fix buffer overflows by calling resize()', function () {
+        const sender = new Sender(16);
+        expect(
+            () => sender.table("tableName")
+                .floatColumn("floatField", 123.34)
+        ).toThrow("Buffer overflow [position=17, bufferSize=16]");
+
+        sender.resize(1024);
+        sender.table("tableName")
+            .floatColumn("floatField", 123.34)
+            .atNow();
+        expect(sender.toBuffer().toString()).toBe(
+            "tableName floatField=123.34\n"
+        );
+    });
+
+    it('is possible to reuse the buffer by calling reset()', function () {
+        const sender = new Sender(1024);
+        sender.table("tableName")
+            .booleanColumn("boolCol", true)
+            .timestampColumn("timestampCol", 1658484765000000)
+            .atNow();
+        sender.table("tableName")
+            .booleanColumn("boolCol", false)
+            .timestampColumn("timestampCol", 1658484766000000)
+            .atNow();
+        expect(sender.toBuffer().toString()).toBe(
+            "tableName boolCol=t,timestampCol=1658484765000000t\n"
+            + "tableName boolCol=f,timestampCol=1658484766000000t\n"
+        );
+
+        sender.reset();
+        sender.table("tableName")
+            .floatColumn("floatCol", 1234567890)
+            .timestampColumn("timestampCol", 1658484767000000)
+            .atNow();
+        expect(sender.toBuffer().toString()).toBe(
+            "tableName floatCol=1234567890,timestampCol=1658484767000000t\n"
+        );
     });
 });
