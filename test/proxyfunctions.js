@@ -25,8 +25,8 @@ async function listen(proxy, listenPort, dataHandler, tlsOptions) {
 
             client.on("data", dataHandler);
 
-            client.on("close", async () => {
-                console.info("client connection closed");
+            client.on("close", () => {
+                //console.info("client connection closed");
             });
         }
 

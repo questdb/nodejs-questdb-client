@@ -116,7 +116,7 @@ class Sender {
                 }
             })
             .on("close", () => {
-                console.info(`Connection to ${options.host}:${options.port} is closed`);
+                //console.info(`Connection to ${options.host}:${options.port} is closed`);
             })
             .on("error", err => {
                 console.error(err);
