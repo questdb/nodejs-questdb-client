@@ -14,7 +14,7 @@ jobs:
           submodules: recursive
 
       - name: Checkout submodules
-        uses: git submodule update --init --recursive
+        run: git submodule update --init --recursive
 
       - name: Setup node
         uses: actions/setup-node@v3
