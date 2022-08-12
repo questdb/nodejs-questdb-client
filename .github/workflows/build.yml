@@ -14,10 +14,10 @@ jobs:
           node-version: 18.0.0
 
       - name: Install dependencies
-      - run: npm ci
+        run: npm ci
 
       - name: Run tests
-      - run: npm test
+        run: npm test
 
       - name: Publish @questdb/nodejs-questdb-client to npm
         if: github.ref == 'refs/heads/main'

@@ -7,12 +7,7 @@ like other clients do.
 Alternatively, the sender could be growing the buffer on row writes and shrinking it on a subsequent flush() call.
 The bufferSize parameter in the constructor can also be optional if this is done.
 - Config object for Sender
-- Setup a release process:
-  - create a branch
-  - update package.json and regen js docs manually
-  - raise a PR, get it merged
-  - create a tag with the version number and use a github action to do npm publish (the action acts on tags matching with the pattern "v.*")
-- Github action to run tests on each commit
+- Github actions to run 'npm test' on each commit and run 'npm publish' when version is bumped in package.json
 - ~~Provide a builder style API:
   builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();~~
 - ~~The project lacks a linter. Use ESLint (https://eslint.org) or standard (https://standardjs.com)~~
