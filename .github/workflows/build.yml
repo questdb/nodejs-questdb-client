@@ -31,4 +31,4 @@ jobs:
           token: ${{ secrets.CI_TOKEN }}
           access: public
           check-version: true
-          package: ./package.json
+          package: package.json
