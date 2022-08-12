@@ -21,6 +21,15 @@ const crypto = require('crypto');
  */
 class Sender {
 
+    /** @private */ jwk;
+    /** @private */ socket;
+    /** @private */ bufferSize;
+    /** @private */ buffer;
+    /** @private */ position;
+    /** @private */ hasTable;
+    /** @private */ hasSymbols;
+    /** @private */ hasColumns;
+
     /**
      * Creates an instance of Sender.
      *
@@ -28,7 +37,6 @@ class Sender {
      * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. <br> Server might reject the connection depending on configuration.
      */
     constructor(bufferSize, jwk = undefined) {
-        /** @private */
         this.jwk = jwk;
         this.resize(bufferSize);
     }
@@ -40,9 +48,7 @@ class Sender {
      * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
      */
     resize(bufferSize) {
-        /** @private */
         this.bufferSize = bufferSize;
-        /** @private */
         this.buffer = Buffer.alloc(this.bufferSize + 1, 0, 'utf8');
         this.reset();
     }
@@ -54,14 +60,8 @@ class Sender {
      * @return {Sender} Returns with a reference to this sender.
      */
     reset() {
-        /** @private */
         this.position = 0;
-        /** @private */
-        this.hasTable = false;
-        /** @private */
-        this.hasSymbols = false;
-        /** @private */
-        this.hasColumns = false;
+        startNewRow(this);
         return this;
     }
 
@@ -78,12 +78,11 @@ class Sender {
             let authenticated = false;
             let data;
 
-            /** @private */
             this.socket = !secure
                 ? connect(options)
                 : connectTLS(options, async () => {
                     if (!self.socket.authorized) {
-                        reject("Problem with server's certificate");
+                        reject(new Error("Problem with server's certificate"));
                         await self.close();
                     }
                 });
@@ -92,7 +91,9 @@ class Sender {
                 data = !data ? raw : Buffer.concat([data, raw]);
                 if (!authenticated) {
                     authenticated = await authenticate(self, data);
-                    authenticated ? resolve(true) : reject("Could not authenticate");
+                    if (authenticated) {
+                        resolve(true);
+                    }
                 } else {
                     console.warn(`Received unexpected data: ${data}`);
                 }
@@ -101,7 +102,11 @@ class Sender {
                 console.info(`Successfully connected to ${options.host}:${options.port}`);
                 if (self.jwk) {
                     console.info(`Authenticating with ${options.host}:${options.port}`);
-                    self.socket.write(`${self.jwk.kid}\n`);
+                    await self.socket.write(`${self.jwk.kid}\n`, err => {
+                        if (err) {
+                            reject(err);
+                        }
+                    });
                 } else {
                     authenticated = true;
                     resolve(true);
@@ -135,7 +140,7 @@ class Sender {
         return new Promise((resolve, reject) => {
             this.socket.write(data, err => {
                 this.reset();
-                err ? reject(err.message) : resolve();
+                err ? reject(err) : resolve();
             });
         });
     }
@@ -320,8 +325,11 @@ async function authenticate(sender, challenge) {
             keyObject
         );
 
-        sender.socket.write(`${Buffer.from(signature).toString("base64")}\n`);
-        return true;
+        return new Promise((resolve, reject) => {
+            sender.socket.write(`${Buffer.from(signature).toString("base64")}\n`, err => {
+                err ? reject(err) : resolve(true);
+            });
+        });
     }
     return false;
 }

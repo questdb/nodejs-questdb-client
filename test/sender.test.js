@@ -344,6 +344,15 @@ describe('Sender message builder test suite (anything not covered in client inte
         ).toThrow("The designated timestamp must be of type string, received number");
     });
 
+    it('throws exception if designated timestamp is an empty string', function () {
+        const sender = new Sender(1024);
+        expect(
+            () => sender.table("tableName")
+                .symbol("name", "value")
+                .at("")
+        ).toThrow("Empty string is not allowed as designated timestamp");
+    });
+
     it('throws exception if designated timestamp is invalid', function () {
         const sender = new Sender(1024);
         expect(

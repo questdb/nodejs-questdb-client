@@ -29,8 +29,14 @@ export class Sender {
         d: string;
         crv: string;
     });
-    /** @private */
-    private jwk;
+    /** @private */ private jwk;
+    /** @private */ private socket;
+    /** @private */ private bufferSize;
+    /** @private */ private buffer;
+    /** @private */ private position;
+    /** @private */ private hasTable;
+    /** @private */ private hasSymbols;
+    /** @private */ private hasColumns;
     /**
      * Reinitializes the buffer of the sender. <br>
      * Can be used to increase the size of buffer if overflown.
@@ -38,10 +44,6 @@ export class Sender {
      * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
      */
     resize(bufferSize: number): void;
-    /** @private */
-    private bufferSize;
-    /** @private */
-    private buffer;
     /**
      * Resets the buffer, data added to the buffer will be lost. <br>
      * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
@@ -49,14 +51,6 @@ export class Sender {
      * @return {Sender} Returns with a reference to this sender.
      */
     reset(): Sender;
-    /** @private */
-    private position;
-    /** @private */
-    private hasTable;
-    /** @private */
-    private hasSymbols;
-    /** @private */
-    private hasColumns;
     /**
      * Creates a connection to the database.
      *
@@ -64,8 +58,6 @@ export class Sender {
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
     connect(options: NetConnectOpts | ConnectionOptions, secure?: boolean): Promise<any>;
-    /** @private */
-    private socket;
     /**
      * Closes the connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
