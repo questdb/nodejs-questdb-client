@@ -127,6 +127,30 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, false, "test,location=us temperature=17.1 1658484765000000000\n");
         await proxy.stop();
     });
+
+    it('guards against multiple connect calls', async function () {
+        const proxy = await createProxy(true, proxyOptions);
+        const sender = await createSender(JWK, true);
+        try {
+            await sender.connect(senderOptions, true);
+        } catch(err) {
+            expect(err.message).toBe("Sender connected already");
+        }
+        await sender.close();
+        await proxy.stop();
+    });
+
+    it('guards against concurrent connect calls', async function () {
+        const proxy = await createProxy(true, proxyOptions);
+        const sender = new Sender(1024, JWK);
+        try {
+            await Promise.all([sender.connect(senderOptions, true), sender.connect(senderOptions, true)]);
+        } catch(err) {
+            expect(err.message).toBe("Sender connected already");
+        }
+        await sender.close();
+        await proxy.stop();
+    });
 });
 
 describe('Client interop test suite', function () {

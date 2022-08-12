@@ -78,6 +78,9 @@ class Sender {
             let authenticated = false;
             let data;
 
+            if (this.socket) {
+                throw new Error("Sender connected already");
+            }
             this.socket = !secure
                 ? connect(options)
                 : connectTLS(options, async () => {
