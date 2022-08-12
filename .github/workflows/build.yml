@@ -14,9 +14,7 @@ jobs:
           submodules: recursive
 
       - name: Checkout submodules
-        uses: textbook/git-checkout-submodule-action@master
-        with:
-          remote: true
+        uses: git submodule update --init --recursive
 
       - name: Setup node
         uses: actions/setup-node@v3
