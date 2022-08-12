@@ -28,7 +28,7 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: JS-DevTools/npm-publish@v1
         with:
-          token: ${{ secrets.NPM_TOKEN }}
+          token: ${{ secrets.CI_TOKEN }}
           access: public
           check-version: true
           package: ./packages/nodejs-questdb-client/package.json
