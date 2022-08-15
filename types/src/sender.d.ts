@@ -57,10 +57,10 @@ export class Sender {
     /**
      * Creates a connection to the database.
      *
-     * @param {NetConnectOpts | ConnectionOptions} options - Connection options, host and port are required.
+     * @param {net.NetConnectOpts | tls.ConnectionOptions} options - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
-    connect(options: NetConnectOpts | ConnectionOptions, secure?: boolean): Promise<any>;
+    connect(options: net.NetConnectOpts | tls.ConnectionOptions, secure?: boolean): Promise<any>;
     /**
      * Closes the connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
@@ -145,7 +145,7 @@ export class Sender {
      */
     atNow(): void;
 }
-import { NetConnectOpts } from "net";
-import { ConnectionOptions } from "tls";
+import net = require("net");
+import tls = require("tls");
 import { Buffer } from "buffer";
 //# sourceMappingURL=sender.d.ts.map

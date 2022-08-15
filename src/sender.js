@@ -2,8 +2,8 @@
 
 const { Buffer } = require("buffer");
 const { validateTableName, validateColumnName, validateDesignatedTimestamp } = require("./validation");
-const { connect, NetConnectOpts } = require("net");
-const { connect: connectTLS, ConnectionOptions} = require("tls");
+const net = require("net");
+const tls = require("tls");
 const crypto = require('crypto');
 
 const DEFAULT_BUFFER_SIZE = 8192;
@@ -86,7 +86,7 @@ class Sender {
     /**
      * Creates a connection to the database.
      *
-     * @param {NetConnectOpts | ConnectionOptions} options - Connection options, host and port are required.
+     * @param {net.NetConnectOpts | tls.ConnectionOptions} options - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
     async connect(options, secure = false) {
@@ -100,8 +100,8 @@ class Sender {
                 throw new Error("Sender connected already");
             }
             this.socket = !secure
-                ? connect(options)
-                : connectTLS(options, async () => {
+                ? net.connect(options)
+                : tls.connect(options, async () => {
                     if (!self.socket.authorized) {
                         reject(new Error("Problem with server's certificate"));
                         await self.close();
