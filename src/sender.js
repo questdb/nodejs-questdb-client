@@ -133,9 +133,6 @@ class Sender {
                     resolve(true);
                 }
             })
-            .on("close", () => {
-                //console.info(`Connection to ${options.host}:${options.port} is closed`);
-            })
             .on("error", err => {
                 console.error(err);
             });
@@ -148,7 +145,10 @@ class Sender {
      */
     async close() {
         return new Promise(resolve => {
+            const address = this.socket.remoteAddress;
+            const port = this.socket.remotePort;
             this.socket.destroy();
+            console.info(`Connection to ${address}:${port} is closed`);
             resolve();
         });
     }

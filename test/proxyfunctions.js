@@ -24,10 +24,6 @@ async function listen(proxy, listenPort, dataHandler, tlsOptions) {
             proxy.client = client;
 
             client.on("data", dataHandler);
-
-            client.on("close", () => {
-                //console.info("client connection closed");
-            });
         }
 
         proxy.server = tlsOptions
