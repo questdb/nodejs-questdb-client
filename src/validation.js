@@ -132,20 +132,8 @@ function validateDesignatedTimestamp(timestamp) {
     }
     for (let i = 0; i < len; i++) {
         let ch = timestamp[i];
-        switch (ch) {
-            case '0':
-            case '1':
-            case '2':
-            case '3':
-            case '4':
-            case '5':
-            case '6':
-            case '7':
-            case '8':
-            case '9':
-                break;
-            default:
-                throw new Error(`Invalid character in designated timestamp: ${ch}`);
+        if (ch < '0' || ch > '9') {
+            throw new Error(`Invalid character in designated timestamp: ${ch}`);
         }
     }
 }

@@ -26,6 +26,7 @@ class Sender {
     /** @private */ bufferSize;
     /** @private */ buffer;
     /** @private */ position;
+    /** @private */ endOfLastRow;
     /** @private */ hasTable;
     /** @private */ hasSymbols;
     /** @private */ hasColumns;
@@ -39,18 +40,23 @@ class Sender {
     constructor(bufferSize, jwk = undefined) {
         this.jwk = jwk;
         this.resize(bufferSize);
+        this.reset();
     }
 
     /**
-     * Reinitializes the buffer of the sender. <br>
+     * Extends the size of the sender's buffer. <br>
      * Can be used to increase the size of buffer if overflown.
+     * The buffer's content is copied into the new buffer.
      *
      * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
      */
     resize(bufferSize) {
         this.bufferSize = bufferSize;
-        this.buffer = Buffer.alloc(this.bufferSize + 1, 0, 'utf8');
-        this.reset();
+        const newBuffer = Buffer.alloc(this.bufferSize + 1, 0, 'utf8');
+        if (this.buffer) {
+            this.buffer.copy(newBuffer);
+        }
+        this.buffer = newBuffer;
     }
 
     /**
@@ -136,30 +142,32 @@ class Sender {
     }
 
     /**
-     * Sends the buffer's content to the database and clears the buffer.
+     * Sends the buffer's content to the database and compacts the buffer.
+     * If the last row is not finished it stays in the sender's buffer.
+     *
+     * @return {boolean} Returns true if there was data in the buffer to send.
      */
     async flush() {
-        const data = this.toBuffer();
+        const data = this.toBuffer(this.endOfLastRow);
+        if (!data) {
+            return false;
+        }
         return new Promise((resolve, reject) => {
             this.socket.write(data, err => {
-                this.reset();
-                err ? reject(err) : resolve();
+                compact(this);
+                err ? reject(err) : resolve(true);
             });
         });
     }
 
     /**
      * @ignore
-     * @return {Buffer} Returns a cropped buffer ready to send to the server.
+     * @return {Buffer} Returns a cropped buffer ready to send to the server or null if there is nothing to send.
      */
-    toBuffer() {
-        if (this.hasTable) {
-            throw new Error("The buffer's content is invalid, row needs to be closed by calling at() or atNow()");
-        }
-        if (this.position < 1) {
-            throw new Error("The buffer is empty");
-        }
-        return this.buffer.subarray(0, this.position);
+    toBuffer(pos = this.position) {
+        return pos > 0
+            ? this.buffer.subarray(0, pos)
+            : null;
     }
 
     /**
@@ -176,6 +184,7 @@ class Sender {
             throw new Error("Table name has already been set");
         }
         validateTableName(table);
+        checkCapacity(this, [table]);
         writeEscaped(this, table);
         this.hasTable = true;
         return this;
@@ -195,11 +204,13 @@ class Sender {
         if (!this.hasTable || this.hasColumns) {
             throw new Error("Symbol can be added only after table name is set and before any column added");
         }
+        const valueStr = value.toString();
+        checkCapacity(this, [name, valueStr], 2 + name.length + valueStr.length);
         write(this, ',');
         validateColumnName(name);
         writeEscaped(this, name);
         write(this, '=');
-        writeEscaped(this, value.toString());
+        writeEscaped(this, valueStr);
         this.hasSymbols = true;
         return this;
     }
@@ -213,6 +224,7 @@ class Sender {
      */
     stringColumn(name, value) {
         writeColumn(this, name, value, () => {
+            checkCapacity(this, [value], 2 + value.length);
             write(this, '"');
             writeEscaped(this, value, true);
             write(this, '"');
@@ -229,6 +241,7 @@ class Sender {
      */
     booleanColumn(name, value) {
         writeColumn(this, name, value, () => {
+            checkCapacity(this, [], 1);
             write(this, value ? 't' : 'f');
         }, "boolean");
         return this;
@@ -243,7 +256,9 @@ class Sender {
      */
     floatColumn(name, value) {
         writeColumn(this, name, value, () => {
-            write(this, value.toString());
+            const valueStr = value.toString();
+            checkCapacity(this, [valueStr], valueStr.length);
+            write(this, valueStr);
         }, "number");
         return this;
     }
@@ -260,7 +275,9 @@ class Sender {
             throw new Error(`Value must be an integer, received ${value}`);
         }
         writeColumn(this, name, value, () => {
-            write(this, value.toString());
+            const valueStr = value.toString();
+            checkCapacity(this, [valueStr], 1 + valueStr.length);
+            write(this, valueStr);
             write(this, 'i');
         }, "number");
         return this;
@@ -278,7 +295,9 @@ class Sender {
             throw new Error(`Value must be an integer, received ${value}`);
         }
         writeColumn(this, name, value, () => {
-            write(this, value.toString());
+            const valueStr = value.toString();
+            checkCapacity(this, [valueStr], 1 + valueStr.length);
+            write(this, valueStr);
             write(this, 't');
         }, "number");
         return this;
@@ -297,8 +316,10 @@ class Sender {
             throw new Error(`The designated timestamp must be of type string, received ${typeof timestamp}`);
         }
         validateDesignatedTimestamp(timestamp);
+        const timestampStr = timestamp.toString();
+        checkCapacity(this, [], 2 + timestampStr.length);
         write(this, ' ');
-        write(this, timestamp.toString());
+        write(this, timestampStr);
         write(this, '\n');
         startNewRow(this);
     }
@@ -311,6 +332,7 @@ class Sender {
         if (!this.hasSymbols && !this.hasColumns) {
             throw new Error("The row must have a symbol or column set before it is closed");
         }
+        checkCapacity(this, [], 1);
         write(this, '\n');
         startNewRow(this);
     }
@@ -338,9 +360,32 @@ async function authenticate(sender, challenge) {
 }
 
 function startNewRow(sender) {
+    sender.endOfLastRow = sender.position;
     sender.hasTable = false;
     sender.hasSymbols = false;
     sender.hasColumns = false;
+}
+
+function checkCapacity(sender, data, base = 0) {
+    let length = base;
+    for (const str of data) {
+        length += Buffer.byteLength(str, 'utf8');
+    }
+    if (sender.position + length > sender.bufferSize) {
+        let newSize = sender.bufferSize;
+        do {
+            newSize += sender.bufferSize;
+        } while(sender.position + length > newSize);
+        sender.resize(newSize);
+    }
+}
+
+function compact(sender) {
+    if (sender.endOfLastRow > 0) {
+        sender.buffer.copy(sender.buffer, 0, sender.endOfLastRow, sender.position);
+        sender.position = sender.position - sender.endOfLastRow;
+        sender.endOfLastRow = 0;
+    }
 }
 
 function writeColumn(sender, name, value, writeValue, valueType) {
@@ -353,6 +398,7 @@ function writeColumn(sender, name, value, writeValue, valueType) {
     if (!sender.hasTable) {
         throw new Error("Column can be set only after table name is set");
     }
+    checkCapacity(sender, [name], 2 + name.length);
     write(sender, sender.hasColumns ? ',' : ' ');
     validateColumnName(name);
     writeEscaped(sender, name);

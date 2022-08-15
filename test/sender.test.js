@@ -335,20 +335,21 @@ describe('Sender message builder test suite (anything not covered in client inte
         ).toThrow("Symbol can be added only after table name is set and before any column added");
     });
 
-    it('throws exception if preparing an empty buffer for send', function () {
+    it('returns null if preparing an empty buffer for send', function () {
         const sender = new Sender(1024);
-        expect(
-            () => sender.toBuffer()
-        ).toThrow("The buffer is empty");
+        expect(sender.toBuffer()).toBe(null);
     });
 
-    it('throws exception if preparing a buffer with an unclosed row for send', function () {
+    it('ignores unfinished rows when preparing a buffer for send', function () {
         const sender = new Sender(1024);
+        sender.table("tableName")
+            .symbol("name", "value")
+            .at("1234567890");
+        sender.table("tableName")
+            .symbol("name", "value2");
         expect(
-            () => sender.table("tableName")
-                .symbol("name", "value")
-                .toBuffer()
-        ).toThrow("The buffer's content is invalid, row needs to be closed by calling at() or atNow()");
+            sender.toBuffer(sender.endOfLastRow).toString()
+        ).toBe("tableName,name=value 1234567890\n");
     });
 
     it('throws exception if a float is passed as integer field', function () {
@@ -394,31 +395,35 @@ describe('Sender message builder test suite (anything not covered in client inte
         ).toThrow("The row must have a symbol or column set before it is closed");
     });
 
-    it('throws exception if buffer overflows', function () {
-        const sender = new Sender(16);
-        expect(
-            () => sender.table("tableName")
-                .intColumn("intField", 123)
-        ).toThrow("Buffer overflow [position=17, bufferSize=16]");
-    });
-
-    it('can fix buffer overflows by calling resize()', function () {
-        const sender = new Sender(16);
-        expect(
-            () => sender.table("tableName")
-                .floatColumn("floatField", 123.34)
-        ).toThrow("Buffer overflow [position=17, bufferSize=16]");
-
-        sender.resize(1024);
-        sender.table("tableName")
-            .floatColumn("floatField", 123.34)
-            .atNow();
+    it('extends the size of the buffer if data does not fit', function () {
+        const sender = new Sender(8);
+        expect(sender.bufferSize).toBe(8);
+        expect(sender.position).toBe(0);
+        sender.table("tableName");
+        expect(sender.bufferSize).toBe(16);
+        expect(sender.position).toBe("tableName".length);
+        sender.intColumn("intField", 123);
+        expect(sender.bufferSize).toBe(32);
+        expect(sender.position).toBe("tableName intField=123i".length);
+        sender.atNow();
+        expect(sender.bufferSize).toBe(32);
+        expect(sender.position).toBe("tableName intField=123i\n".length);
         expect(sender.toBuffer().toString()).toBe(
-            "tableName floatField=123.34\n"
+            "tableName intField=123i\n"
+        );
+
+        sender.table("table2")
+            .intColumn("intField", 125)
+            .stringColumn("strField", "test")
+            .atNow();
+        expect(sender.bufferSize).toBe(64);
+        expect(sender.position).toBe("tableName intField=123i\ntable2 intField=125i,strField=\"test\"\n".length);
+        expect(sender.toBuffer().toString()).toBe(
+            "tableName intField=123i\ntable2 intField=125i,strField=\"test\"\n"
         );
     });
 
-    it('is possible to reuse the buffer by calling reset()', function () {
+    it('is possible to clear the buffer by calling reset()', function () {
         const sender = new Sender(1024);
         sender.table("tableName")
             .booleanColumn("boolCol", true)
