@@ -70,9 +70,9 @@ export class Sender {
      * Sends the buffer's content to the database and compacts the buffer.
      * If the last row is not finished it stays in the sender's buffer.
      *
-     * @return {boolean} Returns true if there was data in the buffer to send.
+     * @return {Promise<boolean>} Resolves to true if there was data in the buffer to send.
      */
-    flush(): boolean;
+    flush(): Promise<boolean>;
     /**
      * @ignore
      * @return {Buffer} Returns a cropped buffer ready to send to the server or null if there is nothing to send.
