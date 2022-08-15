@@ -1,81 +1,37 @@
-const { TLSSocket } = require("tls")
-const { Crypto } = require("node-webcrypto-ossl")
-
-const client = new TLSSocket()
-const crypto = new Crypto()
-
-const HOST = "localhost"
-const PORT = 9009
-
-const JWK = {
-  kid: "testUser1",
-  kty: "EC",
-  d: "5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48",
-  crv: "P-256",
-  x: "fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU",
-  y: "Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac",
-}
-
-async function write(data) {
-  return new Promise((resolve) => {
-    client.write(data, () => {
-      resolve()
-    })
-  })
-}
-
-async function authenticate(challenge) {
-  // Check for trailing \\n which ends the challenge
-  if (challenge.slice(-1).readInt8() === 10) {
-    const apiKey = await crypto.subtle.importKey(
-      "jwk",
-      JWK,
-      { name: "ECDSA", namedCurve: "P-256" },
-      true,
-      ["sign"],
-    )
-
-    const signature = await crypto.subtle.sign(
-      { name: "ECDSA", hash: "SHA-256" },
-      apiKey,
-      challenge.slice(0, challenge.length - 1),
-    )
-
-    await write(`${Buffer.from(signature).toString("base64")}\n`)
-
-    return true
-  }
-
-  return false
-}
-
-async function sendData() {
-  const now = Date.now()
-  await write(`test,location=us temperature=22.4 ${now * 1e6}`)
-  await write(`test,location=us temperature=21.4 ${now * 1e6}`)
-}
+const { Sender } = require("@questdb/nodejs-client");
 
 async function run() {
-  let authenticated = false
-  let data
+  // construct a JsonWebKey
+  const CLIENT_ID = "testapp";
+  const PRIVATE_KEY = "9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8";
+  const PUBLIC_KEY = {
+    x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
+    y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
+  };
+  const JWK = {
+    ...PUBLIC_KEY,
+    d: PRIVATE_KEY,
+    kid: CLIENT_ID,
+    kty: "EC",
+    crv: "P-256",
+  };
 
-  client.on("data", async function (raw) {
-    data = !data ? raw : Buffer.concat([data, raw])
+  // pass the JsonWebKey to the sender
+  // will use it for authentication
+  const sender = new Sender({bufferSize: 4096, jwk: JWK});
 
-    if (!authenticated) {
-      authenticated = await authenticate(data)
-      await sendData()
-      setTimeout(() => {
-        client.destroy()
-      }, 0)
-    }
-  })
+  // connect() takes an optional second argument
+  // if 'true' passed the connection is secured with TLS encryption
+  await sender.connect({port: 9009, host: "127.0.0.1"}, true);
 
-  client.on("ready", async function () {
-    await write(JWK.kid)
-  })
+  // send the data over the authenticated and secure connection
+  sender.table("prices").symbol("instrument", "EURUSD")
+      .floatColumn("bid", 1.0197).floatColumn("ask", 1.0224).atNow();
+  await sender.flush();
 
-  client.connect(PORT, HOST)
+  // close the connection after all rows ingested
+  await sender.close();
+  return 0;
 }
 
-run()
+run().then(value => console.log(value)).catch(err => console.log(err));
