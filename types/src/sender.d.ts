@@ -18,28 +18,31 @@ export class Sender {
     /**
      * Creates an instance of Sender.
      *
-     * @param {number} bufferSize - Size of the buffer used by the sender to collect rows, provided in bytes.
-     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. <br> Server might reject the connection depending on configuration.
+     * @param {object} options - Configuration options. <br>
+     * <p>
+     * Properties of the object:
+     * <ul>
+     *   <li>bufferSize: <i>number</i> - Size of the buffer used by the sender to collect rows, provided in bytes. <br>
+     *   Optional, defaults to 8192 bytes </li>
+     *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
+     *   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
+     * </ul>
+     * </p>
      */
-    constructor(bufferSize: number, jwk?: {
-        x: string;
-        y: string;
-        kid: string;
-        kty: string;
-        d: string;
-        crv: string;
-    });
+    constructor(options: object);
     /** @private */ private jwk;
     /** @private */ private socket;
     /** @private */ private bufferSize;
     /** @private */ private buffer;
     /** @private */ private position;
+    /** @private */ private endOfLastRow;
     /** @private */ private hasTable;
     /** @private */ private hasSymbols;
     /** @private */ private hasColumns;
     /**
-     * Reinitializes the buffer of the sender. <br>
+     * Extends the size of the sender's buffer. <br>
      * Can be used to increase the size of buffer if overflown.
+     * The buffer's content is copied into the new buffer.
      *
      * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
      */
@@ -64,14 +67,17 @@ export class Sender {
      */
     close(): Promise<any>;
     /**
-     * Sends the buffer's content to the database and clears the buffer.
+     * Sends the buffer's content to the database and compacts the buffer.
+     * If the last row is not finished it stays in the sender's buffer.
+     *
+     * @return {boolean} Returns true if there was data in the buffer to send.
      */
-    flush(): Promise<any>;
+    flush(): boolean;
     /**
      * @ignore
-     * @return {Buffer} Returns a cropped buffer ready to send to the server.
+     * @return {Buffer} Returns a cropped buffer ready to send to the server or null if there is nothing to send.
      */
-    toBuffer(): Buffer;
+    toBuffer(pos?: any): Buffer;
     /**
      * Write the table name into the buffer of the sender.
      *

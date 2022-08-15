@@ -37,7 +37,7 @@ async function run() {
     const proxy = new Proxy();
     await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
 
-    const sender = new Sender(1024, JWK); //with authentication
+    const sender = new Sender({bufferSize: 1024, jwk: JWK}); //with authentication
     const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
     if (connected) {
         sender.table("test")

@@ -4,7 +4,7 @@
 ### TODO:
 - ~~The client should grow the buffer instead of throwing on insufficient buffer size, like other clients do~~
 - If the buffer had to be extended, shrink it back to original size on a subsequent flush() call?
-- Config object for Sender, make bufferSize optional by setting a default
+- ~~Config object for Sender, make bufferSize optional by setting a default~~
 - ~~Github actions to run 'npm test' on each commit and run 'npm publish' when version is bumped in package.json~~
 - ~~Provide a builder style API:
   builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();~~

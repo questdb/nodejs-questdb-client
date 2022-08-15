@@ -6,6 +6,8 @@ const { connect, NetConnectOpts } = require("net");
 const { connect: connectTLS, ConnectionOptions} = require("tls");
 const crypto = require('crypto');
 
+const DEFAULT_BUFFER_SIZE = 8192;
+
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data and close the connection.
  * <p>
@@ -34,12 +36,22 @@ class Sender {
     /**
      * Creates an instance of Sender.
      *
-     * @param {number} bufferSize - Size of the buffer used by the sender to collect rows, provided in bytes.
-     * @param {{x: string, y: string, kid: string, kty: string, d: string, crv: string}} [jwk = undefined] - JWK for authentication, client is not authenticated if not provided. <br> Server might reject the connection depending on configuration.
+     * @param {object} options - Configuration options. <br>
+     * <p>
+     * Properties of the object:
+     * <ul>
+     *   <li>bufferSize: <i>number</i> - Size of the buffer used by the sender to collect rows, provided in bytes. <br>
+     *   Optional, defaults to 8192 bytes </li>
+     *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
+     *   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
+     * </ul>
+     * </p>
      */
-    constructor(bufferSize, jwk = undefined) {
-        this.jwk = jwk;
-        this.resize(bufferSize);
+    constructor(options) {
+        if (options) {
+            this.jwk = options.jwk;
+        }
+        this.resize(options && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
         this.reset();
     }
 

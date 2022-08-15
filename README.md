@@ -14,7 +14,7 @@ const { Sender } = require("@questdb/nodejs-client");
 async function run() {
     // create a sender with a 4k buffer
     // it is important to size the buffer correctly so messages can fit
-    const sender = new Sender(4096);
+    const sender = new Sender({bufferSize: 4096});
 
     // connect to QuestDB
     // host and port are required in connect options
@@ -65,7 +65,7 @@ async function run() {
 
     // pass the JsonWebKey to the sender
     // will use it for authentication
-    const sender = new Sender(4096, JWK);
+    const sender = new Sender({bufferSize: 4096, jwk: JWK});
 
     // connect() takes an optional second argument
     // if 'true' passed the connection is secured with TLS encryption
@@ -106,7 +106,7 @@ async function run(): Promise<number> {
 
     // pass the JsonWebKey to the sender
     // will use it for authentication
-    const sender: Sender = new Sender(4096, JWK);
+    const sender: Sender = new Sender({bufferSize: 4096, jwk: JWK});
 
     // connect() takes an optional second argument
     // if 'true' passed the connection is secured with TLS encryption

@@ -42,7 +42,7 @@ async function createProxy(auth = false, tlsOptions = undefined) {
 }
 
 async function createSender(jwk = undefined, secure = false) {
-    const sender = new Sender(1024, jwk);
+    const sender = new Sender({bufferSize: 1024, jwk: jwk});
     const connected = await sender.connect(senderOptions, secure);
     expect(connected).toBe(true);
     return sender;
@@ -142,7 +142,7 @@ describe('Sender connection suite', function () {
 
     it('guards against concurrent connect calls', async function () {
         const proxy = await createProxy(true, proxyOptions);
-        const sender = new Sender(1024, JWK);
+        const sender = new Sender({bufferSize: 1024, jwk: JWK});
         try {
             await Promise.all([sender.connect(senderOptions, true), sender.connect(senderOptions, true)]);
         } catch(err) {
@@ -159,7 +159,7 @@ describe('Client interop test suite', function () {
 
         loopTestCase:
             for (const testCase of testCases) {
-                const sender = new Sender(1024);
+                const sender = new Sender({bufferSize: 1024});
                 try {
                     sender.table(testCase.table);
                     for (const symbol of testCase.symbols) {
@@ -218,7 +218,7 @@ describe('Client interop test suite', function () {
 
 describe('Sender message builder test suite (anything not covered in client interop test suite)', function () {
     it('supports timestamp fields', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         sender.table("tableName")
             .booleanColumn("boolCol", true)
             .timestampColumn("timestampCol", 1658484765000000)
@@ -229,7 +229,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('supports setting designated timestamp from client', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         sender.table("tableName")
             .booleanColumn("boolCol", true)
             .timestampColumn("timestampCol", 1658484765000000)
@@ -240,14 +240,14 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if table name is not a string', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table(23456)
         ).toThrow("Table name must be a string, received number");
     });
 
     it('throws exception if table name is too long', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("123456789012345678901234567890123456789012345678901234567890"
                 + "12345678901234567890123456789012345678901234567890123456789012345678")
@@ -255,7 +255,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if table name is set more times', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .symbol("name", "value")
@@ -264,7 +264,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if symbol name is not a string', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .symbol(12345.5656, "value")
@@ -272,7 +272,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if symbol name is empty string', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .symbol("", "value")
@@ -280,7 +280,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if column name is not a string', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .stringColumn(12345.5656, "value")
@@ -288,7 +288,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if column name is empty string', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .stringColumn("", "value")
@@ -296,7 +296,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if column name is too long', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .stringColumn("123456789012345678901234567890123456789012345678901234567890"
@@ -305,7 +305,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if column value is not the right type', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .stringColumn("columnName", false)
@@ -313,21 +313,21 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if adding column without setting table name', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.floatColumn("name", 12.459)
         ).toThrow("Column can be set only after table name is set");
     });
 
     it('throws exception if adding symbol without setting table name', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.symbol("name", "value")
         ).toThrow("Symbol can be added only after table name is set and before any column added");
     });
 
     it('throws exception if adding symbol after columns', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .stringColumn("name", "value")
@@ -336,12 +336,12 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('returns null if preparing an empty buffer for send', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(sender.toBuffer()).toBe(null);
     });
 
     it('ignores unfinished rows when preparing a buffer for send', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         sender.table("tableName")
             .symbol("name", "value")
             .at("1234567890");
@@ -353,7 +353,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if a float is passed as integer field', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .intColumn("intField", 123.222)
@@ -361,7 +361,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if designated timestamp is not a string', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .symbol("name", "value")
@@ -370,7 +370,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if designated timestamp is an empty string', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .symbol("name", "value")
@@ -379,7 +379,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if designated timestamp is invalid', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .symbol("name", "value")
@@ -388,7 +388,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('throws exception if designated timestamp is set without any fields added', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .at("12345678")
@@ -396,7 +396,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('extends the size of the buffer if data does not fit', function () {
-        const sender = new Sender(8);
+        const sender = new Sender({bufferSize: 8});
         expect(sender.bufferSize).toBe(8);
         expect(sender.position).toBe(0);
         sender.table("tableName");
@@ -424,7 +424,7 @@ describe('Sender message builder test suite (anything not covered in client inte
     });
 
     it('is possible to clear the buffer by calling reset()', function () {
-        const sender = new Sender(1024);
+        const sender = new Sender({bufferSize: 1024});
         sender.table("tableName")
             .booleanColumn("boolCol", true)
             .timestampColumn("timestampCol", 1658484765000000)
