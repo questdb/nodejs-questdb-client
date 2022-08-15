@@ -6,6 +6,7 @@
   "types": "types/index.d.ts",
   "scripts": {
     "test": "jest",
+    "eslint": "npx eslint src/**",
     "docs": "jsdoc index.js src/sender.js README.md -d docs"
   },
   "repository": {

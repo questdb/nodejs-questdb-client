@@ -24,6 +24,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Run linter
+        run: npm run eslint
+
       - name: Publish @questdb/nodejs-questdb-client to npm
         if: github.ref == 'refs/heads/main'
         uses: JS-DevTools/npm-publish@v1
