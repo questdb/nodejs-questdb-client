@@ -5,14 +5,14 @@
     NodeJS client library [repo](https://github.com/questdb/nodejs-questdb-client).
 - name: ilp-auth-tls
   lang: javascript
-  path: examples/auth_and_tls.js
+  path: examples/auth_tls.js
   header: |-
     NodeJS client library [repo](https://github.com/questdb/nodejs-questdb-client).
   auth:
-    kid: testUser1
-    d: 5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48
-    x: fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU
-    y: Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac
+    kid: testapp
+    d: 9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8
+    x: aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc
+    y: __ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg
   addr:
     host: localhost
     port: 9009
