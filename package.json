@@ -1,6 +1,6 @@
 {
   "name": "@questdb/nodejs-client",
-  "version": "0.0.34",
+  "version": "1.0.0",
   "description": "QuestDB Node.js Client",
   "main": "index.js",
   "types": "types/index.d.ts",
