@@ -6,9 +6,9 @@ const tls = require('tls');
 const LOCALHOST = '127.0.0.1';
 
 async function write(socket, data) {
-    return new Promise(resolve => {
-        socket.write(data, 'utf8', () => {
-            resolve();
+    return new Promise((resolve, reject) => {
+        socket.write(data, 'utf8', err => {
+            err ? reject(err) : resolve();
         });
     });
 }

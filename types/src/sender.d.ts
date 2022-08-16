@@ -29,7 +29,7 @@ export class Sender {
      * </ul>
      * </p>
      */
-    constructor(options: object);
+    constructor(options?: object);
     /** @private */ private jwk;
     /** @private */ private socket;
     /** @private */ private bufferSize;

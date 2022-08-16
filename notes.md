@@ -2,24 +2,7 @@
 > ./scripts/generateCerts.sh . questdbPwd123
 
 ### TODO:
-- ~~The client should grow the buffer instead of throwing on insufficient buffer size, like other clients do~~
-- If the buffer had to be extended, shrink it back to original size on a subsequent flush() call?
-- ~~Config object for Sender, make bufferSize optional by setting a default~~
-- ~~Github actions to run 'npm test' on each commit and run 'npm publish' when version is bumped in package.json~~
-- ~~Provide a builder style API:
-  builder.table('tab').symbol('symName', any).intColumn('intCol', 34).timestampColumn('tsCol', 23232323).atNow();~~
-- ~~The project lacks a linter. Use ESLint (https://eslint.org) or standard (https://standardjs.com)~~
-- ~~Run linter in build~~
-- ~~Move certs/ under test/ since these are test specific files. Possibly generate certs from test.~~
-- Test the client against a real QuestDB instance, not only mock. The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
-- ~~authenticate() function doesn't await for sender.socket.write() to happen and doesn't check for errors~~
-- ~~Avoid resource leaks on await sender.connect(); await sender.connect();.
-  As a bonus, we could even protect from concurrent connect calls, e.g. await Promise.all(sender.connect(), sender.connect());~~
-- ~~The client should throw Error instances instead of strings.~~
-- ~~sender.close() doesn't flush pending data to the socket. We should document this.~~
+- Test the client against a real QuestDB instance, not only mock.
+  The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
 - Would be nice to accept alternative logger implementations to be used instead of console
-- ~~Add 'use strict'; since we are using JS + CommonJS~~
-- ~~"Typescript" should be "TypeScript" in the readme~~
-- ~~Remove commented code from test/testapp.js~~
-- Update node.js examples in QuestDB documentation
-- Remove notes.md file
+- If the buffer had to be extended, shrink it back to original size on a subsequent flush() call?

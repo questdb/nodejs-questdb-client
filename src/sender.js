@@ -47,7 +47,7 @@ class Sender {
      * </ul>
      * </p>
      */
-    constructor(options) {
+    constructor(options = undefined) {
         if (options) {
             this.jwk = options.jwk;
         }
@@ -135,6 +135,7 @@ class Sender {
             })
             .on("error", err => {
                 console.error(err);
+                reject(err);
             });
         });
     }
@@ -166,8 +167,12 @@ class Sender {
         }
         return new Promise((resolve, reject) => {
             this.socket.write(data, err => {
-                compact(this);
-                err ? reject(err) : resolve(true);
+                if (err) {
+                    reject(err);
+                } else {
+                    compact(this);
+                    resolve(true);
+                }
             });
         });
     }
