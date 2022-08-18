@@ -165,6 +165,7 @@ describe('Client interop test suite', function () {
 
         loopTestCase:
             for (const testCase of testCases) {
+                console.info(`test name: ${testCase.testName}`);
                 const sender = new Sender({bufferSize: 1024});
                 try {
                     sender.table(testCase.table);
