@@ -8,6 +8,21 @@ const crypto = require('crypto');
 
 const DEFAULT_BUFFER_SIZE = 8192;
 
+const SPACE_REPLACE_REGEX = / /g;
+const SPACE_REPLACE_VALUE = '\\ ';
+const EQUALS_REPLACE_REGEX = /=/g;
+const EQUALS_REPLACE_VALUE = '\\=';
+const DOUBLE_QOUTE_REPLACE_REGEX = /"/g;
+const DOUBLE_QOUTE_REPLACE_VALUE = '\\"';
+const COMMA_REPLACE_REGEX = /,/g;
+const COMMA_REPLACE_VALUE = '\\,';
+const NEWLINE_REPLACE_REGEX = /\n/g;
+const NEWLINE_REPLACE_VALUE = '\\\n';
+const RETURN_REPLACE_REGEX = /\r/g;
+const RETURN_REPLACE_VALUE = '\\\r';
+const BACKSLASH_REPLACE_REGEX = /\\/g;
+const BACKSLASH_REPLACE_VALUE = '\\\\';
+
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data and close the connection.
  * <p>
@@ -202,7 +217,7 @@ class Sender {
         }
         validateTableName(table);
         checkCapacity(this, [table]);
-        writeEscaped(this, table);
+        writeName(this, table);
         this.hasTable = true;
         return this;
     }
@@ -225,9 +240,9 @@ class Sender {
         checkCapacity(this, [name, valueStr], 2 + name.length + valueStr.length);
         write(this, ',');
         validateColumnName(name);
-        writeEscaped(this, name);
+        writeName(this, name);
         write(this, '=');
-        writeEscaped(this, valueStr);
+        writeNonQuotedValue(this, valueStr);
         this.hasSymbols = true;
         return this;
     }
@@ -243,7 +258,7 @@ class Sender {
         writeColumn(this, name, value, () => {
             checkCapacity(this, [value], 2 + value.length);
             write(this, '"');
-            writeEscaped(this, value, true);
+            writeQuotedValue(this, value);
             write(this, '"');
         }, "string");
         return this;
@@ -418,7 +433,7 @@ function writeColumn(sender, name, value, writeValue, valueType) {
     checkCapacity(sender, [name], 2 + name.length);
     write(sender, sender.hasColumns ? ',' : ' ');
     validateColumnName(name);
-    writeEscaped(sender, name);
+    writeName(sender, name);
     write(sender, '=');
     writeValue();
     sender.hasColumns = true;
@@ -431,41 +446,25 @@ function write(sender, data) {
     }
 }
 
-function writeEscaped(sender, data, quoted = false) {
-    for (const ch of data) {
-        if (ch > '\\') {
-            write(sender, ch);
-            continue;
-        }
+function writeNonQuotedValue(sender, value) {
+    write(sender, value.replace(BACKSLASH_REPLACE_REGEX, BACKSLASH_REPLACE_VALUE)
+        .replace(SPACE_REPLACE_REGEX, SPACE_REPLACE_VALUE)
+        .replace(EQUALS_REPLACE_REGEX, EQUALS_REPLACE_VALUE)
+        .replace(COMMA_REPLACE_REGEX, COMMA_REPLACE_VALUE)
+        .replace(NEWLINE_REPLACE_REGEX, NEWLINE_REPLACE_VALUE)
+        .replace(RETURN_REPLACE_REGEX, RETURN_REPLACE_VALUE));
+}
 
-        switch (ch) {
-            case ' ':
-            case ',':
-            case '=':
-                if (!quoted) {
-                    write(sender, '\\');
-                }
-                write(sender, ch);
-                break;
-            case '\n':
-            case '\r':
-                write(sender, '\\');
-                write(sender, ch);
-                break;
-            case '"':
-                if (quoted) {
-                    write(sender, '\\');
-                }
-                write(sender, ch);
-                break;
-            case '\\':
-                write(sender, '\\\\');
-                break;
-            default:
-                write(sender, ch);
-                break;
-        }
-    }
+function writeQuotedValue(sender, value) {
+    write(sender, value.replace(BACKSLASH_REPLACE_REGEX, BACKSLASH_REPLACE_VALUE)
+        .replace(DOUBLE_QOUTE_REPLACE_REGEX, DOUBLE_QOUTE_REPLACE_VALUE)
+        .replace(NEWLINE_REPLACE_REGEX, NEWLINE_REPLACE_VALUE)
+        .replace(RETURN_REPLACE_REGEX, RETURN_REPLACE_VALUE));
+}
+
+function writeName(sender, name) {
+    write(sender, name.replace(SPACE_REPLACE_REGEX, SPACE_REPLACE_VALUE)
+        .replace(EQUALS_REPLACE_REGEX, EQUALS_REPLACE_VALUE));
 }
 
 exports.Sender = Sender;

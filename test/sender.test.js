@@ -384,7 +384,7 @@ describe('Sender message builder test suite (anything not covered in client inte
             () => sender.table("tableName")
                 .symbol("name", "value")
                 .at("343434.5656")
-        ).toThrow("Invalid character in designated timestamp: .");
+        ).toThrow("Invalid character in designated timestamp: 343434.5656");
     });
 
     it('throws exception if designated timestamp is set without any fields added', function () {
