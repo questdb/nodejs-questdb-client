@@ -157,6 +157,17 @@ describe('Sender connection suite', function () {
         await sender.close();
         await proxy.stop();
     });
+
+    it('can handle unfinished rows during flush()', async function () {
+        const proxy = await createProxy(true, proxyOptions);
+        const sender = await createSender(JWK, true);
+        sender.table("test").symbol("location", "us");
+        const sent = await sender.flush();
+        expect(sent).toBe(false);
+        await sender.close();
+        await assertSentData(proxy, true, "testapp\n");
+        await proxy.stop();
+    });
 });
 
 describe('Client interop test suite', function () {
@@ -364,6 +375,14 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(
             () => sender.table("tableName")
                 .intColumn("intField", 123.222)
+        ).toThrow("Value must be an integer, received 123.222");
+    });
+
+    it('throws exception if a float is passed as timestamp field', function () {
+        const sender = new Sender({bufferSize: 1024});
+        expect(
+            () => sender.table("tableName")
+                .timestampColumn("intField", 123.222)
         ).toThrow("Value must be an integer, received 123.222");
     });
 
