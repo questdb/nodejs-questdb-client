@@ -3,7 +3,13 @@
 const { Sender } = require("../index");
 const { MockProxy } = require("./mockproxy");
 const { readFileSync} = require("fs");
+const { GenericContainer } = require("testcontainers");
+const http = require('http');
 
+const HTTP_OK = 200;
+
+const QUESTDB_HTTP_PORT = 9000;
+const QUESTDB_ILP_PORT = 9009;
 const PROXY_PORT = 9099;
 const PROXY_HOST = '127.0.0.1';
 
@@ -32,50 +38,50 @@ const JWK = {
     crv: "P-256",
 }
 
-async function createProxy(auth = false, tlsOptions = undefined) {
-    const mockConfig = { auth: auth, assertions: true };
-    const proxy = new MockProxy(mockConfig);
-    await proxy.start(PROXY_PORT, tlsOptions);
-    expect(proxy.mockConfig).toBe(mockConfig);
-    expect(proxy.dataSentToRemote).toStrictEqual([]);
-    return proxy;
-}
-
-async function createSender(jwk = undefined, secure = false) {
-    const sender = new Sender({bufferSize: 1024, jwk: jwk});
-    const connected = await sender.connect(senderOptions, secure);
-    expect(connected).toBe(true);
-    return sender;
-}
-
-async function sendData(sender) {
-    sender.table("test").symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
-    await sender.flush();
-}
-
-async function assertSentData(proxy, authenticated, expected, timeout = 60000) {
-    const interval = 100;
-    const num = timeout / interval;
-    let actual;
-    for (let i = 0; i < num; i++) {
-        const dataSentToRemote = proxy.getDataSentToRemote().join('').split('\n');
-        if (authenticated) {
-            dataSentToRemote.splice(1, 1);
-        }
-        actual = dataSentToRemote.join('\n');
-        if (actual === expected) {
-            return new Promise(resolve => resolve(null));
-        }
-        await sleep(interval);
-    }
-    return new Promise(resolve => resolve(`data assert failed [expected=${expected}, actual=${actual}]`));
-}
-
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 describe('Sender connection suite', function () {
+    async function createProxy(auth = false, tlsOptions = undefined) {
+        const mockConfig = { auth: auth, assertions: true };
+        const proxy = new MockProxy(mockConfig);
+        await proxy.start(PROXY_PORT, tlsOptions);
+        expect(proxy.mockConfig).toBe(mockConfig);
+        expect(proxy.dataSentToRemote).toStrictEqual([]);
+        return proxy;
+    }
+
+    async function createSender(jwk = undefined, secure = false) {
+        const sender = new Sender({bufferSize: 1024, jwk: jwk});
+        const connected = await sender.connect(senderOptions, secure);
+        expect(connected).toBe(true);
+        return sender;
+    }
+
+    async function sendData(sender) {
+        sender.table("test").symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
+        await sender.flush();
+    }
+
+    async function assertSentData(proxy, authenticated, expected, timeout = 60000) {
+        const interval = 100;
+        const num = timeout / interval;
+        let actual;
+        for (let i = 0; i < num; i++) {
+            const dataSentToRemote = proxy.getDataSentToRemote().join('').split('\n');
+            if (authenticated) {
+                dataSentToRemote.splice(1, 1);
+            }
+            actual = dataSentToRemote.join('\n');
+            if (actual === expected) {
+                return new Promise(resolve => resolve(null));
+            }
+            await sleep(interval);
+        }
+        return new Promise(resolve => resolve(`data assert failed [expected=${expected}, actual=${actual}]`));
+    }
+
     it('can authenticate', async function () {
         const proxy = await createProxy(true);
         const sender = await createSender(JWK);
@@ -159,6 +165,7 @@ describe('Client interop test suite', function () {
 
         loopTestCase:
             for (const testCase of testCases) {
+                console.info(`test name: ${testCase.testName}`);
                 const sender = new Sender({bufferSize: 1024});
                 try {
                     sender.table(testCase.table);
@@ -446,5 +453,131 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBuffer().toString()).toBe(
             "tableName floatCol=1234567890,timestampCol=1658484767000000t\n"
         );
+    });
+});
+
+describe("Sender tests with containerized QuestDB instance", () => {
+    let container;
+    let sender;
+
+    async function query(container, query) {
+        const options = {
+            hostname: container.getHost(),
+            port: container.getMappedPort(QUESTDB_HTTP_PORT),
+            path: `/exec?query=${encodeURIComponent(query)}`,
+            method: 'GET',
+        };
+
+        return new Promise((resolve, reject) => {
+            const req = http.request(options, response => {
+                if (response.statusCode === HTTP_OK) {
+                    response.on('data', data => {
+                        resolve(JSON.parse(data.toString()));
+                    });
+                } else {
+                    reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, query=${query}`));
+                }
+            });
+
+            req.on('error', error => {
+                reject(error);
+            });
+
+            req.end();
+        });
+    }
+
+    async function runSelect(container, select, expectedCount, timeout = 60000) {
+        const interval = 500;
+        const num = timeout / interval;
+        let selectResult;
+        for (let i = 0; i < num; i++) {
+            selectResult = await query(container, select);
+            if (selectResult && selectResult.count >= expectedCount) {
+                return selectResult;
+            }
+            await sleep(interval);
+        }
+        throw new Error(`Timed out while waiting for ${expectedCount} rows, select='${select}'`);
+    }
+
+    function getFieldsString(schema) {
+        let fields = "";
+        for (const element of schema) {
+            fields += `${element.name} ${element.type}, `;
+        }
+        return fields.substring(0, fields.length - 2);
+    }
+
+    beforeAll(async () => {
+        jest.setTimeout(3000000);
+        container = await new GenericContainer("questdb/questdb")
+            .withExposedPorts(QUESTDB_HTTP_PORT, QUESTDB_ILP_PORT)
+            .start();
+
+        sender = new Sender();
+        await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
+    });
+
+    afterAll(async () => {
+        await sender.close();
+        await container.stop();
+    });
+
+    it("can ingest data and run queries", async () => {
+        const tableName = "test";
+        const schema = [
+            {name: "location", type: "SYMBOL"},
+            {name: "temperature", type: "DOUBLE"},
+            {name: "timestamp", type: "TIMESTAMP"}
+        ];
+
+        // create table
+        let createTableResult = await query(container,
+            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY`
+        );
+        expect(createTableResult.ddl).toBe("OK");
+
+        // alter table
+        let alterTableResult = await query(container,
+            `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1`
+        );
+        expect(alterTableResult.ddl).toBe("OK");
+
+        // ingest via client
+        sender.table("test").symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
+        await sender.flush();
+
+        // query table
+        const select1Result = await runSelect(container, "test", 1);
+        expect(select1Result.query).toBe("test");
+        expect(select1Result.count).toBe(1);
+        expect(select1Result.columns).toStrictEqual(schema);
+        expect(select1Result.dataset).toStrictEqual([
+            ["us",17.1,"2022-07-22T10:12:45.000000Z"]
+        ]);
+
+        // ingest via client, add new column
+        sender.table("test").symbol("location", "us").floatColumn("temperature", 17.3).at("1658484765000666000");
+        sender.table("test").symbol("location", "emea").floatColumn("temperature", 17.4).at("1658484765000999000");
+        sender.table("test").symbol("location", "emea").symbol("city", "london").floatColumn("temperature", 18.8).at("1658484765001234000");
+        await sender.flush();
+
+        // query table
+        const select2Result = await runSelect(container, "test", 4);
+        expect(select2Result.query).toBe("test");
+        expect(select2Result.count).toBe(4);
+        expect(select2Result.columns).toStrictEqual([
+            {name: "location", type: "SYMBOL"},
+            {name: "temperature", type: "DOUBLE"},
+            {name: "timestamp", type: "TIMESTAMP"},
+            {name: "city", type: "SYMBOL"}
+        ]);
+        expect(select2Result.dataset).toStrictEqual([
+            ["us",17.1,"2022-07-22T10:12:45.000000Z",null],
+            ["us",17.3,"2022-07-22T10:12:45.000666Z",null],
+            ["emea",17.4,"2022-07-22T10:12:45.000999Z",null],
+            ["emea",18.8,"2022-07-22T10:12:45.001234Z","london"]
+        ]);
     });
 });

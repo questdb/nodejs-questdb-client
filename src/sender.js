@@ -348,10 +348,9 @@ class Sender {
             throw new Error(`The designated timestamp must be of type string, received ${typeof timestamp}`);
         }
         validateDesignatedTimestamp(timestamp);
-        const timestampStr = timestamp.toString();
-        checkCapacity(this, [], 2 + timestampStr.length);
+        checkCapacity(this, [], 2 + timestamp.length);
         write(this, ' ');
-        write(this, timestampStr);
+        write(this, timestamp);
         write(this, '\n');
         startNewRow(this);
     }

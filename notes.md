@@ -2,7 +2,5 @@
 > ./scripts/generateCerts.sh . questdbPwd123
 
 ### TODO:
-- Test the client against a real QuestDB instance, not only mock.
-  The easiest way to do it is to use https://www.npmjs.com/package/testcontainers
 - Would be nice to accept alternative logger implementations to be used instead of console
 - If the buffer had to be extended, shrink it back to original size on a subsequent flush() call?
