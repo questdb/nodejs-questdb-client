@@ -89,7 +89,7 @@ class Sender {
      * @param {net.NetConnectOpts | tls.ConnectionOptions} options - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
-    async connect(options, secure = false) {
+    connect(options, secure = false) {
         let self = this;
 
         return new Promise((resolve, reject) => {
