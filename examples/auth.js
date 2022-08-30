@@ -24,7 +24,7 @@ async function run() {
   // if 'true' passed the connection is secured with TLS encryption
   await sender.connect({port: 9009, host: "127.0.0.1"}, false);
 
-  // send the data over the authenticated and secure connection
+  // send the data over the authenticated connection
   sender.table("prices").symbol("instrument", "EURUSD")
       .floatColumn("bid", 1.0197).floatColumn("ask", 1.0224).atNow();
   await sender.flush();
