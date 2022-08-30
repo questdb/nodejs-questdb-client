@@ -3,6 +3,19 @@
   path: examples/basic.js
   header: |-
     NodeJS client library [repo](https://github.com/questdb/nodejs-questdb-client).
+- name: ilp-auth
+  lang: javascript
+  path: examples/auth.js
+  header: |-
+    NodeJS client library [repo](https://github.com/questdb/nodejs-questdb-client).
+  auth:
+    kid: testapp
+    d: 9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8
+    x: aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc
+    y: __ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg
+  addr:
+    host: localhost
+    port: 9009
 - name: ilp-auth-tls
   lang: javascript
   path: examples/auth_tls.js
