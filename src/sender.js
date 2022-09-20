@@ -161,11 +161,11 @@ class Sender {
      * @return {Promise<boolean>} Resolves to true if there was data in the buffer to send.
      */
     async flush() {
-        const data = this.toBuffer(this.endOfLastRow);
-        if (!data) {
-            return false;
-        }
         return new Promise((resolve, reject) => {
+            const data = this.toBuffer(this.endOfLastRow);
+            if (!data) {
+                resolve(false);
+            }
             this.socket.write(data, err => {
                 if (err) {
                     reject(err);
