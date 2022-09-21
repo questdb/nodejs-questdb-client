@@ -213,7 +213,7 @@ describe('Client interop test suite', function () {
                     continue;
                 }
 
-                const buffer = sender.toBuffer();
+                const buffer = sender.toBufferView();
                 if (testCase.result.status === "SUCCESS") {
                     if (testCase.result.line) {
                         expect(buffer.toString()).toBe(testCase.result.line + '\n');
@@ -241,7 +241,7 @@ describe('Sender message builder test suite (anything not covered in client inte
             .booleanColumn("boolCol", true)
             .timestampColumn("timestampCol", 1658484765000000)
             .atNow();
-        expect(sender.toBuffer().toString()).toBe(
+        expect(sender.toBufferView().toString()).toBe(
             "tableName boolCol=t,timestampCol=1658484765000000t\n"
         );
     });
@@ -252,7 +252,7 @@ describe('Sender message builder test suite (anything not covered in client inte
             .booleanColumn("boolCol", true)
             .timestampColumn("timestampCol", 1658484765000000)
             .at("1658484769000000123");
-        expect(sender.toBuffer().toString()).toBe(
+        expect(sender.toBufferView().toString()).toBe(
             "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n"
         );
     });
@@ -355,7 +355,7 @@ describe('Sender message builder test suite (anything not covered in client inte
 
     it('returns null if preparing an empty buffer for send', function () {
         const sender = new Sender({bufferSize: 1024});
-        expect(sender.toBuffer()).toBe(null);
+        expect(sender.toBufferView()).toBe(null);
     });
 
     it('ignores unfinished rows when preparing a buffer for send', function () {
@@ -366,7 +366,7 @@ describe('Sender message builder test suite (anything not covered in client inte
         sender.table("tableName")
             .symbol("name", "value2");
         expect(
-            sender.toBuffer(sender.endOfLastRow).toString()
+            sender.toBufferView(sender.endOfLastRow).toString()
         ).toBe("tableName,name=value 1234567890\n");
     });
 
@@ -434,7 +434,7 @@ describe('Sender message builder test suite (anything not covered in client inte
         sender.atNow();
         expect(sender.bufferSize).toBe(32);
         expect(sender.position).toBe("tableName intField=123i\n".length);
-        expect(sender.toBuffer().toString()).toBe(
+        expect(sender.toBufferView().toString()).toBe(
             "tableName intField=123i\n"
         );
 
@@ -444,7 +444,7 @@ describe('Sender message builder test suite (anything not covered in client inte
             .atNow();
         expect(sender.bufferSize).toBe(64);
         expect(sender.position).toBe("tableName intField=123i\ntable2 intField=125i,strField=\"test\"\n".length);
-        expect(sender.toBuffer().toString()).toBe(
+        expect(sender.toBufferView().toString()).toBe(
             "tableName intField=123i\ntable2 intField=125i,strField=\"test\"\n"
         );
     });
@@ -459,7 +459,7 @@ describe('Sender message builder test suite (anything not covered in client inte
             .booleanColumn("boolCol", false)
             .timestampColumn("timestampCol", 1658484766000000)
             .atNow();
-        expect(sender.toBuffer().toString()).toBe(
+        expect(sender.toBufferView().toString()).toBe(
             "tableName boolCol=t,timestampCol=1658484765000000t\n"
             + "tableName boolCol=f,timestampCol=1658484766000000t\n"
         );
@@ -469,7 +469,7 @@ describe('Sender message builder test suite (anything not covered in client inte
             .floatColumn("floatCol", 1234567890)
             .timestampColumn("timestampCol", 1658484767000000)
             .atNow();
-        expect(sender.toBuffer().toString()).toBe(
+        expect(sender.toBufferView().toString()).toBe(
             "tableName floatCol=1234567890,timestampCol=1658484767000000t\n"
         );
     });
@@ -477,7 +477,6 @@ describe('Sender message builder test suite (anything not covered in client inte
 
 describe("Sender tests with containerized QuestDB instance", () => {
     let container;
-    let sender;
 
     async function query(container, query) {
         const options = {
@@ -490,8 +489,11 @@ describe("Sender tests with containerized QuestDB instance", () => {
         return new Promise((resolve, reject) => {
             const req = http.request(options, response => {
                 if (response.statusCode === HTTP_OK) {
+                    const body = [];
                     response.on('data', data => {
-                        resolve(JSON.parse(data.toString()));
+                        body.push(data);
+                    }).on('end', () => {
+                        resolve(JSON.parse(Buffer.concat(body).toString()));
                     });
                 } else {
                     reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, query=${query}`));
@@ -533,17 +535,16 @@ describe("Sender tests with containerized QuestDB instance", () => {
         container = await new GenericContainer("questdb/questdb")
             .withExposedPorts(QUESTDB_HTTP_PORT, QUESTDB_ILP_PORT)
             .start();
-
-        sender = new Sender();
-        await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
     });
 
     afterAll(async () => {
-        await sender.close();
         await container.stop();
     });
 
     it("can ingest data and run queries", async () => {
+        const sender = new Sender();
+        await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
+
         const tableName = "test";
         const schema = [
             {name: "location", type: "SYMBOL"},
@@ -564,12 +565,12 @@ describe("Sender tests with containerized QuestDB instance", () => {
         expect(alterTableResult.ddl).toBe("OK");
 
         // ingest via client
-        sender.table("test").symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
+        sender.table(tableName).symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
         await sender.flush();
 
         // query table
-        const select1Result = await runSelect(container, "test", 1);
-        expect(select1Result.query).toBe("test");
+        const select1Result = await runSelect(container, tableName, 1);
+        expect(select1Result.query).toBe(tableName);
         expect(select1Result.count).toBe(1);
         expect(select1Result.columns).toStrictEqual(schema);
         expect(select1Result.dataset).toStrictEqual([
@@ -577,13 +578,13 @@ describe("Sender tests with containerized QuestDB instance", () => {
         ]);
 
         // ingest via client, add new column
-        sender.table("test").symbol("location", "us").floatColumn("temperature", 17.3).at("1658484765000666000");
-        sender.table("test").symbol("location", "emea").floatColumn("temperature", 17.4).at("1658484765000999000");
-        sender.table("test").symbol("location", "emea").symbol("city", "london").floatColumn("temperature", 18.8).at("1658484765001234000");
+        sender.table(tableName).symbol("location", "us").floatColumn("temperature", 17.3).at("1658484765000666000");
+        sender.table(tableName).symbol("location", "emea").floatColumn("temperature", 17.4).at("1658484765000999000");
+        sender.table(tableName).symbol("location", "emea").symbol("city", "london").floatColumn("temperature", 18.8).at("1658484765001234000");
         await sender.flush();
 
         // query table
-        const select2Result = await runSelect(container, "test", 4);
+        const select2Result = await runSelect(container, tableName, 4);
         expect(select2Result.query).toBe("test");
         expect(select2Result.count).toBe(4);
         expect(select2Result.columns).toStrictEqual([
@@ -598,5 +599,55 @@ describe("Sender tests with containerized QuestDB instance", () => {
             ["emea",17.4,"2022-07-22T10:12:45.000999Z",null],
             ["emea",18.8,"2022-07-22T10:12:45.001234Z","london"]
         ]);
+
+        await sender.close();
+    });
+
+    it("does not duplicate rows if await is missing when calling flush", async () => {
+        // setting copyBuffer to make sure promises send data from their own local buffer
+        const sender = new Sender({ copyBuffer: true });
+        await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
+
+        const tableName = "test2";
+        const schema = [
+            {name: "location", type: "SYMBOL"},
+            {name: "temperature", type: "DOUBLE"},
+            {name: "timestamp", type: "TIMESTAMP"}
+        ];
+
+        // create table
+        let createTableResult = await query(container,
+            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY`
+        );
+        expect(createTableResult.ddl).toBe("OK");
+
+        // alter table
+        let alterTableResult = await query(container,
+            `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1`
+        );
+        expect(alterTableResult.ddl).toBe("OK");
+
+        // ingest via client
+        const numOfRows = 100;
+        for (let i = 0; i < numOfRows; i++) {
+            sender.table(tableName).symbol("location", "us").floatColumn("temperature", i).at("1658484765000000000");
+            // missing await is intentional
+            sender.flush();
+        }
+
+        // query table
+        const selectQuery = `${tableName} order by temperature`;
+        const selectResult = await runSelect(container, selectQuery, numOfRows);
+        expect(selectResult.query).toBe(selectQuery);
+        expect(selectResult.count).toBe(numOfRows);
+        expect(selectResult.columns).toStrictEqual(schema);
+
+        const expectedData = [];
+        for (let i = 0; i < numOfRows; i++) {
+            expectedData.push(["us",i,"2022-07-22T10:12:45.000000Z"]);
+        }
+        expect(selectResult.dataset).toStrictEqual(expectedData);
+
+        await sender.close();
     });
 });

@@ -27,6 +27,8 @@ class Sender {
     /** @private */ socket;
     /** @private */ bufferSize;
     /** @private */ buffer;
+    /** @private */ toBuffer;
+    /** @private */ doResolve;
     /** @private */ position;
     /** @private */ endOfLastRow;
     /** @private */ hasTable;
@@ -42,6 +44,9 @@ class Sender {
      * <ul>
      *   <li>bufferSize: <i>number</i> - Size of the buffer used by the sender to collect rows, provided in bytes. <br>
      *   Optional, defaults to 8192 bytes </li>
+     *   <li>copyBuffer: <i>boolean</i> - If true a new buffer will be created for every flush() call and the data to be sent to the server will be copied into this new buffer. <br>
+     *   Setting the flag could result in performance degradation, use this flag only if calls to the client cannot be serialised. <br>
+     *   Optional, defaults to false </li>
      *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
      * </ul>
@@ -51,6 +56,13 @@ class Sender {
         if (options) {
             this.jwk = options.jwk;
         }
+        this.toBuffer = options && options.copyBuffer ? this.toBufferNew : this.toBufferView;
+        this.doResolve = options && options.copyBuffer
+            ? resolve => resolve(true)
+            : resolve => {
+                    compact(this);
+                    resolve(true);
+            }
         this.resize(options && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
         this.reset();
     }
@@ -161,18 +173,13 @@ class Sender {
      * @return {Promise<boolean>} Resolves to true if there was data in the buffer to send.
      */
     async flush() {
+        const data = this.toBuffer(this.endOfLastRow);
+        if (!data) {
+            return false;
+        }
         return new Promise((resolve, reject) => {
-            const data = this.toBuffer(this.endOfLastRow);
-            if (!data) {
-                resolve(false);
-            }
             this.socket.write(data, err => {
-                if (err) {
-                    reject(err);
-                } else {
-                    compact(this);
-                    resolve(true);
-                }
+                err ? reject(err) : this.doResolve(resolve);
             });
         });
     }
@@ -180,11 +187,27 @@ class Sender {
     /**
      * @ignore
      * @return {Buffer} Returns a cropped buffer ready to send to the server or null if there is nothing to send.
+     * The returned buffer is backed by the sender's buffer.
      */
-    toBuffer(pos = this.position) {
+    toBufferView(pos = this.position) {
         return pos > 0
             ? this.buffer.subarray(0, pos)
             : null;
+    }
+
+    /**
+     * @ignore
+     * @return {Buffer} Returns a cropped buffer ready to send to the server or null if there is nothing to send.
+     * The returned buffer is a copy of the sender's buffer.
+     */
+    toBufferNew(pos = this.position) {
+        if (pos > 0) {
+            const data = Buffer.allocUnsafe(pos);
+            this.buffer.copy(data, 0, 0, pos);
+            compact(this);
+            return data;
+        }
+        return null;
     }
 
     /**

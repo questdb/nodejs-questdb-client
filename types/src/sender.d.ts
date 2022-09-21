@@ -24,6 +24,9 @@ export class Sender {
      * <ul>
      *   <li>bufferSize: <i>number</i> - Size of the buffer used by the sender to collect rows, provided in bytes. <br>
      *   Optional, defaults to 8192 bytes </li>
+     *   <li>copyBuffer: <i>boolean</i> - If true a new buffer will be created for every flush() call and the data to be sent to the server will be copied into this new buffer. <br>
+     *   Setting the flag could result in performance degradation, use this flag only if calls to the client cannot be serialised. <br>
+     *   Optional, defaults to false </li>
      *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
      * </ul>
@@ -34,6 +37,8 @@ export class Sender {
     /** @private */ private socket;
     /** @private */ private bufferSize;
     /** @private */ private buffer;
+    /** @private */ private toBuffer;
+    /** @private */ private doResolve;
     /** @private */ private position;
     /** @private */ private endOfLastRow;
     /** @private */ private hasTable;
@@ -76,8 +81,15 @@ export class Sender {
     /**
      * @ignore
      * @return {Buffer} Returns a cropped buffer ready to send to the server or null if there is nothing to send.
+     * The returned buffer is backed by the sender's buffer.
      */
-    toBuffer(pos?: any): Buffer;
+    toBufferView(pos?: any): Buffer;
+    /**
+     * @ignore
+     * @return {Buffer} Returns a cropped buffer ready to send to the server or null if there is nothing to send.
+     * The returned buffer is a copy of the sender's buffer.
+     */
+    toBufferNew(pos?: any): Buffer;
     /**
      * Write the table name into the buffer of the sender.
      *
