@@ -18,7 +18,7 @@ async function run() {
 
     // connect to QuestDB
     // host and port are required in connect options
-    await sender.connect({port: 9009, host: "127.0.0.1"});
+    await sender.connect({port: 9009, host: "localhost"});
 
     // add rows to the buffer of the sender
     sender.table("prices").symbol("instrument", "EURUSD")
@@ -69,7 +69,7 @@ async function run() {
 
     // connect() takes an optional second argument
     // if 'true' passed the connection is secured with TLS encryption
-    await sender.connect({port: 9009, host: "127.0.0.1"}, true);
+    await sender.connect({port: 9009, host: "localhost"}, true);
 
     // send the data over the authenticated and secure connection
     sender.table("prices").symbol("instrument", "EURUSD")
@@ -110,7 +110,7 @@ async function run(): Promise<number> {
 
     // connect() takes an optional second argument
     // if 'true' passed the connection is secured with TLS encryption
-    await sender.connect({port: 9009, host: "127.0.0.1"}, true);
+    await sender.connect({port: 9009, host: "localhost"}, true);
 
     // send the data over the authenticated and secure connection
     sender.table("prices").symbol("instrument", "EURUSD")
