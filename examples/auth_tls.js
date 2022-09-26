@@ -22,7 +22,7 @@ async function run() {
 
   // connect() takes an optional second argument
   // if 'true' passed the connection is secured with TLS encryption
-  await sender.connect({ port: 9009, host: "127.0.0.1" }, true);
+  await sender.connect({ port: 9009, host: "localhost" }, true);
 
   // send the data over the authenticated and secure connection
   sender

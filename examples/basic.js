@@ -6,7 +6,7 @@ async function run() {
 
   // connect to QuestDB
   // host and port are required in connect options
-  await sender.connect({ port: 9009, host: "127.0.0.1" });
+  await sender.connect({ port: 9009, host: "localhost" });
 
   // add rows to the buffer of the sender
   sender
