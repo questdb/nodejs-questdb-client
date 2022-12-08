@@ -65,6 +65,7 @@ class Sender {
             }
         this.resize(options && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
         this.reset();
+        this.debug = options.debug || false;
     }
 
     /**
@@ -101,7 +102,7 @@ class Sender {
      * @param {net.NetConnectOpts | tls.ConnectionOptions} options - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      */
-    async connect(options, secure = false) {
+    connect(options, secure = false) {
         let self = this;
 
         return new Promise((resolve, reject) => {
@@ -132,9 +133,9 @@ class Sender {
                 }
             })
             .on("ready", async () => {
-                console.info(`Successfully connected to ${options.host}:${options.port}`);
+                this.debug && console.info(`Successfully connected to ${options.host}:${options.port}`);
                 if (self.jwk) {
-                    console.info(`Authenticating with ${options.host}:${options.port}`);
+                    this.debug && console.info(`Authenticating with ${options.host}:${options.port}`);
                     await self.socket.write(`${self.jwk.kid}\n`, err => {
                         if (err) {
                             reject(err);
@@ -156,12 +157,12 @@ class Sender {
      * Closes the connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
-    async close() {
+    close() {
         return new Promise(resolve => {
             const address = this.socket.remoteAddress;
             const port = this.socket.remotePort;
             this.socket.destroy();
-            console.info(`Connection to ${address}:${port} is closed`);
+            this.debug && console.info(`Connection to ${address}:${port} is closed`);
             resolve();
         });
     }
@@ -172,7 +173,7 @@ class Sender {
      *
      * @return {Promise<boolean>} Resolves to true if there was data in the buffer to send.
      */
-    async flush() {
+    flush() {
         const data = this.toBuffer(this.endOfLastRow);
         if (!data) {
             return false;
