@@ -168,6 +168,24 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, true, "testapp\n");
         await proxy.stop();
     });
+
+    it('supports custom logger', async function () {
+        const expectedMessages = [
+            "Successfully connected to 127.0.0.1:9099",
+            "Connection to 127.0.0.1:9099 is closed"
+        ];
+        const log = (level, message) => {
+            expect(level).toBe("info");
+            expect(message).toBe(expectedMessages.shift());
+        };
+        const proxy = await createProxy();
+        const sender = new Sender({bufferSize: 1024, log: log});
+        await sender.connect(senderOptions);
+        await sendData(sender);
+        await sender.close();
+        await assertSentData(proxy, false, "test,location=us temperature=17.1 1658484765000000000\n");
+        await proxy.stop();
+    });
 });
 
 describe('Client interop test suite', function () {

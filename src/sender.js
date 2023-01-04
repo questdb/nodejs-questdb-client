@@ -1,6 +1,7 @@
 'use strict';
 
 const { Buffer } = require("buffer");
+const { log } = require("./logging");
 const { validateTableName, validateColumnName, validateDesignatedTimestamp } = require("./validation");
 const net = require("net");
 const tls = require("tls");
@@ -34,6 +35,7 @@ class Sender {
     /** @private */ hasTable;
     /** @private */ hasSymbols;
     /** @private */ hasColumns;
+    /** @private */ log;
 
     /**
      * Creates an instance of Sender.
@@ -49,6 +51,8 @@ class Sender {
      *   Optional, defaults to false </li>
      *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
+     *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
+     *   If not provided, default logging is used which writes to the console with logging level 'info'.</li>
      * </ul>
      * </p>
      */
@@ -62,7 +66,8 @@ class Sender {
             : resolve => {
                     compact(this);
                     resolve(true);
-            }
+            };
+        this.log = options && options.log ? options.log : log;
         this.resize(options && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
         this.reset();
     }
@@ -128,13 +133,13 @@ class Sender {
                         resolve(true);
                     }
                 } else {
-                    console.warn(`Received unexpected data: ${data}`);
+                    this.log("warn", `Received unexpected data: ${data}`);
                 }
             })
             .on("ready", async () => {
-                console.info(`Successfully connected to ${options.host}:${options.port}`);
+                this.log("info", `Successfully connected to ${options.host}:${options.port}`);
                 if (self.jwk) {
-                    console.info(`Authenticating with ${options.host}:${options.port}`);
+                    this.log("info", `Authenticating with ${options.host}:${options.port}`);
                     await self.socket.write(`${self.jwk.kid}\n`, err => {
                         if (err) {
                             reject(err);
@@ -146,7 +151,7 @@ class Sender {
                 }
             })
             .on("error", err => {
-                console.error(err);
+                this.log("error", err);
                 reject(err);
             });
         });
@@ -157,13 +162,10 @@ class Sender {
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
-        return new Promise(resolve => {
-            const address = this.socket.remoteAddress;
-            const port = this.socket.remotePort;
-            this.socket.destroy();
-            console.info(`Connection to ${address}:${port} is closed`);
-            resolve();
-        });
+        const address = this.socket.remoteAddress;
+        const port = this.socket.remotePort;
+        this.socket.destroy();
+        this.log("info", `Connection to ${address}:${port} is closed`);
     }
 
     /**
