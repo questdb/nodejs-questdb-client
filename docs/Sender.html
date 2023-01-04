@@ -126,6 +126,8 @@ Properties of the object:
   Optional, defaults to false </li>
   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
+  <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
+  If not provided, default logging is used which writes to the console with logging level 'info'.</li>
 </ul>
 </p></td>
         </tr>
@@ -168,7 +170,7 @@ Properties of the object:
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line24">line 24</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line25">line 25</a>
     </li></ul></dd>
     
 
@@ -325,7 +327,7 @@ Properties of the object:
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line351">line 351</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line353">line 353</a>
     </li></ul></dd>
     
 
@@ -414,7 +416,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line370">line 370</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line372">line 372</a>
     </li></ul></dd>
     
 
@@ -574,7 +576,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line282">line 282</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line284">line 284</a>
     </li></ul></dd>
     
 
@@ -685,7 +687,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line159">line 159</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line164">line 164</a>
     </li></ul></dd>
     
 
@@ -721,7 +723,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
 
     
-    <h4 class="name" id="connect"><span class="type-signature">(async) </span>connect<span class="signature">(options, secure<span class="signature-attributes">opt</span>)</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="connect"><span class="type-signature"></span>connect<span class="signature">(options, secure<span class="signature-attributes">opt</span>)</span><span class="type-signature"></span></h4>
     
 
     
@@ -880,7 +882,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line104">line 104</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line109">line 109</a>
     </li></ul></dd>
     
 
@@ -1040,7 +1042,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line297">line 297</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line299">line 299</a>
     </li></ul></dd>
     
 
@@ -1151,7 +1153,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line175">line 175</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line177">line 177</a>
     </li></ul></dd>
     
 
@@ -1333,7 +1335,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line313">line 313</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line315">line 315</a>
     </li></ul></dd>
     
 
@@ -1444,7 +1446,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line92">line 92</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line97">line 97</a>
     </li></ul></dd>
     
 
@@ -1605,7 +1607,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line77">line 77</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line82">line 82</a>
     </li></ul></dd>
     
 
@@ -1765,7 +1767,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line265">line 265</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line267">line 267</a>
     </li></ul></dd>
     
 
@@ -1947,7 +1949,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line240">line 240</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line242">line 242</a>
     </li></ul></dd>
     
 
@@ -2106,7 +2108,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line219">line 219</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line221">line 221</a>
     </li></ul></dd>
     
 
@@ -2288,7 +2290,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line333">line 333</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line335">line 335</a>
     </li></ul></dd>
     
 
@@ -2362,7 +2364,7 @@ The buffer's content is copied into the new buffer.
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Wed Sep 21 2022 10:00:52 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Wed Jan 04 2023 16:45:09 GMT+0000 (Greenwich Mean Time)
 </footer>
 
 <script> prettyPrint(); </script>

@@ -29,6 +29,8 @@ export class Sender {
      *   Optional, defaults to false </li>
      *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
+     *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
+     *   If not provided, default logging is used which writes to the console with logging level 'info'.</li>
      * </ul>
      * </p>
      */
@@ -44,6 +46,7 @@ export class Sender {
     /** @private */ private hasTable;
     /** @private */ private hasSymbols;
     /** @private */ private hasColumns;
+    /** @private */ private log;
     /**
      * Extends the size of the sender's buffer. <br>
      * Can be used to increase the size of buffer if overflown.
@@ -70,7 +73,7 @@ export class Sender {
      * Closes the connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
-    close(): Promise<any>;
+    close(): Promise<void>;
     /**
      * Sends the buffer's content to the database and compacts the buffer.
      * If the last row is not finished it stays in the sender's buffer.
