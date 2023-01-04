@@ -162,15 +162,12 @@ class Sender {
     /**
      * Closes the connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
-     *
-     * @return {Promise<boolean>} Resolves to true if connection is closed.
      */
     async close() {
         const address = this.socket.remoteAddress;
         const port = this.socket.remotePort;
         this.socket.destroy();
         this.log("info", `Connection to ${address}:${port} is closed`);
-        return true;
     }
 
     /**

@@ -28,7 +28,7 @@ const proxyOptions = {
 const PRIVATE_KEY = "9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8"
 const PUBLIC_KEY = {
     x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
-    y:"__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
+    y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
 }
 const JWK = {
     ...PUBLIC_KEY,
