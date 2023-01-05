@@ -28,7 +28,7 @@ const proxyOptions = {
 const PRIVATE_KEY = "9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8"
 const PUBLIC_KEY = {
     x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
-    y:"__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
+    y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
 }
 const JWK = {
     ...PUBLIC_KEY,
@@ -166,6 +166,24 @@ describe('Sender connection suite', function () {
         expect(sent).toBe(false);
         await sender.close();
         await assertSentData(proxy, true, "testapp\n");
+        await proxy.stop();
+    });
+
+    it('supports custom logger', async function () {
+        const expectedMessages = [
+            "Successfully connected to 127.0.0.1:9099",
+            "Connection to 127.0.0.1:9099 is closed"
+        ];
+        const log = (level, message) => {
+            expect(level).toBe("info");
+            expect(message).toBe(expectedMessages.shift());
+        };
+        const proxy = await createProxy();
+        const sender = new Sender({bufferSize: 1024, log: log});
+        await sender.connect(senderOptions);
+        await sendData(sender);
+        await sender.close();
+        await assertSentData(proxy, false, "test,location=us temperature=17.1 1658484765000000000\n");
         await proxy.stop();
     });
 });
