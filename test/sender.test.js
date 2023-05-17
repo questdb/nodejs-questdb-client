@@ -578,7 +578,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
 
         // create table
         let createTableResult = await query(container,
-            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY`
+            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY BYPASS WAL`
         );
         expect(createTableResult.ddl).toBe("OK");
 
