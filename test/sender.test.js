@@ -553,6 +553,12 @@ describe("Sender tests with containerized QuestDB instance", () => {
         container = await new GenericContainer("questdb/questdb")
             .withExposedPorts(QUESTDB_HTTP_PORT, QUESTDB_ILP_PORT)
             .start();
+
+        const stream = await container.logs();
+        stream
+            .on("data", line => console.log(line))
+            .on("err", line => console.error(line))
+            .on("end", () => console.log("Stream closed"));
     });
 
     afterAll(async () => {

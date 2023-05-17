@@ -126,6 +126,7 @@ class Sender {
                         await self.close();
                     }
                 });
+            this.socket.setKeepAlive(true);
 
             this.socket.on("data", async raw => {
                 data = !data ? raw : Buffer.concat([data, raw]);
