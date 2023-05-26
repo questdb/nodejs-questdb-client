@@ -31,7 +31,6 @@ async function run() {
     .floatColumn("bid", 1.0197)
     .floatColumn("ask", 1.0224)
     .atNow();
-
   await sender.flush();
 
   // close the connection after all rows ingested

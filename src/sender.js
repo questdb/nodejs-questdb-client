@@ -45,14 +45,18 @@ class Sender {
      * Properties of the object:
      * <ul>
      *   <li>bufferSize: <i>number</i> - Size of the buffer used by the sender to collect rows, provided in bytes. <br>
-     *   Optional, defaults to 8192 bytes </li>
-     *   <li>copyBuffer: <i>boolean</i> - If true a new buffer will be created for every flush() call and the data to be sent to the server will be copied into this new buffer. <br>
-     *   Setting the flag could result in performance degradation, use this flag only if calls to the client cannot be serialised. <br>
-     *   Optional, defaults to false </li>
+     *   Optional, defaults to 8192 bytes. <br>
+     *   If the value passed is not a number, the setting is ignored. </li>
+     *   <li>copyBuffer: <i>boolean</i> - By default a new buffer is created for every flush() call, and the data to be sent to the server is copied into this new buffer.
+     *   Setting the flag to <i>false</i> results in reusing the same buffer instance for each flush() call. Use this flag only if calls to the client are serialised. <br>
+     *   Optional, defaults to <i>true</i>. <br>
+     *   If the value passed is not a boolean, the setting is ignored. </li>
      *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
-     *   If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
+     *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
+     *   No type checks performed on the object passed. </li>
      *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
-     *   If not provided, default logging is used which writes to the console with logging level 'info'.</li>
+     *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
+     *   If not a function passed, the setting is ignored. </li>
      * </ul>
      * </p>
      */
@@ -60,15 +64,16 @@ class Sender {
         if (options) {
             this.jwk = options.jwk;
         }
-        this.toBuffer = options && options.copyBuffer ? this.toBufferNew : this.toBufferView;
-        this.doResolve = options && options.copyBuffer
-            ? resolve => resolve(true)
-            : resolve => {
+        const noCopy = options && typeof options.copyBuffer === "boolean" && !options.copyBuffer;
+        this.toBuffer = noCopy ? this.toBufferView : this.toBufferNew;
+        this.doResolve = noCopy
+            ? resolve => {
                     compact(this);
                     resolve(true);
-            };
-        this.log = options && options.log ? options.log : log;
-        this.resize(options && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
+            }
+            : resolve => resolve(true);
+        this.log = options && typeof options.log === "function" && options.log ? options.log : log;
+        this.resize(options && typeof options.bufferSize === "number" && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
         this.reset();
     }
 
@@ -496,3 +501,4 @@ function writeEscaped(sender, data, quoted = false) {
 }
 
 exports.Sender = Sender;
+exports.DEFAULT_BUFFER_SIZE = DEFAULT_BUFFER_SIZE;

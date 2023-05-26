@@ -1,6 +1,8 @@
 'use strict';
 
 const { Sender } = require("../index");
+const { DEFAULT_BUFFER_SIZE } = require("../src/sender");
+const { log } = require("../src/logging");
 const { MockProxy } = require("./mockproxy");
 const { readFileSync} = require("fs");
 const { GenericContainer } = require("testcontainers");
@@ -490,6 +492,149 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             "tableName floatCol=1234567890,timestampCol=1658484767000000t\n"
         );
+    });
+});
+
+describe('Sender options test suite', function () {
+    it('does copy the buffer during flush() if no options defined', function () {
+        const sender = new Sender();
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does copy the buffer during flush() if options are null', function () {
+        const sender = new Sender(null);
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does copy the buffer during flush() if options are undefined', function () {
+        const sender = new Sender(undefined);
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does copy the buffer during flush() if options are empty', function () {
+        const sender = new Sender({});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does copy the buffer during flush() if copyBuffer is not set', function () {
+        const sender = new Sender({bufferSize: 1024});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does copy the buffer during flush() if copyBuffer is set to true', function () {
+        const sender = new Sender({copyBuffer: true});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does copy the buffer during flush() if copyBuffer is not a boolean', function () {
+        const sender = new Sender({copyBuffer: ""});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does not copy the buffer during flush() if copyBuffer is set to false', function () {
+        const sender = new Sender({copyBuffer: false});
+        expect(sender.toBuffer).toBe(sender.toBufferView);
+    });
+
+    it('does not copy the buffer during flush() if copyBuffer is set to null', function () {
+        const sender = new Sender({copyBuffer: null});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('does not copy the buffer during flush() if copyBuffer is undefined', function () {
+        const sender = new Sender({copyBuffer: undefined});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+    });
+
+    it('sets default buffer size if no options defined', function () {
+        const sender = new Sender();
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('sets default buffer size if options are null', function () {
+        const sender = new Sender(null);
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('sets default buffer size if options are undefined', function () {
+        const sender = new Sender(undefined);
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('sets default buffer size if options are empty', function () {
+        const sender = new Sender({});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('sets default buffer size if bufferSize is not set', function () {
+        const sender = new Sender({copyBuffer: true});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('sets the requested buffer size if bufferSize is set', function () {
+        const sender = new Sender({bufferSize: 1024});
+        expect(sender.bufferSize).toBe(1024);
+    });
+
+    it('sets default buffer size if bufferSize is set to null', function () {
+        const sender = new Sender({bufferSize: null});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('sets default buffer size if bufferSize is set to undefined', function () {
+        const sender = new Sender({bufferSize: undefined});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('sets default buffer size if bufferSize is not a number', function () {
+        const sender = new Sender({bufferSize: "1024"});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    });
+
+    it('uses default logger if no options defined', function () {
+        const sender = new Sender();
+        expect(sender.log).toBe(log);
+    });
+
+    it('uses default logger if options are null', function () {
+        const sender = new Sender(null);
+        expect(sender.log).toBe(log);
+    });
+
+    it('uses default logger if options are undefined', function () {
+        const sender = new Sender(undefined);
+        expect(sender.log).toBe(log);
+    });
+
+    it('uses default logger if options are empty', function () {
+        const sender = new Sender({});
+        expect(sender.log).toBe(log);
+    });
+
+    it('uses default logger if log function is not set', function () {
+        const sender = new Sender({copyBuffer: true});
+        expect(sender.log).toBe(log);
+    });
+
+    it('uses the required log function if it is set', function () {
+        const testFunc = () => {};
+        const sender = new Sender({log: testFunc});
+        expect(sender.log).toBe(testFunc);
+    });
+
+    it('uses default logger if log is set to null', function () {
+        const sender = new Sender({log: null});
+        expect(sender.log).toBe(log);
+    });
+
+    it('uses default logger if log is set to undefined', function () {
+        const sender = new Sender({log: undefined});
+        expect(sender.log).toBe(log);
+    });
+
+    it('uses default logger if log is not a function', function () {
+        const sender = new Sender({log: ""});
+        expect(sender.log).toBe(log);
     });
 });
 
