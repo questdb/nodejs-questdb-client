@@ -120,14 +120,18 @@ However, QuestDB does not support TLS yet and requires an external reverse-proxy
 Properties of the object:
 <ul>
   <li>bufferSize: <i>number</i> - Size of the buffer used by the sender to collect rows, provided in bytes. <br>
-  Optional, defaults to 8192 bytes </li>
-  <li>copyBuffer: <i>boolean</i> - If true a new buffer will be created for every flush() call and the data to be sent to the server will be copied into this new buffer. <br>
-  Setting the flag could result in performance degradation, use this flag only if calls to the client cannot be serialised. <br>
-  Optional, defaults to false </li>
+  Optional, defaults to 8192 bytes. <br>
+  If the value passed is not a number, the setting is ignored. </li>
+  <li>copyBuffer: <i>boolean</i> - By default a new buffer is created for every flush() call, and the data to be sent to the server is copied into this new buffer.
+  Setting the flag to <i>false</i> results in reusing the same buffer instance for each flush() call. Use this flag only if calls to the client are serialised. <br>
+  Optional, defaults to <i>true</i>. <br>
+  If the value passed is not a boolean, the setting is ignored. </li>
   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
-  If not provided, client is not authenticated and server might reject the connection depending on configuration.</li>
+  If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
+  No type checks performed on the object passed. </li>
   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
-  If not provided, default logging is used which writes to the console with logging level 'info'.</li>
+  If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
+  If not a function passed, the setting is ignored. </li>
 </ul>
 </p></td>
         </tr>
@@ -327,7 +331,7 @@ Properties of the object:
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line356">line 356</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line361">line 361</a>
     </li></ul></dd>
     
 
@@ -416,7 +420,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line375">line 375</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line380">line 380</a>
     </li></ul></dd>
     
 
@@ -576,7 +580,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line287">line 287</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line292">line 292</a>
     </li></ul></dd>
     
 
@@ -687,7 +691,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line167">line 167</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line172">line 172</a>
     </li></ul></dd>
     
 
@@ -882,7 +886,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line111">line 111</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line116">line 116</a>
     </li></ul></dd>
     
 
@@ -1064,7 +1068,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line302">line 302</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line307">line 307</a>
     </li></ul></dd>
     
 
@@ -1175,7 +1179,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line180">line 180</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line185">line 185</a>
     </li></ul></dd>
     
 
@@ -1357,7 +1361,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line318">line 318</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line323">line 323</a>
     </li></ul></dd>
     
 
@@ -1468,7 +1472,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line97">line 97</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line102">line 102</a>
     </li></ul></dd>
     
 
@@ -1629,7 +1633,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line82">line 82</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line87">line 87</a>
     </li></ul></dd>
     
 
@@ -1789,7 +1793,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line270">line 270</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line275">line 275</a>
     </li></ul></dd>
     
 
@@ -1971,7 +1975,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line245">line 245</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line250">line 250</a>
     </li></ul></dd>
     
 
@@ -2130,7 +2134,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line224">line 224</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line229">line 229</a>
     </li></ul></dd>
     
 
@@ -2312,7 +2316,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line338">line 338</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line343">line 343</a>
     </li></ul></dd>
     
 
@@ -2386,7 +2390,7 @@ The buffer's content is copied into the new buffer.
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Wed May 17 2023 18:51:54 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Fri May 26 2023 10:30:37 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

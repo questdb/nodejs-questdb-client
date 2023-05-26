@@ -36,7 +36,7 @@ async function run() {
     // it is important that each worker has a dedicated sender object
     // threads cannot share the sender because they would write into the same buffer
     const sender = new Sender({ bufferSize: 4096 });
-    await sender.connect({ port: 9009, host: "127.0.0.1" });
+    await sender.connect({ port: 9009, host: "localhost" });
 
     // subscribe for the market data of the ticker assigned to the worker
     // ingest each price update into the database using the sender

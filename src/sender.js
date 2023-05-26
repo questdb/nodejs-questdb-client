@@ -55,7 +55,7 @@ class Sender {
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
      *   No type checks performed on the object passed. </li>
      *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
-     *   If not provided, default logging is used which writes to the console with logging level 'info'. <br>
+     *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
      *   If not a function passed, the setting is ignored. </li>
      * </ul>
      * </p>
