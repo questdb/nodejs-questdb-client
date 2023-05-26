@@ -501,4 +501,4 @@ function writeEscaped(sender, data, quoted = false) {
 }
 
 exports.Sender = Sender;
-exports.DEFAULT_BUFFER_SIZE = DEFAULT_BUFFER_SIZE
+exports.DEFAULT_BUFFER_SIZE = DEFAULT_BUFFER_SIZE;
