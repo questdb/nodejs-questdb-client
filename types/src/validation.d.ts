@@ -16,7 +16,7 @@ export function validateColumnName(name: string): void;
  * Validates a designated timestamp. The value must contain only digits.<br>
  * Throws an error if the value is invalid.
  *
- * @param {string} timestamp - The table name to validate.
+ * @param {string | bigint} timestamp - The timestamp to validate.
  */
-export function validateDesignatedTimestamp(timestamp: string): void;
+export function validateDesignatedTimestamp(timestamp: string | bigint): void;
 //# sourceMappingURL=validation.d.ts.map

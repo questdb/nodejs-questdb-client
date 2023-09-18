@@ -255,7 +255,7 @@ describe('Client interop test suite', function () {
 });
 
 describe('Sender message builder test suite (anything not covered in client interop test suite)', function () {
-    it('supports timestamp fields', function () {
+    it('supports timestamp field as number', function () {
         const sender = new Sender({bufferSize: 1024});
         sender.table("tableName")
             .booleanColumn("boolCol", true)
@@ -266,12 +266,34 @@ describe('Sender message builder test suite (anything not covered in client inte
         );
     });
 
-    it('supports setting designated timestamp from client', function () {
+    it('supports timestamp field as BigInt', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table("tableName")
+            .booleanColumn("boolCol", true)
+            .timestampColumn("timestampCol", 1658484765000000n)
+            .atNow();
+        expect(sender.toBufferView().toString()).toBe(
+            "tableName boolCol=t,timestampCol=1658484765000000t\n"
+        );
+    });
+
+    it('supports setting designated timestamp as string from client', function () {
         const sender = new Sender({bufferSize: 1024});
         sender.table("tableName")
             .booleanColumn("boolCol", true)
             .timestampColumn("timestampCol", 1658484765000000)
             .at("1658484769000000123");
+        expect(sender.toBufferView().toString()).toBe(
+            "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n"
+        );
+    });
+
+    it('supports setting designated timestamp as BigInt from client', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table("tableName")
+            .booleanColumn("boolCol", true)
+            .timestampColumn("timestampCol", 1658484765000000)
+            .at(1658484769000000123n);
         expect(sender.toBufferView().toString()).toBe(
             "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n"
         );
@@ -403,16 +425,16 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(
             () => sender.table("tableName")
                 .timestampColumn("intField", 123.222)
-        ).toThrow("Value must be an integer, received 123.222");
+        ).toThrow("Value must be an integer or BigInt, received 123.222");
     });
 
-    it('throws exception if designated timestamp is not a string', function () {
+    it('throws exception if designated timestamp is not a string or bigint', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table("tableName")
                 .symbol("name", "value")
                 .at(23232322323)
-        ).toThrow("The designated timestamp must be of type string, received number");
+        ).toThrow("The designated timestamp must be of type string or BigInt, received number");
     });
 
     it('throws exception if designated timestamp is an empty string', function () {

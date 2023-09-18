@@ -1,7 +1,7 @@
 const { Sender } = require("@questdb/nodejs-client");
 
 async function run() {
-  // create a sender with a 4k buffer
+  // create a sender with a 4KB buffer
   const sender = new Sender({ bufferSize: 4096 });
 
   // connect to QuestDB
@@ -9,39 +9,32 @@ async function run() {
   await sender.connect({ port: 9009, host: "localhost" });
 
   // add rows to the buffer of the sender
+  let bday = Date.parse("1856-07-10");
   sender
-    .table("prices")
-    .symbol("instrument", "EURUSD")
-    .floatColumn("bid", 1.0195)
-    .floatColumn("ask", 1.0221)
-    .atNow();
-
+    .table("inventors")
+    .symbol("born", "Austrian Empire")
+    .timestampColumn("birthday", BigInt(bday) * 1000n) // epoch in micros (BigInt)
+    .intColumn("id", 0)
+    .stringColumn("name", "Nicola Tesla")
+    .at(BigInt(Date.now()) * 1000_000n); // epoch in nanos (BigInt)
+  bday = Date.parse("1847-02-11");
   sender
-    .table("prices")
-    .symbol("instrument", "GBPUSD")
-    .floatColumn("bid", 1.2076)
-    .floatColumn("ask", 1.2082)
+    .table("inventors")
+    .symbol("born", "USA")
+    .timestampColumn("birthday", BigInt(bday) * 1000n)
+    .intColumn("id", 1)
+    .stringColumn("name", "Thomas Alva Edison")
     .atNow();
 
   // flush the buffer of the sender, sending the data to QuestDB
   // the buffer is cleared after the data is sent and the sender is ready to accept new data
   await sender.flush();
 
-  // add rows to the buffer again and send it to the server
-  sender
-    .table("prices")
-    .symbol("instrument", "EURUSD")
-    .floatColumn("bid", 1.0197)
-    .floatColumn("ask", 1.0224)
-    .atNow();
-
-  await sender.flush();
-
-  // close the connection after all rows ingested
+  // close the connection after all rows were sent
   await sender.close();
   return 0;
 }
 
 run()
-  .then((value) => console.log(value))
-  .catch((err) => console.log(err));
+  .then(console.log)
+  .catch(console.error);
