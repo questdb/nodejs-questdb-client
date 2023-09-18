@@ -123,7 +123,7 @@ function validateColumnName(name) {
  * Validates a designated timestamp. The value must contain only digits.<br>
  * Throws an error if the value is invalid.
  *
- * @param {string | bigint} timestamp - The table name to validate.
+ * @param {string | bigint} timestamp - The timestamp name to validate.
  */
 function validateDesignatedTimestamp(timestamp) {
     if (typeof timestamp === "string") {
