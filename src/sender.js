@@ -329,7 +329,7 @@ class Sender {
             checkCapacity(this, [valueStr], 1 + valueStr.length);
             write(this, valueStr);
             write(this, 'i');
-        }, "number");
+        });
         return this;
     }
 
@@ -337,38 +337,39 @@ class Sender {
      * Write a timestamp column with its value into the buffer of the sender.
      *
      * @param {string} name - Column name.
-     * @param {number} value - Column value, accepts only number objects.
+     * @param {number | bigint} value - Epoch timestamp in microseconds, accepts only numbers or BigInts.
      * @return {Sender} Returns with a reference to this sender.
      */
     timestampColumn(name, value) {
-        if (!Number.isInteger(value)) {
-            throw new Error(`Value must be an integer, received ${value}`);
+        if (typeof value !== "bigint" && !Number.isInteger(value)) {
+            throw new Error(`Value must be an integer or BigInt, received ${value}`);
         }
         writeColumn(this, name, value, () => {
             const valueStr = value.toString();
             checkCapacity(this, [valueStr], 1 + valueStr.length);
             write(this, valueStr);
             write(this, 't');
-        }, "number");
+        });
         return this;
     }
 
     /**
      * Closing the row after writing the designated timestamp into the buffer of the sender.
      *
-     * @param {string} timestamp - A string represents the designated timestamp in nanoseconds.
+     * @param {string | bigint} timestamp - A string or BigInt that represents the designated timestamp in epoch nanoseconds.
      */
     at(timestamp) {
         if (!this.hasSymbols && !this.hasColumns) {
             throw new Error("The row must have a symbol or column set before it is closed");
         }
-        if (typeof timestamp !== "string") {
-            throw new Error(`The designated timestamp must be of type string, received ${typeof timestamp}`);
+        if (typeof timestamp !== "string" && typeof timestamp !== "bigint") {
+            throw new Error(`The designated timestamp must be of type string or BigInt, received ${typeof timestamp}`);
         }
         validateDesignatedTimestamp(timestamp);
-        checkCapacity(this, [], 2 + timestamp.length);
+        const timestampStr = timestamp.toString();
+        checkCapacity(this, [], 2 + timestampStr.length);
         write(this, ' ');
-        write(this, timestamp);
+        write(this, timestampStr);
         write(this, '\n');
         startNewRow(this);
     }
@@ -441,7 +442,7 @@ function writeColumn(sender, name, value, writeValue, valueType) {
     if (typeof name !== "string") {
         throw new Error(`Column name must be a string, received ${typeof name}`);
     }
-    if (typeof value !== valueType) {
+    if (valueType != null && typeof value !== valueType) {
         throw new Error(`Column value must be of type ${valueType}, received ${typeof value}`);
     }
     if (!sender.hasTable) {
