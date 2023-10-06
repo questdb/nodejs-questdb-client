@@ -1,13 +1,13 @@
 'use strict';
 
-const { write, listen, shutdown } = require("./proxyfunctions");
+const { write, listen, shutdown } = require('./proxyfunctions');
 
 const CHALLENGE_LENGTH = 512;
 
 class MockProxy {
     constructor(mockConfig) {
         if (!mockConfig) {
-            throw new Error("Missing mock config");
+            throw new Error('Missing mock config');
         }
         this.mockConfig = mockConfig;
         this.dataSentToRemote = [];
@@ -32,14 +32,14 @@ class MockProxy {
 
     getDataSentToRemote() {
         if (!this.mockConfig.assertions) {
-            throw new Error("Should be called only when assertions switched on");
+            throw new Error('Should be called only when assertions switched on');
         }
         return this.dataSentToRemote;
     }
 }
 
 function mockChallenge() {
-    let challenge = "";
+    let challenge = '';
     for (let i = 0; i < CHALLENGE_LENGTH - 1; i++) {
         challenge += 'a';
     }

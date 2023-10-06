@@ -1,10 +1,12 @@
 'use strict';
 
-const { Buffer } = require("buffer");
-const { log } = require("./logging");
-const { validateTableName, validateColumnName, validateDesignatedTimestamp } = require("./validation");
-const net = require("net");
-const tls = require("tls");
+/* eslint-disable no-unused-vars */
+
+const { Buffer } = require('buffer');
+const { log } = require('./logging');
+const { validateTableName, validateColumnName } = require('./validation');
+const net = require('net');
+const tls = require('tls');
 const crypto = require('crypto');
 
 const DEFAULT_BUFFER_SIZE = 8192;
@@ -64,7 +66,7 @@ class Sender {
         if (options) {
             this.jwk = options.jwk;
         }
-        const noCopy = options && typeof options.copyBuffer === "boolean" && !options.copyBuffer;
+        const noCopy = options && typeof options.copyBuffer === 'boolean' && !options.copyBuffer;
         this.toBuffer = noCopy ? this.toBufferView : this.toBufferNew;
         this.doResolve = noCopy
             ? resolve => {
@@ -72,8 +74,8 @@ class Sender {
                     resolve(true);
             }
             : resolve => resolve(true);
-        this.log = options && typeof options.log === "function" && options.log ? options.log : log;
-        this.resize(options && typeof options.bufferSize === "number" && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
+        this.log = options && typeof options.log === 'function' && options.log ? options.log : log;
+        this.resize(options && typeof options.bufferSize === 'number' && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
         this.reset();
     }
 
@@ -121,19 +123,19 @@ class Sender {
             let data;
 
             if (this.socket) {
-                throw new Error("Sender connected already");
+                throw new Error('Sender connected already');
             }
             this.socket = !secure
                 ? net.connect(options)
                 : tls.connect(options, async () => {
                     if (!self.socket.authorized) {
-                        reject(new Error("Problem with server's certificate"));
+                        reject(new Error('Problem with server\'s certificate'));
                         await self.close();
                     }
                 });
             this.socket.setKeepAlive(true);
 
-            this.socket.on("data", async raw => {
+            this.socket.on('data', async raw => {
                 data = !data ? raw : Buffer.concat([data, raw]);
                 if (!authenticated) {
                     authenticated = await authenticate(self, data);
@@ -141,13 +143,13 @@ class Sender {
                         resolve(true);
                     }
                 } else {
-                    this.log("warn", `Received unexpected data: ${data}`);
+                    this.log('warn', `Received unexpected data: ${data}`);
                 }
             })
-            .on("ready", async () => {
-                this.log("info", `Successfully connected to ${options.host}:${options.port}`);
+            .on('ready', async () => {
+                this.log('info', `Successfully connected to ${options.host}:${options.port}`);
                 if (self.jwk) {
-                    this.log("info", `Authenticating with ${options.host}:${options.port}`);
+                    this.log('info', `Authenticating with ${options.host}:${options.port}`);
                     await self.socket.write(`${self.jwk.kid}\n`, err => {
                         if (err) {
                             reject(err);
@@ -158,8 +160,8 @@ class Sender {
                     resolve(true);
                 }
             })
-            .on("error", err => {
-                this.log("error", err);
+            .on('error', err => {
+                this.log('error', err);
                 reject(err);
             });
         });
@@ -173,7 +175,7 @@ class Sender {
         const address = this.socket.remoteAddress;
         const port = this.socket.remotePort;
         this.socket.destroy();
-        this.log("info", `Connection to ${address}:${port} is closed`);
+        this.log('info', `Connection to ${address}:${port} is closed`);
     }
 
     /**
@@ -227,11 +229,11 @@ class Sender {
      * @return {Sender} Returns with a reference to this sender.
      */
     table(table) {
-        if (typeof table !== "string") {
+        if (typeof table !== 'string') {
             throw new Error(`Table name must be a string, received ${typeof table}`);
         }
         if (this.hasTable) {
-            throw new Error("Table name has already been set");
+            throw new Error('Table name has already been set');
         }
         validateTableName(table);
         checkCapacity(this, [table]);
@@ -248,11 +250,11 @@ class Sender {
      * @return {Sender} Returns with a reference to this sender.
      */
     symbol(name, value) {
-        if (typeof name !== "string") {
+        if (typeof name !== 'string') {
             throw new Error(`Symbol name must be a string, received ${typeof name}`);
         }
         if (!this.hasTable || this.hasColumns) {
-            throw new Error("Symbol can be added only after table name is set and before any column added");
+            throw new Error('Symbol can be added only after table name is set and before any column added');
         }
         const valueStr = value.toString();
         checkCapacity(this, [name, valueStr], 2 + name.length + valueStr.length);
@@ -278,7 +280,7 @@ class Sender {
             write(this, '"');
             writeEscaped(this, value, true);
             write(this, '"');
-        }, "string");
+        }, 'string');
         return this;
     }
 
@@ -293,7 +295,7 @@ class Sender {
         writeColumn(this, name, value, () => {
             checkCapacity(this, [], 1);
             write(this, value ? 't' : 'f');
-        }, "boolean");
+        }, 'boolean');
         return this;
     }
 
@@ -309,7 +311,7 @@ class Sender {
             const valueStr = value.toString();
             checkCapacity(this, [valueStr], valueStr.length);
             write(this, valueStr);
-        }, "number");
+        }, 'number');
         return this;
     }
 
@@ -337,15 +339,17 @@ class Sender {
      * Write a timestamp column with its value into the buffer of the sender.
      *
      * @param {string} name - Column name.
-     * @param {number | bigint} value - Epoch timestamp in microseconds, accepts only numbers or BigInts.
+     * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
+     * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
      * @return {Sender} Returns with a reference to this sender.
      */
-    timestampColumn(name, value) {
-        if (typeof value !== "bigint" && !Number.isInteger(value)) {
+    timestampColumn(name, value, unit = 'us') {
+        if (typeof value !== 'bigint' && !Number.isInteger(value)) {
             throw new Error(`Value must be an integer or BigInt, received ${value}`);
         }
         writeColumn(this, name, value, () => {
-            const valueStr = value.toString();
+            const valueMicros = timestampToMicros(BigInt(value), unit);
+            const valueStr = valueMicros.toString();
             checkCapacity(this, [valueStr], 1 + valueStr.length);
             write(this, valueStr);
             write(this, 't');
@@ -356,17 +360,18 @@ class Sender {
     /**
      * Closing the row after writing the designated timestamp into the buffer of the sender.
      *
-     * @param {string | bigint} timestamp - A string or BigInt that represents the designated timestamp in epoch nanoseconds.
+     * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
+     * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
      */
-    at(timestamp) {
+    at(timestamp, unit = 'us') {
         if (!this.hasSymbols && !this.hasColumns) {
-            throw new Error("The row must have a symbol or column set before it is closed");
+            throw new Error('The row must have a symbol or column set before it is closed');
         }
-        if (typeof timestamp !== "string" && typeof timestamp !== "bigint") {
-            throw new Error(`The designated timestamp must be of type string or BigInt, received ${typeof timestamp}`);
+        if (typeof timestamp !== 'bigint' && !Number.isInteger(timestamp)) {
+            throw new Error(`Designated timestamp must be an integer or BigInt, received ${timestamp}`);
         }
-        validateDesignatedTimestamp(timestamp);
-        const timestampStr = timestamp.toString();
+        const timestampNanos = timestampToNanos(BigInt(timestamp), unit);
+        const timestampStr = timestampNanos.toString();
         checkCapacity(this, [], 2 + timestampStr.length);
         write(this, ' ');
         write(this, timestampStr);
@@ -380,7 +385,7 @@ class Sender {
      */
     atNow() {
         if (!this.hasSymbols && !this.hasColumns) {
-            throw new Error("The row must have a symbol or column set before it is closed");
+            throw new Error('The row must have a symbol or column set before it is closed');
         }
         checkCapacity(this, [], 1);
         write(this, '\n');
@@ -395,13 +400,13 @@ async function authenticate(sender, challenge) {
             {'key': sender.jwk, 'format': 'jwk'}
         );
         const signature = await crypto.sign(
-            "RSA-SHA256",
+            'RSA-SHA256',
             challenge.slice(0, challenge.length - 1),
             keyObject
         );
 
         return new Promise((resolve, reject) => {
-            sender.socket.write(`${Buffer.from(signature).toString("base64")}\n`, err => {
+            sender.socket.write(`${Buffer.from(signature).toString('base64')}\n`, err => {
                 err ? reject(err) : resolve(true);
             });
         });
@@ -439,14 +444,14 @@ function compact(sender) {
 }
 
 function writeColumn(sender, name, value, writeValue, valueType) {
-    if (typeof name !== "string") {
+    if (typeof name !== 'string') {
         throw new Error(`Column name must be a string, received ${typeof name}`);
     }
     if (valueType != null && typeof value !== valueType) {
         throw new Error(`Column value must be of type ${valueType}, received ${typeof value}`);
     }
     if (!sender.hasTable) {
-        throw new Error("Column can be set only after table name is set");
+        throw new Error('Column can be set only after table name is set');
     }
     checkCapacity(sender, [name], 2 + name.length);
     write(sender, sender.hasColumns ? ',' : ' ');
@@ -498,6 +503,32 @@ function writeEscaped(sender, data, quoted = false) {
                 write(sender, ch);
                 break;
         }
+    }
+}
+
+function timestampToMicros(timestamp, unit) {
+    switch (unit) {
+        case 'ns':
+            return timestamp / 1000n;
+        case 'us':
+            return timestamp;
+        case 'ms':
+            return timestamp * 1000n;
+        default:
+            throw new Error('Unknown timestamp unit: ' + unit);
+    }
+}
+
+function timestampToNanos(timestamp, unit) {
+    switch (unit) {
+        case 'ns':
+            return timestamp;
+        case 'us':
+            return timestamp * 1000n;
+        case 'ms':
+            return timestamp * 1000_000n;
+        default:
+            throw new Error('Unknown timestamp unit: ' + unit);
     }
 }
 

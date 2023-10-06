@@ -174,7 +174,7 @@ Properties of the object:
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line25">line 25</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line27">line 27</a>
     </li></ul></dd>
     
 
@@ -230,7 +230,7 @@ Properties of the object:
     
 
     
-    <h4 class="name" id="at"><span class="type-signature"></span>at<span class="signature">(timestamp)</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="at"><span class="type-signature"></span>at<span class="signature">(timestamp, unit<span class="signature-attributes">opt</span>)</span><span class="type-signature"></span></h4>
     
 
     
@@ -262,7 +262,11 @@ Properties of the object:
         <th>Type</th>
 
         
+        <th>Attributes</th>
+        
 
+        
+        <th>Default</th>
         
 
         <th class="last">Description</th>
@@ -280,7 +284,7 @@ Properties of the object:
             <td class="type">
             
                 
-<span class="param-type">string</span>
+<span class="param-type">number</span>
 |
 
 <span class="param-type">bigint</span>
@@ -290,10 +294,61 @@ Properties of the object:
             </td>
 
             
+                <td class="attributes">
+                
 
+                
+
+                
+                </td>
             
 
-            <td class="description last">A string or BigInt that represents the designated timestamp in epoch nanoseconds.</td>
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Designated epoch timestamp, accepts numbers or BigInts.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>unit</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">string</span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    us
+                
+                </td>
+            
+
+            <td class="description last">Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.</td>
         </tr>
 
     
@@ -334,7 +389,7 @@ Properties of the object:
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line361">line 361</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line366">line 366</a>
     </li></ul></dd>
     
 
@@ -423,7 +478,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line381">line 381</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line386">line 386</a>
     </li></ul></dd>
     
 
@@ -583,7 +638,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line292">line 292</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line294">line 294</a>
     </li></ul></dd>
     
 
@@ -694,7 +749,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line172">line 172</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line174">line 174</a>
     </li></ul></dd>
     
 
@@ -889,7 +944,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line116">line 116</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line118">line 118</a>
     </li></ul></dd>
     
 
@@ -1071,7 +1126,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line307">line 307</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line309">line 309</a>
     </li></ul></dd>
     
 
@@ -1182,7 +1237,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line185">line 185</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line187">line 187</a>
     </li></ul></dd>
     
 
@@ -1364,7 +1419,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line323">line 323</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line325">line 325</a>
     </li></ul></dd>
     
 
@@ -1475,7 +1530,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line102">line 102</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line104">line 104</a>
     </li></ul></dd>
     
 
@@ -1636,7 +1691,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line87">line 87</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line89">line 89</a>
     </li></ul></dd>
     
 
@@ -1796,7 +1851,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line275">line 275</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line277">line 277</a>
     </li></ul></dd>
     
 
@@ -1978,7 +2033,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line250">line 250</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line252">line 252</a>
     </li></ul></dd>
     
 
@@ -2137,7 +2192,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line229">line 229</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line231">line 231</a>
     </li></ul></dd>
     
 
@@ -2195,7 +2250,7 @@ The buffer's content is copied into the new buffer.
     
 
     
-    <h4 class="name" id="timestampColumn"><span class="type-signature"></span>timestampColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
+    <h4 class="name" id="timestampColumn"><span class="type-signature"></span>timestampColumn<span class="signature">(name, value, unit<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
     
 
     
@@ -2227,7 +2282,11 @@ The buffer's content is copied into the new buffer.
         <th>Type</th>
 
         
+        <th>Attributes</th>
+        
 
+        
+        <th>Default</th>
         
 
         <th class="last">Description</th>
@@ -2252,7 +2311,19 @@ The buffer's content is copied into the new buffer.
             </td>
 
             
+                <td class="attributes">
+                
 
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
             
 
             <td class="description last">Column name.</td>
@@ -2278,10 +2349,61 @@ The buffer's content is copied into the new buffer.
             </td>
 
             
+                <td class="attributes">
+                
 
+                
+
+                
+                </td>
             
 
-            <td class="description last">Epoch timestamp in microseconds, accepts only numbers or BigInts.</td>
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Epoch timestamp, accepts numbers or BigInts.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>unit</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">string</span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    us
+                
+                </td>
+            
+
+            <td class="description last">Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.</td>
         </tr>
 
     
@@ -2322,7 +2444,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line343">line 343</a>
+        <a href="src_sender.js.html">src/sender.js</a>, <a href="src_sender.js.html#line346">line 346</a>
     </li></ul></dd>
     
 
@@ -2396,7 +2518,7 @@ The buffer's content is copied into the new buffer.
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Mon Sep 18 2023 15:34:51 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Mon Oct 09 2023 10:21:55 GMT+0300 (Eastern European Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

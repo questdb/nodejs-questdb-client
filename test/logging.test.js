@@ -5,11 +5,11 @@ describe('Default logging suite', function () {
     let log;
 
     beforeAll(() => {
-        error = jest.spyOn(console, "error").mockImplementation(() => {});
-        warn = jest.spyOn(console, "warn").mockImplementation(() => {});
-        info = jest.spyOn(console, "info").mockImplementation(() => {});
-        debug = jest.spyOn(console, "debug").mockImplementation(() => {});
-        log = require("../src/logging").log;
+        error = jest.spyOn(console, 'error').mockImplementation(() => {});
+        warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        info = jest.spyOn(console, 'info').mockImplementation(() => {});
+        debug = jest.spyOn(console, 'debug').mockImplementation(() => {});
+        log = require('../src/logging').log;
     });
 
     afterAll(() => {
@@ -27,8 +27,8 @@ describe('Default logging suite', function () {
     });
 
     it('can log error level messages', function () {
-        const testMessage = "ERROR ERROR ERROR";
-        log("error", testMessage);
+        const testMessage = 'ERROR ERROR ERROR';
+        log('error', testMessage);
         expect(error).toHaveBeenCalledTimes(1);
         expect(warn).toHaveBeenCalledTimes(0);
         expect(info).toHaveBeenCalledTimes(0);
@@ -37,8 +37,8 @@ describe('Default logging suite', function () {
     });
 
     it('can log warn level messages', function () {
-        const testMessage = "WARN WARN WARN";
-        log("warn", testMessage);
+        const testMessage = 'WARN WARN WARN';
+        log('warn', testMessage);
         expect(error).toHaveBeenCalledTimes(0);
         expect(warn).toHaveBeenCalledTimes(1);
         expect(info).toHaveBeenCalledTimes(0);
@@ -47,8 +47,8 @@ describe('Default logging suite', function () {
     });
 
     it('can log info level messages', function () {
-        const testMessage = "INFO INFO INFO";
-        log("info", testMessage);
+        const testMessage = 'INFO INFO INFO';
+        log('info', testMessage);
         expect(error).toHaveBeenCalledTimes(0);
         expect(warn).toHaveBeenCalledTimes(0);
         expect(info).toHaveBeenCalledTimes(1);
@@ -57,8 +57,8 @@ describe('Default logging suite', function () {
     });
 
     it('cannot log debug level messages', function () {
-        const testMessage = "DEBUG DEBUG DEBUG";
-        log("debug", testMessage);
+        const testMessage = 'DEBUG DEBUG DEBUG';
+        log('debug', testMessage);
         expect(error).toHaveBeenCalledTimes(0);
         expect(warn).toHaveBeenCalledTimes(0);
         expect(info).toHaveBeenCalledTimes(0);
@@ -67,7 +67,7 @@ describe('Default logging suite', function () {
 
     it('throws exception if log level is not supported', function () {
         expect(
-            () => log("trace", "TRACE TRACE TRACE")
-        ).toThrow("Invalid log level: 'trace'");
+            () => log('trace', 'TRACE TRACE TRACE')
+        ).toThrow('Invalid log level: \'trace\'');
     });
 });

@@ -1,6 +1,6 @@
 'use strict';
 
-const net = require("net");
+const net = require('net');
 const tls = require('tls');
 
 const LOCALHOST = '127.0.0.1';
@@ -18,12 +18,12 @@ async function listen(proxy, listenPort, dataHandler, tlsOptions) {
         const clientConnHandler = client => {
             console.info('client connected');
             if (proxy.client) {
-                console.error("There is already a client connected");
+                console.error('There is already a client connected');
                 process.exit(1);
             }
             proxy.client = client;
 
-            client.on("data", dataHandler);
+            client.on('data', dataHandler);
         }
 
         proxy.server = tlsOptions
@@ -42,7 +42,7 @@ async function listen(proxy, listenPort, dataHandler, tlsOptions) {
 }
 
 async function shutdown(proxy, onServerClose = async () => {}) {
-    console.info("closing proxy")
+    console.info('closing proxy')
     return new Promise(resolve => {
         proxy.server.close(async () => {
             await onServerClose();
@@ -59,7 +59,7 @@ async function connect(proxy, remotePort, remoteHost) {
 }
 
 async function close(proxy) {
-    console.info("closing remote connection")
+    console.info('closing remote connection')
     return new Promise(resolve => {
         proxy.remote.destroy();
         resolve();

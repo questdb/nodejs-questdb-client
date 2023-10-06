@@ -150,16 +150,18 @@ export class Sender {
      * Write a timestamp column with its value into the buffer of the sender.
      *
      * @param {string} name - Column name.
-     * @param {number | bigint} value - Epoch timestamp in microseconds, accepts only numbers or BigInts.
+     * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
+     * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
      * @return {Sender} Returns with a reference to this sender.
      */
-    timestampColumn(name: string, value: number | bigint): Sender;
+    timestampColumn(name: string, value: number | bigint, unit?: string): Sender;
     /**
      * Closing the row after writing the designated timestamp into the buffer of the sender.
      *
-     * @param {string | bigint} timestamp - A string or BigInt that represents the designated timestamp in epoch nanoseconds.
+     * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
+     * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
      */
-    at(timestamp: string | bigint): void;
+    at(timestamp: number | bigint, unit?: string): void;
     /**
      * Closing the row without writing designated timestamp into the buffer of the sender. <br>
      * Designated timestamp will be populated by the server on this record.
