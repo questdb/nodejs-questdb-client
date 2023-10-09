@@ -562,7 +562,7 @@ describe('Sender message builder test suite (anything not covered in client inte
         ).toThrow('Value must be an integer or BigInt, received 123.222');
     });
 
-    it('throws exception if designated timestamp is not a string or bigint', function () {
+    it('throws exception if designated timestamp is not an integer or bigint', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table('tableName')
@@ -576,8 +576,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(
             () => sender.table('tableName')
                 .symbol('name', 'value')
-                .at(343434.5656)
-        ).toThrow('Designated timestamp must be an integer or BigInt, received 343434.5656');
+                .at('invalid_dts')
+        ).toThrow('Designated timestamp must be an integer or BigInt, received invalid_dts');
     });
 
     it('throws exception if designated timestamp is set without any fields added', function () {
