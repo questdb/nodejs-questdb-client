@@ -1,14 +1,14 @@
 name: build
 
-on: [push]
+on:
+  push:
+    branches:
+      - main
 
 jobs:
-  test:
-    name: Build with Node.js ${{ matrix.node-version }}
+  build:
+    name: Publish @questdb/nodejs-questdb-client to npm
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [16, 20]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -18,7 +18,7 @@ jobs:
       - name: Setup node
         uses: actions/setup-node@v3
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 20
 
       - name: Install dependencies
         run: npm ci
@@ -28,3 +28,11 @@ jobs:
 
       - name: Run linter
         run: npm run eslint
+
+      - name: Publish
+        uses: JS-DevTools/npm-publish@v2
+        with:
+          token: ${{ secrets.CI_TOKEN }}
+          access: public
+          strategy: all
+          package: package.json

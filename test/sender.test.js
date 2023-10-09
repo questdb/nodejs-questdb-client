@@ -1,11 +1,11 @@
 'use strict';
 
-const { Sender } = require("../index");
-const { DEFAULT_BUFFER_SIZE } = require("../src/sender");
-const { log } = require("../src/logging");
-const { MockProxy } = require("./mockproxy");
-const { readFileSync} = require("fs");
-const { GenericContainer } = require("testcontainers");
+const { Sender } = require('../index');
+const { DEFAULT_BUFFER_SIZE } = require('../src/sender');
+const { log } = require('../src/logging');
+const { MockProxy } = require('./mockproxy');
+const { readFileSync} = require('fs');
+const { GenericContainer } = require('testcontainers');
 const http = require('http');
 
 const HTTP_OK = 200;
@@ -27,17 +27,17 @@ const proxyOptions = {
     ca: readFileSync('test/certs/ca/ca.crt')
 };
 
-const PRIVATE_KEY = "9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8"
+const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8'
 const PUBLIC_KEY = {
-    x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
-    y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
+    x: 'aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc',
+    y: '__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg'
 }
 const JWK = {
     ...PUBLIC_KEY,
-    kid: "testapp",
-    kty: "EC",
+    kid: 'testapp',
+    kty: 'EC',
     d: PRIVATE_KEY,
-    crv: "P-256",
+    crv: 'P-256',
 }
 
 async function sleep(ms) {
@@ -62,7 +62,7 @@ describe('Sender connection suite', function () {
     }
 
     async function sendData(sender) {
-        sender.table("test").symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
+        sender.table('test').symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
         await sender.flush();
     }
 
@@ -88,7 +88,7 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy(true);
         const sender = await createSender(JWK);
         await sender.close();
-        await assertSentData(proxy, true, "testapp\n");
+        await assertSentData(proxy, true, 'testapp\n');
         await proxy.stop();
     });
 
@@ -96,7 +96,7 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy();
         const sender = await createSender();
         await sender.close();
-        await assertSentData(proxy, false, "");
+        await assertSentData(proxy, false, '');
         await proxy.stop();
     });
 
@@ -105,7 +105,7 @@ describe('Sender connection suite', function () {
         const sender = await createSender(JWK);
         await sendData(sender);
         await sender.close();
-        await assertSentData(proxy, true, "testapp\ntest,location=us temperature=17.1 1658484765000000000\n");
+        await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
         await proxy.stop();
     });
 
@@ -114,7 +114,7 @@ describe('Sender connection suite', function () {
         const sender = await createSender();
         await sendData(sender);
         await sender.close();
-        await assertSentData(proxy, false, "test,location=us temperature=17.1 1658484765000000000\n");
+        await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
         await proxy.stop();
     });
 
@@ -123,7 +123,7 @@ describe('Sender connection suite', function () {
         const sender = await createSender(JWK, true);
         await sendData(sender);
         await sender.close();
-        await assertSentData(proxy, true, "testapp\ntest,location=us temperature=17.1 1658484765000000000\n");
+        await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
         await proxy.stop();
     });
 
@@ -132,7 +132,7 @@ describe('Sender connection suite', function () {
         const sender = await createSender(null, true);
         await sendData(sender);
         await sender.close();
-        await assertSentData(proxy, false, "test,location=us temperature=17.1 1658484765000000000\n");
+        await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
         await proxy.stop();
     });
 
@@ -142,7 +142,7 @@ describe('Sender connection suite', function () {
         try {
             await sender.connect(senderOptions, true);
         } catch(err) {
-            expect(err.message).toBe("Sender connected already");
+            expect(err.message).toBe('Sender connected already');
         }
         await sender.close();
         await proxy.stop();
@@ -154,7 +154,7 @@ describe('Sender connection suite', function () {
         try {
             await Promise.all([sender.connect(senderOptions, true), sender.connect(senderOptions, true)]);
         } catch(err) {
-            expect(err.message).toBe("Sender connected already");
+            expect(err.message).toBe('Sender connected already');
         }
         await sender.close();
         await proxy.stop();
@@ -163,21 +163,21 @@ describe('Sender connection suite', function () {
     it('can handle unfinished rows during flush()', async function () {
         const proxy = await createProxy(true, proxyOptions);
         const sender = await createSender(JWK, true);
-        sender.table("test").symbol("location", "us");
+        sender.table('test').symbol('location', 'us');
         const sent = await sender.flush();
         expect(sent).toBe(false);
         await sender.close();
-        await assertSentData(proxy, true, "testapp\n");
+        await assertSentData(proxy, true, 'testapp\n');
         await proxy.stop();
     });
 
     it('supports custom logger', async function () {
         const expectedMessages = [
-            "Successfully connected to 127.0.0.1:9099",
-            "Connection to 127.0.0.1:9099 is closed"
+            'Successfully connected to 127.0.0.1:9099',
+            'Connection to 127.0.0.1:9099 is closed'
         ];
         const log = (level, message) => {
-            expect(level).toBe("info");
+            expect(level).toBe('info');
             expect(message).toBe(expectedMessages.shift());
         };
         const proxy = await createProxy();
@@ -185,7 +185,7 @@ describe('Sender connection suite', function () {
         await sender.connect(senderOptions);
         await sendData(sender);
         await sender.close();
-        await assertSentData(proxy, false, "test,location=us temperature=17.1 1658484765000000000\n");
+        await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
         await proxy.stop();
     });
 });
@@ -205,36 +205,36 @@ describe('Client interop test suite', function () {
                     }
                     for (const column of testCase.columns) {
                         switch (column.type) {
-                            case "STRING":
+                            case 'STRING':
                                 sender.stringColumn(column.name, column.value);
                                 break;
-                            case "LONG":
+                            case 'LONG':
                                 sender.intColumn(column.name, column.value);
                                 break;
-                            case "DOUBLE":
+                            case 'DOUBLE':
                                 sender.floatColumn(column.name, column.value);
                                 break;
-                            case "BOOLEAN":
+                            case 'BOOLEAN':
                                 sender.booleanColumn(column.name, column.value);
                                 break;
-                            case "TIMESTAMP":
+                            case 'TIMESTAMP':
                                 sender.timestampColumn(column.name, column.value);
                                 break;
                             default:
-                                throw new Error("Unsupported column type");
+                                throw new Error('Unsupported column type');
                         }
                     }
                     sender.atNow();
                 } catch (e) {
-                    if (testCase.result.status !== "ERROR") {
-                        fail("Did not expect error: " + e.message);
+                    if (testCase.result.status !== 'ERROR') {
+                        fail('Did not expect error: ' + e.message);
                         break;
                     }
                     continue;
                 }
 
                 const buffer = sender.toBufferView();
-                if (testCase.result.status === "SUCCESS") {
+                if (testCase.result.status === 'SUCCESS') {
                     if (testCase.result.line) {
                         expect(buffer.toString()).toBe(testCase.result.line + '\n');
                     } else {
@@ -244,10 +244,10 @@ describe('Client interop test suite', function () {
                                 continue loopTestCase;
                             }
                         }
-                        fail("Line is not matching any of the expected results: " + buffer.toString());
+                        fail('Line is not matching any of the expected results: ' + buffer.toString());
                     }
                 } else {
-                    fail("Expected error missing, instead we have a line: " + buffer.toString());
+                    fail('Expected error missing, instead we have a line: ' + buffer.toString());
                     break;
                 }
             }
@@ -255,47 +255,181 @@ describe('Client interop test suite', function () {
 });
 
 describe('Sender message builder test suite (anything not covered in client interop test suite)', function () {
+    it('throws on invalid timestamp unit', function () {
+        const sender = new Sender({bufferSize: 1024});
+        try {
+            sender.table('tableName')
+                .booleanColumn('boolCol', true)
+                .timestampColumn('timestampCol', 1658484765000000, 'foobar')
+                .atNow();
+        } catch(err) {
+            expect(err.message).toBe('Unknown timestamp unit: foobar');
+        }
+    });
+
     it('supports timestamp field as number', function () {
         const sender = new Sender({bufferSize: 1024});
-        sender.table("tableName")
-            .booleanColumn("boolCol", true)
-            .timestampColumn("timestampCol", 1658484765000000)
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
-            "tableName boolCol=t,timestampCol=1658484765000000t\n"
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
+        );
+    });
+
+    it('supports timestamp field as ns number', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000, 'ns')
+            .atNow();
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000t\n'
+        );
+    });
+
+    it('supports timestamp field as us number', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000, 'us')
+            .atNow();
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
+        );
+    });
+
+    it('supports timestamp field as ms number', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000, 'ms')
+            .atNow();
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
     });
 
     it('supports timestamp field as BigInt', function () {
         const sender = new Sender({bufferSize: 1024});
-        sender.table("tableName")
-            .booleanColumn("boolCol", true)
-            .timestampColumn("timestampCol", 1658484765000000n)
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000n)
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
-            "tableName boolCol=t,timestampCol=1658484765000000t\n"
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
     });
 
-    it('supports setting designated timestamp as string from client', function () {
+    it('supports timestamp field as ns BigInt', function () {
         const sender = new Sender({bufferSize: 1024});
-        sender.table("tableName")
-            .booleanColumn("boolCol", true)
-            .timestampColumn("timestampCol", 1658484765000000)
-            .at("1658484769000000123");
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000000n, 'ns')
+            .atNow();
         expect(sender.toBufferView().toString()).toBe(
-            "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n"
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
+        );
+    });
+
+    it('supports timestamp field as us BigInt', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000n, 'us')
+            .atNow();
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
+        );
+    });
+
+    it('supports timestamp field as ms BigInt', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000n, 'ms')
+            .atNow();
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
+        );
+    });
+
+    it('throws on invalid designated timestamp unit', function () {
+        const sender = new Sender({bufferSize: 1024});
+        try {
+            sender.table('tableName')
+                .booleanColumn('boolCol', true)
+                .timestampColumn('timestampCol', 1658484765000000)
+                .at(1658484769000000, 'foobar');
+        } catch(err) {
+            expect(err.message).toBe('Unknown timestamp unit: foobar');
+        }
+    });
+
+    it('supports setting designated us timestamp as number from client', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
+            .at(1658484769000000, 'us');
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
+        );
+    });
+
+    it('supports setting designated ms timestamp as number from client', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
+            .at(1658484769000, 'ms');
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
     });
 
     it('supports setting designated timestamp as BigInt from client', function () {
         const sender = new Sender({bufferSize: 1024});
-        sender.table("tableName")
-            .booleanColumn("boolCol", true)
-            .timestampColumn("timestampCol", 1658484765000000)
-            .at(1658484769000000123n);
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
+            .at(1658484769000000n);
         expect(sender.toBufferView().toString()).toBe(
-            "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n"
+            'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
+        );
+    });
+
+    it('supports setting designated ns timestamp as BigInt from client', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
+            .at(1658484769000000123n, 'ns');
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n'
+        );
+    });
+
+    it('supports setting designated us timestamp as BigInt from client', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
+            .at(1658484769000000n, 'us');
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
+        );
+    });
+
+    it('supports setting designated ms timestamp as BigInt from client', function () {
+        const sender = new Sender({bufferSize: 1024});
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
+            .at(1658484769000n, 'ms');
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
     });
 
@@ -303,96 +437,96 @@ describe('Sender message builder test suite (anything not covered in client inte
         const sender = new Sender({bufferSize: 1024});
         expect(
             () => sender.table(23456)
-        ).toThrow("Table name must be a string, received number");
+        ).toThrow('Table name must be a string, received number');
     });
 
     it('throws exception if table name is too long', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("123456789012345678901234567890123456789012345678901234567890"
-                + "12345678901234567890123456789012345678901234567890123456789012345678")
-        ).toThrow("Table name is too long, max length is 127");
+            () => sender.table('123456789012345678901234567890123456789012345678901234567890'
+                + '12345678901234567890123456789012345678901234567890123456789012345678')
+        ).toThrow('Table name is too long, max length is 127');
     });
 
     it('throws exception if table name is set more times', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .symbol("name", "value")
-                .table("newTableName")
-        ).toThrow("Table name has already been set");
+            () => sender.table('tableName')
+                .symbol('name', 'value')
+                .table('newTableName')
+        ).toThrow('Table name has already been set');
     });
 
     it('throws exception if symbol name is not a string', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .symbol(12345.5656, "value")
-        ).toThrow("Symbol name must be a string, received number");
+            () => sender.table('tableName')
+                .symbol(12345.5656, 'value')
+        ).toThrow('Symbol name must be a string, received number');
     });
 
     it('throws exception if symbol name is empty string', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .symbol("", "value")
-        ).toThrow("Empty string is not allowed as column name");
+            () => sender.table('tableName')
+                .symbol('', 'value')
+        ).toThrow('Empty string is not allowed as column name');
     });
 
     it('throws exception if column name is not a string', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .stringColumn(12345.5656, "value")
-        ).toThrow("Column name must be a string, received number");
+            () => sender.table('tableName')
+                .stringColumn(12345.5656, 'value')
+        ).toThrow('Column name must be a string, received number');
     });
 
     it('throws exception if column name is empty string', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .stringColumn("", "value")
-        ).toThrow("Empty string is not allowed as column name");
+            () => sender.table('tableName')
+                .stringColumn('', 'value')
+        ).toThrow('Empty string is not allowed as column name');
     });
 
     it('throws exception if column name is too long', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .stringColumn("123456789012345678901234567890123456789012345678901234567890"
-                    + "12345678901234567890123456789012345678901234567890123456789012345678", "value")
-        ).toThrow("Column name is too long, max length is 127");
+            () => sender.table('tableName')
+                .stringColumn('123456789012345678901234567890123456789012345678901234567890'
+                    + '12345678901234567890123456789012345678901234567890123456789012345678', 'value')
+        ).toThrow('Column name is too long, max length is 127');
     });
 
     it('throws exception if column value is not the right type', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .stringColumn("columnName", false)
-        ).toThrow("Column value must be of type string, received boolean");
+            () => sender.table('tableName')
+                .stringColumn('columnName', false)
+        ).toThrow('Column value must be of type string, received boolean');
     });
 
     it('throws exception if adding column without setting table name', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.floatColumn("name", 12.459)
-        ).toThrow("Column can be set only after table name is set");
+            () => sender.floatColumn('name', 12.459)
+        ).toThrow('Column can be set only after table name is set');
     });
 
     it('throws exception if adding symbol without setting table name', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.symbol("name", "value")
-        ).toThrow("Symbol can be added only after table name is set and before any column added");
+            () => sender.symbol('name', 'value')
+        ).toThrow('Symbol can be added only after table name is set and before any column added');
     });
 
     it('throws exception if adding symbol after columns', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .stringColumn("name", "value")
-                .symbol("symbolName", "symbolValue")
-        ).toThrow("Symbol can be added only after table name is set and before any column added");
+            () => sender.table('tableName')
+                .stringColumn('name', 'value')
+                .symbol('symbolName', 'symbolValue')
+        ).toThrow('Symbol can be added only after table name is set and before any column added');
     });
 
     it('returns null if preparing an empty buffer for send', function () {
@@ -402,117 +536,108 @@ describe('Sender message builder test suite (anything not covered in client inte
 
     it('ignores unfinished rows when preparing a buffer for send', function () {
         const sender = new Sender({bufferSize: 1024});
-        sender.table("tableName")
-            .symbol("name", "value")
-            .at("1234567890");
-        sender.table("tableName")
-            .symbol("name", "value2");
+        sender.table('tableName')
+            .symbol('name', 'value')
+            .at(1234567890n, 'ns');
+        sender.table('tableName')
+            .symbol('name', 'value2');
         expect(
             sender.toBufferView(sender.endOfLastRow).toString()
-        ).toBe("tableName,name=value 1234567890\n");
+        ).toBe('tableName,name=value 1234567890\n');
     });
 
     it('throws exception if a float is passed as integer field', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .intColumn("intField", 123.222)
-        ).toThrow("Value must be an integer, received 123.222");
+            () => sender.table('tableName')
+                .intColumn('intField', 123.222)
+        ).toThrow('Value must be an integer, received 123.222');
     });
 
     it('throws exception if a float is passed as timestamp field', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .timestampColumn("intField", 123.222)
-        ).toThrow("Value must be an integer or BigInt, received 123.222");
+            () => sender.table('tableName')
+                .timestampColumn('intField', 123.222)
+        ).toThrow('Value must be an integer or BigInt, received 123.222');
     });
 
-    it('throws exception if designated timestamp is not a string or bigint', function () {
+    it('throws exception if designated timestamp is not an integer or bigint', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .symbol("name", "value")
-                .at(23232322323)
-        ).toThrow("The designated timestamp must be of type string or BigInt, received number");
-    });
-
-    it('throws exception if designated timestamp is an empty string', function () {
-        const sender = new Sender({bufferSize: 1024});
-        expect(
-            () => sender.table("tableName")
-                .symbol("name", "value")
-                .at("")
-        ).toThrow("Empty string is not allowed as designated timestamp");
+            () => sender.table('tableName')
+                .symbol('name', 'value')
+                .at(23232322323.05)
+        ).toThrow('Designated timestamp must be an integer or BigInt, received 23232322323.05');
     });
 
     it('throws exception if designated timestamp is invalid', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .symbol("name", "value")
-                .at("343434.5656")
-        ).toThrow("Invalid character in designated timestamp: .");
+            () => sender.table('tableName')
+                .symbol('name', 'value')
+                .at('invalid_dts')
+        ).toThrow('Designated timestamp must be an integer or BigInt, received invalid_dts');
     });
 
     it('throws exception if designated timestamp is set without any fields added', function () {
         const sender = new Sender({bufferSize: 1024});
         expect(
-            () => sender.table("tableName")
-                .at("12345678")
-        ).toThrow("The row must have a symbol or column set before it is closed");
+            () => sender.table('tableName')
+                .at(12345678n, 'ns')
+        ).toThrow('The row must have a symbol or column set before it is closed');
     });
 
     it('extends the size of the buffer if data does not fit', function () {
         const sender = new Sender({bufferSize: 8});
         expect(sender.bufferSize).toBe(8);
         expect(sender.position).toBe(0);
-        sender.table("tableName");
+        sender.table('tableName');
         expect(sender.bufferSize).toBe(16);
-        expect(sender.position).toBe("tableName".length);
-        sender.intColumn("intField", 123);
+        expect(sender.position).toBe('tableName'.length);
+        sender.intColumn('intField', 123);
         expect(sender.bufferSize).toBe(32);
-        expect(sender.position).toBe("tableName intField=123i".length);
+        expect(sender.position).toBe('tableName intField=123i'.length);
         sender.atNow();
         expect(sender.bufferSize).toBe(32);
-        expect(sender.position).toBe("tableName intField=123i\n".length);
+        expect(sender.position).toBe('tableName intField=123i\n'.length);
         expect(sender.toBufferView().toString()).toBe(
-            "tableName intField=123i\n"
+            'tableName intField=123i\n'
         );
 
-        sender.table("table2")
-            .intColumn("intField", 125)
-            .stringColumn("strField", "test")
+        sender.table('table2')
+            .intColumn('intField', 125)
+            .stringColumn('strField', 'test')
             .atNow();
         expect(sender.bufferSize).toBe(64);
-        expect(sender.position).toBe("tableName intField=123i\ntable2 intField=125i,strField=\"test\"\n".length);
+        expect(sender.position).toBe('tableName intField=123i\ntable2 intField=125i,strField="test"\n'.length);
         expect(sender.toBufferView().toString()).toBe(
-            "tableName intField=123i\ntable2 intField=125i,strField=\"test\"\n"
+            'tableName intField=123i\ntable2 intField=125i,strField="test"\n'
         );
     });
 
     it('is possible to clear the buffer by calling reset()', function () {
         const sender = new Sender({bufferSize: 1024});
-        sender.table("tableName")
-            .booleanColumn("boolCol", true)
-            .timestampColumn("timestampCol", 1658484765000000)
+        sender.table('tableName')
+            .booleanColumn('boolCol', true)
+            .timestampColumn('timestampCol', 1658484765000000)
             .atNow();
-        sender.table("tableName")
-            .booleanColumn("boolCol", false)
-            .timestampColumn("timestampCol", 1658484766000000)
+        sender.table('tableName')
+            .booleanColumn('boolCol', false)
+            .timestampColumn('timestampCol', 1658484766000000)
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
-            "tableName boolCol=t,timestampCol=1658484765000000t\n"
-            + "tableName boolCol=f,timestampCol=1658484766000000t\n"
+            'tableName boolCol=t,timestampCol=1658484765000000t\n'
+            + 'tableName boolCol=f,timestampCol=1658484766000000t\n'
         );
 
         sender.reset();
-        sender.table("tableName")
-            .floatColumn("floatCol", 1234567890)
-            .timestampColumn("timestampCol", 1658484767000000)
+        sender.table('tableName')
+            .floatColumn('floatCol', 1234567890)
+            .timestampColumn('timestampCol', 1658484767000000)
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
-            "tableName floatCol=1234567890,timestampCol=1658484767000000t\n"
+            'tableName floatCol=1234567890,timestampCol=1658484767000000t\n'
         );
     });
 });
@@ -549,7 +674,7 @@ describe('Sender options test suite', function () {
     });
 
     it('does copy the buffer during flush() if copyBuffer is not a boolean', function () {
-        const sender = new Sender({copyBuffer: ""});
+        const sender = new Sender({copyBuffer: ''});
         expect(sender.toBuffer).toBe(sender.toBufferNew);
     });
 
@@ -609,7 +734,7 @@ describe('Sender options test suite', function () {
     });
 
     it('sets default buffer size if bufferSize is not a number', function () {
-        const sender = new Sender({bufferSize: "1024"});
+        const sender = new Sender({bufferSize: '1024'});
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
     });
 
@@ -655,12 +780,12 @@ describe('Sender options test suite', function () {
     });
 
     it('uses default logger if log is not a function', function () {
-        const sender = new Sender({log: ""});
+        const sender = new Sender({log: ''});
         expect(sender.log).toBe(log);
     });
 });
 
-describe("Sender tests with containerized QuestDB instance", () => {
+describe('Sender tests with containerized QuestDB instance', () => {
     let container;
 
     async function query(container, query) {
@@ -708,7 +833,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     }
 
     function getFieldsString(schema) {
-        let fields = "";
+        let fields = '';
         for (const element of schema) {
             fields += `${element.name} ${element.type}, `;
         }
@@ -717,46 +842,46 @@ describe("Sender tests with containerized QuestDB instance", () => {
 
     beforeAll(async () => {
         jest.setTimeout(3000000);
-        container = await new GenericContainer("questdb/questdb")
+        container = await new GenericContainer('questdb/questdb:7.3.2')
             .withExposedPorts(QUESTDB_HTTP_PORT, QUESTDB_ILP_PORT)
             .start();
 
         const stream = await container.logs();
         stream
-            .on("data", line => console.log(line))
-            .on("err", line => console.error(line))
-            .on("end", () => console.log("Stream closed"));
+            .on('data', line => console.log(line))
+            .on('err', line => console.error(line))
+            .on('end', () => console.log('Stream closed'));
     });
 
     afterAll(async () => {
         await container.stop();
     });
 
-    it("can ingest data and run queries", async () => {
+    it('can ingest data and run queries', async () => {
         const sender = new Sender();
         await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
 
-        const tableName = "test";
+        const tableName = 'test';
         const schema = [
-            {name: "location", type: "SYMBOL"},
-            {name: "temperature", type: "DOUBLE"},
-            {name: "timestamp", type: "TIMESTAMP"}
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'}
         ];
 
         // create table
         let createTableResult = await query(container,
-            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY BYPASS WAL`
+            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY BYPASS WAL;`
         );
-        expect(createTableResult.ddl).toBe("OK");
+        expect(createTableResult.ddl).toBe('OK');
 
         // alter table
         let alterTableResult = await query(container,
-            `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1`
+            `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1;`
         );
-        expect(alterTableResult.ddl).toBe("OK");
+        expect(alterTableResult.ddl).toBe('OK');
 
         // ingest via client
-        sender.table(tableName).symbol("location", "us").floatColumn("temperature", 17.1).at("1658484765000000000");
+        sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
         await sender.flush();
 
         // query table
@@ -765,63 +890,63 @@ describe("Sender tests with containerized QuestDB instance", () => {
         expect(select1Result.count).toBe(1);
         expect(select1Result.columns).toStrictEqual(schema);
         expect(select1Result.dataset).toStrictEqual([
-            ["us",17.1,"2022-07-22T10:12:45.000000Z"]
+            ['us',17.1,'2022-07-22T10:12:45.000000Z']
         ]);
 
         // ingest via client, add new column
-        sender.table(tableName).symbol("location", "us").floatColumn("temperature", 17.3).at("1658484765000666000");
-        sender.table(tableName).symbol("location", "emea").floatColumn("temperature", 17.4).at("1658484765000999000");
-        sender.table(tableName).symbol("location", "emea").symbol("city", "london").floatColumn("temperature", 18.8).at("1658484765001234000");
+        sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.3).at(1658484765000666000n, 'ns');
+        sender.table(tableName).symbol('location', 'emea').floatColumn('temperature', 17.4).at(1658484765000999000n, 'ns');
+        sender.table(tableName).symbol('location', 'emea').symbol('city', 'london').floatColumn('temperature', 18.8).at(1658484765001234000n, 'ns');
         await sender.flush();
 
         // query table
         const select2Result = await runSelect(container, tableName, 4);
-        expect(select2Result.query).toBe("test");
+        expect(select2Result.query).toBe('test');
         expect(select2Result.count).toBe(4);
         expect(select2Result.columns).toStrictEqual([
-            {name: "location", type: "SYMBOL"},
-            {name: "temperature", type: "DOUBLE"},
-            {name: "timestamp", type: "TIMESTAMP"},
-            {name: "city", type: "SYMBOL"}
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'},
+            {name: 'city', type: 'SYMBOL'}
         ]);
         expect(select2Result.dataset).toStrictEqual([
-            ["us",17.1,"2022-07-22T10:12:45.000000Z",null],
-            ["us",17.3,"2022-07-22T10:12:45.000666Z",null],
-            ["emea",17.4,"2022-07-22T10:12:45.000999Z",null],
-            ["emea",18.8,"2022-07-22T10:12:45.001234Z","london"]
+            ['us',17.1,'2022-07-22T10:12:45.000000Z',null],
+            ['us',17.3,'2022-07-22T10:12:45.000666Z',null],
+            ['emea',17.4,'2022-07-22T10:12:45.000999Z',null],
+            ['emea',18.8,'2022-07-22T10:12:45.001234Z','london']
         ]);
 
         await sender.close();
     });
 
-    it("does not duplicate rows if await is missing when calling flush", async () => {
+    it('does not duplicate rows if await is missing when calling flush', async () => {
         // setting copyBuffer to make sure promises send data from their own local buffer
         const sender = new Sender({ copyBuffer: true });
         await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
 
-        const tableName = "test2";
+        const tableName = 'test2';
         const schema = [
-            {name: "location", type: "SYMBOL"},
-            {name: "temperature", type: "DOUBLE"},
-            {name: "timestamp", type: "TIMESTAMP"}
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'}
         ];
 
         // create table
         let createTableResult = await query(container,
-            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY`
+            `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY BYPASS WAL;`
         );
-        expect(createTableResult.ddl).toBe("OK");
+        expect(createTableResult.ddl).toBe('OK');
 
         // alter table
         let alterTableResult = await query(container,
-            `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1`
+            `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1;`
         );
-        expect(alterTableResult.ddl).toBe("OK");
+        expect(alterTableResult.ddl).toBe('OK');
 
         // ingest via client
         const numOfRows = 100;
         for (let i = 0; i < numOfRows; i++) {
-            sender.table(tableName).symbol("location", "us").floatColumn("temperature", i).at("1658484765000000000");
+            sender.table(tableName).symbol('location', 'us').floatColumn('temperature', i).at(1658484765000000000n, 'ns');
             // missing await is intentional
             sender.flush();
         }
@@ -835,7 +960,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
 
         const expectedData = [];
         for (let i = 0; i < numOfRows; i++) {
-            expectedData.push(["us",i,"2022-07-22T10:12:45.000000Z"]);
+            expectedData.push(['us',i,'2022-07-22T10:12:45.000000Z']);
         }
         expect(selectResult.dataset).toStrictEqual(expectedData);
 

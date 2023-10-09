@@ -22,10 +22,10 @@ PATH_CLIENT=$ROOTPATH/certs/client
 ######
 
 # Generate CA key
-openssl genrsa -des3 -passout pass:$PASSWORD -out $PATH_CA/ca.key $RSABITS
+openssl genrsa -passout pass:$PASSWORD -out $PATH_CA/ca.key $RSABITS
 
 # Create CA cert
-openssl req -new -x509 -days 3650 -key $PATH_CA/ca.key -out $PATH_CA/ca.crt -passin pass:$PASSWORD -subj "/C=GB/ST=EN/L=./O=QUEST CA/CN=QUEST"
+openssl req -new -x509 -days 10000 -key $PATH_CA/ca.key -out $PATH_CA/ca.crt -passin pass:$PASSWORD -subj "/C=GB/ST=EN/L=./O=QUEST CA/CN=QUEST"
 
 ##########
 # SERVER #
@@ -39,7 +39,7 @@ openssl req -new -key $PATH_SERVER/server.key -out $PATH_SERVER/server.csr -pass
       -reqexts SAN -extensions SAN -config <(cat /etc/ssl/openssl.cnf <(printf "[SAN]\nsubjectAltName=DNS:localhost,IP:127.0.0.1"))
 
 # Sign server cert with CA
-openssl x509 -req -days 3650 -set_serial 01 \
+openssl x509 -req -days 10000 -set_serial 01 \
       -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1") \
       -passin pass:$PASSWORD -in $PATH_SERVER/server.csr -CA $PATH_CA/ca.crt -CAkey $PATH_CA/ca.key -out $PATH_SERVER/server.crt
 
@@ -54,7 +54,7 @@ openssl genrsa -out $PATH_CLIENT/client.key $RSABITS
 openssl req -new -key $PATH_CLIENT/client.key -out $PATH_CLIENT/client.csr -passout pass:$PASSWORD -subj "/C=GB/ST=EN/L=./O=QUEST CLIENT/CN=CLIENT"
 
 # Sign client cert with CA
-openssl x509 -req -days 3650 -set_serial 01 \
+openssl x509 -req -days 10000 -set_serial 01 \
       -passin pass:$PASSWORD -in $PATH_CLIENT/client.csr -CA $PATH_CA/ca.crt -CAkey $PATH_CA/ca.key -out $PATH_CLIENT/client.crt
 
 exit 0

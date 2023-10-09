@@ -1,4 +1,4 @@
-const { Sender } = require("@questdb/nodejs-client");
+const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
   // create a sender with a 4KB buffer
@@ -6,25 +6,25 @@ async function run() {
 
   // connect to QuestDB
   // host and port are required in connect options
-  await sender.connect({ port: 9009, host: "localhost" });
+  await sender.connect({ port: 9009, host: 'localhost' });
 
   // add rows to the buffer of the sender
-  let bday = Date.parse("1856-07-10");
+  let bday = Date.parse('1856-07-10');
   sender
-    .table("inventors")
-    .symbol("born", "Austrian Empire")
-    .timestampColumn("birthday", BigInt(bday) * 1000n) // epoch in micros (BigInt)
-    .intColumn("id", 0)
-    .stringColumn("name", "Nicola Tesla")
-    .at(BigInt(Date.now()) * 1000_000n); // epoch in nanos (BigInt)
-  bday = Date.parse("1847-02-11");
+    .table('inventors')
+    .symbol('born', 'Austrian Empire')
+    .timestampColumn('birthday', bday, 'ms') // epoch in millis
+    .intColumn('id', 0)
+    .stringColumn('name', 'Nicola Tesla')
+    .at(Date.now(), 'ms'); // epoch in millis
+  bday = Date.parse('1847-02-11');
   sender
-    .table("inventors")
-    .symbol("born", "USA")
-    .timestampColumn("birthday", BigInt(bday) * 1000n)
-    .intColumn("id", 1)
-    .stringColumn("name", "Thomas Alva Edison")
-    .atNow();
+    .table('inventors')
+    .symbol('born', 'USA')
+    .timestampColumn('birthday', bday, 'ms')
+    .intColumn('id', 1)
+    .stringColumn('name', 'Thomas Alva Edison')
+    .at(Date.now(), 'ms');
 
   // flush the buffer of the sender, sending the data to QuestDB
   // the buffer is cleared after the data is sent and the sender is ready to accept new data
@@ -32,9 +32,6 @@ async function run() {
 
   // close the connection after all rows were sent
   await sender.close();
-  return 0;
 }
 
-run()
-  .then(console.log)
-  .catch(console.error);
+run().catch(console.error);
