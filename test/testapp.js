@@ -45,8 +45,6 @@ async function run() {
             .stringColumn('hoppa', 'hi').stringColumn('hopp', 'hello').stringColumn('hippo', 'huhu')
             .floatColumn('temperature', 7.1)
             .at(1658484765000555000n, 'ns');
-
-        console.log('sending:\n' + sender.toBuffer().toString());
         await sender.flush();
 
         sender.table('test')
@@ -54,8 +52,6 @@ async function run() {
             .stringColumn('hoppa', 'hello').stringColumn('hippi', 'hello').stringColumn('hippo', 'lalalala')
             .floatColumn('temperature', 13.1).intColumn('intcol', 333)
             .atNow();
-
-        console.log('sending:\n' + sender.toBuffer().toString());
         await sender.flush();
     }
     await sender.close();
