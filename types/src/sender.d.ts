@@ -31,7 +31,10 @@ export class Sender {
      *   If the value passed is not a boolean, the setting is ignored. </li>
      *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
-     *   No type checks performed on the object passed. </li>
+     *   No type checks performed on the object passed. <br>
+     *   <b>Deprecated</b>, please, use the <i>auth</i> option instead. </li>
+     *   <li>auth: <i>{kid: string, d: string}</i> - Authentication details, `kid` is the username, `d` is the user's private key <br>
+     *   If not provided, client is not authenticated and server might reject the connection depending on configuration. </li>
      *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
      *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
      *   If not a function passed, the setting is ignored. </li>

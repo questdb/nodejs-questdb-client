@@ -8,17 +8,11 @@ const PROXY_PORT = 9099;
 const PORT = 9009;
 const HOST = '127.0.0.1';
 
+const USER_NAME = 'testapp';
 const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
-const PUBLIC_KEY = {
-    x: 'aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc',
-    y: '__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg'
-};
-const JWK = {
-    ...PUBLIC_KEY,
-    kid: 'testapp',
-    kty: 'EC',
-    d: PRIVATE_KEY,
-    crv: 'P-256',
+const AUTH = {
+    kid: USER_NAME,
+    d: PRIVATE_KEY
 };
 
 const senderTLS = {
@@ -37,7 +31,7 @@ async function run() {
     const proxy = new Proxy();
     await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
 
-    const sender = new Sender({bufferSize: 1024, jwk: JWK}); //with authentication
+    const sender = new Sender({bufferSize: 1024, auth: AUTH}); //with authentication
     const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
     if (connected) {
         sender.table('test')
