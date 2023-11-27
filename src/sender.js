@@ -66,7 +66,7 @@ class Sender {
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
      *   No type checks performed on the object passed. <br>
      *   <b>Deprecated</b>, please, use the <i>auth</i> option instead. </li>
-     *   <li>auth: <i>{kid: string, d: string}</i> - Authentication details, `kid` is the username, `d` is the user's private key <br>
+     *   <li>auth: <i>{kid: string, d: string}</i> - Authentication details, `kid` is the username, `d` is the user's private key. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. </li>
      *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
      *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
