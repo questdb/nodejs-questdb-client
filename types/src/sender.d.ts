@@ -2,16 +2,18 @@
 /// <reference types="node" />
 /// <reference types="node" />
 /** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data and close the connection.
+ * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
  * <p>
  * The client supports authentication. <br>
- * A JsonWebKey can be passed to the Sender in its constructor, the JsonWebKey will be used for authentication. <br>
- * If no JsonWebKey specified the client will not attempt to authenticate itself with the server. <br>
- * Details on how to configure QuestDB authentication: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
+ * Authentication details can be passed to the Sender in its configuration options. <br>
+ * The user id and the user's private key are required for authentication. <br>
+ * More details on configuration options can be found in the description of the constructor. <br>
+ * Please, note that authentication is enabled by default in QuestDB Enterprise only. <br>
+ * Details on how to configure authentication in the open source version of QuestDB: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
  * </p>
  * <p>
  * The client also supports TLS encryption to provide a secure connection. <br>
- * However, QuestDB does not support TLS yet and requires an external reverse-proxy, such as Nginx to enable encryption.
+ * Please, note that the open source version of QuestDB does not support TLS, and requires an external reverse-proxy, such as Nginx to enable encryption.
  * </p>
  */
 export class Sender {
@@ -33,7 +35,7 @@ export class Sender {
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
      *   No type checks performed on the object passed. <br>
      *   <b>Deprecated</b>, please, use the <i>auth</i> option instead. </li>
-     *   <li>auth: <i>{kid: string, d: string}</i> - Authentication details, `kid` is the username, `d` is the user's private key <br>
+     *   <li>auth: <i>{keyId: string, token: string}</i> - Authentication details, `keyId` is the username, `token` is the user's private key. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. </li>
      *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
      *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>

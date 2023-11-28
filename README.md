@@ -61,8 +61,8 @@ async function run() {
     const CLIENT_ID = 'testapp';
     const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
     const AUTH = {
-        kid: CLIENT_ID,
-        d: PRIVATE_KEY
+        keyId: CLIENT_ID,
+        token: PRIVATE_KEY
     };
 
     // pass the authentication details to the sender
@@ -95,8 +95,8 @@ async function run(): Promise<number> {
     const CLIENT_ID: string = 'testapp';
     const PRIVATE_KEY: string = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
     const AUTH: { kid: string, d: string } = {
-        kid: CLIENT_ID,
-        d: PRIVATE_KEY
+        keyId: CLIENT_ID,
+        token: PRIVATE_KEY
     };
 
     // pass the authentication details to the sender

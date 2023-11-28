@@ -30,8 +30,8 @@ const proxyOptions = {
 const USER_NAME = 'testapp';
 const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
 const AUTH = {
-    kid: USER_NAME,
-    d: PRIVATE_KEY
+    keyId: USER_NAME,
+    token: PRIVATE_KEY
 }
 
 async function sleep(ms) {
@@ -44,13 +44,13 @@ describe('Sender auth config checks suite', function () {
             new Sender({
                 bufferSize: 512,
                 auth: {
-                    d: 'privateKey'
+                    token: 'privateKey'
                 }
             });
             fail('it should not be able to create the sender');
         } catch(err) {
-            expect(err.message).toBe('Missing username, please, specify the \'kid\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
@@ -59,14 +59,14 @@ describe('Sender auth config checks suite', function () {
             new Sender({
                 bufferSize: 512,
                 auth: {
-                    kid: '',
-                    d: 'privateKey'
+                    keyId: '',
+                    token: 'privateKey'
                 }
             });
             fail('it should not be able to create the sender');
         } catch(err) {
-            expect(err.message).toBe('Missing username, please, specify the \'kid\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
@@ -75,14 +75,14 @@ describe('Sender auth config checks suite', function () {
             new Sender({
                 bufferSize: 512,
                 auth: {
-                    kid: 23,
-                    d: 'privateKey'
+                    keyId: 23,
+                    token: 'privateKey'
                 }
             });
             fail('it should not be able to create the sender');
         } catch(err) {
-            expect(err.message).toBe('Please, specify the \'kid\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            expect(err.message).toBe('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
@@ -90,13 +90,13 @@ describe('Sender auth config checks suite', function () {
         try {
             new Sender({
                 auth: {
-                    kid: 'username'
+                    keyId: 'username'
                 }
             });
             fail('it should not be able to create the sender');
         } catch(err) {
-            expect(err.message).toBe('Missing private key, please, specify the \'d\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
@@ -104,14 +104,14 @@ describe('Sender auth config checks suite', function () {
         try {
             new Sender({
                 auth: {
-                    kid: 'username',
-                    d: ''
+                    keyId: 'username',
+                    token: ''
                 }
             });
             fail('it should not be able to create the sender');
         } catch(err) {
-            expect(err.message).toBe('Missing private key, please, specify the \'d\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
@@ -119,14 +119,14 @@ describe('Sender auth config checks suite', function () {
         try {
             new Sender({
                 auth: {
-                    kid: 'username',
-                    d: true
+                    keyId: 'username',
+                    token: true
                 }
             });
             fail('it should not be able to create the sender');
         } catch(err) {
-            expect(err.message).toBe('Please, specify the \'d\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            expect(err.message).toBe('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 });
@@ -182,8 +182,8 @@ describe('Sender connection suite', function () {
     it('can authenticate with a different private key', async function () {
         const proxy = await createProxy(true);
         const sender = await createSender({
-            kid: 'user1',
-            d: 'zhPiK3BkYMYJvRf5sqyrWNJwjDKHOWHnRbmQggUll6A'
+            keyId: 'user1',
+            token: 'zhPiK3BkYMYJvRf5sqyrWNJwjDKHOWHnRbmQggUll6A'
         });
         await sender.close();
         await assertSentData(proxy, true, 'user1\n');

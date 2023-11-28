@@ -66,7 +66,7 @@ class Sender {
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
      *   No type checks performed on the object passed. <br>
      *   <b>Deprecated</b>, please, use the <i>auth</i> option instead. </li>
-     *   <li>auth: <i>{kid: string, d: string}</i> - Authentication details, `kid` is the username, `d` is the user's private key. <br>
+     *   <li>auth: <i>{keyId: string, token: string}</i> - Authentication details, `keyId` is the username, `token` is the user's private key. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. </li>
      *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
      *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
@@ -75,7 +75,7 @@ class Sender {
      * </p>
      */
     constructor(options = undefined) {
-        initJwk(this, options);
+        this.jwk = constructJwk(options);
         const noCopy = options && typeof options.copyBuffer === 'boolean' && !options.copyBuffer;
         this.toBuffer = noCopy ? this.toBufferView : this.toBufferNew;
         this.doResolve = noCopy
@@ -542,36 +542,38 @@ function timestampToNanos(timestamp, unit) {
     }
 }
 
-function initJwk(sender, options) {
+function constructJwk(options) {
     if (options) {
         if (options.auth) {
-            if (!options.auth.kid) {
-                throw new Error('Missing username, please, specify the \'kid\' property of the \'auth\' config option. ' +
-                    'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            if (!options.auth.keyId) {
+                throw new Error('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
             }
-            if (typeof options.auth.kid !== 'string') {
-                throw new Error('Please, specify the \'kid\' property of the \'auth\' config option as a string. ' +
-                    'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            if (typeof options.auth.keyId !== 'string') {
+                throw new Error('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
             }
-            if (!options.auth.d) {
-                throw new Error('Missing private key, please, specify the \'d\' property of the \'auth\' config option. ' +
-                    'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            if (!options.auth.token) {
+                throw new Error('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
             }
-            if (typeof options.auth.d !== 'string') {
-                throw new Error('Please, specify the \'d\' property of the \'auth\' config option as a string. ' +
-                    'For example: new Sender({auth: {kid: \'username\', d: \'private key\'}})');
+            if (typeof options.auth.token !== 'string') {
+                throw new Error('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
             }
 
-            sender.jwk = {
-                ...options.auth,
+            return {
+                kid: options.auth.keyId,
+                d: options.auth.token,
                 ...PUBLIC_KEY,
                 kty: 'EC',
                 crv: 'P-256'
             };
         } else {
-            sender.jwk = options.jwk;
+            return options.jwk;
         }
     }
+    return undefined;
 }
 
 exports.Sender = Sender;
