@@ -25,24 +25,111 @@ const proxyOptions = {
     key: readFileSync('test/certs/server/server.key'),
     cert: readFileSync('test/certs/server/server.crt'),
     ca: readFileSync('test/certs/ca/ca.crt')
-};
-
-const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8'
-const PUBLIC_KEY = {
-    x: 'aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc',
-    y: '__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg'
 }
-const JWK = {
-    ...PUBLIC_KEY,
-    kid: 'testapp',
-    kty: 'EC',
-    d: PRIVATE_KEY,
-    crv: 'P-256',
+
+const USER_NAME = 'testapp';
+const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
+const AUTH = {
+    keyId: USER_NAME,
+    token: PRIVATE_KEY
 }
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+describe('Sender auth config checks suite', function () {
+    it('requires a username for authentication', async function () {
+        try {
+            new Sender({
+                bufferSize: 512,
+                auth: {
+                    token: 'privateKey'
+                }
+            });
+            fail('it should not be able to create the sender');
+        } catch(err) {
+            expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+    });
+
+    it('requires a non-empty username', async function () {
+        try {
+            new Sender({
+                bufferSize: 512,
+                auth: {
+                    keyId: '',
+                    token: 'privateKey'
+                }
+            });
+            fail('it should not be able to create the sender');
+        } catch(err) {
+            expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+    });
+
+    it('requires that the username is a string', async function () {
+        try {
+            new Sender({
+                bufferSize: 512,
+                auth: {
+                    keyId: 23,
+                    token: 'privateKey'
+                }
+            });
+            fail('it should not be able to create the sender');
+        } catch(err) {
+            expect(err.message).toBe('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+    });
+
+    it('requires a private key for authentication', async function () {
+        try {
+            new Sender({
+                auth: {
+                    keyId: 'username'
+                }
+            });
+            fail('it should not be able to create the sender');
+        } catch(err) {
+            expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+    });
+
+    it('requires a non-empty private key', async function () {
+        try {
+            new Sender({
+                auth: {
+                    keyId: 'username',
+                    token: ''
+                }
+            });
+            fail('it should not be able to create the sender');
+        } catch(err) {
+            expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+    });
+
+    it('requires that the private key is a string', async function () {
+        try {
+            new Sender({
+                auth: {
+                    keyId: 'username',
+                    token: true
+                }
+            });
+            fail('it should not be able to create the sender');
+        } catch(err) {
+            expect(err.message).toBe('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+    });
+});
 
 describe('Sender connection suite', function () {
     async function createProxy(auth = false, tlsOptions = undefined) {
@@ -54,8 +141,8 @@ describe('Sender connection suite', function () {
         return proxy;
     }
 
-    async function createSender(jwk = undefined, secure = false) {
-        const sender = new Sender({bufferSize: 1024, jwk: jwk});
+    async function createSender(auth = undefined, secure = false) {
+        const sender = new Sender({bufferSize: 1024, auth: auth});
         const connected = await sender.connect(senderOptions, secure);
         expect(connected).toBe(true);
         return sender;
@@ -86,9 +173,39 @@ describe('Sender connection suite', function () {
 
     it('can authenticate', async function () {
         const proxy = await createProxy(true);
-        const sender = await createSender(JWK);
+        const sender = await createSender(AUTH);
         await sender.close();
         await assertSentData(proxy, true, 'testapp\n');
+        await proxy.stop();
+    });
+
+    it('can authenticate with a different private key', async function () {
+        const proxy = await createProxy(true);
+        const sender = await createSender({
+            keyId: 'user1',
+            token: 'zhPiK3BkYMYJvRf5sqyrWNJwjDKHOWHnRbmQggUll6A'
+        });
+        await sender.close();
+        await assertSentData(proxy, true, 'user1\n');
+        await proxy.stop();
+    });
+
+    it('is backwards compatible and still can authenticate with full JWK', async function () {
+        const JWK = {
+            x: 'BtUXC_K3oAyGlsuPjTgkiwirMUJhuRQDfcUHeyoxFxU',
+            y: 'R8SOup-rrNofB7wJagy4HrJhTVfrVKmj061lNRk3bF8',
+            kid: 'user2',
+            kty: 'EC',
+            d: 'hsg6Zm4kSBlIEvKUWT3kif-2y2Wxw-iWaGrJxrPXQhs',
+            crv: 'P-256'
+        }
+
+        const proxy = await createProxy(true);
+        const sender = new Sender({jwk: JWK});
+        const connected = await sender.connect(senderOptions, false);
+        expect(connected).toBe(true);
+        await sender.close();
+        await assertSentData(proxy, true, 'user2\n');
         await proxy.stop();
     });
 
@@ -102,7 +219,7 @@ describe('Sender connection suite', function () {
 
     it('can authenticate and send data to server', async function () {
         const proxy = await createProxy(true);
-        const sender = await createSender(JWK);
+        const sender = await createSender(AUTH);
         await sendData(sender);
         await sender.close();
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
@@ -120,7 +237,7 @@ describe('Sender connection suite', function () {
 
     it('can authenticate and send data to server via secure connection', async function () {
         const proxy = await createProxy(true, proxyOptions);
-        const sender = await createSender(JWK, true);
+        const sender = await createSender(AUTH, true);
         await sendData(sender);
         await sender.close();
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
@@ -138,9 +255,10 @@ describe('Sender connection suite', function () {
 
     it('guards against multiple connect calls', async function () {
         const proxy = await createProxy(true, proxyOptions);
-        const sender = await createSender(JWK, true);
+        const sender = await createSender(AUTH, true);
         try {
             await sender.connect(senderOptions, true);
+            fail('it should not be able to connect again');
         } catch(err) {
             expect(err.message).toBe('Sender connected already');
         }
@@ -150,9 +268,10 @@ describe('Sender connection suite', function () {
 
     it('guards against concurrent connect calls', async function () {
         const proxy = await createProxy(true, proxyOptions);
-        const sender = new Sender({bufferSize: 1024, jwk: JWK});
+        const sender = new Sender({bufferSize: 1024, auth: AUTH});
         try {
             await Promise.all([sender.connect(senderOptions, true), sender.connect(senderOptions, true)]);
+            fail('it should not be able to connect twice');
         } catch(err) {
             expect(err.message).toBe('Sender connected already');
         }
@@ -162,7 +281,7 @@ describe('Sender connection suite', function () {
 
     it('can handle unfinished rows during flush()', async function () {
         const proxy = await createProxy(true, proxyOptions);
-        const sender = await createSender(JWK, true);
+        const sender = await createSender(AUTH, true);
         sender.table('test').symbol('location', 'us');
         const sent = await sender.flush();
         expect(sent).toBe(false);

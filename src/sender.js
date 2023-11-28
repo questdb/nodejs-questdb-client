@@ -11,17 +11,26 @@ const crypto = require('crypto');
 
 const DEFAULT_BUFFER_SIZE = 8192;
 
+// an arbitrary public key, not used in authentication
+// only used to construct a valid JWK token which is accepted by the crypto API
+const PUBLIC_KEY = {
+    x: 'aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc',
+    y: '__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg'
+};
+
 /** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data and close the connection.
+ * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
  * <p>
  * The client supports authentication. <br>
- * A JsonWebKey can be passed to the Sender in its constructor, the JsonWebKey will be used for authentication. <br>
- * If no JsonWebKey specified the client will not attempt to authenticate itself with the server. <br>
- * Details on how to configure QuestDB authentication: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
+ * Authentication details can be passed to the Sender in its configuration options. <br>
+ * The user id and the user's private key are required for authentication. <br>
+ * More details on configuration options can be found in the description of the constructor. <br>
+ * Please, note that authentication is enabled by default in QuestDB Enterprise only. <br>
+ * Details on how to configure authentication in the open source version of QuestDB: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
  * </p>
  * <p>
  * The client also supports TLS encryption to provide a secure connection. <br>
- * However, QuestDB does not support TLS yet and requires an external reverse-proxy, such as Nginx to enable encryption.
+ * Please, note that the open source version of QuestDB does not support TLS, and requires an external reverse-proxy, such as Nginx to enable encryption.
  * </p>
  */
 class Sender {
@@ -55,7 +64,10 @@ class Sender {
      *   If the value passed is not a boolean, the setting is ignored. </li>
      *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
      *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
-     *   No type checks performed on the object passed. </li>
+     *   No type checks performed on the object passed. <br>
+     *   <b>Deprecated</b>, please, use the <i>auth</i> option instead. </li>
+     *   <li>auth: <i>{keyId: string, token: string}</i> - Authentication details, `keyId` is the username, `token` is the user's private key. <br>
+     *   If not provided, client is not authenticated and server might reject the connection depending on configuration. </li>
      *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
      *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
      *   If not a function passed, the setting is ignored. </li>
@@ -63,9 +75,7 @@ class Sender {
      * </p>
      */
     constructor(options = undefined) {
-        if (options) {
-            this.jwk = options.jwk;
-        }
+        this.jwk = constructJwk(options);
         const noCopy = options && typeof options.copyBuffer === 'boolean' && !options.copyBuffer;
         this.toBuffer = noCopy ? this.toBufferView : this.toBufferNew;
         this.doResolve = noCopy
@@ -530,6 +540,40 @@ function timestampToNanos(timestamp, unit) {
         default:
             throw new Error('Unknown timestamp unit: ' + unit);
     }
+}
+
+function constructJwk(options) {
+    if (options) {
+        if (options.auth) {
+            if (!options.auth.keyId) {
+                throw new Error('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+            }
+            if (typeof options.auth.keyId !== 'string') {
+                throw new Error('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+            }
+            if (!options.auth.token) {
+                throw new Error('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+            }
+            if (typeof options.auth.token !== 'string') {
+                throw new Error('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
+                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+            }
+
+            return {
+                kid: options.auth.keyId,
+                d: options.auth.token,
+                ...PUBLIC_KEY,
+                kty: 'EC',
+                crv: 'P-256'
+            };
+        } else {
+            return options.jwk;
+        }
+    }
+    return undefined;
 }
 
 exports.Sender = Sender;

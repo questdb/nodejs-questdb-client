@@ -57,24 +57,16 @@ run()
 const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
-    // construct a JsonWebKey
+    // authentication details
     const CLIENT_ID = 'testapp';
     const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
-    const PUBLIC_KEY = {
-        x: 'aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc',
-        y: '__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg'
-    };
-    const JWK = {
-        ...PUBLIC_KEY,
-        d: PRIVATE_KEY,
-        kid: CLIENT_ID,
-        kty: 'EC',
-        crv: 'P-256',
+    const AUTH = {
+        keyId: CLIENT_ID,
+        token: PRIVATE_KEY
     };
 
-    // pass the JsonWebKey to the sender
-    // will use it for authentication
-    const sender = new Sender({jwk: JWK});
+    // pass the authentication details to the sender
+    const sender = new Sender({auth: AUTH});
 
     // connect() takes an optional second argument
     // if 'true' passed the connection is secured with TLS encryption
@@ -99,24 +91,16 @@ run().catch(console.error);
 import { Sender } from '@questdb/nodejs-client';
 
 async function run(): Promise<number> {
-    // construct a JsonWebKey
+    // authentication details
     const CLIENT_ID: string = 'testapp';
     const PRIVATE_KEY: string = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
-    const PUBLIC_KEY: { x: string, y: string } = {
-        x: 'aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc',
-        y: '__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg'
-    };
-    const JWK: { x: string, y: string, kid: string, kty: string, d: string, crv: string } = {
-        ...PUBLIC_KEY,
-        d: PRIVATE_KEY,
-        kid: CLIENT_ID,
-        kty: 'EC',
-        crv: 'P-256',
+    const AUTH: { keyId: string, token: string } = {
+        keyId: CLIENT_ID,
+        token: PRIVATE_KEY
     };
 
-    // pass the JsonWebKey to the sender
-    // will use it for authentication
-    const sender: Sender = new Sender({jwk: JWK});
+    // pass the authentication details to the sender
+    const sender: Sender = new Sender({auth: AUTH});
 
     // connect() takes an optional second argument
     // if 'true' passed the connection is secured with TLS encryption
