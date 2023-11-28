@@ -94,7 +94,7 @@ async function run(): Promise<number> {
     // authentication details
     const CLIENT_ID: string = 'testapp';
     const PRIVATE_KEY: string = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
-    const AUTH: { kid: string, d: string } = {
+    const AUTH: { keyId: string, token: string } = {
         keyId: CLIENT_ID,
         token: PRIVATE_KEY
     };
