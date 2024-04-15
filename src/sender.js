@@ -2,14 +2,31 @@
 
 /* eslint-disable no-unused-vars */
 
+const { readFileSync } = require("fs");
 const { Buffer } = require('buffer');
 const { log } = require('./logging');
 const { validateTableName, validateColumnName } = require('./validation');
+const { SenderOptions, HTTP, HTTPS, TCP, TCPS } = require('./options');
+const http = require('http');
+const https = require('https');
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
 
-const DEFAULT_BUFFER_SIZE = 8192;
+const HTTP_NO_CONTENT = 204;
+
+const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
+const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
+const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // millis
+
+const DEFAULT_MAX_NAME_LENGTH = 127;
+
+const DEFAULT_REQUEST_MIN_THROUGHPUT = 100; // KB/s
+const DEFAULT_REQUEST_TIMEOUT = 10; // seconds
+const DEFAULT_RETRY_TIMEOUT = 10; // seconds
+
+const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
+const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 
 // an arbitrary public key, not used in authentication
 // only used to construct a valid JWK token which is accepted by the crypto API
@@ -35,23 +52,50 @@ const PUBLIC_KEY = {
  */
 class Sender {
 
-    /** @private */ jwk;
+    /** @private */ http;       // true if the protocol is HTTP, false if it is TCP
+    /** @private */ secure;     // true if the protocol is HTTPS or TCPS, false otherwise
+    /** @private */ host;
+    /** @private */ port;
+
     /** @private */ socket;
+
+    /** @private */ username;
+    /** @private */ password;
+    /** @private */ token;
+
+    /** @private */ tlsVerify;
+    /** @private */ tlsCA;
+
     /** @private */ bufferSize;
+    /** @private */ maxBufferSize;
     /** @private */ buffer;
     /** @private */ toBuffer;
     /** @private */ doResolve;
     /** @private */ position;
     /** @private */ endOfLastRow;
+
+    /** @private */ autoFlush;
+    /** @private */ autoFlushRows;
+    /** @private */ autoFlushInterval;
+    /** @private */ lastFlushTime;
+    /** @private */ pendingRowCount;
+
+    /** @private */ requestMinThroughput;
+    /** @private */ requestTimeout;
+    /** @private */ retryTimeout;
+
     /** @private */ hasTable;
     /** @private */ hasSymbols;
     /** @private */ hasColumns;
+
+    /** @private */ maxNameLength;
+
     /** @private */ log;
 
     /**
      * Creates an instance of Sender.
      *
-     * @param {object} options - Configuration options. <br>
+     * @param {SenderOptions} options - Configuration options. <br>
      * <p>
      * Properties of the object:
      * <ul>
@@ -75,18 +119,79 @@ class Sender {
      * </p>
      */
     constructor(options = undefined) {
-        this.jwk = constructJwk(options);
-        const noCopy = options && typeof options.copyBuffer === 'boolean' && !options.copyBuffer;
+        options = initSenderOptions(options);
+
+        this.log = typeof options.log === 'function' ? options.log : log;
+
+        switch (options.protocol) {
+            case HTTP:
+                this.http = true;
+                this.secure = false;
+                break;
+            case HTTPS:
+                this.http = true;
+                this.secure = true;
+                break;
+            case TCP:
+                this.http = false;
+                this.secure = false;
+                break;
+            case TCPS:
+                this.http = false;
+                this.secure = true;
+                break;
+            default:
+                throw new Error(`Invalid protocol: \'${options.protocol}\'`);
+        }
+
+        this.host = options.host;
+        this.port = options.port;
+
+        if (this.http) {
+            this.username = options.username;
+            this.password = options.password;
+            this.token = options.token;
+        } else {
+            if (!options.auth && !options.jwk) {
+                constructAuth(options);
+            }
+            this.jwk = constructJwk(options);
+        }
+
+        this.tlsVerify = isBoolean(options.tls_verify) ? options.tls_verify : true;
+        this.tlsCA = options.tls_ca ? readFileSync(options.tls_ca) : undefined;
+
+        this.autoFlush = isBoolean(options.auto_flush) ? options.auto_flush : true;
+        this.autoFlushRows = isInteger(options.auto_flush_rows, 0) ? options.auto_flush_rows : (this.http ? DEFAULT_HTTP_AUTO_FLUSH_ROWS : DEFAULT_TCP_AUTO_FLUSH_ROWS);
+        this.autoFlushInterval = isInteger(options.auto_flush_interval, 0) ? options.auto_flush_interval : DEFAULT_AUTO_FLUSH_INTERVAL;
+
+        this.maxNameLength = isInteger(options.max_name_len, 1) ? options.max_name_len : DEFAULT_MAX_NAME_LENGTH;
+
+        this.requestMinThroughput = isInteger(options.request_min_throughput, 1) ? options.request_min_throughput : DEFAULT_REQUEST_MIN_THROUGHPUT;
+        this.requestTimeout = isInteger(options.request_timeout, 1) ? options.request_timeout : DEFAULT_REQUEST_TIMEOUT;
+        this.retryTimeout = (isInteger(options.retry_timeout, 0) ? options.retry_timeout : DEFAULT_RETRY_TIMEOUT) * 1000;
+
+        const noCopy = isBoolean(options.copy_buffer) && !options.copy_buffer;
         this.toBuffer = noCopy ? this.toBufferView : this.toBufferNew;
         this.doResolve = noCopy
-            ? resolve => {
-                    compact(this);
-                    resolve(true);
+            ? (resolve) => {
+                compact(this);
+                resolve(true);
             }
-            : resolve => resolve(true);
-        this.log = options && typeof options.log === 'function' && options.log ? options.log : log;
-        this.resize(options && typeof options.bufferSize === 'number' && options.bufferSize ? options.bufferSize : DEFAULT_BUFFER_SIZE);
+            : (resolve) => {
+                resolve(true);
+            }
+        this.maxBufferSize = isInteger(options.max_buf_size, 1) ? options.max_buf_size : DEFAULT_MAX_BUFFER_SIZE;
+        this.resize(isInteger(options.init_buf_size, 1) ? options.init_buf_size : DEFAULT_BUFFER_SIZE);
         this.reset();
+    }
+
+    static fromConfig(configurationString) {
+        return new Sender(SenderOptions.fromConfig(configurationString));
+    }
+
+    static fromEnv() {
+        return new Sender(SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF));
     }
 
     /**
@@ -97,6 +202,9 @@ class Sender {
      * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
      */
     resize(bufferSize) {
+        if (bufferSize > this.maxBufferSize) {
+            throw new Error(`Max buffer size is ${this.maxBufferSize} bytes, requested buffer size: ${bufferSize}`);
+        }
         this.bufferSize = bufferSize;
         const newBuffer = Buffer.alloc(this.bufferSize + 1, 0, 'utf8');
         if (this.buffer) {
@@ -113,19 +221,43 @@ class Sender {
      */
     reset() {
         this.position = 0;
+        this.lastFlushTime = Date.now();
+        this.pendingRowCount = 0;
         startNewRow(this);
         return this;
     }
 
     /**
-     * Creates a connection to the database.
+     * Creates a TCP connection to the database.
      *
-     * @param {net.NetConnectOpts | tls.ConnectionOptions} options - Connection options, host and port are required.
+     * @param {net.NetConnectOpts | tls.ConnectionOptions} connectOptions - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      *
      * @return {Promise<boolean>} Resolves to true if client is connected.
      */
-    connect(options, secure = false) {
+    connect(connectOptions = undefined, secure = false) {
+        if (this.http) {
+            throw new Error('\'connect()\' should be called only if the sender connects via TCP');
+        }
+
+        if (secure) {
+            this.secure = secure;
+        }
+
+        if (!connectOptions) {
+            connectOptions = {
+                host: this.host,
+                port: this.port,
+                ca: this.tlsCA
+            }
+        }
+        if (!connectOptions.host) {
+            throw new Error('Hostname is not set');
+        }
+        if (!connectOptions.port) {
+            throw new Error('Port is not set');
+        }
+
         let self = this;
 
         return new Promise((resolve, reject) => {
@@ -135,13 +267,10 @@ class Sender {
             if (this.socket) {
                 throw new Error('Sender connected already');
             }
-            this.socket = !secure
-                ? net.connect(options)
-                : tls.connect(options, async () => {
-                    if (!self.socket.authorized) {
-                        reject(new Error('Problem with server\'s certificate'));
-                        await self.close();
-                    }
+            this.socket = !this.secure
+                ? net.connect(connectOptions)
+                : tls.connect(connectOptions, async () => {
+                    await checkServerCert(self, reject);
                 });
             this.socket.setKeepAlive(true);
 
@@ -157,9 +286,10 @@ class Sender {
                 }
             })
             .on('ready', async () => {
-                this.log('info', `Successfully connected to ${options.host}:${options.port}`);
+                //await checkServerCert(self, reject);
+                this.log('info', `Successfully connected to ${connectOptions.host}:${connectOptions.port}`);
                 if (self.jwk) {
-                    this.log('info', `Authenticating with ${options.host}:${options.port}`);
+                    this.log('info', `Authenticating with ${connectOptions.host}:${connectOptions.port}`);
                     await self.socket.write(`${self.jwk.kid}\n`, err => {
                         if (err) {
                             reject(err);
@@ -178,32 +308,40 @@ class Sender {
     }
 
     /**
-     * Closes the connection to the database. <br>
+     * Closes the TCP connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
-        const address = this.socket.remoteAddress;
-        const port = this.socket.remotePort;
-        this.socket.destroy();
-        this.log('info', `Connection to ${address}:${port} is closed`);
+        if (this.socket) {
+            const address = this.socket.remoteAddress;
+            const port = this.socket.remotePort;
+            this.socket.destroy();
+            this.log('info', `Connection to ${address}:${port} is closed`);
+        }
     }
 
     /**
      * Sends the buffer's content to the database and compacts the buffer.
      * If the last row is not finished it stays in the sender's buffer.
      *
-     * @return {Promise<boolean>} Resolves to true if there was data in the buffer to send.
+     * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send.
      */
     async flush() {
         const data = this.toBuffer(this.endOfLastRow);
         if (!data) {
             return false;
         }
-        return new Promise((resolve, reject) => {
-            this.socket.write(data, err => {
-                err ? reject(err) : this.doResolve(resolve);
-            });
-        });
+
+        if (this.http) {
+            const request = this.secure ? https.request : http.request;
+            const options = createRequestOptions(this, data);
+            return sendHttp(this, request, options, data, this.retryTimeout);
+        } else {
+            if (!this.socket) {
+                throw new Error('Sender is not connected');
+            }
+            return sendTcp(this, data);
+        }
     }
 
     /**
@@ -245,7 +383,7 @@ class Sender {
         if (this.hasTable) {
             throw new Error('Table name has already been set');
         }
-        validateTableName(table);
+        validateTableName(table, this.maxNameLength);
         checkCapacity(this, [table]);
         writeEscaped(this, table);
         this.hasTable = true;
@@ -269,7 +407,7 @@ class Sender {
         const valueStr = value.toString();
         checkCapacity(this, [name, valueStr], 2 + name.length + valueStr.length);
         write(this, ',');
-        validateColumnName(name);
+        validateColumnName(name, this.maxNameLength);
         writeEscaped(this, name);
         write(this, '=');
         writeEscaped(this, valueStr);
@@ -373,7 +511,7 @@ class Sender {
      * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
      * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
      */
-    at(timestamp, unit = 'us') {
+    async at(timestamp, unit = 'us') {
         if (!this.hasSymbols && !this.hasColumns) {
             throw new Error('The row must have a symbol or column set before it is closed');
         }
@@ -386,20 +524,39 @@ class Sender {
         write(this, ' ');
         write(this, timestampStr);
         write(this, '\n');
+        this.pendingRowCount++;
         startNewRow(this);
+        await autoFlush(this);
     }
 
     /**
      * Closing the row without writing designated timestamp into the buffer of the sender. <br>
      * Designated timestamp will be populated by the server on this record.
      */
-    atNow() {
+    async atNow() {
         if (!this.hasSymbols && !this.hasColumns) {
             throw new Error('The row must have a symbol or column set before it is closed');
         }
         checkCapacity(this, [], 1);
         write(this, '\n');
+        this.pendingRowCount++;
         startNewRow(this);
+        await autoFlush(this);
+    }
+}
+
+function isBoolean(value) {
+    return typeof value === 'boolean';
+}
+
+function isInteger(value, lowerBound) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= lowerBound;
+}
+
+async function checkServerCert(sender, reject) {
+    if (sender.secure && sender.tlsVerify && !sender.socket.authorized) {
+        reject(new Error('Problem with server\'s certificate'));
+        await sender.close();
     }
 }
 
@@ -431,6 +588,116 @@ function startNewRow(sender) {
     sender.hasColumns = false;
 }
 
+function createRequestOptions(sender, data) {
+    const timeoutMillis = (data.length / (sender.requestMinThroughput * 1024) + sender.requestTimeout) * 1000;
+    const options = {
+        hostname: sender.host,
+        port: sender.port,
+        path: '/write?precision=n',
+        method: 'POST',
+        timeout: timeoutMillis
+    };
+    if (sender.secure) {
+        // const agentOptions = {
+        //     rejectUnauthorized: sender.tlsVerify
+        // };
+        // options.agent = new https.Agent(agentOptions);
+        options.rejectUnauthorized = sender.tlsVerify;
+        options.ca = sender.tlsCA;
+    }
+    return options;
+}
+
+function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1, retryInterval = -1) {
+    return new Promise(async (resolve, reject) => {
+        const req = request(options, async response => {
+            const body = [];
+            response
+                .on('data', chunk => {
+                    body.push(chunk);
+                })
+                .on('error', err => {
+                    console.error("resp err=" + err);
+                });
+
+            if (response.statusCode === HTTP_NO_CONTENT) {
+                response.on('end', () => {
+                    if (body.length > 0) {
+                        sender.log('warn', `Unexpected message from server: ${Buffer.concat(body)}`);
+                    }
+                    sender.doResolve(resolve);
+                });
+            } else {
+                if (isRetryable(response.statusCode) && retryTimeout > 0) {
+                    if (retryBegin < 0) {
+                        retryBegin = Date.now();
+                        retryInterval = 10;
+                    } else {
+                        const elapsed = Date.now() - retryBegin;
+                        if (elapsed > retryTimeout) {
+                            reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, error=${Buffer.concat(body)}`));
+                            return;
+                        }
+                    }
+                    const jitter = Math.floor(Math.random() * 10) - 5;
+                    await sleep(retryInterval + jitter);
+                    retryInterval = Math.min(retryInterval * 2, 1000);
+                    await sendHttp(sender, request, options, data, retryTimeout, retryBegin, retryInterval);
+                    resolve(true);
+                } else {
+                    reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, error=${Buffer.concat(body)}`));
+                }
+            }
+        });
+
+        if (sender.token) {
+            req.setHeader('Authorization', 'Bearer ' + sender.token);
+        } else if (sender.username && sender.password) {
+            req.setHeader('Authorization', 'Basic ' + Buffer.from(sender.username + ':' + sender.password).toString('base64'));
+        }
+        req.on('timeout', () => req.destroy(new Error('HTTP request timeout')));
+        req.on('error', err => reject(err));
+        //req.write(data, err => err ? reject(err) : () => {});
+        req.write(data);
+        req.end();
+    });
+}
+
+/*
+We are retrying on the following response codes (copied from the Rust client):
+500:  Internal Server Error
+503:  Service Unavailable
+504:  Gateway Timeout
+
+// Unofficial extensions
+507:  Insufficient Storage
+509:  Bandwidth Limit Exceeded
+523:  Origin is Unreachable
+524:  A Timeout Occurred
+529:  Site is overloaded
+599:  Network Connect Timeout Error
+*/
+function isRetryable(statusCode) {
+    return [500, 503, 504, 507, 509, 523, 524, 529, 599].includes(statusCode);
+}
+
+async function autoFlush(sender) {
+    if (sender.autoFlush && sender.pendingRowCount > 0 && (
+        (sender.autoFlushRows > 0 && sender.pendingRowCount >= sender.autoFlushRows) ||
+        (sender.autoFlushInterval > 0 && Date.now() - sender.lastFlushTime >= sender.autoFlushInterval)
+    )) {
+        await sender.flush();
+    }
+}
+
+function sendTcp(sender, data) {
+    return new Promise((resolve, reject) => {
+        sender.socket.write(data, err => {
+            err ? reject(err) : sender.doResolve(resolve);
+        });
+    });
+}
+
 function checkCapacity(sender, data, base = 0) {
     let length = base;
     for (const str of data) {
@@ -450,6 +717,9 @@ function compact(sender) {
         sender.buffer.copy(sender.buffer, 0, sender.endOfLastRow, sender.position);
         sender.position = sender.position - sender.endOfLastRow;
         sender.endOfLastRow = 0;
+
+        sender.lastFlushTime = Date.now();
+        sender.pendingRowCount = 0;
     }
 }
 
@@ -465,7 +735,7 @@ function writeColumn(sender, name, value, writeValue, valueType) {
     }
     checkCapacity(sender, [name], 2 + name.length);
     write(sender, sender.hasColumns ? ',' : ' ');
-    validateColumnName(name);
+    validateColumnName(name, sender.maxNameLength);
     writeEscaped(sender, name);
     write(sender, '=');
     writeValue();
@@ -542,39 +812,79 @@ function timestampToNanos(timestamp, unit) {
     }
 }
 
-function constructJwk(options) {
-    if (options) {
-        if (options.auth) {
-            if (!options.auth.keyId) {
-                throw new Error('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
-                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
-            }
-            if (typeof options.auth.keyId !== 'string') {
-                throw new Error('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
-                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
-            }
-            if (!options.auth.token) {
-                throw new Error('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
-                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
-            }
-            if (typeof options.auth.token !== 'string') {
-                throw new Error('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
-                    'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
-            }
-
-            return {
-                kid: options.auth.keyId,
-                d: options.auth.token,
-                ...PUBLIC_KEY,
-                kty: 'EC',
-                crv: 'P-256'
-            };
-        } else {
-            return options.jwk;
-        }
+function initSenderOptions(options) {
+    if (!options) {
+        options = {};
     }
-    return undefined;
+
+    // defaults to TCP for backwards compatibility
+    if (!options.protocol) {
+        options.protocol = TCP;
+    }
+
+    // deal with deprecated options
+    if (options.copyBuffer) {
+        options.copy_buffer = options.copyBuffer;
+        options.copyBuffer = undefined;
+    }
+    if (options.bufferSize) {
+        options.init_buf_size = options.bufferSize;
+        options.bufferSize = undefined;
+    }
+    return options;
+}
+
+function constructAuth(options) {
+    if (!options.username && !options.token && !options.password) {
+        // no intention to authenticate
+        return;
+    }
+    if (!options.username || !options.token) {
+        throw new Error('TCP transport requires a username and a private key for authentication, ' +
+            'please, specify the \'username\' and \'token\' config options');
+    }
+
+    options.auth = {
+        keyId: options.username,
+        token: options.token
+    };
+}
+
+function constructJwk(options) {
+    if (options.auth) {
+        if (!options.auth.keyId) {
+            throw new Error('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+        if (typeof options.auth.keyId !== 'string') {
+            throw new Error('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+        if (!options.auth.token) {
+            throw new Error('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+        if (typeof options.auth.token !== 'string') {
+            throw new Error('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
+                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+        }
+
+        return {
+            kid: options.auth.keyId,
+            d: options.auth.token,
+            ...PUBLIC_KEY,
+            kty: 'EC',
+            crv: 'P-256'
+        };
+    } else {
+        return options.jwk;
+    }
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 exports.Sender = Sender;
 exports.DEFAULT_BUFFER_SIZE = DEFAULT_BUFFER_SIZE;
+exports.DEFAULT_MAX_BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE;

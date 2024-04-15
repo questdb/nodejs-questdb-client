@@ -31,23 +31,23 @@ async function run() {
     const proxy = new Proxy();
     await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
 
-    const sender = new Sender({bufferSize: 1024, auth: AUTH}); //with authentication
+    const sender = new Sender({min_buf_size: 1024, auth: AUTH}); //with authentication
     const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
     if (connected) {
-        sender.table('test')
+        await sender.table('test')
             .symbol('location', 'emea').symbol('city', 'budapest')
             .stringColumn('hoppa', 'hello').stringColumn('hippi', 'hello').stringColumn('hippo', 'haho')
             .floatColumn('temperature', 14.1).intColumn('intcol', 56)
             .timestampColumn('tscol', Date.now(), 'ms')
             .atNow();
-        sender.table('test')
+        await sender.table('test')
             .symbol('location', 'asia').symbol('city', 'singapore')
             .stringColumn('hoppa', 'hi').stringColumn('hopp', 'hello').stringColumn('hippo', 'huhu')
             .floatColumn('temperature', 7.1)
             .at(1658484765000555000n, 'ns');
         await sender.flush();
 
-        sender.table('test')
+        await sender.table('test')
             .symbol('location', 'emea').symbol('city', 'miskolc')
             .stringColumn('hoppa', 'hello').stringColumn('hippi', 'hello').stringColumn('hippo', 'lalalala')
             .floatColumn('temperature', 13.1).intColumn('intcol', 333)

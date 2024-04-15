@@ -1,17 +1,16 @@
 'use strict';
 
-const QuestDBMaxFileNameLength = 127;
-
 /**
  * Validates a table name. <br>
  * Throws an error if table name is invalid.
  *
  * @param {string} name - The table name to validate.
+ * @param {number} maxNameLength - The maximum length of table names.
  */
-function validateTableName(name) {
+function validateTableName(name, maxNameLength) {
     const len = name.length;
-    if (len > QuestDBMaxFileNameLength) {
-        throw new Error(`Table name is too long, max length is ${QuestDBMaxFileNameLength}`);
+    if (len > maxNameLength) {
+        throw new Error(`Table name is too long, max length is ${maxNameLength}`);
     }
     if (len === 0) {
         throw new Error("Empty string is not allowed as table name");
@@ -27,7 +26,7 @@ function validateTableName(name) {
                     // double or triple dot looks suspicious
                     // single dot allowed as compatibility,
                     // when someone uploads 'file_name.csv' the file name used as the table name
-                    throw new Error("Table name cannot start or end with a dot and only a single dot allowed");
+                    throw new Error('Table name cannot start or end with a dot, and only a single dot allowed');
                 break;
             case '?':
             case ',':
@@ -70,14 +69,15 @@ function validateTableName(name) {
  * Throws an error if column name is invalid.
  *
  * @param {string} name - The column name to validate.
+ * @param {number} maxNameLength - The maximum length of column names.
  */
-function validateColumnName(name) {
+function validateColumnName(name, maxNameLength) {
     const len = name.length;
-    if (len > QuestDBMaxFileNameLength) {
-        throw new Error(`Column name is too long, max length is ${QuestDBMaxFileNameLength}`);
+    if (len > maxNameLength) {
+        throw new Error(`Column name is too long, max length is ${maxNameLength}`);
     }
     if (len === 0) {
-        throw new Error("Empty string is not allowed as column name");
+        throw new Error('Empty string is not allowed as column name');
     }
     for (const ch of name) {
         switch (ch) {

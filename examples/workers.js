@@ -42,7 +42,7 @@ async function run() {
     // ingest each price update into the database using the sender
     let count = 0;
     await subscribe(workerData.ticker, async (tick) => {
-      sender
+      await sender
           .table('prices')
           .symbol('ticker', tick.ticker)
           .floatColumn('price', tick.price)

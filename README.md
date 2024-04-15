@@ -24,10 +24,10 @@ async function run() {
     await sender.connect({port: 9009, host: 'localhost'});
 
     // add rows to the buffer of the sender
-    sender.table('prices').symbol('instrument', 'EURUSD')
+    await sender.table('prices').symbol('instrument', 'EURUSD')
         .floatColumn('bid', 1.0195).floatColumn('ask', 1.0221)
         .at(Date.now(), 'ms');
-    sender.table('prices').symbol('instrument', 'GBPUSD')
+    await sender.table('prices').symbol('instrument', 'GBPUSD')
         .floatColumn('bid', 1.2076).floatColumn('ask', 1.2082)
         .at(Date.now(), 'ms');
 
@@ -36,7 +36,7 @@ async function run() {
     await sender.flush();
 
     // add rows to the buffer again and send it to the server
-    sender.table('prices').symbol('instrument', 'EURUSD')
+    await sender.table('prices').symbol('instrument', 'EURUSD')
         .floatColumn('bid', 1.0197).floatColumn('ask', 1.0224)
         .at(Date.now(), 'ms');
     await sender.flush();
@@ -73,7 +73,7 @@ async function run() {
     await sender.connect({port: 9009, host: 'localhost'}, true);
 
     // send the data over the authenticated and secure connection
-    sender.table('prices').symbol('instrument', 'EURUSD')
+    await sender.table('prices').symbol('instrument', 'EURUSD')
         .floatColumn('bid', 1.0197).floatColumn('ask', 1.0224)
         .at(Date.now(), 'ms');
     await sender.flush();
@@ -167,7 +167,7 @@ async function run() {
         // ingest each price update into the database using the sender
         let count = 0;
         await subscribe(workerData.ticker, async (tick) => {
-            sender
+            await sender
                 .table('prices')
                 .symbol('ticker', tick.ticker)
                 .floatColumn('price', tick.price)
