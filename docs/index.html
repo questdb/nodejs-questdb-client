@@ -54,33 +54,29 @@
 <pre class="prettyprint source lang-javascript"><code>const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
-    const sender = new Sender();
-
-    // connect to QuestDB
-    // host and port are required in connect options
-    await sender.connect({port: 9009, host: 'localhost'});
+    // create a sender using HTTP protocol
+    const sender = Sender.fromConfig('http::addr=localhost:9000');
 
     // add rows to the buffer of the sender
-    sender.table('prices').symbol('instrument', 'EURUSD')
+    await sender.table('prices').symbol('instrument', 'EURUSD')
         .floatColumn('bid', 1.0195).floatColumn('ask', 1.0221)
         .at(Date.now(), 'ms');
-    sender.table('prices').symbol('instrument', 'GBPUSD')
+    await sender.table('prices').symbol('instrument', 'GBPUSD')
         .floatColumn('bid', 1.2076).floatColumn('ask', 1.2082)
         .at(Date.now(), 'ms');
 
     // flush the buffer of the sender, sending the data to QuestDB
-    // the buffer is cleared after the data is sent and the sender is ready to accept new data
+    // the buffer is cleared after the data is sent, and the sender is ready to accept new data
     await sender.flush();
 
-    // add rows to the buffer again and send it to the server
-    sender.table('prices').symbol('instrument', 'EURUSD')
+    // add rows to the buffer again, and send it to the server
+    await sender.table('prices').symbol('instrument', 'EURUSD')
         .floatColumn('bid', 1.0197).floatColumn('ask', 1.0224)
         .at(Date.now(), 'ms');
     await sender.flush();
 
     // close the connection after all rows ingested
     await sender.close();
-    return new Promise(resolve => resolve(0));
 }
 
 run()
@@ -91,23 +87,11 @@ run()
 <pre class="prettyprint source lang-javascript"><code>const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
-    // authentication details
-    const CLIENT_ID = 'testapp';
-    const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
-    const AUTH = {
-        keyId: CLIENT_ID,
-        token: PRIVATE_KEY
-    };
-
-    // pass the authentication details to the sender
-    const sender = new Sender({auth: AUTH});
-
-    // connect() takes an optional second argument
-    // if 'true' passed the connection is secured with TLS encryption
-    await sender.connect({port: 9009, host: 'localhost'}, true);
+    // create a sender using HTTPS protocol with username and password authentication
+    const sender = Sender.fromConfig('https::addr=localhost:9000;username=user1;password=pwd');
 
     // send the data over the authenticated and secure connection
-    sender.table('prices').symbol('instrument', 'EURUSD')
+    await sender.table('prices').symbol('instrument', 'EURUSD')
         .floatColumn('bid', 1.0197).floatColumn('ask', 1.0224)
         .at(Date.now(), 'ms');
     await sender.flush();
@@ -122,20 +106,8 @@ run().catch(console.error);
 <pre class="prettyprint source lang-typescript"><code>import { Sender } from '@questdb/nodejs-client';
 
 async function run(): Promise&lt;number> {
-    // authentication details
-    const CLIENT_ID: string = 'testapp';
-    const PRIVATE_KEY: string = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
-    const AUTH: { kid: string, d: string } = {
-        keyId: CLIENT_ID,
-        token: PRIVATE_KEY
-    };
-
-    // pass the authentication details to the sender
-    const sender: Sender = new Sender({auth: AUTH});
-
-    // connect() takes an optional second argument
-    // if 'true' passed the connection is secured with TLS encryption
-    await sender.connect({port: 9009, host: 'localhost'}, true);
+    // create a sender using HTTPS protocol with bearer token authentication
+    const sender: Sender = Sender.fromConfig('https::addr=localhost:9000;token=Xyvd3er6GF87ysaHk');
 
     // send the data over the authenticated and secure connection
     sender.table('prices').symbol('instrument', 'EURUSD')
@@ -188,14 +160,13 @@ async function run() {
     } else {
         // it is important that each worker has a dedicated sender object
         // threads cannot share the sender because they would write into the same buffer
-        const sender = new Sender();
-        await sender.connect({ port: 9009, host: 'localhost' });
+        const sender = Sender.fromConfig('http::addr=localhost:9000');
 
         // subscribe for the market data of the ticker assigned to the worker
         // ingest each price update into the database using the sender
         let count = 0;
         await subscribe(workerData.ticker, async (tick) => {
-            sender
+            await sender
                 .table('prices')
                 .symbol('ticker', tick.ticker)
                 .floatColumn('price', tick.price)
@@ -234,13 +205,13 @@ run()
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Modules</h3><ul><li><a href="module-@questdb_nodejs-client.html">@questdb/nodejs-client</a></li></ul><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Tue Nov 28 2023 12:41:23 GMT+0000 (Greenwich Mean Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 17 2024 11:13:58 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

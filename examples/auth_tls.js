@@ -1,20 +1,8 @@
 const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
-  // authentication details
-  const CLIENT_ID = 'testapp';
-  const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
-  const AUTH = {
-    keyId: CLIENT_ID,
-    token: PRIVATE_KEY
-  };
-
-  // pass the authentication details to the sender
-  const sender = new Sender({ bufferSize: 4096, auth: AUTH });
-
-  // connect() takes an optional second argument
-  // if 'true' passed the connection is secured with TLS encryption
-  await sender.connect({ port: 9009, host: 'localhost' }, true);
+  // configure the sender to use HTTPS and authentication
+  const sender = Sender.fromConfig('https::addr=localhost:9000;username=ingest;password=pwd');
 
   // send the data over the authenticated and secure connection
   let bday = Date.parse('1856-07-10');

@@ -1,4 +1,32 @@
-'use strict';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: options.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: options.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>'use strict';
 
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
@@ -13,103 +41,103 @@ const OFF = 'off';
 const UNSAFE_OFF = 'unsafe_off';
 
 /** @classdesc
- * <a href="Sender.html">Sender</a> configuration options. <br>
- * <br>
- * Properties of the object are initialized through a configuration string. <br>
- * The configuration string has the following format: <i>&ltprotocol&gt::&ltkey&gt=&ltvalue&gt;&ltkey&gt=&ltvalue&gt;...;</i> <br>
- * The keys are case-sensitive, the trailing semicolon is optional. <br>
- * The values are validated, and an error is thrown if the format is invalid. <br>
- * <br>
+ * &lt;a href="Sender.html">Sender&lt;/a> configuration options. &lt;br>
+ * &lt;br>
+ * Properties of the object are initialized through a configuration string. &lt;br>
+ * The configuration string has the following format: &lt;i>&amp;ltprotocol&amp;gt::&amp;ltkey&amp;gt=&amp;ltvalue&amp;gt;&amp;ltkey&amp;gt=&amp;ltvalue&amp;gt;...;&lt;/i> &lt;br>
+ * The keys are case-sensitive, the trailing semicolon is optional. &lt;br>
+ * The values are validated, and an error is thrown if the format is invalid. &lt;br>
+ * &lt;br>
  * Connection and protocol options
- * <ul>
- * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps</i> - The protocol used to communicate with the server. <br>
- * When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
- * </li>
- * <li> addr: <i>string</i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. <br>
- * If no port is specified, a default will be used. <br>
- * When the protocol is HTTP/HTTPS, the port defaults to 9000. When the protocol is TCP/TCPS, the port defaults to 9009. <br>
- * <br>
- * Examples: <i>http::addr=localhost:9000</i>, <i>https::addr=localhost:9000</i>, <i>http::addr=localhost</i>, <i>tcp::addr=localhost:9009</i>
- * </li>
- * </ul>
- * <br>
+ * &lt;ul>
+ * &lt;li> &lt;b>protocol&lt;/b>: &lt;i>enum, accepted values: http, https, tcp, tcps&lt;/i> - The protocol used to communicate with the server. &lt;br>
+ * When &lt;i>https&lt;/i> or &lt;i>tcps&lt;/i> used, the connection is secured with TLS encryption.
+ * &lt;/li>
+ * &lt;li> addr: &lt;i>string&lt;/i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. &lt;br>
+ * If no port is specified, a default will be used. &lt;br>
+ * When the protocol is HTTP/HTTPS, the port defaults to 9000. When the protocol is TCP/TCPS, the port defaults to 9009. &lt;br>
+ * &lt;br>
+ * Examples: &lt;i>http::addr=localhost:9000&lt;/i>, &lt;i>https::addr=localhost:9000&lt;/i>, &lt;i>http::addr=localhost&lt;/i>, &lt;i>tcp::addr=localhost:9009&lt;/i>
+ * &lt;/li>
+ * &lt;/ul>
+ * &lt;br>
  * Authentication options
- * <ul>
- * <li> username: <i>string</i> - Used for authentication. <br>
- * In case of HTTP Basic authentication should be accompanied by the <i>password</i> option. <br>
- * If the TCP transport used with JWK token authentication, then should be accompanied by the <i>token</i> option.
- * </li>
- * <li> password: <i>string</i> - Password for HTTP Basic authentication, should be accompanied by the <i>username</i> option.
- * </li>
- * <li> token: <i>string</i> - In case of HTTP Bearer token authentication it contains the bearer token. <br>
+ * &lt;ul>
+ * &lt;li> username: &lt;i>string&lt;/i> - Used for authentication. &lt;br>
+ * In case of HTTP Basic authentication should be accompanied by the &lt;i>password&lt;/i> option. &lt;br>
+ * If the TCP transport used with JWK token authentication, then should be accompanied by the &lt;i>token&lt;/i> option.
+ * &lt;/li>
+ * &lt;li> password: &lt;i>string&lt;/i> - Password for HTTP Basic authentication, should be accompanied by the &lt;i>username&lt;/i> option.
+ * &lt;/li>
+ * &lt;li> token: &lt;i>string&lt;/i> - In case of HTTP Bearer token authentication it contains the bearer token. &lt;br>
  * If the TCP transport used with JWK token authentication, then it contains the private key part of the JWK token,
- * and it should be accompanied by the <i>username</i> option.
- * </li>
- * </ul>
- * <br>
+ * and it should be accompanied by the &lt;i>username&lt;/i> option.
+ * &lt;/li>
+ * &lt;/ul>
+ * &lt;br>
  * TLS options
- * <ul>
- * <li> tls_verify: <i>enum, accepted values: on, unsafe_off</i> - When the HTTPS or TCPS protocols are selected, TLS encryption is used. <br>
- * The Sender verifies the server's certificate, this check can be disabled by setting this option to <i>off</i>. Can be useful in
+ * &lt;ul>
+ * &lt;li> tls_verify: &lt;i>enum, accepted values: on, unsafe_off&lt;/i> - When the HTTPS or TCPS protocols are selected, TLS encryption is used. &lt;br>
+ * The Sender verifies the server's certificate, this check can be disabled by setting this option to &lt;i>off&lt;/i>. Can be useful in
  * non-production environments where self-signed certificates might be used, but generally not recommended to use.
- * </li>
- * <li> tls_ca: <i>string</i> - Path to a file containing the root CA's certificate in PEM format. <br>
+ * &lt;/li>
+ * &lt;li> tls_ca: &lt;i>string&lt;/i> - Path to a file containing the root CA's certificate in PEM format. &lt;br>
  * Can be useful when self-signed certificates are used, otherwise should not be set.
- * </li>
- * </ul>
- * <br>
+ * &lt;/li>
+ * &lt;/ul>
+ * &lt;br>
  * Auto flush options
- * <ul>
- * <li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default, this can be switched off
- * by setting this option to <i>off</i>. <br>
- * When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. <br>
+ * &lt;ul>
+ * &lt;li> auto_flush: &lt;i>enum, accepted values: on, off&lt;/i> - The Sender automatically flushes the buffer by default, this can be switched off
+ * by setting this option to &lt;i>off&lt;/i>. &lt;br>
+ * When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. &lt;br>
  * Manual buffer flushing can be useful, when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
  * request, which in turn is a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
  * inserted, or it fails, and none of the rows makes into the database.
- * </li>
- * <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
+ * &lt;/li>
+ * &lt;li> auto_flush_rows: &lt;i>integer&lt;/i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. &lt;br>
  * The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
- * </li>
- * <li> auto_flush_interval: <i>integer</i> - The number of milliseconds that will trigger a flush, default value is 1000.
- * When set to 0, interval-based flushing is disabled. <br>
+ * &lt;/li>
+ * &lt;li> auto_flush_interval: &lt;i>integer&lt;/i> - The number of milliseconds that will trigger a flush, default value is 1000.
+ * When set to 0, interval-based flushing is disabled. &lt;br>
  * Note that the setting is checked only when a new row is added to the buffer. There is no timer registered to flush the buffer automatically.
- * </li>
- * </ul>
- * <br>
+ * &lt;/li>
+ * &lt;/ul>
+ * &lt;br>
  * Buffer sizing options
- * <ul>
- * <li> init_buf_size: <i>integer</i> - Initial buffer size, defaults to 64 KiB in the Sender.
- * </li>
- * <li> max_buf_size: <i>integer</i> - Maximum buffer size, defaults to 100 MiB in the Sender. <br>
+ * &lt;ul>
+ * &lt;li> init_buf_size: &lt;i>integer&lt;/i> - Initial buffer size, defaults to 64 KiB in the Sender.
+ * &lt;/li>
+ * &lt;li> max_buf_size: &lt;i>integer&lt;/i> - Maximum buffer size, defaults to 100 MiB in the Sender. &lt;br>
  * If the buffer would need to be extended beyond the maximum size, an error is thrown.
- * </li>
- * </ul>
- * <br>
+ * &lt;/li>
+ * &lt;/ul>
+ * &lt;br>
  * HTTP request specific options
- * <ul>
- * <li> request_timeout: <i>integer</i> - The time in milliseconds to wait for a response from the server, set to 10 seconds by default. <br>
- * This is in addition to the calculation derived from the <i>request_min_throughput</i> parameter.
- * </li>
- * <li> request_min_throughput: <i>integer</i> - Minimum expected throughput in bytes per second for HTTP requests, set to 100 KiB/s seconds by default. <br>
+ * &lt;ul>
+ * &lt;li> request_timeout: &lt;i>integer&lt;/i> - The time in milliseconds to wait for a response from the server, set to 10 seconds by default. &lt;br>
+ * This is in addition to the calculation derived from the &lt;i>request_min_throughput&lt;/i> parameter.
+ * &lt;/li>
+ * &lt;li> request_min_throughput: &lt;i>integer&lt;/i> - Minimum expected throughput in bytes per second for HTTP requests, set to 100 KiB/s seconds by default. &lt;br>
  * If the throughput is lower than this value, the connection will time out. This is used to calculate an additional
- * timeout on top of <i>request_timeout</i>. This is useful for large requests. You can set this value to 0 to disable this logic.
- * </li>
- * <li> retry_timeout: <i>integer</i> - The time in milliseconds to continue retrying after a failed HTTP request, set to 10 seconds by default. <br>
+ * timeout on top of &lt;i>request_timeout&lt;/i>. This is useful for large requests. You can set this value to 0 to disable this logic.
+ * &lt;/li>
+ * &lt;li> retry_timeout: &lt;i>integer&lt;/i> - The time in milliseconds to continue retrying after a failed HTTP request, set to 10 seconds by default. &lt;br>
  * The interval between retries is an exponential backoff starting at 10ms and doubling after each failed attempt up to a maximum of 1 second.
- * </li>
- * </ul>
- * <br>
+ * &lt;/li>
+ * &lt;/ul>
+ * &lt;br>
  * Other options
- * <ul>
- * <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
+ * &lt;ul>
+ * &lt;li> max_name_len: &lt;i>integer&lt;/i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. &lt;br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
- * </li>
- * <li> copy_buffer: <i>enum, accepted values: on, off</i> - By default the Sender creates a new buffer for every flush() call,
+ * &lt;/li>
+ * &lt;li> copy_buffer: &lt;i>enum, accepted values: on, off&lt;/i> - By default the Sender creates a new buffer for every flush() call,
  * and the data to be sent to the server is copied into this new buffer.
- * Setting the flag to <i>off</i> results in reusing the same buffer instance for each flush() call. <br>
+ * Setting the flag to &lt;i>off&lt;/i> results in reusing the same buffer instance for each flush() call. &lt;br>
  * Use this flag only if calls to the client are serialised.
- * </li>
- * </ul>
+ * &lt;/li>
+ * &lt;/ul>
  */
 class SenderOptions {
 
@@ -152,14 +180,14 @@ class SenderOptions {
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
-     * @param {string} configurationString - Configuration string. <br>
-     * @param {function} log - Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.
+     * @param {string} configurationString - Configuration string. &lt;br>
+     * @param {function} log - Optional logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>.
      */
     constructor(configurationString, log = undefined) {
         parseConfigurationString(this, configurationString);
 
-        if (log && typeof log !== 'function') {
+        if (log &amp;&amp; typeof log !== 'function') {
             throw new Error('Invalid logging function');
         }
         this.log = log;
@@ -168,9 +196,9 @@ class SenderOptions {
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
-     * @param {string} configurationString - Configuration string. <br>
-     * @param {function} log - Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.
+     * @param {string} configurationString - Configuration string. &lt;br>
+     * @param {function} log - Optional logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>.
      *
      * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
      */
@@ -179,12 +207,12 @@ class SenderOptions {
     }
 
     /**
-     * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
+     * Creates a Sender options object by parsing the configuration string set in the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      *
-     * @param {function} log - Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.
+     * @param {function} log - Optional logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>.
      *
-     * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
+     * @return {SenderOptions} A Sender configuration object initialized from the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      */
     static fromEnv(log = undefined) {
         return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, log);
@@ -210,7 +238,7 @@ function parseConfigurationString(options, configString) {
 function parseSettings(options, configString, position) {
     let index = configString.indexOf(';', position);
     while (index > -1) {
-        if (index + 1 < configString.length && configString.charAt(index + 1) === ';') {
+        if (index + 1 &lt; configString.length &amp;&amp; configString.charAt(index + 1) === ';') {
             index = configString.indexOf(';', index + 2);
             continue;
         }
@@ -220,7 +248,7 @@ function parseSettings(options, configString, position) {
         position = index + 1;
         index = configString.indexOf(';', position);
     }
-    if (position < configString.length) {
+    if (position &lt; configString.length) {
         parseSetting(options, configString, position, configString.length);
     }
 }
@@ -228,7 +256,7 @@ function parseSettings(options, configString, position) {
 function parseSetting(options, configString, position, index) {
     const setting = configString.slice(position, index).replaceAll(';;', ';');
     const equalsIndex = setting.indexOf('=');
-    if (equalsIndex < 0) {
+    if (equalsIndex &lt; 0) {
         throw new Error(`Missing '=' sign in '${setting}'`);
     }
     const key = setting.slice(0, equalsIndex);
@@ -259,9 +287,9 @@ function validateConfigValue(key, value) {
     if (!value) {
         throw new Error(`Invalid configuration, value is not set for '${key}'`);
     }
-    for (let i = 0; i < value.length; i++) {
+    for (let i = 0; i &lt; value.length; i++) {
         const unicode = value.codePointAt(i);
-        if (unicode < 0x20 || (unicode > 0x7E && unicode < 0xA0)) {
+        if (unicode &lt; 0x20 || (unicode > 0x7E &amp;&amp; unicode &lt; 0xA0)) {
             throw new Error(`Invalid configuration, control characters are not allowed: '${value}'`);
         }
     }
@@ -269,7 +297,7 @@ function validateConfigValue(key, value) {
 
 function parseProtocol(options, configString) {
     let index = configString.indexOf('::');
-    if (index < 0) {
+    if (index &lt; 0) {
         throw new Error('Missing protocol, configuration string format: \'protocol::key1=value1;key2=value2;key3=value3;\'');
     }
 
@@ -292,7 +320,7 @@ function parseAddress(options) {
     }
 
     const index = options.addr.indexOf(':');
-    if (index < 0) {
+    if (index &lt; 0) {
         options.host = options.addr;
         switch (options.protocol) {
             case HTTP:
@@ -321,7 +349,7 @@ function parseAddress(options) {
     if (isNaN(options.port)) {
         throw new Error(`Invalid port: '${portStr}'`);
     }
-    if (!Number.isInteger(options.port) || options.port < 1) {
+    if (!Number.isInteger(options.port) || options.port &lt; 1) {
         throw new Error(`Invalid port: ${options.port}`);
     }
 }
@@ -383,7 +411,7 @@ function parseInteger(options, property, description, lowerBound) {
         if (isNaN(options[property])) {
             throw new Error(`Invalid ${description} option, not a number: '${property_str}'`);
         }
-        if (!Number.isInteger(options[property]) || options[property] < lowerBound) {
+        if (!Number.isInteger(options[property]) || options[property] &lt; lowerBound) {
             throw new Error(`Invalid ${description} option: ${options[property]}`);
         }
     }
@@ -394,3 +422,26 @@ exports.HTTP = HTTP;
 exports.HTTPS = HTTPS;
 exports.TCP = TCP;
 exports.TCPS = TCPS;
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 17 2024 11:13:58 GMT+0100 (British Summer Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

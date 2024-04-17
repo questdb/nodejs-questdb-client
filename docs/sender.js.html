@@ -1,4 +1,32 @@
-'use strict';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: sender.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: sender.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>'use strict';
 
 /* eslint-disable no-unused-vars */
 
@@ -37,35 +65,35 @@ const PUBLIC_KEY = {
 
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
+ * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. &lt;br>
  * Based on benchmarks HTTP also provides higher throughput, if configured to ingest data in bigger batches.
- * <p>
- * The client supports authentication. <br>
- * Authentication details can be passed to the Sender in its configuration options. <br>
+ * &lt;p>
+ * The client supports authentication. &lt;br>
+ * Authentication details can be passed to the Sender in its configuration options. &lt;br>
  * The client support Basic username/password and Bearer token authentication methods when used with HTTP protocol,
- * and JWK token authentication when ingesting data via TCP. <br>
- * Please, note that authentication is enabled by default in QuestDB Enterprise only. <br>
+ * and JWK token authentication when ingesting data via TCP. &lt;br>
+ * Please, note that authentication is enabled by default in QuestDB Enterprise only. &lt;br>
  * Details on how to configure authentication in the open source version of
  * QuestDB: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
- * </p>
- * <p>
- * The client also supports TLS encryption for both, HTTP and TCP transports to provide a secure connection. <br>
+ * &lt;/p>
+ * &lt;p>
+ * The client also supports TLS encryption for both, HTTP and TCP transports to provide a secure connection. &lt;br>
  * Please, note that the open source version of QuestDB does not support TLS, and requires an external reverse-proxy,
  * such as Nginx to enable encryption.
- * </p>
- * <p>
+ * &lt;/p>
+ * &lt;p>
  * The client uses a buffer to store data. It automatically flushes the buffer by sending its content to the server.
  * Auto flushing can be disabled via configuration options to gain control over transactions, initial and maximum
  * buffer sizes can also be set.
- * </p>
- * <p>
+ * &lt;/p>
+ * &lt;p>
  * It is recommended that the Sender is created by one of the static factory methods,
- * <i>Sender.fromConfig(configString)</i> or <i>Sender.fromEnv()</i>).
+ * &lt;i>Sender.fromConfig(configString)&lt;/i> or &lt;i>Sender.fromEnv()&lt;/i>).
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
- * initialized from a configuration string to make sure that the parameters are validated. <br>
+ * initialized from a configuration string to make sure that the parameters are validated. &lt;br>
  * Detailed description of the Sender's configuration options can be found in
- * the <a href="SenderOptions.html">SenderOptions</a> documentation.
- * </p>
+ * the &lt;a href="SenderOptions.html">SenderOptions&lt;/a> documentation.
+ * &lt;/p>
  */
 class Sender {
 
@@ -112,8 +140,8 @@ class Sender {
     /**
      * Creates an instance of Sender.
      *
-     * @param {SenderOptions} options - Sender configuration object. <br>
-     * See SenderOptions documentation for detailed description of configuration options. <br>
+     * @param {SenderOptions} options - Sender configuration object. &lt;br>
+     * See SenderOptions documentation for detailed description of configuration options. &lt;br>
      */
     constructor(options = undefined) {
         options = initSenderOptions(options);
@@ -149,7 +177,7 @@ class Sender {
             this.password = options.password;
             this.token = options.token;
         } else {
-            if (!options.auth && !options.jwk) {
+            if (!options.auth &amp;&amp; !options.jwk) {
                 constructAuth(options);
             }
             this.jwk = constructJwk(options);
@@ -168,7 +196,7 @@ class Sender {
         this.requestTimeout = isInteger(options.request_timeout, 1) ? options.request_timeout : DEFAULT_REQUEST_TIMEOUT;
         this.retryTimeout = isInteger(options.retry_timeout, 0) ? options.retry_timeout : DEFAULT_RETRY_TIMEOUT;
 
-        const noCopy = isBoolean(options.copy_buffer) && !options.copy_buffer;
+        const noCopy = isBoolean(options.copy_buffer) &amp;&amp; !options.copy_buffer;
         this.toBuffer = noCopy ? this.toBufferView : this.toBufferNew;
         this.doResolve = noCopy
             ? (resolve) => {
@@ -186,7 +214,7 @@ class Sender {
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
-     * @param {string} configurationString - Configuration string. <br>
+     * @param {string} configurationString - Configuration string. &lt;br>
      *
      * @return {Sender} A Sender object initialized from the provided configuration string.
      */
@@ -195,16 +223,16 @@ class Sender {
     }
 
     /**
-     * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
+     * Creates a Sender options object by parsing the configuration string set in the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      *
-     * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
+     * @return {Sender} A Sender object initialized from the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      */
     static fromEnv() {
         return new Sender(SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF));
     }
 
     /**
-     * Extends the size of the sender's buffer. <br>
+     * Extends the size of the sender's buffer. &lt;br>
      * Can be used to increase the size of buffer if overflown.
      * The buffer's content is copied into the new buffer.
      *
@@ -223,7 +251,7 @@ class Sender {
     }
 
     /**
-     * Resets the buffer, data added to the buffer will be lost. <br>
+     * Resets the buffer, data added to the buffer will be lost. &lt;br>
      * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
      *
      * @return {Sender} Returns with a reference to this sender.
@@ -242,7 +270,7 @@ class Sender {
      * @param {net.NetConnectOpts | tls.ConnectionOptions} connectOptions - Connection options, host and port are required.
      * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      *
-     * @return {Promise<boolean>} Resolves to true if client is connected.
+     * @return {Promise&lt;boolean>} Resolves to true if client is connected.
      */
     connect(connectOptions = undefined, secure = false) {
         if (this.http) {
@@ -316,7 +344,7 @@ class Sender {
     }
 
     /**
-     * Closes the TCP connection to the database. <br>
+     * Closes the TCP connection to the database. &lt;br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
@@ -332,7 +360,7 @@ class Sender {
      * Sends the buffer's content to the database and compacts the buffer.
      * If the last row is not finished it stays in the sender's buffer.
      *
-     * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send.
+     * @return {Promise&lt;boolean>} Resolves to true when there was data in the buffer to send.
      */
     async flush() {
         const data = this.toBuffer(this.endOfLastRow);
@@ -500,7 +528,7 @@ class Sender {
      * @return {Sender} Returns with a reference to this sender.
      */
     timestampColumn(name, value, unit = 'us') {
-        if (typeof value !== 'bigint' && !Number.isInteger(value)) {
+        if (typeof value !== 'bigint' &amp;&amp; !Number.isInteger(value)) {
             throw new Error(`Value must be an integer or BigInt, received ${value}`);
         }
         writeColumn(this, name, value, () => {
@@ -520,10 +548,10 @@ class Sender {
      * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
      */
     async at(timestamp, unit = 'us') {
-        if (!this.hasSymbols && !this.hasColumns) {
+        if (!this.hasSymbols &amp;&amp; !this.hasColumns) {
             throw new Error('The row must have a symbol or column set before it is closed');
         }
-        if (typeof timestamp !== 'bigint' && !Number.isInteger(timestamp)) {
+        if (typeof timestamp !== 'bigint' &amp;&amp; !Number.isInteger(timestamp)) {
             throw new Error(`Designated timestamp must be an integer or BigInt, received ${timestamp}`);
         }
         const timestampNanos = timestampToNanos(BigInt(timestamp), unit);
@@ -538,11 +566,11 @@ class Sender {
     }
 
     /**
-     * Closing the row without writing designated timestamp into the buffer of the sender. <br>
+     * Closing the row without writing designated timestamp into the buffer of the sender. &lt;br>
      * Designated timestamp will be populated by the server on this record.
      */
     async atNow() {
-        if (!this.hasSymbols && !this.hasColumns) {
+        if (!this.hasSymbols &amp;&amp; !this.hasColumns) {
             throw new Error('The row must have a symbol or column set before it is closed');
         }
         checkCapacity(this, [], 1);
@@ -558,11 +586,11 @@ function isBoolean(value) {
 }
 
 function isInteger(value, lowerBound) {
-    return typeof value === 'number' && Number.isInteger(value) && value >= lowerBound;
+    return typeof value === 'number' &amp;&amp; Number.isInteger(value) &amp;&amp; value >= lowerBound;
 }
 
 async function checkServerCert(sender, reject) {
-    if (sender.secure && sender.tlsVerify && !sender.socket.authorized) {
+    if (sender.secure &amp;&amp; sender.tlsVerify &amp;&amp; !sender.socket.authorized) {
         reject(new Error('Problem with server\'s certificate'));
         await sender.close();
     }
@@ -632,8 +660,8 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
                     sender.doResolve(resolve);
                 });
             } else {
-                if (isRetryable(response.statusCode) && retryTimeout > 0) {
-                    if (retryBegin < 0) {
+                if (isRetryable(response.statusCode) &amp;&amp; retryTimeout > 0) {
+                    if (retryBegin &lt; 0) {
                         retryBegin = Date.now();
                         retryInterval = 10;
                     } else {
@@ -660,7 +688,7 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
 
         if (sender.token) {
             req.setHeader('Authorization', 'Bearer ' + sender.token);
-        } else if (sender.username && sender.password) {
+        } else if (sender.username &amp;&amp; sender.password) {
             req.setHeader('Authorization', 'Basic ' + Buffer.from(sender.username + ':' + sender.password).toString('base64'));
         }
         req.on('timeout', () => req.destroy(new Error('HTTP request timeout')));
@@ -689,9 +717,9 @@ function isRetryable(statusCode) {
 }
 
 async function autoFlush(sender) {
-    if (sender.autoFlush && sender.pendingRowCount > 0 && (
-        (sender.autoFlushRows > 0 && sender.pendingRowCount >= sender.autoFlushRows) ||
-        (sender.autoFlushInterval > 0 && Date.now() - sender.lastFlushTime >= sender.autoFlushInterval)
+    if (sender.autoFlush &amp;&amp; sender.pendingRowCount > 0 &amp;&amp; (
+        (sender.autoFlushRows > 0 &amp;&amp; sender.pendingRowCount >= sender.autoFlushRows) ||
+        (sender.autoFlushInterval > 0 &amp;&amp; Date.now() - sender.lastFlushTime >= sender.autoFlushInterval)
     )) {
         await sender.flush();
     }
@@ -734,7 +762,7 @@ function writeColumn(sender, name, value, writeValue, valueType) {
     if (typeof name !== 'string') {
         throw new Error(`Column name must be a string, received ${typeof name}`);
     }
-    if (valueType != null && typeof value !== valueType) {
+    if (valueType != null &amp;&amp; typeof value !== valueType) {
         throw new Error(`Column value must be of type ${valueType}, received ${typeof value}`);
     }
     if (!sender.hasTable) {
@@ -842,7 +870,7 @@ function initSenderOptions(options) {
 }
 
 function constructAuth(options) {
-    if (!options.username && !options.token && !options.password) {
+    if (!options.username &amp;&amp; !options.token &amp;&amp; !options.password) {
         // no intention to authenticate
         return;
     }
@@ -895,3 +923,26 @@ function sleep(ms) {
 exports.Sender = Sender;
 exports.DEFAULT_BUFFER_SIZE = DEFAULT_BUFFER_SIZE;
 exports.DEFAULT_MAX_BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE;
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 17 2024 11:13:58 GMT+0100 (British Summer Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

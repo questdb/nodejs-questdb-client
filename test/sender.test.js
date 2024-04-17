@@ -14,7 +14,7 @@ const HTTP_OK = 200;
 const QUESTDB_HTTP_PORT = 9000;
 const QUESTDB_ILP_PORT = 9009;
 const PROXY_PORT = 9099;
-const PROXY_HOST = '127.0.0.1';
+const PROXY_HOST = 'localhost';
 
 const senderOptions = {
     port: PROXY_PORT,
@@ -388,8 +388,115 @@ describe('Sender HTTP suite', function () {
 
         const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
         await sendData(sender);
+        expect(mock.numOfRequests).toBe(1);
 
         await sender.close();
+        await mock.stop();
+    });
+
+    it('can ingest via HTTPS', async function () {
+        const mock = new MockHttp({});
+        await mock.start(PROXY_PORT, true, proxyOptions);
+
+        const senderCertCheckFail = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        try {
+            await sendData(senderCertCheckFail);
+            fail('it should not be able to ingest data');
+        } catch (err) {
+            expect(err.message).toBe('self signed certificate in certificate chain');
+        }
+        await senderCertCheckFail.close();
+
+        const senderWithCA = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT};tls_ca=test/certs/ca/ca.crt`);
+        await sendData(senderWithCA);
+        expect(mock.numOfRequests).toBe(1);
+        await senderWithCA.close();
+
+        const senderVerifyOff = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT};tls_verify=unsafe_off`);
+        await sendData(senderVerifyOff);
+        expect(mock.numOfRequests).toBe(2);
+        await senderVerifyOff.close();
+
+        await mock.stop();
+    });
+
+    it('can ingest via HTTP with basic auth', async function () {
+        const mock = new MockHttp({username: 'user1', password: 'pwd'});
+        await mock.start(PROXY_PORT);
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1;password=pwd`);
+        await sendData(sender);
+        expect(mock.numOfRequests).toBe(1);
+        await sender.close();
+
+        const senderFailPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1;password=xyz`);
+        try {
+            await sendData(senderFailPwd);
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailPwd.close();
+
+        const senderFailMissingPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1z`);
+        try {
+            await sendData(senderFailMissingPwd);
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissingPwd.close();
+
+        const senderFailUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=xyz;password=pwd`);
+        try {
+            await sendData(senderFailUsername);
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailUsername.close();
+
+        const senderFailMissingUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};password=pwd`);
+        try {
+            await sendData(senderFailMissingUsername);
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissingUsername.close();
+
+        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        try {
+            await sendData(senderFailMissing);
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissing.close();
+
+        await mock.stop();
+    });
+
+    it('can ingest via HTTP with token auth', async function () {
+        const mock = new MockHttp({token: 'abcdefghijkl123'});
+        await mock.start(PROXY_PORT);
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};token=abcdefghijkl123`);
+        await sendData(sender);
+        expect(mock.numOfRequests).toBe(1);
+        await sender.close();
+
+        const senderFailToken = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};token=xyz`);
+        try {
+            await sendData(senderFailToken);
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailToken.close();
+
+        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        try {
+            await sendData(senderFailMissing);
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissing.close();
+
         await mock.stop();
     });
 
@@ -399,6 +506,27 @@ describe('Sender HTTP suite', function () {
 
         const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
         await sendData(sender);
+        expect(mock.numOfRequests).toBe(5);
+
+        await sender.close();
+        await mock.stop();
+    });
+
+    it('fails when retry timeout expires', async function () {
+        // artificial delay (responseDelay) is same as retry timeout
+        // should result in the request failing on the second try
+        const mock = new MockHttp({
+            responseCodes: [204, 500, 500, 500, 500, 500, 500],
+            responseDelay: 1000
+        });
+        await mock.start(PROXY_PORT);
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=1`);
+        try {
+            await sendData(sender);
+        } catch(err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=500, error=');
+        }
 
         await sender.close();
         await mock.stop();
@@ -448,8 +576,8 @@ describe('Sender connection suite', function () {
     it('can authenticate', async function () {
         const proxy = await createProxy(true);
         const sender = await createSender(AUTH);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -459,8 +587,8 @@ describe('Sender connection suite', function () {
             keyId: 'user1',
             token: 'zhPiK3BkYMYJvRf5sqyrWNJwjDKHOWHnRbmQggUll6A'
         });
-        await sender.close();
         await assertSentData(proxy, true, 'user1\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -478,16 +606,16 @@ describe('Sender connection suite', function () {
         const sender = new Sender({jwk: JWK});
         const connected = await sender.connect(senderOptions, false);
         expect(connected).toBe(true);
-        await sender.close();
         await assertSentData(proxy, true, 'user2\n');
+        await sender.close();
         await proxy.stop();
     });
 
     it('can connect unauthenticated', async function () {
         const proxy = await createProxy();
         const sender = await createSender();
-        await sender.close();
         await assertSentData(proxy, false, '');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -495,8 +623,8 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy(true);
         const sender = await createSender(AUTH);
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -504,8 +632,8 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy();
         const sender = await createSender();
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -513,8 +641,8 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy(true, proxyOptions);
         const sender = await createSender(AUTH, true);
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -522,8 +650,8 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy(false, proxyOptions);
         const sender = await createSender(null, true);
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -579,8 +707,9 @@ describe('Sender connection suite', function () {
     it('can disable the server certificate check' , async function () {
         const proxy = await createProxy(true, proxyOptions);
         const senderCertCheckOn = Sender.fromConfig(`tcps::addr=${PROXY_HOST}:${PROXY_PORT};tls_ca=test/certs/ca/ca.crt`);
-        await senderCertCheckOn.connect();
+        await senderCertCheckOn.connect(senderOptions, true);
         await senderCertCheckOn.close();
+
         const senderCertCheckOff = Sender.fromConfig(`tcps::addr=${PROXY_HOST}:${PROXY_PORT};tls_verify=unsafe_off`);
         await senderCertCheckOff.connect();
         await senderCertCheckOff.close();
@@ -593,14 +722,14 @@ describe('Sender connection suite', function () {
         sender.table('test').symbol('location', 'us');
         const sent = await sender.flush();
         expect(sent).toBe(false);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\n');
+        await sender.close();
         await proxy.stop();
     });
 
     it('supports custom logger', async function () {
         const expectedMessages = [
-            'Successfully connected to 127.0.0.1:9099',
+            'Successfully connected to localhost:9099',
             'Connection to 127.0.0.1:9099 is closed'
         ];
         const log = (level, message) => {
@@ -611,8 +740,8 @@ describe('Sender connection suite', function () {
         const sender = new Sender({init_buf_size: 1024, log: log});
         await sender.connect(senderOptions);
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 });
@@ -1262,10 +1391,10 @@ describe('Sender tests with containerized QuestDB instance', () => {
         await sender.close();
     });
 
-    it('can ingest data via HTTP with auto flush', async () => {
-        const sender = Sender.fromConfig(`http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_rows=1`);
+    it('can ingest data via HTTP with auto flush rows', async () => {
+        const sender = Sender.fromConfig(`http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=0;auto_flush_rows=1`);
 
-        const tableName = 'test_http';
+        const tableName = 'test_http_rows';
         const schema = [
             {name: 'location', type: 'SYMBOL'},
             {name: 'temperature', type: 'DOUBLE'},
@@ -1274,7 +1403,6 @@ describe('Sender tests with containerized QuestDB instance', () => {
 
         // ingest via client
         await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
-        await sender.flush();
 
         // query table
         const select1Result = await runSelect(container, tableName, 1);
@@ -1289,7 +1417,59 @@ describe('Sender tests with containerized QuestDB instance', () => {
         await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.36).at(1658484765000666000n, 'ns');
         await sender.table(tableName).symbol('location', 'emea').floatColumn('temperature', 17.41).at(1658484765000999000n, 'ns');
         await sender.table(tableName).symbol('location', 'emea').symbol('city', 'london').floatColumn('temperature', 18.81).at(1658484765001234000n, 'ns');
-        await sender.flush();
+
+        // query table
+        const select2Result = await runSelect(container, tableName, 4);
+        expect(select2Result.query).toBe(tableName);
+        expect(select2Result.count).toBe(4);
+        expect(select2Result.columns).toStrictEqual([
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'},
+            {name: 'city', type: 'SYMBOL'}
+        ]);
+        expect(select2Result.dataset).toStrictEqual([
+            ['us',17.1,'2022-07-22T10:12:45.000000Z',null],
+            ['us',17.36,'2022-07-22T10:12:45.000666Z',null],
+            ['emea',17.41,'2022-07-22T10:12:45.000999Z',null],
+            ['emea',18.81,'2022-07-22T10:12:45.001234Z','london']
+        ]);
+
+        await sender.close();
+    });
+
+    it('can ingest data via HTTP with auto flush interval', async () => {
+        const sender = Sender.fromConfig(`http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=1;auto_flush_rows=0`);
+
+        const tableName = 'test_http_interval';
+        const schema = [
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'}
+        ];
+
+        // wait longer than the set auto flush interval to make sure there is a flush
+        await sleep(10);
+
+        // ingest via client
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
+
+        // query table
+        const select1Result = await runSelect(container, tableName, 1);
+        expect(select1Result.query).toBe(tableName);
+        expect(select1Result.count).toBe(1);
+        expect(select1Result.columns).toStrictEqual(schema);
+        expect(select1Result.dataset).toStrictEqual([
+            ['us',17.1,'2022-07-22T10:12:45.000000Z']
+        ]);
+
+        // ingest via client, add new column
+        await sleep(10);
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.36).at(1658484765000666000n, 'ns');
+        await sleep(10);
+        await sender.table(tableName).symbol('location', 'emea').floatColumn('temperature', 17.41).at(1658484765000999000n, 'ns');
+        await sleep(10);
+        await sender.table(tableName).symbol('location', 'emea').symbol('city', 'london').floatColumn('temperature', 18.81).at(1658484765001234000n, 'ns');
 
         // query table
         const select2Result = await runSelect(container, tableName, 4);

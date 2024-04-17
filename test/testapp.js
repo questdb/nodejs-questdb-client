@@ -6,7 +6,7 @@ const { readFileSync } = require('fs');
 
 const PROXY_PORT = 9099;
 const PORT = 9009;
-const HOST = '127.0.0.1';
+const HOST = 'localhost';
 
 const USER_NAME = 'testapp';
 const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';

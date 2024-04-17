@@ -184,13 +184,13 @@ describe('Configuration string parser suite', function () {
         ).toThrow('Invalid configuration, value is not set for \'init_buf_size\'');
         expect(
             () => SenderOptions.fromConfig('tcp::addr=host;init_buf_size=1024a;')
-        ).toThrow('Invalid initial buffer size, not a number: \'1024a\'');
+        ).toThrow('Invalid initial buffer size option, not a number: \'1024a\'');
         expect(
             () => SenderOptions.fromConfig('tcp::addr=host;init_buf_size=102 4;')
-        ).toThrow('Invalid initial buffer size, not a number: \'102 4\'');
+        ).toThrow('Invalid initial buffer size option, not a number: \'102 4\'');
         expect(
             () => SenderOptions.fromConfig('tcp::addr=host;init_buf_size=0;')
-        ).toThrow('Invalid initial buffer size: 0');
+        ).toThrow('Invalid initial buffer size option: 0');
     });
 
     it('fails if max_buf_size is not a positive integer', function () {
@@ -199,13 +199,13 @@ describe('Configuration string parser suite', function () {
         ).toThrow('Invalid configuration, value is not set for \'max_buf_size\'');
         expect(
             () => SenderOptions.fromConfig('tcp::addr=host;max_buf_size=1024a;')
-        ).toThrow('Invalid max buffer size, not a number: \'1024a\'');
+        ).toThrow('Invalid max buffer size option, not a number: \'1024a\'');
         expect(
             () => SenderOptions.fromConfig('tcp::addr=host;max_buf_size=102 4;')
-        ).toThrow('Invalid max buffer size, not a number: \'102 4\'');
+        ).toThrow('Invalid max buffer size option, not a number: \'102 4\'');
         expect(
             () => SenderOptions.fromConfig('tcp::addr=host;max_buf_size=0;')
-        ).toThrow('Invalid max buffer size: 0');
+        ).toThrow('Invalid max buffer size option: 0');
     });
 
     it('rejects missing or empty hostname', function () {

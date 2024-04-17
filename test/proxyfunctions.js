@@ -3,7 +3,7 @@
 const net = require('net');
 const tls = require('tls');
 
-const LOCALHOST = '127.0.0.1';
+const LOCALHOST = 'localhost';
 
 async function write(socket, data) {
     return new Promise((resolve, reject) => {
