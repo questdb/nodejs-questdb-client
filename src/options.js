@@ -50,8 +50,8 @@ const UNSAFE_OFF = 'unsafe_off';
  * TLS options
  * <ul>
  * <li> tls_verify: <i>enum, accepted values: on, unsafe_off</i> - When the HTTPS or TCPS protocols are selected, TLS encryption is used. <br>
- * The Sender verifies the server's certificate, this check can be disabled by setting this option to <i>off</i>. Can be useful in
- * non-production environments where self-signed certificates might be used, but generally not recommended to use.
+ * By default, the Sender will verify the server's certificate, but this check can be disabled by setting this option to <i>off</i>. This is useful
+ * non-production environments where self-signed certificates might be used, but should be avoided in production if possible.
  * </li>
  * <li> tls_ca: <i>string</i> - Path to a file containing the root CA's certificate in PEM format. <br>
  * Can be useful when self-signed certificates are used, otherwise should not be set.
