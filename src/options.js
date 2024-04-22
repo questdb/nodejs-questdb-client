@@ -41,9 +41,9 @@ const UNSAFE_OFF = 'unsafe_off';
  * </li>
  * <li> password: <i>string</i> - Password for HTTP Basic authentication, should be accompanied by the <i>username</i> option.
  * </li>
- * <li> token: <i>string</i> - In case of HTTP Bearer token authentication it contains the bearer token. <br>
- * If the TCP transport used with JWK token authentication, then it contains the private key part of the JWK token,
- * and it should be accompanied by the <i>username</i> option.
+ * <li> token: <i>string</i> - For HTTP with Bearer authentication, this is the bearer token. <br>
+ * For TCP with JWK token authentication, this is the private key part of the JWK token,
+ * and must be accompanied by the <i>username</i> option.
  * </li>
  * </ul>
  * <br>
