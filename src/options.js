@@ -60,7 +60,7 @@ const UNSAFE_OFF = 'unsafe_off';
  * <br>
  * Auto flush options
  * <ul>
- * <li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default, this can be switched off
+ * <li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default. This can be switched off
  * by setting this option to <i>off</i>. <br>
  * When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. <br>
  * Manual buffer flushing can be useful, especially when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
