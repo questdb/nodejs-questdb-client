@@ -621,7 +621,7 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
                     body.push(chunk);
                 })
                 .on('error', err => {
-                    console.error("resp err=" + err);
+                    sender.log('error', `resp err=${err}`);
                 });
 
             if (response.statusCode === HTTP_NO_CONTENT) {
