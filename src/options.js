@@ -104,7 +104,7 @@ const UNSAFE_OFF = 'unsafe_off';
  * <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * </li>
- * <li> copy_buffer: <i>enum, accepted values: on, off</i> - By default the Sender creates a new buffer for every flush() call,
+ * <li> copy_buffer: <i>enum, accepted values: on, off</i> - By default, the Sender creates a new buffer for every flush() call,
  * and the data to be sent to the server is copied into this new buffer.
  * Setting the flag to <i>off</i> results in reusing the same buffer instance for each flush() call. <br>
  * Use this flag only if calls to the client are serialised.
