@@ -21,7 +21,7 @@
  * </p>
  * <p>
  * The client uses a buffer to store data. It automatically flushes the buffer by sending its content to the server.
- * Auto flushing can be disabled via configuration options to gain control over transactions, initial and maximum
+ * Auto flushing can be disabled via configuration options to gain control over transactions. Initial and maximum
  * buffer sizes can also be set.
  * </p>
  * <p>
