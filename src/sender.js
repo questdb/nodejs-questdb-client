@@ -59,7 +59,7 @@ const PUBLIC_KEY = {
  * buffer sizes can also be set.
  * </p>
  * <p>
- * It is recommended that the Sender is created by one of the static factory methods,
+ * It is recommended that the Sender is created by using one of the static factory methods,
  * <i>Sender.fromConfig(configString)</i> or <i>Sender.fromEnv()</i>).
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
  * initialized from a configuration string to make sure that the parameters are validated. <br>
