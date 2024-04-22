@@ -63,9 +63,9 @@ const UNSAFE_OFF = 'unsafe_off';
  * <li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default, this can be switched off
  * by setting this option to <i>off</i>. <br>
  * When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. <br>
- * Manual buffer flushing can be useful, when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
- * request, which in turn is a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
- * inserted, or it fails, and none of the rows makes into the database.
+ * Manual buffer flushing can be useful, especially when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
+ * request, which becomes a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
+ * inserted; or it fails, and none of the rows make it into the database.
  * </li>
  * <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
  * The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
