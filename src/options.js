@@ -37,7 +37,7 @@ const UNSAFE_OFF = 'unsafe_off';
  * <ul>
  * <li> username: <i>string</i> - Used for authentication. <br>
  * For HTTP, Basic Authentication requires the <i>password</i> option. <br>
- * If the TCP transport used with JWK token authentication, then should be accompanied by the <i>token</i> option.
+ * For TCP with JWK token authentication, <i>token</i> option is required.
  * </li>
  * <li> password: <i>string</i> - Password for HTTP Basic authentication, should be accompanied by the <i>username</i> option.
  * </li>
