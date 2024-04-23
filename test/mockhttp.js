@@ -29,12 +29,13 @@ class MockHttp {
                 console.info(`Received data: ${Buffer.concat(body)}`);
                 this.numOfRequests++;
 
-                if (this.mockConfig.responseDelay) {
-                    await sleep(this.mockConfig.responseDelay);
+                const delay = this.mockConfig.responseDelays && this.mockConfig.responseDelays.length > 0 ? this.mockConfig.responseDelays.pop() : undefined;
+                if (delay) {
+                    await sleep(delay);
                 }
 
                 const responseCode = authFailed ? 401 : (
-                    this.mockConfig.responseCodes ? this.mockConfig.responseCodes.pop() : 204
+                    this.mockConfig.responseCodes && this.mockConfig.responseCodes.length > 0 ? this.mockConfig.responseCodes.pop() : 204
                 );
                 res.writeHead(responseCode);
                 res.end();

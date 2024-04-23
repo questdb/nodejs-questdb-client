@@ -614,7 +614,10 @@ function createRequestOptions(sender, data) {
 
 function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1, retryInterval = -1) {
     return new Promise((resolve, reject) => {
-        const req = request(options, async response => {
+        let statusCode = -1;
+        const req = request(options, response => {
+            statusCode = response.statusCode;
+
             const body = [];
             response
                 .on('data', chunk => {
@@ -624,7 +627,7 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
                     sender.log('error', `resp err=${err}`);
                 });
 
-            if (response.statusCode === HTTP_NO_CONTENT) {
+            if (statusCode === HTTP_NO_CONTENT) {
                 response.on('end', () => {
                     if (body.length > 0) {
                         sender.log('warn', `Unexpected message from server: ${Buffer.concat(body)}`);
@@ -632,29 +635,7 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
                     sender.doResolve(resolve);
                 });
             } else {
-                if (isRetryable(response.statusCode) && retryTimeout > 0) {
-                    if (retryBegin < 0) {
-                        retryBegin = Date.now();
-                        retryInterval = 10;
-                    } else {
-                        const elapsed = Date.now() - retryBegin;
-                        if (elapsed > retryTimeout) {
-                            reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, error=${Buffer.concat(body)}`));
-                            return;
-                        }
-                    }
-                    const jitter = Math.floor(Math.random() * 10) - 5;
-                    await sleep(retryInterval + jitter);
-                    retryInterval = Math.min(retryInterval * 2, 1000);
-                    try {
-                        await sendHttp(sender, request, options, data, retryTimeout, retryBegin, retryInterval);
-                        resolve(true);
-                    } catch (e) {
-                        reject(e);
-                    }
-                } else {
-                    reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, error=${Buffer.concat(body)}`));
-                }
+                req.destroy(new Error(`HTTP request failed, statusCode=${statusCode}, error=${Buffer.concat(body)}`));
             }
         });
 
@@ -663,8 +644,38 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
         } else if (sender.username && sender.password) {
             req.setHeader('Authorization', 'Basic ' + Buffer.from(sender.username + ':' + sender.password).toString('base64'));
         }
-        req.on('timeout', () => req.destroy(new Error('HTTP request timeout')));
-        req.on('error', err => reject(err));
+
+        req.on('timeout', () => {
+            // set a retryable error code
+            statusCode = 524;
+            req.destroy(new Error('HTTP request timeout, no response from server in time'));
+        });
+        req.on('error', err => {
+            // if the error is thrown while the request is sent, statusCode is -1 => no retry
+            // request timeout comes through with statusCode 524 => retry
+            // if the error is thrown while the response is processed, the statusCode is taken from the response => retry depends on statusCode
+            if (isRetryable(statusCode) && retryTimeout > 0) {
+                if (retryBegin < 0) {
+                    retryBegin = Date.now();
+                    retryInterval = 10;
+                } else {
+                    const elapsed = Date.now() - retryBegin;
+                    if (elapsed > retryTimeout) {
+                        reject(err);
+                        return;
+                    }
+                }
+                const jitter = Math.floor(Math.random() * 10) - 5;
+                setTimeout(() => {
+                    retryInterval = Math.min(retryInterval * 2, 1000);
+                    sendHttp(sender, request, options, data, retryTimeout, retryBegin, retryInterval)
+                        .then(() => resolve(true))
+                        .catch(e => reject(e));
+                }, retryInterval + jitter);
+            } else {
+                reject(err);
+            }
+        });
         req.write(data, err => err ? reject(err) : () => {});
         req.end();
     });
@@ -886,10 +897,6 @@ function constructJwk(options) {
     } else {
         return options.jwk;
     }
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 exports.Sender = Sender;

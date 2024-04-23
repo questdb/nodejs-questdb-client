@@ -401,7 +401,7 @@ describe('Sender HTTP suite', function () {
         const senderCertCheckFail = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT}`);
         try {
             await sendData(senderCertCheckFail);
-            fail('it should not be able to ingest data');
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('self signed certificate in certificate chain');
         }
@@ -432,6 +432,7 @@ describe('Sender HTTP suite', function () {
         const senderFailPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1;password=xyz`);
         try {
             await sendData(senderFailPwd);
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
         }
@@ -440,6 +441,7 @@ describe('Sender HTTP suite', function () {
         const senderFailMissingPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1z`);
         try {
             await sendData(senderFailMissingPwd);
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
         }
@@ -448,6 +450,7 @@ describe('Sender HTTP suite', function () {
         const senderFailUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=xyz;password=pwd`);
         try {
             await sendData(senderFailUsername);
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
         }
@@ -456,6 +459,7 @@ describe('Sender HTTP suite', function () {
         const senderFailMissingUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};password=pwd`);
         try {
             await sendData(senderFailMissingUsername);
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
         }
@@ -464,6 +468,7 @@ describe('Sender HTTP suite', function () {
         const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
         try {
             await sendData(senderFailMissing);
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
         }
@@ -484,6 +489,7 @@ describe('Sender HTTP suite', function () {
         const senderFailToken = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};token=xyz`);
         try {
             await sendData(senderFailToken);
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
         }
@@ -492,6 +498,7 @@ describe('Sender HTTP suite', function () {
         const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
         try {
             await sendData(senderFailMissing);
+            fail('Request should have failed');
         } catch (err) {
             expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
         }
@@ -513,20 +520,56 @@ describe('Sender HTTP suite', function () {
     });
 
     it('fails when retry timeout expires', async function () {
-        // artificial delay (responseDelay) is same as retry timeout
+        // artificial delay (responseDelays) is same as retry timeout
         // should result in the request failing on the second try
         const mock = new MockHttp({
-            responseCodes: [204, 500, 500, 500, 500, 500, 500],
-            responseDelay: 1000
+            responseCodes: [204, 500, 503],
+            responseDelays: [1000, 1000, 1000]
         });
         await mock.start(PROXY_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=1`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=1000`);
         try {
             await sendData(sender);
+            fail('Request should have failed');
         } catch(err) {
             expect(err.message).toBe('HTTP request failed, statusCode=500, error=');
         }
+
+        await sender.close();
+        await mock.stop();
+    });
+
+    it('fails when HTTP request times out', async function () {
+        // artificial delay (responseDelays) is greater than request timeout, and retry is switched off
+        // should result in the request failing with timeout
+        const mock = new MockHttp({
+            responseCodes: [204],
+            responseDelays: [500]
+        });
+        await mock.start(PROXY_PORT);
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=0;request_timeout=100`);
+        try {
+            await sendData(sender);
+            fail('Request should have failed');
+        } catch(err) {
+            expect(err.message).toBe('HTTP request timeout, no response from server in time');
+        }
+
+        await sender.close();
+        await mock.stop();
+    });
+
+    it('succeeds on the third request after two timeouts', async function () {
+        const mock = new MockHttp({
+            responseCodes: [204, 504, 504],
+            responseDelays: [2000, 2000]
+        });
+        await mock.start(PROXY_PORT);
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=30000;request_timeout=1000`);
+        await sendData(sender);
 
         await sender.close();
         await mock.stop();
