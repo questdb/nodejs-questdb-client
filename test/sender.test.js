@@ -403,7 +403,7 @@ describe('Sender HTTP suite', function () {
             await sendData(senderCertCheckFail);
             fail('Request should have failed');
         } catch (err) {
-            expect(err.message).toBe('self signed certificate in certificate chain');
+            expect(err.message).toMatch(/^self[ -]signed certificate in certificate chain$/);
         }
         await senderCertCheckFail.close();
 
