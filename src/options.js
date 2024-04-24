@@ -1,5 +1,8 @@
 'use strict';
 
+const http = require('http');
+const https = require('https');
+
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
 
@@ -148,46 +151,60 @@ class SenderOptions {
     max_name_len;
 
     log;
+    agent;
 
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. <br>
-     * @param {function} log - Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.
+     * @param {log: function, agent: http.Agent|https.Agent} extraOptions - Optional extra configuration. <br>
+     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used.
      */
-    constructor(configurationString, log = undefined) {
+    constructor(configurationString, extraOptions = undefined) {
         parseConfigurationString(this, configurationString);
 
-        if (log && typeof log !== 'function') {
-            throw new Error('Invalid logging function');
+        if (extraOptions) {
+            if (extraOptions.log && typeof extraOptions.log !== 'function') {
+                throw new Error('Invalid logging function');
+            }
+            this.log = extraOptions.log;
+
+            if (extraOptions.agent && !(extraOptions.agent instanceof http.Agent) && !(extraOptions.agent instanceof https.Agent)) {
+                throw new Error('Invalid http/https agent');
+            }
+            this.agent = extraOptions.agent;
         }
-        this.log = log;
     }
 
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. <br>
-     * @param {function} log - Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.
+     * @param {log: function, agent: http.Agent | https.Agent} extraOptions - Optional extra configuration. <br>
+     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used.
      *
      * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
      */
-    static fromConfig(configurationString, log = undefined) {
-        return new SenderOptions(configurationString, log);
+    static fromConfig(configurationString, extraOptions = undefined) {
+        return new SenderOptions(configurationString, extraOptions);
     }
 
     /**
      * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
      *
-     * @param {function} log - Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.
+     * @param {log: function, agent: http.Agent | https.Agent} extraOptions - Optional extra configuration. <br>
+     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used.
      *
      * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
      */
-    static fromEnv(log = undefined) {
-        return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, log);
+    static fromEnv(extraOptions = undefined) {
+        return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions);
     }
 }
 

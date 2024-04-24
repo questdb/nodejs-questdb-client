@@ -390,6 +390,22 @@ describe('Sender HTTP suite', function () {
         await sendData(sender);
         expect(mock.numOfRequests).toBe(1);
 
+        expect(sender.agent.maxSockets).toBe(256);
+
+        await sender.close();
+        await mock.stop();
+    });
+
+    it('supports custom http agent', async function () {
+        const mock = new MockHttp({});
+        await mock.start(PROXY_PORT);
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`, { agent: new http.Agent({ maxSockets: 128 }) });
+        await sendData(sender);
+        expect(mock.numOfRequests).toBe(1);
+
+        expect(sender.agent.maxSockets).toBe(128);
+
         await sender.close();
         await mock.stop();
     });
@@ -572,6 +588,32 @@ describe('Sender HTTP suite', function () {
         await sendData(sender);
 
         await sender.close();
+        await mock.stop();
+    });
+
+    it('limits maximum number of http connections', async function () {
+        const mock = new MockHttp({});
+        await mock.start(PROXY_PORT);
+
+        const agent = new http.Agent({ maxSockets: 2 });
+
+        const num = 300;
+        const senders = [];
+        const promises = [];
+        for (let i = 0; i < num; i++) {
+            const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`, { agent: agent});
+            senders.push(sender);
+            const promise = sendData(sender);
+            promises.push(promise);
+        }
+        await Promise.all(promises);
+        expect(mock.numOfRequests).toBe(num);
+
+        expect(agent.totalSocketCount).toBeLessThan(3);
+
+        for (const sender of senders) {
+            await sender.close();
+        }
         await mock.stop();
     });
 });

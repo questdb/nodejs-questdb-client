@@ -1,6 +1,7 @@
 'use strict';
 
 const { SenderOptions } = require('../src/options');
+const http = require("http");
 
 describe('Configuration string parser suite', function () {
     it('can parse a basic config string', function () {
@@ -600,5 +601,38 @@ describe('Configuration string parser suite', function () {
         expect(
             () => SenderOptions.fromConfig('http::addr=host:9000;max_name_len=6w0')
         ).toThrow('Invalid max name length option, not a number: \'6w0\'');
+    });
+
+    it('can take a custom logger', function () {
+        let options = SenderOptions.fromConfig('http::addr=host:9000', { log: console.log });
+        expect(options.protocol).toBe('http');
+        expect(options.log).toBe(console.log);
+
+        expect(
+            () => SenderOptions.fromConfig('http::addr=host:9000', { log: 1234 })
+        ).toThrow('Invalid logging function');
+        expect(
+            () => SenderOptions.fromConfig('http::addr=host:9000', { log: 'hoppa' })
+        ).toThrow('Invalid logging function');
+    });
+
+    it('can take a custom agent', function () {
+        let options = SenderOptions.fromConfig('http::addr=host:9000', { agent: new http.Agent() });
+        expect(options.protocol).toBe('http');
+        expect(options.agent.keepAlive).toBe(false);
+
+        options = SenderOptions.fromConfig('http::addr=host:9000', { agent: new http.Agent({ keepAlive: true }) });
+        expect(options.protocol).toBe('http');
+        expect(options.agent.keepAlive).toBe(true);
+
+        expect(
+            () => SenderOptions.fromConfig('http::addr=host:9000', { agent: { keepAlive: true } })
+        ).toThrow('Invalid http/https agent');
+        expect(
+            () => SenderOptions.fromConfig('http::addr=host:9000', { agent: 4567 })
+        ).toThrow('Invalid http/https agent');
+        expect(
+            () => SenderOptions.fromConfig('http::addr=host:9000', { agent: 'hopp' })
+        ).toThrow('Invalid http/https agent');
     });
 });

@@ -19,6 +19,8 @@ const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
+const DEFAULT_MAX_CONNECTIONS = 256;
+
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
 const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400; // 100 KB/sec
@@ -108,6 +110,7 @@ class Sender {
     /** @private */ maxNameLength;
 
     /** @private */ log;
+    /** @private */ agent;
 
     /**
      * Creates an instance of Sender.
@@ -124,10 +127,12 @@ class Sender {
             case HTTP:
                 this.http = true;
                 this.secure = false;
+                this.agent = options.agent instanceof http.Agent ? options.agent : new http.Agent({ maxSockets: DEFAULT_MAX_CONNECTIONS });
                 break;
             case HTTPS:
                 this.http = true;
                 this.secure = true;
+                this.agent = options.agent instanceof https.Agent ? options.agent : new https.Agent({ maxSockets: DEFAULT_MAX_CONNECTIONS });
                 break;
             case TCP:
                 this.http = false;
@@ -187,20 +192,29 @@ class Sender {
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. <br>
+     * @param {log: function, agent: http.Agent | https.Agent} extraOptions - Optional extra configuration. <br>
+     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used.
      *
      * @return {Sender} A Sender object initialized from the provided configuration string.
      */
-    static fromConfig(configurationString) {
-        return new Sender(SenderOptions.fromConfig(configurationString));
+    static fromConfig(configurationString, extraOptions = undefined) {
+        return new Sender(SenderOptions.fromConfig(configurationString, extraOptions));
     }
 
     /**
      * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
      *
+     * @param {log: function, agent: http.Agent | https.Agent} extraOptions - Optional extra configuration. <br>
+     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used.
+     *
      * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
      */
-    static fromEnv() {
-        return new Sender(SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF));
+    static fromEnv(extraOptions = undefined) {
+        return new Sender(SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions));
     }
 
     /**
@@ -601,6 +615,7 @@ function createRequestOptions(sender, data) {
     const options = {
         hostname: sender.host,
         port: sender.port,
+        agent: sender.agent,
         path: '/write?precision=n',
         method: 'POST',
         timeout: timeoutMillis
