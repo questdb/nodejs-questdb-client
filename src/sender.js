@@ -19,8 +19,6 @@ const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
-const DEFAULT_MAX_CONNECTIONS = 256;
-
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
 const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400; // 100 KB/sec
@@ -29,6 +27,15 @@ const DEFAULT_RETRY_TIMEOUT = 10000; // 10 sec
 
 const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
 const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
+
+// default options for HTTP agent
+// - persistent connections with 1 minute idle timeout, server side has 5 minutes set by default
+// - max open connections is set to 256, same as server side default
+const DEFAULT_HTTP_AGENT_CONFIG = {
+    maxSockets: 256,
+    keepAlive: true,
+    timeout: 60000 // 1 min
+}
 
 // an arbitrary public key, not used in authentication
 // only used to construct a valid JWK token which is accepted by the crypto API
@@ -127,12 +134,12 @@ class Sender {
             case HTTP:
                 this.http = true;
                 this.secure = false;
-                this.agent = options.agent instanceof http.Agent ? options.agent : new http.Agent({ maxSockets: DEFAULT_MAX_CONNECTIONS });
+                this.agent = options.agent instanceof http.Agent ? options.agent : new http.Agent(DEFAULT_HTTP_AGENT_CONFIG);
                 break;
             case HTTPS:
                 this.http = true;
                 this.secure = true;
-                this.agent = options.agent instanceof https.Agent ? options.agent : new https.Agent({ maxSockets: DEFAULT_MAX_CONNECTIONS });
+                this.agent = options.agent instanceof https.Agent ? options.agent : new https.Agent(DEFAULT_HTTP_AGENT_CONFIG);
                 break;
             case TCP:
                 this.http = false;

@@ -591,11 +591,11 @@ describe('Sender HTTP suite', function () {
         await mock.stop();
     });
 
-    it('limits maximum number of http connections', async function () {
+    it('accepts custom http agent', async function () {
         const mock = new MockHttp({});
         await mock.start(PROXY_PORT);
 
-        const agent = new http.Agent({ maxSockets: 2 });
+        const agent = new http.Agent({ keepAlive: false, maxSockets: 2 });
 
         const num = 300;
         const senders = [];
