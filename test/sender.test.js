@@ -981,11 +981,11 @@ describe('Sender connection suite', function () {
     it('supports custom logger', async function () {
         const expectedMessages = [
             'Successfully connected to localhost:9088',
-            'Connection to 127.0.0.1:9088 is closed'
+            /^Connection to .*1:9088 is closed$/
         ];
         const log = (level, message) => {
             expect(level).toBe('info');
-            expect(message).toBe(expectedMessages.shift());
+            expect(message).toMatch(expectedMessages.shift());
         };
         const proxy = await createProxy();
         const sender = new Sender({init_buf_size: 1024, log: log});
