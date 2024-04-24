@@ -204,10 +204,11 @@ class Sender {
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. <br>
-     * @param {log: function, agent: http.Agent | https.Agent} extraOptions - Optional extra configuration. <br>
+     * @param {object} extraOptions - Optional extra configuration. <br>
      * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
      * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used.
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the provided configuration string.
      */
@@ -218,10 +219,11 @@ class Sender {
     /**
      * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
      *
-     * @param {log: function, agent: http.Agent | https.Agent} extraOptions - Optional extra configuration. <br>
+     * @param {object} extraOptions - Optional extra configuration. <br>
      * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
      * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used.
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
      */
@@ -241,6 +243,10 @@ class Sender {
             throw new Error(`Max buffer size is ${this.maxBufferSize} bytes, requested buffer size: ${bufferSize}`);
         }
         this.bufferSize = bufferSize;
+        // Allocating an extra byte because Buffer.write() does not fail if the length of the data to be written is
+        // longer than the size of the buffer. It simply just writes whatever it can, and returns.
+        // If we can write into the extra byte, that indicates buffer overflow.
+        // See the check in our write() function.
         const newBuffer = Buffer.alloc(this.bufferSize + 1, 0, 'utf8');
         if (this.buffer) {
             this.buffer.copy(newBuffer);
