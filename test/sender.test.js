@@ -591,6 +591,55 @@ describe('Sender HTTP suite', function () {
         await mock.stop();
     });
 
+    it('destroys default http/https agents when last sender is closed', async function () {
+        expect(Sender.DEFAULT_HTTP_AGENT).toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).toBeUndefined();
+
+        const sender1 = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        expect(sender1.agent).toBe(Sender.DEFAULT_HTTP_AGENT);
+        expect(Sender.numOfSenders).toBe(1);
+        expect(Sender.DEFAULT_HTTP_AGENT).not.toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).toBeUndefined();
+
+        const sender2 = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        expect(sender2.agent).toBe(Sender.DEFAULT_HTTP_AGENT);
+        expect(Sender.numOfSenders).toBe(2);
+        expect(Sender.DEFAULT_HTTP_AGENT).not.toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).toBeUndefined();
+
+        const sender3 = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        expect(sender3.agent).toBe(Sender.DEFAULT_HTTP_AGENT);
+        expect(Sender.numOfSenders).toBe(3);
+        expect(Sender.DEFAULT_HTTP_AGENT).not.toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).toBeUndefined();
+
+        const sender4 = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        expect(sender4.agent).toBe(Sender.DEFAULT_HTTPS_AGENT);
+        expect(Sender.numOfSenders).toBe(4);
+        expect(Sender.DEFAULT_HTTP_AGENT).not.toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).not.toBeUndefined();
+
+        await sender1.close();
+        expect(Sender.numOfSenders).toBe(3);
+        expect(Sender.DEFAULT_HTTP_AGENT).not.toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).not.toBeUndefined();
+
+        await sender4.close();
+        expect(Sender.numOfSenders).toBe(2);
+        expect(Sender.DEFAULT_HTTP_AGENT).not.toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).not.toBeUndefined();
+
+        await sender2.close();
+        expect(Sender.numOfSenders).toBe(1);
+        expect(Sender.DEFAULT_HTTP_AGENT).not.toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).not.toBeUndefined();
+
+        await sender3.close();
+        expect(Sender.numOfSenders).toBe(0);
+        expect(Sender.DEFAULT_HTTP_AGENT).toBeUndefined();
+        expect(Sender.DEFAULT_HTTPS_AGENT).toBeUndefined();
+    });
+
     it('accepts custom http agent', async function () {
         const mock = new MockHttp({});
         await mock.start(PROXY_PORT);
@@ -615,6 +664,7 @@ describe('Sender HTTP suite', function () {
             await sender.close();
         }
         await mock.stop();
+        agent.destroy();
     });
 });
 

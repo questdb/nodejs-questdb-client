@@ -77,6 +77,9 @@ const PUBLIC_KEY = {
  * </p>
  */
 class Sender {
+    /** @private */ static DEFAULT_HTTP_AGENT;
+    /** @private */ static DEFAULT_HTTPS_AGENT;
+    /** @private */ static numOfSenders = 0;
 
     /** @private */ http;       // true if the protocol is HTTP/HTTPS, false if it is TCP/TCPS
     /** @private */ secure;     // true if the protocol is HTTPS or TCPS, false otherwise
@@ -134,12 +137,12 @@ class Sender {
             case HTTP:
                 this.http = true;
                 this.secure = false;
-                this.agent = options.agent instanceof http.Agent ? options.agent : new http.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+                this.agent = options.agent instanceof http.Agent ? options.agent : this.getDefaultHttpAgent();
                 break;
             case HTTPS:
                 this.http = true;
                 this.secure = true;
-                this.agent = options.agent instanceof https.Agent ? options.agent : new https.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+                this.agent = options.agent instanceof https.Agent ? options.agent : this.getDefaultHttpsAgent();
                 break;
             case TCP:
                 this.http = false;
@@ -193,6 +196,8 @@ class Sender {
         this.maxBufferSize = isInteger(options.max_buf_size, 1) ? options.max_buf_size : DEFAULT_MAX_BUFFER_SIZE;
         this.resize(isInteger(options.init_buf_size, 1) ? options.init_buf_size : DEFAULT_BUFFER_SIZE);
         this.reset();
+
+        Sender.numOfSenders++;
     }
 
     /**
@@ -337,10 +342,44 @@ class Sender {
     }
 
     /**
+     * @ignore
+     * @return {http.Agent} Returns the default http agent.
+     */
+    getDefaultHttpAgent() {
+        if (!Sender.DEFAULT_HTTP_AGENT) {
+            Sender.DEFAULT_HTTP_AGENT = new http.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+        }
+        return Sender.DEFAULT_HTTP_AGENT;
+    }
+
+    /**
+     * @ignore
+     * @return {https.Agent} Returns the default https agent.
+     */
+    getDefaultHttpsAgent() {
+        if (!Sender.DEFAULT_HTTPS_AGENT) {
+            Sender.DEFAULT_HTTPS_AGENT = new https.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+        }
+        return Sender.DEFAULT_HTTPS_AGENT;
+    }
+
+    /**
      * Closes the TCP connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
+        Sender.numOfSenders--;
+        if (Sender.numOfSenders < 1) {
+            if (Sender.DEFAULT_HTTP_AGENT) {
+                Sender.DEFAULT_HTTP_AGENT.destroy();
+                Sender.DEFAULT_HTTP_AGENT = undefined;
+            }
+            if (Sender.DEFAULT_HTTPS_AGENT) {
+                Sender.DEFAULT_HTTPS_AGENT.destroy();
+                Sender.DEFAULT_HTTPS_AGENT = undefined;
+            }
+        }
+
         if (this.socket) {
             const address = this.socket.remoteAddress;
             const port = this.socket.remotePort;
