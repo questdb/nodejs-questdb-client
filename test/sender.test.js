@@ -13,7 +13,8 @@ const HTTP_OK = 200;
 
 const QUESTDB_HTTP_PORT = 9000;
 const QUESTDB_ILP_PORT = 9009;
-const PROXY_PORT = 9099;
+const MOCK_HTTP_PORT = 9099;
+const PROXY_PORT = 9088;
 const PROXY_HOST = 'localhost';
 
 const senderOptions = {
@@ -41,338 +42,426 @@ async function sleep(ms) {
 
 describe('Sender configuration options suite', function () {
     it('creates a sender from a configuration string', async function () {
-        Sender.fromConfig('tcps::addr=hostname;');
+        await Sender.fromConfig('tcps::addr=hostname;').close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('creates a sender from a configuration string picked up from env', async function () {
         process.env.QDB_CLIENT_CONF = 'https::addr=hostname;';
-        Sender.fromEnv();
+        await Sender.fromEnv().close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws exception if the username or the token is missing when TCP transport is used', async function () {
         try {
-            Sender.fromConfig('tcp::addr=hostname;username=bobo;');
+            await Sender.fromConfig('tcp::addr=hostname;username=bobo;').close();
         } catch(err) {
             expect(err.message).toBe('TCP transport requires a username and a private key for authentication, please, specify the \'username\' and \'token\' config options');
         }
 
         try {
-            Sender.fromConfig('tcp::addr=hostname;token=bobo_token;');
+            await Sender.fromConfig('tcp::addr=hostname;token=bobo_token;').close();
         } catch(err) {
             expect(err.message).toBe('TCP transport requires a username and a private key for authentication, please, specify the \'username\' and \'token\' config options');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws exception if tls_roots or tls_roots_password is used', async function () {
         try {
-            Sender.fromConfig('tcps::addr=hostname;username=bobo;tls_roots=bla;');
+            await Sender.fromConfig('tcps::addr=hostname;username=bobo;tls_roots=bla;').close();
         } catch(err) {
             expect(err.message).toBe('\'tls_roots\' and \'tls_roots_password\' options are not supported, please, use the \'tls_ca\' option or the NODE_EXTRA_CA_CERTS environment variable instead');
         }
 
         try {
-            Sender.fromConfig('tcps::addr=hostname;token=bobo_token;tls_roots_password=bla;');
+            await Sender.fromConfig('tcps::addr=hostname;token=bobo_token;tls_roots_password=bla;').close();
         } catch(err) {
             expect(err.message).toBe('\'tls_roots\' and \'tls_roots_password\' options are not supported, please, use the \'tls_ca\' option or the NODE_EXTRA_CA_CERTS environment variable instead');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws exception if connect() is called when http transport is used', async function () {
+        let sender;
         try {
-            const sender = Sender.fromConfig('http::addr=hostname');
+            sender = Sender.fromConfig('http::addr=hostname');
             await sender.connect();
         } catch(err) {
             expect(err.message).toBe('\'connect()\' should be called only if the sender connects via TCP');
         }
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 });
 
 describe('Sender options test suite', function () {
-    it('does copy the buffer during flush() if no options defined', function () {
+    it('does copy the buffer during flush() if no options defined', async function () {
         const sender = new Sender();
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does copy the buffer during flush() if options are null', function () {
+    it('does copy the buffer during flush() if options are null', async function () {
         const sender = new Sender(null);
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does copy the buffer during flush() if options are undefined', function () {
+    it('does copy the buffer during flush() if options are undefined', async function () {
         const sender = new Sender(undefined);
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does copy the buffer during flush() if options are empty', function () {
+    it('does copy the buffer during flush() if options are empty', async function () {
         const sender = new Sender({});
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does copy the buffer during flush() if copyBuffer is not set', function () {
+    it('does copy the buffer during flush() if copyBuffer is not set', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does copy the buffer during flush() if copyBuffer is set to true', function () {
+    it('does copy the buffer during flush() if copyBuffer is set to true', async function () {
         const sender = new Sender({copy_buffer: true});
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does copy the buffer during flush() if copyBuffer is not a boolean', function () {
+    it('does copy the buffer during flush() if copyBuffer is not a boolean', async function () {
         const sender = new Sender({copy_buffer: ''});
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does not copy the buffer during flush() if copyBuffer is set to false', function () {
+    it('does not copy the buffer during flush() if copyBuffer is set to false', async function () {
         const sender = new Sender({copy_buffer: false});
         expect(sender.toBuffer).toBe(sender.toBufferView);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does not copy the buffer during flush() if copyBuffer is set to null', function () {
+    it('does not copy the buffer during flush() if copyBuffer is set to null', async function () {
         const sender = new Sender({copy_buffer: null});
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('does not copy the buffer during flush() if copyBuffer is undefined', function () {
+    it('does not copy the buffer during flush() if copyBuffer is undefined', async function () {
         const sender = new Sender({copy_buffer: undefined});
         expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if no options defined', function () {
+    it('sets default buffer size if no options defined', async function () {
         const sender = new Sender();
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if options are null', function () {
+    it('sets default buffer size if options are null', async function () {
         const sender = new Sender(null);
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if options are undefined', function () {
+    it('sets default buffer size if options are undefined', async function () {
         const sender = new Sender(undefined);
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if options are empty', function () {
+    it('sets default buffer size if options are empty', async function () {
         const sender = new Sender({});
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if bufferSize is not set', function () {
+    it('sets default buffer size if bufferSize is not set', async function () {
         const sender = new Sender({copy_buffer: true});
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets the requested buffer size if bufferSize is set', function () {
+    it('sets the requested buffer size if bufferSize is set', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(sender.bufferSize).toBe(1024);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if bufferSize is set to null', function () {
+    it('sets default buffer size if bufferSize is set to null', async function () {
         const sender = new Sender({init_buf_size: null});
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if bufferSize is set to undefined', function () {
+    it('sets default buffer size if bufferSize is set to undefined', async function () {
         const sender = new Sender({init_buf_size: undefined});
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default buffer size if bufferSize is not a number', function () {
+    it('sets default buffer size if bufferSize is not a number', async function () {
         const sender = new Sender({init_buf_size: '1024'});
         expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if no options defined', function () {
+    it('sets default max buffer size if no options defined', async function () {
         const sender = new Sender();
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if options are null', function () {
+    it('sets default max buffer size if options are null', async function () {
         const sender = new Sender(null);
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if options are undefined', function () {
+    it('sets default max buffer size if options are undefined', async function () {
         const sender = new Sender(undefined);
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if options are empty', function () {
+    it('sets default max buffer size if options are empty', async function () {
         const sender = new Sender({});
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if max_buf_size is not set', function () {
+    it('sets default max buffer size if max_buf_size is not set', async function () {
         const sender = new Sender({copy_buffer: true});
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets the requested max buffer size if max_buf_size is set', function () {
+    it('sets the requested max buffer size if max_buf_size is set', async function () {
         const sender = new Sender({max_buf_size: 131072});
         expect(sender.maxBufferSize).toBe(131072);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws error if initial buffer size is greater than max_buf_size', function () {
+    it('throws error if initial buffer size is greater than max_buf_size', async function () {
         try {
-            new Sender({max_buf_size: 8192, init_buf_size: 16384});
-        } catch(err) {
+            await new Sender({max_buf_size: 8192, init_buf_size: 16384}).close();
+        } catch (err) {
             expect(err.message).toBe('Max buffer size is 8192 bytes, requested buffer size: 16384');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if max_buf_size is set to null', function () {
+    it('sets default max buffer size if max_buf_size is set to null', async function () {
         const sender = new Sender({max_buf_size: null});
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if max_buf_size is set to undefined', function () {
+    it('sets default max buffer size if max_buf_size is set to undefined', async function () {
         const sender = new Sender({max_buf_size: undefined});
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('sets default max buffer size if max_buf_size is not a number', function () {
+    it('sets default max buffer size if max_buf_size is not a number', async function () {
         const sender = new Sender({max_buf_size: '1024'});
         expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if no options defined', function () {
+    it('uses default logger if no options defined', async function () {
         const sender = new Sender();
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if options are null', function () {
+    it('uses default logger if options are null', async function () {
         const sender = new Sender(null);
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if options are undefined', function () {
+    it('uses default logger if options are undefined', async function () {
         const sender = new Sender(undefined);
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if options are empty', function () {
+    it('uses default logger if options are empty', async function () {
         const sender = new Sender({});
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if log function is not set', function () {
+    it('uses default logger if log function is not set', async function () {
         const sender = new Sender({copy_buffer: true});
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses the required log function if it is set', function () {
+    it('uses the required log function if it is set', async function () {
         const testFunc = () => {};
         const sender = new Sender({log: testFunc});
         expect(sender.log).toBe(testFunc);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if log is set to null', function () {
+    it('uses default logger if log is set to null', async function () {
         const sender = new Sender({log: null});
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if log is set to undefined', function () {
+    it('uses default logger if log is set to undefined', async function () {
         const sender = new Sender({log: undefined});
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('uses default logger if log is not a function', function () {
+    it('uses default logger if log is not a function', async function () {
         const sender = new Sender({log: ''});
         expect(sender.log).toBe(log);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 });
 
 describe('Sender auth config checks suite', function () {
     it('requires a username for authentication', async function () {
         try {
-            new Sender({
+            await new Sender({
                 bufferSize: 512,
                 auth: {
                     token: 'privateKey'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
                 'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('requires a non-empty username', async function () {
         try {
-            new Sender({
+            await new Sender({
                 bufferSize: 512,
                 auth: {
                     keyId: '',
                     token: 'privateKey'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
                 'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('requires that the username is a string', async function () {
         try {
-            new Sender({
+            await new Sender({
                 bufferSize: 512,
                 auth: {
                     keyId: 23,
                     token: 'privateKey'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
                 'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('requires a private key for authentication', async function () {
         try {
-            new Sender({
+            await new Sender({
                 auth: {
                     keyId: 'username'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
                 'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('requires a non-empty private key', async function () {
         try {
-            new Sender({
+            await new Sender({
                 auth: {
                     keyId: 'username',
                     token: ''
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
                 'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('requires that the private key is a string', async function () {
         try {
-            new Sender({
+            await new Sender({
                 auth: {
                     keyId: 'username',
                     token: true
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
                 'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
         }
+        expect(Sender.numOfSenders).toBe(0);
     });
 });
 
@@ -384,9 +473,9 @@ describe('Sender HTTP suite', function () {
 
     it('can ingest via HTTP', async function () {
         const mock = new MockHttp({});
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
         await sendData(sender);
         expect(mock.numOfRequests).toBe(1);
 
@@ -394,15 +483,16 @@ describe('Sender HTTP suite', function () {
 
         await sender.close();
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports custom http agent', async function () {
         const mock = new MockHttp({});
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
         const agent = new http.Agent({ maxSockets: 128 });
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`, { agent: agent });
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`, { agent: agent });
         await sendData(sender);
         expect(mock.numOfRequests).toBe(1);
 
@@ -411,13 +501,14 @@ describe('Sender HTTP suite', function () {
         await sender.close();
         await mock.stop();
         agent.destroy();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can ingest via HTTPS', async function () {
         const mock = new MockHttp({});
-        await mock.start(PROXY_PORT, true, proxyOptions);
+        await mock.start(MOCK_HTTP_PORT, true, proxyOptions);
 
-        const senderCertCheckFail = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        const senderCertCheckFail = Sender.fromConfig(`https::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
         try {
             await sendData(senderCertCheckFail);
             fail('Request should have failed');
@@ -426,29 +517,30 @@ describe('Sender HTTP suite', function () {
         }
         await senderCertCheckFail.close();
 
-        const senderWithCA = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT};tls_ca=test/certs/ca/ca.crt`);
+        const senderWithCA = Sender.fromConfig(`https::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};tls_ca=test/certs/ca/ca.crt`);
         await sendData(senderWithCA);
         expect(mock.numOfRequests).toBe(1);
         await senderWithCA.close();
 
-        const senderVerifyOff = Sender.fromConfig(`https::addr=${PROXY_HOST}:${PROXY_PORT};tls_verify=unsafe_off`);
+        const senderVerifyOff = Sender.fromConfig(`https::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};tls_verify=unsafe_off`);
         await sendData(senderVerifyOff);
         expect(mock.numOfRequests).toBe(2);
         await senderVerifyOff.close();
 
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can ingest via HTTP with basic auth', async function () {
         const mock = new MockHttp({username: 'user1', password: 'pwd'});
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1;password=pwd`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1;password=pwd`);
         await sendData(sender);
         expect(mock.numOfRequests).toBe(1);
         await sender.close();
 
-        const senderFailPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1;password=xyz`);
+        const senderFailPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1;password=xyz`);
         try {
             await sendData(senderFailPwd);
             fail('Request should have failed');
@@ -457,7 +549,7 @@ describe('Sender HTTP suite', function () {
         }
         await senderFailPwd.close();
 
-        const senderFailMissingPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=user1z`);
+        const senderFailMissingPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1z`);
         try {
             await sendData(senderFailMissingPwd);
             fail('Request should have failed');
@@ -466,7 +558,7 @@ describe('Sender HTTP suite', function () {
         }
         await senderFailMissingPwd.close();
 
-        const senderFailUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};username=xyz;password=pwd`);
+        const senderFailUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=xyz;password=pwd`);
         try {
             await sendData(senderFailUsername);
             fail('Request should have failed');
@@ -475,7 +567,7 @@ describe('Sender HTTP suite', function () {
         }
         await senderFailUsername.close();
 
-        const senderFailMissingUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};password=pwd`);
+        const senderFailMissingUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};password=pwd`);
         try {
             await sendData(senderFailMissingUsername);
             fail('Request should have failed');
@@ -484,7 +576,7 @@ describe('Sender HTTP suite', function () {
         }
         await senderFailMissingUsername.close();
 
-        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
         try {
             await sendData(senderFailMissing);
             fail('Request should have failed');
@@ -494,18 +586,19 @@ describe('Sender HTTP suite', function () {
         await senderFailMissing.close();
 
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can ingest via HTTP with token auth', async function () {
         const mock = new MockHttp({token: 'abcdefghijkl123'});
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};token=abcdefghijkl123`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};token=abcdefghijkl123`);
         await sendData(sender);
         expect(mock.numOfRequests).toBe(1);
         await sender.close();
 
-        const senderFailToken = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};token=xyz`);
+        const senderFailToken = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};token=xyz`);
         try {
             await sendData(senderFailToken);
             fail('Request should have failed');
@@ -514,7 +607,7 @@ describe('Sender HTTP suite', function () {
         }
         await senderFailToken.close();
 
-        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
         try {
             await sendData(senderFailMissing);
             fail('Request should have failed');
@@ -524,18 +617,20 @@ describe('Sender HTTP suite', function () {
         await senderFailMissing.close();
 
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can retry via HTTP', async function () {
         const mock = new MockHttp({responseCodes: [204, 500, 523, 504, 500]});
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
         await sendData(sender);
         expect(mock.numOfRequests).toBe(5);
 
         await sender.close();
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('fails when retry timeout expires', async function () {
@@ -545,9 +640,9 @@ describe('Sender HTTP suite', function () {
             responseCodes: [204, 500, 503],
             responseDelays: [1000, 1000, 1000]
         });
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=1000`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=1000`);
         try {
             await sendData(sender);
             fail('Request should have failed');
@@ -557,6 +652,7 @@ describe('Sender HTTP suite', function () {
 
         await sender.close();
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('fails when HTTP request times out', async function () {
@@ -566,9 +662,9 @@ describe('Sender HTTP suite', function () {
             responseCodes: [204],
             responseDelays: [500]
         });
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=0;request_timeout=100`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=0;request_timeout=100`);
         try {
             await sendData(sender);
             fail('Request should have failed');
@@ -578,6 +674,7 @@ describe('Sender HTTP suite', function () {
 
         await sender.close();
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('succeeds on the third request after two timeouts', async function () {
@@ -585,13 +682,14 @@ describe('Sender HTTP suite', function () {
             responseCodes: [204, 504, 504],
             responseDelays: [2000, 2000]
         });
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT};retry_timeout=30000;request_timeout=1000`);
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=30000;request_timeout=1000`);
         await sendData(sender);
 
         await sender.close();
         await mock.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('destroys default http/https agents when last sender is closed', async function () {
@@ -645,7 +743,7 @@ describe('Sender HTTP suite', function () {
 
     it('accepts custom http agent', async function () {
         const mock = new MockHttp({});
-        await mock.start(PROXY_PORT);
+        await mock.start(MOCK_HTTP_PORT);
 
         const agent = new http.Agent({ keepAlive: false, maxSockets: 2 });
 
@@ -653,7 +751,7 @@ describe('Sender HTTP suite', function () {
         const senders = [];
         const promises = [];
         for (let i = 0; i < num; i++) {
-            const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`, { agent: agent});
+            const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`, { agent: agent});
             senders.push(sender);
             const promise = sendData(sender);
             promises.push(promise);
@@ -668,6 +766,7 @@ describe('Sender HTTP suite', function () {
         }
         await mock.stop();
         agent.destroy();
+        expect(Sender.numOfSenders).toBe(0);
     });
 });
 
@@ -717,6 +816,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, true, 'testapp\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can authenticate with a different private key', async function () {
@@ -728,6 +828,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, true, 'user1\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('is backwards compatible and still can authenticate with full JWK', async function () {
@@ -747,6 +848,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, true, 'user2\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can connect unauthenticated', async function () {
@@ -755,6 +857,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, false, '');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can authenticate and send data to server', async function () {
@@ -764,6 +867,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can connect unauthenticated and send data to server', async function () {
@@ -773,6 +877,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can authenticate and send data to server via secure connection', async function () {
@@ -782,6 +887,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can connect unauthenticated and send data to server via secure connection', async function () {
@@ -791,6 +897,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('fails to connect without hostname and port', async function () {
@@ -802,6 +909,7 @@ describe('Sender connection suite', function () {
             expect(err.message).toBe('Hostname is not set');
         }
         await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('fails to send data if not connected', async function () {
@@ -814,6 +922,7 @@ describe('Sender connection suite', function () {
             expect(err.message).toBe('Sender is not connected');
         }
         await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('guards against multiple connect calls', async function () {
@@ -827,6 +936,7 @@ describe('Sender connection suite', function () {
         }
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('guards against concurrent connect calls', async function () {
@@ -840,6 +950,7 @@ describe('Sender connection suite', function () {
         }
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can disable the server certificate check' , async function () {
@@ -852,6 +963,7 @@ describe('Sender connection suite', function () {
         await senderCertCheckOff.connect();
         await senderCertCheckOff.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can handle unfinished rows during flush()', async function () {
@@ -863,12 +975,13 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, true, 'testapp\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports custom logger', async function () {
         const expectedMessages = [
-            'Successfully connected to localhost:9099',
-            'Connection to 127.0.0.1:9099 is closed'
+            'Successfully connected to localhost:9088',
+            'Connection to 127.0.0.1:9088 is closed'
         ];
         const log = (level, message) => {
             expect(level).toBe('info');
@@ -881,6 +994,7 @@ describe('Sender connection suite', function () {
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
         await sender.close();
         await proxy.stop();
+        expect(Sender.numOfSenders).toBe(0);
     });
 });
 
@@ -924,6 +1038,7 @@ describe('Client interop test suite', function () {
                         fail('Did not expect error: ' + e.message);
                         break;
                     }
+                    await sender.close();
                     continue;
                 }
 
@@ -935,6 +1050,7 @@ describe('Client interop test suite', function () {
                         for (const line of testCase.result.anyLines) {
                             if (buffer.toString() === line + '\n') {
                                 // test passed
+                                await sender.close();
                                 continue loopTestCase;
                             }
                         }
@@ -944,6 +1060,9 @@ describe('Client interop test suite', function () {
                     fail('Expected error missing, instead we have a line: ' + buffer.toString());
                     break;
                 }
+
+                await sender.close();
+                expect(Sender.numOfSenders).toBe(0);
             }
     });
 });
@@ -959,6 +1078,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         } catch (err) {
             expect(err.message).toBe('Unknown timestamp unit: foobar');
         }
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports json object', async function () {
@@ -985,6 +1106,8 @@ describe('Sender message builder test suite (anything not covered in client inte
             'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716182\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2802\\"}]",boolCol=t\n' +
             'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716183\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2803\\"}]",boolCol=t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as number', async function () {
@@ -996,6 +1119,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as ns number', async function () {
@@ -1007,6 +1132,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as us number', async function () {
@@ -1018,6 +1145,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as ms number', async function () {
@@ -1029,6 +1158,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as BigInt', async function () {
@@ -1040,6 +1171,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as ns BigInt', async function () {
@@ -1051,6 +1184,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as us BigInt', async function () {
@@ -1062,6 +1197,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports timestamp field as ms BigInt', async function () {
@@ -1073,6 +1210,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws on invalid designated timestamp unit', async function () {
@@ -1085,6 +1224,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         } catch(err) {
             expect(err.message).toBe('Unknown timestamp unit: foobar');
         }
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports setting designated us timestamp as number from client', async function () {
@@ -1096,6 +1237,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports setting designated ms timestamp as number from client', async function () {
@@ -1107,6 +1250,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports setting designated timestamp as BigInt from client', async function () {
@@ -1118,6 +1263,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports setting designated ns timestamp as BigInt from client', async function () {
@@ -1129,6 +1276,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports setting designated us timestamp as BigInt from client', async function () {
@@ -1140,6 +1289,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('supports setting designated ms timestamp as BigInt from client', async function () {
@@ -1151,107 +1302,135 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if table name is not a string', function () {
+    it('throws exception if table name is not a string', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table(23456)
         ).toThrow('Table name must be a string, received number');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if table name is too long', function () {
+    it('throws exception if table name is too long', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('123456789012345678901234567890123456789012345678901234567890'
                 + '12345678901234567890123456789012345678901234567890123456789012345678')
         ).toThrow('Table name is too long, max length is 127');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if table name is set more times', function () {
+    it('throws exception if table name is set more times', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .symbol('name', 'value')
                 .table('newTableName')
         ).toThrow('Table name has already been set');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if symbol name is not a string', function () {
+    it('throws exception if symbol name is not a string', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .symbol(12345.5656, 'value')
         ).toThrow('Symbol name must be a string, received number');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if symbol name is empty string', function () {
+    it('throws exception if symbol name is empty string', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .symbol('', 'value')
         ).toThrow('Empty string is not allowed as column name');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if column name is not a string', function () {
+    it('throws exception if column name is not a string', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn(12345.5656, 'value')
         ).toThrow('Column name must be a string, received number');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if column name is empty string', function () {
+    it('throws exception if column name is empty string', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('', 'value')
         ).toThrow('Empty string is not allowed as column name');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if column name is too long', function () {
+    it('throws exception if column name is too long', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('123456789012345678901234567890123456789012345678901234567890'
                     + '12345678901234567890123456789012345678901234567890123456789012345678', 'value')
         ).toThrow('Column name is too long, max length is 127');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if column value is not the right type', function () {
+    it('throws exception if column value is not the right type', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('columnName', false)
         ).toThrow('Column value must be of type string, received boolean');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if adding column without setting table name', function () {
+    it('throws exception if adding column without setting table name', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.floatColumn('name', 12.459)
         ).toThrow('Column can be set only after table name is set');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if adding symbol without setting table name', function () {
+    it('throws exception if adding symbol without setting table name', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.symbol('name', 'value')
         ).toThrow('Symbol can be added only after table name is set and before any column added');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if adding symbol after columns', function () {
+    it('throws exception if adding symbol after columns', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('name', 'value')
                 .symbol('symbolName', 'symbolValue')
         ).toThrow('Symbol can be added only after table name is set and before any column added');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('returns null if preparing an empty buffer for send', function () {
+    it('returns null if preparing an empty buffer for send', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(sender.toBufferView()).toBe(null);
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('ignores unfinished rows when preparing a buffer for send', async function () {
@@ -1264,22 +1443,28 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(
             sender.toBufferView(sender.endOfLastRow).toString()
         ).toBe('tableName,name=value 1234567890\n');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if a float is passed as integer field', function () {
+    it('throws exception if a float is passed as integer field', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .intColumn('intField', 123.222)
         ).toThrow('Value must be an integer, received 123.222');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
-    it('throws exception if a float is passed as timestamp field', function () {
+    it('throws exception if a float is passed as timestamp field', async function () {
         const sender = new Sender({init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .timestampColumn('intField', 123.222)
         ).toThrow('Value must be an integer or BigInt, received 123.222');
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws exception if designated timestamp is not an integer or bigint', async function () {
@@ -1291,6 +1476,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         } catch (e) {
             expect(e.message).toEqual('Designated timestamp must be an integer or BigInt, received 23232322323.05');
         }
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws exception if designated timestamp is invalid', async function () {
@@ -1302,6 +1489,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         } catch (e) {
             expect(e.message).toEqual('Designated timestamp must be an integer or BigInt, received invalid_dts');
         }
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws exception if designated timestamp is set without any fields added', async function () {
@@ -1312,6 +1501,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         } catch (e) {
             expect(e.message).toEqual('The row must have a symbol or column set before it is closed');
         }
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('extends the size of the buffer if data does not fit', async function () {
@@ -1340,6 +1531,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName intField=123i\ntable2 intField=125i,strField="test"\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('throws exception if tries to extend the size of the buffer above max buffer size', async function () {
@@ -1367,6 +1560,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         } catch (err) {
             expect(err.message).toBe('Max buffer size is 48 bytes, requested buffer size: 64');
         }
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('is possible to clear the buffer by calling reset()', async function () {
@@ -1392,6 +1587,8 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName floatCol=1234567890,timestampCol=1658484767000000t\n'
         );
+        await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 });
 
@@ -1527,6 +1724,7 @@ describe('Sender tests with containerized QuestDB instance', () => {
         ]);
 
         await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can ingest data via HTTP with auto flush rows', async () => {
@@ -1574,6 +1772,7 @@ describe('Sender tests with containerized QuestDB instance', () => {
         ]);
 
         await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('can ingest data via HTTP with auto flush interval', async () => {
@@ -1627,6 +1826,7 @@ describe('Sender tests with containerized QuestDB instance', () => {
         ]);
 
         await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 
     it('does not duplicate rows if await is missing when calling flush', async () => {
@@ -1675,5 +1875,6 @@ describe('Sender tests with containerized QuestDB instance', () => {
         expect(selectResult.dataset).toStrictEqual(expectedData);
 
         await sender.close();
+        expect(Sender.numOfSenders).toBe(0);
     });
 });
