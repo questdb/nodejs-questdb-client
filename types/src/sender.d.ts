@@ -1,6 +1,8 @@
 /// <reference types="node" />
 /// <reference types="node" />
 /// <reference types="node" />
+/// <reference types="node" />
+/// <reference types="node" />
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
  * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
@@ -25,7 +27,7 @@
  * buffer sizes can also be set.
  * </p>
  * <p>
- * It is recommended that the Sender is created by one of the static factory methods,
+ * It is recommended that the Sender is created by using one of the static factory methods,
  * <i>Sender.fromConfig(configString)</i> or <i>Sender.fromEnv()</i>).
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
  * initialized from a configuration string to make sure that the parameters are validated. <br>
@@ -34,20 +36,34 @@
  * </p>
  */
 export class Sender {
+    /** @private */ private static DEFAULT_HTTP_AGENT;
+    /** @private */ private static DEFAULT_HTTPS_AGENT;
+    /** @private */ private static numOfSenders;
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. <br>
+     * @param {object} extraOptions - Optional extra configuration. <br>
+     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the provided configuration string.
      */
-    static fromConfig(configurationString: string): Sender;
+    static fromConfig(configurationString: string, extraOptions?: object): Sender;
     /**
      * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
      *
+     * @param {object} extraOptions - Optional extra configuration. <br>
+     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
+     *
      * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
      */
-    static fromEnv(): Sender;
+    static fromEnv(extraOptions?: object): Sender;
     /**
      * Creates an instance of Sender.
      *
@@ -85,6 +101,7 @@ export class Sender {
     /** @private */ private hasColumns;
     /** @private */ private maxNameLength;
     /** @private */ private log;
+    /** @private */ private agent;
     jwk: any;
     /**
      * Extends the size of the sender's buffer. <br>
@@ -110,6 +127,16 @@ export class Sender {
      * @return {Promise<boolean>} Resolves to true if client is connected.
      */
     connect(connectOptions?: net.NetConnectOpts | tls.ConnectionOptions, secure?: boolean): Promise<boolean>;
+    /**
+     * @ignore
+     * @return {http.Agent} Returns the default http agent.
+     */
+    getDefaultHttpAgent(): http.Agent;
+    /**
+     * @ignore
+     * @return {https.Agent} Returns the default https agent.
+     */
+    getDefaultHttpsAgent(): https.Agent;
     /**
      * Closes the TCP connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
@@ -207,6 +234,8 @@ export const DEFAULT_BUFFER_SIZE: 65536;
 export const DEFAULT_MAX_BUFFER_SIZE: 104857600;
 import net = require("net");
 import tls = require("tls");
+import http = require("http");
+import https = require("https");
 import { Buffer } from "buffer";
 import { SenderOptions } from "./options";
 //# sourceMappingURL=sender.d.ts.map

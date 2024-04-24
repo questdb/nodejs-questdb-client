@@ -28,7 +28,7 @@
 
 <header>
     
-        <h2><span class="attribs"><span class="type-signature"></span></span>SenderOptions<span class="signature">(configurationString, log)</span><span class="type-signature"></span></h2>
+        <h2><span class="attribs"><span class="type-signature"></span></span>SenderOptions<span class="signature">(configurationString, extraOptions)</span><span class="type-signature"></span></h2>
         
             <div class="class-description"><a href="Sender.html">Sender</a> configuration options. <br>
 <br>
@@ -53,22 +53,22 @@ Examples: <i>http::addr=localhost:9000</i>, <i>https::addr=localhost:9000</i>, <
 Authentication options
 <ul>
 <li> username: <i>string</i> - Used for authentication. <br>
-In case of HTTP Basic authentication should be accompanied by the <i>password</i> option. <br>
-If the TCP transport used with JWK token authentication, then should be accompanied by the <i>token</i> option.
+For HTTP, Basic Authentication requires the <i>password</i> option. <br>
+For TCP with JWK token authentication, <i>token</i> option is required.
 </li>
 <li> password: <i>string</i> - Password for HTTP Basic authentication, should be accompanied by the <i>username</i> option.
 </li>
-<li> token: <i>string</i> - In case of HTTP Bearer token authentication it contains the bearer token. <br>
-If the TCP transport used with JWK token authentication, then it contains the private key part of the JWK token,
-and it should be accompanied by the <i>username</i> option.
+<li> token: <i>string</i> - For HTTP with Bearer authentication, this is the bearer token. <br>
+For TCP with JWK token authentication, this is the private key part of the JWK token,
+and must be accompanied by the <i>username</i> option.
 </li>
 </ul>
 <br>
 TLS options
 <ul>
 <li> tls_verify: <i>enum, accepted values: on, unsafe_off</i> - When the HTTPS or TCPS protocols are selected, TLS encryption is used. <br>
-The Sender verifies the server's certificate, this check can be disabled by setting this option to <i>off</i>. Can be useful in
-non-production environments where self-signed certificates might be used, but generally not recommended to use.
+By default, the Sender will verify the server's certificate, but this check can be disabled by setting this option to <i>off</i>. This is useful
+non-production environments where self-signed certificates might be used, but should be avoided in production if possible.
 </li>
 <li> tls_ca: <i>string</i> - Path to a file containing the root CA's certificate in PEM format. <br>
 Can be useful when self-signed certificates are used, otherwise should not be set.
@@ -77,12 +77,12 @@ Can be useful when self-signed certificates are used, otherwise should not be se
 <br>
 Auto flush options
 <ul>
-<li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default, this can be switched off
+<li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default. This can be switched off
 by setting this option to <i>off</i>. <br>
 When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. <br>
-Manual buffer flushing can be useful, when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
-request, which in turn is a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
-inserted, or it fails, and none of the rows makes into the database.
+Manual buffer flushing can be useful, especially when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
+request, which becomes a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
+inserted; or it fails, and none of the rows make it into the database.
 </li>
 <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
 The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
@@ -121,7 +121,7 @@ Other options
 <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
 Recommended to use the same setting as the server, which also uses 127 by default.
 </li>
-<li> copy_buffer: <i>enum, accepted values: on, off</i> - By default the Sender creates a new buffer for every flush() call,
+<li> copy_buffer: <i>enum, accepted values: on, off</i> - By default, the Sender creates a new buffer for every flush() call,
 and the data to be sent to the server is copied into this new buffer.
 Setting the flag to <i>off</i> results in reusing the same buffer instance for each flush() call. <br>
 Use this flag only if calls to the client are serialised.
@@ -141,7 +141,7 @@ Use this flag only if calls to the client are serialised.
     
 
     
-    <h4 class="name" id="SenderOptions"><span class="type-signature"></span>new SenderOptions<span class="signature">(configurationString, log)</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="SenderOptions"><span class="type-signature"></span>new SenderOptions<span class="signature">(configurationString, extraOptions)</span><span class="type-signature"></span></h4>
     
 
     
@@ -208,13 +208,13 @@ Use this flag only if calls to the client are serialised.
 
         <tr>
             
-                <td class="name"><code>log</code></td>
+                <td class="name"><code>extraOptions</code></td>
             
 
             <td class="type">
             
                 
-<span class="param-type">function</span>
+<span class="param-type">object</span>
 
 
             
@@ -224,8 +224,11 @@ Use this flag only if calls to the client are serialised.
 
             
 
-            <td class="description last">Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.</td>
+            <td class="description last">Optional extra configuration. <br>
+'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
         </tr>
 
     
@@ -266,7 +269,7 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="options.js.html">options.js</a>, <a href="options.js.html#line114">line 114</a>
+        <a href="options.js.html">options.js</a>, <a href="options.js.html#line117">line 117</a>
     </li></ul></dd>
     
 
@@ -322,7 +325,7 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
     
 
     
-    <h4 class="name" id=".fromConfig"><span class="type-signature">(static) </span>fromConfig<span class="signature">(configurationString, log)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
+    <h4 class="name" id=".fromConfig"><span class="type-signature">(static) </span>fromConfig<span class="signature">(configurationString, extraOptions)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
     
 
     
@@ -389,13 +392,13 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
 
         <tr>
             
-                <td class="name"><code>log</code></td>
+                <td class="name"><code>extraOptions</code></td>
             
 
             <td class="type">
             
                 
-<span class="param-type">function</span>
+<span class="param-type">object</span>
 
 
             
@@ -405,8 +408,11 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
 
             
 
-            <td class="description last">Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.</td>
+            <td class="description last">Optional extra configuration. <br>
+'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
         </tr>
 
     
@@ -447,7 +453,7 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="options.js.html">options.js</a>, <a href="options.js.html#line177">line 177</a>
+        <a href="options.js.html">options.js</a>, <a href="options.js.html#line194">line 194</a>
     </li></ul></dd>
     
 
@@ -505,7 +511,7 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
     
 
     
-    <h4 class="name" id=".fromEnv"><span class="type-signature">(static) </span>fromEnv<span class="signature">(log)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
+    <h4 class="name" id=".fromEnv"><span class="type-signature">(static) </span>fromEnv<span class="signature">(extraOptions)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
     
 
     
@@ -549,13 +555,13 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
 
         <tr>
             
-                <td class="name"><code>log</code></td>
+                <td class="name"><code>extraOptions</code></td>
             
 
             <td class="type">
             
                 
-<span class="param-type">function</span>
+<span class="param-type">object</span>
 
 
             
@@ -565,8 +571,11 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
 
             
 
-            <td class="description last">Optional logging function used by the <a href="Sender.html">Sender</a>. <br>
-Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>.</td>
+            <td class="description last">Optional extra configuration. <br>
+'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
         </tr>
 
     
@@ -607,7 +616,7 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="options.js.html">options.js</a>, <a href="options.js.html#line189">line 189</a>
+        <a href="options.js.html">options.js</a>, <a href="options.js.html#line209">line 209</a>
     </li></ul></dd>
     
 
@@ -681,7 +690,7 @@ Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 17 2024 11:13:58 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 24 2024 17:52:08 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

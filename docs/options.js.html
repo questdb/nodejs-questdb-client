@@ -28,6 +28,9 @@
         <article>
             <pre class="prettyprint source linenums"><code>'use strict';
 
+const http = require('http');
+const https = require('https');
+
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
 
@@ -64,22 +67,22 @@ const UNSAFE_OFF = 'unsafe_off';
  * Authentication options
  * &lt;ul>
  * &lt;li> username: &lt;i>string&lt;/i> - Used for authentication. &lt;br>
- * In case of HTTP Basic authentication should be accompanied by the &lt;i>password&lt;/i> option. &lt;br>
- * If the TCP transport used with JWK token authentication, then should be accompanied by the &lt;i>token&lt;/i> option.
+ * For HTTP, Basic Authentication requires the &lt;i>password&lt;/i> option. &lt;br>
+ * For TCP with JWK token authentication, &lt;i>token&lt;/i> option is required.
  * &lt;/li>
  * &lt;li> password: &lt;i>string&lt;/i> - Password for HTTP Basic authentication, should be accompanied by the &lt;i>username&lt;/i> option.
  * &lt;/li>
- * &lt;li> token: &lt;i>string&lt;/i> - In case of HTTP Bearer token authentication it contains the bearer token. &lt;br>
- * If the TCP transport used with JWK token authentication, then it contains the private key part of the JWK token,
- * and it should be accompanied by the &lt;i>username&lt;/i> option.
+ * &lt;li> token: &lt;i>string&lt;/i> - For HTTP with Bearer authentication, this is the bearer token. &lt;br>
+ * For TCP with JWK token authentication, this is the private key part of the JWK token,
+ * and must be accompanied by the &lt;i>username&lt;/i> option.
  * &lt;/li>
  * &lt;/ul>
  * &lt;br>
  * TLS options
  * &lt;ul>
  * &lt;li> tls_verify: &lt;i>enum, accepted values: on, unsafe_off&lt;/i> - When the HTTPS or TCPS protocols are selected, TLS encryption is used. &lt;br>
- * The Sender verifies the server's certificate, this check can be disabled by setting this option to &lt;i>off&lt;/i>. Can be useful in
- * non-production environments where self-signed certificates might be used, but generally not recommended to use.
+ * By default, the Sender will verify the server's certificate, but this check can be disabled by setting this option to &lt;i>off&lt;/i>. This is useful
+ * non-production environments where self-signed certificates might be used, but should be avoided in production if possible.
  * &lt;/li>
  * &lt;li> tls_ca: &lt;i>string&lt;/i> - Path to a file containing the root CA's certificate in PEM format. &lt;br>
  * Can be useful when self-signed certificates are used, otherwise should not be set.
@@ -88,12 +91,12 @@ const UNSAFE_OFF = 'unsafe_off';
  * &lt;br>
  * Auto flush options
  * &lt;ul>
- * &lt;li> auto_flush: &lt;i>enum, accepted values: on, off&lt;/i> - The Sender automatically flushes the buffer by default, this can be switched off
+ * &lt;li> auto_flush: &lt;i>enum, accepted values: on, off&lt;/i> - The Sender automatically flushes the buffer by default. This can be switched off
  * by setting this option to &lt;i>off&lt;/i>. &lt;br>
  * When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. &lt;br>
- * Manual buffer flushing can be useful, when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
- * request, which in turn is a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
- * inserted, or it fails, and none of the rows makes into the database.
+ * Manual buffer flushing can be useful, especially when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
+ * request, which becomes a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
+ * inserted; or it fails, and none of the rows make it into the database.
  * &lt;/li>
  * &lt;li> auto_flush_rows: &lt;i>integer&lt;/i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. &lt;br>
  * The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
@@ -132,7 +135,7 @@ const UNSAFE_OFF = 'unsafe_off';
  * &lt;li> max_name_len: &lt;i>integer&lt;/i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. &lt;br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * &lt;/li>
- * &lt;li> copy_buffer: &lt;i>enum, accepted values: on, off&lt;/i> - By default the Sender creates a new buffer for every flush() call,
+ * &lt;li> copy_buffer: &lt;i>enum, accepted values: on, off&lt;/i> - By default, the Sender creates a new buffer for every flush() call,
  * and the data to be sent to the server is copied into this new buffer.
  * Setting the flag to &lt;i>off&lt;/i> results in reusing the same buffer instance for each flush() call. &lt;br>
  * Use this flag only if calls to the client are serialised.
@@ -176,46 +179,63 @@ class SenderOptions {
     max_name_len;
 
     log;
+    agent;
 
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. &lt;br>
-     * @param {function} log - Optional logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
-     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>.
+     * @param {object} extraOptions - Optional extra configuration. &lt;br>
+     * 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>.
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
+     * 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+     * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
      */
-    constructor(configurationString, log = undefined) {
+    constructor(configurationString, extraOptions = undefined) {
         parseConfigurationString(this, configurationString);
 
-        if (log &amp;&amp; typeof log !== 'function') {
-            throw new Error('Invalid logging function');
+        if (extraOptions) {
+            if (extraOptions.log &amp;&amp; typeof extraOptions.log !== 'function') {
+                throw new Error('Invalid logging function');
+            }
+            this.log = extraOptions.log;
+
+            if (extraOptions.agent &amp;&amp; !(extraOptions.agent instanceof http.Agent) &amp;&amp; !(extraOptions.agent instanceof https.Agent)) {
+                throw new Error('Invalid http/https agent');
+            }
+            this.agent = extraOptions.agent;
         }
-        this.log = log;
     }
 
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. &lt;br>
-     * @param {function} log - Optional logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
-     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>.
+     * @param {object} extraOptions - Optional extra configuration. &lt;br>
+     * 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>.
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
+     * 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+     * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
      *
      * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
      */
-    static fromConfig(configurationString, log = undefined) {
-        return new SenderOptions(configurationString, log);
+    static fromConfig(configurationString, extraOptions = undefined) {
+        return new SenderOptions(configurationString, extraOptions);
     }
 
     /**
      * Creates a Sender options object by parsing the configuration string set in the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      *
-     * @param {function} log - Optional logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
-     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>.
+     * @param {object} extraOptions - Optional extra configuration. &lt;br>
+     * 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>.
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
+     * 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+     * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
      *
      * @return {SenderOptions} A Sender configuration object initialized from the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      */
-    static fromEnv(log = undefined) {
-        return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, log);
+    static fromEnv(extraOptions = undefined) {
+        return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions);
     }
 }
 
@@ -438,7 +458,7 @@ exports.TCPS = TCPS;
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 17 2024 11:13:58 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 24 2024 17:52:08 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

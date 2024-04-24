@@ -617,13 +617,13 @@ describe('Configuration string parser suite', function () {
     });
 
     it('can take a custom agent', function () {
-        let options = SenderOptions.fromConfig('http::addr=host:9000', { agent: new http.Agent() });
-        expect(options.protocol).toBe('http');
-        expect(options.agent.keepAlive).toBe(false);
+        const agent = new http.Agent({ keepAlive: true });
 
-        options = SenderOptions.fromConfig('http::addr=host:9000', { agent: new http.Agent({ keepAlive: true }) });
+        const options = SenderOptions.fromConfig('http::addr=host:9000', { agent: agent });
         expect(options.protocol).toBe('http');
         expect(options.agent.keepAlive).toBe(true);
+
+        agent.destroy();
 
         expect(
             () => SenderOptions.fromConfig('http::addr=host:9000', { agent: { keepAlive: true } })

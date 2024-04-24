@@ -56,6 +56,15 @@ const DEFAULT_RETRY_TIMEOUT = 10000; // 10 sec
 const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
 const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 
+// default options for HTTP agent
+// - persistent connections with 1 minute idle timeout, server side has 5 minutes set by default
+// - max open connections is set to 256, same as server side default
+const DEFAULT_HTTP_AGENT_CONFIG = {
+    maxSockets: 256,
+    keepAlive: true,
+    timeout: 60000 // 1 min
+}
+
 // an arbitrary public key, not used in authentication
 // only used to construct a valid JWK token which is accepted by the crypto API
 const PUBLIC_KEY = {
@@ -83,11 +92,11 @@ const PUBLIC_KEY = {
  * &lt;/p>
  * &lt;p>
  * The client uses a buffer to store data. It automatically flushes the buffer by sending its content to the server.
- * Auto flushing can be disabled via configuration options to gain control over transactions, initial and maximum
+ * Auto flushing can be disabled via configuration options to gain control over transactions. Initial and maximum
  * buffer sizes can also be set.
  * &lt;/p>
  * &lt;p>
- * It is recommended that the Sender is created by one of the static factory methods,
+ * It is recommended that the Sender is created by using one of the static factory methods,
  * &lt;i>Sender.fromConfig(configString)&lt;/i> or &lt;i>Sender.fromEnv()&lt;/i>).
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
  * initialized from a configuration string to make sure that the parameters are validated. &lt;br>
@@ -96,6 +105,9 @@ const PUBLIC_KEY = {
  * &lt;/p>
  */
 class Sender {
+    /** @private */ static DEFAULT_HTTP_AGENT;
+    /** @private */ static DEFAULT_HTTPS_AGENT;
+    /** @private */ static numOfSenders = 0;
 
     /** @private */ http;       // true if the protocol is HTTP/HTTPS, false if it is TCP/TCPS
     /** @private */ secure;     // true if the protocol is HTTPS or TCPS, false otherwise
@@ -136,6 +148,7 @@ class Sender {
     /** @private */ maxNameLength;
 
     /** @private */ log;
+    /** @private */ agent;
 
     /**
      * Creates an instance of Sender.
@@ -152,10 +165,12 @@ class Sender {
             case HTTP:
                 this.http = true;
                 this.secure = false;
+                this.agent = options.agent instanceof http.Agent ? options.agent : this.getDefaultHttpAgent();
                 break;
             case HTTPS:
                 this.http = true;
                 this.secure = true;
+                this.agent = options.agent instanceof https.Agent ? options.agent : this.getDefaultHttpsAgent();
                 break;
             case TCP:
                 this.http = false;
@@ -209,26 +224,39 @@ class Sender {
         this.maxBufferSize = isInteger(options.max_buf_size, 1) ? options.max_buf_size : DEFAULT_MAX_BUFFER_SIZE;
         this.resize(isInteger(options.init_buf_size, 1) ? options.init_buf_size : DEFAULT_BUFFER_SIZE);
         this.reset();
+
+        Sender.numOfSenders++;
     }
 
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *
      * @param {string} configurationString - Configuration string. &lt;br>
+     * @param {object} extraOptions - Optional extra configuration. &lt;br>
+     * 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>.
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
+     * 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+     * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the provided configuration string.
      */
-    static fromConfig(configurationString) {
-        return new Sender(SenderOptions.fromConfig(configurationString));
+    static fromConfig(configurationString, extraOptions = undefined) {
+        return new Sender(SenderOptions.fromConfig(configurationString, extraOptions));
     }
 
     /**
      * Creates a Sender options object by parsing the configuration string set in the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      *
+     * @param {object} extraOptions - Optional extra configuration. &lt;br>
+     * 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>.
+     * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
+     * 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+     * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
+     *
      * @return {Sender} A Sender object initialized from the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      */
-    static fromEnv() {
-        return new Sender(SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF));
+    static fromEnv(extraOptions = undefined) {
+        return new Sender(SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions));
     }
 
     /**
@@ -243,6 +271,10 @@ class Sender {
             throw new Error(`Max buffer size is ${this.maxBufferSize} bytes, requested buffer size: ${bufferSize}`);
         }
         this.bufferSize = bufferSize;
+        // Allocating an extra byte because Buffer.write() does not fail if the length of the data to be written is
+        // longer than the size of the buffer. It simply just writes whatever it can, and returns.
+        // If we can write into the extra byte, that indicates buffer overflow.
+        // See the check in our write() function.
         const newBuffer = Buffer.alloc(this.bufferSize + 1, 0, 'utf8');
         if (this.buffer) {
             this.buffer.copy(newBuffer);
@@ -344,10 +376,44 @@ class Sender {
     }
 
     /**
+     * @ignore
+     * @return {http.Agent} Returns the default http agent.
+     */
+    getDefaultHttpAgent() {
+        if (!Sender.DEFAULT_HTTP_AGENT) {
+            Sender.DEFAULT_HTTP_AGENT = new http.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+        }
+        return Sender.DEFAULT_HTTP_AGENT;
+    }
+
+    /**
+     * @ignore
+     * @return {https.Agent} Returns the default https agent.
+     */
+    getDefaultHttpsAgent() {
+        if (!Sender.DEFAULT_HTTPS_AGENT) {
+            Sender.DEFAULT_HTTPS_AGENT = new https.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+        }
+        return Sender.DEFAULT_HTTPS_AGENT;
+    }
+
+    /**
      * Closes the TCP connection to the database. &lt;br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
+        Sender.numOfSenders--;
+        if (Sender.numOfSenders &lt; 1) {
+            if (Sender.DEFAULT_HTTP_AGENT) {
+                Sender.DEFAULT_HTTP_AGENT.destroy();
+                Sender.DEFAULT_HTTP_AGENT = undefined;
+            }
+            if (Sender.DEFAULT_HTTPS_AGENT) {
+                Sender.DEFAULT_HTTPS_AGENT.destroy();
+                Sender.DEFAULT_HTTPS_AGENT = undefined;
+            }
+        }
+
         if (this.socket) {
             const address = this.socket.remoteAddress;
             const port = this.socket.remotePort;
@@ -629,6 +695,7 @@ function createRequestOptions(sender, data) {
     const options = {
         hostname: sender.host,
         port: sender.port,
+        agent: sender.agent,
         path: '/write?precision=n',
         method: 'POST',
         timeout: timeoutMillis
@@ -642,17 +709,20 @@ function createRequestOptions(sender, data) {
 
 function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1, retryInterval = -1) {
     return new Promise((resolve, reject) => {
-        const req = request(options, async response => {
+        let statusCode = -1;
+        const req = request(options, response => {
+            statusCode = response.statusCode;
+
             const body = [];
             response
                 .on('data', chunk => {
                     body.push(chunk);
                 })
                 .on('error', err => {
-                    console.error("resp err=" + err);
+                    sender.log('error', `resp err=${err}`);
                 });
 
-            if (response.statusCode === HTTP_NO_CONTENT) {
+            if (statusCode === HTTP_NO_CONTENT) {
                 response.on('end', () => {
                     if (body.length > 0) {
                         sender.log('warn', `Unexpected message from server: ${Buffer.concat(body)}`);
@@ -660,29 +730,7 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
                     sender.doResolve(resolve);
                 });
             } else {
-                if (isRetryable(response.statusCode) &amp;&amp; retryTimeout > 0) {
-                    if (retryBegin &lt; 0) {
-                        retryBegin = Date.now();
-                        retryInterval = 10;
-                    } else {
-                        const elapsed = Date.now() - retryBegin;
-                        if (elapsed > retryTimeout) {
-                            reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, error=${Buffer.concat(body)}`));
-                            return;
-                        }
-                    }
-                    const jitter = Math.floor(Math.random() * 10) - 5;
-                    await sleep(retryInterval + jitter);
-                    retryInterval = Math.min(retryInterval * 2, 1000);
-                    try {
-                        await sendHttp(sender, request, options, data, retryTimeout, retryBegin, retryInterval);
-                        resolve(true);
-                    } catch (e) {
-                        reject(e);
-                    }
-                } else {
-                    reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, error=${Buffer.concat(body)}`));
-                }
+                req.destroy(new Error(`HTTP request failed, statusCode=${statusCode}, error=${Buffer.concat(body)}`));
             }
         });
 
@@ -691,8 +739,38 @@ function sendHttp(sender, request, options, data, retryTimeout, retryBegin = -1,
         } else if (sender.username &amp;&amp; sender.password) {
             req.setHeader('Authorization', 'Basic ' + Buffer.from(sender.username + ':' + sender.password).toString('base64'));
         }
-        req.on('timeout', () => req.destroy(new Error('HTTP request timeout')));
-        req.on('error', err => reject(err));
+
+        req.on('timeout', () => {
+            // set a retryable error code
+            statusCode = 524;
+            req.destroy(new Error('HTTP request timeout, no response from server in time'));
+        });
+        req.on('error', err => {
+            // if the error is thrown while the request is sent, statusCode is -1 => no retry
+            // request timeout comes through with statusCode 524 => retry
+            // if the error is thrown while the response is processed, the statusCode is taken from the response => retry depends on statusCode
+            if (isRetryable(statusCode) &amp;&amp; retryTimeout > 0) {
+                if (retryBegin &lt; 0) {
+                    retryBegin = Date.now();
+                    retryInterval = 10;
+                } else {
+                    const elapsed = Date.now() - retryBegin;
+                    if (elapsed > retryTimeout) {
+                        reject(err);
+                        return;
+                    }
+                }
+                const jitter = Math.floor(Math.random() * 10) - 5;
+                setTimeout(() => {
+                    retryInterval = Math.min(retryInterval * 2, 1000);
+                    sendHttp(sender, request, options, data, retryTimeout, retryBegin, retryInterval)
+                        .then(() => resolve(true))
+                        .catch(e => reject(e));
+                }, retryInterval + jitter);
+            } else {
+                reject(err);
+            }
+        });
         req.write(data, err => err ? reject(err) : () => {});
         req.end();
     });
@@ -916,10 +994,6 @@ function constructJwk(options) {
     }
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 exports.Sender = Sender;
 exports.DEFAULT_BUFFER_SIZE = DEFAULT_BUFFER_SIZE;
 exports.DEFAULT_MAX_BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE;
@@ -939,7 +1013,7 @@ exports.DEFAULT_MAX_BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE;
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 17 2024 11:13:58 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 24 2024 17:52:08 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

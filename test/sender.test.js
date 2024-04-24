@@ -400,7 +400,9 @@ describe('Sender HTTP suite', function () {
         const mock = new MockHttp({});
         await mock.start(PROXY_PORT);
 
-        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`, { agent: new http.Agent({ maxSockets: 128 }) });
+        const agent = new http.Agent({ maxSockets: 128 });
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${PROXY_PORT}`, { agent: agent });
         await sendData(sender);
         expect(mock.numOfRequests).toBe(1);
 
@@ -408,6 +410,7 @@ describe('Sender HTTP suite', function () {
 
         await sender.close();
         await mock.stop();
+        agent.destroy();
     });
 
     it('can ingest via HTTPS', async function () {
