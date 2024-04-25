@@ -43,7 +43,7 @@ async function run() {
     let count = 0;
     await subscribe(workerData.ticker, async (tick) => {
       sender
-          .table('prices')
+          .table('prices_nodejs')
           .symbol('ticker', tick.ticker)
           .floatColumn('price', tick.price)
           .atNow();
