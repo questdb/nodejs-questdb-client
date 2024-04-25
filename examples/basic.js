@@ -7,7 +7,7 @@ async function run() {
   // add rows to the buffer of the sender
   let bday = Date.parse('1856-07-10');
   await sender
-    .table('inventors')
+    .table('inventors_nodejs')
     .symbol('born', 'Austrian Empire')
     .timestampColumn('birthday', bday, 'ms') // epoch in millis
     .intColumn('id', 0)
@@ -15,7 +15,7 @@ async function run() {
     .at(Date.now(), 'ms'); // epoch in millis
   bday = Date.parse('1847-02-11');
   await sender
-    .table('inventors')
+    .table('inventors_nodejs')
     .symbol('born', 'USA')
     .timestampColumn('birthday', bday, 'ms')
     .intColumn('id', 1)
