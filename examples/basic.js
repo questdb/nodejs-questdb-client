@@ -1,7 +1,7 @@
 const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
-// create a sender with a 4KB buffer
+  // create a sender with a 4KB buffer
   const sender = new Sender({ bufferSize: 4096 });
 
   // connect to QuestDB
