@@ -163,7 +163,7 @@ class SenderOptions {
      * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
      * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      */
-    constructor(configurationString, extraOptions = undefined) {
+    constructor(configurationString, extraOptions) {
         parseConfigurationString(this, configurationString);
 
         if (extraOptions) {
