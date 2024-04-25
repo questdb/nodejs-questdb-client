@@ -2,7 +2,7 @@ const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
   // configure the sender
-  const sender = Sender.fromConfig('http::addr=localhost:9000;');
+  const sender = Sender.fromConfig('http::addr=localhost:9000');
 
   // add rows to the buffer of the sender
   let bday = Date.parse('1856-07-10');
