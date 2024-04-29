@@ -1,9 +1,8 @@
 const { Sender } = require('@questdb/nodejs-client');
 
 async function run() {
-  // create a sender with a 4KB buffer
-  const sender = new Sender({ protocol: 'tcp', host: 'localhost', port: 9009, bufferSize: 4096 });
-  await sender.connect();
+  // configure the sender
+  const sender = Sender.fromConfig('http::addr=localhost:9000');
 
   // add rows to the buffer of the sender
   let bday = Date.parse('1856-07-10');

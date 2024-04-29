@@ -1,25 +1,22 @@
 'use strict';
 
 const { Sender } = require('../index');
-const { DEFAULT_BUFFER_SIZE } = require('../src/sender');
+const { DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFER_SIZE } = require('../src/sender');
 const { log } = require('../src/logging');
 const { MockProxy } = require('./mockproxy');
 const { readFileSync} = require('fs');
 const { GenericContainer } = require('testcontainers');
 const http = require('http');
+const {MockHttp} = require("./mockhttp");
 
 const HTTP_OK = 200;
 
 const QUESTDB_HTTP_PORT = 9000;
 const QUESTDB_ILP_PORT = 9009;
-const PROXY_PORT = 9099;
-const PROXY_HOST = '127.0.0.1';
-
-const senderOptions = {
-    port: PROXY_PORT,
-    host: PROXY_HOST,
-    ca: readFileSync('test/certs/ca/ca.crt')
-}
+const MOCK_HTTP_PORT = 9099;
+const MOCK_HTTPS_PORT = 9098;
+const PROXY_PORT = 9088;
+const PROXY_HOST = 'localhost';
 
 const proxyOptions = {
     key: readFileSync('test/certs/server/server.key'),
@@ -38,96 +35,580 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+describe('Sender configuration options suite', function () {
+    it('creates a sender from a configuration string', async function () {
+        await Sender.fromConfig('tcps::addr=hostname;').close();
+    });
+
+    it('creates a sender from a configuration string picked up from env', async function () {
+        process.env.QDB_CLIENT_CONF = 'https::addr=hostname;';
+        await Sender.fromEnv().close();
+    });
+
+    it('throws exception if the username or the token is missing when TCP transport is used', async function () {
+        try {
+            await Sender.fromConfig('tcp::addr=hostname;username=bobo;').close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('TCP transport requires a username and a private key for authentication, please, specify the \'username\' and \'token\' config options');
+        }
+
+        try {
+            await Sender.fromConfig('tcp::addr=hostname;token=bobo_token;').close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('TCP transport requires a username and a private key for authentication, please, specify the \'username\' and \'token\' config options');
+        }
+    });
+
+    it('throws exception if tls_roots or tls_roots_password is used', async function () {
+        try {
+            await Sender.fromConfig('tcps::addr=hostname;username=bobo;tls_roots=bla;').close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('\'tls_roots\' and \'tls_roots_password\' options are not supported, please, use the \'tls_ca\' option or the NODE_EXTRA_CA_CERTS environment variable instead');
+        }
+
+        try {
+            await Sender.fromConfig('tcps::addr=hostname;token=bobo_token;tls_roots_password=bla;').close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('\'tls_roots\' and \'tls_roots_password\' options are not supported, please, use the \'tls_ca\' option or the NODE_EXTRA_CA_CERTS environment variable instead');
+        }
+    });
+
+    it('throws exception if connect() is called when http transport is used', async function () {
+        let sender;
+        try {
+            sender = Sender.fromConfig('http::addr=hostname');
+            await sender.connect();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('\'connect()\' should be called only if the sender connects via TCP');
+        }
+        await sender.close();
+    });
+});
+
+describe('Sender options test suite', function () {
+    it('fails if no options defined', async function () {
+        try {
+            await new Sender().close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('The \'protocol\' option is mandatory');
+        }
+    });
+
+    it('fails if options are null', async function () {
+        try {
+            await new Sender(null).close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('The \'protocol\' option is mandatory');
+        }
+    });
+
+    it('fails if options are undefined', async function () {
+        try {
+            await new Sender(undefined).close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('The \'protocol\' option is mandatory');
+        }
+    });
+
+    it('fails if options are empty', async function () {
+        try {
+            await new Sender({}).close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('The \'protocol\' option is mandatory');
+        }
+    });
+
+    it('fails if protocol option is missing', async function () {
+        try {
+            await new Sender({host: 'host'}).close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('The \'protocol\' option is mandatory');
+        }
+    });
+
+    it('fails if protocol option is invalid', async function () {
+        try {
+            await new Sender({protocol: 'abcd'}).close();
+            fail('Expected error is not thrown');
+        } catch(err) {
+            expect(err.message).toBe('Invalid protocol: \'abcd\'');
+        }
+    });
+
+    it('does copy the buffer during flush() if copyBuffer is not set', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host'});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+    });
+
+    it('does copy the buffer during flush() if copyBuffer is set to true', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', copy_buffer: true});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+    });
+
+    it('does copy the buffer during flush() if copyBuffer is not a boolean', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', copy_buffer: ''});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+    });
+
+    it('does not copy the buffer during flush() if copyBuffer is set to false', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', copy_buffer: false});
+        expect(sender.toBuffer).toBe(sender.toBufferView);
+        await sender.close();
+    });
+
+    it('does not copy the buffer during flush() if copyBuffer is set to null', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', copy_buffer: null});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+    });
+
+    it('does not copy the buffer during flush() if copyBuffer is undefined', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', copy_buffer: undefined});
+        expect(sender.toBuffer).toBe(sender.toBufferNew);
+        await sender.close();
+    });
+
+    it('sets default buffer size if bufferSize is not set', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', copy_buffer: true});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('sets the requested buffer size if bufferSize is set', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', init_buf_size: 1024});
+        expect(sender.bufferSize).toBe(1024);
+        await sender.close();
+    });
+
+    it('sets default buffer size if bufferSize is set to null', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', init_buf_size: null});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('sets default buffer size if bufferSize is set to undefined', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', init_buf_size: undefined});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('sets default buffer size if bufferSize is not a number', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', init_buf_size: '1024'});
+        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('sets default max buffer size if max_buf_size is not set', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host'});
+        expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('sets the requested max buffer size if max_buf_size is set', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', max_buf_size: 131072});
+        expect(sender.maxBufferSize).toBe(131072);
+        await sender.close();
+    });
+
+    it('throws error if initial buffer size is greater than max_buf_size', async function () {
+        try {
+            await new Sender({protocol: 'http', host: 'host', max_buf_size: 8192, init_buf_size: 16384}).close();
+            fail('Expected error is not thrown');
+        } catch (err) {
+            expect(err.message).toBe('Max buffer size is 8192 bytes, requested buffer size: 16384');
+        }
+    });
+
+    it('sets default max buffer size if max_buf_size is set to null', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', max_buf_size: null});
+        expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('sets default max buffer size if max_buf_size is set to undefined', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', max_buf_size: undefined});
+        expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('sets default max buffer size if max_buf_size is not a number', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', max_buf_size: '1024'});
+        expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+        await sender.close();
+    });
+
+    it('uses default logger if log function is not set', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', });
+        expect(sender.log).toBe(log);
+        await sender.close();
+    });
+
+    it('uses the required log function if it is set', async function () {
+        const testFunc = () => {};
+        const sender = new Sender({protocol: 'http', host: 'host', log: testFunc});
+        expect(sender.log).toBe(testFunc);
+        await sender.close();
+    });
+
+    it('uses default logger if log is set to null', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', log: null});
+        expect(sender.log).toBe(log);
+        await sender.close();
+    });
+
+    it('uses default logger if log is set to undefined', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', log: undefined});
+        expect(sender.log).toBe(log);
+        await sender.close();
+    });
+
+    it('uses default logger if log is not a function', async function () {
+        const sender = new Sender({protocol: 'http', host: 'host', log: ''});
+        expect(sender.log).toBe(log);
+        await sender.close();
+    });
+});
+
 describe('Sender auth config checks suite', function () {
     it('requires a username for authentication', async function () {
         try {
-            new Sender({
-                bufferSize: 512,
+            await new Sender({
+                protocol: 'tcp', host: 'host',
                 auth: {
                     token: 'privateKey'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
     it('requires a non-empty username', async function () {
         try {
-            new Sender({
-                bufferSize: 512,
+            await new Sender({
+                protocol: 'tcp', host: 'host',
                 auth: {
                     keyId: '',
                     token: 'privateKey'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
     it('requires that the username is a string', async function () {
         try {
-            new Sender({
-                bufferSize: 512,
+            await new Sender({
+                protocol: 'tcp', host: 'host',
                 auth: {
                     keyId: 23,
                     token: 'privateKey'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
     it('requires a private key for authentication', async function () {
         try {
-            new Sender({
+            await new Sender({
+                protocol: 'tcp', host: 'host',
                 auth: {
                     keyId: 'username'
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
     it('requires a non-empty private key', async function () {
         try {
-            new Sender({
+            await new Sender({
+                protocol: 'tcp', host: 'host',
                 auth: {
                     keyId: 'username',
                     token: ''
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
     });
 
     it('requires that the private key is a string', async function () {
         try {
-            new Sender({
+            await new Sender({
+                protocol: 'tcp', host: 'host',
                 auth: {
                     keyId: 'username',
                     token: true
                 }
-            });
+            }).close();
             fail('it should not be able to create the sender');
         } catch(err) {
             expect(err.message).toBe('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
+    });
+});
+
+describe('Sender HTTP suite', function () {
+    async function sendData(sender) {
+        await sender.table('test').symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
+        await sender.flush();
+    }
+
+    const mockHttp = new MockHttp();
+    const mockHttps = new MockHttp();
+
+    beforeAll(async function () {
+        await mockHttp.start(MOCK_HTTP_PORT);
+        await mockHttps.start(MOCK_HTTPS_PORT, true, proxyOptions);
+    });
+
+    afterAll(async function () {
+        await mockHttp.stop();
+        await mockHttps.stop();
+    });
+
+    it('can ingest via HTTP', async function () {
+        mockHttp.reset();
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
+        await sendData(sender);
+        expect(mockHttp.numOfRequests).toBe(1);
+
+        expect(sender.agent.maxSockets).toBe(256);
+
+        await sender.close();
+    });
+
+    it('supports custom http agent', async function () {
+        mockHttp.reset();
+        const agent = new http.Agent({ maxSockets: 128 });
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`, { agent: agent });
+        await sendData(sender);
+        expect(mockHttp.numOfRequests).toBe(1);
+
+        expect(sender.agent.maxSockets).toBe(128);
+
+        await sender.close();
+        agent.destroy();
+    });
+
+    it('can ingest via HTTPS', async function () {
+        mockHttps.reset();
+
+        const senderCertCheckFail = Sender.fromConfig(`https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT}`);
+        try {
+            await sendData(senderCertCheckFail);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toMatch(/^self[ -]signed certificate in certificate chain$/);
+        }
+        await senderCertCheckFail.close();
+
+        const senderWithCA = Sender.fromConfig(`https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT};tls_ca=test/certs/ca/ca.crt`);
+        await sendData(senderWithCA);
+        expect(mockHttps.numOfRequests).toBe(1);
+        await senderWithCA.close();
+
+        const senderVerifyOff = Sender.fromConfig(`https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`);
+        await sendData(senderVerifyOff);
+        expect(mockHttps.numOfRequests).toBe(2);
+        await senderVerifyOff.close();
+    });
+
+    it('can ingest via HTTP with basic auth', async function () {
+        mockHttp.reset({username: 'user1', password: 'pwd'});
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1;password=pwd`);
+        await sendData(sender);
+        expect(mockHttp.numOfRequests).toBe(1);
+        await sender.close();
+
+        const senderFailPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1;password=xyz`);
+        try {
+            await sendData(senderFailPwd);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailPwd.close();
+
+        const senderFailMissingPwd = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1z`);
+        try {
+            await sendData(senderFailMissingPwd);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissingPwd.close();
+
+        const senderFailUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=xyz;password=pwd`);
+        try {
+            await sendData(senderFailUsername);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailUsername.close();
+
+        const senderFailMissingUsername = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};password=pwd`);
+        try {
+            await sendData(senderFailMissingUsername);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissingUsername.close();
+
+        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
+        try {
+            await sendData(senderFailMissing);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissing.close();
+    });
+
+    it('can ingest via HTTP with token auth', async function () {
+        mockHttp.reset({token: 'abcdefghijkl123'});
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};token=abcdefghijkl123`);
+        await sendData(sender);
+        expect(mockHttp.numOfRequests).toBe(1);
+        await sender.close();
+
+        const senderFailToken = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};token=xyz`);
+        try {
+            await sendData(senderFailToken);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailToken.close();
+
+        const senderFailMissing = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
+        try {
+            await sendData(senderFailMissing);
+            fail('Request should have failed');
+        } catch (err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=401, error=');
+        }
+        await senderFailMissing.close();
+    });
+
+    it('can retry via HTTP', async function () {
+        mockHttp.reset({responseCodes: [204, 500, 523, 504, 500]});
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`);
+        await sendData(sender);
+        expect(mockHttp.numOfRequests).toBe(5);
+
+        await sender.close();
+    });
+
+    it('fails when retry timeout expires', async function () {
+        // artificial delay (responseDelays) is same as retry timeout
+        // should result in the request failing on the second try
+        mockHttp.reset({
+            responseCodes: [204, 500, 503],
+            responseDelays: [1000, 1000, 1000]
+        });
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=1000`);
+        try {
+            await sendData(sender);
+            fail('Request should have failed');
+        } catch(err) {
+            expect(err.message).toBe('HTTP request failed, statusCode=500, error=');
+        }
+
+        await sender.close();
+    });
+
+    it('fails when HTTP request times out', async function () {
+        // artificial delay (responseDelays) is greater than request timeout, and retry is switched off
+        // should result in the request failing with timeout
+        mockHttp.reset({
+            responseCodes: [204],
+            responseDelays: [500]
+        });
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=0;request_timeout=100`);
+        try {
+            await sendData(sender);
+            fail('Request should have failed');
+        } catch(err) {
+            expect(err.message).toBe('HTTP request timeout, no response from server in time');
+        }
+
+        await sender.close();
+    });
+
+    it('succeeds on the third request after two timeouts', async function () {
+        mockHttp.reset({
+            responseCodes: [204, 504, 504],
+            responseDelays: [2000, 2000]
+        });
+
+        const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=30000;request_timeout=1000`);
+        await sendData(sender);
+
+        await sender.close();
+    });
+
+    it('accepts custom http agent', async function () {
+        mockHttp.reset();
+        const agent = new http.Agent({ keepAlive: false, maxSockets: 2 });
+
+        const num = 300;
+        const senders = [];
+        const promises = [];
+        for (let i = 0; i < num; i++) {
+            const sender = Sender.fromConfig(`http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`, { agent: agent});
+            senders.push(sender);
+            const promise = sendData(sender);
+            promises.push(promise);
+        }
+        await Promise.all(promises);
+        expect(mockHttp.numOfRequests).toBe(num);
+
+        expect(agent.totalSocketCount).toBeLessThan(3);
+
+        for (const sender of senders) {
+            await sender.close();
+        }
+        agent.destroy();
     });
 });
 
@@ -142,14 +623,20 @@ describe('Sender connection suite', function () {
     }
 
     async function createSender(auth = undefined, secure = false) {
-        const sender = new Sender({bufferSize: 1024, auth: auth});
-        const connected = await sender.connect(senderOptions, secure);
+        const sender = new Sender({
+            protocol: (secure ? 'tcps' : 'tcp'),
+            port: PROXY_PORT,
+            host: PROXY_HOST,
+            auth: auth,
+            tls_ca: 'test/certs/ca/ca.crt'
+        });
+        const connected = await sender.connect();
         expect(connected).toBe(true);
         return sender;
     }
 
     async function sendData(sender) {
-        sender.table('test').symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
+        await sender.table('test').symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
         await sender.flush();
     }
 
@@ -174,8 +661,8 @@ describe('Sender connection suite', function () {
     it('can authenticate', async function () {
         const proxy = await createProxy(true);
         const sender = await createSender(AUTH);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -185,8 +672,8 @@ describe('Sender connection suite', function () {
             keyId: 'user1',
             token: 'zhPiK3BkYMYJvRf5sqyrWNJwjDKHOWHnRbmQggUll6A'
         });
-        await sender.close();
         await assertSentData(proxy, true, 'user1\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -201,19 +688,24 @@ describe('Sender connection suite', function () {
         }
 
         const proxy = await createProxy(true);
-        const sender = new Sender({jwk: JWK});
-        const connected = await sender.connect(senderOptions, false);
+        const sender = new Sender({
+            protocol: 'tcp',
+            port: PROXY_PORT,
+            host: PROXY_HOST,
+            ca: readFileSync('test/certs/ca/ca.crt'),
+            jwk: JWK});
+        const connected = await sender.connect();
         expect(connected).toBe(true);
-        await sender.close();
         await assertSentData(proxy, true, 'user2\n');
+        await sender.close();
         await proxy.stop();
     });
 
     it('can connect unauthenticated', async function () {
         const proxy = await createProxy();
         const sender = await createSender();
-        await sender.close();
         await assertSentData(proxy, false, '');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -221,8 +713,8 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy(true);
         const sender = await createSender(AUTH);
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -230,8 +722,8 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy();
         const sender = await createSender();
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -239,8 +731,8 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy(true, proxyOptions);
         const sender = await createSender(AUTH, true);
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\ntest,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 
@@ -248,16 +740,39 @@ describe('Sender connection suite', function () {
         const proxy = await createProxy(false, proxyOptions);
         const sender = await createSender(null, true);
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
+    });
+
+    it('fails to connect without hostname and port', async function () {
+        const sender = new Sender({protocol: 'tcp'});
+        try {
+            await sender.connect();
+            fail('it should not be able to connect');
+        } catch(err) {
+            expect(err.message).toBe('Hostname is not set');
+        }
+        await sender.close();
+    });
+
+    it('fails to send data if not connected', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'localhost'});
+        try {
+            await sender.table('test').symbol('location', 'us').atNow();
+            await sender.flush();
+            fail('it should not be able to send data');
+        } catch(err) {
+            expect(err.message).toBe('Sender is not connected');
+        }
+        await sender.close();
     });
 
     it('guards against multiple connect calls', async function () {
         const proxy = await createProxy(true, proxyOptions);
         const sender = await createSender(AUTH, true);
         try {
-            await sender.connect(senderOptions, true);
+            await sender.connect();
             fail('it should not be able to connect again');
         } catch(err) {
             expect(err.message).toBe('Sender connected already');
@@ -268,14 +783,41 @@ describe('Sender connection suite', function () {
 
     it('guards against concurrent connect calls', async function () {
         const proxy = await createProxy(true, proxyOptions);
-        const sender = new Sender({bufferSize: 1024, auth: AUTH});
+        const sender = new Sender({
+            protocol: 'tcps',
+            port: PROXY_PORT,
+            host: PROXY_HOST,
+            auth: AUTH,
+            ca: readFileSync('test/certs/ca/ca.crt')
+        });
         try {
-            await Promise.all([sender.connect(senderOptions, true), sender.connect(senderOptions, true)]);
+            await Promise.all([sender.connect(), sender.connect()]);
             fail('it should not be able to connect twice');
         } catch(err) {
             expect(err.message).toBe('Sender connected already');
         }
         await sender.close();
+        await proxy.stop();
+    });
+
+    it('can disable the server certificate check' , async function () {
+        const proxy = await createProxy(true, proxyOptions);
+        const senderCertCheckFail = Sender.fromConfig(`tcps::addr=${PROXY_HOST}:${PROXY_PORT}`);
+        try {
+            await senderCertCheckFail.connect();
+            fail('it should not be able to connect');
+        } catch (err) {
+            expect(err.message).toMatch(/^self[ -]signed certificate in certificate chain$/);
+        }
+        await senderCertCheckFail.close();
+
+        const senderCertCheckOn = Sender.fromConfig(`tcps::addr=${PROXY_HOST}:${PROXY_PORT};tls_ca=test/certs/ca/ca.crt`);
+        await senderCertCheckOn.connect();
+        await senderCertCheckOn.close();
+
+        const senderCertCheckOff = Sender.fromConfig(`tcps::addr=${PROXY_HOST}:${PROXY_PORT};tls_verify=unsafe_off`);
+        await senderCertCheckOff.connect();
+        await senderCertCheckOff.close();
         await proxy.stop();
     });
 
@@ -285,38 +827,42 @@ describe('Sender connection suite', function () {
         sender.table('test').symbol('location', 'us');
         const sent = await sender.flush();
         expect(sent).toBe(false);
-        await sender.close();
         await assertSentData(proxy, true, 'testapp\n');
+        await sender.close();
         await proxy.stop();
     });
 
     it('supports custom logger', async function () {
         const expectedMessages = [
-            'Successfully connected to 127.0.0.1:9099',
-            'Connection to 127.0.0.1:9099 is closed'
+            'Successfully connected to localhost:9088',
+            /^Connection to .*1:9088 is closed$/
         ];
         const log = (level, message) => {
             expect(level).toBe('info');
-            expect(message).toBe(expectedMessages.shift());
+            expect(message).toMatch(expectedMessages.shift());
         };
         const proxy = await createProxy();
-        const sender = new Sender({bufferSize: 1024, log: log});
-        await sender.connect(senderOptions);
+        const sender = new Sender({
+            protocol: 'tcp',
+            port: PROXY_PORT,
+            host: PROXY_HOST,
+            log: log});
+        await sender.connect();
         await sendData(sender);
-        await sender.close();
         await assertSentData(proxy, false, 'test,location=us temperature=17.1 1658484765000000000\n');
+        await sender.close();
         await proxy.stop();
     });
 });
 
 describe('Client interop test suite', function () {
-    it('runs client tests as per json test config', function () {
+    it('runs client tests as per json test config', async function () {
         let testCases = JSON.parse(readFileSync('./questdb-client-test/ilp-client-interop-test.json').toString());
 
         loopTestCase:
             for (const testCase of testCases) {
                 console.info(`test name: ${testCase.testName}`);
-                const sender = new Sender({bufferSize: 1024});
+                const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
                 try {
                     sender.table(testCase.table);
                     for (const symbol of testCase.symbols) {
@@ -343,12 +889,13 @@ describe('Client interop test suite', function () {
                                 throw new Error('Unsupported column type');
                         }
                     }
-                    sender.atNow();
+                    await sender.atNow();
                 } catch (e) {
                     if (testCase.result.status !== 'ERROR') {
                         fail('Did not expect error: ' + e.message);
                         break;
                     }
+                    await sender.close();
                     continue;
                 }
 
@@ -360,6 +907,7 @@ describe('Client interop test suite', function () {
                         for (const line of testCase.result.anyLines) {
                             if (buffer.toString() === line + '\n') {
                                 // test passed
+                                await sender.close();
                                 continue loopTestCase;
                             }
                         }
@@ -369,346 +917,418 @@ describe('Client interop test suite', function () {
                     fail('Expected error missing, instead we have a line: ' + buffer.toString());
                     break;
                 }
+
+                await sender.close();
             }
     });
 });
 
 describe('Sender message builder test suite (anything not covered in client interop test suite)', function () {
-    it('throws on invalid timestamp unit', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws on invalid timestamp unit', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         try {
-            sender.table('tableName')
+            await sender.table('tableName')
                 .booleanColumn('boolCol', true)
                 .timestampColumn('timestampCol', 1658484765000000, 'foobar')
                 .atNow();
-        } catch(err) {
+            fail('Expected error is not thrown');
+        } catch (err) {
             expect(err.message).toBe('Unknown timestamp unit: foobar');
         }
+        await sender.close();
     });
 
-    it('supports timestamp field as number', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports json object', async function () {
+        const pages = [];
+        for (let i = 0; i < 4; i++) {
+            const pageProducts = [
+                {"id": "46022e96-076f-457f-b630-51b82b871618" + i, "gridId": "46022e96-076f-457f-b630-51b82b871618"},
+                {"id": "55615358-4af1-4179-9153-faaa57d71e55", "gridId": "55615358-4af1-4179-9153-faaa57d71e55"},
+                {"id": "365b9cdf-3d4e-4135-9cb0-f1a65601c840", "gridId": "365b9cdf-3d4e-4135-9cb0-f1a65601c840"},
+                {"id": "0b67ddf2-8e69-4482-bf0c-bb987ee5c280", "gridId": "0b67ddf2-8e69-4482-bf0c-bb987ee5c280" + i}];
+            pages.push(pageProducts);
+        }
+
+        const sender = new Sender({protocol: 'tcp', host: 'host', bufferSize: 256});
+        for (const p of pages) {
+            await sender.table('tableName')
+                .stringColumn('page_products', JSON.stringify(p || []))
+                .booleanColumn('boolCol', true)
+                .atNow();
+        }
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716180\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2800\\"}]",boolCol=t\n' +
+            'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716181\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2801\\"}]",boolCol=t\n' +
+            'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716182\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2802\\"}]",boolCol=t\n' +
+            'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716183\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2803\\"}]",boolCol=t\n'
+        );
+        await sender.close();
+    });
+
+    it('supports timestamp field as number', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
     });
 
-    it('supports timestamp field as ns number', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports timestamp field as ns number', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000, 'ns')
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000t\n'
         );
+        await sender.close();
     });
 
-    it('supports timestamp field as us number', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports timestamp field as us number', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000, 'us')
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
     });
 
-    it('supports timestamp field as ms number', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports timestamp field as ms number', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000, 'ms')
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
     });
 
-    it('supports timestamp field as BigInt', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports timestamp field as BigInt', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000n)
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
     });
 
-    it('supports timestamp field as ns BigInt', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports timestamp field as ns BigInt', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000000n, 'ns')
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
     });
 
-    it('supports timestamp field as us BigInt', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports timestamp field as us BigInt', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000n, 'us')
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
     });
 
-    it('supports timestamp field as ms BigInt', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports timestamp field as ms BigInt', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000n, 'ms')
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t\n'
         );
+        await sender.close();
     });
 
-    it('throws on invalid designated timestamp unit', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws on invalid designated timestamp unit', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         try {
-            sender.table('tableName')
+            await sender.table('tableName')
                 .booleanColumn('boolCol', true)
                 .timestampColumn('timestampCol', 1658484765000000)
                 .at(1658484769000000, 'foobar');
+            fail('Expected error is not thrown');
         } catch(err) {
             expect(err.message).toBe('Unknown timestamp unit: foobar');
         }
+        await sender.close();
     });
 
-    it('supports setting designated us timestamp as number from client', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports setting designated us timestamp as number from client', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .at(1658484769000000, 'us');
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
     });
 
-    it('supports setting designated ms timestamp as number from client', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports setting designated ms timestamp as number from client', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .at(1658484769000, 'ms');
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
     });
 
-    it('supports setting designated timestamp as BigInt from client', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports setting designated timestamp as BigInt from client', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .at(1658484769000000n);
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
     });
 
-    it('supports setting designated ns timestamp as BigInt from client', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports setting designated ns timestamp as BigInt from client', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .at(1658484769000000123n, 'ns');
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n'
         );
+        await sender.close();
     });
 
-    it('supports setting designated us timestamp as BigInt from client', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports setting designated us timestamp as BigInt from client', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .at(1658484769000000n, 'us');
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
     });
 
-    it('supports setting designated ms timestamp as BigInt from client', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('supports setting designated ms timestamp as BigInt from client', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .at(1658484769000n, 'ms');
         expect(sender.toBufferView().toString()).toBe(
             'tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n'
         );
+        await sender.close();
     });
 
-    it('throws exception if table name is not a string', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if table name is not a string', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table(23456)
         ).toThrow('Table name must be a string, received number');
+        await sender.close();
     });
 
-    it('throws exception if table name is too long', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if table name is too long', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('123456789012345678901234567890123456789012345678901234567890'
                 + '12345678901234567890123456789012345678901234567890123456789012345678')
         ).toThrow('Table name is too long, max length is 127');
+        await sender.close();
     });
 
-    it('throws exception if table name is set more times', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if table name is set more times', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .symbol('name', 'value')
                 .table('newTableName')
         ).toThrow('Table name has already been set');
+        await sender.close();
     });
 
-    it('throws exception if symbol name is not a string', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if symbol name is not a string', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .symbol(12345.5656, 'value')
         ).toThrow('Symbol name must be a string, received number');
+        await sender.close();
     });
 
-    it('throws exception if symbol name is empty string', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if symbol name is empty string', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .symbol('', 'value')
         ).toThrow('Empty string is not allowed as column name');
+        await sender.close();
     });
 
-    it('throws exception if column name is not a string', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if column name is not a string', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn(12345.5656, 'value')
         ).toThrow('Column name must be a string, received number');
+        await sender.close();
     });
 
-    it('throws exception if column name is empty string', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if column name is empty string', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('', 'value')
         ).toThrow('Empty string is not allowed as column name');
+        await sender.close();
     });
 
-    it('throws exception if column name is too long', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if column name is too long', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('123456789012345678901234567890123456789012345678901234567890'
                     + '12345678901234567890123456789012345678901234567890123456789012345678', 'value')
         ).toThrow('Column name is too long, max length is 127');
+        await sender.close();
     });
 
-    it('throws exception if column value is not the right type', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if column value is not the right type', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('columnName', false)
         ).toThrow('Column value must be of type string, received boolean');
+        await sender.close();
     });
 
-    it('throws exception if adding column without setting table name', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if adding column without setting table name', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.floatColumn('name', 12.459)
         ).toThrow('Column can be set only after table name is set');
+        await sender.close();
     });
 
-    it('throws exception if adding symbol without setting table name', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if adding symbol without setting table name', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.symbol('name', 'value')
         ).toThrow('Symbol can be added only after table name is set and before any column added');
+        await sender.close();
     });
 
-    it('throws exception if adding symbol after columns', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if adding symbol after columns', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .stringColumn('name', 'value')
                 .symbol('symbolName', 'symbolValue')
         ).toThrow('Symbol can be added only after table name is set and before any column added');
+        await sender.close();
     });
 
-    it('returns null if preparing an empty buffer for send', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('returns null if preparing an empty buffer for send', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(sender.toBufferView()).toBe(null);
+        await sender.close();
     });
 
-    it('ignores unfinished rows when preparing a buffer for send', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('ignores unfinished rows when preparing a buffer for send', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         sender.table('tableName')
-            .symbol('name', 'value')
-            .at(1234567890n, 'ns');
+            .symbol('name', 'value');
+        await sender.at(1234567890n, 'ns');
         sender.table('tableName')
             .symbol('name', 'value2');
         expect(
             sender.toBufferView(sender.endOfLastRow).toString()
         ).toBe('tableName,name=value 1234567890\n');
+        await sender.close();
     });
 
-    it('throws exception if a float is passed as integer field', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if a float is passed as integer field', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .intColumn('intField', 123.222)
         ).toThrow('Value must be an integer, received 123.222');
+        await sender.close();
     });
 
-    it('throws exception if a float is passed as timestamp field', function () {
-        const sender = new Sender({bufferSize: 1024});
+    it('throws exception if a float is passed as timestamp field', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
         expect(
             () => sender.table('tableName')
                 .timestampColumn('intField', 123.222)
         ).toThrow('Value must be an integer or BigInt, received 123.222');
+        await sender.close();
     });
 
-    it('throws exception if designated timestamp is not an integer or bigint', function () {
-        const sender = new Sender({bufferSize: 1024});
-        expect(
-            () => sender.table('tableName')
+    it('throws exception if designated timestamp is not an integer or bigint', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        try {
+            await sender.table('tableName')
                 .symbol('name', 'value')
-                .at(23232322323.05)
-        ).toThrow('Designated timestamp must be an integer or BigInt, received 23232322323.05');
+                .at(23232322323.05);
+        } catch (e) {
+            expect(e.message).toEqual('Designated timestamp must be an integer or BigInt, received 23232322323.05');
+        }
+        await sender.close();
     });
 
-    it('throws exception if designated timestamp is invalid', function () {
-        const sender = new Sender({bufferSize: 1024});
-        expect(
-            () => sender.table('tableName')
+    it('throws exception if designated timestamp is invalid', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        try {
+            await sender.table('tableName')
                 .symbol('name', 'value')
-                .at('invalid_dts')
-        ).toThrow('Designated timestamp must be an integer or BigInt, received invalid_dts');
+                .at('invalid_dts');
+        } catch (e) {
+            expect(e.message).toEqual('Designated timestamp must be an integer or BigInt, received invalid_dts');
+        }
+        await sender.close();
     });
 
-    it('throws exception if designated timestamp is set without any fields added', function () {
-        const sender = new Sender({bufferSize: 1024});
-        expect(
-            () => sender.table('tableName')
-                .at(12345678n, 'ns')
-        ).toThrow('The row must have a symbol or column set before it is closed');
+    it('throws exception if designated timestamp is set without any fields added', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        try {
+            await sender.table('tableName')
+                .at(12345678n, 'ns');
+        } catch (e) {
+            expect(e.message).toEqual('The row must have a symbol or column set before it is closed');
+        }
+        await sender.close();
     });
 
-    it('extends the size of the buffer if data does not fit', function () {
-        const sender = new Sender({bufferSize: 8});
+    it('extends the size of the buffer if data does not fit', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 8});
         expect(sender.bufferSize).toBe(8);
         expect(sender.position).toBe(0);
         sender.table('tableName');
@@ -717,14 +1337,14 @@ describe('Sender message builder test suite (anything not covered in client inte
         sender.intColumn('intField', 123);
         expect(sender.bufferSize).toBe(32);
         expect(sender.position).toBe('tableName intField=123i'.length);
-        sender.atNow();
+        await sender.atNow();
         expect(sender.bufferSize).toBe(32);
         expect(sender.position).toBe('tableName intField=123i\n'.length);
         expect(sender.toBufferView().toString()).toBe(
             'tableName intField=123i\n'
         );
 
-        sender.table('table2')
+        await sender.table('table2')
             .intColumn('intField', 125)
             .stringColumn('strField', 'test')
             .atNow();
@@ -733,15 +1353,45 @@ describe('Sender message builder test suite (anything not covered in client inte
         expect(sender.toBufferView().toString()).toBe(
             'tableName intField=123i\ntable2 intField=125i,strField="test"\n'
         );
+        await sender.close();
     });
 
-    it('is possible to clear the buffer by calling reset()', function () {
-        const sender = new Sender({bufferSize: 1024});
-        sender.table('tableName')
+    it('throws exception if tries to extend the size of the buffer above max buffer size', async function () {
+        const sender = Sender.fromConfig('tcp::addr=host;init_buf_size=8;max_buf_size=48;')
+        expect(sender.bufferSize).toBe(8);
+        expect(sender.position).toBe(0);
+        sender.table('tableName');
+        expect(sender.bufferSize).toBe(16);
+        expect(sender.position).toBe('tableName'.length);
+        sender.intColumn('intField', 123);
+        expect(sender.bufferSize).toBe(32);
+        expect(sender.position).toBe('tableName intField=123i'.length);
+        await sender.atNow();
+        expect(sender.bufferSize).toBe(32);
+        expect(sender.position).toBe('tableName intField=123i\n'.length);
+        expect(sender.toBufferView().toString()).toBe(
+            'tableName intField=123i\n'
+        );
+
+        try {
+            await sender.table('table2')
+                .intColumn('intField', 125)
+                .stringColumn('strField', 'test')
+                .atNow();
+            fail('Expected error is not thrown');
+        } catch (err) {
+            expect(err.message).toBe('Max buffer size is 48 bytes, requested buffer size: 64');
+        }
+        await sender.close();
+    });
+
+    it('is possible to clear the buffer by calling reset()', async function () {
+        const sender = new Sender({protocol: 'tcp', host: 'host', init_buf_size: 1024});
+        await sender.table('tableName')
             .booleanColumn('boolCol', true)
             .timestampColumn('timestampCol', 1658484765000000)
             .atNow();
-        sender.table('tableName')
+        await sender.table('tableName')
             .booleanColumn('boolCol', false)
             .timestampColumn('timestampCol', 1658484766000000)
             .atNow();
@@ -751,156 +1401,14 @@ describe('Sender message builder test suite (anything not covered in client inte
         );
 
         sender.reset();
-        sender.table('tableName')
+        await sender.table('tableName')
             .floatColumn('floatCol', 1234567890)
             .timestampColumn('timestampCol', 1658484767000000)
             .atNow();
         expect(sender.toBufferView().toString()).toBe(
             'tableName floatCol=1234567890,timestampCol=1658484767000000t\n'
         );
-    });
-});
-
-describe('Sender options test suite', function () {
-    it('does copy the buffer during flush() if no options defined', function () {
-        const sender = new Sender();
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does copy the buffer during flush() if options are null', function () {
-        const sender = new Sender(null);
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does copy the buffer during flush() if options are undefined', function () {
-        const sender = new Sender(undefined);
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does copy the buffer during flush() if options are empty', function () {
-        const sender = new Sender({});
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does copy the buffer during flush() if copyBuffer is not set', function () {
-        const sender = new Sender({bufferSize: 1024});
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does copy the buffer during flush() if copyBuffer is set to true', function () {
-        const sender = new Sender({copyBuffer: true});
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does copy the buffer during flush() if copyBuffer is not a boolean', function () {
-        const sender = new Sender({copyBuffer: ''});
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does not copy the buffer during flush() if copyBuffer is set to false', function () {
-        const sender = new Sender({copyBuffer: false});
-        expect(sender.toBuffer).toBe(sender.toBufferView);
-    });
-
-    it('does not copy the buffer during flush() if copyBuffer is set to null', function () {
-        const sender = new Sender({copyBuffer: null});
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('does not copy the buffer during flush() if copyBuffer is undefined', function () {
-        const sender = new Sender({copyBuffer: undefined});
-        expect(sender.toBuffer).toBe(sender.toBufferNew);
-    });
-
-    it('sets default buffer size if no options defined', function () {
-        const sender = new Sender();
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('sets default buffer size if options are null', function () {
-        const sender = new Sender(null);
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('sets default buffer size if options are undefined', function () {
-        const sender = new Sender(undefined);
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('sets default buffer size if options are empty', function () {
-        const sender = new Sender({});
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('sets default buffer size if bufferSize is not set', function () {
-        const sender = new Sender({copyBuffer: true});
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('sets the requested buffer size if bufferSize is set', function () {
-        const sender = new Sender({bufferSize: 1024});
-        expect(sender.bufferSize).toBe(1024);
-    });
-
-    it('sets default buffer size if bufferSize is set to null', function () {
-        const sender = new Sender({bufferSize: null});
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('sets default buffer size if bufferSize is set to undefined', function () {
-        const sender = new Sender({bufferSize: undefined});
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('sets default buffer size if bufferSize is not a number', function () {
-        const sender = new Sender({bufferSize: '1024'});
-        expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
-    });
-
-    it('uses default logger if no options defined', function () {
-        const sender = new Sender();
-        expect(sender.log).toBe(log);
-    });
-
-    it('uses default logger if options are null', function () {
-        const sender = new Sender(null);
-        expect(sender.log).toBe(log);
-    });
-
-    it('uses default logger if options are undefined', function () {
-        const sender = new Sender(undefined);
-        expect(sender.log).toBe(log);
-    });
-
-    it('uses default logger if options are empty', function () {
-        const sender = new Sender({});
-        expect(sender.log).toBe(log);
-    });
-
-    it('uses default logger if log function is not set', function () {
-        const sender = new Sender({copyBuffer: true});
-        expect(sender.log).toBe(log);
-    });
-
-    it('uses the required log function if it is set', function () {
-        const testFunc = () => {};
-        const sender = new Sender({log: testFunc});
-        expect(sender.log).toBe(testFunc);
-    });
-
-    it('uses default logger if log is set to null', function () {
-        const sender = new Sender({log: null});
-        expect(sender.log).toBe(log);
-    });
-
-    it('uses default logger if log is set to undefined', function () {
-        const sender = new Sender({log: undefined});
-        expect(sender.log).toBe(log);
-    });
-
-    it('uses default logger if log is not a function', function () {
-        const sender = new Sender({log: ''});
-        expect(sender.log).toBe(log);
+        await sender.close();
     });
 });
 
@@ -961,7 +1469,7 @@ describe('Sender tests with containerized QuestDB instance', () => {
 
     beforeAll(async () => {
         jest.setTimeout(3000000);
-        container = await new GenericContainer('questdb/questdb:7.3.2')
+        container = await new GenericContainer('questdb/questdb:7.4.0')
             .withExposedPorts(QUESTDB_HTTP_PORT, QUESTDB_ILP_PORT)
             .start();
 
@@ -976,11 +1484,15 @@ describe('Sender tests with containerized QuestDB instance', () => {
         await container.stop();
     });
 
-    it('can ingest data and run queries', async () => {
-        const sender = new Sender();
-        await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
+    it('can ingest data via TCP and run queries', async () => {
+        const sender = new Sender({
+            protocol: 'tcp',
+            host: container.getHost(),
+            port: container.getMappedPort(QUESTDB_ILP_PORT)}
+        );
+        await sender.connect();
 
-        const tableName = 'test';
+        const tableName = 'test_tcp';
         const schema = [
             {name: 'location', type: 'SYMBOL'},
             {name: 'temperature', type: 'DOUBLE'},
@@ -1000,7 +1512,7 @@ describe('Sender tests with containerized QuestDB instance', () => {
         expect(alterTableResult.ddl).toBe('OK');
 
         // ingest via client
-        sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
         await sender.flush();
 
         // query table
@@ -1013,14 +1525,14 @@ describe('Sender tests with containerized QuestDB instance', () => {
         ]);
 
         // ingest via client, add new column
-        sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.3).at(1658484765000666000n, 'ns');
-        sender.table(tableName).symbol('location', 'emea').floatColumn('temperature', 17.4).at(1658484765000999000n, 'ns');
-        sender.table(tableName).symbol('location', 'emea').symbol('city', 'london').floatColumn('temperature', 18.8).at(1658484765001234000n, 'ns');
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.3).at(1658484765000666000n, 'ns');
+        await sender.table(tableName).symbol('location', 'emea').floatColumn('temperature', 17.4).at(1658484765000999000n, 'ns');
+        await sender.table(tableName).symbol('location', 'emea').symbol('city', 'london').floatColumn('temperature', 18.8).at(1658484765001234000n, 'ns');
         await sender.flush();
 
         // query table
         const select2Result = await runSelect(container, tableName, 4);
-        expect(select2Result.query).toBe('test');
+        expect(select2Result.query).toBe(tableName);
         expect(select2Result.count).toBe(4);
         expect(select2Result.columns).toStrictEqual([
             {name: 'location', type: 'SYMBOL'},
@@ -1038,10 +1550,110 @@ describe('Sender tests with containerized QuestDB instance', () => {
         await sender.close();
     });
 
+    it('can ingest data via HTTP with auto flush rows', async () => {
+        const sender = Sender.fromConfig(`http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=0;auto_flush_rows=1`);
+
+        const tableName = 'test_http_rows';
+        const schema = [
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'}
+        ];
+
+        // ingest via client
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
+
+        // query table
+        const select1Result = await runSelect(container, tableName, 1);
+        expect(select1Result.query).toBe(tableName);
+        expect(select1Result.count).toBe(1);
+        expect(select1Result.columns).toStrictEqual(schema);
+        expect(select1Result.dataset).toStrictEqual([
+            ['us',17.1,'2022-07-22T10:12:45.000000Z']
+        ]);
+
+        // ingest via client, add new column
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.36).at(1658484765000666000n, 'ns');
+        await sender.table(tableName).symbol('location', 'emea').floatColumn('temperature', 17.41).at(1658484765000999000n, 'ns');
+        await sender.table(tableName).symbol('location', 'emea').symbol('city', 'london').floatColumn('temperature', 18.81).at(1658484765001234000n, 'ns');
+
+        // query table
+        const select2Result = await runSelect(container, tableName, 4);
+        expect(select2Result.query).toBe(tableName);
+        expect(select2Result.count).toBe(4);
+        expect(select2Result.columns).toStrictEqual([
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'},
+            {name: 'city', type: 'SYMBOL'}
+        ]);
+        expect(select2Result.dataset).toStrictEqual([
+            ['us',17.1,'2022-07-22T10:12:45.000000Z',null],
+            ['us',17.36,'2022-07-22T10:12:45.000666Z',null],
+            ['emea',17.41,'2022-07-22T10:12:45.000999Z',null],
+            ['emea',18.81,'2022-07-22T10:12:45.001234Z','london']
+        ]);
+
+        await sender.close();
+    });
+
+    it('can ingest data via HTTP with auto flush interval', async () => {
+        const sender = Sender.fromConfig(`http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=1;auto_flush_rows=0`);
+
+        const tableName = 'test_http_interval';
+        const schema = [
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'}
+        ];
+
+        // wait longer than the set auto flush interval to make sure there is a flush
+        await sleep(10);
+
+        // ingest via client
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.1).at(1658484765000000000n, 'ns');
+
+        // query table
+        const select1Result = await runSelect(container, tableName, 1);
+        expect(select1Result.query).toBe(tableName);
+        expect(select1Result.count).toBe(1);
+        expect(select1Result.columns).toStrictEqual(schema);
+        expect(select1Result.dataset).toStrictEqual([
+            ['us',17.1,'2022-07-22T10:12:45.000000Z']
+        ]);
+
+        // ingest via client, add new column
+        await sleep(10);
+        await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', 17.36).at(1658484765000666000n, 'ns');
+        await sleep(10);
+        await sender.table(tableName).symbol('location', 'emea').floatColumn('temperature', 17.41).at(1658484765000999000n, 'ns');
+        await sleep(10);
+        await sender.table(tableName).symbol('location', 'emea').symbol('city', 'london').floatColumn('temperature', 18.81).at(1658484765001234000n, 'ns');
+
+        // query table
+        const select2Result = await runSelect(container, tableName, 4);
+        expect(select2Result.query).toBe(tableName);
+        expect(select2Result.count).toBe(4);
+        expect(select2Result.columns).toStrictEqual([
+            {name: 'location', type: 'SYMBOL'},
+            {name: 'temperature', type: 'DOUBLE'},
+            {name: 'timestamp', type: 'TIMESTAMP'},
+            {name: 'city', type: 'SYMBOL'}
+        ]);
+        expect(select2Result.dataset).toStrictEqual([
+            ['us',17.1,'2022-07-22T10:12:45.000000Z',null],
+            ['us',17.36,'2022-07-22T10:12:45.000666Z',null],
+            ['emea',17.41,'2022-07-22T10:12:45.000999Z',null],
+            ['emea',18.81,'2022-07-22T10:12:45.001234Z','london']
+        ]);
+
+        await sender.close();
+    });
+
     it('does not duplicate rows if await is missing when calling flush', async () => {
         // setting copyBuffer to make sure promises send data from their own local buffer
-        const sender = new Sender({ copyBuffer: true });
-        await sender.connect({host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT)});
+        const sender = new Sender({ protocol: 'tcp', host: container.getHost(), port: container.getMappedPort(QUESTDB_ILP_PORT), copy_buffer: true });
+        await sender.connect();
 
         const tableName = 'test2';
         const schema = [
@@ -1065,9 +1677,9 @@ describe('Sender tests with containerized QuestDB instance', () => {
         // ingest via client
         const numOfRows = 100;
         for (let i = 0; i < numOfRows; i++) {
-            sender.table(tableName).symbol('location', 'us').floatColumn('temperature', i).at(1658484765000000000n, 'ns');
+            await sender.table(tableName).symbol('location', 'us').floatColumn('temperature', i).at(1658484765000000000n, 'ns');
             // missing await is intentional
-            sender.flush();
+            await sender.flush();
         }
 
         // query table

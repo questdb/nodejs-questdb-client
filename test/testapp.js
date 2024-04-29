@@ -6,7 +6,7 @@ const { readFileSync } = require('fs');
 
 const PROXY_PORT = 9099;
 const PORT = 9009;
-const HOST = '127.0.0.1';
+const HOST = 'localhost';
 
 const USER_NAME = 'testapp';
 const PRIVATE_KEY = '9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8';
@@ -15,9 +15,11 @@ const AUTH = {
     d: PRIVATE_KEY
 };
 
-const senderTLS = {
+const senderOptions = {
+    protocol: 'tcps',
     host: HOST,
     port: PROXY_PORT,
+    auth: AUTH,
     ca: readFileSync('certs/ca/ca.crt') // necessary only if the server uses self-signed certificate
 };
 
@@ -31,23 +33,23 @@ async function run() {
     const proxy = new Proxy();
     await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
 
-    const sender = new Sender({bufferSize: 1024, auth: AUTH}); //with authentication
-    const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
+    const sender = new Sender(senderOptions); //with authentication
+    const connected = await sender.connect(); //connection through proxy with encryption
     if (connected) {
-        sender.table('test')
+        await sender.table('test')
             .symbol('location', 'emea').symbol('city', 'budapest')
             .stringColumn('hoppa', 'hello').stringColumn('hippi', 'hello').stringColumn('hippo', 'haho')
             .floatColumn('temperature', 14.1).intColumn('intcol', 56)
             .timestampColumn('tscol', Date.now(), 'ms')
             .atNow();
-        sender.table('test')
+        await sender.table('test')
             .symbol('location', 'asia').symbol('city', 'singapore')
             .stringColumn('hoppa', 'hi').stringColumn('hopp', 'hello').stringColumn('hippo', 'huhu')
             .floatColumn('temperature', 7.1)
             .at(1658484765000555000n, 'ns');
         await sender.flush();
 
-        sender.table('test')
+        await sender.table('test')
             .symbol('location', 'emea').symbol('city', 'miskolc')
             .stringColumn('hoppa', 'hello').stringColumn('hippi', 'hello').stringColumn('hippo', 'lalalala')
             .floatColumn('temperature', 13.1).intColumn('intcol', 333)

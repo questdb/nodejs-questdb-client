@@ -1,61 +1,120 @@
 /// <reference types="node" />
 /// <reference types="node" />
 /// <reference types="node" />
+/// <reference types="node" />
+/// <reference types="node" />
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
+ * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
+ * Based on benchmarks HTTP also provides higher throughput, if configured to ingest data in bigger batches.
  * <p>
  * The client supports authentication. <br>
  * Authentication details can be passed to the Sender in its configuration options. <br>
- * The user id and the user's private key are required for authentication. <br>
- * More details on configuration options can be found in the description of the constructor. <br>
+ * The client supports Basic username/password and Bearer token authentication methods when used with HTTP protocol,
+ * and JWK token authentication when ingesting data via TCP. <br>
  * Please, note that authentication is enabled by default in QuestDB Enterprise only. <br>
- * Details on how to configure authentication in the open source version of QuestDB: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
+ * Details on how to configure authentication in the open source version of
+ * QuestDB: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
  * </p>
  * <p>
- * The client also supports TLS encryption to provide a secure connection. <br>
- * Please, note that the open source version of QuestDB does not support TLS, and requires an external reverse-proxy, such as Nginx to enable encryption.
+ * The client also supports TLS encryption for both, HTTP and TCP transports to provide a secure connection. <br>
+ * Please, note that the open source version of QuestDB does not support TLS, and requires an external reverse-proxy,
+ * such as Nginx to enable encryption.
+ * </p>
+ * <p>
+ * The client uses a buffer to store data. It automatically flushes the buffer by sending its content to the server.
+ * Auto flushing can be disabled via configuration options to gain control over transactions. Initial and maximum
+ * buffer sizes can also be set.
+ * </p>
+ * <p>
+ * It is recommended that the Sender is created by using one of the static factory methods,
+ * <i>Sender.fromConfig(configString, extraOptions)</i> or <i>Sender.fromEnv(extraOptions)</i>).
+ * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
+ * initialized from a configuration string to make sure that the parameters are validated. <br>
+ * Detailed description of the Sender's configuration options can be found in
+ * the <a href="SenderOptions.html">SenderOptions</a> documentation.
+ * </p>
+ * <p>
+ * Extra options can be provided to the Sender in the <i>extraOptions</i> configuration object. <br>
+ * A custom logging function and a custom HTTP(S) agent can be passed to the Sender in this object. <br>
+ * The logger implementation provides the option to direct log messages to the same place where the host application's
+ * log is saved. The default logger writes to the console. <br>
+ * The custom HTTP(S) agent option becomes handy if there is a need to modify the default options set for the
+ * HTTP(S) connections. A popular setting would be disabling persistent connections, in this case an agent can be
+ * passed to the Sender with <i>keepAlive</i> set to <i>false</i>. <br>
+ * For example: <i>Sender.fromConfig(`http::addr=host:port`, { agent: new http.Agent({ keepAlive: false })})</i> <br>
+ * If no custom agent is configured, the Sender will use its own agent which overrides some default values
+ * of <i>http.Agent</i>/<i>https.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle
+ * timeout, and limits the number of open connections to the server, which is set to 256 for each host.
  * </p>
  */
 export class Sender {
+    /** @private */ private static DEFAULT_HTTP_AGENT;
+    /** @private */ private static DEFAULT_HTTPS_AGENT;
+    /**
+     * Creates a Sender options object by parsing the provided configuration string.
+     *
+     * @param {string} configurationString - Configuration string. <br>
+     * @param {object} extraOptions - Optional extra configuration. <br>
+     * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
+     *
+     * @return {Sender} A Sender object initialized from the provided configuration string.
+     */
+    static fromConfig(configurationString: string, extraOptions?: object): Sender;
+    /**
+     * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
+     *
+     * @param {object} extraOptions - Optional extra configuration. <br>
+     * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
+     * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
+     * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
+     *
+     * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
+     */
+    static fromEnv(extraOptions?: object): Sender;
     /**
      * Creates an instance of Sender.
      *
-     * @param {object} options - Configuration options. <br>
-     * <p>
-     * Properties of the object:
-     * <ul>
-     *   <li>bufferSize: <i>number</i> - Size of the buffer used by the sender to collect rows, provided in bytes. <br>
-     *   Optional, defaults to 8192 bytes. <br>
-     *   If the value passed is not a number, the setting is ignored. </li>
-     *   <li>copyBuffer: <i>boolean</i> - By default a new buffer is created for every flush() call, and the data to be sent to the server is copied into this new buffer.
-     *   Setting the flag to <i>false</i> results in reusing the same buffer instance for each flush() call. Use this flag only if calls to the client are serialised. <br>
-     *   Optional, defaults to <i>true</i>. <br>
-     *   If the value passed is not a boolean, the setting is ignored. </li>
-     *   <li>jwk: <i>{x: string, y: string, kid: string, kty: string, d: string, crv: string}</i> - JsonWebKey for authentication. <br>
-     *   If not provided, client is not authenticated and server might reject the connection depending on configuration. <br>
-     *   No type checks performed on the object passed. <br>
-     *   <b>Deprecated</b>, please, use the <i>auth</i> option instead. </li>
-     *   <li>auth: <i>{keyId: string, token: string}</i> - Authentication details, `keyId` is the username, `token` is the user's private key. <br>
-     *   If not provided, client is not authenticated and server might reject the connection depending on configuration. </li>
-     *   <li>log: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i> - logging function. <br>
-     *   If not provided, default logging is used which writes to the console with logging level <i>info</i>. <br>
-     *   If not a function passed, the setting is ignored. </li>
-     * </ul>
-     * </p>
+     * @param {SenderOptions} options - Sender configuration object. <br>
+     * See SenderOptions documentation for detailed description of configuration options. <br>
      */
-    constructor(options?: object);
-    /** @private */ private jwk;
+    constructor(options: SenderOptions);
+    /** @private */ private http;
+    /** @private */ private secure;
+    /** @private */ private host;
+    /** @private */ private port;
     /** @private */ private socket;
+    /** @private */ private username;
+    /** @private */ private password;
+    /** @private */ private token;
+    /** @private */ private tlsVerify;
+    /** @private */ private tlsCA;
     /** @private */ private bufferSize;
+    /** @private */ private maxBufferSize;
     /** @private */ private buffer;
     /** @private */ private toBuffer;
     /** @private */ private doResolve;
     /** @private */ private position;
     /** @private */ private endOfLastRow;
+    /** @private */ private autoFlush;
+    /** @private */ private autoFlushRows;
+    /** @private */ private autoFlushInterval;
+    /** @private */ private lastFlushTime;
+    /** @private */ private pendingRowCount;
+    /** @private */ private requestMinThroughput;
+    /** @private */ private requestTimeout;
+    /** @private */ private retryTimeout;
     /** @private */ private hasTable;
     /** @private */ private hasSymbols;
     /** @private */ private hasColumns;
+    /** @private */ private maxNameLength;
     /** @private */ private log;
+    /** @private */ private agent;
+    jwk: any;
     /**
      * Extends the size of the sender's buffer. <br>
      * Can be used to increase the size of buffer if overflown.
@@ -72,16 +131,25 @@ export class Sender {
      */
     reset(): Sender;
     /**
-     * Creates a connection to the database.
+     * Creates a TCP connection to the database.
      *
-     * @param {net.NetConnectOpts | tls.ConnectionOptions} options - Connection options, host and port are required.
-     * @param {boolean} [secure = false] - If true connection will use TLS encryption.
+     * @param {net.NetConnectOpts | tls.ConnectionOptions} connectOptions - Connection options, host and port are required.
      *
-     * @return {Promise<boolean>} Resolves to true if client is connected.
+     * @return {Promise<boolean>} Resolves to true if the client is connected.
      */
-    connect(options: net.NetConnectOpts | tls.ConnectionOptions, secure?: boolean): Promise<boolean>;
+    connect(connectOptions?: net.NetConnectOpts | tls.ConnectionOptions): Promise<boolean>;
     /**
-     * Closes the connection to the database. <br>
+     * @ignore
+     * @return {http.Agent} Returns the default http agent.
+     */
+    getDefaultHttpAgent(): http.Agent;
+    /**
+     * @ignore
+     * @return {https.Agent} Returns the default https agent.
+     */
+    getDefaultHttpsAgent(): https.Agent;
+    /**
+     * Closes the TCP connection to the database. <br>
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     close(): Promise<void>;
@@ -89,7 +157,7 @@ export class Sender {
      * Sends the buffer's content to the database and compacts the buffer.
      * If the last row is not finished it stays in the sender's buffer.
      *
-     * @return {Promise<boolean>} Resolves to true if there was data in the buffer to send.
+     * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send.
      */
     flush(): Promise<boolean>;
     /**
@@ -166,15 +234,19 @@ export class Sender {
      * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
      * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
      */
-    at(timestamp: number | bigint, unit?: string): void;
+    at(timestamp: number | bigint, unit?: string): Promise<void>;
     /**
      * Closing the row without writing designated timestamp into the buffer of the sender. <br>
      * Designated timestamp will be populated by the server on this record.
      */
-    atNow(): void;
+    atNow(): Promise<void>;
 }
-export const DEFAULT_BUFFER_SIZE: 8192;
+export const DEFAULT_BUFFER_SIZE: 65536;
+export const DEFAULT_MAX_BUFFER_SIZE: 104857600;
 import net = require("net");
 import tls = require("tls");
+import http = require("http");
+import https = require("https");
 import { Buffer } from "buffer";
+import { SenderOptions } from "./options";
 //# sourceMappingURL=sender.d.ts.map

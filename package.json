@@ -1,13 +1,13 @@
 {
   "name": "@questdb/nodejs-client",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "description": "QuestDB Node.js Client",
   "main": "index.js",
   "types": "types/index.d.ts",
   "scripts": {
     "test": "jest",
     "eslint": "npx eslint src/**",
-    "docs": "jsdoc index.js src/sender.js README.md -d docs",
+    "docs": "jsdoc src/sender.js src/options.js README.md -d docs",
     "types": "npx -p typescript tsc --skipLibCheck --declaration --allowJs --emitDeclarationOnly --outDir types"
   },
   "repository": {

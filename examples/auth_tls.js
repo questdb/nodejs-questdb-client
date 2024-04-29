@@ -10,15 +10,12 @@ async function run() {
   };
 
   // pass the authentication details to the sender
-  const sender = new Sender({ bufferSize: 4096, auth: AUTH });
-
-  // connect() takes an optional second argument
-  // if 'true' passed the connection is secured with TLS encryption
-  await sender.connect({ port: 9009, host: 'localhost' }, true);
+  const sender = new Sender({ protocol: 'tcps', host: 'localhost', port: 9009, bufferSize: 4096, auth: AUTH });
+  await sender.connect();
 
   // send the data over the authenticated and secure connection
   let bday = Date.parse('1856-07-10');
-  sender
+  await sender
     .table('inventors_nodejs')
     .symbol('born', 'Austrian Empire')
     .timestampColumn('birthday', bday, 'ms') // epoch in millis
@@ -26,7 +23,7 @@ async function run() {
     .stringColumn('name', 'Nicola Tesla')
     .at(Date.now(), 'ms'); // epoch in millis
   bday = Date.parse('1847-02-11');
-  sender
+  await sender
     .table('inventors_nodejs')
     .symbol('born', 'USA')
     .timestampColumn('birthday', bday, 'ms')
