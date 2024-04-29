@@ -36,7 +36,7 @@ Based on benchmarks HTTP also provides higher throughput, if configured to inges
 <p>
 The client supports authentication. <br>
 Authentication details can be passed to the Sender in its configuration options. <br>
-The client support Basic username/password and Bearer token authentication methods when used with HTTP protocol,
+The client supports Basic username/password and Bearer token authentication methods when used with HTTP protocol,
 and JWK token authentication when ingesting data via TCP. <br>
 Please, note that authentication is enabled by default in QuestDB Enterprise only. <br>
 Details on how to configure authentication in the open source version of
@@ -54,11 +54,24 @@ buffer sizes can also be set.
 </p>
 <p>
 It is recommended that the Sender is created by using one of the static factory methods,
-<i>Sender.fromConfig(configString)</i> or <i>Sender.fromEnv()</i>).
+<i>Sender.fromConfig(configString, extraOptions)</i> or <i>Sender.fromEnv(extraOptions)</i>).
 If the Sender is created via its constructor, at least the SenderOptions configuration object should be
 initialized from a configuration string to make sure that the parameters are validated. <br>
 Detailed description of the Sender's configuration options can be found in
 the <a href="SenderOptions.html">SenderOptions</a> documentation.
+</p>
+<p>
+Extra options can be provided to the Sender in the <i>extraOptions</i> configuration object. <br>
+A custom logging function and a custom HTTP(S) agent can be passed to the Sender in this object. <br>
+The logger implementation provides the option to direct log messages to the same place where the host application's
+log is saved. The default logger writes to the console. <br>
+The custom HTTP(S) agent option becomes handy if there is a need to modify the default options set for the
+HTTP(S) connections. A popular setting would be disabling persistent connections, in this case an agent can be
+passed to the Sender with <i>keepAlive</i> set to <i>false</i>. <br>
+For example: <i>Sender.fromConfig(`http::addr=host:port`, { agent: new http.Agent({ keepAlive: false })})</i> <br>
+If no custom agent is configured, the Sender will use its own agent which overrides some default values
+of <i>http.Agent</i>/<i>https.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle
+timeout, and limits the number of open connections to the server, which is set to 256 for each host.
 </p></div>
         
     
@@ -176,7 +189,7 @@ See SenderOptions documentation for detailed description of configuration option
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line79">line 79</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line92">line 92</a>
     </li></ul></dd>
     
 
@@ -391,7 +404,7 @@ See SenderOptions documentation for detailed description of configuration option
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line588">line 588</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line597">line 597</a>
     </li></ul></dd>
     
 
@@ -480,7 +493,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line610">line 610</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line619">line 619</a>
     </li></ul></dd>
     
 
@@ -640,7 +653,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line516">line 516</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line525">line 525</a>
     </li></ul></dd>
     
 
@@ -751,7 +764,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line376">line 376</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line396">line 396</a>
     </li></ul></dd>
     
 
@@ -787,7 +800,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
 
     
-    <h4 class="name" id="connect"><span class="type-signature"></span>connect<span class="signature">(connectOptions, secure<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {Promise.&lt;boolean>}</span></h4>
+    <h4 class="name" id="connect"><span class="type-signature"></span>connect<span class="signature">(connectOptions)</span><span class="type-signature"> &rarr; {Promise.&lt;boolean>}</span></h4>
     
 
     
@@ -819,11 +832,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
         <th>Type</th>
 
         
-        <th>Attributes</th>
-        
 
-        
-        <th>Default</th>
         
 
         <th class="last">Description</th>
@@ -851,61 +860,10 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
             </td>
 
             
-                <td class="attributes">
-                
 
-                
-
-                
-                </td>
-            
-
-            
-                <td class="default">
-                
-                </td>
             
 
             <td class="description last">Connection options, host and port are required.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>secure</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">boolean</span>
-
-
-            
-            </td>
-
-            
-                <td class="attributes">
-                
-                    &lt;optional><br>
-                
-
-                
-
-                
-                </td>
-            
-
-            
-                <td class="default">
-                
-                    false
-                
-                </td>
-            
-
-            <td class="description last">If true connection will use TLS encryption.</td>
         </tr>
 
     
@@ -946,7 +904,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line279">line 279</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line297">line 297</a>
     </li></ul></dd>
     
 
@@ -975,7 +933,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
 
         
 <div class="param-desc">
-    Resolves to true if client is connected.
+    Resolves to true if the client is connected.
 </div>
 
 
@@ -1128,7 +1086,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line531">line 531</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line540">line 540</a>
     </li></ul></dd>
     
 
@@ -1239,7 +1197,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line403">line 403</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line412">line 412</a>
     </li></ul></dd>
     
 
@@ -1421,7 +1379,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line547">line 547</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line556">line 556</a>
     </li></ul></dd>
     
 
@@ -1532,7 +1490,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line263">line 263</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line282">line 282</a>
     </li></ul></dd>
     
 
@@ -1693,7 +1651,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line241">line 241</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line260">line 260</a>
     </li></ul></dd>
     
 
@@ -1853,7 +1811,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line499">line 499</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line508">line 508</a>
     </li></ul></dd>
     
 
@@ -2035,7 +1993,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line474">line 474</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line483">line 483</a>
     </li></ul></dd>
     
 
@@ -2194,7 +2152,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line453">line 453</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line462">line 462</a>
     </li></ul></dd>
     
 
@@ -2446,7 +2404,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line568">line 568</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line577">line 577</a>
     </li></ul></dd>
     
 
@@ -2588,9 +2546,9 @@ The buffer's content is copied into the new buffer.
             
 
             <td class="description last">Optional extra configuration. <br>
-'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+- 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
 Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+- 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
 A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
         </tr>
 
@@ -2632,7 +2590,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line215">line 215</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line234">line 234</a>
     </li></ul></dd>
     
 
@@ -2751,9 +2709,9 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
             
 
             <td class="description last">Optional extra configuration. <br>
-'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+- 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
 Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+- 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
 A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
         </tr>
 
@@ -2795,7 +2753,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line230">line 230</a>
+        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line249">line 249</a>
     </li></ul></dd>
     
 
@@ -2869,7 +2827,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 24 2024 17:52:08 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Mon Apr 29 2024 20:05:17 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

@@ -51,7 +51,7 @@ const PUBLIC_KEY = {
  * <p>
  * The client supports authentication. <br>
  * Authentication details can be passed to the Sender in its configuration options. <br>
- * The client support Basic username/password and Bearer token authentication methods when used with HTTP protocol,
+ * The client supports Basic username/password and Bearer token authentication methods when used with HTTP protocol,
  * and JWK token authentication when ingesting data via TCP. <br>
  * Please, note that authentication is enabled by default in QuestDB Enterprise only. <br>
  * Details on how to configure authentication in the open source version of
@@ -69,11 +69,24 @@ const PUBLIC_KEY = {
  * </p>
  * <p>
  * It is recommended that the Sender is created by using one of the static factory methods,
- * <i>Sender.fromConfig(configString)</i> or <i>Sender.fromEnv()</i>).
+ * <i>Sender.fromConfig(configString, extraOptions)</i> or <i>Sender.fromEnv(extraOptions)</i>).
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
  * initialized from a configuration string to make sure that the parameters are validated. <br>
  * Detailed description of the Sender's configuration options can be found in
  * the <a href="SenderOptions.html">SenderOptions</a> documentation.
+ * </p>
+ * <p>
+ * Extra options can be provided to the Sender in the <i>extraOptions</i> configuration object. <br>
+ * A custom logging function and a custom HTTP(S) agent can be passed to the Sender in this object. <br>
+ * The logger implementation provides the option to direct log messages to the same place where the host application's
+ * log is saved. The default logger writes to the console. <br>
+ * The custom HTTP(S) agent option becomes handy if there is a need to modify the default options set for the
+ * HTTP(S) connections. A popular setting would be disabling persistent connections, in this case an agent can be
+ * passed to the Sender with <i>keepAlive</i> set to <i>false</i>. <br>
+ * For example: <i>Sender.fromConfig(`http::addr=host:port`, { agent: new http.Agent({ keepAlive: false })})</i> <br>
+ * If no custom agent is configured, the Sender will use its own agent which overrides some default values
+ * of <i>http.Agent</i>/<i>https.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle
+ * timeout, and limits the number of open connections to the server, which is set to 256 for each host.
  * </p>
  */
 class Sender {
@@ -211,9 +224,9 @@ class Sender {
      *
      * @param {string} configurationString - Configuration string. <br>
      * @param {object} extraOptions - Optional extra configuration. <br>
-     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
      * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
      * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the provided configuration string.
@@ -226,9 +239,9 @@ class Sender {
      * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
      *
      * @param {object} extraOptions - Optional extra configuration. <br>
-     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
      * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
      * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
@@ -385,6 +398,7 @@ class Sender {
             const address = this.socket.remoteAddress;
             const port = this.socket.remotePort;
             this.socket.destroy();
+            this.socket = null;
             this.log('info', `Connection to ${address}:${port} is closed`);
         }
     }

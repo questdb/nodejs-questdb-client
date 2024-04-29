@@ -79,7 +79,7 @@ const PUBLIC_KEY = {
  * &lt;p>
  * The client supports authentication. &lt;br>
  * Authentication details can be passed to the Sender in its configuration options. &lt;br>
- * The client support Basic username/password and Bearer token authentication methods when used with HTTP protocol,
+ * The client supports Basic username/password and Bearer token authentication methods when used with HTTP protocol,
  * and JWK token authentication when ingesting data via TCP. &lt;br>
  * Please, note that authentication is enabled by default in QuestDB Enterprise only. &lt;br>
  * Details on how to configure authentication in the open source version of
@@ -97,17 +97,29 @@ const PUBLIC_KEY = {
  * &lt;/p>
  * &lt;p>
  * It is recommended that the Sender is created by using one of the static factory methods,
- * &lt;i>Sender.fromConfig(configString)&lt;/i> or &lt;i>Sender.fromEnv()&lt;/i>).
+ * &lt;i>Sender.fromConfig(configString, extraOptions)&lt;/i> or &lt;i>Sender.fromEnv(extraOptions)&lt;/i>).
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
  * initialized from a configuration string to make sure that the parameters are validated. &lt;br>
  * Detailed description of the Sender's configuration options can be found in
  * the &lt;a href="SenderOptions.html">SenderOptions&lt;/a> documentation.
  * &lt;/p>
+ * &lt;p>
+ * Extra options can be provided to the Sender in the &lt;i>extraOptions&lt;/i> configuration object. &lt;br>
+ * A custom logging function and a custom HTTP(S) agent can be passed to the Sender in this object. &lt;br>
+ * The logger implementation provides the option to direct log messages to the same place where the host application's
+ * log is saved. The default logger writes to the console. &lt;br>
+ * The custom HTTP(S) agent option becomes handy if there is a need to modify the default options set for the
+ * HTTP(S) connections. A popular setting would be disabling persistent connections, in this case an agent can be
+ * passed to the Sender with &lt;i>keepAlive&lt;/i> set to &lt;i>false&lt;/i>. &lt;br>
+ * For example: &lt;i>Sender.fromConfig(`http::addr=host:port`, { agent: new http.Agent({ keepAlive: false })})&lt;/i> &lt;br>
+ * If no custom agent is configured, the Sender will use its own agent which overrides some default values
+ * of &lt;i>http.Agent&lt;/i>/&lt;i>https.Agent&lt;/i>. The Sender's own agent uses persistent connections with 1 minute idle
+ * timeout, and limits the number of open connections to the server, which is set to 256 for each host.
+ * &lt;/p>
  */
 class Sender {
     /** @private */ static DEFAULT_HTTP_AGENT;
     /** @private */ static DEFAULT_HTTPS_AGENT;
-    /** @private */ static numOfSenders = 0;
 
     /** @private */ http;       // true if the protocol is HTTP/HTTPS, false if it is TCP/TCPS
     /** @private */ secure;     // true if the protocol is HTTPS or TCPS, false otherwise
@@ -156,8 +168,11 @@ class Sender {
      * @param {SenderOptions} options - Sender configuration object. &lt;br>
      * See SenderOptions documentation for detailed description of configuration options. &lt;br>
      */
-    constructor(options = undefined) {
-        options = initSenderOptions(options);
+    constructor(options) {
+        if (!options || !options.protocol) {
+            throw new Error('The \'protocol\' option is mandatory');
+        }
+        replaceDeprecatedOptions(options);
 
         this.log = typeof options.log === 'function' ? options.log : log;
 
@@ -184,19 +199,25 @@ class Sender {
                 throw new Error(`Invalid protocol: '${options.protocol}'`);
         }
 
-        this.host = options.host;
-        this.port = options.port;
-
         if (this.http) {
             this.username = options.username;
             this.password = options.password;
             this.token = options.token;
+            if (!options.port) {
+                options.port = 9000;
+            }
         } else {
             if (!options.auth &amp;&amp; !options.jwk) {
                 constructAuth(options);
             }
             this.jwk = constructJwk(options);
+            if (!options.port) {
+                options.port = 9009;
+            }
         }
+
+        this.host = options.host;
+        this.port = options.port;
 
         this.tlsVerify = isBoolean(options.tls_verify) ? options.tls_verify : true;
         this.tlsCA = options.tls_ca ? readFileSync(options.tls_ca) : undefined;
@@ -224,8 +245,6 @@ class Sender {
         this.maxBufferSize = isInteger(options.max_buf_size, 1) ? options.max_buf_size : DEFAULT_MAX_BUFFER_SIZE;
         this.resize(isInteger(options.init_buf_size, 1) ? options.init_buf_size : DEFAULT_BUFFER_SIZE);
         this.reset();
-
-        Sender.numOfSenders++;
     }
 
     /**
@@ -233,9 +252,9 @@ class Sender {
      *
      * @param {string} configurationString - Configuration string. &lt;br>
      * @param {object} extraOptions - Optional extra configuration. &lt;br>
-     * 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>.
+     * - 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
      * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
-     * 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+     * - 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
      * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the provided configuration string.
@@ -248,9 +267,9 @@ class Sender {
      * Creates a Sender options object by parsing the configuration string set in the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
      *
      * @param {object} extraOptions - Optional extra configuration. &lt;br>
-     * 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>.
+     * - 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
      * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
-     * 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+     * - 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
      * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
      *
      * @return {Sender} A Sender object initialized from the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
@@ -300,17 +319,12 @@ class Sender {
      * Creates a TCP connection to the database.
      *
      * @param {net.NetConnectOpts | tls.ConnectionOptions} connectOptions - Connection options, host and port are required.
-     * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      *
-     * @return {Promise&lt;boolean>} Resolves to true if client is connected.
+     * @return {Promise&lt;boolean>} Resolves to true if the client is connected.
      */
-    connect(connectOptions = undefined, secure = false) {
+    connect(connectOptions = undefined) {
         if (this.http) {
             throw new Error('\'connect()\' should be called only if the sender connects via TCP');
-        }
-
-        if (secure) {
-            this.secure = secure;
         }
 
         if (!connectOptions) {
@@ -328,18 +342,20 @@ class Sender {
         }
 
         let self = this;
-
         return new Promise((resolve, reject) => {
-            let authenticated = false;
-            let data;
-
             if (this.socket) {
                 throw new Error('Sender connected already');
             }
+
+            let authenticated = false;
+            let data;
+
             this.socket = !this.secure
                 ? net.connect(connectOptions)
-                : tls.connect(connectOptions, async () => {
-                    await checkServerCert(self, reject);
+                : tls.connect(connectOptions, () => {
+                    if (authenticated) {
+                        resolve(true);
+                    }
                 });
             this.socket.setKeepAlive(true);
 
@@ -365,12 +381,16 @@ class Sender {
                     });
                 } else {
                     authenticated = true;
-                    resolve(true);
+                    if (!self.secure || !self.tlsVerify) {
+                        resolve(true);
+                    }
                 }
             })
             .on('error', err => {
-                this.log('error', err);
-                reject(err);
+                self.log('error', err);
+                if (err.code !== 'SELF_SIGNED_CERT_IN_CHAIN' || self.tlsVerify) {
+                    reject(err);
+                }
             });
         });
     }
@@ -402,22 +422,11 @@ class Sender {
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
-        Sender.numOfSenders--;
-        if (Sender.numOfSenders &lt; 1) {
-            if (Sender.DEFAULT_HTTP_AGENT) {
-                Sender.DEFAULT_HTTP_AGENT.destroy();
-                Sender.DEFAULT_HTTP_AGENT = undefined;
-            }
-            if (Sender.DEFAULT_HTTPS_AGENT) {
-                Sender.DEFAULT_HTTPS_AGENT.destroy();
-                Sender.DEFAULT_HTTPS_AGENT = undefined;
-            }
-        }
-
         if (this.socket) {
             const address = this.socket.remoteAddress;
             const port = this.socket.remotePort;
             this.socket.destroy();
+            this.socket = null;
             this.log('info', `Connection to ${address}:${port} is closed`);
         }
     }
@@ -653,13 +662,6 @@ function isBoolean(value) {
 
 function isInteger(value, lowerBound) {
     return typeof value === 'number' &amp;&amp; Number.isInteger(value) &amp;&amp; value >= lowerBound;
-}
-
-async function checkServerCert(sender, reject) {
-    if (sender.secure &amp;&amp; sender.tlsVerify &amp;&amp; !sender.socket.authorized) {
-        reject(new Error('Problem with server\'s certificate'));
-        await sender.close();
-    }
 }
 
 async function authenticate(sender, challenge) {
@@ -925,16 +927,7 @@ function timestampToNanos(timestamp, unit) {
     }
 }
 
-function initSenderOptions(options) {
-    if (!options) {
-        options = {};
-    }
-
-    // defaults to TCP for backwards compatibility
-    if (!options.protocol) {
-        options.protocol = TCP;
-    }
-
+function replaceDeprecatedOptions(options) {
     // deal with deprecated options
     if (options.copyBuffer) {
         options.copy_buffer = options.copyBuffer;
@@ -944,7 +937,6 @@ function initSenderOptions(options) {
         options.init_buf_size = options.bufferSize;
         options.bufferSize = undefined;
     }
-    return options;
 }
 
 function constructAuth(options) {
@@ -967,19 +959,19 @@ function constructJwk(options) {
     if (options.auth) {
         if (!options.auth.keyId) {
             throw new Error('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
         if (typeof options.auth.keyId !== 'string') {
             throw new Error('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
         if (!options.auth.token) {
             throw new Error('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
         if (typeof options.auth.token !== 'string') {
             throw new Error('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
 
         return {
@@ -1013,7 +1005,7 @@ exports.DEFAULT_MAX_BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE;
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Wed Apr 24 2024 17:52:08 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Mon Apr 29 2024 20:05:17 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

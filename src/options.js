@@ -158,9 +158,9 @@ class SenderOptions {
      *
      * @param {string} configurationString - Configuration string. <br>
      * @param {object} extraOptions - Optional extra configuration. <br>
-     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
      * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
      * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      */
     constructor(configurationString, extraOptions = undefined) {
@@ -184,9 +184,9 @@ class SenderOptions {
      *
      * @param {string} configurationString - Configuration string. <br>
      * @param {object} extraOptions - Optional extra configuration. <br>
-     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
      * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
      * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      *
      * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
@@ -199,9 +199,9 @@ class SenderOptions {
      * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
      *
      * @param {object} extraOptions - Optional extra configuration. <br>
-     * 'log' is a logging function used by the <a href="Sender.html">Sender</a>.
+     * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
      * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-     * 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+     * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
      * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
      *
      * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
