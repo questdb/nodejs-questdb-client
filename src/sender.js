@@ -128,8 +128,11 @@ class Sender {
      * @param {SenderOptions} options - Sender configuration object. <br>
      * See SenderOptions documentation for detailed description of configuration options. <br>
      */
-    constructor(options = undefined) {
-        options = initSenderOptions(options);
+    constructor(options) {
+        if (!options || !options.protocol) {
+            throw new Error('The \'protocol\' option is mandatory');
+        }
+        replaceDeprecatedOptions(options);
 
         this.log = typeof options.log === 'function' ? options.log : log;
 
@@ -156,19 +159,25 @@ class Sender {
                 throw new Error(`Invalid protocol: '${options.protocol}'`);
         }
 
-        this.host = options.host;
-        this.port = options.port;
-
         if (this.http) {
             this.username = options.username;
             this.password = options.password;
             this.token = options.token;
+            if (!options.port) {
+                options.port = 9000;
+            }
         } else {
             if (!options.auth && !options.jwk) {
                 constructAuth(options);
             }
             this.jwk = constructJwk(options);
+            if (!options.port) {
+                options.port = 9009;
+            }
         }
+
+        this.host = options.host;
+        this.port = options.port;
 
         this.tlsVerify = isBoolean(options.tls_verify) ? options.tls_verify : true;
         this.tlsCA = options.tls_ca ? readFileSync(options.tls_ca) : undefined;
@@ -272,17 +281,12 @@ class Sender {
      * Creates a TCP connection to the database.
      *
      * @param {net.NetConnectOpts | tls.ConnectionOptions} connectOptions - Connection options, host and port are required.
-     * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      *
-     * @return {Promise<boolean>} Resolves to true if client is connected.
+     * @return {Promise<boolean>} Resolves to true if the client is connected.
      */
-    connect(connectOptions = undefined, secure = false) {
+    connect(connectOptions = undefined) {
         if (this.http) {
             throw new Error('\'connect()\' should be called only if the sender connects via TCP');
-        }
-
-        if (secure) {
-            this.secure = secure;
         }
 
         if (!connectOptions) {
@@ -300,18 +304,20 @@ class Sender {
         }
 
         let self = this;
-
         return new Promise((resolve, reject) => {
-            let authenticated = false;
-            let data;
-
             if (this.socket) {
                 throw new Error('Sender connected already');
             }
+
+            let authenticated = false;
+            let data;
+
             this.socket = !this.secure
                 ? net.connect(connectOptions)
-                : tls.connect(connectOptions, async () => {
-                    await checkServerCert(self, reject);
+                : tls.connect(connectOptions, () => {
+                    if (authenticated) {
+                        resolve(true);
+                    }
                 });
             this.socket.setKeepAlive(true);
 
@@ -337,12 +343,16 @@ class Sender {
                     });
                 } else {
                     authenticated = true;
-                    resolve(true);
+                    if (!self.secure || !self.tlsVerify) {
+                        resolve(true);
+                    }
                 }
             })
             .on('error', err => {
-                this.log('error', err);
-                reject(err);
+                self.log('error', err);
+                if (err.code !== 'SELF_SIGNED_CERT_IN_CHAIN' || self.tlsVerify) {
+                    reject(err);
+                }
             });
         });
     }
@@ -630,13 +640,6 @@ function isInteger(value, lowerBound) {
     return typeof value === 'number' && Number.isInteger(value) && value >= lowerBound;
 }
 
-async function checkServerCert(sender, reject) {
-    if (sender.secure && sender.tlsVerify && !sender.socket.authorized) {
-        reject(new Error('Problem with server\'s certificate'));
-        await sender.close();
-    }
-}
-
 async function authenticate(sender, challenge) {
     // Check for trailing \n which ends the challenge
     if (challenge.slice(-1).readInt8() === 10) {
@@ -900,16 +903,7 @@ function timestampToNanos(timestamp, unit) {
     }
 }
 
-function initSenderOptions(options) {
-    if (!options) {
-        options = {};
-    }
-
-    // defaults to TCP for backwards compatibility
-    if (!options.protocol) {
-        options.protocol = TCP;
-    }
-
+function replaceDeprecatedOptions(options) {
     // deal with deprecated options
     if (options.copyBuffer) {
         options.copy_buffer = options.copyBuffer;
@@ -919,7 +913,6 @@ function initSenderOptions(options) {
         options.init_buf_size = options.bufferSize;
         options.bufferSize = undefined;
     }
-    return options;
 }
 
 function constructAuth(options) {
@@ -942,19 +935,19 @@ function constructJwk(options) {
     if (options.auth) {
         if (!options.auth.keyId) {
             throw new Error('Missing username, please, specify the \'keyId\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
         if (typeof options.auth.keyId !== 'string') {
             throw new Error('Please, specify the \'keyId\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
         if (!options.auth.token) {
             throw new Error('Missing private key, please, specify the \'token\' property of the \'auth\' config option. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
         if (typeof options.auth.token !== 'string') {
             throw new Error('Please, specify the \'token\' property of the \'auth\' config option as a string. ' +
-                'For example: new Sender({auth: {keyId: \'username\', token: \'private key\'}})');
+                'For example: new Sender({protocol: \'tcp\', host: \'host\', auth: {keyId: \'username\', token: \'private key\'}})');
         }
 
         return {

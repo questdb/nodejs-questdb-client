@@ -70,7 +70,7 @@ export class Sender {
      * @param {SenderOptions} options - Sender configuration object. <br>
      * See SenderOptions documentation for detailed description of configuration options. <br>
      */
-    constructor(options?: SenderOptions);
+    constructor(options: SenderOptions);
     /** @private */ private http;
     /** @private */ private secure;
     /** @private */ private host;
@@ -122,11 +122,10 @@ export class Sender {
      * Creates a TCP connection to the database.
      *
      * @param {net.NetConnectOpts | tls.ConnectionOptions} connectOptions - Connection options, host and port are required.
-     * @param {boolean} [secure = false] - If true connection will use TLS encryption.
      *
-     * @return {Promise<boolean>} Resolves to true if client is connected.
+     * @return {Promise<boolean>} Resolves to true if the client is connected.
      */
-    connect(connectOptions?: net.NetConnectOpts | tls.ConnectionOptions, secure?: boolean): Promise<boolean>;
+    connect(connectOptions?: net.NetConnectOpts | tls.ConnectionOptions): Promise<boolean>;
     /**
      * @ignore
      * @return {http.Agent} Returns the default http agent.

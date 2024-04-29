@@ -10,11 +10,8 @@ async function run() {
   };
 
   // pass the authentication details to the sender
-  const sender = new Sender({ bufferSize: 4096, auth: AUTH });
-
-  // connect() takes an optional second argument
-  // if 'true' passed the connection is secured with TLS encryption
-  await sender.connect({ port: 9009, host: 'localhost' }, false);
+  const sender = new Sender({ protocol: 'tcp', host: 'localhost', port: 9009, bufferSize: 4096, auth: AUTH });
+  await sender.connect();
 
   // send the data over the authenticated connection
   let bday = Date.parse('1856-07-10');

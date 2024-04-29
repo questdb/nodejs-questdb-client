@@ -15,9 +15,11 @@ const AUTH = {
     d: PRIVATE_KEY
 };
 
-const senderTLS = {
+const senderOptions = {
+    protocol: 'tcps',
     host: HOST,
     port: PROXY_PORT,
+    auth: AUTH,
     ca: readFileSync('certs/ca/ca.crt') // necessary only if the server uses self-signed certificate
 };
 
@@ -31,8 +33,8 @@ async function run() {
     const proxy = new Proxy();
     await proxy.start(PROXY_PORT, PORT, HOST, proxyTLS);
 
-    const sender = new Sender({min_buf_size: 1024, auth: AUTH}); //with authentication
-    const connected = await sender.connect(senderTLS, true); //connection through proxy with encryption
+    const sender = new Sender(senderOptions); //with authentication
+    const connected = await sender.connect(); //connection through proxy with encryption
     if (connected) {
         await sender.table('test')
             .symbol('location', 'emea').symbol('city', 'budapest')
