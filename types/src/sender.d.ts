@@ -38,7 +38,6 @@
 export class Sender {
     /** @private */ private static DEFAULT_HTTP_AGENT;
     /** @private */ private static DEFAULT_HTTPS_AGENT;
-    /** @private */ private static numOfSenders;
     /**
      * Creates a Sender options object by parsing the provided configuration string.
      *

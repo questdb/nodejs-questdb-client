@@ -79,7 +79,6 @@ const PUBLIC_KEY = {
 class Sender {
     /** @private */ static DEFAULT_HTTP_AGENT;
     /** @private */ static DEFAULT_HTTPS_AGENT;
-    /** @private */ static numOfSenders = { http: 0, tcp: 0 };
 
     /** @private */ http;       // true if the protocol is HTTP/HTTPS, false if it is TCP/TCPS
     /** @private */ secure;     // true if the protocol is HTTPS or TCPS, false otherwise
@@ -205,8 +204,6 @@ class Sender {
         this.maxBufferSize = isInteger(options.max_buf_size, 1) ? options.max_buf_size : DEFAULT_MAX_BUFFER_SIZE;
         this.resize(isInteger(options.init_buf_size, 1) ? options.init_buf_size : DEFAULT_BUFFER_SIZE);
         this.reset();
-
-        Sender.numOfSenders[this.http ? HTTP : TCP]++;
     }
 
     /**
@@ -384,26 +381,11 @@ class Sender {
      * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
      */
     async close() {
-        if (this.http) {
-            Sender.numOfSenders.http--;
-            if (Sender.numOfSenders.http < 1) {
-                if (Sender.DEFAULT_HTTP_AGENT) {
-                    Sender.DEFAULT_HTTP_AGENT.destroy();
-                    Sender.DEFAULT_HTTP_AGENT = undefined;
-                }
-                if (Sender.DEFAULT_HTTPS_AGENT) {
-                    Sender.DEFAULT_HTTPS_AGENT.destroy();
-                    Sender.DEFAULT_HTTPS_AGENT = undefined;
-                }
-            }
-        } else {
-            Sender.numOfSenders.tcp--;
-            if (this.socket) {
-                const address = this.socket.remoteAddress;
-                const port = this.socket.remotePort;
-                this.socket.destroy();
-                this.log('info', `Connection to ${address}:${port} is closed`);
-            }
+        if (this.socket) {
+            const address = this.socket.remoteAddress;
+            const port = this.socket.remotePort;
+            this.socket.destroy();
+            this.log('info', `Connection to ${address}:${port} is closed`);
         }
     }
 

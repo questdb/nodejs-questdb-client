@@ -6,13 +6,15 @@ const https = require('https');
 class MockHttp {
     server;
     mockConfig;
-    numOfRequests = 0;
+    numOfRequests;
 
-    constructor(mockConfig) {
-        if (!mockConfig) {
-            throw new Error('Missing mock config');
-        }
+    constructor() {
+        this.reset();
+    }
+
+    reset(mockConfig = {}) {
         this.mockConfig = mockConfig;
+        this.numOfRequests = 0;
     }
 
     async start(listenPort, secure = false, options = undefined) {
