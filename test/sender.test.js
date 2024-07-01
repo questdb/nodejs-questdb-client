@@ -1469,7 +1469,7 @@ describe('Sender tests with containerized QuestDB instance', () => {
 
     beforeAll(async () => {
         jest.setTimeout(3000000);
-        container = await new GenericContainer('questdb/questdb:7.4.0')
+        container = await new GenericContainer('questdb/questdb:nightly')
             .withExposedPorts(QUESTDB_HTTP_PORT, QUESTDB_ILP_PORT)
             .start();
 
