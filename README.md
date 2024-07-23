@@ -143,7 +143,7 @@ async function run() {
     } else {
         // it is important that each worker has a dedicated sender object
         // threads cannot share the sender because they would write into the same buffer
-        const sender = Sender.fromConfig('http::addr=127.0.0.1:9000');
+        const sender = Sender.fromConfig("http::addr=127.0.0.1:9000");
 
         // subscribe for the market data of the ticker assigned to the worker
         // ingest each price update into the database using the sender
