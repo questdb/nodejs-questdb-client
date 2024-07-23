@@ -104,7 +104,7 @@ run().catch(console.error);
 ### Worker threads example
 
 ```javascript
-const { Sender } = require('@questdb/nodejs-client')
+const { Sender } = require("@questdb/nodejs-client")
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads')
 
 // fake venue
