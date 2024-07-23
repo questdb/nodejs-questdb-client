@@ -130,7 +130,7 @@ async function subscribe(ticker, onTick) {
 
 async function run() {
     if (isMainThread) {
-        const tickers = ['ETH-USD', 'BTC-USD', 'SOL-USD', 'DOGE-USD']
+        const tickers = ["ETH-USD", "BTC-USD", "SOL-USD", "DOGE-USD"]
         // main thread to start a worker thread for each ticker
         for (let ticker of tickers) {
             const worker = new Worker(__filename, { workerData: { ticker: ticker } })
