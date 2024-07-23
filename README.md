@@ -78,7 +78,7 @@ run().catch(console.error)
 ### TypeScript example
 
 ```typescript
-import { Sender } from '@questdb/nodejs-client'
+import { Sender } from "@questdb/nodejs-client"
 
 async function run(): Promise<void> {
     // create a sender using HTTPS protocol with bearer token authentication
