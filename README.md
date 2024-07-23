@@ -56,7 +56,7 @@ const { Sender } = require("@questdb/nodejs-client")
 
 async function run() {
     // create a sender using HTTPS protocol with username and password authentication
-    const sender = Sender.fromConfig('https::addr=127.0.0.1:9000;username=admin;password=quest;')
+    const sender = Sender.fromConfig("https::addr=127.0.0.1:9000;username=admin;password=quest;")
 
     // send the data over the authenticated and secure connection
     await sender
