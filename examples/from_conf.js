@@ -11,7 +11,7 @@ async function run() {
     .symbol("side", "sell")
     .floatColumn("price", 2615.54)
     .floatColumn("amount", 0.00044)
-    .atNow()
+    .at(Date.now(), 'ms')
 
   // flush the buffer of the sender, sending the data to QuestDB
   // the buffer is cleared after the data is sent, and the sender is ready to accept new data

@@ -35,7 +35,7 @@ async function run() {
     .symbol("side", "sell")
     .floatColumn("price", 2615.54)
     .floatColumn("amount", 0.00044)
-    .atNow()
+    .at(Date.now(), 'ms')
 
   // flush the buffer of the sender, sending the data to QuestDB
   // the buffer is cleared after the data is sent, and the sender is ready to accept new data
@@ -52,11 +52,11 @@ run().then(console.log).catch(console.error)
 ### Authentication and secure connection
 
 ```javascript
-const { Sender } = require('@questdb/nodejs-client');
+const { Sender } = require('@questdb/nodejs-client')
 
 async function run() {
     // create a sender using HTTPS protocol with username and password authentication
-    const sender = Sender.fromConfig('https::addr=127.0.0.1:9000;username=admin;password=quest;');
+    const sender = Sender.fromConfig('https::addr=127.0.0.1:9000;username=admin;password=quest;')
 
     // send the data over the authenticated and secure connection
     await sender
@@ -65,24 +65,24 @@ async function run() {
         .symbol("side", "sell")
         .floatColumn("price", 2615.54)
         .floatColumn("amount", 0.00044)
-        .atNow()
-    await sender.flush();
+        .at(Date.now(), 'ms')
+    await sender.flush()
 
     // close the connection after all rows ingested
-    await sender.close();
+    await sender.close()
 }
 
-run().catch(console.error);
+run().catch(console.error)
 ```
 
 ### TypeScript example
 
 ```typescript
-import { Sender } from '@questdb/nodejs-client';
+import { Sender } from '@questdb/nodejs-client'
 
 async function run(): Promise<void> {
     // create a sender using HTTPS protocol with bearer token authentication
-    const sender: Sender = Sender.fromConfig('https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk;');
+    const sender: Sender = Sender.fromConfig('https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk;')
 
     // send the data over the authenticated and secure connection
     await sender
@@ -91,11 +91,11 @@ async function run(): Promise<void> {
         .symbol("side", "sell")
         .floatColumn("price", 2615.54)
         .floatColumn("amount", 0.00044)
-        .atNow()
-    await sender.flush();
+        .at(Date.now(), 'ms')
+    await sender.flush()
 
     // close the connection after all rows ingested
-    await sender.close();
+    await sender.close()
 }
 
 run().catch(console.error);
@@ -104,40 +104,40 @@ run().catch(console.error);
 ### Worker threads example
 
 ```javascript
-const { Sender } = require('@questdb/nodejs-client');
-const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
+const { Sender } = require('@questdb/nodejs-client')
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads')
 
 // fake venue
 // generates random prices and amounts for a ticker for max 5 seconds, then the feed closes
 function* venue(ticker) {
-    let end = false;
-    setTimeout(() => { end = true; }, rndInt(5000));
+    let end = false
+    setTimeout(() => { end = true; }, rndInt(5000))
     while (!end) {
-        yield {'ticker': ticker, 'price': Math.random(), 'amount': Math.random()};
+        yield {'ticker': ticker, 'price': Math.random(), 'amount': Math.random()}
     }
 }
 
 // market data feed simulator
 // uses the fake venue to deliver price and amount updates to the feed handler (onTick() callback)
 async function subscribe(ticker, onTick) {
-    const feed = venue(workerData.ticker);
+    const feed = venue(workerData.ticker)
     let tick;
     while (tick = feed.next().value) {
-        await onTick(tick);
-        await sleep(rndInt(30));
+        await onTick(tick)
+        await sleep(rndInt(30))
     }
 }
 
 async function run() {
     if (isMainThread) {
-        const tickers = ['ETH-USD', 'BTC-USD', 'SOL-USD', 'DOGE-USD'];
+        const tickers = ['ETH-USD', 'BTC-USD', 'SOL-USD', 'DOGE-USD']
         // main thread to start a worker thread for each ticker
         for (let ticker of tickers) {
             const worker = new Worker(__filename, { workerData: { ticker: ticker } })
                 .on('error', (err) => { throw err; })
                 .on('exit', () => { console.log(`${ticker} thread exiting...`); })
                 .on('message', (msg) => {
-                    console.log(`Ingested ${msg.count} prices for ticker ${msg.ticker}`);
+                    console.log(`Ingested ${msg.count} prices for ticker ${msg.ticker}`)
                 });
         }
     } else {
@@ -155,28 +155,28 @@ async function run() {
                 .symbol("side", "sell")
                 .floatColumn("price", tick.price)
                 .floatColumn("amount", tick.amount)
-                .atNow()
+                .at(Date.now(), 'ms')
             await sender.flush();
             count++;
         });
 
         // let the main thread know how many prices were ingested
-        parentPort.postMessage({'ticker': workerData.ticker, 'count': count});
+        parentPort.postMessage({'ticker': workerData.ticker, 'count': count})
 
         // close the connection to the database
-        await sender.close();
+        await sender.close()
     }
 }
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function rndInt(limit) {
-    return Math.floor((Math.random() * limit) + 1);
+    return Math.floor((Math.random() * limit) + 1)
 }
 
 run()
     .then(console.log)
-    .catch(console.error);
+    .catch(console.error)
 ```
