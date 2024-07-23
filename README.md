@@ -82,7 +82,7 @@ import { Sender } from "@questdb/nodejs-client"
 
 async function run(): Promise<void> {
     // create a sender using HTTPS protocol with bearer token authentication
-    const sender: Sender = Sender.fromConfig('https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk;')
+    const sender: Sender = Sender.fromConfig("https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk;")
 
     // send the data over the authenticated and secure connection
     await sender
