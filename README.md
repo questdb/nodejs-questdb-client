@@ -52,7 +52,7 @@ run().then(console.log).catch(console.error)
 ### Authentication and secure connection
 
 ```javascript
-const { Sender } = require('@questdb/nodejs-client')
+const { Sender } = require("@questdb/nodejs-client")
 
 async function run() {
     // create a sender using HTTPS protocol with username and password authentication
