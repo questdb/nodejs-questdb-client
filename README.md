@@ -91,7 +91,7 @@ async function run(): Promise<void> {
         .symbol("side", "sell")
         .floatColumn("price", 2615.54)
         .floatColumn("amount", 0.00044)
-        .at(Date.now(), 'ms')
+        .at(Date.now(), "ms")
     await sender.flush()
 
     // close the connection after all rows ingested
