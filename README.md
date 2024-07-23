@@ -161,7 +161,7 @@ async function run() {
         });
 
         // let the main thread know how many prices were ingested
-        parentPort.postMessage({'ticker': workerData.ticker, 'count': count})
+        parentPort.postMessage({ticker: workerData.ticker, count})
 
         // close the connection to the database
         await sender.close()
