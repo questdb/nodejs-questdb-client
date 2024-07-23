@@ -155,7 +155,7 @@ async function run() {
                 .symbol("side", "sell")
                 .floatColumn("price", tick.price)
                 .floatColumn("amount", tick.amount)
-                .at(Date.now(), 'ms')
+                .at(Date.now(), "ms")
             await sender.flush();
             count++;
         });
