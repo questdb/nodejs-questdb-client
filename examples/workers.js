@@ -7,7 +7,7 @@ function* venue(ticker) {
     let end = false
     setTimeout(() => { end = true; }, rndInt(5000))
     while (!end) {
-        yield {'ticker': ticker, 'price': Math.random(), 'amount': Math.random()}
+        yield {ticker, price: Math.random(), amount: Math.random()}
     }
 }
 
