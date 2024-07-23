@@ -105,7 +105,7 @@ run().catch(console.error);
 
 ```javascript
 const { Sender } = require("@questdb/nodejs-client")
-const { Worker, isMainThread, parentPort, workerData } = require('worker_threads')
+const { Worker, isMainThread, parentPort, workerData } = require("worker_threads")
 
 // fake venue
 // generates random prices and amounts for a ticker for max 5 seconds, then the feed closes
