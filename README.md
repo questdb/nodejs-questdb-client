@@ -12,12 +12,12 @@ npm i -s @questdb/nodejs-client
 ## Configuration options
 
 Detailed description of the client's configuration options can be found in
-the <a href="SenderOptions.html">SenderOptions</a> documentation.
+the <a href="https://questdb.github.io/nodejs-questdb-client/SenderOptions.html">SenderOptions</a> documentation.
 
 ## Examples
 
 The examples below demonstrate how to use the client. <br>
-For more details, please, check the <a href="Sender.html">Sender</a>'s documentation.
+For more details, please, check the <a href="https://questdb.github.io/nodejs-questdb-client/Sender.html">Sender</a>'s documentation.
 
 ### Basic API usage
 
