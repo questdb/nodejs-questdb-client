@@ -45,22 +45,49 @@
     <section>
         <article><h1>QuestDB Node.js Client</h1>
 <h2>Requirements</h2>
-<p>The client requires Node.js v16 or newer version.</p>
+<p>The client requires Node.js v20 or newer version.</p>
 <h2>Installation</h2>
-<pre class="prettyprint source lang-shell"><code>npm i -s @questdb/nodejs-client
+<pre class="prettyprint source lang-shell"><code># With npm
+npm i -s @questdb/nodejs-client
+# With yarn
+yarn add @questdb/nodejs-client
+# With pnpm
+pnpm add @questdb/nodejs-client
 </code></pre>
+<h2>Compatibility table</h2>
+<table>
+<thead>
+<tr>
+<th>QuestDB version</th>
+<th>Node.js client version</th>
+<th>HTTP Agent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>^5.0.0</td>
+<td>&gt;=v20.X.X</td>
+<td>Undici Agent</td>
+</tr>
+<tr>
+<td>^4.0.0</td>
+<td>&lt;v20.X.X</td>
+<td>Http.Agent</td>
+</tr>
+</tbody>
+</table>
 <h2>Configuration options</h2>
 <p>Detailed description of the client's configuration options can be found in
-the <a href="SenderOptions.html">SenderOptions</a> documentation.</p>
+the <a href="https://questdb.github.io/nodejs-questdb-client/SenderOptions.html">SenderOptions</a> documentation.</p>
 <h2>Examples</h2>
 <p>The examples below demonstrate how to use the client. <br>
-For more details, please, check the <a href="Sender.html">Sender</a>'s documentation.</p>
+For more details, please, check the <a href="https://questdb.github.io/nodejs-questdb-client/Sender.html">Sender</a>'s documentation.</p>
 <h3>Basic API usage</h3>
-<pre class="prettyprint source lang-javascript"><code>const { Sender } = require(&quot;@questdb/nodejs-client&quot;)
+<pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
 
 async function run() {
   // create a sender using HTTP protocol
-  const sender = Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;)
+  const sender = Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;);
 
   // add rows to the buffer of the sender
   await sender
@@ -69,141 +96,154 @@ async function run() {
     .symbol(&quot;side&quot;, &quot;sell&quot;)
     .floatColumn(&quot;price&quot;, 2615.54)
     .floatColumn(&quot;amount&quot;, 0.00044)
-    .at(Date.now(), &quot;ms&quot;)
+    .at(Date.now(), &quot;ms&quot;);
 
   // flush the buffer of the sender, sending the data to QuestDB
   // the buffer is cleared after the data is sent, and the sender is ready to accept new data
-  await sender.flush()
+  await sender.flush();
 
   // close the connection after all rows ingested
   // unflushed data will be lost
-  await sender.close()
+  await sender.close();
 }
 
-run().then(console.log).catch(console.error)
+run().then(console.log).catch(console.error);
 </code></pre>
 <h3>Authentication and secure connection</h3>
-<pre class="prettyprint source lang-javascript"><code>const { Sender } = require(&quot;@questdb/nodejs-client&quot;)
+<pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
 
 async function run() {
-    // create a sender using HTTPS protocol with username and password authentication
-    const sender = Sender.fromConfig(&quot;https::addr=127.0.0.1:9000;username=admin;password=quest;&quot;)
+  // create a sender using HTTPS protocol with username and password authentication
+  const sender = Sender.fromConfig(
+    &quot;https::addr=127.0.0.1:9000;username=admin;password=quest;&quot;,
+  );
 
-    // send the data over the authenticated and secure connection
-    await sender
-        .table(&quot;trades&quot;)
-        .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
-        .symbol(&quot;side&quot;, &quot;sell&quot;)
-        .floatColumn(&quot;price&quot;, 2615.54)
-        .floatColumn(&quot;amount&quot;, 0.00044)
-        .at(Date.now(), &quot;ms&quot;)
-    await sender.flush()
+  // send the data over the authenticated and secure connection
+  await sender
+    .table(&quot;trades&quot;)
+    .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
+    .symbol(&quot;side&quot;, &quot;sell&quot;)
+    .floatColumn(&quot;price&quot;, 2615.54)
+    .floatColumn(&quot;amount&quot;, 0.00044)
+    .at(Date.now(), &quot;ms&quot;);
+  await sender.flush();
 
-    // close the connection after all rows ingested
-    await sender.close()
+  // close the connection after all rows ingested
+  await sender.close();
 }
 
-run().catch(console.error)
+run().catch(console.error);
 </code></pre>
 <h3>TypeScript example</h3>
-<pre class="prettyprint source lang-typescript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;
+<pre class="prettyprint source lang-typescript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
 
 async function run(): Promise&lt;void> {
-    // create a sender using HTTPS protocol with bearer token authentication
-    const sender: Sender = Sender.fromConfig(&quot;https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk;&quot;)
+  // create a sender using HTTPS protocol with bearer token authentication
+  const sender: Sender = Sender.fromConfig(
+    &quot;https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk;&quot;,
+  );
 
-    // send the data over the authenticated and secure connection
-    await sender
-        .table(&quot;trades&quot;)
-        .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
-        .symbol(&quot;side&quot;, &quot;sell&quot;)
-        .floatColumn(&quot;price&quot;, 2615.54)
-        .floatColumn(&quot;amount&quot;, 0.00044)
-        .at(Date.now(), &quot;ms&quot;)
-    await sender.flush()
+  // send the data over the authenticated and secure connection
+  await sender
+    .table(&quot;trades&quot;)
+    .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
+    .symbol(&quot;side&quot;, &quot;sell&quot;)
+    .floatColumn(&quot;price&quot;, 2615.54)
+    .floatColumn(&quot;amount&quot;, 0.00044)
+    .at(Date.now(), &quot;ms&quot;);
+  await sender.flush();
 
-    // close the connection after all rows ingested
-    await sender.close()
+  // close the connection after all rows ingested
+  await sender.close();
 }
 
 run().catch(console.error);
 </code></pre>
 <h3>Worker threads example</h3>
-<pre class="prettyprint source lang-javascript"><code>const { Sender } = require(&quot;@questdb/nodejs-client&quot;)
-const { Worker, isMainThread, parentPort, workerData } = require(&quot;worker_threads&quot;)
+<pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
+const {
+  Worker,
+  isMainThread,
+  parentPort,
+  workerData,
+} = require(&quot;worker_threads&quot;);
 
 // fake venue
 // generates random prices and amounts for a ticker for max 5 seconds, then the feed closes
 function* venue(ticker) {
-    let end = false
-    setTimeout(() => { end = true; }, rndInt(5000))
-    while (!end) {
-        yield {ticker, price: Math.random(), amount: Math.random()}
-    }
+  let end = false;
+  setTimeout(() => {
+    end = true;
+  }, rndInt(5000));
+  while (!end) {
+    yield { ticker, price: Math.random(), amount: Math.random() };
+  }
 }
 
 // market data feed simulator
 // uses the fake venue to deliver price and amount updates to the feed handler (onTick() callback)
 async function subscribe(ticker, onTick) {
-    const feed = venue(workerData.ticker)
-    let tick;
-    while (tick = feed.next().value) {
-        await onTick(tick)
-        await sleep(rndInt(30))
-    }
+  const feed = venue(workerData.ticker);
+  let tick;
+  while ((tick = feed.next().value)) {
+    await onTick(tick);
+    await sleep(rndInt(30));
+  }
 }
 
 async function run() {
-    if (isMainThread) {
-        const tickers = [&quot;ETH-USD&quot;, &quot;BTC-USD&quot;, &quot;SOL-USD&quot;, &quot;DOGE-USD&quot;]
-        // main thread to start a worker thread for each ticker
-        for (let ticker of tickers) {
-            const worker = new Worker(__filename, { workerData: { ticker: ticker } })
-                .on('error', (err) => { throw err; })
-                .on('exit', () => { console.log(`${ticker} thread exiting...`); })
-                .on('message', (msg) => {
-                    console.log(`Ingested ${msg.count} prices for ticker ${msg.ticker}`)
-                });
-        }
-    } else {
-        // it is important that each worker has a dedicated sender object
-        // threads cannot share the sender because they would write into the same buffer
-        const sender = Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;);
-
-        // subscribe for the market data of the ticker assigned to the worker
-        // ingest each price update into the database using the sender
-        let count = 0;
-        await subscribe(workerData.ticker, async (tick) => {
-            await sender
-                .table(&quot;trades&quot;)
-                .symbol(&quot;symbol&quot;, tick.ticker)
-                .symbol(&quot;side&quot;, &quot;sell&quot;)
-                .floatColumn(&quot;price&quot;, tick.price)
-                .floatColumn(&quot;amount&quot;, tick.amount)
-                .at(Date.now(), &quot;ms&quot;)
-            await sender.flush();
-            count++;
+  if (isMainThread) {
+    const tickers = [&quot;ETH-USD&quot;, &quot;BTC-USD&quot;, &quot;SOL-USD&quot;, &quot;DOGE-USD&quot;];
+    // main thread to start a worker thread for each ticker
+    for (let ticker of tickers) {
+      const worker = new Worker(__filename, { workerData: { ticker: ticker } })
+        .on(&quot;error&quot;, (err) => {
+          throw err;
+        })
+        .on(&quot;exit&quot;, () => {
+          console.log(`${ticker} thread exiting...`);
+        })
+        .on(&quot;message&quot;, (msg) => {
+          console.log(`Ingested ${msg.count} prices for ticker ${msg.ticker}`);
         });
-
-        // let the main thread know how many prices were ingested
-        parentPort.postMessage({ticker: workerData.ticker, count})
-
-        // close the connection to the database
-        await sender.close()
     }
+  } else {
+    // it is important that each worker has a dedicated sender object
+    // threads cannot share the sender because they would write into the same buffer
+    const sender = Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;);
+
+    // subscribe for the market data of the ticker assigned to the worker
+    // ingest each price update into the database using the sender
+    let count = 0;
+    await subscribe(workerData.ticker, async (tick) => {
+      await sender
+        .table(&quot;trades&quot;)
+        .symbol(&quot;symbol&quot;, tick.ticker)
+        .symbol(&quot;side&quot;, &quot;sell&quot;)
+        .floatColumn(&quot;price&quot;, tick.price)
+        .floatColumn(&quot;amount&quot;, tick.amount)
+        .at(Date.now(), &quot;ms&quot;);
+      await sender.flush();
+      count++;
+    });
+
+    // let the main thread know how many prices were ingested
+    parentPort.postMessage({ ticker: workerData.ticker, count });
+
+    // close the connection to the database
+    await sender.close();
+  }
 }
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function rndInt(limit) {
-    return Math.floor((Math.random() * limit) + 1)
+  return Math.floor(Math.random() * limit + 1);
 }
 
-run()
-    .then(console.log)
-    .catch(console.error)
+run().then(console.log).catch(console.error);
 </code></pre></article>
     </section>
 
@@ -215,13 +255,13 @@ run()
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Tue Aug 13 2024 14:27:30 GMT+0300 (Eastern European Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Mon Dec 09 2024 02:16:59 GMT+0100 (hora estándar de Europa central)
 </footer>
 
 <script> prettyPrint(); </script>

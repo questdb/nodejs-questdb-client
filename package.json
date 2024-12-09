@@ -1,14 +1,27 @@
 {
   "name": "@questdb/nodejs-client",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "description": "QuestDB Node.js Client",
-  "main": "index.js",
-  "types": "types/index.d.ts",
   "scripts": {
-    "test": "jest",
-    "eslint": "npx eslint src/**",
-    "docs": "jsdoc src/sender.js src/options.js README.md -d docs",
-    "types": "npx -p typescript tsc --skipLibCheck --declaration --allowJs --emitDeclarationOnly --outDir types"
+    "test": "vitest",
+    "build": "bunchee",
+    "eslint": "eslint src/**",
+    "typecheck": "tsc --noEmit",
+    "docs": "pnpm run build && jsdoc ./dist/cjs/index.js README.md -d docs",
+    "preview:docs": "serve docs"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "import": {
+      "types": "./dist/es/index.d.mts",
+      "default": "./dist/es/index.mjs"
+    },
+    "require": {
+      "types": "./dist/cjs/index.d.ts",
+      "default": "./dist/cjs/index.js"
+    }
   },
   "repository": {
     "type": "git",
@@ -20,13 +33,19 @@
   "author": "QuestDB",
   "license": "Apache-2.0",
   "homepage": "https://questdb.github.io/nodejs-questdb-client",
-  "jest": {
-    "testRunner": "jest-jasmine2"
-  },
   "devDependencies": {
-    "eslint": "^8.50.0",
-    "jest": "^29.7.0",
-    "jest-jasmine2": "^29.7.0",
-    "testcontainers": "^10.2.1"
+    "@eslint/js": "^9.16.0",
+    "bunchee": "^6.0.3",
+    "eslint": "^9.16.0",
+    "jsdoc": "^4.0.4",
+    "prettier": "3.4.1",
+    "serve": "^14.2.4",
+    "testcontainers": "^10.15.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.17.0",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "undici": "^7.1.0"
   }
 }
