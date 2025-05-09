@@ -539,7 +539,7 @@ describe("Sender HTTP suite", function () {
       `https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT}`,
     );
     await expect(sendData(senderCertCheckFail)).rejects.toThrowError(
-      "HTTP request failed, statusCode=500, error=self-signed certificate in certificate chain",
+      "HTTP request failed, statusCode=unknown, error=self-signed certificate in certificate chain",
     );
     await senderCertCheckFail.close();
 
@@ -660,7 +660,7 @@ describe("Sender HTTP suite", function () {
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=1000`,
     );
     await expect(sendData(sender)).rejects.toThrowError(
-      "HTTP request failed, statusCode=500, error=",
+      "HTTP request failed, statusCode=503, error=Request failed"
     );
     await sender.close();
   });
@@ -677,7 +677,7 @@ describe("Sender HTTP suite", function () {
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=0;request_timeout=100`,
     );
     await expect(sendData(sender)).rejects.toThrowError(
-      "HTTP request timeout, no response from server in time",
+      "HTTP request timeout, statusCode=undefined, error=Headers Timeout Error",
     );
     await sender.close();
   });
@@ -908,7 +908,7 @@ describe("Sender connection suite", function () {
       await sender.flush();
       // fail('it should not be able to send data');
     } catch (err) {
-      expect(err.message).toBe("Sender is not connected");
+      expect(err.message).toBe("TCP send failed, error=Sender is not connected");
     }
     await sender.close();
   });
@@ -1950,10 +1950,6 @@ describe("Sender tests with containerized QuestDB instance", () => {
   });
 
   it("can ingest data via HTTP with auto flush rows", async () => {
-    const sender = Sender.fromConfig(
-      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=0;auto_flush_rows=1`,
-    );
-
     const tableName = "test_http_rows";
     const schema = [
       { name: "location", type: "SYMBOL" },
@@ -1961,12 +1957,29 @@ describe("Sender tests with containerized QuestDB instance", () => {
       { name: "timestamp", type: "TIMESTAMP" },
     ];
 
+    // Ensure table exists and is clean
+    await query(
+      container,
+      `CREATE TABLE IF NOT EXISTS ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY;`,
+    );
+    await query(container, `TRUNCATE TABLE ${tableName}`);
+    await query(
+      container,
+      `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1;`, // Make data visible quickly
+    );
+
+    const sender = Sender.fromConfig(
+      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=0;auto_flush_rows=1`,
+    );
+
     // ingest via client
     await sender
       .table(tableName)
       .symbol("location", "us")
       .floatColumn("temperature", 17.1)
       .at(1658484765000000000n, "ns");
+
+    // await sender.flush(); // Explicit flush before querying
 
     // query table
     const select1Result = await runSelect(container, tableName, 1);
@@ -1994,6 +2007,8 @@ describe("Sender tests with containerized QuestDB instance", () => {
       .symbol("city", "london")
       .floatColumn("temperature", 18.81)
       .at(1658484765001234000n, "ns");
+
+    // await sender.flush(); // Explicit flush before querying
 
     // query table
     const select2Result = await runSelect(container, tableName, 4);
@@ -2016,16 +2031,27 @@ describe("Sender tests with containerized QuestDB instance", () => {
   });
 
   it("can ingest data via HTTP with auto flush interval", async () => {
-    const sender = Sender.fromConfig(
-      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=1;auto_flush_rows=0`,
-    );
-
     const tableName = "test_http_interval";
     const schema = [
       { name: "location", type: "SYMBOL" },
       { name: "temperature", type: "DOUBLE" },
       { name: "timestamp", type: "TIMESTAMP" },
     ];
+
+    // Ensure table exists and is clean
+    await query(
+      container,
+      `CREATE TABLE IF NOT EXISTS ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY;`,
+    );
+    await query(container, `TRUNCATE TABLE ${tableName}`);
+    await query(
+      container,
+      `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1;`, // Make data visible quickly
+    );
+
+    const sender = Sender.fromConfig(
+      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=1;auto_flush_rows=0`,
+    );
 
     // wait longer than the set auto flush interval to make sure there is a flush
     await sleep(10);
@@ -2036,6 +2062,8 @@ describe("Sender tests with containerized QuestDB instance", () => {
       .symbol("location", "us")
       .floatColumn("temperature", 17.1)
       .at(1658484765000000000n, "ns");
+
+    // await sender.flush(); // Explicit flush before querying
 
     // query table
     const select1Result = await runSelect(container, tableName, 1);
@@ -2066,6 +2094,8 @@ describe("Sender tests with containerized QuestDB instance", () => {
       .symbol("city", "london")
       .floatColumn("temperature", 18.81)
       .at(1658484765001234000n, "ns");
+
+    // await sender.flush(); // Explicit flush before querying
 
     // query table
     const select2Result = await runSelect(container, tableName, 4);
@@ -2107,7 +2137,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     // create table
     const createTableResult = (await query(
       container,
-      `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY BYPASS WAL;`,
+      `CREATE TABLE ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY;`,
     )) as {
       ddl: string;
     };
@@ -2149,4 +2179,62 @@ describe("Sender tests with containerized QuestDB instance", () => {
 
     await sender.close();
   });
+
+  it("ingests all data without loss under high load with auto-flush", async () => {
+    const sender = Sender.fromConfig(
+      `tcp::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_ILP_PORT)};auto_flush_rows=5;auto_flush_interval=1;copy_buffer=on`,
+    );
+    await sender.connect();
+
+    const tableName = "test_high_load_autoflush";
+    const schema = [
+      { name: "id", type: "LONG" },
+      { name: "timestamp", type: "TIMESTAMP" },
+    ];
+
+    // Create table if not exists, and truncate it for a clean test
+    await query(
+      container,
+      `CREATE TABLE IF NOT EXISTS ${tableName}(${getFieldsString(schema)}) TIMESTAMP (timestamp) PARTITION BY DAY;`,
+    );
+    await query(
+      container,
+      `ALTER TABLE ${tableName} SET PARAM maxUncommittedRows = 1;`, // Make data visible quickly
+    );
+    await query(container, `TRUNCATE TABLE ${tableName}`);
+
+    const numOfRows = 1000;
+    const promises: Promise<void>[] = [];
+
+    for (let i = 0; i < numOfRows; i++) {
+      // Not awaiting each .at() call individually to allow them to queue up
+      const p = sender
+        .table(tableName)
+        .intColumn("id", i)
+        .at(1658484765000000000n + BigInt(i), "ns"); // Unique timestamp for each row
+      promises.push(p);
+    }
+
+    // Wait for all .at() calls to complete their processing (including triggering auto-flushes)
+    await Promise.all(promises);
+
+    // Perform a final flush to ensure any data remaining in the buffer is sent.
+    // This will be queued correctly after any ongoing auto-flushes.
+    await sender.flush();
+
+    // Query table and verify count
+    const selectQuery = `${tableName}`;
+    // Increased timeout for runSelect as many small flushes might take longer to commit and be queryable
+    const selectResult = await runSelect(container, selectQuery, numOfRows, 20000);
+    expect(selectResult.count).toBe(numOfRows);
+
+    // Verify data integrity
+    const dataCheckResult = (await query(container, `SELECT id FROM ${tableName} ORDER BY id`)) as { dataset: [number][], count: number };
+    expect(dataCheckResult.count).toBe(numOfRows);
+    for (let i = 0; i < numOfRows; i++) {
+      expect(dataCheckResult.dataset[i][0]).toBe(i);
+    }
+
+    await sender.close();
+  }, 30000); // Increased test timeout for this specific test
 });

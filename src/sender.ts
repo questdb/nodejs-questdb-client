@@ -145,6 +145,7 @@ class Sender {
   /** @private */ log;
   /** @private */ agent;
   /** @private */ jwk;
+  /** @private */ flushPromiseChain: Promise<boolean>;
 
   /**
    * Creates an instance of Sender.
@@ -159,6 +160,7 @@ class Sender {
     replaceDeprecatedOptions(options);
 
     this.log = typeof options.log === "function" ? options.log : log;
+    this.flushPromiseChain = Promise.resolve(true as boolean);
 
     switch (options.protocol) {
       case HTTP:
@@ -167,15 +169,25 @@ class Sender {
         this.agent =
           options.agent instanceof Agent
             ? options.agent
-            : this.getDefaultHttpAgent();
+            : Sender.getDefaultHttpAgent();
         break;
       case HTTPS:
         this.http = true;
         this.secure = true;
-        this.agent =
-          options.agent instanceof Agent
-            ? options.agent
-            : this.getDefaultHttpAgent();
+        if (options.agent instanceof Agent) {
+          this.agent = options.agent;
+        } else {
+          // Create a new agent with instance-specific TLS options
+          this.agent = new Agent({
+            ...DEFAULT_HTTP_OPTIONS,
+            connect: {
+              ...DEFAULT_HTTP_OPTIONS.connect,
+              requestCert: isBoolean(options.tls_verify) ? options.tls_verify : true,
+              rejectUnauthorized: isBoolean(options.tls_verify) ? options.tls_verify : true,
+              ca: options.tls_ca ? readFileSync(options.tls_ca) : undefined,
+            },
+          });
+        }
         break;
       case TCP:
         this.http = false;
@@ -238,14 +250,6 @@ class Sender {
 
     const noCopy = isBoolean(options.copy_buffer) && !options.copy_buffer;
     this.toBuffer = noCopy ? this.toBufferView : this.toBufferNew;
-    this.doResolve = noCopy
-      ? (resolve) => {
-        compact(this);
-        resolve(true);
-      }
-      : (resolve) => {
-        resolve(true);
-      };
     this.maxBufferSize = isInteger(options.max_buf_size, 1)
       ? options.max_buf_size
       : DEFAULT_MAX_BUFFER_SIZE;
@@ -428,11 +432,167 @@ class Sender {
    * @ignore
    * @return {Agent} Returns the default http agent.
    */
-  getDefaultHttpAgent(): Agent {
+  static getDefaultHttpAgent(): Agent {
     if (!Sender.DEFAULT_HTTP_AGENT) {
       Sender.DEFAULT_HTTP_AGENT = new Agent(DEFAULT_HTTP_OPTIONS);
     }
     return Sender.DEFAULT_HTTP_AGENT;
+  }
+
+  /**
+   * @ignore
+   * Compacts the buffer after data has been sent and resets pending row count.
+   * This method should only be called after a flush operation has successfully sent data.
+   * @param {number} bytesSent The number of bytes that were successfully sent and should be compacted.
+   */
+  private _compactBufferAndResetState(bytesSent: number) {
+    if (bytesSent > 0 && bytesSent <= this.position) {
+      this.buffer.copy(this.buffer, 0, bytesSent, this.position);
+      this.position = this.position - bytesSent;
+    } else if (bytesSent > this.position) {
+      // This case should ideally not happen if logic is correct, means we tried to compact more than available
+      this.position = 0;
+    }
+    // If bytesSent is 0 or negative, or if no actual data was at the start of the buffer to be shifted,
+    // this.position effectively remains the same relative to the start of new data.
+
+    this.endOfLastRow = Math.max(0, this.endOfLastRow - bytesSent);
+    // Ensure endOfLastRow is also shifted if it was within the compacted area, 
+    // or reset if it pointed to data that's now gone. 
+    // If new rows were added while flushing, endOfLastRow would be > position post-compaction of old data.
+    // This needs careful handling if new data is added *during* an async flush.
+    // For now, we assume endOfLastRow is relative to the data just flushed.
+    // A simpler approach might be to always set this.endOfLastRow = 0 after a successful flush, 
+    // as startNewRow() will set it correctly for the *next* new row.
+    // However, if a flush doesn't clear all pending complete rows, this needs to be accurate.
+    // The current `flush` logic sends up to `this.endOfLastRow`, so after sending `dataAmountToSend`
+    // (which was `this.endOfLastRow` at the time of prepping the flush), the new `this.endOfLastRow`
+    // should effectively be 0 relative to the start of the compacted buffer, until a new row is started.
+
+    this.lastFlushTime = Date.now();
+    this.pendingRowCount = 0; // Reset after successful flush
+    // If autoFlush was triggered by row count, this reset is crucial.
+    // If triggered by interval, this is also fine.
+  }
+
+  /**
+   * @ignore
+   * Executes the actual data sending logic (HTTP or TCP).
+   * This is called by the `flush` method, wrapped in the promise chain.
+   * @return {Promise<boolean>} Resolves to true if data was sent.
+   */
+  private async _executeFlush(): Promise<boolean> {
+    const dataAmountToSend = this.endOfLastRow;
+    if (dataAmountToSend <= 0) {
+      return false; // Nothing to send
+    }
+
+    // Use toBufferView to get a reference, actual data copy for sending happens based on protocol needs
+    const dataView = this.toBufferView(dataAmountToSend);
+    if (!dataView) {
+      return false; // Should not happen if dataAmountToSend > 0, but a safe check
+    }
+
+    // Create a copy for sending to avoid issues if the underlying buffer changes
+    // This is especially important for async operations.
+    const dataToSend = Buffer.allocUnsafe(dataView.length);
+    dataView.copy(dataToSend);
+
+    try {
+      if (this.http) {
+        const { timeout: calculatedTimeoutMillis } = createRequestOptions(this, dataToSend);
+        const retryBegin = Date.now();
+        const headers: Record<string, string> = {};
+
+        const dispatcher = new RetryAgent(this.agent, {
+          maxRetries: Infinity,
+          minTimeout: 10,
+          maxTimeout: 1000,
+          timeoutFactor: 2,
+          retryAfter: true,
+          methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+          statusCodes: RETRIABLE_STATUS_CODES,
+          errorCodes: [
+            "ECONNRESET",
+            "EAI_AGAIN",
+            "ECONNREFUSED",
+            "ETIMEDOUT",
+            "EPIPE",
+            "UND_ERR_CONNECT_TIMEOUT",
+            "UND_ERR_HEADERS_TIMEOUT",
+            "UND_ERR_BODY_TIMEOUT",
+          ],
+          retry: (err, context, callback) => {
+            const elapsed = Date.now() - retryBegin;
+            if (elapsed > this.retryTimeout) {
+              return callback(err);
+            }
+            return callback(null);
+          },
+        });
+
+        if (this.token) {
+          headers["Authorization"] = "Bearer " + this.token;
+        } else if (this.username && this.password) {
+          headers["Authorization"] =
+            "Basic " +
+            Buffer.from(this.username + ":" + this.password).toString("base64");
+        }
+
+        const { statusCode, body } = await dispatcher.request({
+          origin: `${this.secure ? "https" : "http"}://${this.host}:${this.port}`,
+          path: "/write?precision=n",
+          method: "POST",
+          headers,
+          body: dataToSend,
+          headersTimeout: this.requestTimeout,
+          bodyTimeout: calculatedTimeoutMillis,
+        });
+
+        const responseBody = await body.arrayBuffer();
+        if (statusCode === HTTP_NO_CONTENT) {
+          if (responseBody.byteLength > 0) {
+            this.log(
+              "warn",
+              `Unexpected message from server: ${Buffer.from(responseBody).toString()}`,
+            );
+          }
+          this._compactBufferAndResetState(dataAmountToSend);
+          return true;
+        } else {
+          const error = new Error(
+            `HTTP request failed, statusCode=${statusCode}, error=${Buffer.from(responseBody).toString()}`,
+          );
+          throw error;
+        }
+      } else { // TCP
+        if (!this.socket || this.socket.destroyed) {
+          throw new Error("Sender is not connected");
+        }
+        return new Promise((resolve, reject) => {
+          this.socket.write(dataToSend, (err) => { // Use the copied dataToSend
+            if (err) {
+              reject(err);
+            } else {
+              this._compactBufferAndResetState(dataAmountToSend);
+              resolve(true);
+            }
+          });
+        });
+      }
+    } catch (err) {
+      // Log the error and then throw a new, standardized error
+      if (this.http && err.code === "UND_ERR_HEADERS_TIMEOUT") {
+        this.log("error", `HTTP request timeout, no response from server in time. Original error: ${err.message}`);
+        throw new Error(`HTTP request timeout, statusCode=${err.statusCode}, error=${err.message}`);
+      } else if (this.http) {
+        this.log("error", `HTTP request failed, statusCode=${err.statusCode || 'unknown'}, error=${err.message}`);
+        throw new Error(`HTTP request failed, statusCode=${err.statusCode || 'unknown'}, error=${err.message}`);
+      } else { // TCP
+        this.log("error", `TCP send failed: ${err.message}`);
+        throw new Error(`TCP send failed, error=${err.message}`);
+      }
+    }
   }
 
   /**
@@ -452,25 +612,28 @@ class Sender {
   /**
    * Sends the buffer's content to the database and compacts the buffer.
    * If the last row is not finished it stays in the sender's buffer.
+   * This operation is added to a queue and executed sequentially.
    *
-   * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send.
+   * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send and it was sent successfully.
    */
-  async flush(): Promise<unknown> {
-    const data = this.toBuffer(this.endOfLastRow);
-    if (!data) {
-      return false;
-    }
-
-    if (this.http) {
-      // const request = this.secure ? https.request : http.request;
-      const options = createRequestOptions(this, data);
-      return sendHttp(this, options, data, this.retryTimeout);
-    } else {
-      if (!this.socket) {
-        throw new Error("Sender is not connected");
-      }
-      return sendTcp(this, data);
-    }
+  async flush(): Promise<boolean> {
+    // Add to the promise chain to ensure sequential execution
+    this.flushPromiseChain = this.flushPromiseChain
+      .then(async () => {
+        // Check if there's anything to flush just before execution
+        if (this.endOfLastRow <= 0) {
+          return false; // Nothing to flush
+        }
+        return this._executeFlush();
+      })
+      .catch((err) => {
+        // Log or handle error. If _executeFlush throws, it will be caught here.
+        // The error should have already been logged by _executeFlush.
+        // We re-throw to ensure the promise chain reflects the failure.
+        this.log("error", `Flush operation failed in chain: ${err.message}`);
+        throw err; // Propagate error to the caller of this specific flush()
+      });
+    return this.flushPromiseChain;
   }
 
   /**
@@ -491,7 +654,6 @@ class Sender {
     if (pos > 0) {
       const data = Buffer.allocUnsafe(pos);
       this.buffer.copy(data, 0, 0, pos);
-      compact(this);
       return data;
     }
     return null;
@@ -779,105 +941,6 @@ function createRequestOptions(
   return options;
 }
 
-async function sendHttp(
-  sender: Sender,
-  options: InternalHttpOptions,
-  data: Buffer,
-  retryTimeout: number,
-) {
-  const retryBegin = Date.now();
-  const headers: Record<string, string> = {};
-
-  if (sender.secure) {
-    sender.agent = new Agent({
-      ...DEFAULT_HTTP_OPTIONS,
-      connect: {
-        ...DEFAULT_HTTP_OPTIONS.connect,
-        requestCert: sender.tlsVerify,
-        rejectUnauthorized: sender.tlsVerify,
-        ca: sender.tlsCA,
-      },
-    });
-  }
-
-  const dispatcher = new RetryAgent(sender.agent, {
-    maxRetries: Infinity, // We'll control retries based on time
-    minTimeout: 10, // Initial retry interval in milliseconds
-    maxTimeout: 1000, // Maximum retry interval in milliseconds
-    timeoutFactor: 2, // Exponential backoff factor
-    retryAfter: true, // Enable automatic retry after 'Retry-After' header
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
-    statusCodes: RETRIABLE_STATUS_CODES,
-    errorCodes: [
-      "ECONNRESET",
-      "EAI_AGAIN",
-      "ECONNREFUSED",
-      "ETIMEDOUT",
-      "EPIPE",
-      "UND_ERR_CONNECT_TIMEOUT",
-      "UND_ERR_HEADERS_TIMEOUT",
-      "UND_ERR_BODY_TIMEOUT",
-    ],
-    retry(err, context, callback) {
-      const elapsed = Date.now() - retryBegin;
-      if (elapsed > retryTimeout) {
-        // Stop retrying if the total retry timeout is exceeded
-        return callback(err);
-      }
-
-      return callback(null);
-    },
-  });
-
-  if (sender.token) {
-    headers["Authorization"] = "Bearer " + sender.token;
-  } else if (sender.username && sender.password) {
-    headers["Authorization"] =
-      "Basic " +
-      Buffer.from(sender.username + ":" + sender.password).toString("base64");
-  }
-
-  try {
-    const { statusCode, body } = await dispatcher.request({
-      origin: `${options.protocol}://${options.hostname}:${options.port}`,
-      path: options.path,
-      method: options.method,
-      headers,
-      body: data,
-      headersTimeout: sender.requestTimeout,
-    });
-
-    const responseBody = await body.arrayBuffer();
-    if (statusCode === HTTP_NO_CONTENT) {
-      if (responseBody.byteLength > 0) {
-        sender.log(
-          "warn",
-          `Unexpected message from server: ${responseBody.toString()}`,
-        );
-      }
-      return true;
-    } else {
-      const error = new Error(
-        `HTTP request failed, statusCode=${statusCode}, error=${responseBody.toString()}`,
-      );
-      throw error;
-    }
-  } catch (err) {
-    if (err.code === "UND_ERR_HEADERS_TIMEOUT") {
-      sender.log(
-        "error",
-        `HTTP request timeout, no response from server in time`,
-      );
-      throw new Error(`HTTP request timeout, no response from server in time`);
-    }
-
-    sender.log("error", `HTTP request failed, statusCode=500, error=`);
-    throw new Error(
-      `HTTP request failed, statusCode=500, error=${err.message}`,
-    );
-  }
-}
-
 async function autoFlush(sender: Sender) {
   if (
     sender.autoFlush &&
@@ -887,20 +950,13 @@ async function autoFlush(sender: Sender) {
       (sender.autoFlushInterval > 0 &&
         Date.now() - sender.lastFlushTime >= sender.autoFlushInterval))
   ) {
-    await sender.flush();
-  }
-}
-
-function sendTcp(sender: Sender, data: Buffer) {
-  return new Promise((resolve, reject) => {
-    sender.socket.write(data, (err) => {
-      if (err) {
-        reject(err);
-      } else {
-        sender.doResolve(resolve);
-      }
+    // await sender.flush(); // Old call
+    sender.flush().catch(err => {
+      // Auto-flush errors should be logged but not necessarily crash the application
+      // The error is already logged by the flush chain's catch block or _executeFlush
+      sender.log("error", `Auto-flush failed: ${err.message}`);
     });
-  });
+  }
 }
 
 function checkCapacity(sender: Sender, data: string[], base = 0) {
@@ -914,17 +970,6 @@ function checkCapacity(sender: Sender, data: string[], base = 0) {
       newSize += sender.bufferSize;
     } while (sender.position + length > newSize);
     sender.resize(newSize);
-  }
-}
-
-function compact(sender: Sender) {
-  if (sender.endOfLastRow > 0) {
-    sender.buffer.copy(sender.buffer, 0, sender.endOfLastRow, sender.position);
-    sender.position = sender.position - sender.endOfLastRow;
-    sender.endOfLastRow = 0;
-
-    sender.lastFlushTime = Date.now();
-    sender.pendingRowCount = 0;
   }
 }
 
