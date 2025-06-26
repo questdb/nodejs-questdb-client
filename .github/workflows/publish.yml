@@ -1,13 +1,11 @@
-name: build
+name: publish
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Publish @questdb/nodejs-questdb-client to npm
+  test:
+    name: Publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -18,16 +16,21 @@ jobs:
       - name: Setup node
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 22
 
-      - name: Install dependencies
-        run: npm ci
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: true
 
-      - name: Run tests
-        run: npm test
+      - name: Linting
+        run: pnpm eslint
 
-      - name: Run linter
-        run: npm run eslint
+      - name: Type-checking
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
 
       - name: Publish
         uses: JS-DevTools/npm-publish@v3
