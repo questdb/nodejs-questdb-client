@@ -376,11 +376,9 @@ describe("Configuration string parser suite", function () {
     expect(() => SenderOptions.fromConfig("")).toThrow(
       "Configuration string is missing",
     );
-    // @ts-expect-error - Testing invalid input
     expect(() => SenderOptions.fromConfig(null)).toThrow(
       "Configuration string is missing",
     );
-    // @ts-expect-error - Testing invalid input
     expect(() => SenderOptions.fromConfig(undefined)).toThrow(
       "Configuration string is missing",
     );

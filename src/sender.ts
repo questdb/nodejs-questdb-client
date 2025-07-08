@@ -81,7 +81,7 @@ const RETRIABLE_STATUS_CODES = [500, 503, 504, 507, 509, 523, 524, 529, 599];
  * </p>
  * <p>
  * It is recommended that the Sender is created by using one of the static factory methods,
- * <i>Sender.fromConfig(configString, extraOptions)</i> or <i>Sender.fromEnv(extraOptions)</i>).
+ * <i>Sender.fromConfig(configString, extraOptions)</i> or <i>Sender.fromEnv(extraOptions)</i>.
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
  * initialized from a configuration string to make sure that the parameters are validated. <br>
  * Detailed description of the Sender's configuration options can be found in
@@ -407,7 +407,7 @@ class Sender {
               "info",
               `Authenticating with ${(connectOptions as tls.ConnectionOptions).host}:${(connectOptions as tls.ConnectionOptions).port}`,
             );
-            await this.socket.write(`${this.jwk.kid}\n`, (err) => {
+            await this.socket.write(`${this.jwk.kid}\n`, (err: Error) => {
               if (err) {
                 reject(err);
               }
@@ -570,7 +570,7 @@ class Sender {
           throw new Error("Sender is not connected");
         }
         return new Promise((resolve, reject) => {
-          this.socket.write(dataToSend, (err) => { // Use the copied dataToSend
+          this.socket.write(dataToSend, (err: Error) => { // Use the copied dataToSend
             if (err) {
               reject(err);
             } else {
@@ -614,7 +614,7 @@ class Sender {
    * If the last row is not finished it stays in the sender's buffer.
    * This operation is added to a queue and executed sequentially.
    *
-   * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send and it was sent successfully.
+   * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send, and it was sent successfully.
    */
   async flush(): Promise<boolean> {
     // Add to the promise chain to ensure sequential execution
@@ -626,7 +626,7 @@ class Sender {
         }
         return this._executeFlush();
       })
-      .catch((err) => {
+      .catch((err: Error) => {
         // Log or handle error. If _executeFlush throws, it will be caught here.
         // The error should have already been logged by _executeFlush.
         // We re-throw to ensure the promise chain reflects the failure.
@@ -893,7 +893,7 @@ async function authenticate(
     return new Promise((resolve, reject) => {
       sender.socket.write(
         `${Buffer.from(signature).toString("base64")}\n`,
-        (err) => {
+        (err: Error) => {
           if (err) {
             reject(err);
           } else {
