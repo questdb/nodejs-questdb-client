@@ -2,8 +2,9 @@ name: build
 
 on:
   push:
-  schedule:
-    - cron: '15 2,10,18 * * *'
+    branches:
+      - main
+  pull_request:
 
 jobs:
   test:
@@ -11,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [16, latest]
+        node-version: [20, 22, latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,11 +24,16 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
-      - name: Install dependencies
-        run: npm ci
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: true
 
-      - name: Run tests
-        run: npm test
+      - name: Linting
+        run: pnpm eslint
 
-      - name: Run linter
-        run: npm run eslint
+      - name: Type-checking
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test

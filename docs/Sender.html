@@ -68,10 +68,9 @@ log is saved. The default logger writes to the console. <br>
 The custom HTTP(S) agent option becomes handy if there is a need to modify the default options set for the
 HTTP(S) connections. A popular setting would be disabling persistent connections, in this case an agent can be
 passed to the Sender with <i>keepAlive</i> set to <i>false</i>. <br>
-For example: <i>Sender.fromConfig(`http::addr=host:port`, { agent: new http.Agent({ keepAlive: false })})</i> <br>
+For example: <i>Sender.fromConfig(`http::addr=host:port`, { agent: new undici.Agent({ connect: { keepAlive: false } })})</i> <br>
 If no custom agent is configured, the Sender will use its own agent which overrides some default values
-of <i>http.Agent</i>/<i>https.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle
-timeout, and limits the number of open connections to the server, which is set to 256 for each host.
+of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
 </p></div>
         
     
@@ -189,7 +188,7 @@ See SenderOptions documentation for detailed description of configuration option
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line92">line 92</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line600">line 600</a>
     </li></ul></dd>
     
 
@@ -404,7 +403,7 @@ See SenderOptions documentation for detailed description of configuration option
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line597">line 597</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1005">line 1005</a>
     </li></ul></dd>
     
 
@@ -493,7 +492,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line619">line 619</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1025">line 1025</a>
     </li></ul></dd>
     
 
@@ -653,7 +652,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line525">line 525</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line935">line 935</a>
     </li></ul></dd>
     
 
@@ -764,7 +763,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line396">line 396</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line816">line 816</a>
     </li></ul></dd>
     
 
@@ -904,7 +903,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line297">line 297</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line739">line 739</a>
     </li></ul></dd>
     
 
@@ -1086,7 +1085,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line540">line 540</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line948">line 948</a>
     </li></ul></dd>
     
 
@@ -1197,7 +1196,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line412">line 412</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line830">line 830</a>
     </li></ul></dd>
     
 
@@ -1379,7 +1378,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line556">line 556</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line964">line 964</a>
     </li></ul></dd>
     
 
@@ -1490,7 +1489,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line282">line 282</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line726">line 726</a>
     </li></ul></dd>
     
 
@@ -1651,7 +1650,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line260">line 260</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line706">line 706</a>
     </li></ul></dd>
     
 
@@ -1811,7 +1810,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line508">line 508</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line918">line 918</a>
     </li></ul></dd>
     
 
@@ -1993,7 +1992,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line483">line 483</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line892">line 892</a>
     </li></ul></dd>
     
 
@@ -2152,7 +2151,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line462">line 462</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line871">line 871</a>
     </li></ul></dd>
     
 
@@ -2404,7 +2403,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line577">line 577</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line985">line 985</a>
     </li></ul></dd>
     
 
@@ -2548,8 +2547,8 @@ The buffer's content is copied into the new buffer.
             <td class="description last">Optional extra configuration. <br>
 - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
 Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-- 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
+- 'agent' is a custom Undici agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+A <i>undici.Agent</i>  object is expected.</td>
         </tr>
 
     
@@ -2590,7 +2589,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line234">line 234</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line684">line 684</a>
     </li></ul></dd>
     
 
@@ -2711,8 +2710,8 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
             <td class="description last">Optional extra configuration. <br>
 - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
 Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-- 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
+- 'agent' is a custom Undici agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+A <i>undici.Agent</i>  object is expected.</td>
         </tr>
 
     
@@ -2753,7 +2752,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="sender.js.html">sender.js</a>, <a href="sender.js.html#line249">line 249</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line697">line 697</a>
     </li></ul></dd>
     
 
@@ -2821,13 +2820,13 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Tue Aug 13 2024 14:27:30 GMT+0300 (Eastern European Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Mon Dec 09 2024 02:16:59 GMT+0100 (hora estándar de Europa central)
 </footer>
 
 <script> prettyPrint(); </script>
