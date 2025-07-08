@@ -2,9 +2,15 @@ import http from "node:http";
 import https from "node:https";
 
 class MockHttp {
-  server;
-  mockConfig;
-  numOfRequests;
+  server: http.Server | https.Server;
+  mockConfig: {
+    responseDelays?: number[],
+    responseCodes?: number[],
+    username?: string,
+    password?: string,
+    token?: string,
+  };
+  numOfRequests: number;
 
   constructor() {
     this.reset();
@@ -15,7 +21,7 @@ class MockHttp {
     this.numOfRequests = 0;
   }
 
-  async start(listenPort, secure = false, options?: Record<string, unknown>) {
+  async start(listenPort: number, secure: boolean = false, options?: Record<string, unknown>) {
     const serverCreator = secure ? https.createServer : http.createServer;
     // @ts-expect-error - Testing different options, so typing is not important
     this.server = serverCreator(options, (req, res) => {
