@@ -627,41 +627,6 @@ describe("Configuration string parser suite", function () {
     ).toThrow("Invalid retry timeout option, not a number: '6w0'");
   });
 
-  it("can parse copy_buffer config", function () {
-    let options = SenderOptions.fromConfig(
-      "http::addr=host:9000;copy_buffer=on;",
-    );
-    expect(options.protocol).toBe("http");
-    expect(options.host).toBe("host");
-    expect(options.port).toBe(9000);
-    expect(options.copy_buffer).toBe(true);
-
-    options = SenderOptions.fromConfig("http::addr=host:9000;copy_buffer=off;");
-    expect(options.protocol).toBe("http");
-    expect(options.host).toBe("host");
-    expect(options.port).toBe(9000);
-    expect(options.copy_buffer).toBe(false);
-
-    expect(() =>
-      SenderOptions.fromConfig("http::addr=host:9000;copy_buffer=ON;"),
-    ).toThrow("Invalid copy buffer option: 'ON'");
-    expect(() =>
-      SenderOptions.fromConfig("http::addr=host:9000;copy_buffer=On;"),
-    ).toThrow("Invalid copy buffer option: 'On'");
-    expect(() =>
-      SenderOptions.fromConfig("http::addr=host:9000;copy_buffer=true;"),
-    ).toThrow("Invalid copy buffer option: 'true'");
-    expect(() =>
-      SenderOptions.fromConfig("http::addr=host:9000;copy_buffer=OFF;"),
-    ).toThrow("Invalid copy buffer option: 'OFF'");
-    expect(() =>
-      SenderOptions.fromConfig("http::addr=host:9000;copy_buffer=Off;"),
-    ).toThrow("Invalid copy buffer option: 'Off'");
-    expect(() =>
-      SenderOptions.fromConfig("http::addr=host:9000;copy_buffer=false;"),
-    ).toThrow("Invalid copy buffer option: 'false'");
-  });
-
   it("can parse max_name_len config", function () {
     const options = SenderOptions.fromConfig(
       "http::addr=host:9000;max_name_len=30",

@@ -164,73 +164,16 @@ describe("Sender options test suite", function () {
     }
   });
 
-  it("does copy the buffer during flush() if copyBuffer is not set", async function () {
-    const sender = new Sender({ protocol: "http", host: "host" });
-    expect(sender.toBuffer).toBe(sender.toBufferNew);
-    await sender.close();
-  });
-
-  it("does copy the buffer during flush() if copyBuffer is set to true", async function () {
+  it("sets default buffer size if init_buf_size is not set", async function () {
     const sender = new Sender({
       protocol: "http",
       host: "host",
-      copy_buffer: true,
-    });
-    expect(sender.toBuffer).toBe(sender.toBufferNew);
-    await sender.close();
-  });
-
-  it("does copy the buffer during flush() if copyBuffer is not a boolean", async function () {
-    const sender = new Sender({
-      protocol: "http",
-      host: "host",
-      copy_buffer: "",
-    });
-    expect(sender.toBuffer).toBe(sender.toBufferNew);
-    await sender.close();
-  });
-
-  it("does not copy the buffer during flush() if copyBuffer is set to false", async function () {
-    const sender = new Sender({
-      protocol: "http",
-      host: "host",
-      copy_buffer: false,
-    });
-    expect(sender.toBuffer).toBe(sender.toBufferView);
-    await sender.close();
-  });
-
-  it("does not copy the buffer during flush() if copyBuffer is set to null", async function () {
-    const sender = new Sender({
-      protocol: "http",
-      host: "host",
-      copy_buffer: null,
-    });
-    expect(sender.toBuffer).toBe(sender.toBufferNew);
-    await sender.close();
-  });
-
-  it("does not copy the buffer during flush() if copyBuffer is undefined", async function () {
-    const sender = new Sender({
-      protocol: "http",
-      host: "host",
-      copy_buffer: undefined,
-    });
-    expect(sender.toBuffer).toBe(sender.toBufferNew);
-    await sender.close();
-  });
-
-  it("sets default buffer size if bufferSize is not set", async function () {
-    const sender = new Sender({
-      protocol: "http",
-      host: "host",
-      copy_buffer: true,
     });
     expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
     await sender.close();
   });
 
-  it("sets the requested buffer size if bufferSize is set", async function () {
+  it("sets the requested buffer size if init_buf_size is set", async function () {
     const sender = new Sender({
       protocol: "http",
       host: "host",
@@ -240,7 +183,7 @@ describe("Sender options test suite", function () {
     await sender.close();
   });
 
-  it("sets default buffer size if bufferSize is set to null", async function () {
+  it("sets default buffer size if init_buf_size is set to null", async function () {
     const sender = new Sender({
       protocol: "http",
       host: "host",
@@ -250,7 +193,7 @@ describe("Sender options test suite", function () {
     await sender.close();
   });
 
-  it("sets default buffer size if bufferSize is set to undefined", async function () {
+  it("sets default buffer size if init_buf_size is set to undefined", async function () {
     const sender = new Sender({
       protocol: "http",
       host: "host",
@@ -260,7 +203,7 @@ describe("Sender options test suite", function () {
     await sender.close();
   });
 
-  it("sets default buffer size if bufferSize is not a number", async function () {
+  it("sets default buffer size if init_buf_size is not a number", async function () {
     const sender = new Sender({
       protocol: "http",
       host: "host",
@@ -268,6 +211,52 @@ describe("Sender options test suite", function () {
       init_buf_size: "1024",
     });
     expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets the requested buffer size if 'bufferSize' is set, but warns that it is deprecated", async function () {
+    const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
+      expect(level).toBe("warn");
+      expect(message).toMatch("Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'");
+    };
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing deprecated option
+      bufferSize: 2048,
+      log: log,
+    });
+    expect(sender.bufferSize).toBe(2048);
+    await sender.close();
+  });
+
+  it("warns about deprecated option 'copy_buffer'", async function () {
+    const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
+      expect(level).toBe("warn");
+      expect(message).toMatch("Option 'copy_buffer' is not supported anymore, please, remove it");
+    };
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing deprecated option
+      copy_buffer: false,
+      log: log,
+    });
+    await sender.close();
+  });
+
+  it("warns about deprecated option 'copyBuffer'", async function () {
+    const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
+      expect(level).toBe("warn");
+      expect(message).toMatch("Option 'copyBuffer' is not supported anymore, please, remove it");
+    };
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing deprecated option
+      copyBuffer: false,
+      log: log,
+    });
     await sender.close();
   });
 
@@ -1151,8 +1140,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     const sender = new Sender({
       protocol: "tcp",
       host: "host",
-      // @ts-expect-error - Technically it's a private field, but I'm not sure
-      bufferSize: 256,
+      init_buf_size: 256,
     });
     for (const p of pages) {
       await sender
@@ -1596,10 +1584,11 @@ describe("Sender message builder test suite (anything not covered in client inte
       init_buf_size: 1024,
     });
     expect(sender.toBufferView()).toBe(null);
+    expect(sender.toBufferNew()).toBe(null);
     await sender.close();
   });
 
-  it("ignores unfinished rows when preparing a buffer for send", async function () {
+  it("leaves unfinished rows in the sender's buffer when preparing a copy of the buffer for send", async function () {
     const sender = new Sender({
       protocol: "tcp",
       host: "host",
@@ -1608,8 +1597,14 @@ describe("Sender message builder test suite (anything not covered in client inte
     sender.table("tableName").symbol("name", "value");
     await sender.at(1234567890n, "ns");
     sender.table("tableName").symbol("name", "value2");
-    expect(sender.toBufferView(sender.endOfLastRow).toString()).toBe(
+
+    // copy of the sender's buffer contains the finished row
+    expect(sender.toBufferNew(sender.endOfLastRow).toString()).toBe(
       "tableName,name=value 1234567890\n",
+    );
+    // the sender's buffer is compacted, and contains only the unfinished row
+    expect(sender.toBufferView().toString()).toBe(
+      "tableName,name=value2",
     );
     await sender.close();
   });
@@ -2096,7 +2091,6 @@ describe("Sender tests with containerized QuestDB instance", () => {
       protocol: "tcp",
       host: container.getHost(),
       port: container.getMappedPort(QUESTDB_ILP_PORT),
-      copy_buffer: true,
     });
     await sender.connect();
 
@@ -2140,7 +2134,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
 
   it("ingests all data without loss under high load with auto-flush", async () => {
     const sender = Sender.fromConfig(
-      `tcp::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_ILP_PORT)};auto_flush_rows=5;auto_flush_interval=1;copy_buffer=on`,
+      `tcp::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_ILP_PORT)};auto_flush_rows=5;auto_flush_interval=1`,
     );
     await sender.connect();
 

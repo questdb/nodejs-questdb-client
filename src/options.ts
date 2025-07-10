@@ -105,11 +105,6 @@ const UNSAFE_OFF = "unsafe_off";
  * <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * </li>
- * <li> copy_buffer: <i>enum, accepted values: on, off</i> - By default, the Sender creates a new buffer for every flush() call,
- * and the data to be sent to the server is copied into this new buffer.
- * Setting the flag to <i>off</i> results in reusing the same buffer instance for each flush() call. <br>
- * Use this flag only if calls to the client are serialised.
- * </li>
  * </ul>
  */
 class SenderOptions {
@@ -128,9 +123,6 @@ class SenderOptions {
   auto_flush?: boolean;
   auto_flush_rows?: number;
   auto_flush_interval?: number;
-
-  // replaces `copyBuffer` option
-  copy_buffer?: string | boolean | null;
 
   request_min_throughput?: number;
   request_timeout?: number;
@@ -243,7 +235,6 @@ function parseConfigurationString(
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
-  parseCopyBuffer(options);
 }
 
 function parseSettings(
@@ -299,7 +290,6 @@ const ValidConfigKeys = [
   "auto_flush",
   "auto_flush_rows",
   "auto_flush_interval",
-  "copy_buffer",
   "request_min_throughput",
   "request_timeout",
   "retry_timeout",
@@ -430,10 +420,6 @@ function parseRequestTimeoutOptions(options: SenderOptions) {
 
 function parseMaxNameLength(options: SenderOptions) {
   parseInteger(options, "max_name_len", "max name length", 1);
-}
-
-function parseCopyBuffer(options: SenderOptions) {
-  parseBoolean(options, "copy_buffer", "copy buffer");
 }
 
 function parseBoolean(
