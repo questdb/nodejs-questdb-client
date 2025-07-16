@@ -193,7 +193,7 @@ class SenderOptions {
           extraOptions.agent
           && !(extraOptions.agent instanceof Agent)
           && !(extraOptions.agent instanceof http.Agent)
-          // @ts-ignore
+          // @ts-expect-error - Not clear what the problem is, the two lines above have no issues
           && !(extraOptions.agent instanceof https.Agent)
       ) {
         throw new Error("Invalid HTTP agent");
