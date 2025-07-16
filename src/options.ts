@@ -180,7 +180,7 @@ class SenderOptions {
    * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
    * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
    */
-  constructor(configurationString: string, extraOptions: ExtraOptions = undefined) {
+  constructor(configurationString: string, extraOptions?: ExtraOptions) {
     parseConfigurationString(this, configurationString);
 
     if (extraOptions) {
@@ -231,7 +231,7 @@ class SenderOptions {
    *
    * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
    */
-  static fromConfig(configurationString: string, extraOptions: ExtraOptions = undefined): SenderOptions {
+  static fromConfig(configurationString: string, extraOptions?: ExtraOptions): SenderOptions {
     return new SenderOptions(configurationString, extraOptions);
   }
 
@@ -246,7 +246,7 @@ class SenderOptions {
    *
    * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
-  static fromEnv(extraOptions: ExtraOptions = undefined): SenderOptions {
+  static fromEnv(extraOptions?: ExtraOptions): SenderOptions {
     return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions);
   }
 }

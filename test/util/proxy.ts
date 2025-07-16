@@ -22,7 +22,7 @@ class Proxy {
       console.info("remote connection closed");
     });
 
-    this.remote.on("error", (err: unknown) => {
+    this.remote.on("error", (err: Error) => {
       console.error(`remote connection: ${err}`);
     });
   }

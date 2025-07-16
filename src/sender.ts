@@ -128,7 +128,7 @@ class Sender {
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
    */
-  static fromConfig(configurationString: string, extraOptions: ExtraOptions = undefined): Sender {
+  static fromConfig(configurationString: string, extraOptions?: ExtraOptions): Sender {
     return new Sender(
       SenderOptions.fromConfig(configurationString, extraOptions),
     );
@@ -145,7 +145,7 @@ class Sender {
    *
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
-  static fromEnv(extraOptions: ExtraOptions = undefined): Sender {
+  static fromEnv(extraOptions?: ExtraOptions): Sender {
     return new Sender(
       SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions),
     );
@@ -488,12 +488,12 @@ class Sender {
       name: string,
       value: unknown,
       writeValue: () => void,
-      valueType?: string | null,
+      valueType?: string
   ) {
     if (typeof name !== "string") {
       throw new Error(`Column name must be a string, received ${typeof name}`);
     }
-    if (valueType != null && typeof value !== valueType) {
+    if (valueType && typeof value !== valueType) {
       throw new Error(
           `Column value must be of type ${valueType}, received ${typeof value}`,
       );

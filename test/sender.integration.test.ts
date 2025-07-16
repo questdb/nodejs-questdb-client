@@ -1,6 +1,6 @@
 // @ts-check
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { GenericContainer } from "testcontainers";
+import { GenericContainer, StartedTestContainer } from "testcontainers";
 import http from "http";
 
 import { Sender } from "../src";
@@ -15,9 +15,9 @@ async function sleep(ms: number) {
 }
 
 describe("Sender tests with containerized QuestDB instance", () => {
-  let container: any;
+  let container: StartedTestContainer;
 
-  async function query(container: any, query: string) {
+  async function query(container: StartedTestContainer, query: string) {
     const options: http.RequestOptions = {
       hostname: container.getHost(),
       port: container.getMappedPort(QUESTDB_HTTP_PORT),
@@ -46,7 +46,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     });
   }
 
-  async function runSelect(container: any, select: string, expectedCount: number, timeout = 60000) {
+  async function runSelect(container: StartedTestContainer, select: string, expectedCount: number, timeout = 60000) {
     const interval = 500;
     const num = timeout / interval;
     let selectResult: any;
@@ -62,7 +62,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     );
   }
 
-  async function waitForTable(container: any, tableName: string, timeout = 30000) {
+  async function waitForTable(container: StartedTestContainer, tableName: string, timeout = 30000) {
     await runSelect(container, `tables() where table_name='${tableName}'`, 1, timeout);
   }
 
