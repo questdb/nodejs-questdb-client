@@ -1,15 +1,17 @@
 import http from "node:http";
 import https from "node:https";
 
+type MockConfig = {
+  responseDelays?: number[],
+  responseCodes?: number[],
+  username?: string,
+  password?: string,
+  token?: string,
+}
+
 class MockHttp {
   server: http.Server | https.Server;
-  mockConfig: {
-    responseDelays?: number[],
-    responseCodes?: number[],
-    username?: string,
-    password?: string,
-    token?: string,
-  };
+  mockConfig: MockConfig;
   numOfRequests: number;
 
   constructor() {
@@ -21,10 +23,10 @@ class MockHttp {
     this.numOfRequests = 0;
   }
 
-  async start(listenPort: number, secure: boolean = false, options?: Record<string, unknown>) {
+  async start(listenPort: number, secure: boolean = false, options?: Record<string, unknown>): Promise<boolean> {
     const serverCreator = secure ? https.createServer : http.createServer;
     // @ts-expect-error - Testing different options, so typing is not important
-    this.server = serverCreator(options, (req, res) => {
+    this.server = serverCreator(options, (req: http.IncomingMessage, res: http.ServerResponse) => {
       const authFailed = checkAuthHeader(this.mockConfig, req);
 
       const body: Uint8Array[] = [];
@@ -56,8 +58,16 @@ class MockHttp {
       });
     });
 
-    this.server.listen(listenPort, () => {
-      console.info(`Server is running on port ${listenPort}`);
+    return new Promise((resolve, reject) => {
+      this.server.listen(listenPort, () => {
+        console.info(`Server is running on port ${listenPort}`);
+        resolve(true);
+      });
+
+      this.server.on("error", e => {
+        console.error(`server error: ${e}`);
+        reject(e);
+      });
     });
   }
 
@@ -68,7 +78,7 @@ class MockHttp {
   }
 }
 
-function checkAuthHeader(mockConfig, req) {
+function checkAuthHeader(mockConfig: MockConfig, req: http.IncomingMessage) {
   let authFailed = false;
   const header = (req.headers.authorization || "").split(/\s+/);
   switch (header[0]) {
@@ -92,7 +102,7 @@ function checkAuthHeader(mockConfig, req) {
   return authFailed;
 }
 
-function sleep(ms) {
+function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 

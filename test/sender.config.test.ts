@@ -1,0 +1,402 @@
+// @ts-check
+import { describe, it, expect } from "vitest";
+
+import { Sender, DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFER_SIZE } from "../src/sender";
+import { log } from "../src/logging";
+
+describe("Sender configuration options suite", function () {
+  it("creates a sender from a configuration string", async function () {
+    await Sender.fromConfig("tcps::addr=hostname;").close();
+  });
+
+  it("creates a sender from a configuration string picked up from env", async function () {
+    process.env.QDB_CLIENT_CONF = "https::addr=hostname;";
+    await Sender.fromEnv().close();
+  });
+
+  it("throws exception if the username or the token is missing when TCP transport is used", async function () {
+    await expect(async () =>
+      await Sender.fromConfig("tcp::addr=hostname;username=bobo;").close()
+    ).rejects.toThrow(
+    "TCP transport requires a username and a private key for authentication, please, specify the 'username' and 'token' config options",
+    );
+
+    await expect(async () =>
+      await Sender.fromConfig("tcp::addr=hostname;token=bobo_token;").close()
+    ).rejects.toThrow(
+    "TCP transport requires a username and a private key for authentication, please, specify the 'username' and 'token' config options",
+    );
+  });
+
+  it("throws exception if tls_roots or tls_roots_password is used", async function () {
+    await expect(async () =>
+      await Sender.fromConfig("tcps::addr=hostname;username=bobo;tls_roots=bla;").close()
+    ).rejects.toThrow(
+      "'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
+    );
+
+    await expect(async () =>
+      await Sender.fromConfig("tcps::addr=hostname;token=bobo_token;tls_roots_password=bla;").close()
+    ).rejects.toThrow(
+      "'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
+    );
+  });
+
+  it("throws exception if connect() is called when http transport is used", async function () {
+    let sender: Sender;
+    await expect(async () => {
+      sender = Sender.fromConfig("http::addr=hostname");
+      await sender.connect();
+    }).rejects.toThrow("'connect()' is not required for HTTP transport");
+    await sender.close();
+  });
+});
+
+describe("Sender options test suite", function () {
+  it("fails if no options defined", async function () {
+    await expect(async () =>
+        // @ts-expect-error - Testing invalid options
+      await new Sender().close()
+    ).rejects.toThrow("The 'protocol' option is mandatory");
+  });
+
+  it("fails if options are null", async function () {
+    await expect(async () => 
+      await new Sender(null).close()
+    ).rejects.toThrow("The 'protocol' option is mandatory");
+  });
+
+  it("fails if options are undefined", async function () {
+    await expect(async () =>
+        await new Sender(undefined).close()
+    ).rejects.toThrow("The 'protocol' option is mandatory");
+  });
+
+  it("fails if options are empty", async function () {
+    await expect(async () =>
+        // @ts-expect-error - Testing invalid options
+        await new Sender({}).close()
+    ).rejects.toThrow("The 'protocol' option is mandatory");
+  });
+
+  it("fails if protocol option is missing", async function () {
+    await expect(async () =>
+        // @ts-expect-error - Testing invalid options
+        await new Sender({ host: "host" }).close()
+    ).rejects.toThrow("The 'protocol' option is mandatory");
+  });
+
+  it("fails if protocol option is invalid", async function () {
+    await expect(async () =>
+        await new Sender({ protocol: "abcd", host: "hostname" }).close()
+    ).rejects.toThrow("Invalid protocol: 'abcd'");
+  });
+
+  it("sets default buffer size if init_buf_size is not set", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets the requested buffer size if init_buf_size is set", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.bufferSize).toBe(1024);
+    await sender.close();
+  });
+
+  it("sets default buffer size if init_buf_size is set to null", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      init_buf_size: null,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets default buffer size if init_buf_size is set to undefined", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      init_buf_size: undefined,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets default buffer size if init_buf_size is not a number", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing invalid options
+      init_buf_size: "1024",
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets the requested buffer size if 'bufferSize' is set, but warns that it is deprecated", async function () {
+    const log = (level: "error" | "warn" | "info" | "debug", message: string | Error) => {
+      expect(level).toBe("warn");
+      expect(message).toMatch("Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'");
+    };
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing deprecated option
+      bufferSize: 2048,
+      log: log,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.bufferSize).toBe(2048);
+    await sender.close();
+  });
+
+  it("warns about deprecated option 'copy_buffer'", async function () {
+    const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
+      expect(level).toBe("warn");
+      expect(message).toMatch("Option 'copy_buffer' is not supported anymore, please, remove it");
+    };
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing deprecated option
+      copy_buffer: false,
+      log: log,
+    });
+    await sender.close();
+  });
+
+  it("warns about deprecated option 'copyBuffer'", async function () {
+    const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
+      expect(level).toBe("warn");
+      expect(message).toMatch("Option 'copyBuffer' is not supported anymore, please, remove it");
+    };
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing deprecated option
+      copyBuffer: false,
+      log: log,
+    });
+    await sender.close();
+  });
+
+  it("sets default max buffer size if max_buf_size is not set", async function () {
+    const sender = new Sender({ protocol: "http", host: "host" });
+    // @ts-expect-error - Accessing private field
+    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets the requested max buffer size if max_buf_size is set", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      max_buf_size: 131072,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.maxBufferSize).toBe(131072);
+    await sender.close();
+  });
+
+  it("throws error if initial buffer size is greater than max_buf_size", async function () {
+    await expect(async () =>
+      await new Sender({
+        protocol: "http",
+        host: "host",
+        max_buf_size: 8192,
+        init_buf_size: 16384,
+      }).close()
+    ).rejects.toThrow("Max buffer size is 8192 bytes, requested buffer size: 16384")
+  });
+
+  it("sets default max buffer size if max_buf_size is set to null", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      max_buf_size: null,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets default max buffer size if max_buf_size is set to undefined", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      max_buf_size: undefined,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("sets default max buffer size if max_buf_size is not a number", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      // @ts-expect-error - Testing invalid value
+      max_buf_size: "1024",
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    await sender.close();
+  });
+
+  it("uses default logger if log function is not set", async function () {
+    const sender = new Sender({ protocol: "http", host: "host" });
+    // @ts-expect-error - Accessing private field
+    expect(sender.log).toBe(log);
+    await sender.close();
+  });
+
+  it("uses the required log function if it is set", async function () {
+    const testFunc = () => { };
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      log: testFunc,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.log).toBe(testFunc);
+    await sender.close();
+  });
+
+  it("uses default logger if log is set to null", async function () {
+    const sender = new Sender({ protocol: "http", host: "host", log: null });
+    // @ts-expect-error - Accessing private field
+    expect(sender.log).toBe(log);
+    await sender.close();
+  });
+
+  it("uses default logger if log is set to undefined", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      host: "host",
+      log: undefined,
+    });
+    // @ts-expect-error - Accessing private field
+    expect(sender.log).toBe(log);
+    await sender.close();
+  });
+
+  it("uses default logger if log is not a function", async function () {
+    // @ts-expect-error - Testing invalid options
+    const sender = new Sender({ protocol: "http", host: "host", log: "" });
+    // @ts-expect-error - Accessing private field
+    expect(sender.log).toBe(log);
+    await sender.close();
+  });
+});
+
+describe("Sender auth config checks suite", function () {
+  it("requires a username for authentication", async function () {
+    await expect(async () =>
+      await new Sender({
+        protocol: "tcp",
+        host: "host",
+        auth: {
+          token: "privateKey",
+        },
+      }).close()
+    ).rejects.toThrow(
+      "Missing username, please, specify the 'keyId' property of the 'auth' config option. " +
+      "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+    );
+  });
+
+  it("requires a non-empty username", async function () {
+    await expect(async () =>
+      await new Sender({
+        protocol: "tcp",
+        host: "host",
+        auth: {
+          keyId: "",
+          token: "privateKey",
+        },
+      }).close()
+    ).rejects.toThrow(
+      "Missing username, please, specify the 'keyId' property of the 'auth' config option. " +
+      "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+    );
+  });
+
+  it("requires that the username is a string", async function () {
+    await expect(async () =>
+      await new Sender({
+        protocol: "tcp",
+        host: "host",
+        auth: {
+          // @ts-expect-error - Testing invalid options
+          keyId: 23,
+          token: "privateKey",
+        },
+      }).close()
+    ).rejects.toThrow(
+      "Please, specify the 'keyId' property of the 'auth' config option as a string. " +
+      "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+    );
+  });
+
+  it("requires a private key for authentication", async function () {
+    await expect(async () =>
+      await new Sender({
+        protocol: "tcp",
+        host: "host",
+        auth: {
+          keyId: "username",
+        },
+      }).close()
+    ).rejects.toThrow(
+      "Missing private key, please, specify the 'token' property of the 'auth' config option. " +
+      "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+    );
+  });
+
+  it("requires a non-empty private key", async function () {
+    await expect(async () =>
+      await new Sender({
+        protocol: "tcp",
+        host: "host",
+        auth: {
+          keyId: "username",
+          token: "",
+        },
+      }).close()
+    ).rejects.toThrow(
+      "Missing private key, please, specify the 'token' property of the 'auth' config option. " +
+      "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+    );
+  });
+
+  it("requires that the private key is a string", async function () {
+    await expect(async () =>
+      await new Sender({
+        protocol: "tcp",
+        host: "host",
+        auth: {
+          keyId: "username",
+          // @ts-expect-error - Testing invalid options
+          token: true,
+        },
+      }).close()
+    ).rejects.toThrow(
+      "Please, specify the 'token' property of the 'auth' config option as a string. " +
+      "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+    );
+  });
+});

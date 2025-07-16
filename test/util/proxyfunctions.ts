@@ -1,23 +1,19 @@
-import net from "node:net";
-import tls from "node:tls";
+import net, { Socket } from "node:net";
+import tls, { TLSSocket } from "node:tls";
+import { Proxy } from "./proxy";
+import {MockProxy} from "./mockproxy";
 
 const LOCALHOST = "localhost";
 
-async function write(socket, data) {
+async function write(socket: Socket, data: string) {
   return new Promise<void>((resolve, reject) => {
-    socket.write(data, "utf8", (err) => {
-      if (err) {
-        reject(err)
-      } else {
-        resolve();
-      }
-    });
+    socket.write(data, "utf8", (err: Error) => err ? reject(err): resolve());
   });
 }
 
-async function listen(proxy, listenPort, dataHandler, tlsOptions) {
+async function listen(proxy: Proxy | MockProxy, listenPort: number, dataHandler: (data: string) => void, tlsOptions: tls.TlsOptions) {
   return new Promise<void>((resolve) => {
-    const clientConnHandler = (client) => {
+    const clientConnHandler = (client: Socket | TLSSocket) => {
       console.info("client connected");
       if (proxy.client) {
         console.error("There is already a client connected");
@@ -43,7 +39,7 @@ async function listen(proxy, listenPort, dataHandler, tlsOptions) {
   });
 }
 
-async function shutdown(proxy, onServerClose = async () => { }) {
+async function shutdown(proxy: Proxy | MockProxy, onServerClose = async () => {}) {
   console.info("closing proxy");
   return new Promise<void>((resolve) => {
     proxy.server.close(async () => {
@@ -53,7 +49,7 @@ async function shutdown(proxy, onServerClose = async () => { }) {
   });
 }
 
-async function connect(proxy, remotePort, remoteHost) {
+async function connect(proxy: Proxy, remotePort: number, remoteHost: string) {
   console.info(`opening remote connection to ${remoteHost}:${remotePort}`);
   return new Promise<void>((resolve) => {
     proxy.remote.connect(remotePort, remoteHost, () => resolve());

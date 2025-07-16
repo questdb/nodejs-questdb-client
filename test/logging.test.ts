@@ -1,22 +1,14 @@
-import {
-  describe,
-  it,
-  beforeAll,
-  afterAll,
-  afterEach,
-  expect,
-  vi,
-} from "vitest";
+// @ts-check
+import { describe, it, beforeAll, afterAll, afterEach, expect, vi, } from "vitest";
+
+import { Logger } from "../src/logging";
 
 describe("Default logging suite", function () {
   const error = vi.spyOn(console, "error").mockImplementation(() => { });
   const warn = vi.spyOn(console, "warn").mockImplementation(() => { });
   const info = vi.spyOn(console, "info").mockImplementation(() => { });
   const debug = vi.spyOn(console, "debug").mockImplementation(() => { });
-  let log: (
-    level: "error" | "warn" | "info" | "debug",
-    message: string,
-  ) => void;
+  let log: Logger;
 
   beforeAll(async () => {
     log = (await import("../src/logging")).log;
@@ -66,7 +58,7 @@ describe("Default logging suite", function () {
     expect(info).toHaveBeenCalledWith(testMessage);
   });
 
-  it("cannot log debug level messages", function () {
+  it("cannot log debug level messages, default logging level is 'info'", function () {
     const testMessage = "DEBUG DEBUG DEBUG";
     log("debug", testMessage);
     expect(error).toHaveBeenCalledTimes(0);
