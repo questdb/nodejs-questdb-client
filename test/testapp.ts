@@ -1,19 +1,12 @@
 import { readFileSync } from "node:fs";
 
-import { Proxy } from "./_utils_/proxy";
+import { Proxy } from "./util/proxy";
 import { Sender } from "../src";
 import { SenderOptions } from "../src/options";
 
 const PROXY_PORT = 9099;
 const PORT = 9009;
 const HOST = "localhost";
-
-const USER_NAME = "testapp";
-const PRIVATE_KEY = "9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8";
-const AUTH = {
-  kid: USER_NAME,
-  d: PRIVATE_KEY,
-};
 
 const senderOptions: SenderOptions = {
   protocol: "tcps",

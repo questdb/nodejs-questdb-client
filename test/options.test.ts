@@ -1,6 +1,8 @@
+// @ts-check
 import { describe, it, expect } from "vitest";
-import { SenderOptions } from "../src/options";
 import { Agent } from "undici";
+
+import { SenderOptions } from "../src/options";
 
 describe("Configuration string parser suite", function () {
   it("can parse a basic config string", function () {
@@ -688,14 +690,14 @@ describe("Configuration string parser suite", function () {
         // @ts-expect-error - Testing invalid input
         agent: { keepAlive: true },
       }),
-    ).toThrow("Invalid http/https agent");
+    ).toThrow("Invalid HTTP agent");
     expect(() =>
       // @ts-expect-error - Testing invalid input
       SenderOptions.fromConfig("http::addr=host:9000", { agent: 4567 }),
-    ).toThrow("Invalid http/https agent");
+    ).toThrow("Invalid HTTP agent");
     expect(() =>
       // @ts-expect-error - Testing invalid input
       SenderOptions.fromConfig("http::addr=host:9000", { agent: "hopp" }),
-    ).toThrow("Invalid http/https agent");
+    ).toThrow("Invalid HTTP agent");
   });
 });

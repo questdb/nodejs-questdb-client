@@ -7,15 +7,20 @@ const LOG_LEVELS = {
 
 const DEFAULT_CRITICALITY = LOG_LEVELS.info.criticality;
 
+type Logger = (
+    level: "error" | "warn" | "info" | "debug",
+    message: string | Error,
+) => void;
+
 /**
  * Simple logger to write log messages to the console. <br>
  * Supported logging levels are `error`, `warn`, `info` and `debug`. <br>
  * Throws an error if logging level is invalid.
  *
  * @param {'error'|'warn'|'info'|'debug'} level - The log level of the message.
- * @param {string} message - The log message.
+ * @param {string | Error} message - The log message.
  */
-function log(level: "error" | "warn" | "info" | "debug", message: string) {
+function log(level: "error" | "warn" | "info" | "debug", message: string | Error) {
   const logLevel = LOG_LEVELS[level];
   if (!logLevel) {
     throw new Error(`Invalid log level: '${level}'`);
@@ -25,4 +30,4 @@ function log(level: "error" | "warn" | "info" | "debug", message: string) {
   }
 }
 
-export { log };
+export { log, Logger };
