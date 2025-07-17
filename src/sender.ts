@@ -2,7 +2,7 @@
 import { log, Logger } from "./logging";
 import { SenderOptions, ExtraOptions } from "./options";
 import { SenderTransport, createTransport } from "./transport";
-import { isBoolean, isInteger } from "./utils";
+import { isBoolean, isInteger, TimestampUnit } from "./utils";
 import { SenderBuffer } from "./buffer";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
@@ -248,11 +248,7 @@ class Sender {
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    * @return {Sender} Returns with a reference to this sender.
    */
-  timestampColumn(
-    name: string,
-    value: number | bigint,
-    unit: "ns" | "us" | "ms" = "us",
-  ): Sender {
+  timestampColumn(name: string, value: number | bigint, unit: TimestampUnit = "us"): Sender {
     this.buffer.timestampColumn(name, value, unit);
     return this;
   }
@@ -263,7 +259,7 @@ class Sender {
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    */
-  async at(timestamp: number | bigint, unit: "ns" | "us" | "ms" = "us") {
+  async at(timestamp: number | bigint, unit: TimestampUnit = "us") {
     this.buffer.at(timestamp, unit);
     this.pendingRowCount++;
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);

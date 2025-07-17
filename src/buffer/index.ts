@@ -4,7 +4,7 @@ import { Buffer } from "node:buffer";
 import { log, Logger } from "../logging";
 import { validateColumnName, validateTableName } from "../validation";
 import { SenderOptions } from "../options";
-import { isInteger, timestampToMicros, timestampToNanos } from "../utils";
+import { isInteger, timestampToMicros, timestampToNanos, TimestampUnit } from "../utils";
 
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
@@ -262,11 +262,7 @@ class SenderBuffer {
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    * @return {Sender} Returns with a reference to this sender.
    */
-  timestampColumn(
-    name: string,
-    value: number | bigint,
-    unit: "ns" | "us" | "ms" = "us",
-  ): SenderBuffer {
+  timestampColumn(name: string, value: number | bigint, unit: TimestampUnit = "us"): SenderBuffer {
     if (typeof value !== "bigint" && !Number.isInteger(value)) {
       throw new Error(`Value must be an integer or BigInt, received ${value}`);
     }
@@ -286,7 +282,7 @@ class SenderBuffer {
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    */
-  at(timestamp: number | bigint, unit: "ns" | "us" | "ms" = "us") {
+  at(timestamp: number | bigint, unit: TimestampUnit = "us") {
     if (!this.hasSymbols && !this.hasColumns) {
       throw new Error("The row must have a symbol or column set before it is closed");
     }
