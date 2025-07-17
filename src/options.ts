@@ -203,6 +203,10 @@ class SenderOptions {
   }
 
   static resolveDeprecated(options: SenderOptions & DeprecatedOptions, log: Logger) {
+    if (!options) {
+      return;
+    }
+
     // deal with deprecated options
     if (options.copy_buffer !== undefined) {
       log("warn", `Option 'copy_buffer' is not supported anymore, please, remove it`);

@@ -1,18 +1,11 @@
 // @ts-check
-import { Buffer } from "node:buffer";
-
 import { log, Logger } from "./logging";
-import { validateColumnName, validateTableName } from "./validation";
 import { SenderOptions, ExtraOptions } from "./options";
 import { SenderTransport, createTransport } from "./transport";
-import { isBoolean, isInteger, timestampToMicros, timestampToNanos } from "./utils";
+import { isBoolean, isInteger } from "./utils";
+import { SenderBuffer } from "./buffer";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
-
-const DEFAULT_MAX_NAME_LENGTH = 127;
-
-const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
-const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
@@ -61,23 +54,13 @@ const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 class Sender {
   private readonly transport: SenderTransport;
 
-  private bufferSize: number;
-  private readonly maxBufferSize: number;
-  private buffer: Buffer<ArrayBuffer>;
-  private position: number;
-  private endOfLastRow: number;
+  private buffer: SenderBuffer;
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
   private readonly autoFlushInterval: number;
   private lastFlushTime: number;
   private pendingRowCount: number;
-
-  private hasTable: boolean;
-  private hasSymbols: boolean;
-  private hasColumns: boolean;
-
-  private readonly maxNameLength: number;
 
   private readonly log: Logger;
 
@@ -89,9 +72,9 @@ class Sender {
    */
   constructor(options: SenderOptions) {
     this.transport = createTransport(options);
+    this.buffer = new SenderBuffer(options);
 
     this.log = typeof options.log === "function" ? options.log : log;
-    SenderOptions.resolveDeprecated(options, this.log);
 
     this.autoFlush = isBoolean(options.auto_flush) ? options.auto_flush : true;
     this.autoFlushRows = isInteger(options.auto_flush_rows, 0)
@@ -101,18 +84,6 @@ class Sender {
       ? options.auto_flush_interval
       : DEFAULT_AUTO_FLUSH_INTERVAL;
 
-    this.maxNameLength = isInteger(options.max_name_len, 1)
-      ? options.max_name_len
-      : DEFAULT_MAX_NAME_LENGTH;
-
-    this.maxBufferSize = isInteger(options.max_buf_size, 1)
-      ? options.max_buf_size
-      : DEFAULT_MAX_BUFFER_SIZE;
-    this.resize(
-      isInteger(options.init_buf_size, 1)
-        ? options.init_buf_size
-        : DEFAULT_BUFFER_SIZE,
-    );
     this.reset();
   }
 
@@ -152,39 +123,14 @@ class Sender {
   }
 
   /**
-   * Extends the size of the sender's buffer. <br>
-   * Can be used to increase the size of buffer if overflown.
-   * The buffer's content is copied into the new buffer.
-   *
-   * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
-   */
-  private resize(bufferSize: number) {
-    if (bufferSize > this.maxBufferSize) {
-      throw new Error(`Max buffer size is ${this.maxBufferSize} bytes, requested buffer size: ${bufferSize}`);
-    }
-    this.bufferSize = bufferSize;
-    // Allocating an extra byte because Buffer.write() does not fail if the length of the data to be written is
-    // longer than the size of the buffer. It simply just writes whatever it can, and returns.
-    // If we can write into the extra byte, that indicates buffer overflow.
-    // See the check in our write() function.
-    const newBuffer = Buffer.alloc(this.bufferSize + 1, 0, "utf8");
-    if (this.buffer) {
-      this.buffer.copy(newBuffer);
-    }
-    this.buffer = newBuffer;
-  }
-
-  /**
    * Resets the buffer, data added to the buffer will be lost. <br>
    * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
    *
    * @return {Sender} Returns with a reference to this sender.
    */
   reset(): Sender {
-    this.position = 0;
-    this.lastFlushTime = Date.now();
-    this.pendingRowCount = 0;
-    this.startNewRow();
+    this.buffer.reset();
+    this.resetAutoFlush();
     return this;
   }
 
@@ -204,10 +150,13 @@ class Sender {
    * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send, and it was sent successfully.
    */
   async flush(): Promise<boolean> {
-    const dataToSend: Buffer = this.toBufferNew();
+    const dataToSend: Buffer = this.buffer.toBufferNew();
     if (!dataToSend) {
       return false; // Nothing to send
     }
+
+    this.log("debug", `Flushing, number of flushed rows: ${this.pendingRowCount}`);
+    this.resetAutoFlush();
 
     await this.transport.send(dataToSend);
   }
@@ -221,48 +170,13 @@ class Sender {
   }
 
   /**
-   * @ignore
-   * @return {Buffer} Returns a cropped buffer, or null if there is nothing to send.
-   * The returned buffer is backed by the sender's buffer.
-   * Used only in tests.
-   */
-  toBufferView(pos = this.endOfLastRow): Buffer {
-    return pos > 0 ? this.buffer.subarray(0, pos) : null;
-  }
-
-  /**
-   * @ignore
-   * @return {Buffer|null} Returns a cropped buffer ready to send to the server, or null if there is nothing to send.
-   * The returned buffer is a copy of the sender's buffer.
-   * It also compacts the Sender's buffer.
-   */
-  toBufferNew(pos = this.endOfLastRow): Buffer | null {
-    if (pos > 0) {
-      const data = Buffer.allocUnsafe(pos);
-      this.buffer.copy(data, 0, 0, pos);
-      this.compact();
-      return data;
-    }
-    return null;
-  }
-
-  /**
    * Write the table name into the buffer of the sender.
    *
    * @param {string} table - Table name.
    * @return {Sender} Returns with a reference to this sender.
    */
   table(table: string): Sender {
-    if (typeof table !== "string") {
-      throw new Error(`Table name must be a string, received ${typeof table}`);
-    }
-    if (this.hasTable) {
-      throw new Error("Table name has already been set");
-    }
-    validateTableName(table, this.maxNameLength);
-    this.checkCapacity([table]);
-    this.writeEscaped(table);
-    this.hasTable = true;
+    this.buffer.table(table);
     return this;
   }
 
@@ -270,24 +184,11 @@ class Sender {
    * Write a symbol name and value into the buffer of the sender.
    *
    * @param {string} name - Symbol name.
-   * @param {any} value - Symbol value, toString() will be called to extract the actual symbol value from the parameter.
+   * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
    * @return {Sender} Returns with a reference to this sender.
    */
-  symbol<T = unknown>(name: string, value: T): Sender {
-    if (typeof name !== "string") {
-      throw new Error(`Symbol name must be a string, received ${typeof name}`);
-    }
-    if (!this.hasTable || this.hasColumns) {
-      throw new Error("Symbol can be added only after table name is set and before any column added");
-    }
-    const valueStr = value.toString();
-    this.checkCapacity([name, valueStr], 2 + name.length + valueStr.length);
-    this.write(",");
-    validateColumnName(name, this.maxNameLength);
-    this.writeEscaped(name);
-    this.write("=");
-    this.writeEscaped(valueStr);
-    this.hasSymbols = true;
+  symbol(name: string, value: unknown): Sender {
+    this.buffer.symbol(name, value);
     return this;
   }
 
@@ -299,17 +200,7 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   stringColumn(name: string, value: string): Sender {
-    this.writeColumn(
-      name,
-      value,
-      () => {
-        this.checkCapacity([value], 2 + value.length);
-        this.write('"');
-        this.writeEscaped(value, true);
-        this.write('"');
-      },
-      "string",
-    );
+    this.buffer.stringColumn(name, value);
     return this;
   }
 
@@ -321,15 +212,7 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   booleanColumn(name: string, value: boolean): Sender {
-    this.writeColumn(
-      name,
-      value,
-      () => {
-        this.checkCapacity([], 1);
-        this.write(value ? "t" : "f");
-      },
-      "boolean",
-    );
+    this.buffer.booleanColumn(name, value);
     return this;
   }
 
@@ -341,16 +224,7 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   floatColumn(name: string, value: number): Sender {
-    this.writeColumn(
-      name,
-      value,
-      () => {
-        const valueStr = value.toString();
-        this.checkCapacity([valueStr], valueStr.length);
-        this.write(valueStr);
-      },
-      "number",
-    );
+    this.buffer.floatColumn(name, value);
     return this;
   }
 
@@ -362,15 +236,7 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   intColumn(name: string, value: number): Sender {
-    if (!Number.isInteger(value)) {
-      throw new Error(`Value must be an integer, received ${value}`);
-    }
-    this.writeColumn(name, value, () => {
-      const valueStr = value.toString();
-      this.checkCapacity([valueStr], 1 + valueStr.length);
-      this.write(valueStr);
-      this.write("i");
-    });
+    this.buffer.intColumn(name, value);
     return this;
   }
 
@@ -387,16 +253,7 @@ class Sender {
     value: number | bigint,
     unit: "ns" | "us" | "ms" = "us",
   ): Sender {
-    if (typeof value !== "bigint" && !Number.isInteger(value)) {
-      throw new Error(`Value must be an integer or BigInt, received ${value}`);
-    }
-    this.writeColumn(name, value, () => {
-      const valueMicros = timestampToMicros(BigInt(value), unit);
-      const valueStr = valueMicros.toString();
-      this.checkCapacity([valueStr], 1 + valueStr.length);
-      this.write(valueStr);
-      this.write("t");
-    });
+    this.buffer.timestampColumn(name, value, unit);
     return this;
   }
 
@@ -407,21 +264,10 @@ class Sender {
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    */
   async at(timestamp: number | bigint, unit: "ns" | "us" | "ms" = "us") {
-    if (!this.hasSymbols && !this.hasColumns) {
-      throw new Error("The row must have a symbol or column set before it is closed");
-    }
-    if (typeof timestamp !== "bigint" && !Number.isInteger(timestamp)) {
-      throw new Error(`Designated timestamp must be an integer or BigInt, received ${timestamp}`);
-    }
-    const timestampNanos = timestampToNanos(BigInt(timestamp), unit);
-    const timestampStr = timestampNanos.toString();
-    this.checkCapacity([], 2 + timestampStr.length);
-    this.write(" ");
-    this.write(timestampStr);
-    this.write("\n");
+    this.buffer.at(timestamp, unit);
     this.pendingRowCount++;
-    this.startNewRow();
-    await this.automaticFlush();
+    this.log("debug", `Pending row count: ${this.pendingRowCount}`);
+    await this.tryFlush();
   }
 
   /**
@@ -429,132 +275,30 @@ class Sender {
    * Designated timestamp will be populated by the server on this record.
    */
   async atNow() {
-    if (!this.hasSymbols && !this.hasColumns) {
-      throw new Error("The row must have a symbol or column set before it is closed");
-    }
-    this.checkCapacity([], 1);
-    this.write("\n");
+    this.buffer.atNow();
     this.pendingRowCount++;
-    this.startNewRow();
-    await this.automaticFlush();
+    this.log("debug", `Pending row count: ${this.pendingRowCount}`);
+    await this.tryFlush();
   }
 
-  private startNewRow() {
-    this.endOfLastRow = this.position;
-    this.hasTable = false;
-    this.hasSymbols = false;
-    this.hasColumns = false;
+  private resetAutoFlush(): void {
+    this.lastFlushTime = Date.now();
+    this.pendingRowCount = 0;
+    this.log("debug", `Pending row count: ${this.pendingRowCount}`);
   }
 
-  private async automaticFlush() {
+  private async tryFlush() {
     if (
-        this.autoFlush &&
-        this.pendingRowCount > 0 &&
-        ((this.autoFlushRows > 0 &&
-                this.pendingRowCount >= this.autoFlushRows) ||
-            (this.autoFlushInterval > 0 &&
-                Date.now() - this.lastFlushTime >= this.autoFlushInterval))
+        this.autoFlush
+        && this.pendingRowCount > 0
+        && (
+            (this.autoFlushRows > 0 && this.pendingRowCount >= this.autoFlushRows)
+            || (this.autoFlushInterval > 0 && Date.now() - this.lastFlushTime >= this.autoFlushInterval)
+        )
     ) {
       await this.flush();
     }
   }
-
-  private checkCapacity(data: string[], base = 0) {
-    let length = base;
-    for (const str of data) {
-      length += Buffer.byteLength(str, "utf8");
-    }
-    if (this.position + length > this.bufferSize) {
-      let newSize = this.bufferSize;
-      do {
-        newSize += this.bufferSize;
-      } while (this.position + length > newSize);
-      this.resize(newSize);
-    }
-  }
-
-  private compact() {
-    if (this.endOfLastRow > 0) {
-      this.buffer.copy(this.buffer, 0, this.endOfLastRow, this.position);
-      this.position = this.position - this.endOfLastRow;
-      this.endOfLastRow = 0;
-
-      this.lastFlushTime = Date.now();
-      this.pendingRowCount = 0;
-    }
-  }
-
-  private writeColumn(
-      name: string,
-      value: unknown,
-      writeValue: () => void,
-      valueType?: string
-  ) {
-    if (typeof name !== "string") {
-      throw new Error(`Column name must be a string, received ${typeof name}`);
-    }
-    if (valueType && typeof value !== valueType) {
-      throw new Error(
-          `Column value must be of type ${valueType}, received ${typeof value}`,
-      );
-    }
-    if (!this.hasTable) {
-      throw new Error("Column can be set only after table name is set");
-    }
-    this.checkCapacity([name], 2 + name.length);
-    this.write(this.hasColumns ? "," : " ");
-    validateColumnName(name, this.maxNameLength);
-    this.writeEscaped(name);
-    this.write("=");
-    writeValue();
-    this.hasColumns = true;
-  }
-
-  private write(data: string) {
-    this.position += this.buffer.write(data, this.position);
-    if (this.position > this.bufferSize) {
-      throw new Error(
-          `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
-    }
-  }
-
-  private writeEscaped(data: string, quoted = false) {
-    for (const ch of data) {
-      if (ch > "\\") {
-        this.write(ch);
-        continue;
-      }
-
-      switch (ch) {
-        case " ":
-        case ",":
-        case "=":
-          if (!quoted) {
-            this.write("\\");
-          }
-          this.write(ch);
-          break;
-        case "\n":
-        case "\r":
-          this.write("\\");
-          this.write(ch);
-          break;
-        case '"':
-          if (quoted) {
-            this.write("\\");
-          }
-          this.write(ch);
-          break;
-        case "\\":
-          this.write("\\\\");
-          break;
-        default:
-          this.write(ch);
-          break;
-      }
-    }
-  }
 }
 
-export { Sender, DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFER_SIZE };
+export { Sender };

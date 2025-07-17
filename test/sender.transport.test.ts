@@ -545,8 +545,10 @@ describe("Sender TCP suite", function () {
       /^Connection to .*1:9088 is closed$/,
     ];
     const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
-      expect(level).toBe("info");
-      expect(message).toMatch(expectedMessages.shift());
+      if (level !== "debug") {
+        expect(level).toBe("info");
+        expect(message).toMatch(expectedMessages.shift());
+      }
     };
     const proxy = await createProxy();
     const sender = new Sender({

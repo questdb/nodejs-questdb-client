@@ -60,7 +60,7 @@ describe("Client interop test suite", function () {
       }
 
       if (!errorMessage) {
-        const actualLine = sender.toBufferView().toString();
+        const actualLine = bufferContent(sender);
 
         if (testCase.result.status === "SUCCESS") {
           if (testCase.result.line) {
@@ -150,7 +150,7 @@ describe("Sender message builder test suite (anything not covered in client inte
         .booleanColumn("boolCol", true)
         .atNow();
     }
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716180\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2800\\"}]",boolCol=t\n' +
       'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716181\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2801\\"}]",boolCol=t\n' +
       'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716182\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2802\\"}]",boolCol=t\n' +
@@ -170,7 +170,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000)
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n",
     );
     await sender.close();
@@ -187,7 +187,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000, "ns")
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000t\n",
     );
     await sender.close();
@@ -204,7 +204,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000, "us")
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n",
     );
     await sender.close();
@@ -221,7 +221,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000, "ms")
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n",
     );
     await sender.close();
@@ -238,7 +238,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000n)
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n",
     );
     await sender.close();
@@ -255,7 +255,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000000n, "ns")
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n",
     );
     await sender.close();
@@ -272,7 +272,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000n, "us")
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n",
     );
     await sender.close();
@@ -289,7 +289,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000n, "ms")
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n",
     );
     await sender.close();
@@ -325,7 +325,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000, "us");
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
     );
     await sender.close();
@@ -342,7 +342,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000, "ms");
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
     );
     await sender.close();
@@ -359,7 +359,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000n);
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
     );
     await sender.close();
@@ -376,7 +376,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000123n, "ns");
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n",
     );
     await sender.close();
@@ -393,7 +393,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000n, "us");
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
     );
     await sender.close();
@@ -410,7 +410,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", true)
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000n, "ms");
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
     );
     await sender.close();
@@ -582,8 +582,10 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    expect(sender.toBufferView()).toBe(null);
-    expect(sender.toBufferNew()).toBe(null);
+    // @ts-expect-error - Accessing private field
+    expect(sender.buffer.toBufferView()).toBe(null);
+    // @ts-expect-error - Accessing private field
+    expect(sender.buffer.toBufferNew()).toBe(null);
     await sender.close();
   });
 
@@ -598,12 +600,13 @@ describe("Sender message builder test suite (anything not covered in client inte
     sender.table("tableName").symbol("name", "value2");
 
     // copy of the sender's buffer contains the finished row
-    expect(sender.toBufferNew().toString()).toBe(
+    // @ts-expect-error - Accessing private field
+    expect(sender.buffer.toBufferNew().toString()).toBe(
       "tableName,name=value 1234567890\n",
     );
     // the sender's buffer is compacted, and contains only the unfinished row
     // @ts-expect-error - Accessing private field
-    expect(sender.toBufferView(sender.position).toString()).toBe(
+    expect(sender.buffer.toBufferView(bufferPosition(sender)).toString()).toBe(
       "tableName,name=value2",
     );
     await sender.close();
@@ -691,39 +694,29 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 8,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(8);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe(0);
+    expect(bufferSize(sender)).toBe(8);
+    expect(bufferPosition(sender)).toBe(0);
     sender.table("tableName");
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(16);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe("tableName".length);
+    expect(bufferSize(sender)).toBe(24);
+    expect(bufferPosition(sender)).toBe("tableName".length);
     sender.intColumn("intField", 123);
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(32);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe("tableName intField=123i".length);
+    expect(bufferSize(sender)).toBe(48);
+    expect(bufferPosition(sender)).toBe("tableName intField=123i".length);
     await sender.atNow();
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(32);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe("tableName intField=123i\n".length);
-    expect(sender.toBufferView().toString()).toBe("tableName intField=123i\n");
+    expect(bufferSize(sender)).toBe(48);
+    expect(bufferPosition(sender)).toBe("tableName intField=123i\n".length);
+    expect(bufferContent(sender)).toBe("tableName intField=123i\n");
 
     await sender
       .table("table2")
       .intColumn("intField", 125)
       .stringColumn("strField", "test")
       .atNow();
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(64);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe(
+    expect(bufferSize(sender)).toBe(96);
+    expect(bufferPosition(sender)).toBe(
       'tableName intField=123i\ntable2 intField=125i,strField="test"\n'.length,
     );
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       'tableName intField=123i\ntable2 intField=125i,strField="test"\n',
     );
     await sender.close();
@@ -731,28 +724,20 @@ describe("Sender message builder test suite (anything not covered in client inte
 
   it("throws exception if tries to extend the size of the buffer above max buffer size", async function () {
     const sender = Sender.fromConfig(
-      "tcp::addr=host;init_buf_size=8;max_buf_size=48;",
+      "tcp::addr=host;init_buf_size=8;max_buf_size=64;",
     );
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(8);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe(0);
+    expect(bufferSize(sender)).toBe(8);
+    expect(bufferPosition(sender)).toBe(0);
     sender.table("tableName");
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(16);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe("tableName".length);
+    expect(bufferSize(sender)).toBe(24);
+    expect(bufferPosition(sender)).toBe("tableName".length);
     sender.intColumn("intField", 123);
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(32);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe("tableName intField=123i".length);
+    expect(bufferSize(sender)).toBe(48);
+    expect(bufferPosition(sender)).toBe("tableName intField=123i".length);
     await sender.atNow();
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(32);
-    // @ts-expect-error - Accessing private field
-    expect(sender.position).toBe("tableName intField=123i\n".length);
-    expect(sender.toBufferView().toString()).toBe("tableName intField=123i\n");
+    expect(bufferSize(sender)).toBe(48);
+    expect(bufferPosition(sender)).toBe("tableName intField=123i\n".length);
+    expect(bufferContent(sender)).toBe("tableName intField=123i\n");
 
     try {
       await sender
@@ -762,7 +747,7 @@ describe("Sender message builder test suite (anything not covered in client inte
         .atNow();
     } catch (err) {
       expect(err.message).toBe(
-        "Max buffer size is 48 bytes, requested buffer size: 64",
+        "Max buffer size is 64 bytes, requested buffer size: 96",
       );
     }
     await sender.close();
@@ -784,7 +769,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .booleanColumn("boolCol", false)
       .timestampColumn("timestampCol", 1658484766000000)
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n" +
       "tableName boolCol=f,timestampCol=1658484766000000t\n",
     );
@@ -795,9 +780,24 @@ describe("Sender message builder test suite (anything not covered in client inte
       .floatColumn("floatCol", 1234567890)
       .timestampColumn("timestampCol", 1658484767000000)
       .atNow();
-    expect(sender.toBufferView().toString()).toBe(
+    expect(bufferContent(sender)).toBe(
       "tableName floatCol=1234567890,timestampCol=1658484767000000t\n",
     );
     await sender.close();
   });
 });
+
+function bufferContent(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.toBufferView().toString();
+}
+
+function bufferSize(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.bufferSize;
+}
+
+function bufferPosition(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.position;
+}

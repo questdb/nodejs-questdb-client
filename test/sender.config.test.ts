@@ -1,7 +1,8 @@
 // @ts-check
 import { describe, it, expect } from "vitest";
 
-import { Sender, DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFER_SIZE } from "../src/sender";
+import { Sender } from "../src";
+import { DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFER_SIZE } from "../src/buffer";
 import { log } from "../src/logging";
 
 describe("Sender configuration options suite", function () {
@@ -55,7 +56,7 @@ describe("Sender configuration options suite", function () {
 describe("Sender options test suite", function () {
   it("fails if no options defined", async function () {
     await expect(async () =>
-        // @ts-expect-error - Testing invalid options
+      // @ts-expect-error - Testing invalid options
       await new Sender().close()
     ).rejects.toThrow("The 'protocol' option is mandatory");
   });
@@ -97,8 +98,7 @@ describe("Sender options test suite", function () {
       protocol: "http",
       host: "host",
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    expect(bufferSize(sender)).toBe(DEFAULT_BUFFER_SIZE);
     await sender.close();
   });
 
@@ -108,8 +108,7 @@ describe("Sender options test suite", function () {
       host: "host",
       init_buf_size: 1024,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(1024);
+    expect(bufferSize(sender)).toBe(1024);
     await sender.close();
   });
 
@@ -119,8 +118,7 @@ describe("Sender options test suite", function () {
       host: "host",
       init_buf_size: null,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    expect(bufferSize(sender)).toBe(DEFAULT_BUFFER_SIZE);
     await sender.close();
   });
 
@@ -130,8 +128,7 @@ describe("Sender options test suite", function () {
       host: "host",
       init_buf_size: undefined,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    expect(bufferSize(sender)).toBe(DEFAULT_BUFFER_SIZE);
     await sender.close();
   });
 
@@ -142,15 +139,16 @@ describe("Sender options test suite", function () {
       // @ts-expect-error - Testing invalid options
       init_buf_size: "1024",
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(DEFAULT_BUFFER_SIZE);
+    expect(bufferSize(sender)).toBe(DEFAULT_BUFFER_SIZE);
     await sender.close();
   });
 
   it("sets the requested buffer size if 'bufferSize' is set, but warns that it is deprecated", async function () {
     const log = (level: "error" | "warn" | "info" | "debug", message: string | Error) => {
-      expect(level).toBe("warn");
-      expect(message).toMatch("Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'");
+      if (level !== "debug") {
+        expect(level).toBe("warn");
+        expect(message).toMatch("Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'");
+      }
     };
     const sender = new Sender({
       protocol: "http",
@@ -159,15 +157,16 @@ describe("Sender options test suite", function () {
       bufferSize: 2048,
       log: log,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.bufferSize).toBe(2048);
+    expect(bufferSize(sender)).toBe(2048);
     await sender.close();
   });
 
   it("warns about deprecated option 'copy_buffer'", async function () {
     const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
-      expect(level).toBe("warn");
-      expect(message).toMatch("Option 'copy_buffer' is not supported anymore, please, remove it");
+      if (level !== "debug") {
+        expect(level).toBe("warn");
+        expect(message).toMatch("Option 'copy_buffer' is not supported anymore, please, remove it");
+      }
     };
     const sender = new Sender({
       protocol: "http",
@@ -181,8 +180,10 @@ describe("Sender options test suite", function () {
 
   it("warns about deprecated option 'copyBuffer'", async function () {
     const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
-      expect(level).toBe("warn");
-      expect(message).toMatch("Option 'copyBuffer' is not supported anymore, please, remove it");
+      if (level !== "debug") {
+        expect(level).toBe("warn");
+        expect(message).toMatch("Option 'copyBuffer' is not supported anymore, please, remove it");
+      }
     };
     const sender = new Sender({
       protocol: "http",
@@ -196,8 +197,7 @@ describe("Sender options test suite", function () {
 
   it("sets default max buffer size if max_buf_size is not set", async function () {
     const sender = new Sender({ protocol: "http", host: "host" });
-    // @ts-expect-error - Accessing private field
-    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    expect(maxBufferSize(sender)).toBe(DEFAULT_MAX_BUFFER_SIZE);
     await sender.close();
   });
 
@@ -207,8 +207,7 @@ describe("Sender options test suite", function () {
       host: "host",
       max_buf_size: 131072,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.maxBufferSize).toBe(131072);
+    expect(maxBufferSize(sender)).toBe(131072);
     await sender.close();
   });
 
@@ -229,8 +228,7 @@ describe("Sender options test suite", function () {
       host: "host",
       max_buf_size: null,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    expect(maxBufferSize(sender)).toBe(DEFAULT_MAX_BUFFER_SIZE);
     await sender.close();
   });
 
@@ -240,8 +238,7 @@ describe("Sender options test suite", function () {
       host: "host",
       max_buf_size: undefined,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    expect(maxBufferSize(sender)).toBe(DEFAULT_MAX_BUFFER_SIZE);
     await sender.close();
   });
 
@@ -252,15 +249,13 @@ describe("Sender options test suite", function () {
       // @ts-expect-error - Testing invalid value
       max_buf_size: "1024",
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.maxBufferSize).toBe(DEFAULT_MAX_BUFFER_SIZE);
+    expect(maxBufferSize(sender)).toBe(DEFAULT_MAX_BUFFER_SIZE);
     await sender.close();
   });
 
   it("uses default logger if log function is not set", async function () {
     const sender = new Sender({ protocol: "http", host: "host" });
-    // @ts-expect-error - Accessing private field
-    expect(sender.log).toBe(log);
+    expect(logger(sender)).toBe(log);
     await sender.close();
   });
 
@@ -271,15 +266,13 @@ describe("Sender options test suite", function () {
       host: "host",
       log: testFunc,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.log).toBe(testFunc);
+    expect(logger(sender)).toBe(testFunc);
     await sender.close();
   });
 
   it("uses default logger if log is set to null", async function () {
     const sender = new Sender({ protocol: "http", host: "host", log: null });
-    // @ts-expect-error - Accessing private field
-    expect(sender.log).toBe(log);
+    expect(logger(sender)).toBe(log);
     await sender.close();
   });
 
@@ -289,16 +282,14 @@ describe("Sender options test suite", function () {
       host: "host",
       log: undefined,
     });
-    // @ts-expect-error - Accessing private field
-    expect(sender.log).toBe(log);
+    expect(logger(sender)).toBe(log);
     await sender.close();
   });
 
   it("uses default logger if log is not a function", async function () {
     // @ts-expect-error - Testing invalid options
     const sender = new Sender({ protocol: "http", host: "host", log: "" });
-    // @ts-expect-error - Accessing private field
-    expect(sender.log).toBe(log);
+    expect(logger(sender)).toBe(log);
     await sender.close();
   });
 });
@@ -400,3 +391,18 @@ describe("Sender auth config checks suite", function () {
     );
   });
 });
+
+function bufferSize(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.bufferSize;
+}
+
+function maxBufferSize(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.maxBufferSize;
+}
+
+function logger(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.log;
+}
