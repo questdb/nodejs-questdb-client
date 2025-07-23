@@ -1,17 +1,22 @@
+import net, { Socket } from "node:net";
+import tls from "node:tls";
 import { write, listen, shutdown } from "./proxyfunctions";
 
 const CHALLENGE_LENGTH = 512;
 
+type MockConfig = {
+  auth?: boolean;
+  assertions?: boolean;
+};
+
 class MockProxy {
-  mockConfig: {
-    auth?: boolean;
-    assertions?: boolean;
-  };
+  mockConfig: MockConfig;
   dataSentToRemote: string[];
   hasSentChallenge: boolean;
-  client: unknown;
+  client: Socket;
+  server: net.Server | tls.Server;
 
-  constructor(mockConfig) {
+  constructor(mockConfig: MockConfig) {
     if (!mockConfig) {
       throw new Error("Missing mock config");
     }
@@ -19,7 +24,7 @@ class MockProxy {
     this.dataSentToRemote = [];
   }
 
-  async start(listenPort: number, tlsOptions?: Record<string, unknown>) {
+  async start(listenPort: number, tlsOptions?: tls.TlsOptions) {
     await listen(
       this,
       listenPort,

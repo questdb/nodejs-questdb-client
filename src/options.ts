@@ -1,5 +1,9 @@
 import { PathOrFileDescriptor } from "fs";
 import { Agent } from "undici";
+import http from "http";
+import https from "https";
+
+import { Logger } from "./logging";
 
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
@@ -12,6 +16,20 @@ const TCPS = "tcps";
 const ON = "on";
 const OFF = "off";
 const UNSAFE_OFF = "unsafe_off";
+
+type ExtraOptions = {
+  log?: Logger;
+  agent?: Agent | http.Agent | https.Agent;
+};
+
+type DeprecatedOptions = {
+  /** @deprecated */
+  copy_buffer?: boolean;
+  /** @deprecated */
+  copyBuffer?: boolean;
+  /** @deprecated */
+  bufferSize?: number;
+};
 
 /** @classdesc
  * <a href="Sender.html">Sender</a> configuration options. <br>
@@ -139,10 +157,10 @@ class SenderOptions {
 
   max_name_len?: number;
 
-  log?:
-    | ((level: "error" | "warn" | "info" | "debug", message: string) => void)
-    | null;
-  agent?: Agent;
+  log?: Logger;
+  agent?: Agent | http.Agent | https.Agent;
+
+  legacy_http?: boolean;
 
   auth?: {
     username?: string;
@@ -162,7 +180,7 @@ class SenderOptions {
    * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
    * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
    */
-  constructor(configurationString: string, extraOptions = undefined) {
+  constructor(configurationString: string, extraOptions?: ExtraOptions) {
     parseConfigurationString(this, configurationString);
 
     if (extraOptions) {
@@ -171,10 +189,49 @@ class SenderOptions {
       }
       this.log = extraOptions.log;
 
-      if (extraOptions.agent && !(extraOptions.agent instanceof Agent)) {
-        throw new Error("Invalid http/https agent");
+      if (
+        extraOptions.agent &&
+        !(extraOptions.agent instanceof Agent) &&
+        !(extraOptions.agent instanceof http.Agent) &&
+        // @ts-expect-error - Not clear what the problem is, the two lines above have no issues
+        !(extraOptions.agent instanceof https.Agent)
+      ) {
+        throw new Error("Invalid HTTP agent");
       }
       this.agent = extraOptions.agent;
+    }
+  }
+
+  static resolveDeprecated(
+    options: SenderOptions & DeprecatedOptions,
+    log: Logger,
+  ) {
+    if (!options) {
+      return;
+    }
+
+    // deal with deprecated options
+    if (options.copy_buffer !== undefined) {
+      log(
+        "warn",
+        `Option 'copy_buffer' is not supported anymore, please, remove it`,
+      );
+      options.copy_buffer = undefined;
+    }
+    if (options.copyBuffer !== undefined) {
+      log(
+        "warn",
+        `Option 'copyBuffer' is not supported anymore, please, remove it`,
+      );
+      options.copyBuffer = undefined;
+    }
+    if (options.bufferSize !== undefined) {
+      log(
+        "warn",
+        `Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'`,
+      );
+      options.init_buf_size = options.bufferSize;
+      options.bufferSize = undefined;
     }
   }
 
@@ -192,14 +249,8 @@ class SenderOptions {
    */
   static fromConfig(
     configurationString: string,
-    extraOptions: {
-      log?: (
-        level: "error" | "warn" | "info" | "debug",
-        message: string,
-      ) => void;
-      agent?: Agent;
-    } = undefined,
-  ) {
+    extraOptions?: ExtraOptions,
+  ): SenderOptions {
     return new SenderOptions(configurationString, extraOptions);
   }
 
@@ -214,7 +265,7 @@ class SenderOptions {
    *
    * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
-  static fromEnv(extraOptions = undefined) {
+  static fromEnv(extraOptions?: ExtraOptions): SenderOptions {
     return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions);
   }
 }
@@ -235,6 +286,7 @@ function parseConfigurationString(
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
+  parseLegacyTransport(options);
 }
 
 function parseSettings(
@@ -297,6 +349,7 @@ const ValidConfigKeys = [
   "max_buf_size",
   "max_name_len",
   "tls_verify",
+  "legacy_http",
   "tls_ca",
   "tls_roots",
   "tls_roots_password",
@@ -322,10 +375,7 @@ function validateConfigValue(key: string, value: string) {
   }
 }
 
-function parseProtocol(
-  options: SenderOptions,
-  configString: string | string[],
-) {
+function parseProtocol(options: SenderOptions, configString: string) {
   const index = configString.indexOf("::");
   if (index < 0) {
     throw new Error(
@@ -407,7 +457,7 @@ function parseTlsOptions(options: SenderOptions) {
   if (options.tls_roots || options.tls_roots_password) {
     throw new Error(
       "'tls_roots' and 'tls_roots_password' options are not supported, please, " +
-      "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
+        "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
     );
   }
 }
@@ -420,6 +470,10 @@ function parseRequestTimeoutOptions(options: SenderOptions) {
 
 function parseMaxNameLength(options: SenderOptions) {
   parseInteger(options, "max_name_len", "max name length", 1);
+}
+
+function parseLegacyTransport(options: SenderOptions) {
+  parseBoolean(options, "legacy_http", "legacy http");
 }
 
 function parseBoolean(
@@ -466,4 +520,4 @@ function parseInteger(
   }
 }
 
-export { SenderOptions, HTTP, HTTPS, TCP, TCPS };
+export { SenderOptions, ExtraOptions, HTTP, HTTPS, TCP, TCPS };

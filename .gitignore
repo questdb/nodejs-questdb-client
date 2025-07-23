@@ -3,5 +3,4 @@ coverage
 .idea
 *.iml
 .DS_Store
-certs
 dist
