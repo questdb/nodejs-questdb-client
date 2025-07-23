@@ -99,7 +99,10 @@ class Sender {
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
    */
-  static fromConfig(configurationString: string, extraOptions?: ExtraOptions): Sender {
+  static fromConfig(
+    configurationString: string,
+    extraOptions?: ExtraOptions,
+  ): Sender {
     return new Sender(
       SenderOptions.fromConfig(configurationString, extraOptions),
     );
@@ -155,7 +158,10 @@ class Sender {
       return false; // Nothing to send
     }
 
-    this.log("debug", `Flushing, number of flushed rows: ${this.pendingRowCount}`);
+    this.log(
+      "debug",
+      `Flushing, number of flushed rows: ${this.pendingRowCount}`,
+    );
     this.resetAutoFlush();
 
     await this.transport.send(dataToSend);
@@ -248,7 +254,11 @@ class Sender {
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    * @return {Sender} Returns with a reference to this sender.
    */
-  timestampColumn(name: string, value: number | bigint, unit: TimestampUnit = "us"): Sender {
+  timestampColumn(
+    name: string,
+    value: number | bigint,
+    unit: TimestampUnit = "us",
+  ): Sender {
     this.buffer.timestampColumn(name, value, unit);
     return this;
   }
@@ -285,12 +295,11 @@ class Sender {
 
   private async tryFlush() {
     if (
-        this.autoFlush
-        && this.pendingRowCount > 0
-        && (
-            (this.autoFlushRows > 0 && this.pendingRowCount >= this.autoFlushRows)
-            || (this.autoFlushInterval > 0 && Date.now() - this.lastFlushTime >= this.autoFlushInterval)
-        )
+      this.autoFlush &&
+      this.pendingRowCount > 0 &&
+      ((this.autoFlushRows > 0 && this.pendingRowCount >= this.autoFlushRows) ||
+        (this.autoFlushInterval > 0 &&
+          Date.now() - this.lastFlushTime >= this.autoFlushInterval))
     ) {
       await this.flush();
     }

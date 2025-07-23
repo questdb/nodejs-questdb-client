@@ -37,16 +37,25 @@ describe("Sender tests with containerized QuestDB instance", () => {
               resolve(JSON.parse(Buffer.concat(body).toString()));
             });
         } else {
-          reject(new Error(`HTTP request failed, statusCode=${response.statusCode}, query=${query}`));
+          reject(
+            new Error(
+              `HTTP request failed, statusCode=${response.statusCode}, query=${query}`,
+            ),
+          );
         }
       });
 
-      req.on("error", error => reject(error));
+      req.on("error", (error) => reject(error));
       req.end();
     });
   }
 
-  async function runSelect(container: StartedTestContainer, select: string, expectedCount: number, timeout = 60000) {
+  async function runSelect(
+    container: StartedTestContainer,
+    select: string,
+    expectedCount: number,
+    timeout = 60000,
+  ) {
     const interval = 500;
     const num = timeout / interval;
     let selectResult: any;
@@ -62,8 +71,17 @@ describe("Sender tests with containerized QuestDB instance", () => {
     );
   }
 
-  async function waitForTable(container: StartedTestContainer, tableName: string, timeout = 30000) {
-    await runSelect(container, `tables() where table_name='${tableName}'`, 1, timeout);
+  async function waitForTable(
+    container: StartedTestContainer,
+    tableName: string,
+    timeout = 30000,
+  ) {
+    await runSelect(
+      container,
+      `tables() where table_name='${tableName}'`,
+      1,
+      timeout,
+    );
   }
 
   beforeAll(async () => {
@@ -106,7 +124,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     await sender.flush();
 
     // wait for the table
-    await waitForTable(container, tableName)
+    await waitForTable(container, tableName);
 
     // query table
     const select1Result = await runSelect(container, tableName, 1);
@@ -176,7 +194,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
       .at(1658484765000000000n, "ns");
 
     // wait for the table
-    await waitForTable(container, tableName)
+    await waitForTable(container, tableName);
 
     // query table
     const select1Result = await runSelect(container, tableName, 1);
@@ -248,7 +266,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
       .at(1658484765000000000n, "ns");
 
     // wait for the table
-    await waitForTable(container, tableName)
+    await waitForTable(container, tableName);
 
     // query table
     const select1Result = await runSelect(container, tableName, 1);
@@ -330,7 +348,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     }
 
     // wait for the table
-    await waitForTable(container, tableName)
+    await waitForTable(container, tableName);
 
     // query table
     const selectQuery = `${tableName} order by temperature`;
@@ -375,7 +393,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     await sender.flush();
 
     // Wait for the table
-    await waitForTable(container, tableName)
+    await waitForTable(container, tableName);
 
     // Query table and verify count
     const selectQuery = `SELECT id FROM ${tableName}`;

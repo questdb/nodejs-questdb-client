@@ -24,7 +24,9 @@ function createTransport(options: SenderOptions): SenderTransport {
   switch (options.protocol) {
     case HTTP:
     case HTTPS:
-      return options.legacy_http ? new HttpTransport(options) : new UndiciTransport(options);
+      return options.legacy_http
+        ? new HttpTransport(options)
+        : new UndiciTransport(options);
     case TCP:
     case TCPS:
       return new TcpTransport(options);
@@ -33,4 +35,4 @@ function createTransport(options: SenderOptions): SenderTransport {
   }
 }
 
-export { SenderTransport, createTransport }
+export { SenderTransport, createTransport };

@@ -4,7 +4,11 @@ import { Agent, RetryAgent } from "undici";
 import Dispatcher from "undici/types/dispatcher";
 
 import { SenderOptions, HTTP, HTTPS } from "../../options";
-import { HttpTransportBase, RETRIABLE_STATUS_CODES, HTTP_NO_CONTENT } from "./base";
+import {
+  HttpTransportBase,
+  RETRIABLE_STATUS_CODES,
+  HTTP_NO_CONTENT,
+} from "./base";
 
 const DEFAULT_HTTP_OPTIONS: Agent.Options = {
   connect: {
@@ -24,7 +28,7 @@ class UndiciTransport extends HttpTransportBase {
   private static DEFAULT_HTTP_AGENT: Agent;
 
   private readonly agent: Dispatcher;
-  private readonly dispatcher : RetryAgent;
+  private readonly dispatcher: RetryAgent;
 
   /**
    * Creates an instance of Sender.
@@ -37,7 +41,10 @@ class UndiciTransport extends HttpTransportBase {
 
     switch (options.protocol) {
       case HTTP:
-        this.agent = options.agent instanceof Agent ? options.agent : UndiciTransport.getDefaultHttpAgent();
+        this.agent =
+          options.agent instanceof Agent
+            ? options.agent
+            : UndiciTransport.getDefaultHttpAgent();
         break;
       case HTTPS:
         if (options.agent instanceof Agent) {
@@ -56,7 +63,9 @@ class UndiciTransport extends HttpTransportBase {
         }
         break;
       default:
-        throw new Error("The 'protocol' has to be 'http' or 'https' for the Undici HTTP transport");
+        throw new Error(
+          "The 'protocol' has to be 'http' or 'https' for the Undici HTTP transport",
+        );
     }
 
     this.dispatcher = new RetryAgent(this.agent, {
@@ -85,7 +94,8 @@ class UndiciTransport extends HttpTransportBase {
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
     } else if (this.username && this.password) {
-      headers["Authorization"] = `Basic ${Buffer.from(`${this.username}:${this.password}`).toString("base64")}`;
+      headers["Authorization"] =
+        `Basic ${Buffer.from(`${this.username}:${this.password}`).toString("base64")}`;
     }
 
     const controller = new AbortController();
@@ -94,36 +104,41 @@ class UndiciTransport extends HttpTransportBase {
 
     let responseData: Dispatcher.ResponseData;
     try {
-      const timeoutMillis = (data.length / this.requestMinThroughput) * 1000 + this.requestTimeout;
-      responseData =
-          await this.dispatcher.request({
-            origin: `${this.secure ? "https" : "http"}://${this.host}:${this.port}`,
-            path: "/write?precision=n",
-            method: "POST",
-            headers,
-            body: data,
-            headersTimeout: this.requestTimeout,
-            bodyTimeout: timeoutMillis,
-            signal,
-          });
+      const timeoutMillis =
+        (data.length / this.requestMinThroughput) * 1000 + this.requestTimeout;
+      responseData = await this.dispatcher.request({
+        origin: `${this.secure ? "https" : "http"}://${this.host}:${this.port}`,
+        path: "/write?precision=n",
+        method: "POST",
+        headers,
+        body: data,
+        headersTimeout: this.requestTimeout,
+        bodyTimeout: timeoutMillis,
+        signal,
+      });
     } catch (err) {
       if (err.name === "AbortError") {
-        throw new Error("HTTP request timeout, no response from server in time");
+        throw new Error(
+          "HTTP request timeout, no response from server in time",
+        );
       } else {
         throw err;
       }
     }
 
-    const { statusCode} = responseData;
+    const { statusCode } = responseData;
     const body = await responseData.body.arrayBuffer();
     if (statusCode === HTTP_NO_CONTENT) {
       if (body.byteLength > 0) {
-        this.log("warn", `Unexpected message from server: ${Buffer.from(body).toString()}`);
+        this.log(
+          "warn",
+          `Unexpected message from server: ${Buffer.from(body).toString()}`,
+        );
       }
       return true;
     } else {
       throw new Error(
-          `HTTP request failed, statusCode=${statusCode}, error=${Buffer.from(body).toString()}`,
+        `HTTP request failed, statusCode=${statusCode}, error=${Buffer.from(body).toString()}`,
       );
     }
   }

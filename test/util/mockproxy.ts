@@ -7,14 +7,14 @@ const CHALLENGE_LENGTH = 512;
 type MockConfig = {
   auth?: boolean;
   assertions?: boolean;
-}
+};
 
 class MockProxy {
   mockConfig: MockConfig;
   dataSentToRemote: string[];
   hasSentChallenge: boolean;
   client: Socket;
-  server: net.Server | tls.Server
+  server: net.Server | tls.Server;
 
   constructor(mockConfig: MockConfig) {
     if (!mockConfig) {

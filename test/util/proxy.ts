@@ -8,7 +8,7 @@ import { write, listen, shutdown, connect, close } from "./proxyfunctions";
 class Proxy {
   client: Socket;
   remote: Socket;
-  server: net.Server | tls.Server
+  server: net.Server | tls.Server;
 
   constructor() {
     this.remote = new Socket();
@@ -27,7 +27,12 @@ class Proxy {
     });
   }
 
-  async start(listenPort: number, remotePort: number, remoteHost: string, tlsOptions: Record<string, unknown>) {
+  async start(
+    listenPort: number,
+    remotePort: number,
+    remoteHost: string,
+    tlsOptions: Record<string, unknown>,
+  ) {
     return new Promise<void>((resolve) => {
       this.remote.on("ready", async () => {
         console.info("remote connection ready");

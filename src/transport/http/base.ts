@@ -76,14 +76,14 @@ abstract class HttpTransportBase implements SenderTransport {
     this.port = options.port;
 
     this.requestMinThroughput = isInteger(options.request_min_throughput, 0)
-        ? options.request_min_throughput
-        : DEFAULT_REQUEST_MIN_THROUGHPUT;
+      ? options.request_min_throughput
+      : DEFAULT_REQUEST_MIN_THROUGHPUT;
     this.requestTimeout = isInteger(options.request_timeout, 1)
-        ? options.request_timeout
-        : DEFAULT_REQUEST_TIMEOUT;
+      ? options.request_timeout
+      : DEFAULT_REQUEST_TIMEOUT;
     this.retryTimeout = isInteger(options.retry_timeout, 0)
-        ? options.retry_timeout
-        : DEFAULT_RETRY_TIMEOUT;
+      ? options.retry_timeout
+      : DEFAULT_RETRY_TIMEOUT;
 
     switch (options.protocol) {
       case HTTP:
@@ -93,7 +93,9 @@ abstract class HttpTransportBase implements SenderTransport {
         this.secure = true;
         break;
       default:
-        throw new Error("The 'protocol' has to be 'http' or 'https' for the HTTP transport");
+        throw new Error(
+          "The 'protocol' has to be 'http' or 'https' for the HTTP transport",
+        );
     }
   }
 
@@ -101,8 +103,7 @@ abstract class HttpTransportBase implements SenderTransport {
     throw new Error("'connect()' is not required for HTTP transport");
   }
 
-  async close(): Promise<void> {
-  }
+  async close(): Promise<void> {}
 
   getDefaultAutoFlushRows(): number {
     return DEFAULT_HTTP_AUTO_FLUSH_ROWS;

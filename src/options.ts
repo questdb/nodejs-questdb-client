@@ -20,7 +20,7 @@ const UNSAFE_OFF = "unsafe_off";
 type ExtraOptions = {
   log?: Logger;
   agent?: Agent | http.Agent | https.Agent;
-}
+};
 
 type DeprecatedOptions = {
   /** @deprecated */
@@ -190,11 +190,11 @@ class SenderOptions {
       this.log = extraOptions.log;
 
       if (
-          extraOptions.agent
-          && !(extraOptions.agent instanceof Agent)
-          && !(extraOptions.agent instanceof http.Agent)
-          // @ts-expect-error - Not clear what the problem is, the two lines above have no issues
-          && !(extraOptions.agent instanceof https.Agent)
+        extraOptions.agent &&
+        !(extraOptions.agent instanceof Agent) &&
+        !(extraOptions.agent instanceof http.Agent) &&
+        // @ts-expect-error - Not clear what the problem is, the two lines above have no issues
+        !(extraOptions.agent instanceof https.Agent)
       ) {
         throw new Error("Invalid HTTP agent");
       }
@@ -202,22 +202,34 @@ class SenderOptions {
     }
   }
 
-  static resolveDeprecated(options: SenderOptions & DeprecatedOptions, log: Logger) {
+  static resolveDeprecated(
+    options: SenderOptions & DeprecatedOptions,
+    log: Logger,
+  ) {
     if (!options) {
       return;
     }
 
     // deal with deprecated options
     if (options.copy_buffer !== undefined) {
-      log("warn", `Option 'copy_buffer' is not supported anymore, please, remove it`);
+      log(
+        "warn",
+        `Option 'copy_buffer' is not supported anymore, please, remove it`,
+      );
       options.copy_buffer = undefined;
     }
     if (options.copyBuffer !== undefined) {
-      log("warn", `Option 'copyBuffer' is not supported anymore, please, remove it`);
+      log(
+        "warn",
+        `Option 'copyBuffer' is not supported anymore, please, remove it`,
+      );
       options.copyBuffer = undefined;
     }
     if (options.bufferSize !== undefined) {
-      log("warn", `Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'`);
+      log(
+        "warn",
+        `Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'`,
+      );
       options.init_buf_size = options.bufferSize;
       options.bufferSize = undefined;
     }
@@ -235,7 +247,10 @@ class SenderOptions {
    *
    * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
    */
-  static fromConfig(configurationString: string, extraOptions?: ExtraOptions): SenderOptions {
+  static fromConfig(
+    configurationString: string,
+    extraOptions?: ExtraOptions,
+  ): SenderOptions {
     return new SenderOptions(configurationString, extraOptions);
   }
 
@@ -255,7 +270,10 @@ class SenderOptions {
   }
 }
 
-function parseConfigurationString(options: SenderOptions, configString: string) {
+function parseConfigurationString(
+  options: SenderOptions,
+  configString: string,
+) {
   if (!configString) {
     throw new Error("Configuration string is missing or empty");
   }
@@ -278,7 +296,10 @@ function parseSettings(
 ) {
   let index = configString.indexOf(";", position);
   while (index > -1) {
-    if (index + 1 < configString.length && configString.charAt(index + 1) === ";") {
+    if (
+      index + 1 < configString.length &&
+      configString.charAt(index + 1) === ";"
+    ) {
       index = configString.indexOf(";", index + 2);
       continue;
     }
@@ -436,7 +457,7 @@ function parseTlsOptions(options: SenderOptions) {
   if (options.tls_roots || options.tls_roots_password) {
     throw new Error(
       "'tls_roots' and 'tls_roots_password' options are not supported, please, " +
-      "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
+        "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
     );
   }
 }

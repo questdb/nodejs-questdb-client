@@ -7,7 +7,9 @@ import { Sender } from "../src";
 describe("Client interop test suite", function () {
   it("runs client tests as per json test config", async function () {
     const testCases = JSON.parse(
-        readFileSync("./questdb-client-test/ilp-client-interop-test.json").toString()
+      readFileSync(
+        "./questdb-client-test/ilp-client-interop-test.json",
+      ).toString(),
     );
 
     for (const testCase of testCases) {
@@ -97,13 +99,14 @@ describe("Sender message builder test suite (anything not covered in client inte
       init_buf_size: 1024,
     });
 
-    await expect(async () =>
-      await sender
-        .table("tableName")
-        .booleanColumn("boolCol", true)
-        // @ts-expect-error - Testing invalid options
-        .timestampColumn("timestampCol", 1658484765000000, "foobar")
-        .atNow()
+    await expect(
+      async () =>
+        await sender
+          .table("tableName")
+          .booleanColumn("boolCol", true)
+          // @ts-expect-error - Testing invalid options
+          .timestampColumn("timestampCol", 1658484765000000, "foobar")
+          .atNow(),
     ).rejects.toThrow("Unknown timestamp unit: foobar");
     await sender.close();
   });
@@ -118,23 +121,23 @@ describe("Sender message builder test suite (anything not covered in client inte
         id: string;
         gridId: string;
       }> = [
-          {
-            id: "46022e96-076f-457f-b630-51b82b871618" + i,
-            gridId: "46022e96-076f-457f-b630-51b82b871618",
-          },
-          {
-            id: "55615358-4af1-4179-9153-faaa57d71e55",
-            gridId: "55615358-4af1-4179-9153-faaa57d71e55",
-          },
-          {
-            id: "365b9cdf-3d4e-4135-9cb0-f1a65601c840",
-            gridId: "365b9cdf-3d4e-4135-9cb0-f1a65601c840",
-          },
-          {
-            id: "0b67ddf2-8e69-4482-bf0c-bb987ee5c280",
-            gridId: "0b67ddf2-8e69-4482-bf0c-bb987ee5c280" + i,
-          },
-        ];
+        {
+          id: "46022e96-076f-457f-b630-51b82b871618" + i,
+          gridId: "46022e96-076f-457f-b630-51b82b871618",
+        },
+        {
+          id: "55615358-4af1-4179-9153-faaa57d71e55",
+          gridId: "55615358-4af1-4179-9153-faaa57d71e55",
+        },
+        {
+          id: "365b9cdf-3d4e-4135-9cb0-f1a65601c840",
+          gridId: "365b9cdf-3d4e-4135-9cb0-f1a65601c840",
+        },
+        {
+          id: "0b67ddf2-8e69-4482-bf0c-bb987ee5c280",
+          gridId: "0b67ddf2-8e69-4482-bf0c-bb987ee5c280" + i,
+        },
+      ];
       pages.push(pageProducts);
     }
 
@@ -152,9 +155,9 @@ describe("Sender message builder test suite (anything not covered in client inte
     }
     expect(bufferContent(sender)).toBe(
       'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716180\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2800\\"}]",boolCol=t\n' +
-      'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716181\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2801\\"}]",boolCol=t\n' +
-      'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716182\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2802\\"}]",boolCol=t\n' +
-      'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716183\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2803\\"}]",boolCol=t\n',
+        'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716181\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2801\\"}]",boolCol=t\n' +
+        'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716182\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2802\\"}]",boolCol=t\n' +
+        'tableName page_products="[{\\"id\\":\\"46022e96-076f-457f-b630-51b82b8716183\\",\\"gridId\\":\\"46022e96-076f-457f-b630-51b82b871618\\"},{\\"id\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\",\\"gridId\\":\\"55615358-4af1-4179-9153-faaa57d71e55\\"},{\\"id\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\",\\"gridId\\":\\"365b9cdf-3d4e-4135-9cb0-f1a65601c840\\"},{\\"id\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c280\\",\\"gridId\\":\\"0b67ddf2-8e69-4482-bf0c-bb987ee5c2803\\"}]",boolCol=t\n',
     );
     await sender.close();
   });
@@ -438,7 +441,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     expect(() =>
       sender.table(
         "123456789012345678901234567890123456789012345678901234567890" +
-        "12345678901234567890123456789012345678901234567890123456789012345678",
+          "12345678901234567890123456789012345678901234567890123456789012345678",
       ),
     ).toThrow("Table name is too long, max length is 127");
     await sender.close();
@@ -517,7 +520,7 @@ describe("Sender message builder test suite (anything not covered in client inte
         .table("tableName")
         .stringColumn(
           "123456789012345678901234567890123456789012345678901234567890" +
-          "12345678901234567890123456789012345678901234567890123456789012345678",
+            "12345678901234567890123456789012345678901234567890123456789012345678",
           "value",
         ),
     ).toThrow("Column name is too long, max length is 127");
@@ -572,7 +575,9 @@ describe("Sender message builder test suite (anything not covered in client inte
         .table("tableName")
         .stringColumn("name", "value")
         .symbol("symbolName", "symbolValue"),
-    ).toThrow("Symbol can be added only after table name is set and before any column added");
+    ).toThrow(
+      "Symbol can be added only after table name is set and before any column added",
+    );
     await sender.close();
   });
 
@@ -771,7 +776,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .atNow();
     expect(bufferContent(sender)).toBe(
       "tableName boolCol=t,timestampCol=1658484765000000t\n" +
-      "tableName boolCol=f,timestampCol=1658484766000000t\n",
+        "tableName boolCol=f,timestampCol=1658484766000000t\n",
     );
 
     sender.reset();

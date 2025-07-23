@@ -1,13 +1,21 @@
 // @ts-check
-import { describe, it, beforeAll, afterAll, afterEach, expect, vi, } from "vitest";
+import {
+  describe,
+  it,
+  beforeAll,
+  afterAll,
+  afterEach,
+  expect,
+  vi,
+} from "vitest";
 
 import { Logger } from "../src/logging";
 
 describe("Default logging suite", function () {
-  const error = vi.spyOn(console, "error").mockImplementation(() => { });
-  const warn = vi.spyOn(console, "warn").mockImplementation(() => { });
-  const info = vi.spyOn(console, "info").mockImplementation(() => { });
-  const debug = vi.spyOn(console, "debug").mockImplementation(() => { });
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const info = vi.spyOn(console, "info").mockImplementation(() => {});
+  const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
   let log: Logger;
 
   beforeAll(async () => {

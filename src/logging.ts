@@ -8,8 +8,8 @@ const LOG_LEVELS = {
 const DEFAULT_CRITICALITY = LOG_LEVELS.info.criticality;
 
 type Logger = (
-    level: "error" | "warn" | "info" | "debug",
-    message: string | Error,
+  level: "error" | "warn" | "info" | "debug",
+  message: string | Error,
 ) => void;
 
 /**
@@ -20,7 +20,10 @@ type Logger = (
  * @param {'error'|'warn'|'info'|'debug'} level - The log level of the message.
  * @param {string | Error} message - The log message.
  */
-function log(level: "error" | "warn" | "info" | "debug", message: string | Error) {
+function log(
+  level: "error" | "warn" | "info" | "debug",
+  message: string | Error,
+) {
   const logLevel = LOG_LEVELS[level];
   if (!logLevel) {
     throw new Error(`Invalid log level: '${level}'`);

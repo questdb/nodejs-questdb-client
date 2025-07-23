@@ -105,7 +105,9 @@ class TcpTransport implements SenderTransport {
         this.secure = true;
         break;
       default:
-        throw new Error("The 'protocol' has to be 'tcp' or 'tcps' for the TCP transport");
+        throw new Error(
+          "The 'protocol' has to be 'tcp' or 'tcps' for the TCP transport",
+        );
     }
 
     if (!options.auth && !options.jwk) {
@@ -140,10 +142,10 @@ class TcpTransport implements SenderTransport {
       this.socket = !this.secure
         ? net.connect(connOptions as net.NetConnectOpts)
         : tls.connect(connOptions as tls.ConnectionOptions, () => {
-          if (authenticated) {
-            resolve(true);
-          }
-        });
+            if (authenticated) {
+              resolve(true);
+            }
+          });
       this.socket.setKeepAlive(true);
 
       this.socket
@@ -159,10 +161,18 @@ class TcpTransport implements SenderTransport {
           }
         })
         .on("ready", async () => {
-          this.log("info", `Successfully connected to ${connOptions.host}:${connOptions.port}`);
+          this.log(
+            "info",
+            `Successfully connected to ${connOptions.host}:${connOptions.port}`,
+          );
           if (this.jwk) {
-            this.log("info", `Authenticating with ${connOptions.host}:${connOptions.port}`);
-            this.socket.write(`${this.jwk.kid}\n`, err => err ? reject(err) : () => {});
+            this.log(
+              "info",
+              `Authenticating with ${connOptions.host}:${connOptions.port}`,
+            );
+            this.socket.write(`${this.jwk.kid}\n`, (err) =>
+              err ? reject(err) : () => {},
+            );
           } else {
             authenticated = true;
             if (!this.secure || !this.tlsVerify) {
@@ -172,7 +182,11 @@ class TcpTransport implements SenderTransport {
         })
         .on("error", (err: Error & { code: string }) => {
           this.log("error", err);
-          if (this.tlsVerify || !err.code || err.code !== "SELF_SIGNED_CERT_IN_CHAIN") {
+          if (
+            this.tlsVerify ||
+            !err.code ||
+            err.code !== "SELF_SIGNED_CERT_IN_CHAIN"
+          ) {
             reject(err);
           }
         });
@@ -217,24 +231,24 @@ class TcpTransport implements SenderTransport {
     if (challenge.subarray(-1).readInt8() === 10) {
       const keyObject = crypto.createPrivateKey({
         key: this.jwk,
-        format: "jwk"
+        format: "jwk",
       });
       const signature = crypto.sign(
-          "RSA-SHA256",
-          challenge.subarray(0, challenge.length - 1),
-          keyObject
+        "RSA-SHA256",
+        challenge.subarray(0, challenge.length - 1),
+        keyObject,
       );
 
       return new Promise((resolve, reject) => {
         this.socket.write(
-            `${Buffer.from(signature).toString("base64")}\n`,
-            (err: Error) => {
-              if (err) {
-                reject(err);
-              } else {
-                resolve(true);
-              }
+          `${Buffer.from(signature).toString("base64")}\n`,
+          (err: Error) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(true);
             }
+          },
         );
       });
     }
@@ -250,7 +264,7 @@ function constructAuth(options: SenderOptions) {
   if (!options.username || !options.token) {
     throw new Error(
       "TCP transport requires a username and a private key for authentication, " +
-      "please, specify the 'username' and 'token' config options",
+        "please, specify the 'username' and 'token' config options",
     );
   }
 
@@ -265,25 +279,25 @@ function constructJwk(options: SenderOptions) {
     if (!options.auth.keyId) {
       throw new Error(
         "Missing username, please, specify the 'keyId' property of the 'auth' config option. " +
-        "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+          "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
       );
     }
     if (typeof options.auth.keyId !== "string") {
       throw new Error(
         "Please, specify the 'keyId' property of the 'auth' config option as a string. " +
-        "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+          "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
       );
     }
     if (!options.auth.token) {
       throw new Error(
         "Missing private key, please, specify the 'token' property of the 'auth' config option. " +
-        "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+          "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
       );
     }
     if (typeof options.auth.token !== "string") {
       throw new Error(
         "Please, specify the 'token' property of the 'auth' config option as a string. " +
-        "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
+          "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
       );
     }
 

@@ -4,7 +4,12 @@ import { Buffer } from "node:buffer";
 import { log, Logger } from "../logging";
 import { validateColumnName, validateTableName } from "../validation";
 import { SenderOptions } from "../options";
-import { isInteger, timestampToMicros, timestampToNanos, TimestampUnit } from "../utils";
+import {
+  isInteger,
+  timestampToMicros,
+  timestampToNanos,
+  TimestampUnit,
+} from "../utils";
 
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
@@ -42,15 +47,17 @@ class SenderBuffer {
     this.log = options && typeof options.log === "function" ? options.log : log;
     SenderOptions.resolveDeprecated(options, this.log);
 
-    this.maxNameLength = options && isInteger(options.max_name_len, 1)
-      ? options.max_name_len
-      : DEFAULT_MAX_NAME_LENGTH;
+    this.maxNameLength =
+      options && isInteger(options.max_name_len, 1)
+        ? options.max_name_len
+        : DEFAULT_MAX_NAME_LENGTH;
 
-    this.maxBufferSize = options && isInteger(options.max_buf_size, 1)
-      ? options.max_buf_size
-      : DEFAULT_MAX_BUFFER_SIZE;
+    this.maxBufferSize =
+      options && isInteger(options.max_buf_size, 1)
+        ? options.max_buf_size
+        : DEFAULT_MAX_BUFFER_SIZE;
     this.resize(
-        options && isInteger(options.init_buf_size, 1)
+      options && isInteger(options.init_buf_size, 1)
         ? options.init_buf_size
         : DEFAULT_BUFFER_SIZE,
     );
@@ -67,7 +74,9 @@ class SenderBuffer {
    */
   private resize(bufferSize: number) {
     if (bufferSize > this.maxBufferSize) {
-      throw new Error(`Max buffer size is ${this.maxBufferSize} bytes, requested buffer size: ${bufferSize}`);
+      throw new Error(
+        `Max buffer size is ${this.maxBufferSize} bytes, requested buffer size: ${bufferSize}`,
+      );
     }
     this.bufferSize = bufferSize;
     // Allocating an extra byte because Buffer.write() does not fail if the length of the data to be written is
@@ -158,7 +167,9 @@ class SenderBuffer {
       throw new Error(`Symbol name must be a string, received ${typeof name}`);
     }
     if (!this.hasTable || this.hasColumns) {
-      throw new Error("Symbol can be added only after table name is set and before any column added");
+      throw new Error(
+        "Symbol can be added only after table name is set and before any column added",
+      );
     }
     const valueStr = value.toString();
     this.checkCapacity([name, valueStr], 2 + name.length + valueStr.length);
@@ -262,7 +273,11 @@ class SenderBuffer {
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    * @return {Sender} Returns with a reference to this sender.
    */
-  timestampColumn(name: string, value: number | bigint, unit: TimestampUnit = "us"): SenderBuffer {
+  timestampColumn(
+    name: string,
+    value: number | bigint,
+    unit: TimestampUnit = "us",
+  ): SenderBuffer {
     if (typeof value !== "bigint" && !Number.isInteger(value)) {
       throw new Error(`Value must be an integer or BigInt, received ${value}`);
     }
@@ -284,10 +299,14 @@ class SenderBuffer {
    */
   at(timestamp: number | bigint, unit: TimestampUnit = "us") {
     if (!this.hasSymbols && !this.hasColumns) {
-      throw new Error("The row must have a symbol or column set before it is closed");
+      throw new Error(
+        "The row must have a symbol or column set before it is closed",
+      );
     }
     if (typeof timestamp !== "bigint" && !Number.isInteger(timestamp)) {
-      throw new Error(`Designated timestamp must be an integer or BigInt, received ${timestamp}`);
+      throw new Error(
+        `Designated timestamp must be an integer or BigInt, received ${timestamp}`,
+      );
     }
     const timestampNanos = timestampToNanos(BigInt(timestamp), unit);
     const timestampStr = timestampNanos.toString();
@@ -304,7 +323,9 @@ class SenderBuffer {
    */
   atNow() {
     if (!this.hasSymbols && !this.hasColumns) {
-      throw new Error("The row must have a symbol or column set before it is closed");
+      throw new Error(
+        "The row must have a symbol or column set before it is closed",
+      );
     }
     this.checkCapacity([], 1);
     this.write("\n");
@@ -334,17 +355,17 @@ class SenderBuffer {
   }
 
   private writeColumn(
-      name: string,
-      value: unknown,
-      writeValue: () => void,
-      valueType?: string
+    name: string,
+    value: unknown,
+    writeValue: () => void,
+    valueType?: string,
   ) {
     if (typeof name !== "string") {
       throw new Error(`Column name must be a string, received ${typeof name}`);
     }
     if (valueType && typeof value !== valueType) {
       throw new Error(
-          `Column value must be of type ${valueType}, received ${typeof value}`,
+        `Column value must be of type ${valueType}, received ${typeof value}`,
       );
     }
     if (!this.hasTable) {
@@ -364,7 +385,7 @@ class SenderBuffer {
     if (this.position > this.bufferSize) {
       // should never happen, if checkCapacity() is correctly used
       throw new Error(
-          `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
+        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
       );
     }
   }

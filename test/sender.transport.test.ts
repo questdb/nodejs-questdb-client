@@ -196,7 +196,7 @@ describe("Sender HTTP suite", function () {
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=1000`,
     );
     await expect(sendData(sender)).rejects.toThrowError(
-      "HTTP request timeout, no response from server in time"
+      "HTTP request timeout, no response from server in time",
     );
     await sender.close();
   });
@@ -262,8 +262,8 @@ describe("Sender HTTP suite", function () {
     const agent = new Agent({ pipelining: 3 });
 
     const sender = Sender.fromConfig(
-        `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
-        { agent: agent },
+      `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
+      { agent: agent },
     );
 
     await sendData(sender);
@@ -278,13 +278,13 @@ describe("Sender HTTP suite", function () {
     await agent.destroy();
   });
 
-  it('supports custom legacy HTTP agent', async function () {
+  it("supports custom legacy HTTP agent", async function () {
     mockHttp.reset();
     const agent = new http.Agent({ maxSockets: 128 });
 
     const sender = Sender.fromConfig(
-        `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};legacy_http=on`,
-        { agent: agent },
+      `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};legacy_http=on`,
+      { agent: agent },
     );
     await sendData(sender);
     expect(mockHttp.numOfRequests).toBe(1);
@@ -464,8 +464,8 @@ describe("Sender TCP suite", function () {
   });
 
   it("fails to connect without hostname and port", async function () {
-    await expect(async () =>
-      await new Sender({ protocol: "tcp" }).close()
+    await expect(
+      async () => await new Sender({ protocol: "tcp" }).close(),
     ).rejects.toThrow("The 'host' option is mandatory");
   });
 
@@ -481,9 +481,9 @@ describe("Sender TCP suite", function () {
   it("guards against multiple connect calls", async function () {
     const proxy = await createProxy(true, proxyOptions);
     const sender = await createSender(AUTH, true);
-    await expect(async () =>
-      await sender.connect()
-    ).rejects.toThrow("Sender connected already");
+    await expect(async () => await sender.connect()).rejects.toThrow(
+      "Sender connected already",
+    );
     await sender.close();
     await proxy.stop();
   });
@@ -497,8 +497,8 @@ describe("Sender TCP suite", function () {
       auth: AUTH,
       tls_ca: "test/certs/ca/ca.crt",
     });
-    await expect(async () =>
-      await Promise.all([sender.connect(), sender.connect()])
+    await expect(
+      async () => await Promise.all([sender.connect(), sender.connect()]),
     ).rejects.toThrow("Sender connected already");
     await sender.close();
     await proxy.stop();
@@ -509,8 +509,8 @@ describe("Sender TCP suite", function () {
     const senderCertCheckFail = Sender.fromConfig(
       `tcps::addr=${PROXY_HOST}:${PROXY_PORT}`,
     );
-    await expect(async () =>
-      await senderCertCheckFail.connect()
+    await expect(
+      async () => await senderCertCheckFail.connect(),
     ).rejects.toThrow("self-signed certificate in certificate chain");
     await senderCertCheckFail.close();
 
@@ -544,7 +544,10 @@ describe("Sender TCP suite", function () {
       "Successfully connected to localhost:9088",
       /^Connection to .*1:9088 is closed$/,
     ];
-    const log = (level: "error" | "warn" | "info" | "debug", message: string) => {
+    const log = (
+      level: "error" | "warn" | "info" | "debug",
+      message: string,
+    ) => {
       if (level !== "debug") {
         expect(level).toBe("info");
         expect(message).toMatch(expectedMessages.shift());

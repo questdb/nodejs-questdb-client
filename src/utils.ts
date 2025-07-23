@@ -6,7 +6,7 @@ function isBoolean(value: unknown): value is boolean {
 
 function isInteger(value: unknown, lowerBound: number): value is number {
   return (
-      typeof value === "number" && Number.isInteger(value) && value >= lowerBound
+    typeof value === "number" && Number.isInteger(value) && value >= lowerBound
   );
 }
 
@@ -36,4 +36,10 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
-export { isBoolean, isInteger, timestampToMicros, timestampToNanos, TimestampUnit };
+export {
+  isBoolean,
+  isInteger,
+  timestampToMicros,
+  timestampToNanos,
+  TimestampUnit,
+};

@@ -1,17 +1,22 @@
 import net, { Socket } from "node:net";
 import tls, { TLSSocket } from "node:tls";
 import { Proxy } from "./proxy";
-import {MockProxy} from "./mockproxy";
+import { MockProxy } from "./mockproxy";
 
 const LOCALHOST = "localhost";
 
 async function write(socket: Socket, data: string) {
   return new Promise<void>((resolve, reject) => {
-    socket.write(data, "utf8", (err: Error) => err ? reject(err): resolve());
+    socket.write(data, "utf8", (err: Error) => (err ? reject(err) : resolve()));
   });
 }
 
-async function listen(proxy: Proxy | MockProxy, listenPort: number, dataHandler: (data: string) => void, tlsOptions: tls.TlsOptions) {
+async function listen(
+  proxy: Proxy | MockProxy,
+  listenPort: number,
+  dataHandler: (data: string) => void,
+  tlsOptions: tls.TlsOptions,
+) {
   return new Promise<void>((resolve) => {
     const clientConnHandler = (client: Socket | TLSSocket) => {
       console.info("client connected");
@@ -39,7 +44,10 @@ async function listen(proxy: Proxy | MockProxy, listenPort: number, dataHandler:
   });
 }
 
-async function shutdown(proxy: Proxy | MockProxy, onServerClose = async () => {}) {
+async function shutdown(
+  proxy: Proxy | MockProxy,
+  onServerClose = async () => {},
+) {
   console.info("closing proxy");
   return new Promise<void>((resolve) => {
     proxy.server.close(async () => {

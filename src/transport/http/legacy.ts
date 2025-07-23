@@ -4,7 +4,11 @@ import https from "https";
 import { Buffer } from "node:buffer";
 
 import { SenderOptions, HTTP, HTTPS } from "../../options";
-import { HttpTransportBase, RETRIABLE_STATUS_CODES, HTTP_NO_CONTENT } from "./base";
+import {
+  HttpTransportBase,
+  RETRIABLE_STATUS_CODES,
+  HTTP_NO_CONTENT,
+} from "./base";
 
 // default options for HTTP agent
 // - persistent connections with 1 minute idle timeout, server side has 5 minutes set by default
@@ -12,8 +16,8 @@ import { HttpTransportBase, RETRIABLE_STATUS_CODES, HTTP_NO_CONTENT } from "./ba
 const DEFAULT_HTTP_AGENT_CONFIG = {
   maxSockets: 256,
   keepAlive: true,
-  timeout: 60000 // 1 min
-}
+  timeout: 60000, // 1 min
+};
 
 /** @classdesc
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
@@ -37,60 +41,81 @@ class HttpTransport extends HttpTransportBase {
 
     switch (options.protocol) {
       case HTTP:
-        this.agent = options.agent instanceof http.Agent ? options.agent : HttpTransport.getDefaultHttpAgent();
+        this.agent =
+          options.agent instanceof http.Agent
+            ? options.agent
+            : HttpTransport.getDefaultHttpAgent();
         break;
       case HTTPS:
-        this.agent = options.agent instanceof https.Agent ? options.agent : HttpTransport.getDefaultHttpsAgent();
+        this.agent =
+          options.agent instanceof https.Agent
+            ? options.agent
+            : HttpTransport.getDefaultHttpsAgent();
         break;
       default:
-        throw new Error("The 'protocol' has to be 'http' or 'https' for the HTTP transport");
+        throw new Error(
+          "The 'protocol' has to be 'http' or 'https' for the HTTP transport",
+        );
     }
   }
 
   send(data: Buffer, retryBegin = -1, retryInterval = -1): Promise<boolean> {
     const request = this.secure ? https.request : http.request;
 
-    const timeoutMillis = (data.length / this.requestMinThroughput) * 1000 + this.requestTimeout;
+    const timeoutMillis =
+      (data.length / this.requestMinThroughput) * 1000 + this.requestTimeout;
     const options = this.createRequestOptions(timeoutMillis);
 
     return new Promise((resolve, reject) => {
       let statusCode = -1;
-      const req = request(options, response => {
+      const req = request(options, (response) => {
         statusCode = response.statusCode;
 
         const body = [];
         response
-            .on("data", chunk => {
-              body.push(chunk);
-            })
-            .on("error", err => {
-              this.log("error", `resp err=${err}`);
-            });
+          .on("data", (chunk) => {
+            body.push(chunk);
+          })
+          .on("error", (err) => {
+            this.log("error", `resp err=${err}`);
+          });
 
         if (statusCode === HTTP_NO_CONTENT) {
           response.on("end", () => {
             if (body.length > 0) {
-              this.log("warn", `Unexpected message from server: ${Buffer.concat(body)}`);
+              this.log(
+                "warn",
+                `Unexpected message from server: ${Buffer.concat(body)}`,
+              );
             }
             resolve(true);
           });
         } else {
-          req.destroy(new Error(`HTTP request failed, statusCode=${statusCode}, error=${Buffer.concat(body)}`));
+          req.destroy(
+            new Error(
+              `HTTP request failed, statusCode=${statusCode}, error=${Buffer.concat(body)}`,
+            ),
+          );
         }
       });
 
       if (this.token) {
         req.setHeader("Authorization", `Bearer ${this.token}`);
       } else if (this.username && this.password) {
-        req.setHeader("Authorization", `Basic ${Buffer.from(`${this.username}:${this.password}`).toString("base64")}`);
+        req.setHeader(
+          "Authorization",
+          `Basic ${Buffer.from(`${this.username}:${this.password}`).toString("base64")}`,
+        );
       }
 
       req.on("timeout", () => {
         // set a retryable error code
         statusCode = 524;
-        req.destroy(new Error("HTTP request timeout, no response from server in time"));
+        req.destroy(
+          new Error("HTTP request timeout, no response from server in time"),
+        );
       });
-      req.on("error", err => {
+      req.on("error", (err) => {
         // if the error is thrown while the request is sent, statusCode is -1 => no retry
         // request timeout comes through with statusCode 524 => retry
         // if the error is thrown while the response is processed, the statusCode is taken from the response => retry depends on statusCode
@@ -109,19 +134,21 @@ class HttpTransport extends HttpTransportBase {
           setTimeout(() => {
             retryInterval = Math.min(retryInterval * 2, 1000);
             this.send(data, retryBegin, retryInterval)
-                .then(() => resolve(true))
-                .catch(e => reject(e));
+              .then(() => resolve(true))
+              .catch((e) => reject(e));
           }, retryInterval + jitter);
         } else {
           reject(err);
         }
       });
-      req.write(data, err => err ? reject(err) : () => {});
+      req.write(data, (err) => (err ? reject(err) : () => {}));
       req.end();
     });
   }
 
-  private createRequestOptions(timeoutMillis: number): http.RequestOptions | https.RequestOptions {
+  private createRequestOptions(
+    timeoutMillis: number,
+  ): http.RequestOptions | https.RequestOptions {
     return {
       //protocol: this.secure ? "https:" : "http:",
       hostname: this.host,
@@ -141,7 +168,9 @@ class HttpTransport extends HttpTransportBase {
    */
   private static getDefaultHttpAgent(): http.Agent {
     if (!HttpTransport.DEFAULT_HTTP_AGENT) {
-      HttpTransport.DEFAULT_HTTP_AGENT = new http.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+      HttpTransport.DEFAULT_HTTP_AGENT = new http.Agent(
+        DEFAULT_HTTP_AGENT_CONFIG,
+      );
     }
     return HttpTransport.DEFAULT_HTTP_AGENT;
   }
@@ -152,7 +181,9 @@ class HttpTransport extends HttpTransportBase {
    */
   private static getDefaultHttpsAgent(): https.Agent {
     if (!HttpTransport.DEFAULT_HTTPS_AGENT) {
-      HttpTransport.DEFAULT_HTTPS_AGENT = new https.Agent(DEFAULT_HTTP_AGENT_CONFIG);
+      HttpTransport.DEFAULT_HTTPS_AGENT = new https.Agent(
+        DEFAULT_HTTP_AGENT_CONFIG,
+      );
     }
     return HttpTransport.DEFAULT_HTTPS_AGENT;
   }
