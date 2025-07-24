@@ -7,6 +7,9 @@ type MockConfig = {
   username?: string;
   password?: string;
   token?: string;
+  settings?: {
+    config: { "line.proto.support.versions": number[] };
+  };
 };
 
 class MockHttp {
@@ -18,7 +21,13 @@ class MockHttp {
     this.reset();
   }
 
-  reset(mockConfig = {}) {
+  reset(mockConfig: MockConfig = {}) {
+    if (!mockConfig.settings) {
+      mockConfig.settings = {
+        config: { "line.proto.support.versions": [1, 2] },
+      };
+    }
+
     this.mockConfig = mockConfig;
     this.numOfRequests = 0;
   }
@@ -33,35 +42,48 @@ class MockHttp {
     this.server = serverCreator(
       options,
       (req: http.IncomingMessage, res: http.ServerResponse) => {
-        const authFailed = checkAuthHeader(this.mockConfig, req);
+        const { url, method } = req;
+        if (url.startsWith("/write") && method === "POST") {
+          const authFailed = checkAuthHeader(this.mockConfig, req);
 
-        const body: Uint8Array[] = [];
-        req.on("data", (chunk: Uint8Array) => {
-          body.push(chunk);
-        });
+          const body: Uint8Array[] = [];
+          req.on("data", (chunk: Uint8Array) => {
+            body.push(chunk);
+          });
 
-        req.on("end", async () => {
-          console.info(`Received data: ${Buffer.concat(body)}`);
-          this.numOfRequests++;
+          req.on("end", async () => {
+            console.info(`Received data: ${Buffer.concat(body)}`);
+            this.numOfRequests++;
 
-          const delay =
-            this.mockConfig.responseDelays &&
-            this.mockConfig.responseDelays.length > 0
-              ? this.mockConfig.responseDelays.pop()
-              : undefined;
-          if (delay) {
-            await sleep(delay);
-          }
+            const delay =
+              this.mockConfig.responseDelays &&
+              this.mockConfig.responseDelays.length > 0
+                ? this.mockConfig.responseDelays.pop()
+                : undefined;
+            if (delay) {
+              await sleep(delay);
+            }
 
-          const responseCode = authFailed
-            ? 401
-            : this.mockConfig.responseCodes &&
-                this.mockConfig.responseCodes.length > 0
-              ? this.mockConfig.responseCodes.pop()
-              : 204;
-          res.writeHead(responseCode);
-          res.end();
-        });
+            const responseCode = authFailed
+              ? 401
+              : this.mockConfig.responseCodes &&
+                  this.mockConfig.responseCodes.length > 0
+                ? this.mockConfig.responseCodes.pop()
+                : 204;
+            res.writeHead(responseCode);
+            res.end();
+          });
+        } else if (url === "/settings" && method === "GET") {
+          const settingsStr = JSON.stringify(this.mockConfig.settings);
+          console.info(`Settings reply: ${settingsStr}`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(settingsStr);
+          return;
+        } else {
+          console.info(`No handler for: ${method} ${url}`);
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("Not found");
+        }
       },
     );
 
@@ -80,8 +102,13 @@ class MockHttp {
 
   async stop() {
     if (this.server) {
-      this.server.close();
+      return new Promise((resolve, reject) => {
+        this.server.close((err) => {
+          err ? reject(err) : resolve(true);
+        });
+      });
     }
+    return true;
   }
 }
 

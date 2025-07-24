@@ -54,12 +54,12 @@ describe("Sender HTTP suite", function () {
   afterAll(async function () {
     await mockHttp.stop();
     await mockHttps.stop();
-  });
+  }, 30000);
 
   it("can ingest via HTTP", async function () {
     mockHttp.reset();
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
     );
     await sendData(sender);
@@ -71,23 +71,23 @@ describe("Sender HTTP suite", function () {
   it("can ingest via HTTPS", async function () {
     mockHttps.reset();
 
-    const senderCertCheckFail = Sender.fromConfig(
-      `https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT}`,
+    const senderCertCheckFail = await Sender.fromConfig(
+      `https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT};protocol_version=2`,
     );
-    await expect(sendData(senderCertCheckFail)).rejects.toThrowError(
-      "self-signed certificate in certificate chain",
-    );
+    await expect(
+      async () => await sendData(senderCertCheckFail),
+    ).rejects.toThrowError("self-signed certificate in certificate chain");
     await senderCertCheckFail.close();
 
-    const senderWithCA = Sender.fromConfig(
-      `https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT};tls_ca=test/certs/ca/ca.crt`,
+    const senderWithCA = await Sender.fromConfig(
+      `https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT};protocol_version=2;tls_ca=test/certs/ca/ca.crt`,
     );
     await sendData(senderWithCA);
     expect(mockHttps.numOfRequests).toEqual(1);
     await senderWithCA.close();
 
-    const senderVerifyOff = Sender.fromConfig(
-      `https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`,
+    const senderVerifyOff = await Sender.fromConfig(
+      `https::addr=${PROXY_HOST}:${MOCK_HTTPS_PORT};protocol_version=2;tls_verify=unsafe_off`,
     );
     await sendData(senderVerifyOff);
     expect(mockHttps.numOfRequests).toEqual(2);
@@ -97,85 +97,85 @@ describe("Sender HTTP suite", function () {
   it("can ingest via HTTP with basic auth", async function () {
     mockHttp.reset({ username: "user1", password: "pwd" });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1;password=pwd`,
     );
     await sendData(sender);
     expect(mockHttp.numOfRequests).toEqual(1);
     await sender.close();
 
-    const senderFailPwd = Sender.fromConfig(
+    const senderFailPwd = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1;password=xyz`,
     );
-    await expect(sendData(senderFailPwd)).rejects.toThrowError(
-      "HTTP request failed, statusCode=401",
-    );
+    await expect(
+      async () => await sendData(senderFailPwd),
+    ).rejects.toThrowError("HTTP request failed, statusCode=401");
     await senderFailPwd.close();
 
-    const senderFailMissingPwd = Sender.fromConfig(
+    const senderFailMissingPwd = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=user1z`,
     );
-    await expect(sendData(senderFailMissingPwd)).rejects.toThrowError(
-      "HTTP request failed, statusCode=401",
-    );
+    await expect(
+      async () => await sendData(senderFailMissingPwd),
+    ).rejects.toThrowError("HTTP request failed, statusCode=401");
     await senderFailMissingPwd.close();
 
-    const senderFailUsername = Sender.fromConfig(
+    const senderFailUsername = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};username=xyz;password=pwd`,
     );
-    await expect(sendData(senderFailUsername)).rejects.toThrowError(
-      "HTTP request failed, statusCode=401",
-    );
+    await expect(
+      async () => await sendData(senderFailUsername),
+    ).rejects.toThrowError("HTTP request failed, statusCode=401");
     await senderFailUsername.close();
 
-    const senderFailMissingUsername = Sender.fromConfig(
+    const senderFailMissingUsername = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};password=pwd`,
     );
-    await expect(sendData(senderFailMissingUsername)).rejects.toThrowError(
-      "HTTP request failed, statusCode=401",
-    );
+    await expect(
+      async () => await sendData(senderFailMissingUsername),
+    ).rejects.toThrowError("HTTP request failed, statusCode=401");
     await senderFailMissingUsername.close();
 
-    const senderFailMissing = Sender.fromConfig(
+    const senderFailMissing = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
     );
-    await expect(sendData(senderFailMissing)).rejects.toThrowError(
-      "HTTP request failed, statusCode=401",
-    );
+    await expect(
+      async () => await sendData(senderFailMissing),
+    ).rejects.toThrowError("HTTP request failed, statusCode=401");
     await senderFailMissing.close();
   });
 
   it("can ingest via HTTP with token auth", async function () {
     mockHttp.reset({ token: "abcdefghijkl123" });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};token=abcdefghijkl123`,
     );
     await sendData(sender);
     expect(mockHttp.numOfRequests).toBe(1);
     await sender.close();
 
-    const senderFailToken = Sender.fromConfig(
+    const senderFailToken = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};token=xyz`,
     );
-    await expect(sendData(senderFailToken)).rejects.toThrowError(
-      "HTTP request failed, statusCode=401",
-    );
+    await expect(
+      async () => await sendData(senderFailToken),
+    ).rejects.toThrowError("HTTP request failed, statusCode=401");
     await senderFailToken.close();
 
-    const senderFailMissing = Sender.fromConfig(
+    const senderFailMissing = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
     );
-    await expect(sendData(senderFailMissing)).rejects.toThrowError(
-      "HTTP request failed, statusCode=401",
-    );
+    await expect(
+      async () => await sendData(senderFailMissing),
+    ).rejects.toThrowError("HTTP request failed, statusCode=401");
     await senderFailMissing.close();
   });
 
   it("can retry via HTTP", async function () {
     mockHttp.reset({ responseCodes: [204, 500, 523, 504, 500] });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
     );
     await sendData(sender);
@@ -192,10 +192,10 @@ describe("Sender HTTP suite", function () {
       responseDelays: [1000, 1000, 1000],
     });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=1000`,
     );
-    await expect(sendData(sender)).rejects.toThrowError(
+    await expect(async () => await sendData(sender)).rejects.toThrowError(
       "HTTP request timeout, no response from server in time",
     );
     await sender.close();
@@ -209,10 +209,10 @@ describe("Sender HTTP suite", function () {
       responseDelays: [1000],
     });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=0;request_timeout=100`,
     );
-    await expect(sendData(sender)).rejects.toThrowError(
+    await expect(async () => await sendData(sender)).rejects.toThrowError(
       "HTTP request timeout, no response from server in time",
     );
     await sender.close();
@@ -224,7 +224,7 @@ describe("Sender HTTP suite", function () {
       responseDelays: [2000, 2000],
     });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};retry_timeout=600000;request_timeout=1000`,
     );
     await sendData(sender);
@@ -240,7 +240,7 @@ describe("Sender HTTP suite", function () {
     const senders: Sender[] = [];
     const promises: Promise<void>[] = [];
     for (let i = 0; i < num; i++) {
-      const sender = Sender.fromConfig(
+      const sender = await Sender.fromConfig(
         `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
         { agent: agent },
       );
@@ -261,7 +261,7 @@ describe("Sender HTTP suite", function () {
     mockHttp.reset();
     const agent = new Agent({ pipelining: 3 });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT}`,
       { agent: agent },
     );
@@ -282,7 +282,7 @@ describe("Sender HTTP suite", function () {
     mockHttp.reset();
     const agent = new http.Agent({ maxSockets: 128 });
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};legacy_http=on`,
       { agent: agent },
     );
@@ -314,6 +314,7 @@ describe("Sender TCP suite", function () {
   async function createSender(auth: SenderOptions["auth"], secure = false) {
     const sender = new Sender({
       protocol: secure ? "tcps" : "tcp",
+      protocol_version: "1",
       port: PROXY_PORT,
       host: PROXY_HOST,
       auth: auth,
@@ -390,6 +391,7 @@ describe("Sender TCP suite", function () {
     const proxy = await createProxy(true);
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       port: PROXY_PORT,
       host: PROXY_HOST,
       jwk: JWK,
@@ -470,7 +472,11 @@ describe("Sender TCP suite", function () {
   });
 
   it("fails to send data if not connected", async function () {
-    const sender = new Sender({ protocol: "tcp", host: "localhost" });
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "localhost",
+    });
     await expect(async () => {
       await sender.table("test").symbol("location", "us").atNow();
       await sender.flush();
@@ -492,6 +498,7 @@ describe("Sender TCP suite", function () {
     const proxy = await createProxy(true, proxyOptions);
     const sender = new Sender({
       protocol: "tcps",
+      protocol_version: "1",
       port: PROXY_PORT,
       host: PROXY_HOST,
       auth: AUTH,
@@ -506,22 +513,22 @@ describe("Sender TCP suite", function () {
 
   it("can disable the server certificate check", async function () {
     const proxy = await createProxy(true, proxyOptions);
-    const senderCertCheckFail = Sender.fromConfig(
-      `tcps::addr=${PROXY_HOST}:${PROXY_PORT}`,
+    const senderCertCheckFail = await Sender.fromConfig(
+      `tcps::addr=${PROXY_HOST}:${PROXY_PORT};protocol_version=1`,
     );
     await expect(
       async () => await senderCertCheckFail.connect(),
     ).rejects.toThrow("self-signed certificate in certificate chain");
     await senderCertCheckFail.close();
 
-    const senderCertCheckOn = Sender.fromConfig(
-      `tcps::addr=${PROXY_HOST}:${PROXY_PORT};tls_ca=test/certs/ca/ca.crt`,
+    const senderCertCheckOn = await Sender.fromConfig(
+      `tcps::addr=${PROXY_HOST}:${PROXY_PORT};protocol_version=1;tls_ca=test/certs/ca/ca.crt`,
     );
     await senderCertCheckOn.connect();
     await senderCertCheckOn.close();
 
-    const senderCertCheckOff = Sender.fromConfig(
-      `tcps::addr=${PROXY_HOST}:${PROXY_PORT};tls_verify=unsafe_off`,
+    const senderCertCheckOff = await Sender.fromConfig(
+      `tcps::addr=${PROXY_HOST}:${PROXY_PORT};protocol_version=1;tls_verify=unsafe_off`,
     );
     await senderCertCheckOff.connect();
     await senderCertCheckOff.close();
@@ -556,6 +563,7 @@ describe("Sender TCP suite", function () {
     const proxy = await createProxy();
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       port: PROXY_PORT,
       host: PROXY_HOST,
       log: log,

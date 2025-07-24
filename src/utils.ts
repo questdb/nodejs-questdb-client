@@ -36,10 +36,27 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
+async function fetchJson<T>(url: string): Promise<T> {
+  let response: globalThis.Response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    throw new Error(`Failed to load ${url} [error=${error}]`);
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to load ${url} [statusCode=${response.status} (${response.statusText})]`,
+    );
+  }
+  return (await response.json()) as T;
+}
+
 export {
   isBoolean,
   isInteger,
   timestampToMicros,
   timestampToNanos,
   TimestampUnit,
+  fetchJson,
 };
