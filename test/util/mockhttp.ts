@@ -8,7 +8,7 @@ type MockConfig = {
   password?: string;
   token?: string;
   settings?: {
-    config: { "line.proto.support.versions": number[] };
+    config?: { "line.proto.support.versions"?: number[] };
   };
 };
 

@@ -267,8 +267,12 @@ describe("Configuration string parser suite", function () {
       "Invalid protocol version: 'automatic', accepted values: 'auto', '1', '2'",
     );
 
-    // defaults
-    let options = await SenderOptions.fromConfig("tcp::addr=localhost");
+    let options: SenderOptions;
+
+    // defaults with supported versions: 1,2
+    mockHttp.reset();
+    mockHttps.reset();
+    options = await SenderOptions.fromConfig("tcp::addr=localhost");
     expect(options.protocol_version).toBe("1");
     options = await SenderOptions.fromConfig("tcps::addr=localhost");
     expect(options.protocol_version).toBe("1");
@@ -281,7 +285,80 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("2");
 
-    // auto, 1, 2 with each protocol (tcp, tcps, http, https)
+    // defaults with supported versions: 1
+    const only1 = {
+      settings: {
+        config: { "line.proto.support.versions": [1] },
+      },
+    };
+    mockHttp.reset(only1);
+    mockHttps.reset(only1);
+    options = await SenderOptions.fromConfig("tcp::addr=localhost");
+    expect(options.protocol_version).toBe("1");
+    options = await SenderOptions.fromConfig("tcps::addr=localhost");
+    expect(options.protocol_version).toBe("1");
+    options = await SenderOptions.fromConfig(
+      `http::addr=localhost:${MOCK_HTTP_PORT}`,
+    );
+    expect(options.protocol_version).toBe("1");
+    options = await SenderOptions.fromConfig(
+      `https::addr=localhost:${MOCK_HTTPS_PORT}`,
+    );
+    expect(options.protocol_version).toBe("1");
+
+    // defaults with no supported versions
+    const noVersions = {
+      settings: {
+        config: {},
+      },
+    };
+    mockHttp.reset(noVersions);
+    mockHttps.reset(noVersions);
+    options = await SenderOptions.fromConfig("tcp::addr=localhost");
+    expect(options.protocol_version).toBe("1");
+    options = await SenderOptions.fromConfig("tcps::addr=localhost");
+    expect(options.protocol_version).toBe("1");
+    options = await SenderOptions.fromConfig(
+      `http::addr=localhost:${MOCK_HTTP_PORT}`,
+    );
+    expect(options.protocol_version).toBe("1");
+    options = await SenderOptions.fromConfig(
+      `https::addr=localhost:${MOCK_HTTPS_PORT}`,
+    );
+    expect(options.protocol_version).toBe("1");
+
+    // defaults with no match with supported versions
+    const no1and2 = {
+      settings: {
+        config: { "line.proto.support.versions": [3, 5] },
+      },
+    };
+    mockHttp.reset(no1and2);
+    mockHttps.reset(no1and2);
+    options = await SenderOptions.fromConfig("tcp::addr=localhost");
+    expect(options.protocol_version).toBe("1");
+    options = await SenderOptions.fromConfig("tcps::addr=localhost");
+    expect(options.protocol_version).toBe("1");
+    await expect(
+      async () =>
+        await SenderOptions.fromConfig(
+          `http::addr=localhost:${MOCK_HTTP_PORT}`,
+        ),
+    ).rejects.toThrow(
+      "Unsupported protocol versions received from server: 3,5",
+    );
+    await expect(
+      async () =>
+        await SenderOptions.fromConfig(
+          `https::addr=localhost:${MOCK_HTTPS_PORT}`,
+        ),
+    ).rejects.toThrow(
+      "Unsupported protocol versions received from server: 3,5",
+    );
+
+    // auto, 1, 2 with each protocol (tcp, tcps, http, https), supported versions: 1,2
+    mockHttp.reset();
+    mockHttps.reset();
     options = await SenderOptions.fromConfig(
       "tcp::addr=localhost;protocol_version=1",
     );
