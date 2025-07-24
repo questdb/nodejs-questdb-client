@@ -7,46 +7,51 @@ import { log } from "../src/logging";
 
 describe("Sender configuration options suite", function () {
   it("creates a sender from a configuration string", async function () {
-    await Sender.fromConfig("tcps::addr=hostname;").close();
+    const sender = await Sender.fromConfig("tcps::addr=hostname;");
+    await sender.close();
   });
 
   it("creates a sender from a configuration string picked up from env", async function () {
-    process.env.QDB_CLIENT_CONF = "https::addr=hostname;";
-    await Sender.fromEnv().close();
+    process.env.QDB_CLIENT_CONF = "https::addr=hostname;protocol_version=1";
+    await (await Sender.fromEnv()).close();
   });
 
   it("throws exception if the username or the token is missing when TCP transport is used", async function () {
-    await expect(
-      async () =>
-        await Sender.fromConfig("tcp::addr=hostname;username=bobo;").close(),
-    ).rejects.toThrow(
+    await expect(async () => {
+      const sender = await Sender.fromConfig(
+        "tcp::addr=hostname;username=bobo;",
+      );
+      await sender.close();
+    }).rejects.toThrow(
       "TCP transport requires a username and a private key for authentication, please, specify the 'username' and 'token' config options",
     );
 
-    await expect(
-      async () =>
-        await Sender.fromConfig("tcp::addr=hostname;token=bobo_token;").close(),
-    ).rejects.toThrow(
+    await expect(async () => {
+      const sender = await Sender.fromConfig(
+        "tcp::addr=hostname;token=bobo_token;",
+      );
+      await sender.close();
+    }).rejects.toThrow(
       "TCP transport requires a username and a private key for authentication, please, specify the 'username' and 'token' config options",
     );
   });
 
   it("throws exception if tls_roots or tls_roots_password is used", async function () {
-    await expect(
-      async () =>
-        await Sender.fromConfig(
-          "tcps::addr=hostname;username=bobo;tls_roots=bla;",
-        ).close(),
-    ).rejects.toThrow(
+    await expect(async () => {
+      const sender = await Sender.fromConfig(
+        "tcps::addr=hostname;username=bobo;tls_roots=bla;",
+      );
+      await sender.close();
+    }).rejects.toThrow(
       "'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
     );
 
-    await expect(
-      async () =>
-        await Sender.fromConfig(
-          "tcps::addr=hostname;token=bobo_token;tls_roots_password=bla;",
-        ).close(),
-    ).rejects.toThrow(
+    await expect(async () => {
+      const sender = await Sender.fromConfig(
+        "tcps::addr=hostname;token=bobo_token;tls_roots_password=bla;",
+      );
+      await sender.close();
+    }).rejects.toThrow(
       "'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
     );
   });
@@ -54,7 +59,9 @@ describe("Sender configuration options suite", function () {
   it("throws exception if connect() is called when http transport is used", async function () {
     let sender: Sender;
     await expect(async () => {
-      sender = Sender.fromConfig("http::addr=hostname");
+      sender = await Sender.fromConfig(
+        "http::addr=hostname;protocol_version=2",
+      );
       await sender.connect();
     }).rejects.toThrow("'connect()' is not required for HTTP transport");
     await sender.close();
@@ -108,6 +115,7 @@ describe("Sender options test suite", function () {
   it("sets default buffer size if init_buf_size is not set", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
     });
     expect(bufferSize(sender)).toBe(DEFAULT_BUFFER_SIZE);
@@ -117,6 +125,7 @@ describe("Sender options test suite", function () {
   it("sets the requested buffer size if init_buf_size is set", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -127,6 +136,7 @@ describe("Sender options test suite", function () {
   it("sets default buffer size if init_buf_size is set to null", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       init_buf_size: null,
     });
@@ -137,6 +147,7 @@ describe("Sender options test suite", function () {
   it("sets default buffer size if init_buf_size is set to undefined", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       init_buf_size: undefined,
     });
@@ -147,6 +158,7 @@ describe("Sender options test suite", function () {
   it("sets default buffer size if init_buf_size is not a number", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       // @ts-expect-error - Testing invalid options
       init_buf_size: "1024",
@@ -169,6 +181,7 @@ describe("Sender options test suite", function () {
     };
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       // @ts-expect-error - Testing deprecated option
       bufferSize: 2048,
@@ -192,6 +205,7 @@ describe("Sender options test suite", function () {
     };
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       // @ts-expect-error - Testing deprecated option
       copy_buffer: false,
@@ -214,6 +228,7 @@ describe("Sender options test suite", function () {
     };
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       // @ts-expect-error - Testing deprecated option
       copyBuffer: false,
@@ -223,7 +238,11 @@ describe("Sender options test suite", function () {
   });
 
   it("sets default max buffer size if max_buf_size is not set", async function () {
-    const sender = new Sender({ protocol: "http", host: "host" });
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+    });
     expect(maxBufferSize(sender)).toBe(DEFAULT_MAX_BUFFER_SIZE);
     await sender.close();
   });
@@ -231,6 +250,7 @@ describe("Sender options test suite", function () {
   it("sets the requested max buffer size if max_buf_size is set", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       max_buf_size: 131072,
     });
@@ -243,6 +263,7 @@ describe("Sender options test suite", function () {
       async () =>
         await new Sender({
           protocol: "http",
+          protocol_version: "1",
           host: "host",
           max_buf_size: 8192,
           init_buf_size: 16384,
@@ -255,6 +276,7 @@ describe("Sender options test suite", function () {
   it("sets default max buffer size if max_buf_size is set to null", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       max_buf_size: null,
     });
@@ -265,6 +287,7 @@ describe("Sender options test suite", function () {
   it("sets default max buffer size if max_buf_size is set to undefined", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       max_buf_size: undefined,
     });
@@ -275,6 +298,7 @@ describe("Sender options test suite", function () {
   it("sets default max buffer size if max_buf_size is not a number", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       // @ts-expect-error - Testing invalid value
       max_buf_size: "1024",
@@ -284,7 +308,11 @@ describe("Sender options test suite", function () {
   });
 
   it("uses default logger if log function is not set", async function () {
-    const sender = new Sender({ protocol: "http", host: "host" });
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+    });
     expect(logger(sender)).toBe(log);
     await sender.close();
   });
@@ -293,6 +321,7 @@ describe("Sender options test suite", function () {
     const testFunc = () => {};
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "1",
       host: "host",
       log: testFunc,
     });
@@ -301,7 +330,12 @@ describe("Sender options test suite", function () {
   });
 
   it("uses default logger if log is set to null", async function () {
-    const sender = new Sender({ protocol: "http", host: "host", log: null });
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      log: null,
+    });
     expect(logger(sender)).toBe(log);
     await sender.close();
   });
@@ -309,6 +343,7 @@ describe("Sender options test suite", function () {
   it("uses default logger if log is set to undefined", async function () {
     const sender = new Sender({
       protocol: "http",
+      protocol_version: "2",
       host: "host",
       log: undefined,
     });
@@ -317,8 +352,13 @@ describe("Sender options test suite", function () {
   });
 
   it("uses default logger if log is not a function", async function () {
-    // @ts-expect-error - Testing invalid options
-    const sender = new Sender({ protocol: "http", host: "host", log: "" });
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      // @ts-expect-error - Testing invalid options
+      log: "",
+    });
     expect(logger(sender)).toBe(log);
     await sender.close();
   });
@@ -330,6 +370,7 @@ describe("Sender auth config checks suite", function () {
       async () =>
         await new Sender({
           protocol: "tcp",
+          protocol_version: "2",
           host: "host",
           auth: {
             token: "privateKey",
@@ -346,6 +387,7 @@ describe("Sender auth config checks suite", function () {
       async () =>
         await new Sender({
           protocol: "tcp",
+          protocol_version: "2",
           host: "host",
           auth: {
             keyId: "",
