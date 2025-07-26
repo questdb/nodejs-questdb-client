@@ -11,6 +11,7 @@ import {
 } from "./index";
 import {
   isInteger,
+  getDimensions,
   timestampToMicros,
   timestampToNanos,
   TimestampUnit,
@@ -235,6 +236,8 @@ abstract class SenderBufferBase implements SenderBuffer {
    */
   abstract floatColumn(name: string, value: number): SenderBuffer;
 
+  abstract arrayColumn(name: string, value: unknown[]): SenderBuffer;
+
   /**
    * Write an integer column with its value into the buffer of the sender.
    *
@@ -367,36 +370,66 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.writeEscaped(name);
     this.write("=");
     writeValue();
+    this.assertBufferOverflow();
     this.hasColumns = true;
   }
 
   protected write(data: string) {
     this.position += this.buffer.write(data, this.position);
-    if (this.position > this.bufferSize) {
-      // should never happen, if checkCapacity() is correctly used
-      throw new Error(
-        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
-    }
   }
 
   protected writeByte(data: number) {
     this.position = this.buffer.writeInt8(data, this.position);
-    if (this.position > this.bufferSize) {
-      // should never happen, if checkCapacity() is correctly used
-      throw new Error(
-        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
-    }
+  }
+
+  protected writeInt(data: number) {
+    this.position = this.buffer.writeInt32LE(data, this.position);
   }
 
   protected writeDouble(data: number) {
     this.position = this.buffer.writeDoubleLE(data, this.position);
-    if (this.position > this.bufferSize) {
-      // should never happen, if checkCapacity() is correctly used
-      throw new Error(
-        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
+  }
+
+  protected writeArray(arr: unknown[]) {
+    const dimensions = getDimensions(arr);
+    this.checkCapacity([], 1 + dimensions.length * 4);
+    this.writeByte(dimensions.length);
+    let numOfElements = 1;
+    for (let i = 0; i < dimensions.length; i++) {
+      numOfElements *= dimensions[i];
+      this.writeInt(dimensions[i]);
+    }
+
+    this.checkCapacity([], numOfElements * 8);
+    this.writeArrayValues(arr, dimensions);
+  }
+
+  private writeArrayValues(arr: unknown[], dimensions: number[]) {
+    if (Array.isArray(arr[0])) {
+      const length = arr[0].length;
+      for (let i = 0; i < arr.length; i++) {
+        const subArray = arr[i] as unknown[];
+        if (subArray.length !== length) {
+          throw new Error(
+            `length does not match array dimensions [dimensions=[${dimensions}], length=${subArray.length}]`,
+          );
+        }
+        this.writeArrayValues(subArray, dimensions);
+      }
+    } else {
+      const dataType = typeof arr[0];
+      switch (dataType) {
+        case "number":
+          for (let i = 0; i < arr.length; i++) {
+            this.position = this.buffer.writeDoubleLE(
+              arr[i] as number,
+              this.position,
+            );
+          }
+          break;
+        default:
+          throw new Error(`unsupported array type [type=${dataType}]`);
+      }
     }
   }
 
@@ -434,6 +467,15 @@ abstract class SenderBufferBase implements SenderBuffer {
           this.write(ch);
           break;
       }
+    }
+  }
+
+  private assertBufferOverflow() {
+    if (this.position > this.bufferSize) {
+      // should never happen, if checkCapacity() is correctly used
+      throw new Error(
+        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
+      );
     }
   }
 }

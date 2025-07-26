@@ -234,6 +234,11 @@ class Sender {
     return this;
   }
 
+  arrayColumn(name: string, value: unknown[]): Sender {
+    this.buffer.arrayColumn(name, value);
+    return this;
+  }
+
   /**
    * Write an integer column with its value into the buffer of the sender.
    *
