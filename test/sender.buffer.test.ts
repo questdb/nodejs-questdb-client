@@ -167,6 +167,108 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("does not support arrays with protocol v1", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() =>
+      sender.table("tableName").arrayColumn("arrayCol", [12.3, 23.4]),
+    ).toThrow("Arrays are not supported in protocol v1");
+    await sender.close();
+  });
+
+  it("supports arrays with protocol v2", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", [12.3, 23.4])
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 01 02 00 00 00 9a 99 99 99 99 99 28 40 66 66 66 66 66 66 37 40 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("supports multidimensional arrays with protocol v2", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", [[12.3], [23.4]])
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 02 02 00 00 00 01 00 00 00 9a 99 99 99 99 99 28 40 66 66 66 66 66 66 37 40 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("does not accept empty array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    sender.table("tableName");
+    expect(() => sender.arrayColumn("arrayCol", [])).toThrow(
+      "zero length array not supported",
+    );
+    expect(() => sender.arrayColumn("arrayCol", [[], []])).toThrow(
+      "zero length array not supported",
+    );
+    await sender.close();
+  });
+
+  it("does not accept irregular array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() =>
+      sender.table("tableName").arrayColumn("arrayCol", [[1.1, 2.2], [3.3]]),
+    ).toThrow(
+      "length does not match array dimensions [dimensions=[2,2], length=1]",
+    );
+    await sender.close();
+  });
+
+  it("supports arrays with NULL value", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("tableName").arrayColumn("arrayCol", undefined).atNow();
+    await sender.table("tableName").arrayColumn("arrayCol", null).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 21 " +
+        toHex("\ntableName arrayCol==") +
+        " 0e 21 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
   it("supports timestamp field as number", async function () {
     const sender = new Sender({
       protocol: "tcp",
@@ -836,6 +938,21 @@ describe("Sender message builder test suite (anything not covered in client inte
 function bufferContent(sender: Sender) {
   // @ts-expect-error - Accessing private field
   return sender.buffer.toBufferView().toString();
+}
+
+function bufferContentHex(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return toHexString(sender.buffer.toBufferView());
+}
+
+function toHex(str: string) {
+  return toHexString(Buffer.from(str));
+}
+
+function toHexString(buffer: Buffer) {
+  return Array.from(buffer)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join(" ");
 }
 
 function bufferSize(sender: Sender) {

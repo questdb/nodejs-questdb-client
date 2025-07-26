@@ -36,6 +36,18 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
+function getDimensions(arr: unknown) {
+  const dimensions: number[] = [];
+  while (Array.isArray(arr)) {
+    if (arr.length === 0) {
+      throw new Error("zero length array not supported");
+    }
+    dimensions.push(arr.length);
+    arr = arr[0];
+  }
+  return dimensions;
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   let response: globalThis.Response;
   try {
@@ -59,4 +71,5 @@ export {
   timestampToNanos,
   TimestampUnit,
   fetchJson,
+  getDimensions,
 };
