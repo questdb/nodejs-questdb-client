@@ -250,6 +250,22 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("does not accept unsupported types", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    sender.table("tableName");
+    expect(() => sender.arrayColumn("col", ['str'])).toThrow("unsupported array type [type=string]");
+    expect(() => sender.arrayColumn("col", [true])).toThrow("unsupported array type [type=boolean]");
+    expect(() => sender.arrayColumn("col", [{}])).toThrow("unsupported array type [type=object]");
+    expect(() => sender.arrayColumn("col", [null])).toThrow("unsupported array type [type=object]");
+    expect(() => sender.arrayColumn("col", [undefined])).toThrow("unsupported array type [type=undefined]");
+    await sender.close();
+  });
+
   it("supports arrays with NULL value", async function () {
     const sender = new Sender({
       protocol: "http",
