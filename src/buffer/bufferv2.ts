@@ -32,8 +32,8 @@ class SenderBufferV2 extends SenderBufferBase {
   }
 
   arrayColumn(name: string, value: unknown[]): SenderBuffer {
-    if (value && !Array.isArray(value)) {
-      throw new Error(`Value must be an array, received ${value}`);
+    if (value !== null && value !== undefined && !Array.isArray(value)) {
+      throw new Error(`The value must be an array [value=${JSON.stringify(value)}, type=${typeof value}]`);
     }
     this.writeColumn(name, value, () => {
       this.checkCapacity([], 3);

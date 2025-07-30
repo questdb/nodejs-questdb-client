@@ -266,6 +266,29 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("does not accept non-array types", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    sender.table("tableName");
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", 12.345)).toThrow("The value must be an array [value=12.345, type=number]");
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", 42)).toThrow("The value must be an array [value=42, type=number]");
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", "str")).toThrow("The value must be an array [value=\"str\", type=string]");
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", "")).toThrow("The value must be an array [value=\"\", type=string]");
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", true)).toThrow("The value must be an array [value=true, type=boolean]");
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", {})).toThrow("The value must be an array [value={}, type=object]");
+    await sender.close();
+  });
+
   it("supports arrays with NULL value", async function () {
     const sender = new Sender({
       protocol: "http",
