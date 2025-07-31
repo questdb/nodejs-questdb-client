@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: '15 2,10,18 * * *'
 
 jobs:
   test:
