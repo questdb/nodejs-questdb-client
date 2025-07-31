@@ -10,19 +10,20 @@ import {
   HTTP_NO_CONTENT,
 } from "./base";
 
-// default options for HTTP agent
-// - persistent connections with 1 minute idle timeout, server side has 5 minutes set by default
-// - max open connections is set to 256, same as server side default
+/**
+ * Default configuration for HTTP agents.
+ * - Persistent connections with 1 minute idle timeout
+ * - Maximum of 256 open connections (matching server default)
+ */
 const DEFAULT_HTTP_AGENT_CONFIG = {
   maxSockets: 256,
   keepAlive: true,
   timeout: 60000, // 1 min
 };
 
-/** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
- * Based on benchmarks HTTP also provides higher throughput, if configured to ingest data in bigger batches.
+/**
+ * HTTP transport implementation using Node.js built-in http/https modules. <br>
+ * Supports both HTTP and HTTPS protocols with configurable authentication.
  */
 class HttpTransport extends HttpTransportBase {
   private static DEFAULT_HTTP_AGENT: http.Agent;
@@ -31,10 +32,10 @@ class HttpTransport extends HttpTransportBase {
   private readonly agent: http.Agent | https.Agent;
 
   /**
-   * Creates an instance of Sender.
+   * Creates a new HttpTransport instance using Node.js HTTP modules.
    *
-   * @param {SenderOptions} options - Sender configuration object. <br>
-   * See SenderOptions documentation for detailed description of configuration options. <br>
+   * @param options - Sender configuration object containing connection details
+   * @throws Error if the protocol is not 'http' or 'https'
    */
   constructor(options: SenderOptions) {
     super(options);
@@ -59,6 +60,14 @@ class HttpTransport extends HttpTransportBase {
     }
   }
 
+  /**
+   * Sends data to QuestDB using HTTP POST.
+   * @param data - Buffer containing data to send
+   * @param retryBegin - Internal parameter for tracking retry start time
+   * @param retryInterval - Internal parameter for tracking retry intervals
+   * @returns Promise resolving to true if data was sent successfully
+   * @throws Error if request fails after all retries or times out
+   */
   send(data: Buffer, retryBegin = -1, retryInterval = -1): Promise<boolean> {
     const request = this.secure ? https.request : http.request;
 

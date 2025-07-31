@@ -16,11 +16,8 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
 const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
 const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 
-/** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * If no custom agent is configured, the Sender will use its own agent which overrides some default values
- * of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
- * </p>
+/**
+ * Buffer used by the Sender.
  */
 class SenderBuffer {
   private bufferSize: number;
@@ -38,7 +35,7 @@ class SenderBuffer {
   private readonly log: Logger;
 
   /**
-   * Creates an instance of Sender.
+   * Creates an instance of SenderBuffer.
    *
    * @param {SenderOptions} options - Sender configuration object. <br>
    * See SenderOptions documentation for detailed description of configuration options. <br>
@@ -66,7 +63,7 @@ class SenderBuffer {
   }
 
   /**
-   * Extends the size of the sender's buffer. <br>
+   * Extends the size of the buffer. <br>
    * Can be used to increase the size of buffer if overflown.
    * The buffer's content is copied into the new buffer.
    *
