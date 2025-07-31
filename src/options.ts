@@ -1,5 +1,9 @@
 import { PathOrFileDescriptor } from "fs";
 import { Agent } from "undici";
+import http from "http";
+import https from "https";
+
+import { Logger } from "./logging";
 
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
@@ -12,6 +16,20 @@ const TCPS = "tcps";
 const ON = "on";
 const OFF = "off";
 const UNSAFE_OFF = "unsafe_off";
+
+type ExtraOptions = {
+  log?: Logger;
+  agent?: Agent | http.Agent | https.Agent;
+};
+
+type DeprecatedOptions = {
+  /** @deprecated */
+  copy_buffer?: boolean;
+  /** @deprecated */
+  copyBuffer?: boolean;
+  /** @deprecated */
+  bufferSize?: number;
+};
 
 /** @classdesc
  * <a href="Sender.html">Sender</a> configuration options. <br>
@@ -102,6 +120,9 @@ const UNSAFE_OFF = "unsafe_off";
  * <br>
  * Other options
  * <ul>
+ * <li> stdlib_http: <i>enum, accepted values: on, off</i> - With HTTP protocol the Undici library is used by default. By setting this option
+ * to <i>on</i> the client switches to node's core http and https modules.
+ * </li>
  * <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * </li>
@@ -139,10 +160,10 @@ class SenderOptions {
 
   max_name_len?: number;
 
-  log?:
-    | ((level: "error" | "warn" | "info" | "debug", message: string) => void)
-    | null;
-  agent?: Agent;
+  log?: Logger;
+  agent?: Agent | http.Agent | https.Agent;
+
+  stdlib_http?: boolean;
 
   auth?: {
     username?: string;
@@ -162,7 +183,7 @@ class SenderOptions {
    * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
    * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
    */
-  constructor(configurationString: string, extraOptions = undefined) {
+  constructor(configurationString: string, extraOptions?: ExtraOptions) {
     parseConfigurationString(this, configurationString);
 
     if (extraOptions) {
@@ -171,10 +192,49 @@ class SenderOptions {
       }
       this.log = extraOptions.log;
 
-      if (extraOptions.agent && !(extraOptions.agent instanceof Agent)) {
-        throw new Error("Invalid http/https agent");
+      if (
+        extraOptions.agent &&
+        !(extraOptions.agent instanceof Agent) &&
+        !(extraOptions.agent instanceof http.Agent) &&
+        // @ts-expect-error - Not clear what the problem is, the two lines above have no issues
+        !(extraOptions.agent instanceof https.Agent)
+      ) {
+        throw new Error("Invalid HTTP agent");
       }
       this.agent = extraOptions.agent;
+    }
+  }
+
+  static resolveDeprecated(
+    options: SenderOptions & DeprecatedOptions,
+    log: Logger,
+  ) {
+    if (!options) {
+      return;
+    }
+
+    // deal with deprecated options
+    if (options.copy_buffer !== undefined) {
+      log(
+        "warn",
+        `Option 'copy_buffer' is not supported anymore, please, remove it`,
+      );
+      options.copy_buffer = undefined;
+    }
+    if (options.copyBuffer !== undefined) {
+      log(
+        "warn",
+        `Option 'copyBuffer' is not supported anymore, please, remove it`,
+      );
+      options.copyBuffer = undefined;
+    }
+    if (options.bufferSize !== undefined) {
+      log(
+        "warn",
+        `Option 'bufferSize' is not supported anymore, please, replace it with 'init_buf_size'`,
+      );
+      options.init_buf_size = options.bufferSize;
+      options.bufferSize = undefined;
     }
   }
 
@@ -192,14 +252,8 @@ class SenderOptions {
    */
   static fromConfig(
     configurationString: string,
-    extraOptions: {
-      log?: (
-        level: "error" | "warn" | "info" | "debug",
-        message: string,
-      ) => void;
-      agent?: Agent;
-    } = undefined,
-  ) {
+    extraOptions?: ExtraOptions,
+  ): SenderOptions {
     return new SenderOptions(configurationString, extraOptions);
   }
 
@@ -214,7 +268,7 @@ class SenderOptions {
    *
    * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
-  static fromEnv(extraOptions = undefined) {
+  static fromEnv(extraOptions?: ExtraOptions): SenderOptions {
     return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions);
   }
 }
@@ -235,6 +289,7 @@ function parseConfigurationString(
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
+  parseStdlibTransport(options);
 }
 
 function parseSettings(
@@ -296,6 +351,7 @@ const ValidConfigKeys = [
   "init_buf_size",
   "max_buf_size",
   "max_name_len",
+  "stdlib_http",
   "tls_verify",
   "tls_ca",
   "tls_roots",
@@ -322,10 +378,7 @@ function validateConfigValue(key: string, value: string) {
   }
 }
 
-function parseProtocol(
-  options: SenderOptions,
-  configString: string | string[],
-) {
+function parseProtocol(options: SenderOptions, configString: string) {
   const index = configString.indexOf("::");
   if (index < 0) {
     throw new Error(
@@ -407,7 +460,7 @@ function parseTlsOptions(options: SenderOptions) {
   if (options.tls_roots || options.tls_roots_password) {
     throw new Error(
       "'tls_roots' and 'tls_roots_password' options are not supported, please, " +
-      "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
+        "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
     );
   }
 }
@@ -420,6 +473,10 @@ function parseRequestTimeoutOptions(options: SenderOptions) {
 
 function parseMaxNameLength(options: SenderOptions) {
   parseInteger(options, "max_name_len", "max name length", 1);
+}
+
+function parseStdlibTransport(options: SenderOptions) {
+  parseBoolean(options, "stdlib_http", "stdlib http");
 }
 
 function parseBoolean(
@@ -466,4 +523,4 @@ function parseInteger(
   }
 }
 
-export { SenderOptions, HTTP, HTTPS, TCP, TCPS };
+export { SenderOptions, ExtraOptions, HTTP, HTTPS, TCP, TCPS };
