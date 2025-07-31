@@ -175,8 +175,7 @@ class TcpTransport implements SenderTransport {
   }
 
   /**
-   * Closes the TCP connection to the database. <br>
-   * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
+   * Closes the TCP connection to the database.
    */
   async close(): Promise<void> {
     if (this.socket) {
