@@ -4,6 +4,7 @@ import { GenericContainer, StartedTestContainer } from "testcontainers";
 import http from "http";
 
 import { Sender } from "../src";
+import { SenderOptions } from "../src/options";
 
 const HTTP_OK = 200;
 
@@ -101,11 +102,13 @@ describe("Sender tests with containerized QuestDB instance", () => {
   });
 
   it("can ingest data via TCP and run queries", async () => {
-    const sender = new Sender({
-      protocol: "tcp",
-      host: container.getHost(),
-      port: container.getMappedPort(QUESTDB_ILP_PORT),
-    });
+    const sender = new Sender(
+      await SenderOptions.resolveAuto({
+        protocol: "tcp",
+        host: container.getHost(),
+        port: container.getMappedPort(QUESTDB_ILP_PORT),
+      }),
+    );
     await sender.connect();
 
     const tableName = "test_tcp";
@@ -182,7 +185,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
       { name: "timestamp", type: "TIMESTAMP" },
     ];
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=0;auto_flush_rows=1`,
     );
 
@@ -251,7 +254,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
       { name: "timestamp", type: "TIMESTAMP" },
     ];
 
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_interval=1;auto_flush_rows=0`,
     );
 
@@ -319,11 +322,13 @@ describe("Sender tests with containerized QuestDB instance", () => {
   });
 
   it("does not duplicate rows if await is missing when calling flush", async () => {
-    const sender = new Sender({
-      protocol: "tcp",
-      host: container.getHost(),
-      port: container.getMappedPort(QUESTDB_ILP_PORT),
-    });
+    const sender = new Sender(
+      await SenderOptions.resolveAuto({
+        protocol: "tcp",
+        host: container.getHost(),
+        port: container.getMappedPort(QUESTDB_ILP_PORT),
+      }),
+    );
     await sender.connect();
 
     const tableName = "test2";
@@ -367,7 +372,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
   });
 
   it("ingests all data without loss under high load with auto-flush", async () => {
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       `tcp::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_ILP_PORT)};auto_flush_rows=5;auto_flush_interval=1`,
     );
     await sender.connect();

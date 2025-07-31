@@ -36,10 +36,34 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
+/**
+ * Fetches JSON data from a URL.
+ * @template T - The expected type of the JSON response
+ * @param url - The URL to fetch from
+ * @returns Promise resolving to the parsed JSON data
+ * @throws Error if the request fails or returns a non-OK status
+ */
+async function fetchJson<T>(url: string): Promise<T> {
+  let response: globalThis.Response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    throw new Error(`Failed to load ${url} [error=${error}]`);
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to load ${url} [statusCode=${response.status} (${response.statusText})]`,
+    );
+  }
+  return (await response.json()) as T;
+}
+
 export {
   isBoolean,
   isInteger,
   timestampToMicros,
   timestampToNanos,
   TimestampUnit,
+  fetchJson,
 };

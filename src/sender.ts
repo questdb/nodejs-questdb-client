@@ -2,8 +2,8 @@
 import { log, Logger } from "./logging";
 import { SenderOptions, ExtraOptions } from "./options";
 import { SenderTransport, createTransport } from "./transport";
+import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
-import { SenderBuffer } from "./buffer";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
@@ -72,7 +72,7 @@ class Sender {
    */
   constructor(options: SenderOptions) {
     this.transport = createTransport(options);
-    this.buffer = new SenderBuffer(options);
+    this.buffer = createBuffer(options);
 
     this.log = typeof options.log === "function" ? options.log : log;
 
@@ -99,12 +99,12 @@ class Sender {
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
    */
-  static fromConfig(
+  static async fromConfig(
     configurationString: string,
     extraOptions?: ExtraOptions,
-  ): Sender {
+  ): Promise<Sender> {
     return new Sender(
-      SenderOptions.fromConfig(configurationString, extraOptions),
+      await SenderOptions.fromConfig(configurationString, extraOptions),
     );
   }
 
@@ -119,9 +119,9 @@ class Sender {
    *
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
-  static fromEnv(extraOptions?: ExtraOptions): Sender {
+  static async fromEnv(extraOptions?: ExtraOptions): Promise<Sender> {
     return new Sender(
-      SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions),
+      await SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions),
     );
   }
 
