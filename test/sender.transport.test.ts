@@ -587,8 +587,8 @@ describe("Sender TCP suite", function () {
       /^Connection to .*1:9088 is closed$/,
     ];
     const log = (
-        level: "error" | "warn" | "info" | "debug",
-        message: string,
+      level: "error" | "warn" | "info" | "debug",
+      message: string,
     ) => {
       if (level !== "debug") {
         expect(message).toMatch(expectedMessages.shift());
@@ -610,9 +610,9 @@ describe("Sender TCP suite", function () {
 
     // assert that only the first line was sent
     await assertSentData(
-        proxy,
-        false,
-        "test,location=us temperature=17.1 1658484765000000000\n",
+      proxy,
+      false,
+      "test,location=us temperature=17.1 1658484765000000000\n",
     );
     await sender.close();
     await proxy.stop();
