@@ -2,6 +2,7 @@
 import { SenderOptions } from "../options";
 import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
+import { getDimensions, validateArray } from "../utils";
 
 const COLUMN_TYPE_DOUBLE: number = 10;
 const COLUMN_TYPE_NULL: number = 33;
@@ -32,9 +33,13 @@ class SenderBufferV2 extends SenderBufferBase {
   }
 
   arrayColumn(name: string, value: unknown[]): SenderBuffer {
-    if (value !== null && value !== undefined && !Array.isArray(value)) {
-      throw new Error(`The value must be an array [value=${JSON.stringify(value)}, type=${typeof value}]`);
+    const dimensions = getDimensions(value);
+    const type = validateArray(value, dimensions);
+    // only number arrays and NULL supported for now
+    if (type !== "number" && type !== null) {
+      throw new Error(`Unsupported array type [type=${type}]`);
     }
+
     this.writeColumn(name, value, () => {
       this.checkCapacity([], 3);
       this.writeByte(EQUALS_SIGN);
@@ -44,7 +49,7 @@ class SenderBufferV2 extends SenderBufferBase {
         this.writeByte(COLUMN_TYPE_NULL);
       } else {
         this.writeByte(COLUMN_TYPE_DOUBLE);
-        this.writeArray(value);
+        this.writeArray(value, dimensions, type);
       }
     });
     return this;

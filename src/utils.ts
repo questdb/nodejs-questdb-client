@@ -1,3 +1,5 @@
+type ArrayPrimitive = "number" | "boolean" | "string" | null;
+
 type TimestampUnit = "ns" | "us" | "ms";
 
 function isBoolean(value: unknown): value is boolean {
@@ -36,16 +38,71 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
-function getDimensions(arr: unknown) {
+function getDimensions(data: unknown) {
   const dimensions: number[] = [];
-  while (Array.isArray(arr)) {
-    if (arr.length === 0) {
-      throw new Error("zero length array not supported");
+  while (Array.isArray(data)) {
+    if (data.length === 0) {
+      throw new Error("Zero length array not supported");
     }
-    dimensions.push(arr.length);
-    arr = arr[0];
+    dimensions.push(data.length);
+    data = data[0];
   }
   return dimensions;
+}
+
+function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
+  if (data === null || data === undefined) {
+    return null;
+  }
+  if (!Array.isArray(data)) {
+    throw new Error(
+      `The value must be an array [value=${JSON.stringify(data)}, type=${typeof data}]`,
+    );
+  }
+
+  let expectedType: ArrayPrimitive = null;
+
+  function checkArray(
+    array: unknown[],
+    depth: number = 0,
+    path: string = "",
+  ): void {
+    const expectedLength = dimensions[depth];
+    if (array.length !== expectedLength) {
+      throw new Error(
+        `Length of arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`,
+      );
+    }
+
+    if (depth < dimensions.length - 1) {
+      // intermediate level, expecting arrays
+      for (let i = 0; i < array.length; i++) {
+        if (!Array.isArray(array[i])) {
+          throw new Error(
+            `Mixed types found [expected=array, current=${typeof array[i]}, path=${path}[${i}]]`,
+          );
+        }
+        checkArray(array[i] as unknown[], depth + 1, `${path}[${i}]`);
+      }
+    } else {
+      // leaf level, expecting primitives
+      if (expectedType === null) {
+        expectedType = typeof array[0] as ArrayPrimitive;
+      }
+
+      for (let i = 0; i < array.length; i++) {
+        const currentType = typeof array[i] as ArrayPrimitive;
+        if (currentType !== expectedType) {
+          throw new Error(
+            `Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]`,
+          );
+        }
+      }
+    }
+  }
+
+  checkArray(data);
+  return expectedType;
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -72,4 +129,6 @@ export {
   TimestampUnit,
   fetchJson,
   getDimensions,
+  validateArray,
+  ArrayPrimitive,
 };

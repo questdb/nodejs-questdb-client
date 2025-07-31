@@ -227,15 +227,15 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     sender.table("tableName");
     expect(() => sender.arrayColumn("arrayCol", [])).toThrow(
-      "zero length array not supported",
+      "Zero length array not supported",
     );
     expect(() => sender.arrayColumn("arrayCol", [[], []])).toThrow(
-      "zero length array not supported",
+      "Zero length array not supported",
     );
     await sender.close();
   });
 
-  it("does not accept irregular array", async function () {
+  it("does not accept irregularly sized array", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "2",
@@ -243,9 +243,85 @@ describe("Sender message builder test suite (anything not covered in client inte
       init_buf_size: 1024,
     });
     expect(() =>
-      sender.table("tableName").arrayColumn("arrayCol", [[1.1, 2.2], [3.3]]),
+      sender.table("tableName").arrayColumn("arrayCol", [
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [[1.1, 2.2], [3.3], [5.5, 6.6]],
+      ]),
     ).toThrow(
-      "length does not match array dimensions [dimensions=[2,2], length=1]",
+      "Length of arrays do not match [expected=2, actual=1, dimensions=[4,3,2], path=[3][1]]",
+    );
+    await sender.close();
+  });
+
+  it("does not accept non-homogenous array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    sender.table("tableName");
+    expect(() =>
+      sender.arrayColumn("arrayCol", [
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, "4.4"],
+          [5.5, 6.6],
+        ],
+      ]),
+    ).toThrow(
+      "Mixed types found [expected=number, current=string, path=[3][1][1]]",
+    );
+    expect(() =>
+      sender.arrayColumn("arrayCol", [
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [[1.1, 2.2], 3.3, [5.5, 6.6]],
+      ]),
+    ).toThrow(
+      "Mixed types found [expected=array, current=number, path=[3][1]]",
     );
     await sender.close();
   });
@@ -258,11 +334,21 @@ describe("Sender message builder test suite (anything not covered in client inte
       init_buf_size: 1024,
     });
     sender.table("tableName");
-    expect(() => sender.arrayColumn("col", ['str'])).toThrow("unsupported array type [type=string]");
-    expect(() => sender.arrayColumn("col", [true])).toThrow("unsupported array type [type=boolean]");
-    expect(() => sender.arrayColumn("col", [{}])).toThrow("unsupported array type [type=object]");
-    expect(() => sender.arrayColumn("col", [null])).toThrow("unsupported array type [type=object]");
-    expect(() => sender.arrayColumn("col", [undefined])).toThrow("unsupported array type [type=undefined]");
+    expect(() => sender.arrayColumn("col", ["str"])).toThrow(
+      "Unsupported array type [type=string]",
+    );
+    expect(() => sender.arrayColumn("col", [true])).toThrow(
+      "Unsupported array type [type=boolean]",
+    );
+    expect(() => sender.arrayColumn("col", [{}])).toThrow(
+      "Unsupported array type [type=object]",
+    );
+    expect(() => sender.arrayColumn("col", [null])).toThrow(
+      "Unsupported array type [type=object]",
+    );
+    expect(() => sender.arrayColumn("col", [undefined])).toThrow(
+      "Unsupported array type [type=undefined]",
+    );
     await sender.close();
   });
 
@@ -275,17 +361,29 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     sender.table("tableName");
     // @ts-expect-error - Testing invalid input
-    expect(() => sender.arrayColumn("col", 12.345)).toThrow("The value must be an array [value=12.345, type=number]");
+    expect(() => sender.arrayColumn("col", 12.345)).toThrow(
+      "The value must be an array [value=12.345, type=number]",
+    );
     // @ts-expect-error - Testing invalid input
-    expect(() => sender.arrayColumn("col", 42)).toThrow("The value must be an array [value=42, type=number]");
+    expect(() => sender.arrayColumn("col", 42)).toThrow(
+      "The value must be an array [value=42, type=number]",
+    );
     // @ts-expect-error - Testing invalid input
-    expect(() => sender.arrayColumn("col", "str")).toThrow("The value must be an array [value=\"str\", type=string]");
+    expect(() => sender.arrayColumn("col", "str")).toThrow(
+      'The value must be an array [value="str", type=string]',
+    );
     // @ts-expect-error - Testing invalid input
-    expect(() => sender.arrayColumn("col", "")).toThrow("The value must be an array [value=\"\", type=string]");
+    expect(() => sender.arrayColumn("col", "")).toThrow(
+      'The value must be an array [value="", type=string]',
+    );
     // @ts-expect-error - Testing invalid input
-    expect(() => sender.arrayColumn("col", true)).toThrow("The value must be an array [value=true, type=boolean]");
+    expect(() => sender.arrayColumn("col", true)).toThrow(
+      "The value must be an array [value=true, type=boolean]",
+    );
     // @ts-expect-error - Testing invalid input
-    expect(() => sender.arrayColumn("col", {})).toThrow("The value must be an array [value={}, type=object]");
+    expect(() => sender.arrayColumn("col", {})).toThrow(
+      "The value must be an array [value={}, type=object]",
+    );
     await sender.close();
   });
 
