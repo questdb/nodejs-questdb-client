@@ -159,7 +159,6 @@ class HttpTransport extends HttpTransportBase {
     timeoutMillis: number,
   ): http.RequestOptions | https.RequestOptions {
     return {
-      //protocol: this.secure ? "https:" : "http:",
       hostname: this.host,
       port: this.port,
       agent: this.agent,
