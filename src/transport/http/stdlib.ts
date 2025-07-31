@@ -92,10 +92,12 @@ class HttpTransport extends HttpTransportBase {
         if (statusCode === HTTP_NO_CONTENT) {
           response.on("end", () => {
             if (body.length > 0) {
-              this.log(
-                "warn",
-                `Unexpected message from server: ${Buffer.concat(body)}`,
-              );
+              const message = Buffer.concat(body).toString();
+              const logMessage =
+                message.length < 256
+                  ? message
+                  : `${message.substring(0, 256)}... (truncated, full length=${message.length})`;
+              this.log("warn", `Unexpected message from server: ${logMessage}`);
             }
             resolve(true);
           });

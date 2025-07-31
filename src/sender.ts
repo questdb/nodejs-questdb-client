@@ -174,7 +174,10 @@ class Sender {
   async close() {
     const pos = this.buffer.currentPosition();
     if (pos > 0) {
-      this.log("warn", `Buffer contains data which has not been flushed, and it will be lost [position=${pos}]`);
+      this.log(
+        "warn",
+        `Buffer contains data which has not been flushed, and it will be lost [position=${pos}]`,
+      );
     }
     return this.transport.close();
   }

@@ -598,10 +598,10 @@ describe("Sender TCP suite", function () {
 
     // add another line to the buffer without calling flush()
     await sender
-        .table("test")
-        .symbol("location", "gb")
-        .floatColumn("temperature", 16.4)
-        .at(1658484775000000000n, "ns");
+      .table("test")
+      .symbol("location", "gb")
+      .floatColumn("temperature", 16.4)
+      .at(1658484775000000000n, "ns");
 
     // assert that only the first line was sent
     await assertSentData(
