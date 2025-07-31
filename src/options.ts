@@ -120,6 +120,9 @@ type DeprecatedOptions = {
  * <br>
  * Other options
  * <ul>
+ * <li> stdlib_http: <i>enum, accepted values: on, off</i> - With HTTP protocol the Undici library is used by default. By setting this option
+ * to <i>on</i> the client switches to node's core http and https modules.
+ * </li>
  * <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * </li>
