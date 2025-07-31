@@ -33,7 +33,6 @@ class HttpTransport extends HttpTransportBase {
 
   /**
    * Creates a new HttpTransport instance using Node.js HTTP modules.
-   *
    * @param options - Sender configuration object containing connection details
    * @throws Error if the protocol is not 'http' or 'https'
    */
