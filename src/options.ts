@@ -51,8 +51,10 @@ type DeprecatedOptions = {
  * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps</i> - The protocol used to communicate with the server. <br>
  * When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
  * </li>
- * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used to communicate with the server. <br>
- * When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
+ * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used for data serialization. <br>
+ * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles. <br>
+ * When set to 'auto' (default for HTTP/HTTPS), the client automatically negotiates the highest supported version with the server. <br>
+ * TCP/TCPS connections default to version 1.
  * </li>
  * <li> addr: <i>string</i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. <br>
  * If no port is specified, a default will be used. <br>
