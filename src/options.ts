@@ -130,6 +130,9 @@ type DeprecatedOptions = {
  * <br>
  * Other options
  * <ul>
+ * <li> stdlib_http: <i>enum, accepted values: on, off</i> - With HTTP protocol the Undici library is used by default. By setting this option
+ * to <i>on</i> the client switches to node's core http and https modules.
+ * </li>
  * <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * </li>
@@ -172,7 +175,7 @@ class SenderOptions {
   log?: Logger;
   agent?: Agent | http.Agent | https.Agent;
 
-  legacy_http?: boolean;
+  stdlib_http?: boolean;
 
   auth?: {
     username?: string;
@@ -333,7 +336,7 @@ function parseConfigurationString(
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
-  parseLegacyTransport(options);
+  parseStdlibTransport(options);
 }
 
 function parseSettings(
@@ -396,8 +399,8 @@ const ValidConfigKeys = [
   "init_buf_size",
   "max_buf_size",
   "max_name_len",
+  "stdlib_http",
   "tls_verify",
-  "legacy_http",
   "tls_ca",
   "tls_roots",
   "tls_roots_password",
@@ -544,8 +547,8 @@ function parseMaxNameLength(options: SenderOptions) {
   parseInteger(options, "max_name_len", "max name length", 1);
 }
 
-function parseLegacyTransport(options: SenderOptions) {
-  parseBoolean(options, "legacy_http", "legacy http");
+function parseStdlibTransport(options: SenderOptions) {
+  parseBoolean(options, "stdlib_http", "stdlib http");
 }
 
 function parseBoolean(

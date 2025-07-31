@@ -34,11 +34,8 @@ function createBuffer(options: SenderOptions): SenderBuffer {
   }
 }
 
-/** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * If no custom agent is configured, the Sender will use its own agent which overrides some default values
- * of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
- * </p>
+/**
+ * Buffer used by the Sender.
  */
 interface SenderBuffer {
   /**
@@ -145,6 +142,12 @@ interface SenderBuffer {
    * Designated timestamp will be populated by the server on this record.
    */
   atNow(): void;
+
+  /**
+   * Returns the current position of the buffer.
+   * New data will be written into the buffer starting from this position.
+   */
+  currentPosition(): number;
 }
 
 export {

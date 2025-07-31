@@ -7,7 +7,7 @@ import http from "http";
 import { Sender } from "../src";
 import { SenderOptions } from "../src/options";
 import { UndiciTransport } from "../src/transport/http/undici";
-import { HttpTransport } from "../src/transport/http/legacy";
+import { HttpTransport } from "../src/transport/http/stdlib";
 import { MockProxy } from "./util/mockproxy";
 import { MockHttp } from "./util/mockhttp";
 
@@ -278,12 +278,12 @@ describe("Sender HTTP suite", function () {
     await agent.destroy();
   });
 
-  it("supports custom legacy HTTP agent", async function () {
+  it("supports custom stdlib HTTP agent", async function () {
     mockHttp.reset();
     const agent = new http.Agent({ maxSockets: 128 });
 
     const sender = await Sender.fromConfig(
-      `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};legacy_http=on`,
+      `http::addr=${PROXY_HOST}:${MOCK_HTTP_PORT};stdlib_http=on`,
       { agent: agent },
     );
     await sendData(sender);
@@ -574,6 +574,45 @@ describe("Sender TCP suite", function () {
       proxy,
       false,
       "test,location=us temperature=17.1 1658484765000000000\n",
+    );
+    await sender.close();
+    await proxy.stop();
+  });
+
+  it("warns if data is lost on close()", async function () {
+    // we expect a warning about non-flushed data at close()
+    const expectedMessages = [
+      "Successfully connected to localhost:9088",
+      `Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=${"test,location=gb".length}]`,
+      /^Connection to .*1:9088 is closed$/,
+    ];
+    const log = (
+        level: "error" | "warn" | "info" | "debug",
+        message: string,
+    ) => {
+      if (level !== "debug") {
+        expect(message).toMatch(expectedMessages.shift());
+      }
+    };
+    const proxy = await createProxy();
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      port: PROXY_PORT,
+      host: PROXY_HOST,
+      log: log,
+    });
+    await sender.connect();
+    await sendData(sender);
+
+    // write something into the buffer without calling flush()
+    sender.table("test").symbol("location", "gb");
+
+    // assert that only the first line was sent
+    await assertSentData(
+        proxy,
+        false,
+        "test,location=us temperature=17.1 1658484765000000000\n",
     );
     await sender.close();
     await proxy.stop();
