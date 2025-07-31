@@ -1,17 +1,41 @@
+/**
+ * Supported primitive types for QuestDB arrays.
+ */
 type ArrayPrimitive = "number" | "boolean" | "string" | null;
 
+/**
+ * Supported timestamp units for QuestDB operations.
+ */
 type TimestampUnit = "ns" | "us" | "ms";
 
+/**
+ * Type guard to check if a value is a boolean.
+ * @param value - The value to check
+ * @returns True if the value is a boolean, false otherwise
+ */
 function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
 }
 
+/**
+ * Type guard to check if a value is an integer within specified bounds.
+ * @param value - The value to check
+ * @param lowerBound - The minimum allowed value (inclusive)
+ * @returns True if the value is an integer >= lowerBound, false otherwise
+ */
 function isInteger(value: unknown, lowerBound: number): value is number {
   return (
     typeof value === "number" && Number.isInteger(value) && value >= lowerBound
   );
 }
 
+/**
+ * Converts a timestamp from the specified unit to microseconds.
+ * @param timestamp - The timestamp value as a bigint
+ * @param unit - The source timestamp unit
+ * @returns The timestamp converted to microseconds
+ * @throws Error if the timestamp unit is unknown
+ */
 function timestampToMicros(timestamp: bigint, unit: TimestampUnit) {
   switch (unit) {
     case "ns":
@@ -25,6 +49,13 @@ function timestampToMicros(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
+/**
+ * Converts a timestamp from the specified unit to nanoseconds.
+ * @param timestamp - The timestamp value as a bigint
+ * @param unit - The source timestamp unit
+ * @returns The timestamp converted to nanoseconds
+ * @throws Error if the timestamp unit is unknown
+ */
 function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   switch (unit) {
     case "ns":
@@ -38,6 +69,12 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
+/**
+ * Analyzes the dimensions of a nested array structure.
+ * @param data - The array to analyze
+ * @returns Array of dimension sizes at each nesting level
+ * @throws Error if any dimension has zero length
+ */
 function getDimensions(data: unknown) {
   const dimensions: number[] = [];
   while (Array.isArray(data)) {
@@ -105,6 +142,13 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
   return expectedType;
 }
 
+/**
+ * Fetches JSON data from a URL with error handling.
+ * @template T - The expected type of the JSON response
+ * @param url - The URL to fetch from
+ * @returns Promise resolving to the parsed JSON data
+ * @throws Error if the request fails or returns a non-OK status
+ */
 async function fetchJson<T>(url: string): Promise<T> {
   let response: globalThis.Response;
   try {

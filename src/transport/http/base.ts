@@ -7,33 +7,28 @@ import { SenderOptions, HTTP, HTTPS } from "../../options";
 import { SenderTransport } from "../index";
 import { isBoolean, isInteger } from "../../utils";
 
-const HTTP_NO_CONTENT = 204; // success
+// HTTP status code for successful request with no content.
+const HTTP_NO_CONTENT = 204;
 
+// Default number of rows that trigger auto-flush for HTTP transport.
 const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
 
-const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400; // 100 KB/sec
-const DEFAULT_REQUEST_TIMEOUT = 10000; // 10 sec
-const DEFAULT_RETRY_TIMEOUT = 10000; // 10 sec
+// Default minimum throughput for HTTP requests (100 KB/sec).
+const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400;
 
-/*
-We are retrying on the following response codes (copied from the Rust client):
-500:  Internal Server Error
-503:  Service Unavailable
-504:  Gateway Timeout
+// Default request timeout in milliseconds (10 seconds).
+const DEFAULT_REQUEST_TIMEOUT = 10000;
 
-// Unofficial extensions
-507:  Insufficient Storage
-509:  Bandwidth Limit Exceeded
-523:  Origin is Unreachable
-524:  A Timeout Occurred
-529:  Site is overloaded
-599:  Network Connect Timeout Error
-*/
+// Default retry timeout in milliseconds (10 seconds).
+const DEFAULT_RETRY_TIMEOUT = 10000;
+
+// HTTP status codes that should trigger request retries.
+// Includes server errors and gateway timeouts that may be transient.
 const RETRIABLE_STATUS_CODES = [500, 503, 504, 507, 509, 523, 524, 529, 599];
 
-/** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
+/**
+ * Abstract base class for HTTP-based transport implementations. <br>
+ * Provides common configuration and functionality for HTTP and HTTPS protocols.
  */
 abstract class HttpTransportBase implements SenderTransport {
   protected readonly secure: boolean;
@@ -53,6 +48,11 @@ abstract class HttpTransportBase implements SenderTransport {
 
   protected readonly log: Logger;
 
+  /**
+   * Creates a new HttpTransportBase instance.
+   * @param options - Sender configuration options including connection and authentication details
+   * @throws Error if required protocol or host options are missing
+   */
   protected constructor(options: SenderOptions) {
     if (!options || !options.protocol) {
       throw new Error("The 'protocol' option is mandatory");
@@ -99,16 +99,34 @@ abstract class HttpTransportBase implements SenderTransport {
     }
   }
 
+  /**
+   * HTTP transport does not require explicit connection establishment.
+   * @throws Error indicating connect is not required for HTTP transport
+   */
   connect(): Promise<boolean> {
     throw new Error("'connect()' is not required for HTTP transport");
   }
 
+  /**
+   * HTTP transport does not require explicit connection closure.
+   * @returns Promise that resolves immediately
+   */
   async close(): Promise<void> {}
 
+  /**
+   * Gets the default auto-flush row count for HTTP transport.
+   * @returns Default number of rows that trigger auto-flush
+   */
   getDefaultAutoFlushRows(): number {
     return DEFAULT_HTTP_AUTO_FLUSH_ROWS;
   }
 
+  /**
+   * Sends data to the QuestDB server via HTTP.
+   * Must be implemented by concrete HTTP transport classes.
+   * @param data - Buffer containing the data to send
+   * @returns Promise resolving to true if data was sent successfully
+   */
   abstract send(data: Buffer): Promise<boolean>;
 }
 

@@ -10,6 +10,10 @@ import {
   HTTP_NO_CONTENT,
 } from "./base";
 
+/**
+ * Default HTTP options for the Undici agent.
+ * Configures keep-alive connections with 60-second timeout and single request pipelining.
+ */
 const DEFAULT_HTTP_OPTIONS: Agent.Options = {
   connect: {
     keepAlive: true,
@@ -18,11 +22,10 @@ const DEFAULT_HTTP_OPTIONS: Agent.Options = {
   keepAliveTimeout: 60000, // 1 minute
 };
 
-/** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
- * of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
- * </p>
+/**
+ * HTTP transport implementation using the Undici library. <br>
+ * Provides high-performance HTTP requests with connection pooling and retry logic. <br>
+ * Supports both HTTP and HTTPS protocols with configurable authentication.
  */
 class UndiciTransport extends HttpTransportBase {
   private static DEFAULT_HTTP_AGENT: Agent;
@@ -31,10 +34,10 @@ class UndiciTransport extends HttpTransportBase {
   private readonly dispatcher: RetryAgent;
 
   /**
-   * Creates an instance of Sender.
+   * Creates a new UndiciTransport instance.
    *
-   * @param {SenderOptions} options - Sender configuration object. <br>
-   * See SenderOptions documentation for detailed description of configuration options. <br>
+   * @param options - Sender configuration object containing connection and retry settings
+   * @throws Error if the protocol is not 'http' or 'https'
    */
   constructor(options: SenderOptions) {
     super(options);
@@ -89,6 +92,12 @@ class UndiciTransport extends HttpTransportBase {
     });
   }
 
+  /**
+   * Sends data to QuestDB using HTTP POST with retry logic and authentication.
+   * @param data - Buffer containing line protocol data to send
+   * @returns Promise resolving to true if data was sent successfully
+   * @throws Error if request fails after all retries or times out
+   */
   async send(data: Buffer): Promise<boolean> {
     const headers: Record<string, string> = {};
     if (this.token) {
@@ -144,8 +153,9 @@ class UndiciTransport extends HttpTransportBase {
   }
 
   /**
-   * @ignore
-   * @return {Agent} Returns the default http agent.
+   * Gets or creates the default HTTP agent with standard configuration.
+   * Uses a singleton pattern to reuse the same agent across instances.
+   * @returns The default Undici agent instance
    */
   private static getDefaultHttpAgent(): Agent {
     if (!UndiciTransport.DEFAULT_HTTP_AGENT) {

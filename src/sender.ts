@@ -8,9 +8,19 @@ import { isBoolean, isInteger, TimestampUnit } from "./utils";
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
 /** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
- * Based on benchmarks HTTP also provides higher throughput, if configured to ingest data in bigger batches.
+ * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection. <br>
+ * The client supports multiple transport protocols.
+ * <p>
+ * <b>Transport Options:</b>
+ * <ul>
+ * <li><b>HTTP (http://)</b>: Uses standard HTTP requests for data ingestion. Provides immediate feedback via HTTP response codes.
+ * Recommended for most use cases due to superior error handling and debugging capabilities. Uses Undici library by default for high performance.</li>
+ * <li><b>HTTPS (https://)</b>: Secure HTTP transport with TLS encryption. Same benefits as HTTP but with encrypted communication.
+ * Supports certificate validation and custom CA certificates.</li>
+ * <li><b>TCP (tcp://)</b>: Direct TCP connection, provides persistent connections. Uses JWK token-based authentication.</li>
+ * <li><b>TCPS (tcps://)</b>: Secure TCP transport with TLS encryption.</li>
+ * </ul>
+ * </p>
  * <p>
  * The client supports authentication. <br>
  * Authentication details can be passed to the Sender in its configuration options. <br>
@@ -26,6 +36,12 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * such as Nginx to enable encryption.
  * </p>
  * <p>
+ * The client supports multiple protocol versions for data serialization. Protocol version 1 uses text-based 
+ * serialization, while version 2 uses binary encoding for doubles and supports array columns for improved 
+ * performance. The client can automatically negotiate the protocol version with the server when using HTTP/HTTPS
+ * by setting the protocol_version to 'auto' (default behavior).
+ * </p>
+ * <p>
  * The client uses a buffer to store data. It automatically flushes the buffer by sending its content to the server.
  * Auto flushing can be disabled via configuration options to gain control over transactions. Initial and maximum
  * buffer sizes can also be set.
@@ -37,6 +53,22 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * initialized from a configuration string to make sure that the parameters are validated. <br>
  * Detailed description of the Sender's configuration options can be found in
  * the <a href="SenderOptions.html">SenderOptions</a> documentation.
+ * </p>
+ * <p>
+ * <b>Transport Configuration Examples:</b>
+ * <ul>
+ * <li>HTTP: <i>Sender.fromConfig("http::addr=localhost:9000")</i></li>
+ * <li>HTTPS with authentication: <i>Sender.fromConfig("https::addr=localhost:9000;username=admin;password=secret")</i></li>
+ * <li>TCP with authentication: <i>Sender.fromConfig("tcp::addr=localhost:9009;username=user;token=private_key")</i></li>
+ * <li>Legacy HTTP transport: <i>Sender.fromConfig("http::addr=localhost:9000;legacy_http=on")</i></li>
+ * </ul>
+ * </p>
+ * <p>
+ * <b>HTTP Transport Implementation:</b><br>
+ * By default, HTTP/HTTPS transport uses the high-performance Undici library for connection management and request handling.
+ * For compatibility or specific requirements, you can enable the legacy HTTP transport using Node.js built-in modules
+ * by setting <i>legacy_http=on</i> in the configuration string. The legacy transport provides the same functionality
+ * but uses Node.js http/https modules instead of Undici.
  * </p>
  * <p>
  * Extra options can be provided to the Sender in the <i>extraOptions</i> configuration object. <br>
@@ -234,6 +266,16 @@ class Sender {
     return this;
   }
 
+  /**
+   * Write an array column with its values into the buffer of the sender. <br>
+   * <b>Note:</b> Array columns are only supported in protocol version 2. If using protocol version 1, 
+   * this method will throw an error.
+   *
+   * @param {string} name - Column name.
+   * @param {unknown[]} value - Array values to be written. Currently supports arrays of numbers.
+   * @return {Sender} Returns with a reference to this sender.
+   * @throws {Error} If protocol version 1 is used, as arrays are not supported.
+   */
   arrayColumn(name: string, value: unknown[]): Sender {
     this.buffer.arrayColumn(name, value);
     return this;

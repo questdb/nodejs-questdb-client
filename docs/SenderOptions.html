@@ -35,12 +35,17 @@
 Properties of the object are initialized through a configuration string. <br>
 The configuration string has the following format: <i>&ltprotocol&gt::&ltkey&gt=&ltvalue&gt;&ltkey&gt=&ltvalue&gt;...;</i> <br>
 The keys are case-sensitive, the trailing semicolon is optional. <br>
-The values are validated, and an error is thrown if the format is invalid. <br>
+The values are validated and an error is thrown if the format is invalid. <br>
 <br>
 Connection and protocol options
 <ul>
 <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps</i> - The protocol used to communicate with the server. <br>
 When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
+</li>
+<li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The line protocol version used for data serialization. <br>
+Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles and supports array columns. <br>
+When set to 'auto' (default for HTTP/HTTPS), the client automatically negotiates the highest supported version with the server. <br>
+TCP/TCPS connections default to version 1. Version 2 provides better performance for numeric data and enables array column support.
 </li>
 <li> addr: <i>string</i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. <br>
 If no port is specified, a default will be used. <br>
@@ -67,8 +72,8 @@ and must be accompanied by the <i>username</i> option.
 TLS options
 <ul>
 <li> tls_verify: <i>enum, accepted values: on, unsafe_off</i> - When the HTTPS or TCPS protocols are selected, TLS encryption is used. <br>
-By default, the Sender will verify the server's certificate, but this check can be disabled by setting this option to <i>off</i>. This is useful
-non-production environments where self-signed certificates might be used, but should be avoided in production if possible.
+By default, the Sender will verify the server's certificate, but this check can be disabled by setting this option to <i>unsafe_off</i>. <br>
+This is useful in non-production environments where self-signed certificates might be used, but should be avoided in production if possible.
 </li>
 <li> tls_ca: <i>string</i> - Path to a file containing the root CA's certificate in PEM format. <br>
 Can be useful when self-signed certificates are used, otherwise should not be set.
@@ -80,9 +85,9 @@ Auto flush options
 <li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default. This can be switched off
 by setting this option to <i>off</i>. <br>
 When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. <br>
-Manual buffer flushing can be useful, especially when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
-request, which becomes a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
-inserted; or it fails, and none of the rows make it into the database.
+Manual buffer flushing can be useful, especially when we want to control transaction boundaries. <br>
+When the HTTP protocol is used, each flush results in a single HTTP request, which becomes a single transaction on the server side. <br>
+The transaction either succeeds, and all rows sent in the request are inserted; or it fails, and none of the rows make it into the database.
 </li>
 <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
 The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
@@ -120,11 +125,6 @@ Other options
 <ul>
 <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
 Recommended to use the same setting as the server, which also uses 127 by default.
-</li>
-<li> copy_buffer: <i>enum, accepted values: on, off</i> - By default, the Sender creates a new buffer for every flush() call,
-and the data to be sent to the server is copied into this new buffer.
-Setting the flag to <i>off</i> results in reusing the same buffer instance for each flush() call. <br>
-Use this flag only if calls to the client are serialised.
 </li>
 </ul></div>
         
@@ -228,7 +228,8 @@ Use this flag only if calls to the client are serialised.
 - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
 Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
 - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
+An <i>undici.Agent</i> object is expected. <br>
+If the legacy HTTP transport is used, a <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
         </tr>
 
     
@@ -269,7 +270,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line272">line 272</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line293">line 293</a>
     </li></ul></dd>
     
 
@@ -325,7 +326,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
 
     
-    <h4 class="name" id=".fromConfig"><span class="type-signature">(static) </span>fromConfig<span class="signature">(configurationString, extraOptions)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
+    <h4 class="name" id=".fromConfig"><span class="type-signature">(async, static) </span>fromConfig<span class="signature">(configurationString, extraOptions)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
     
 
     
@@ -453,7 +454,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line306">line 306</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line367">line 367</a>
     </li></ul></dd>
     
 
@@ -511,7 +512,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
 
     
-    <h4 class="name" id=".fromEnv"><span class="type-signature">(static) </span>fromEnv<span class="signature">(extraOptions)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
+    <h4 class="name" id=".fromEnv"><span class="type-signature">(async, static) </span>fromEnv<span class="signature">(extraOptions)</span><span class="type-signature"> &rarr; {<a href="SenderOptions.html">SenderOptions</a>}</span></h4>
     
 
     
@@ -616,7 +617,7 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line319">line 319</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line382">line 382</a>
     </li></ul></dd>
     
 
@@ -684,13 +685,13 @@ A <i>http.Agent</i> or <i>https.Agent</i> object is expected.</td>
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#isRetryable">isRetryable</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Mon Dec 09 2024 02:16:59 GMT+0100 (hora estándar de Europa central)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Jul 31 2025 11:43:45 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

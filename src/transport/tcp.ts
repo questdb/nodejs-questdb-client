@@ -10,58 +10,20 @@ import { SenderOptions, TCP, TCPS } from "../options";
 import { SenderTransport } from "./index";
 import { isBoolean } from "../utils";
 
+// Default number of rows that trigger auto-flush for TCP transport.
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 
-// an arbitrary public key, not used in authentication
-// only used to construct a valid JWK token which is accepted by the crypto API
+// Arbitrary public key coordinates used to construct valid JWK tokens.
+// These are not used for actual authentication, only for crypto API compatibility.
 const PUBLIC_KEY = {
   x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
   y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg",
 };
 
-/** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * The supported protocols are HTTP and TCP. HTTP is preferred as it provides feedback in the HTTP response. <br>
- * Based on benchmarks HTTP also provides higher throughput, if configured to ingest data in bigger batches.
- * <p>
- * The client supports authentication. <br>
- * Authentication details can be passed to the Sender in its configuration options. <br>
- * The client supports Basic username/password and Bearer token authentication methods when used with HTTP protocol,
- * and JWK token authentication when ingesting data via TCP. <br>
- * Please, note that authentication is enabled by default in QuestDB Enterprise only. <br>
- * Details on how to configure authentication in the open source version of
- * QuestDB: {@link https://questdb.io/docs/reference/api/ilp/authenticate}
- * </p>
- * <p>
- * The client also supports TLS encryption for both, HTTP and TCP transports to provide a secure connection. <br>
- * Please, note that the open source version of QuestDB does not support TLS, and requires an external reverse-proxy,
- * such as Nginx to enable encryption.
- * </p>
- * <p>
- * The client uses a buffer to store data. It automatically flushes the buffer by sending its content to the server.
- * Auto flushing can be disabled via configuration options to gain control over transactions. Initial and maximum
- * buffer sizes can also be set.
- * </p>
- * <p>
- * It is recommended that the Sender is created by using one of the static factory methods,
- * <i>Sender.fromConfig(configString, extraOptions)</i> or <i>Sender.fromEnv(extraOptions)</i>.
- * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
- * initialized from a configuration string to make sure that the parameters are validated. <br>
- * Detailed description of the Sender's configuration options can be found in
- * the <a href="SenderOptions.html">SenderOptions</a> documentation.
- * </p>
- * <p>
- * Extra options can be provided to the Sender in the <i>extraOptions</i> configuration object. <br>
- * A custom logging function and a custom HTTP(S) agent can be passed to the Sender in this object. <br>
- * The logger implementation provides the option to direct log messages to the same place where the host application's
- * log is saved. The default logger writes to the console. <br>
- * The custom HTTP(S) agent option becomes handy if there is a need to modify the default options set for the
- * HTTP(S) connections. A popular setting would be disabling persistent connections, in this case an agent can be
- * passed to the Sender with <i>keepAlive</i> set to <i>false</i>. <br>
- * For example: <i>Sender.fromConfig(`http::addr=host:port`, { agent: new undici.Agent({ connect: { keepAlive: false } })})</i> <br>
- * If no custom agent is configured, the Sender will use its own agent which overrides some default values
- * of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
- * </p>
+/**
+ * TCP transport implementation for QuestDB line protocol.
+ * Supports both TCP and TCPS (TLS-encrypted) connections with JWK token authentication.
+ * Provides persistent connections with challenge-response authentication flow.
  */
 class TcpTransport implements SenderTransport {
   private readonly secure: boolean;
@@ -77,10 +39,10 @@ class TcpTransport implements SenderTransport {
   private readonly jwk: Record<string, string>;
 
   /**
-   * Creates an instance of Sender.
+   * Creates a new TcpTransport instance.
    *
-   * @param {SenderOptions} options - Sender configuration object. <br>
-   * See SenderOptions documentation for detailed description of configuration options. <br>
+   * @param options - Sender configuration object containing connection and authentication details
+   * @throws Error if required options are missing or protocol is not 'tcp' or 'tcps'
    */
   constructor(options: SenderOptions) {
     if (!options || !options.protocol) {
@@ -120,9 +82,11 @@ class TcpTransport implements SenderTransport {
   }
 
   /**
-   * Creates a TCP connection to the database.
+   * Creates a TCP connection to the database with optional authentication. <br>
+   * Handles both plain TCP and TLS-encrypted connections.
    *
-   * @return {Promise<boolean>} Resolves to true if the client is connected.
+   * @returns Promise resolving to true if the connection is established successfully
+   * @throws Error if connection fails or authentication is rejected
    */
   connect(): Promise<boolean> {
     const connOptions: net.NetConnectOpts | tls.ConnectionOptions = {
@@ -193,6 +157,12 @@ class TcpTransport implements SenderTransport {
     });
   }
 
+  /**
+   * Sends data over the established TCP connection.
+   * @param data - Buffer containing the data to send
+   * @returns Promise resolving to true if data was sent successfully
+   * @throws Error if the connection is not established
+   */
   send(data: Buffer): Promise<boolean> {
     if (!this.socket || this.socket.destroyed) {
       throw new Error("TCP transport is not connected");
@@ -211,6 +181,7 @@ class TcpTransport implements SenderTransport {
   /**
    * Closes the TCP connection to the database. <br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
+   * @returns Promise that resolves when the connection is closed
    */
   async close(): Promise<void> {
     if (this.socket) {
@@ -222,10 +193,19 @@ class TcpTransport implements SenderTransport {
     }
   }
 
+  /**
+   * Gets the default auto-flush row count for TCP transport.
+   * @returns Default number of rows that trigger auto-flush
+   */
   getDefaultAutoFlushRows(): number {
     return DEFAULT_TCP_AUTO_FLUSH_ROWS;
   }
 
+  /**
+   * Handles the JWK token authentication challenge-response flow.
+   * @param challenge - Challenge buffer received from the server
+   * @returns Promise resolving to true if authentication is successful
+   */
   private async authenticate(challenge: Buffer): Promise<boolean> {
     // Check for trailing \n which ends the challenge
     if (challenge.subarray(-1).readInt8() === 10) {
@@ -256,6 +236,9 @@ class TcpTransport implements SenderTransport {
   }
 }
 
+// Constructs authentication configuration from username/token options.
+// @param options - Sender options that may contain authentication details
+// @throws Error if username or token is missing when authentication is intended
 function constructAuth(options: SenderOptions) {
   if (!options.username && !options.token && !options.password) {
     // no intention to authenticate
@@ -274,6 +257,10 @@ function constructAuth(options: SenderOptions) {
   };
 }
 
+// Constructs a JWK (JSON Web Key) object for cryptographic authentication.
+// @param options - Sender options containing authentication configuration
+// @returns JWK object with key ID, private key, and public key coordinates
+// @throws Error if required authentication properties are missing or invalid
 function constructJwk(options: SenderOptions) {
   if (options.auth) {
     if (!options.auth.keyId) {

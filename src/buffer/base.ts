@@ -17,13 +17,13 @@ import {
   TimestampUnit,
 } from "../utils";
 
+// Default maximum length for table and column names.
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
-/** @classdesc
- * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection.
- * If no custom agent is configured, the Sender will use its own agent which overrides some default values
- * of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
- * </p>
+/**
+ * Abstract base class for QuestDB line protocol buffer implementations.
+ * Provides common functionality for building line protocol messages including
+ * table names, symbols, columns, and timestamps.
  */
 abstract class SenderBufferBase implements SenderBuffer {
   private bufferSize: number;
@@ -41,10 +41,9 @@ abstract class SenderBufferBase implements SenderBuffer {
   protected readonly log: Logger;
 
   /**
-   * Creates an instance of Sender.
+   * Creates an instance of SenderBufferBase.
    *
-   * @param {SenderOptions} options - Sender configuration object. <br>
-   * See SenderOptions documentation for detailed description of configuration options. <br>
+   * @param options - Sender configuration object containing buffer and naming options
    */
   protected constructor(options: SenderOptions) {
     this.log = options && typeof options.log === "function" ? options.log : log;
@@ -69,11 +68,12 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Extends the size of the sender's buffer. <br>
+   * Extends the size of the sender's buffer.
    * Can be used to increase the size of buffer if overflown.
    * The buffer's content is copied into the new buffer.
    *
-   * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
+   * @param bufferSize - New size of the buffer used by the sender, provided in bytes
+   * @throws Error if the requested buffer size exceeds the maximum allowed size
    */
   private resize(bufferSize: number) {
     if (bufferSize > this.maxBufferSize) {
@@ -236,6 +236,14 @@ abstract class SenderBufferBase implements SenderBuffer {
    */
   abstract floatColumn(name: string, value: number): SenderBuffer;
 
+  /**
+   * Write an array column with its values into the buffer of the sender.
+   * Must be implemented by concrete buffer classes based on protocol version.
+   *
+   * @param name - Column name
+   * @param value - Array values to be written
+   * @returns Reference to this sender buffer for method chaining
+   */
   abstract arrayColumn(name: string, value: unknown[]): SenderBuffer;
 
   /**
@@ -325,6 +333,11 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.startNewRow();
   }
 
+  /**
+   * Checks if the buffer has sufficient capacity for additional data and resizes if needed.
+   * @param data - Array of strings to calculate the required capacity for
+   * @param base - Base number of bytes to add to the calculation
+   */
   protected checkCapacity(data: string[], base = 0) {
     let length = base;
     for (const str of data) {
@@ -339,6 +352,10 @@ abstract class SenderBufferBase implements SenderBuffer {
     }
   }
 
+  /**
+   * Compacts the buffer by removing data from completed rows.
+   * Moves any remaining data to the beginning of the buffer.
+   */
   private compact() {
     if (this.endOfLastRow > 0) {
       this.buffer.copy(this.buffer, 0, this.endOfLastRow, this.position);
@@ -347,6 +364,13 @@ abstract class SenderBufferBase implements SenderBuffer {
     }
   }
 
+  /**
+   * Common logic for writing column data to the buffer.
+   * @param name - Column name
+   * @param value - Column value 
+   * @param writeValue - Function to write the value portion to the buffer
+   * @param valueType - Optional expected type for validation
+   */
   protected writeColumn(
     name: string,
     value: unknown,
@@ -374,22 +398,42 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.hasColumns = true;
   }
 
+  /**
+   * Writes string data to the buffer at the current position.
+   * @param data - String data to write
+   */
   protected write(data: string) {
     this.position += this.buffer.write(data, this.position);
   }
 
+  /**
+   * Writes a single byte to the buffer at the current position.
+   * @param data - Byte value to write
+   */
   protected writeByte(data: number) {
     this.position = this.buffer.writeInt8(data, this.position);
   }
 
+  /**
+   * Writes a 32-bit integer to the buffer in little-endian format.
+   * @param data - Integer value to write
+   */
   protected writeInt(data: number) {
     this.position = this.buffer.writeInt32LE(data, this.position);
   }
 
+  /**
+   * Writes a double-precision float to the buffer in little-endian format.
+   * @param data - Double value to write
+   */
   protected writeDouble(data: number) {
     this.position = this.buffer.writeDoubleLE(data, this.position);
   }
 
+  /**
+   * Writes array data to the buffer including dimensions and values.
+   * @param arr - Array to write to the buffer
+   */
   protected writeArray(
     arr: unknown[],
     dimensions: number[],
