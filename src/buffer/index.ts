@@ -38,7 +38,6 @@ function createBuffer(options: SenderOptions): SenderBuffer {
  * Buffer used by the Sender.
  */
 interface SenderBuffer {
-
   /**
    * Resets the buffer, data added to the buffer will be lost. <br>
    * In other words it clears the buffer and sets the writing position to the beginning of the buffer.

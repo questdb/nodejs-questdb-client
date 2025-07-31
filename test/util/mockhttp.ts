@@ -102,13 +102,8 @@ class MockHttp {
 
   async stop() {
     if (this.server) {
-      return new Promise((resolve, reject) => {
-        this.server.close((err) => {
-          err ? reject(err) : resolve(true);
-        });
-      });
+      this.server.close();
     }
-    return true;
   }
 }
 

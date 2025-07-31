@@ -12,13 +12,13 @@ class SenderBufferV1 extends SenderBufferBase {
     super(options);
   }
 
-    /**
-     * Write a float column with its value into the buffer using v1 serialization (text format).
-     *
-     * @param {string} name - Column name.
-     * @param {number} value - Column value, accepts only number values.
-     * @return {Sender} Returns with a reference to this sender.
-     */
+  /**
+   * Write a float column with its value into the buffer using v1 serialization (text format).
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number values.
+   * @return {Sender} Returns with a reference to this sender.
+   */
   floatColumn(name: string, value: number): SenderBuffer {
     this.writeColumn(
       name,
