@@ -105,6 +105,13 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
   return expectedType;
 }
 
+/**
+ * Fetches JSON data from a URL.
+ * @template T - The expected type of the JSON response
+ * @param url - The URL to fetch from
+ * @returns Promise resolving to the parsed JSON data
+ * @throws Error if the request fails or returns a non-OK status
+ */
 async function fetchJson<T>(url: string): Promise<T> {
   let response: globalThis.Response;
   try {

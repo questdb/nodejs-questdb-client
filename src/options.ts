@@ -51,8 +51,10 @@ type DeprecatedOptions = {
  * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps</i> - The protocol used to communicate with the server. <br>
  * When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
  * </li>
- * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used to communicate with the server. <br>
- * When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
+ * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used for data serialization. <br>
+ * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles. <br>
+ * When set to 'auto' (default for HTTP/HTTPS), the client automatically negotiates the highest supported version with the server. <br>
+ * TCP/TCPS connections default to version 1.
  * </li>
  * <li> addr: <i>string</i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. <br>
  * If no port is specified, a default will be used. <br>
@@ -130,6 +132,9 @@ type DeprecatedOptions = {
  * <br>
  * Other options
  * <ul>
+ * <li> stdlib_http: <i>enum, accepted values: on, off</i> - With HTTP protocol the Undici library is used by default. By setting this option
+ * to <i>on</i> the client switches to node's core http and https modules.
+ * </li>
  * <li> max_name_len: <i>integer</i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. <br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * </li>
@@ -172,7 +177,7 @@ class SenderOptions {
   log?: Logger;
   agent?: Agent | http.Agent | https.Agent;
 
-  legacy_http?: boolean;
+  stdlib_http?: boolean;
 
   auth?: {
     username?: string;
@@ -214,6 +219,13 @@ class SenderOptions {
     }
   }
 
+  /**
+   * Resolves the protocol version, if it is set to 'auto'. <br>
+   * If TCP transport is used, the protocol version will default to 1.
+   * In case of HTTP transport the /settings endpoint of the database is used to find the protocol versions
+   * supported by the server, and the highest will be selected.
+   * @param options SenderOptions instance needs resolving protocol version
+   */
   static async resolveAuto(options: SenderOptions) {
     parseProtocolVersion(options);
     if (options.protocol_version !== PROTOCOL_VERSION_AUTO) {
@@ -333,7 +345,7 @@ function parseConfigurationString(
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
-  parseLegacyTransport(options);
+  parseStdlibTransport(options);
 }
 
 function parseSettings(
@@ -396,8 +408,8 @@ const ValidConfigKeys = [
   "init_buf_size",
   "max_buf_size",
   "max_name_len",
+  "stdlib_http",
   "tls_verify",
-  "legacy_http",
   "tls_ca",
   "tls_roots",
   "tls_roots_password",
@@ -544,8 +556,8 @@ function parseMaxNameLength(options: SenderOptions) {
   parseInteger(options, "max_name_len", "max name length", 1);
 }
 
-function parseLegacyTransport(options: SenderOptions) {
-  parseBoolean(options, "legacy_http", "legacy http");
+function parseStdlibTransport(options: SenderOptions) {
+  parseBoolean(options, "stdlib_http", "stdlib http");
 }
 
 function parseBoolean(
