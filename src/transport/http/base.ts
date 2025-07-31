@@ -116,8 +116,7 @@ abstract class HttpTransportBase implements SenderTransport {
    * HTTP transport does not require explicit connection closure.
    * @returns Promise that resolves immediately
    */
-  async close(): Promise<void> {
-  }
+  async close(): Promise<void> {}
 
   /**
    * Gets the default auto-flush row count for HTTP transport.

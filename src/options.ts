@@ -160,7 +160,7 @@ class SenderOptions {
   log?: Logger;
   agent?: Agent | http.Agent | https.Agent;
 
-  legacy_http?: boolean;
+  stdlib_http?: boolean;
 
   auth?: {
     username?: string;
@@ -286,7 +286,7 @@ function parseConfigurationString(
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
-  parseLegacyTransport(options);
+  parseStdlibTransport(options);
 }
 
 function parseSettings(
@@ -348,8 +348,8 @@ const ValidConfigKeys = [
   "init_buf_size",
   "max_buf_size",
   "max_name_len",
+  "stdlib_http",
   "tls_verify",
-  "legacy_http",
   "tls_ca",
   "tls_roots",
   "tls_roots_password",
@@ -472,8 +472,8 @@ function parseMaxNameLength(options: SenderOptions) {
   parseInteger(options, "max_name_len", "max name length", 1);
 }
 
-function parseLegacyTransport(options: SenderOptions) {
-  parseBoolean(options, "legacy_http", "legacy http");
+function parseStdlibTransport(options: SenderOptions) {
+  parseBoolean(options, "stdlib_http", "stdlib http");
 }
 
 function parseBoolean(
