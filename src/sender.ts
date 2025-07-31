@@ -168,10 +168,14 @@ class Sender {
   }
 
   /**
-   * Closes the TCP connection to the database. <br>
+   * Closes the connection to the database. <br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
    */
   async close() {
+    const pos = this.buffer.currentPosition();
+    if (pos > 0) {
+      this.log("warn", `Buffer contains data which has not been flushed, and it will be lost [position=${pos}]`);
+    }
     return this.transport.close();
   }
 

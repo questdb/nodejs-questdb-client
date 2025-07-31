@@ -329,6 +329,14 @@ class SenderBuffer {
     this.startNewRow();
   }
 
+  /**
+   * Returns the current position of the buffer.
+   * New data will be written into the buffer starting from this position.
+   */
+  currentPosition() {
+    return this.position;
+  }
+
   private checkCapacity(data: string[], base = 0) {
     let length = base;
     for (const str of data) {

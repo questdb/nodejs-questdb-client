@@ -570,4 +570,46 @@ describe("Sender TCP suite", function () {
     await sender.close();
     await proxy.stop();
   });
+
+  it("warns if data is lost on close()", async function () {
+    // we expect a warning about non-flushed data at close()
+    const expectedMessages = [
+      "Successfully connected to localhost:9088",
+      "Buffer contains data which has not been flushed, and it will be lost [position=54]",
+      /^Connection to .*1:9088 is closed$/,
+    ];
+    const log = (
+      level: "error" | "warn" | "info" | "debug",
+      message: string,
+    ) => {
+      if (level !== "debug") {
+        expect(message).toMatch(expectedMessages.shift());
+      }
+    };
+    const proxy = await createProxy();
+    const sender = new Sender({
+      protocol: "tcp",
+      port: PROXY_PORT,
+      host: PROXY_HOST,
+      log: log,
+    });
+    await sender.connect();
+    await sendData(sender);
+
+    // add another line to the buffer without calling flush()
+    await sender
+        .table("test")
+        .symbol("location", "gb")
+        .floatColumn("temperature", 16.4)
+        .at(1658484775000000000n, "ns");
+
+    // assert that only the first line was sent
+    await assertSentData(
+      proxy,
+      false,
+      "test,location=us temperature=17.1 1658484765000000000\n",
+    );
+    await sender.close();
+    await proxy.stop();
+  });
 });
