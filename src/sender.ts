@@ -176,7 +176,7 @@ class Sender {
     if (pos > 0) {
       this.log(
         "warn",
-        `Buffer contains data which has not been flushed, and it will be lost [position=${pos}]`,
+        `Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=${pos}]`,
       );
     }
     return this.transport.close();

@@ -575,7 +575,7 @@ describe("Sender TCP suite", function () {
     // we expect a warning about non-flushed data at close()
     const expectedMessages = [
       "Successfully connected to localhost:9088",
-      "Buffer contains data which has not been flushed, and it will be lost [position=54]",
+      "Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=54]",
       /^Connection to .*1:9088 is closed$/,
     ];
     const log = (
