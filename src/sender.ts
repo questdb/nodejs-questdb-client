@@ -54,7 +54,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 class Sender {
   private readonly transport: SenderTransport;
 
-  private buffer: SenderBuffer;
+  private readonly buffer: SenderBuffer;
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
