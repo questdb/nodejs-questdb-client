@@ -219,6 +219,13 @@ class SenderOptions {
     }
   }
 
+  /**
+   * Resolves the protocol version, if it is set to 'auto'. <br>
+   * If TCP transport is used, the protocol version will default to 1.
+   * In case of HTTP transport the /settings endpoint of the database is used to find the protocol versions
+   * supported by the server, and the highest will be selected.
+   * @param options SenderOptions instance needs resolving protocol version
+   */
   static async resolveAuto(options: SenderOptions) {
     parseProtocolVersion(options);
     if (options.protocol_version !== PROTOCOL_VERSION_AUTO) {
