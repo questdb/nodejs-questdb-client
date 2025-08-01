@@ -13,17 +13,16 @@ import { isBoolean } from "../utils";
 // Default number of rows that trigger auto-flush for TCP transport.
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 
-// Arbitrary public key coordinates used to construct valid JWK tokens.
-// These are not used for actual authentication, only for crypto API compatibility.
+// Arbitrary public key, used to construct valid JWK tokens.
+// These are not used for actual authentication, only required for crypto API compatibility.
 const PUBLIC_KEY = {
   x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
   y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg",
 };
 
 /**
- * TCP transport implementation for QuestDB line protocol.
- * Supports both TCP and TCPS (TLS-encrypted) connections with JWK token authentication.
- * Provides persistent connections with challenge-response authentication flow.
+ * TCP transport implementation. <br>
+ * Supports both plain TCP or secure TLS-encrypted connections with configurable JWK token authentication.
  */
 class TcpTransport implements SenderTransport {
   private readonly secure: boolean;
@@ -82,9 +81,7 @@ class TcpTransport implements SenderTransport {
   }
 
   /**
-   * Creates a TCP connection to the database with optional authentication. <br>
-   * Handles both plain TCP and TLS-encrypted connections.
-   *
+   * Creates a TCP connection to the database.
    * @returns Promise resolving to true if the connection is established successfully
    * @throws Error if connection fails or authentication is rejected
    */
@@ -161,7 +158,7 @@ class TcpTransport implements SenderTransport {
    * Sends data over the established TCP connection.
    * @param data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
-   * @throws Error if the connection is not established
+   * @throws Error if the data could not be written to the socket
    */
   send(data: Buffer): Promise<boolean> {
     if (!this.socket || this.socket.destroyed) {
@@ -180,8 +177,6 @@ class TcpTransport implements SenderTransport {
 
   /**
    * Closes the TCP connection to the database. <br>
-   * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
-   * @returns Promise that resolves when the connection is closed
    */
   async close(): Promise<void> {
     if (this.socket) {

@@ -93,8 +93,8 @@ class UndiciTransport extends HttpTransportBase {
   }
 
   /**
-   * Sends data to QuestDB using HTTP POST with retry logic and authentication.
-   * @param data - Buffer containing line protocol data to send
+   * Sends data to QuestDB using HTTP POST.
+   * @param data - Buffer containing data to send
    * @returns Promise resolving to true if data was sent successfully
    * @throws Error if request fails after all retries or times out
    */
@@ -139,10 +139,12 @@ class UndiciTransport extends HttpTransportBase {
     const body = await responseData.body.arrayBuffer();
     if (statusCode === HTTP_NO_CONTENT) {
       if (body.byteLength > 0) {
-        this.log(
-          "warn",
-          `Unexpected message from server: ${Buffer.from(body).toString()}`,
-        );
+        const message = Buffer.from(body).toString();
+        const logMessage =
+          message.length < 256
+            ? message
+            : `${message.substring(0, 256)}... (truncated, full length=${message.length})`;
+        this.log("warn", `Unexpected message from server: ${logMessage}`);
       }
       return true;
     } else {

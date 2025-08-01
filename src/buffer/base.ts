@@ -21,9 +21,8 @@ import {
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
 /**
- * Abstract base class for QuestDB line protocol buffer implementations.
- * Provides common functionality for building line protocol messages including
- * table names, symbols, columns, and timestamps.
+ * Abstract base class for SenderBuffer implementations. <br>
+ * Provides common functionality for writing data into the buffer.
  */
 abstract class SenderBufferBase implements SenderBuffer {
   private bufferSize: number;
@@ -68,7 +67,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Extends the size of the sender's buffer.
+   * Extends the size of the buffer. <br>
    * Can be used to increase the size of buffer if overflown.
    * The buffer's content is copied into the new buffer.
    *
@@ -113,22 +112,20 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * @ignore
-   * @return {Buffer} Returns a cropped buffer, or null if there is nothing to send.
-   * The returned buffer is backed by the sender's buffer.
-   * Used only in tests.
+   * @return {Buffer} Returns a cropped buffer, or null if there is nothing to send. <br>
+   * The returned buffer is backed by this buffer instance, meaning the view can change as the buffer is mutated.
+   * Used only in tests to assert the buffer's content.
    */
   toBufferView(pos = this.endOfLastRow): Buffer {
     return pos > 0 ? this.buffer.subarray(0, pos) : null;
   }
 
   /**
-   * @ignore
-   * @return {Buffer|null} Returns a cropped buffer ready to send to the server, or null if there is nothing to send.
-   * The returned buffer is a copy of the sender's buffer.
-   * It also compacts the Sender's buffer.
+   * @return {Buffer} Returns a cropped buffer ready to send to the server, or null if there is nothing to send. <br>
+   * The returned buffer is a copy of this buffer.
+   * It also compacts the buffer.
    */
-  toBufferNew(pos = this.endOfLastRow): Buffer | null {
+  toBufferNew(pos = this.endOfLastRow): Buffer {
     if (pos > 0) {
       const data = Buffer.allocUnsafe(pos);
       this.buffer.copy(data, 0, 0, pos);
@@ -139,7 +136,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write the table name into the buffer of the sender.
+   * Write the table name into the buffer.
    *
    * @param {string} table - Table name.
    * @return {Sender} Returns with a reference to this sender.
@@ -159,7 +156,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a symbol name and value into the buffer of the sender.
+   * Write a symbol name and value into the buffer.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -186,7 +183,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a string column with its value into the buffer of the sender.
+   * Write a string column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -208,7 +205,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a boolean column with its value into the buffer of the sender.
+   * Write a boolean column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -228,7 +225,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a float column with its value into the buffer of the sender.
+   * Write a float column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -247,11 +244,12 @@ abstract class SenderBufferBase implements SenderBuffer {
   abstract arrayColumn(name: string, value: unknown[]): SenderBuffer;
 
   /**
-   * Write an integer column with its value into the buffer of the sender.
+   * Write an integer column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
    * @return {Sender} Returns with a reference to this sender.
+   * @throws Error if the value is not an integer
    */
   intColumn(name: string, value: number): SenderBuffer {
     if (!Number.isInteger(value)) {
@@ -267,7 +265,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a timestamp column with its value into the buffer of the sender.
+   * Write a timestamp column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
@@ -293,7 +291,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Closing the row after writing the designated timestamp into the buffer of the sender.
+   * Closing the row after writing the designated timestamp into the buffer.
    *
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
@@ -319,7 +317,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Closing the row without writing designated timestamp into the buffer of the sender. <br>
+   * Closing the row without writing designated timestamp into the buffer. <br>
    * Designated timestamp will be populated by the server on this record.
    */
   atNow() {
@@ -331,6 +329,14 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.checkCapacity([], 1);
     this.write("\n");
     this.startNewRow();
+  }
+
+  /**
+   * Returns the current position of the buffer. <br>
+   * New data will be written into the buffer starting from this position.
+   */
+  currentPosition(): number {
+    return this.position;
   }
 
   /**

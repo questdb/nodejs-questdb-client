@@ -1,5 +1,6 @@
 /**
- * Supported primitive types for QuestDB arrays.
+ * Primitive types for QuestDB arrays. <br>
+ * Currently only <i>number</i> arrays are supported by the server.
  */
 type ArrayPrimitive = "number" | "boolean" | "string" | null;
 
@@ -87,6 +88,17 @@ function getDimensions(data: unknown) {
   return dimensions;
 }
 
+/**
+ * Validates an array structure. <br>
+ * Validation fails if:
+ * - <i>data</i> is not an array
+ * - the array is irregular: the length of its sub-arrays are different
+ *  - the array is not homogenous: the array contains mixed types
+ * @param data - The array to validate
+ * @param dimensions - The shape of the array
+ * @returns The primitive type of the array's elements
+ * @throws Error if the validation fails
+ */
 function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
   if (data === null || data === undefined) {
     return null;
@@ -143,7 +155,7 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
 }
 
 /**
- * Fetches JSON data from a URL with error handling.
+ * Fetches JSON data from a URL.
  * @template T - The expected type of the JSON response
  * @param url - The URL to fetch from
  * @returns Promise resolving to the parsed JSON data

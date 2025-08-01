@@ -86,7 +86,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 class Sender {
   private readonly transport: SenderTransport;
 
-  private buffer: SenderBuffer;
+  private readonly buffer: SenderBuffer;
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
@@ -200,10 +200,17 @@ class Sender {
   }
 
   /**
-   * Closes the TCP connection to the database. <br>
+   * Closes the connection to the database. <br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
    */
   async close() {
+    const pos = this.buffer.currentPosition();
+    if (pos > 0) {
+      this.log(
+        "warn",
+        `Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=${pos}]`,
+      );
+    }
     return this.transport.close();
   }
 

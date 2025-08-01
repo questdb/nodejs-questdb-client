@@ -4,8 +4,8 @@ import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
 
 /**
- * Buffer implementation for QuestDB line protocol version 1.
- * Supports basic column types but does not support array columns.
+ * Buffer implementation for protocol version 1.
+ * Sends floating point numbers in their text form.
  */
 class SenderBufferV1 extends SenderBufferBase {
   /**
@@ -17,10 +17,11 @@ class SenderBufferV1 extends SenderBufferBase {
   }
 
   /**
-   * Write a float column with its value into the buffer using v1 format.
-   * @param name - Column name
-   * @param value - Float value to write
-   * @returns Reference to this sender buffer for method chaining
+   * Write a float column with its value into the buffer using v1 serialization (text format).
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number values.
+   * @return {Sender} Returns with a reference to this sender.
    */
   floatColumn(name: string, value: number): SenderBuffer {
     this.writeColumn(

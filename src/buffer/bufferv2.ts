@@ -16,8 +16,8 @@ const ENTITY_TYPE_DOUBLE: number = 16;
 const EQUALS_SIGN: number = "=".charCodeAt(0);
 
 /**
- * Buffer implementation for QuestDB line protocol version 2.
- * Supports all column types including arrays with binary encoding for doubles.
+ * Buffer implementation for protocol version 2.
+ * Sends floating point numbers in binary form.
  */
 class SenderBufferV2 extends SenderBufferBase {
   /**
@@ -29,10 +29,11 @@ class SenderBufferV2 extends SenderBufferBase {
   }
 
   /**
-   * Write a float column with its value into the buffer using v2 binary format.
-   * @param name - Column name
-   * @param value - Float value to write
-   * @returns Reference to this sender buffer for method chaining
+   * Write a float column with its value into the buffer using v2 serialization (binary format).
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number values.
+   * @return {Sender} Returns with a reference to this sender.
    */
   floatColumn(name: string, value: number): SenderBuffer {
     this.writeColumn(
@@ -53,8 +54,11 @@ class SenderBufferV2 extends SenderBufferBase {
    * Write an array column with its values into the buffer using v2 format.
    * @param name - Column name
    * @param value - Array values to write (currently supports double arrays)
-   * @returns Reference to this sender buffer for method chaining
-   * @throws Error if value is not an array when provided
+   * @returns Reference to this buffer for method chaining
+   * @throws Error if array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
    */
   arrayColumn(name: string, value: unknown[]): SenderBuffer {
     const dimensions = getDimensions(value);

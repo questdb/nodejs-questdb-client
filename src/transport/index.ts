@@ -4,7 +4,7 @@ import { Buffer } from "node:buffer";
 import { SenderOptions, HTTP, HTTPS, TCP, TCPS } from "../options";
 import { UndiciTransport } from "./http/undici";
 import { TcpTransport } from "./tcp";
-import { HttpTransport } from "./http/legacy";
+import { HttpTransport } from "./http/stdlib";
 
 /**
  * Interface for QuestDB transport implementations. <br>
@@ -12,7 +12,8 @@ import { HttpTransport } from "./http/legacy";
  */
 interface SenderTransport {
   /**
-   * Establishes a connection to the database server.
+   * Establishes a connection to the database server. <br>
+   * Should not be called on HTTP transports.
    * @returns Promise resolving to true if connection is successful
    */
   connect(): Promise<boolean>;
@@ -25,7 +26,8 @@ interface SenderTransport {
   send(data: Buffer): Promise<boolean>;
 
   /**
-   * Closes the connection to the database server.
+   * Closes the connection to the database server. <br>
+   * Should not be called on HTTP transports.
    * @returns Promise that resolves when the connection is closed
    */
   close(): Promise<void>;
@@ -54,7 +56,7 @@ function createTransport(options: SenderOptions): SenderTransport {
   switch (options.protocol) {
     case HTTP:
     case HTTPS:
-      return options.legacy_http
+      return options.stdlib_http
         ? new HttpTransport(options)
         : new UndiciTransport(options);
     case TCP:

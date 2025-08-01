@@ -22,8 +22,7 @@ const DEFAULT_HTTP_AGENT_CONFIG = {
 };
 
 /**
- * Legacy HTTP transport implementation using Node.js built-in http/https modules. <br>
- * Provides HTTP requests with manual retry logic and connection pooling. <br>
+ * HTTP transport implementation using Node.js built-in http/https modules. <br>
  * Supports both HTTP and HTTPS protocols with configurable authentication.
  */
 class HttpTransport extends HttpTransportBase {
@@ -33,7 +32,7 @@ class HttpTransport extends HttpTransportBase {
   private readonly agent: http.Agent | https.Agent;
 
   /**
-   * Creates a new HttpTransport instance using legacy Node.js HTTP modules.
+   * Creates a new HttpTransport instance using Node.js HTTP modules.
    *
    * @param options - Sender configuration object containing connection details
    * @throws Error if the protocol is not 'http' or 'https'
@@ -62,8 +61,8 @@ class HttpTransport extends HttpTransportBase {
   }
 
   /**
-   * Sends data to QuestDB using HTTP POST with manual retry logic.
-   * @param data - Buffer containing line protocol data to send
+   * Sends data to QuestDB using HTTP POST.
+   * @param data - Buffer containing data to send
    * @param retryBegin - Internal parameter for tracking retry start time
    * @param retryInterval - Internal parameter for tracking retry intervals
    * @returns Promise resolving to true if data was sent successfully
@@ -93,10 +92,12 @@ class HttpTransport extends HttpTransportBase {
         if (statusCode === HTTP_NO_CONTENT) {
           response.on("end", () => {
             if (body.length > 0) {
-              this.log(
-                "warn",
-                `Unexpected message from server: ${Buffer.concat(body)}`,
-              );
+              const message = Buffer.concat(body).toString();
+              const logMessage =
+                message.length < 256
+                  ? message
+                  : `${message.substring(0, 256)}... (truncated, full length=${message.length})`;
+              this.log("warn", `Unexpected message from server: ${logMessage}`);
             }
             resolve(true);
           });
@@ -165,7 +166,6 @@ class HttpTransport extends HttpTransportBase {
     timeoutMillis: number,
   ): http.RequestOptions | https.RequestOptions {
     return {
-      //protocol: this.secure ? "https:" : "http:",
       hostname: this.host,
       port: this.port,
       agent: this.agent,
