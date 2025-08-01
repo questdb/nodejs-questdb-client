@@ -11,9 +11,18 @@ import { TimestampUnit } from "../utils";
 import { SenderBufferV1 } from "./bufferv1";
 import { SenderBufferV2 } from "./bufferv2";
 
+// Default initial buffer size in bytes (64 KB).
 const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
+
+// Default maximum buffer size in bytes (100 MB).
 const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 
+/**
+ * Factory function to create a SenderBuffer instance based on the protocol version.
+ * @param options - Sender configuration options
+ * @returns A SenderBuffer instance appropriate for the specified protocol version
+ * @throws Error if protocol version is not specified or is unsupported
+ */
 function createBuffer(options: SenderOptions): SenderBuffer {
   switch (options.protocol_version) {
     case PROTOCOL_VERSION_V2:
@@ -104,6 +113,13 @@ interface SenderBuffer {
    */
   floatColumn(name: string, value: number): SenderBuffer;
 
+  /**
+   * Write an array column with its values into the buffer of the sender.
+   *
+   * @param {string} name - Column name.
+   * @param {unknown[]} value - Array values to be written.
+   * @return {SenderBuffer} Returns with a reference to this sender buffer.
+   */
   arrayColumn(name: string, value: unknown[]): SenderBuffer;
 
   /**

@@ -8,6 +8,10 @@ import { SenderBufferBase } from "./base";
  * Sends floating point numbers in their text form.
  */
 class SenderBufferV1 extends SenderBufferBase {
+  /**
+   * Creates a new SenderBufferV1 instance.
+   * @param options - Sender configuration options
+   */
   constructor(options: SenderOptions) {
     super(options);
   }
@@ -33,6 +37,10 @@ class SenderBufferV1 extends SenderBufferBase {
     return this;
   }
 
+  /**
+   * Array columns are not supported in protocol v1.
+   * @throws Error indicating arrays are not supported in v1
+   */
   arrayColumn(): SenderBuffer {
     throw new Error("Arrays are not supported in protocol v1");
   }

@@ -155,8 +155,9 @@ class UndiciTransport extends HttpTransportBase {
   }
 
   /**
-   * @ignore
-   * @return {Agent} Returns the default http agent.
+   * Gets or creates the default HTTP agent with standard configuration.
+   * Uses a singleton pattern to reuse the same agent across instances.
+   * @returns The default Undici agent instance
    */
   private static getDefaultHttpAgent(): Agent {
     if (!UndiciTransport.DEFAULT_HTTP_AGENT) {

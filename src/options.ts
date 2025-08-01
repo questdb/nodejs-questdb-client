@@ -44,7 +44,7 @@ type DeprecatedOptions = {
  * Properties of the object are initialized through a configuration string. <br>
  * The configuration string has the following format: <i>&ltprotocol&gt::&ltkey&gt=&ltvalue&gt;&ltkey&gt=&ltvalue&gt;...;</i> <br>
  * The keys are case-sensitive, the trailing semicolon is optional. <br>
- * The values are validated, and an error is thrown if the format is invalid. <br>
+ * The values are validated and an error is thrown if the format is invalid. <br>
  * <br>
  * Connection and protocol options
  * <ul>
@@ -81,8 +81,8 @@ type DeprecatedOptions = {
  * TLS options
  * <ul>
  * <li> tls_verify: <i>enum, accepted values: on, unsafe_off</i> - When the HTTPS or TCPS protocols are selected, TLS encryption is used. <br>
- * By default, the Sender will verify the server's certificate, but this check can be disabled by setting this option to <i>off</i>. This is useful
- * non-production environments where self-signed certificates might be used, but should be avoided in production if possible.
+ * By default, the Sender will verify the server's certificate, but this check can be disabled by setting this option to <i>unsafe_off</i>. <br>
+ * This is useful in non-production environments where self-signed certificates might be used, but should be avoided in production if possible.
  * </li>
  * <li> tls_ca: <i>string</i> - Path to a file containing the root CA's certificate in PEM format. <br>
  * Can be useful when self-signed certificates are used, otherwise should not be set.
@@ -94,9 +94,9 @@ type DeprecatedOptions = {
  * <li> auto_flush: <i>enum, accepted values: on, off</i> - The Sender automatically flushes the buffer by default. This can be switched off
  * by setting this option to <i>off</i>. <br>
  * When disabled, the flush() method of the Sender has to be called explicitly to make sure data is sent to the server. <br>
- * Manual buffer flushing can be useful, especially when we want to use transactions. When the HTTP protocol is used, each flush results in a single HTTP
- * request, which becomes a single transaction on the server side. The transaction either succeeds, and all rows sent in the request are
- * inserted; or it fails, and none of the rows make it into the database.
+ * Manual buffer flushing can be useful, especially when we want to control transaction boundaries. <br>
+ * When the HTTP protocol is used, each flush results in a single HTTP request, which becomes a single transaction on the server side. <br>
+ * The transaction either succeeds, and all rows sent in the request are inserted; or it fails, and none of the rows make it into the database.
  * </li>
  * <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
  * The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
@@ -195,7 +195,8 @@ class SenderOptions {
    * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-   * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
+   * An <i>undici.Agent</i> object is expected. <br>
+   * If the standard HTTP transport is used, a <i>http.Agent</i> or <i>https.Agent</i> object is expected.
    */
   constructor(configurationString: string, extraOptions?: ExtraOptions) {
     parseConfigurationString(this, configurationString);

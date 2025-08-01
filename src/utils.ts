@@ -1,17 +1,42 @@
+/**
+ * Primitive types for QuestDB arrays. <br>
+ * Currently only <i>number</i> arrays are supported by the server.
+ */
 type ArrayPrimitive = "number" | "boolean" | "string" | null;
 
+/**
+ * Supported timestamp units for QuestDB operations.
+ */
 type TimestampUnit = "ns" | "us" | "ms";
 
+/**
+ * Type guard to check if a value is a boolean.
+ * @param value - The value to check
+ * @returns True if the value is a boolean, false otherwise
+ */
 function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
 }
 
+/**
+ * Type guard to check if a value is an integer within specified bounds.
+ * @param value - The value to check
+ * @param lowerBound - The minimum allowed value (inclusive)
+ * @returns True if the value is an integer >= lowerBound, false otherwise
+ */
 function isInteger(value: unknown, lowerBound: number): value is number {
   return (
     typeof value === "number" && Number.isInteger(value) && value >= lowerBound
   );
 }
 
+/**
+ * Converts a timestamp from the specified unit to microseconds.
+ * @param timestamp - The timestamp value as a bigint
+ * @param unit - The source timestamp unit
+ * @returns The timestamp converted to microseconds
+ * @throws Error if the timestamp unit is unknown
+ */
 function timestampToMicros(timestamp: bigint, unit: TimestampUnit) {
   switch (unit) {
     case "ns":
@@ -25,6 +50,13 @@ function timestampToMicros(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
+/**
+ * Converts a timestamp from the specified unit to nanoseconds.
+ * @param timestamp - The timestamp value as a bigint
+ * @param unit - The source timestamp unit
+ * @returns The timestamp converted to nanoseconds
+ * @throws Error if the timestamp unit is unknown
+ */
 function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   switch (unit) {
     case "ns":
@@ -38,6 +70,12 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
   }
 }
 
+/**
+ * Analyzes the dimensions of a nested array structure.
+ * @param data - The array to analyze
+ * @returns Array of dimension sizes at each nesting level
+ * @throws Error if any dimension has zero length
+ */
 function getDimensions(data: unknown) {
   const dimensions: number[] = [];
   while (Array.isArray(data)) {
@@ -50,6 +88,17 @@ function getDimensions(data: unknown) {
   return dimensions;
 }
 
+/**
+ * Validates an array structure. <br>
+ * Validation fails if:
+ * - <i>data</i> is not an array
+ * - the array is irregular: the length of its sub-arrays are different
+ *  - the array is not homogenous: the array contains mixed types
+ * @param data - The array to validate
+ * @param dimensions - The shape of the array
+ * @returns The primitive type of the array's elements
+ * @throws Error if the validation fails
+ */
 function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
   if (data === null || data === undefined) {
     return null;

@@ -157,6 +157,11 @@ class HttpTransport extends HttpTransportBase {
     });
   }
 
+  /**
+   * Creates HTTP request options based on configuration.
+   * @param timeoutMillis - Request timeout in milliseconds
+   * @returns HTTP or HTTPS request options object
+   */
   private createRequestOptions(
     timeoutMillis: number,
   ): http.RequestOptions | https.RequestOptions {
@@ -173,8 +178,9 @@ class HttpTransport extends HttpTransportBase {
   }
 
   /**
-   * @ignore
-   * @return {http.Agent} Returns the default http agent.
+   * Gets or creates the default HTTP agent with standard configuration.
+   * Uses a singleton pattern to reuse the same agent across instances.
+   * @returns The default HTTP agent instance
    */
   private static getDefaultHttpAgent(): http.Agent {
     if (!HttpTransport.DEFAULT_HTTP_AGENT) {
@@ -186,8 +192,9 @@ class HttpTransport extends HttpTransportBase {
   }
 
   /**
-   * @ignore
-   * @return {https.Agent} Returns the default https agent.
+   * Gets or creates the default HTTPS agent with standard configuration.
+   * Uses a singleton pattern to reuse the same agent across instances.
+   * @returns The default HTTPS agent instance
    */
   private static getDefaultHttpsAgent(): https.Agent {
     if (!HttpTransport.DEFAULT_HTTPS_AGENT) {
@@ -199,6 +206,11 @@ class HttpTransport extends HttpTransportBase {
   }
 }
 
+/**
+ * Determines if an HTTP status code should trigger a retry.
+ * @param statusCode - HTTP status code to check
+ * @returns True if the status code indicates a retryable error
+ */
 function isRetryable(statusCode: number) {
   return RETRIABLE_STATUS_CODES.includes(statusCode);
 }

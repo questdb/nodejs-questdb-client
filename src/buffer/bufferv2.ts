@@ -4,12 +4,15 @@ import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
 import { getDimensions, validateArray } from "../utils";
 
+// Column type constants for protocol v2.
 const COLUMN_TYPE_DOUBLE: number = 10;
 const COLUMN_TYPE_NULL: number = 33;
 
+// Entity type constants for protocol v2.
 const ENTITY_TYPE_ARRAY: number = 14;
 const ENTITY_TYPE_DOUBLE: number = 16;
 
+// ASCII code for equals sign used in binary protocol.
 const EQUALS_SIGN: number = "=".charCodeAt(0);
 
 /**
@@ -17,6 +20,10 @@ const EQUALS_SIGN: number = "=".charCodeAt(0);
  * Sends floating point numbers in binary form.
  */
 class SenderBufferV2 extends SenderBufferBase {
+  /**
+   * Creates a new SenderBufferV2 instance.
+   * @param options - Sender configuration options
+   */
   constructor(options: SenderOptions) {
     super(options);
   }
@@ -43,6 +50,16 @@ class SenderBufferV2 extends SenderBufferBase {
     return this;
   }
 
+  /**
+   * Write an array column with its values into the buffer using v2 format.
+   * @param name - Column name
+   * @param value - Array values to write (currently supports double arrays)
+   * @returns Reference to this buffer for method chaining
+   * @throws Error if array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
+   */
   arrayColumn(name: string, value: unknown[]): SenderBuffer {
     const dimensions = getDimensions(value);
     const type = validateArray(value, dimensions);
