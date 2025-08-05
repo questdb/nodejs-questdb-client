@@ -80,11 +80,7 @@ abstract class SenderBufferBase implements SenderBuffer {
       );
     }
     this.bufferSize = bufferSize;
-    // Allocating an extra byte because Buffer.write() does not fail if the length of the data to be written is
-    // longer than the size of the buffer. It simply just writes whatever it can, and returns.
-    // If we can write into the extra byte, that indicates buffer overflow.
-    // See the check in the write() function.
-    const newBuffer = Buffer.alloc(this.bufferSize + 1, 0);
+    const newBuffer = Buffer.alloc(this.bufferSize, 0);
     if (this.buffer) {
       this.buffer.copy(newBuffer);
     }
@@ -378,32 +374,14 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   protected write(data: string) {
     this.position += this.buffer.write(data, this.position);
-    if (this.position > this.bufferSize) {
-      // should never happen, if checkCapacity() is correctly used
-      throw new Error(
-        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
-    }
   }
 
   protected writeByte(data: number) {
     this.position = this.buffer.writeInt8(data, this.position);
-    if (this.position > this.bufferSize) {
-      // should never happen, if checkCapacity() is correctly used
-      throw new Error(
-        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
-    }
   }
 
   protected writeDouble(data: number) {
     this.position = this.buffer.writeDoubleLE(data, this.position);
-    if (this.position > this.bufferSize) {
-      // should never happen, if checkCapacity() is correctly used
-      throw new Error(
-        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
-    }
   }
 
   private writeEscaped(data: string, quoted = false) {

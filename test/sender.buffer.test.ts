@@ -732,7 +732,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("extends the size of the buffer if data does not fit", async function () {
+  it("extends the size of the buffer v1 if data does not fit", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "1",
@@ -763,6 +763,39 @@ describe("Sender message builder test suite (anything not covered in client inte
     );
     expect(bufferContent(sender)).toBe(
       'tableName intField=123i\ntable2 intField=125i,strField="test"\n',
+    );
+    await sender.close();
+  });
+
+  it("extends the size of the buffer v2 if data does not fit", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 8,
+    });
+    expect(bufferSize(sender)).toBe(8);
+    expect(bufferPosition(sender)).toBe(0);
+    sender.table("tableName");
+    expect(bufferSize(sender)).toBe(24);
+    expect(bufferPosition(sender)).toBe("tableName".length);
+    sender.floatColumn("floatField", 123.456);
+    expect(bufferSize(sender)).toBe(48);
+    expect(bufferPosition(sender)).toBe("tableName floatField=".length + 10);
+    sender.stringColumn("strField", "hoho");
+    expect(bufferSize(sender)).toBe(96);
+    expect(bufferPosition(sender)).toBe(
+      "tableName floatField=".length + 10 + ',strField="hoho"'.length,
+    );
+    await sender.atNow();
+    expect(bufferSize(sender)).toBe(96);
+    expect(bufferPosition(sender)).toBe(
+      "tableName floatField=".length + 10 + ',strField="hoho"\n'.length,
+    );
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName floatField=") +
+        " 3d 10 77 be 9f 1a 2f dd 5e 40 " +
+        toHex(',strField="hoho"\n'),
     );
     await sender.close();
   });
@@ -836,6 +869,21 @@ describe("Sender message builder test suite (anything not covered in client inte
 function bufferContent(sender: Sender) {
   // @ts-expect-error - Accessing private field
   return sender.buffer.toBufferView().toString();
+}
+
+function bufferContentHex(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return toHexString(sender.buffer.toBufferView());
+}
+
+function toHex(str: string) {
+  return toHexString(Buffer.from(str));
+}
+
+function toHexString(buffer: Buffer) {
+  return Array.from(buffer)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join(" ");
 }
 
 function bufferSize(sender: Sender) {
