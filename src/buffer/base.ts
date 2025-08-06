@@ -151,7 +151,8 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Writes a symbol name and value into the buffer.
+   * Writes a symbol name and value into the buffer. <br>
+   * Use it to insert into SYMBOL columns.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -178,7 +179,8 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Writes a string column with its value into the buffer.
+   * Writes a string column with its value into the buffer. <br>
+   * Use it to insert into VARCHAR and STRING columns.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -200,7 +202,8 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Writes a boolean column with its value into the buffer.
+   * Writes a boolean column with its value into the buffer. <br>
+   * Use it to insert into BOOLEAN columns.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -220,7 +223,8 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Writes a float column with its value into the buffer.
+   * Writes a 64-bit floating point value into the buffer. <br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -229,7 +233,8 @@ abstract class SenderBufferBase implements SenderBuffer {
   abstract floatColumn(name: string, value: number): SenderBuffer;
 
   /**
-   * Writes an integer column with its value into the buffer.
+   * Writes a 64-bit signed integer into the buffer. <br>
+   * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -250,7 +255,8 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Writes a timestamp column with its value into the buffer.
+   * Writes a timestamp column with its value into the buffer. <br>
+   * Use it to insert into TIMESTAMP columns.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.

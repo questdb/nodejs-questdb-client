@@ -16,7 +16,8 @@ class SenderBufferV2 extends SenderBufferBase {
   }
 
   /**
-   * Writes a float column with its value into the buffer using v2 serialization (binary format).
+   * Writes a 64-bit floating point value into the buffer using v2 serialization (binary format). <br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
