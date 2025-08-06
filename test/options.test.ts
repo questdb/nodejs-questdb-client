@@ -15,8 +15,6 @@ const proxyOptions = {
   ca: readFileSync("test/certs/ca/ca.crt"),
 };
 
-process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
-
 describe("Configuration string parser suite", function () {
   const mockHttp = new MockHttp();
   const mockHttps = new MockHttp();

@@ -122,7 +122,7 @@ async function fetchJson<T>(
 ): Promise<T> {
   const controller = new AbortController();
   const { signal } = controller;
-  setTimeout(() => controller.abort(), timeout);
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   let response: globalThis.Response;
   try {
@@ -132,6 +132,8 @@ async function fetchJson<T>(
     });
   } catch (error) {
     throw new Error(`Failed to load ${url} [error=${error}]`);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!response.ok) {
