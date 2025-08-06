@@ -17,7 +17,7 @@ class SenderBufferV1 extends SenderBufferBase {
   }
 
   /**
-   * Write a float column with its value into the buffer using v1 serialization (text format).
+   * Writes a float column with its value into the buffer using v1 serialization (text format).
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.

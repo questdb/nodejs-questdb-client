@@ -281,7 +281,7 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("2");
     options = await SenderOptions.fromConfig(
-      `https::addr=localhost:${MOCK_HTTPS_PORT}`,
+      `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`,
     );
     expect(options.protocol_version).toBe("2");
 
@@ -302,7 +302,7 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("1");
     options = await SenderOptions.fromConfig(
-      `https::addr=localhost:${MOCK_HTTPS_PORT}`,
+      `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`,
     );
     expect(options.protocol_version).toBe("1");
 
@@ -323,7 +323,7 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("1");
     options = await SenderOptions.fromConfig(
-      `https::addr=localhost:${MOCK_HTTPS_PORT}`,
+      `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`,
     );
     expect(options.protocol_version).toBe("1");
 
@@ -342,7 +342,7 @@ describe("Configuration string parser suite", function () {
     await expect(
       async () =>
         await SenderOptions.fromConfig(
-          `http::addr=localhost:${MOCK_HTTP_PORT}`,
+          `http::addr=localhost:${MOCK_HTTP_PORT};tls_verify=unsafe_off`,
         ),
     ).rejects.toThrow(
       "Unsupported protocol versions received from server: 3,5",
@@ -350,7 +350,7 @@ describe("Configuration string parser suite", function () {
     await expect(
       async () =>
         await SenderOptions.fromConfig(
-          `https::addr=localhost:${MOCK_HTTPS_PORT}`,
+          `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`,
         ),
     ).rejects.toThrow(
       "Unsupported protocol versions received from server: 3,5",
@@ -407,7 +407,7 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("2");
     options = await SenderOptions.fromConfig(
-      `https::addr=localhost:${MOCK_HTTPS_PORT};protocol_version=auto`,
+      `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off;protocol_version=auto`,
     );
     expect(options.protocol_version).toBe("2");
   });

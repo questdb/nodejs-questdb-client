@@ -130,4 +130,9 @@ abstract class HttpTransportBase implements SenderTransport {
   abstract send(data: Buffer): Promise<boolean>;
 }
 
-export { HttpTransportBase, RETRIABLE_STATUS_CODES, HTTP_NO_CONTENT };
+export {
+  HttpTransportBase,
+  RETRIABLE_STATUS_CODES,
+  HTTP_NO_CONTENT,
+  DEFAULT_REQUEST_TIMEOUT,
+};

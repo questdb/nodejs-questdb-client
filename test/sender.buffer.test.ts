@@ -218,19 +218,39 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("does not accept empty array", async function () {
+  it("accepts empty array", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "2",
       host: "host",
       init_buf_size: 1024,
     });
-    sender.table("tableName");
-    expect(() => sender.arrayColumn("arrayCol", [])).toThrow(
-      "Zero length array not supported",
+    await sender.table("tableName").arrayColumn("arrayCol", []).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") + " 0e 0a 01 00 00 00 00 " + toHex("\n"),
     );
-    expect(() => sender.arrayColumn("arrayCol", [[], []])).toThrow(
-      "Zero length array not supported",
+    await sender.close();
+  });
+
+  it("accepts multi dimensional empty array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", [
+        [[], []],
+        [[], []],
+        [[], []],
+      ])
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 03 03 00 00 00 02 00 00 00 00 00 00 00 " +
+        toHex("\n"),
     );
     await sender.close();
   });
@@ -262,7 +282,7 @@ describe("Sender message builder test suite (anything not covered in client inte
         [[1.1, 2.2], [3.3], [5.5, 6.6]],
       ]),
     ).toThrow(
-      "Length of arrays do not match [expected=2, actual=1, dimensions=[4,3,2], path=[3][1]]",
+      "Lengths of sub-arrays do not match [expected=2, actual=1, dimensions=[4,3,2], path=[3][1]]",
     );
     await sender.close();
   });
@@ -971,7 +991,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("extends the size of the buffer if data does not fit", async function () {
+  it("extends the size of the buffer v1 if data does not fit", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "1",
@@ -1002,6 +1022,39 @@ describe("Sender message builder test suite (anything not covered in client inte
     );
     expect(bufferContent(sender)).toBe(
       'tableName intField=123i\ntable2 intField=125i,strField="test"\n',
+    );
+    await sender.close();
+  });
+
+  it("extends the size of the buffer v2 if data does not fit", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 8,
+    });
+    expect(bufferSize(sender)).toBe(8);
+    expect(bufferPosition(sender)).toBe(0);
+    sender.table("tableName");
+    expect(bufferSize(sender)).toBe(24);
+    expect(bufferPosition(sender)).toBe("tableName".length);
+    sender.floatColumn("floatField", 123.456);
+    expect(bufferSize(sender)).toBe(48);
+    expect(bufferPosition(sender)).toBe("tableName floatField=".length + 10);
+    sender.stringColumn("strField", "hoho");
+    expect(bufferSize(sender)).toBe(96);
+    expect(bufferPosition(sender)).toBe(
+      "tableName floatField=".length + 10 + ',strField="hoho"'.length,
+    );
+    await sender.atNow();
+    expect(bufferSize(sender)).toBe(96);
+    expect(bufferPosition(sender)).toBe(
+      "tableName floatField=".length + 10 + ',strField="hoho"\n'.length,
+    );
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName floatField=") +
+        " 3d 10 77 be 9f 1a 2f dd 5e 40 " +
+        toHex(',strField="hoho"\n'),
     );
     await sender.close();
   });

@@ -1,3 +1,5 @@
+import { Agent } from "undici";
+
 /**
  * Primitive types for QuestDB arrays. <br>
  * Currently only <i>number</i> arrays are supported by the server.
@@ -79,9 +81,6 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
 function getDimensions(data: unknown) {
   const dimensions: number[] = [];
   while (Array.isArray(data)) {
-    if (data.length === 0) {
-      throw new Error("Zero length array not supported");
-    }
     dimensions.push(data.length);
     data = data[0];
   }
@@ -119,7 +118,7 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
     const expectedLength = dimensions[depth];
     if (array.length !== expectedLength) {
       throw new Error(
-        `Length of arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`,
+        `Lengths of sub-arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`,
       );
     }
 
@@ -135,7 +134,7 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
       }
     } else {
       // leaf level, expecting primitives
-      if (expectedType === null) {
+      if (expectedType === null && array[0]) {
         expectedType = typeof array[0] as ArrayPrimitive;
       }
 
@@ -143,7 +142,9 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
         const currentType = typeof array[i] as ArrayPrimitive;
         if (currentType !== expectedType) {
           throw new Error(
-            `Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]`,
+            expectedType !== null
+              ? `Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]`
+              : `Unsupported array type [type=${currentType}]`,
           );
         }
       }
@@ -158,13 +159,26 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
  * Fetches JSON data from a URL.
  * @template T - The expected type of the JSON response
  * @param url - The URL to fetch from
+ * @param agent - HTTP agent to be used for the request
+ * @param timeout - Request timeout, query will be aborted if not finished in time
  * @returns Promise resolving to the parsed JSON data
  * @throws Error if the request fails or returns a non-OK status
  */
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(
+  url: string,
+  timeout: number,
+  agent: Agent,
+): Promise<T> {
+  const controller = new AbortController();
+  const { signal } = controller;
+  setTimeout(() => controller.abort(), timeout);
+
   let response: globalThis.Response;
   try {
-    response = await fetch(url);
+    response = await fetch(url, {
+      dispatcher: agent,
+      signal,
+    });
   } catch (error) {
     throw new Error(`Failed to load ${url} [error=${error}]`);
   }
