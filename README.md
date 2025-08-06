@@ -19,10 +19,10 @@ pnpm add @questdb/nodejs-client
 
 ## Compatibility table
 
-| QuestDB version | Node.js client version | HTTP Agent   |
-| --------------- | ---------------------- | ------------ |
-| ^4.0.0          | >=v20.X.X              | Undici Agent |
-| ^3.0.0          | <v20.X.X               | Http.Agent   |
+| QuestDB client version | Node.js version | HTTP Agent   |
+|------------------------| --------------- |--------------|
+| ^4.0.0                 | >=v20.X.X       | Undici Agent |
+| ^3.0.0                 | <v20.X.X        | Http Agent   |
 
 ## Configuration options
 
@@ -40,7 +40,7 @@ For more details, please, check the <a href="https://questdb.github.io/nodejs-qu
 import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
-    // create a sender with protocol version 2 to support arrays
+    // create a sender with protocol version 2
     const sender = await Sender.fromConfig('http::addr=localhost:9000;protocol_version=2');
 
     // order book snapshots
