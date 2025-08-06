@@ -72,7 +72,7 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
     const expectedLength = dimensions[depth];
     if (array.length !== expectedLength) {
       throw new Error(
-        `Length of arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`,
+        `Lengths of sub-arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`,
       );
     }
 
