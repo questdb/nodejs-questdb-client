@@ -199,6 +199,22 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("supports arrays with zeros", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("tableName").arrayColumn("arrayCol", [0.0, 0.0]).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 01 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
   it("supports multidimensional arrays with protocol v2", async function () {
     const sender = new Sender({
       protocol: "tcp",

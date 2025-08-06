@@ -85,7 +85,7 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
       }
     } else {
       // leaf level, expecting primitives
-      if (expectedType === null && array[0]) {
+      if (expectedType === null && array[0] !== undefined) {
         expectedType = typeof array[0] as ArrayPrimitive;
       }
 

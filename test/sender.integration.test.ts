@@ -363,6 +363,67 @@ describe("Sender tests with containerized QuestDB instance", () => {
     await sender.close();
   });
 
+  it("can ingest zero vector via HTTP with protocol v2", async () => {
+    const tableName = "test_http_v2_zeros";
+    const schema = [
+      { name: "location", type: "SYMBOL" },
+      { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 2 },
+      { name: "timestamp", type: "TIMESTAMP" },
+    ];
+
+    const sender = await Sender.fromConfig(
+      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)}`,
+    );
+
+    // ingest via client
+    await sender
+      .table(tableName)
+      .symbol("location", "us")
+      .arrayColumn("temperatures", [
+        [17.1, 17.7, 18.4],
+        [17.1, 17.7, 18.4],
+      ])
+      .at(1658484765000000000n, "ns");
+    await sender
+      .table(tableName)
+      .symbol("location", "gb")
+      .arrayColumn("temperatures", [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+      ])
+      .at(1658484765000666000n, "ns");
+    await sender.flush();
+
+    // wait for the table
+    await waitForTable(container, tableName);
+
+    // query table
+    const select1Result = await runSelect(container, tableName, 2);
+    expect(select1Result.query).toBe(tableName);
+    expect(select1Result.count).toBe(2);
+    expect(select1Result.columns).toStrictEqual(schema);
+    expect(select1Result.dataset).toStrictEqual([
+      [
+        "us",
+        [
+          [17.1, 17.7, 18.4],
+          [17.1, 17.7, 18.4],
+        ],
+        "2022-07-22T10:12:45.000000Z",
+      ],
+      [
+        "gb",
+        [
+          [0.0, 0.0, 0.0],
+          [0.0, 0.0, 0.0],
+        ],
+        "2022-07-22T10:12:45.000666Z",
+      ],
+    ]);
+
+    await sender.close();
+  });
+
   it("can ingest empty array via HTTP with protocol v2", async () => {
     const tableName = "test_http_v2_empty";
     const schema = [
