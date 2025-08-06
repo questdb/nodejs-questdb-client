@@ -236,7 +236,7 @@ class SenderOptions {
 
     const url = `${options.protocol}://${options.host}:${options.port}/settings`;
     const settings: {
-      config: { LINE_PROTO_SUPPORT_VERSION: number[] };
+      config: { [LINE_PROTO_SUPPORT_VERSION]: number[] };
     } = await fetchJson(
       url,
       isInteger(options.request_timeout, 1)
