@@ -81,11 +81,7 @@ abstract class SenderBufferBase implements SenderBuffer {
       );
     }
     this.bufferSize = bufferSize;
-    // Allocating an extra byte because Buffer.write() does not fail if the length of the data to be written is
-    // longer than the size of the buffer. It simply just writes whatever it can, and returns.
-    // If we can write into the extra byte, that indicates buffer overflow.
-    // See the check in the write() function.
-    const newBuffer = Buffer.alloc(this.bufferSize + 1, 0);
+    const newBuffer = Buffer.alloc(this.bufferSize, 0);
     if (this.buffer) {
       this.buffer.copy(newBuffer);
     }
@@ -136,7 +132,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write the table name into the buffer.
+   * Writes the table name into the buffer.
    *
    * @param {string} table - Table name.
    * @return {Sender} Returns with a reference to this sender.
@@ -156,7 +152,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a symbol name and value into the buffer.
+   * Writes a symbol name and value into the buffer.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -183,7 +179,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a string column with its value into the buffer.
+   * Writes a string column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -205,7 +201,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a boolean column with its value into the buffer.
+   * Writes a boolean column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -225,7 +221,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a float column with its value into the buffer.
+   * Writes a float column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -233,10 +229,17 @@ abstract class SenderBufferBase implements SenderBuffer {
    */
   abstract floatColumn(name: string, value: number): SenderBuffer;
 
+  /**
+   * Writes an array column with its values into the buffer.
+   *
+   * @param {string} name - Column name.
+   * @param {unknown[]} value - Column value, accepts only arrays.
+   * @return {Sender} Returns with a reference to this sender.
+   */
   abstract arrayColumn(name: string, value: unknown[]): SenderBuffer;
 
   /**
-   * Write an integer column with its value into the buffer.
+   * Writes an integer column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -257,7 +260,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Write a timestamp column with its value into the buffer.
+   * Writes a timestamp column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
@@ -283,7 +286,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Closing the row after writing the designated timestamp into the buffer.
+   * Closes the row after writing the designated timestamp into the buffer.
    *
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
@@ -309,7 +312,7 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Closing the row without writing designated timestamp into the buffer. <br>
+   * Closes the row without writing designated timestamp into the buffer. <br>
    * Designated timestamp will be populated by the server on this record.
    */
   atNow() {
@@ -376,7 +379,6 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.writeEscaped(name);
     this.write("=");
     writeValue();
-    this.assertBufferOverflow();
     this.hasColumns = true;
   }
 
@@ -486,15 +488,6 @@ abstract class SenderBufferBase implements SenderBuffer {
         return 0;
       default:
         throw new Error(`Unsupported array type [type=${type}]`);
-    }
-  }
-
-  private assertBufferOverflow() {
-    if (this.position > this.bufferSize) {
-      // should never happen, if checkCapacity() is correctly used
-      throw new Error(
-        `Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`,
-      );
     }
   }
 }

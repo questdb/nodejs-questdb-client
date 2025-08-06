@@ -1,10 +1,12 @@
+import { readFileSync } from "node:fs";
 import { PathOrFileDescriptor } from "fs";
 import { Agent } from "undici";
 import http from "http";
 import https from "https";
 
 import { Logger } from "./logging";
-import { fetchJson } from "./utils";
+import { fetchJson, isBoolean, isInteger } from "./utils";
+import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
@@ -234,8 +236,21 @@ class SenderOptions {
 
     const url = `${options.protocol}://${options.host}:${options.port}/settings`;
     const settings: {
-      config: { LINE_PROTO_SUPPORT_VERSION: number[] };
-    } = await fetchJson(url);
+      config: { [LINE_PROTO_SUPPORT_VERSION]: number[] };
+    } = await fetchJson(
+      url,
+      isInteger(options.request_timeout, 1)
+        ? options.request_timeout
+        : DEFAULT_REQUEST_TIMEOUT,
+      new Agent({
+        connect: {
+          ca: options.tls_ca ? readFileSync(options.tls_ca) : undefined,
+          rejectUnauthorized: isBoolean(options.tls_verify)
+            ? options.tls_verify
+            : true,
+        },
+      }),
+    );
     const supportedVersions: string[] = (
       settings.config[LINE_PROTO_SUPPORT_VERSION] ?? []
     ).map((version: unknown) => String(version));
