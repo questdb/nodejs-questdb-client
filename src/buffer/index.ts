@@ -61,7 +61,7 @@ interface SenderBuffer {
   toBufferNew(pos?: number): Buffer | null;
 
   /**
-   * Write the table name into the buffer.
+   * Writes the table name into the buffer.
    *
    * @param {string} table - Table name.
    * @return {Sender} Returns with a reference to this sender.
@@ -69,7 +69,7 @@ interface SenderBuffer {
   table(table: string): SenderBuffer;
 
   /**
-   * Write a symbol name and value into the buffer.
+   * Writes a symbol name and value into the buffer.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -78,7 +78,7 @@ interface SenderBuffer {
   symbol(name: string, value: unknown): SenderBuffer;
 
   /**
-   * Write a string column with its value into the buffer.
+   * Writes a string column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -87,7 +87,7 @@ interface SenderBuffer {
   stringColumn(name: string, value: string): SenderBuffer;
 
   /**
-   * Write a boolean column with its value into the buffer.
+   * Writes a boolean column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -96,7 +96,7 @@ interface SenderBuffer {
   booleanColumn(name: string, value: boolean): SenderBuffer;
 
   /**
-   * Write a float column with its value into the buffer.
+   * Writes a float column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -105,7 +105,7 @@ interface SenderBuffer {
   floatColumn(name: string, value: number): SenderBuffer;
 
   /**
-   * Write an integer column with its value into the buffer.
+   * Writes an integer column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -115,7 +115,7 @@ interface SenderBuffer {
   intColumn(name: string, value: number): SenderBuffer;
 
   /**
-   * Write a timestamp column with its value into the buffer.
+   * Writes a timestamp column with its value into the buffer.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
@@ -129,7 +129,7 @@ interface SenderBuffer {
   ): SenderBuffer;
 
   /**
-   * Closing the row after writing the designated timestamp into the buffer.
+   * Closes the row after writing the designated timestamp into the buffer.
    *
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
@@ -137,7 +137,7 @@ interface SenderBuffer {
   at(timestamp: number | bigint, unit: TimestampUnit): void;
 
   /**
-   * Closing the row without writing designated timestamp into the buffer. <br>
+   * Closes the row without writing designated timestamp into the buffer. <br>
    * Designated timestamp will be populated by the server on this record.
    */
   atNow(): void;
