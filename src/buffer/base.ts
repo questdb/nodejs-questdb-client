@@ -10,7 +10,6 @@ import {
   DEFAULT_MAX_BUFFER_SIZE,
 } from "./index";
 import {
-  ArrayPrimitive,
   isInteger,
   timestampToMicros,
   timestampToNanos,
@@ -27,8 +26,8 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
 abstract class SenderBufferBase implements SenderBuffer {
   private bufferSize: number;
   private readonly maxBufferSize: number;
-  private buffer: Buffer<ArrayBuffer>;
-  private position: number;
+  protected buffer: Buffer<ArrayBuffer>;
+  protected position: number;
   private endOfLastRow: number;
 
   private hasTable: boolean;
@@ -398,43 +397,6 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.position = this.buffer.writeDoubleLE(data, this.position);
   }
 
-  protected writeArray(
-    arr: unknown[],
-    dimensions: number[],
-    type: ArrayPrimitive,
-  ) {
-    this.checkCapacity([], 1 + dimensions.length * 4);
-    this.writeByte(dimensions.length);
-    for (let i = 0; i < dimensions.length; i++) {
-      this.writeInt(dimensions[i]);
-    }
-
-    this.checkCapacity([], SenderBufferBase.arraySize(dimensions, type));
-    this.writeArrayValues(arr, dimensions);
-  }
-
-  private writeArrayValues(arr: unknown[], dimensions: number[]) {
-    if (Array.isArray(arr[0])) {
-      for (let i = 0; i < arr.length; i++) {
-        this.writeArrayValues(arr[i] as unknown[], dimensions);
-      }
-    } else {
-      const type = typeof arr[0];
-      switch (type) {
-        case "number":
-          for (let i = 0; i < arr.length; i++) {
-            this.position = this.buffer.writeDoubleLE(
-              arr[i] as number,
-              this.position,
-            );
-          }
-          break;
-        default:
-          throw new Error(`Unsupported array type [type=${type}]`);
-      }
-    }
-  }
-
   private writeEscaped(data: string, quoted = false) {
     for (const ch of data) {
       if (ch > "\\") {
@@ -469,25 +431,6 @@ abstract class SenderBufferBase implements SenderBuffer {
           this.write(ch);
           break;
       }
-    }
-  }
-
-  private static arraySize(dimensions: number[], type: ArrayPrimitive): number {
-    let numOfElements = 1;
-    for (let i = 0; i < dimensions.length; i++) {
-      numOfElements *= dimensions[i];
-    }
-
-    switch (type) {
-      case "number":
-        return numOfElements * 8;
-      case "boolean":
-        return numOfElements;
-      case "string":
-        // in case of string[] capacity check is done separately for each array element
-        return 0;
-      default:
-        throw new Error(`Unsupported array type [type=${type}]`);
     }
   }
 }

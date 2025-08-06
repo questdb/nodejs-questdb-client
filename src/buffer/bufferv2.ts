@@ -2,7 +2,7 @@
 import { SenderOptions } from "../options";
 import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
-import { getDimensions, validateArray } from "../utils";
+import { ArrayPrimitive, getDimensions, validateArray } from "../utils";
 
 const COLUMN_TYPE_DOUBLE: number = 10;
 const COLUMN_TYPE_NULL: number = 33;
@@ -64,6 +64,62 @@ class SenderBufferV2 extends SenderBufferBase {
       }
     });
     return this;
+  }
+
+  private writeArray(
+    arr: unknown[],
+    dimensions: number[],
+    type: ArrayPrimitive,
+  ) {
+    this.checkCapacity([], 1 + dimensions.length * 4);
+    this.writeByte(dimensions.length);
+    for (let i = 0; i < dimensions.length; i++) {
+      this.writeInt(dimensions[i]);
+    }
+
+    this.checkCapacity([], SenderBufferV2.arraySize(dimensions, type));
+    this.writeArrayValues(arr, dimensions);
+  }
+
+  private writeArrayValues(arr: unknown[], dimensions: number[]) {
+    if (Array.isArray(arr[0])) {
+      for (let i = 0; i < arr.length; i++) {
+        this.writeArrayValues(arr[i] as unknown[], dimensions);
+      }
+    } else {
+      const type = typeof arr[0];
+      switch (type) {
+        case "number":
+          for (let i = 0; i < arr.length; i++) {
+            this.position = this.buffer.writeDoubleLE(
+              arr[i] as number,
+              this.position,
+            );
+          }
+          break;
+        default:
+          throw new Error(`Unsupported array type [type=${type}]`);
+      }
+    }
+  }
+
+  private static arraySize(dimensions: number[], type: ArrayPrimitive): number {
+    let numOfElements = 1;
+    for (let i = 0; i < dimensions.length; i++) {
+      numOfElements *= dimensions[i];
+    }
+
+    switch (type) {
+      case "number":
+        return numOfElements * 8;
+      case "boolean":
+        return numOfElements;
+      case "string":
+        // in case of string[] capacity check is done separately for each array element
+        return 0;
+      default:
+        throw new Error(`Unsupported array type [type=${type}]`);
+    }
   }
 }
 
