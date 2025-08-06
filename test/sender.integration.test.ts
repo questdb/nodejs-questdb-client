@@ -246,6 +246,217 @@ describe("Sender tests with containerized QuestDB instance", () => {
     await sender.close();
   });
 
+  it("can ingest data via HTTP with protocol v2", async () => {
+    const tableName = "test_http_v2";
+    const schema = [
+      { name: "location", type: "SYMBOL" },
+      { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 1 },
+      { name: "timestamp", type: "TIMESTAMP" },
+    ];
+
+    const sender = await Sender.fromConfig(
+      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)};auto_flush_rows=1`,
+    );
+
+    // ingest via client
+    await sender
+      .table(tableName)
+      .symbol("location", "us")
+      .arrayColumn("temperatures", [17.1, 17.7, 18.4])
+      .at(1658484765000000000n, "ns");
+
+    // wait for the table
+    await waitForTable(container, tableName);
+
+    // query table
+    const select1Result = await runSelect(container, tableName, 1);
+    expect(select1Result.query).toBe(tableName);
+    expect(select1Result.count).toBe(1);
+    expect(select1Result.columns).toStrictEqual(schema);
+    expect(select1Result.dataset).toStrictEqual([
+      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000Z"],
+    ]);
+
+    // ingest via client, add new columns
+    await sender
+      .table(tableName)
+      .symbol("location", "us")
+      .arrayColumn("temperatures", [17.36, 18.4, 19.6, 18.7])
+      .at(1658484765000666000n, "ns");
+    await sender
+      .table(tableName)
+      .symbol("location", "emea")
+      .symbol("city", "london")
+      .arrayColumn("temperatures", [18.5, 18.4, 19.2])
+      .floatColumn("daily_avg_temp", 18.7)
+      .at(1658484765001234000n, "ns");
+
+    // query table
+    const select2Result = await runSelect(container, tableName, 3);
+    expect(select2Result.query).toBe(tableName);
+    expect(select2Result.count).toBe(3);
+    expect(select2Result.columns).toStrictEqual([
+      { name: "location", type: "SYMBOL" },
+      { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 1 },
+      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "city", type: "SYMBOL" },
+      { name: "daily_avg_temp", type: "DOUBLE" },
+    ]);
+    expect(select2Result.dataset).toStrictEqual([
+      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000Z", null, null],
+      [
+        "us",
+        [17.36, 18.4, 19.6, 18.7],
+        "2022-07-22T10:12:45.000666Z",
+        null,
+        null,
+      ],
+      [
+        "emea",
+        [18.5, 18.4, 19.2],
+        "2022-07-22T10:12:45.001234Z",
+        "london",
+        18.7,
+      ],
+    ]);
+
+    await sender.close();
+  });
+
+  it("can ingest NULL array via HTTP with protocol v2", async () => {
+    const tableName = "test_http_v2_null";
+    const schema = [
+      { name: "location", type: "SYMBOL" },
+      { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 1 },
+      { name: "timestamp", type: "TIMESTAMP" },
+    ];
+
+    const sender = await Sender.fromConfig(
+      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)}`,
+    );
+
+    // ingest via client
+    await sender
+      .table(tableName)
+      .symbol("location", "us")
+      .arrayColumn("temperatures", [17.1, 17.7, 18.4])
+      .at(1658484765000000000n, "ns");
+    await sender
+      .table(tableName)
+      .symbol("location", "gb")
+      .at(1658484765000666000n, "ns");
+    await sender.flush();
+
+    // wait for the table
+    await waitForTable(container, tableName);
+
+    // query table
+    const select1Result = await runSelect(container, tableName, 2);
+    expect(select1Result.query).toBe(tableName);
+    expect(select1Result.count).toBe(2);
+    expect(select1Result.columns).toStrictEqual(schema);
+    expect(select1Result.dataset).toStrictEqual([
+      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000Z"],
+      ["gb", null, "2022-07-22T10:12:45.000666Z"],
+    ]);
+
+    await sender.close();
+  });
+
+  it("can ingest empty array via HTTP with protocol v2", async () => {
+    const tableName = "test_http_v2_empty";
+    const schema = [
+      { name: "location", type: "SYMBOL" },
+      { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 1 },
+      { name: "timestamp", type: "TIMESTAMP" },
+    ];
+
+    const sender = await Sender.fromConfig(
+      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)}`,
+    );
+
+    // ingest via client
+    await sender
+      .table(tableName)
+      .symbol("location", "us")
+      .arrayColumn("temperatures", [17.1, 17.7, 18.4])
+      .at(1658484765000000000n, "ns");
+    await sender
+      .table(tableName)
+      .symbol("location", "gb")
+      .arrayColumn("temperatures", [])
+      .at(1658484765000666000n, "ns");
+    await sender.flush();
+
+    // wait for the table
+    await waitForTable(container, tableName);
+
+    // query table
+    const select1Result = await runSelect(container, tableName, 2);
+    expect(select1Result.query).toBe(tableName);
+    expect(select1Result.count).toBe(2);
+    expect(select1Result.columns).toStrictEqual(schema);
+    expect(select1Result.dataset).toStrictEqual([
+      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000Z"],
+      ["gb", [], "2022-07-22T10:12:45.000666Z"],
+    ]);
+
+    await sender.close();
+  });
+
+  it("can ingest multi dimensional empty array via HTTP with protocol v2", async () => {
+    const tableName = "test_http_v2_multi_empty";
+    const schema = [
+      { name: "location", type: "SYMBOL" },
+      { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 2 },
+      { name: "timestamp", type: "TIMESTAMP" },
+    ];
+
+    const sender = await Sender.fromConfig(
+      `http::addr=${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)}`,
+    );
+
+    // ingest via client
+    await sender
+      .table(tableName)
+      .symbol("location", "us")
+      .arrayColumn("temperatures", [
+        [17.1, 17.7],
+        [18.4, 18.7],
+      ])
+      .at(1658484765000000000n, "ns");
+    await sender
+      .table(tableName)
+      .symbol("location", "gb")
+      .arrayColumn("temperatures", [[], []])
+      .at(1658484765000666000n, "ns");
+    await sender.flush();
+
+    // wait for the table
+    await waitForTable(container, tableName);
+
+    // query table
+    const select1Result = await runSelect(container, tableName, 2);
+    expect(select1Result.query).toBe(tableName);
+    expect(select1Result.count).toBe(2);
+    expect(select1Result.columns).toStrictEqual(schema);
+    expect(select1Result.dataset).toStrictEqual([
+      [
+        "us",
+        [
+          [17.1, 17.7],
+          [18.4, 18.7],
+        ],
+        "2022-07-22T10:12:45.000000Z",
+      ],
+      // todo: this should be [[], []]
+      //  probably a server bug
+      ["gb", [], "2022-07-22T10:12:45.000666Z"],
+    ]);
+
+    await sender.close();
+  }, 60000000);
+
   it("can ingest data via HTTP with auto flush interval", async () => {
     const tableName = "test_http_interval";
     const schema = [

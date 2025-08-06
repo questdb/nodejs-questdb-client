@@ -218,19 +218,39 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("does not accept empty array", async function () {
+  it("accepts empty array", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "2",
       host: "host",
       init_buf_size: 1024,
     });
-    sender.table("tableName");
-    expect(() => sender.arrayColumn("arrayCol", [])).toThrow(
-      "Zero length array not supported",
+    await sender.table("tableName").arrayColumn("arrayCol", []).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") + " 0e 0a 01 00 00 00 00 " + toHex("\n"),
     );
-    expect(() => sender.arrayColumn("arrayCol", [[], []])).toThrow(
-      "Zero length array not supported",
+    await sender.close();
+  });
+
+  it("accepts multi dimensional empty array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", [
+        [[], []],
+        [[], []],
+        [[], []],
+      ])
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 03 03 00 00 00 02 00 00 00 00 00 00 00 " +
+        toHex("\n"),
     );
     await sender.close();
   });

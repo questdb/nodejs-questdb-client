@@ -43,9 +43,6 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
 function getDimensions(data: unknown) {
   const dimensions: number[] = [];
   while (Array.isArray(data)) {
-    if (data.length === 0) {
-      throw new Error("Zero length array not supported");
-    }
     dimensions.push(data.length);
     data = data[0];
   }
@@ -88,7 +85,7 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
       }
     } else {
       // leaf level, expecting primitives
-      if (expectedType === null) {
+      if (expectedType === null && array[0]) {
         expectedType = typeof array[0] as ArrayPrimitive;
       }
 
@@ -96,7 +93,9 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
         const currentType = typeof array[i] as ArrayPrimitive;
         if (currentType !== expectedType) {
           throw new Error(
-            `Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]`,
+            expectedType !== null
+              ? `Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]`
+              : `Unsupported array type [type=${currentType}]`,
           );
         }
       }

@@ -87,7 +87,7 @@ class SenderBufferV2 extends SenderBufferBase {
         this.writeArrayValues(arr[i] as unknown[], dimensions);
       }
     } else {
-      const type = typeof arr[0];
+      const type = arr[0] ? typeof arr[0] : null;
       switch (type) {
         case "number":
           for (let i = 0; i < arr.length; i++) {
@@ -96,6 +96,9 @@ class SenderBufferV2 extends SenderBufferBase {
               this.position,
             );
           }
+          break;
+        case null:
+          // empty array
           break;
         default:
           throw new Error(`Unsupported array type [type=${type}]`);
@@ -116,6 +119,9 @@ class SenderBufferV2 extends SenderBufferBase {
         return numOfElements;
       case "string":
         // in case of string[] capacity check is done separately for each array element
+        return 0;
+      case null:
+        // empty array
         return 0;
       default:
         throw new Error(`Unsupported array type [type=${type}]`);
