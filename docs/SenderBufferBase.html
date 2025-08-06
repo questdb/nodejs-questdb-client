@@ -30,9 +30,8 @@
     
         <h2><span class="attribs"><span class="type-signature"></span></span>SenderBufferBase<span class="signature">(options)</span><span class="type-signature"></span></h2>
         
-            <div class="class-description">Abstract base class for QuestDB line protocol buffer implementations.
-Provides common functionality for building line protocol messages including
-table names, symbols, columns, and timestamps.</div>
+            <div class="class-description">Abstract base class for SenderBuffer implementations. <br>
+Provides common functionality for writing data into the buffer.</div>
         
     
 </header>
@@ -96,13 +95,19 @@ table names, symbols, columns, and timestamps.</div>
 
             <td class="type">
             
+                
+<span class="param-type"><a href="SenderOptions.html">SenderOptions</a></span>
+
+
+            
             </td>
 
             
 
             
 
-            <td class="description last">Sender configuration object containing buffer and naming options</td>
+            <td class="description last">Sender configuration object. <br>
+See SenderOptions documentation for detailed description of configuration options.</td>
         </tr>
 
     
@@ -143,7 +148,7 @@ table names, symbols, columns, and timestamps.</div>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1319">line 1319</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1358">line 1358</a>
     </li></ul></dd>
     
 
@@ -207,7 +212,7 @@ table names, symbols, columns, and timestamps.</div>
 
 
 <div class="description">
-    Closing the row after writing the designated timestamp into the buffer of the sender.
+    Closes the row after writing the designated timestamp into the buffer.
 </div>
 
 
@@ -358,7 +363,7 @@ table names, symbols, columns, and timestamps.</div>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1515">line 1515</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1556">line 1556</a>
     </li></ul></dd>
     
 
@@ -402,7 +407,7 @@ table names, symbols, columns, and timestamps.</div>
 
 
 <div class="description">
-    Closing the row without writing designated timestamp into the buffer of the sender. <br>
+    Closes the row without writing designated timestamp into the buffer. <br>
 Designated timestamp will be populated by the server on this record.
 </div>
 
@@ -447,7 +452,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1535">line 1535</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1576">line 1576</a>
     </li></ul></dd>
     
 
@@ -483,7 +488,7 @@ Designated timestamp will be populated by the server on this record.
     
 
     
-    <h4 class="name" id="booleanColumn"><span class="type-signature"></span>booleanColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
+    <h4 class="name" id="booleanColumn"><span class="type-signature"></span>booleanColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {SenderBuffer}</span></h4>
     
 
     
@@ -491,7 +496,8 @@ Designated timestamp will be populated by the server on this record.
 
 
 <div class="description">
-    Write a boolean column with its value into the buffer of the sender.
+    Writes a boolean column with its value into the buffer. <br>
+Use it to insert into BOOLEAN columns.
 </div>
 
 
@@ -607,7 +613,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1461">line 1461</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1499">line 1499</a>
     </li></ul></dd>
     
 
@@ -636,7 +642,7 @@ Designated timestamp will be populated by the server on this record.
 
         
 <div class="param-desc">
-    Returns with a reference to this sender.
+    Returns with a reference to this buffer.
 </div>
 
 
@@ -647,7 +653,7 @@ Designated timestamp will be populated by the server on this record.
     </dt>
     <dd>
         
-<span class="param-type"><a href="Sender.html">Sender</a></span>
+<span class="param-type">SenderBuffer</span>
 
 
     </dd>
@@ -791,7 +797,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1547">line 1547</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1594">line 1594</a>
     </li></ul></dd>
     
 
@@ -827,7 +833,7 @@ Designated timestamp will be populated by the server on this record.
     
 
     
-    <h4 class="name" id="compact"><span class="type-signature"></span>compact<span class="signature">()</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="currentPosition"><span class="type-signature"></span>currentPosition<span class="signature">()</span><span class="type-signature"></span></h4>
     
 
     
@@ -835,8 +841,8 @@ Designated timestamp will be populated by the server on this record.
 
 
 <div class="description">
-    Compacts the buffer by removing data from completed rows.
-Moves any remaining data to the beginning of the buffer.
+    Returns the current position of the buffer. <br>
+New data will be written into the buffer starting from this position.
 </div>
 
 
@@ -880,7 +886,7 @@ Moves any remaining data to the beginning of the buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1563">line 1563</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1587">line 1587</a>
     </li></ul></dd>
     
 
@@ -916,7 +922,7 @@ Moves any remaining data to the beginning of the buffer.
     
 
     
-    <h4 class="name" id="intColumn"><span class="type-signature"></span>intColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
+    <h4 class="name" id="intColumn"><span class="type-signature"></span>intColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {SenderBuffer}</span></h4>
     
 
     
@@ -924,7 +930,8 @@ Moves any remaining data to the beginning of the buffer.
 
 
 <div class="description">
-    Write an integer column with its value into the buffer of the sender.
+    Writes a 64-bit signed integer into the buffer. <br>
+Use it to insert into LONG, INT, SHORT and BYTE columns.
 </div>
 
 
@@ -1040,274 +1047,7 @@ Moves any remaining data to the beginning of the buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1474">line 1474</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Returns with a reference to this sender.
-</div>
-
-
-
-<dl>
-    <dt>
-        Type
-    </dt>
-    <dd>
-        
-<span class="param-type"><a href="Sender.html">Sender</a></span>
-
-
-    </dd>
-</dl>
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id="reset"><span class="type-signature"></span>reset<span class="signature">()</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Resets the buffer, data added to the buffer will be lost. <br>
-In other words it clears the buffer and sets the writing position to the beginning of the buffer.
-</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1359">line 1359</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Returns with a reference to this sender.
-</div>
-
-
-
-<dl>
-    <dt>
-        Type
-    </dt>
-    <dd>
-        
-<span class="param-type"><a href="Sender.html">Sender</a></span>
-
-
-    </dd>
-</dl>
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id="resize"><span class="type-signature"></span>resize<span class="signature">(bufferSize)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Extends the size of the sender's buffer.
-Can be used to increase the size of buffer if overflown.
-The buffer's content is copied into the new buffer.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>bufferSize</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">New size of the buffer used by the sender, provided in bytes</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1339">line 1339</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1514">line 1514</a>
     </li></ul></dd>
     
 
@@ -1336,7 +1076,7 @@ The buffer's content is copied into the new buffer.
 
     <div class="param-desc">
     
-        Error if the requested buffer size exceeds the maximum allowed size
+        Error if the value is not an integer
     
     </div>
 
@@ -1344,6 +1084,28 @@ The buffer's content is copied into the new buffer.
     
 
 
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Returns with a reference to this buffer.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">SenderBuffer</span>
+
+
+    </dd>
+</dl>
+
+    
 
 
 
@@ -1355,7 +1117,7 @@ The buffer's content is copied into the new buffer.
     
 
     
-    <h4 class="name" id="stringColumn"><span class="type-signature"></span>stringColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
+    <h4 class="name" id="reset"><span class="type-signature"></span>reset<span class="signature">()</span><span class="type-signature"> &rarr; {SenderBuffer}</span></h4>
     
 
     
@@ -1363,7 +1125,119 @@ The buffer's content is copied into the new buffer.
 
 
 <div class="description">
-    Write a string column with its value into the buffer of the sender.
+    Resets the buffer, data sitting in the buffer will be lost. <br>
+In other words it clears the buffer, and sets the writing position to the beginning of the buffer.
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1396">line 1396</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Returns with a reference to this buffer.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">SenderBuffer</span>
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
+    <h4 class="name" id="stringColumn"><span class="type-signature"></span>stringColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {SenderBuffer}</span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Writes a string column with its value into the buffer. <br>
+Use it to insert into VARCHAR and STRING columns.
 </div>
 
 
@@ -1479,7 +1353,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1444">line 1444</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1481">line 1481</a>
     </li></ul></dd>
     
 
@@ -1508,7 +1382,7 @@ The buffer's content is copied into the new buffer.
 
         
 <div class="param-desc">
-    Returns with a reference to this sender.
+    Returns with a reference to this buffer.
 </div>
 
 
@@ -1519,7 +1393,7 @@ The buffer's content is copied into the new buffer.
     </dt>
     <dd>
         
-<span class="param-type"><a href="Sender.html">Sender</a></span>
+<span class="param-type">SenderBuffer</span>
 
 
     </dd>
@@ -1537,7 +1411,7 @@ The buffer's content is copied into the new buffer.
     
 
     
-    <h4 class="name" id="symbol"><span class="type-signature"></span>symbol<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
+    <h4 class="name" id="symbol"><span class="type-signature"></span>symbol<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {SenderBuffer}</span></h4>
     
 
     
@@ -1545,7 +1419,8 @@ The buffer's content is copied into the new buffer.
 
 
 <div class="description">
-    Write a symbol name and value into the buffer of the sender.
+    Writes a symbol name and value into the buffer. <br>
+Use it to insert into SYMBOL columns.
 </div>
 
 
@@ -1661,7 +1536,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1418">line 1418</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1454">line 1454</a>
     </li></ul></dd>
     
 
@@ -1690,7 +1565,7 @@ The buffer's content is copied into the new buffer.
 
         
 <div class="param-desc">
-    Returns with a reference to this sender.
+    Returns with a reference to this buffer.
 </div>
 
 
@@ -1701,7 +1576,7 @@ The buffer's content is copied into the new buffer.
     </dt>
     <dd>
         
-<span class="param-type"><a href="Sender.html">Sender</a></span>
+<span class="param-type">SenderBuffer</span>
 
 
     </dd>
@@ -1719,7 +1594,7 @@ The buffer's content is copied into the new buffer.
     
 
     
-    <h4 class="name" id="table"><span class="type-signature"></span>table<span class="signature">(table)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
+    <h4 class="name" id="table"><span class="type-signature"></span>table<span class="signature">(table)</span><span class="type-signature"> &rarr; {SenderBuffer}</span></h4>
     
 
     
@@ -1727,7 +1602,7 @@ The buffer's content is copied into the new buffer.
 
 
 <div class="description">
-    Write the table name into the buffer of the sender.
+    Writes the table name into the buffer.
 </div>
 
 
@@ -1820,7 +1695,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1397">line 1397</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1432">line 1432</a>
     </li></ul></dd>
     
 
@@ -1849,7 +1724,7 @@ The buffer's content is copied into the new buffer.
 
         
 <div class="param-desc">
-    Returns with a reference to this sender.
+    Returns with a reference to this buffer.
 </div>
 
 
@@ -1860,7 +1735,7 @@ The buffer's content is copied into the new buffer.
     </dt>
     <dd>
         
-<span class="param-type"><a href="Sender.html">Sender</a></span>
+<span class="param-type">SenderBuffer</span>
 
 
     </dd>
@@ -1878,7 +1753,7 @@ The buffer's content is copied into the new buffer.
     
 
     
-    <h4 class="name" id="timestampColumn"><span class="type-signature"></span>timestampColumn<span class="signature">(name, value, unit<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
+    <h4 class="name" id="timestampColumn"><span class="type-signature"></span>timestampColumn<span class="signature">(name, value, unit<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {SenderBuffer}</span></h4>
     
 
     
@@ -1886,7 +1761,8 @@ The buffer's content is copied into the new buffer.
 
 
 <div class="description">
-    Write a timestamp column with its value into the buffer of the sender.
+    Writes a timestamp column with its value into the buffer. <br>
+Use it to insert into TIMESTAMP columns.
 </div>
 
 
@@ -2072,7 +1948,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1495">line 1495</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1536">line 1536</a>
     </li></ul></dd>
     
 
@@ -2101,7 +1977,7 @@ The buffer's content is copied into the new buffer.
 
         
 <div class="param-desc">
-    Returns with a reference to this sender.
+    Returns with a reference to this buffer.
 </div>
 
 
@@ -2112,7 +1988,7 @@ The buffer's content is copied into the new buffer.
     </dt>
     <dd>
         
-<span class="param-type"><a href="Sender.html">Sender</a></span>
+<span class="param-type">SenderBuffer</span>
 
 
     </dd>
@@ -2130,67 +2006,19 @@ The buffer's content is copied into the new buffer.
     
 
     
-    <h4 class="name" id="write"><span class="type-signature"></span>write<span class="signature">(data)</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="toBufferNew"><span class="type-signature"></span>toBufferNew<span class="signature">()</span><span class="type-signature"> &rarr; {Buffer}</span></h4>
     
 
     
 
 
 
-<div class="description">
-    Writes string data to the buffer at the current position.
-</div>
 
 
 
 
 
 
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>data</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">String data to write</td>
-        </tr>
-
-    
-    </tbody>
-</table>
 
 
 
@@ -2226,7 +2054,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1600">line 1600</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1418">line 1418</a>
     </li></ul></dd>
     
 
@@ -2251,78 +2079,54 @@ The buffer's content is copied into the new buffer.
 
 
 
-
-
-
-
+<h5>Returns:</h5>
 
         
-            
-
-    
-
-    
-    <h4 class="name" id="writeArray"><span class="type-signature"></span>writeArray<span class="signature">(arr)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Writes array data to the buffer including dimensions and values.
+<div class="param-desc">
+    Returns a cropped buffer ready to send to the server, or null if there is nothing to send. <br>
+The returned buffer is a copy of this buffer.
+It also compacts the buffer.
 </div>
 
 
 
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Buffer</span>
 
 
+    </dd>
+</dl>
 
-
-
-
-    <h5>Parameters:</h5>
     
 
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
 
-        <th>Type</th>
+
+
 
         
+            
 
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
     
 
-        <tr>
-            
-                <td class="name"><code>arr</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Array to write to the buffer</td>
-        </tr>
+    
+    <h4 class="name" id="toBufferView"><span class="type-signature"></span>toBufferView<span class="signature">()</span><span class="type-signature"> &rarr; {Buffer}</span></h4>
+    
 
     
-    </tbody>
-</table>
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2358,7 +2162,7 @@ The buffer's content is copied into the new buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1624">line 1624</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1411">line 1411</a>
     </li></ul></dd>
     
 
@@ -2383,588 +2187,30 @@ The buffer's content is copied into the new buffer.
 
 
 
-
-
-
-
+<h5>Returns:</h5>
 
         
-            
-
-    
-
-    
-    <h4 class="name" id="writeByte"><span class="type-signature"></span>writeByte<span class="signature">(data)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Writes a single byte to the buffer at the current position.
+<div class="param-desc">
+    Returns a cropped buffer, or null if there is nothing to send. <br>
+The returned buffer is backed by this buffer instance, meaning the view can change as the buffer is mutated.
+Used only in tests to assert the buffer's content.
 </div>
 
 
 
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
         
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>data</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Byte value to write</td>
-        </tr>
-
-    
-    </tbody>
-</table>
+<span class="param-type">Buffer</span>
 
 
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1606">line 1606</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
+    </dd>
 </dl>
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-            
-
     
-
-    
-    <h4 class="name" id="writeColumn"><span class="type-signature"></span>writeColumn<span class="signature">(name, value, writeValue, valueType)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Common logic for writing column data to the buffer.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>name</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Column name</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>value</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Column value</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>writeValue</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Function to write the value portion to the buffer</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>valueType</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Optional expected type for validation</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1576">line 1576</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id="writeDouble"><span class="type-signature"></span>writeDouble<span class="signature">(data)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Writes a double-precision float to the buffer in little-endian format.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>data</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Double value to write</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1618">line 1618</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id="writeInt"><span class="type-signature"></span>writeInt<span class="signature">(data)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Writes a 32-bit integer to the buffer in little-endian format.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>data</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Integer value to write</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1612">line 1612</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -2986,13 +2232,13 @@ The buffer's content is copied into the new buffer.
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#isRetryable">isRetryable</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateArray">validateArray</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Jul 31 2025 11:43:45 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Wed Aug 06 2025 18:31:40 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

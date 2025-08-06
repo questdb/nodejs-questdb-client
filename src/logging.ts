@@ -12,8 +12,9 @@ const DEFAULT_CRITICALITY = LOG_LEVELS.info.criticality;
 
 /**
  * Logger function type definition.
- * @param level - The log level for the message
- * @param message - The message to log, either a string or Error object
+ *
+ * @param {'error'|'warn'|'info'|'debug'} level - The log level for the message
+ * @param {string | Error} message - The message to log, either a string or Error object
  */
 type Logger = (
   level: "error" | "warn" | "info" | "debug",
@@ -25,8 +26,8 @@ type Logger = (
  * Supported logging levels are `error`, `warn`, `info` and `debug`. <br>
  * Throws an error if logging level is invalid.
  *
- * @param {'error'|'warn'|'info'|'debug'} level - The log level of the message.
- * @param {string | Error} message - The log message.
+ * @param {'error'|'warn'|'info'|'debug'} level - The log level for the message
+ * @param {string | Error} message - The message to log, either a string or Error object
  */
 function log(
   level: "error" | "warn" | "info" | "debug",

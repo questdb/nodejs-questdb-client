@@ -30,8 +30,8 @@
     
         <h2><span class="attribs"><span class="type-signature"></span></span>SenderBufferV2<span class="signature">(options)</span><span class="type-signature"></span></h2>
         
-            <div class="class-description">Buffer implementation for QuestDB line protocol version 2.
-Supports all column types including arrays with binary encoding for doubles.</div>
+            <div class="class-description">Buffer implementation for protocol version 2.
+Sends floating point numbers in binary form.</div>
         
     
 </header>
@@ -95,13 +95,19 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
             <td class="type">
             
+                
+<span class="param-type"><a href="SenderOptions.html">SenderOptions</a></span>
+
+
+            
             </td>
 
             
 
             
 
-            <td class="description last">Sender configuration options</td>
+            <td class="description last">Sender configuration object. <br>
+See SenderOptions documentation for detailed description of configuration options.</td>
         </tr>
 
     
@@ -142,7 +148,7 @@ Supports all column types including arrays with binary encoding for doubles.</di
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1757">line 1757</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1760">line 1760</a>
     </li></ul></dd>
     
 
@@ -198,7 +204,7 @@ Supports all column types including arrays with binary encoding for doubles.</di
     
 
     
-    <h4 class="name" id="arrayColumn"><span class="type-signature"></span>arrayColumn<span class="signature">(name, value)</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="arrayColumn"><span class="type-signature"></span>arrayColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
     
 
     
@@ -247,6 +253,11 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
             <td class="type">
             
+                
+<span class="param-type">string</span>
+
+
+            
             </td>
 
             
@@ -264,6 +275,11 @@ Supports all column types including arrays with binary encoding for doubles.</di
             
 
             <td class="type">
+            
+                
+<span class="param-type">Array.&lt;unknown></span>
+
+
             
             </td>
 
@@ -312,7 +328,7 @@ Supports all column types including arrays with binary encoding for doubles.</di
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1784">line 1784</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1795">line 1795</a>
     </li></ul></dd>
     
 
@@ -341,7 +357,10 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
     <div class="param-desc">
     
-        Error if value is not an array when provided
+        Error if array validation fails:
+- value is not an array
+- or the shape of the array is irregular: the length of sub-arrays are different
+- or the array is not homogeneous: its elements are not all the same type
     
     </div>
 
@@ -353,10 +372,22 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
         
 <div class="param-desc">
-    Reference to this sender buffer for method chaining
+    Returns with a reference to this buffer.
 </div>
 
 
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type"><a href="Sender.html">Sender</a></span>
+
+
+    </dd>
+</dl>
 
     
 
@@ -370,7 +401,7 @@ Supports all column types including arrays with binary encoding for doubles.</di
     
 
     
-    <h4 class="name" id="floatColumn"><span class="type-signature"></span>floatColumn<span class="signature">(name, value)</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="floatColumn"><span class="type-signature"></span>floatColumn<span class="signature">(name, value)</span><span class="type-signature"> &rarr; {<a href="Sender.html">Sender</a>}</span></h4>
     
 
     
@@ -378,7 +409,8 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
 
 <div class="description">
-    Write a float column with its value into the buffer using v2 binary format.
+    Writes a 64-bit floating point value into the buffer using v2 serialization (binary format). <br>
+Use it to insert into DOUBLE or FLOAT database columns.
 </div>
 
 
@@ -419,13 +451,18 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
             <td class="type">
             
+                
+<span class="param-type">string</span>
+
+
+            
             </td>
 
             
 
             
 
-            <td class="description last">Column name</td>
+            <td class="description last">Column name.</td>
         </tr>
 
     
@@ -437,13 +474,18 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
             <td class="type">
             
+                
+<span class="param-type">number</span>
+
+
+            
             </td>
 
             
 
             
 
-            <td class="description last">Float value to write</td>
+            <td class="description last">Column value, accepts only number values.</td>
         </tr>
 
     
@@ -484,7 +526,7 @@ Supports all column types including arrays with binary encoding for doubles.</di
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1769">line 1769</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1776">line 1776</a>
     </li></ul></dd>
     
 
@@ -513,10 +555,22 @@ Supports all column types including arrays with binary encoding for doubles.</di
 
         
 <div class="param-desc">
-    Reference to this sender buffer for method chaining
+    Returns with a reference to this buffer.
 </div>
 
 
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type"><a href="Sender.html">Sender</a></span>
+
+
+    </dd>
+</dl>
 
     
 
@@ -540,13 +594,13 @@ Supports all column types including arrays with binary encoding for doubles.</di
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#isRetryable">isRetryable</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateArray">validateArray</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Jul 31 2025 11:43:45 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Wed Aug 06 2025 18:31:40 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

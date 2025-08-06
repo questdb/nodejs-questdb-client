@@ -26,11 +26,11 @@
     
     <section>
         <article>
-            <pre class="prettyprint source linenums"><code>var undici = require('undici');
+            <pre class="prettyprint source linenums"><code>var node_fs = require('node:fs');
+var undici = require('undici');
 var http = require('http');
 var https = require('https');
 var node_buffer = require('node:buffer');
-var node_fs = require('node:fs');
 var net = require('node:net');
 var tls = require('node:tls');
 var crypto = require('node:crypto');
@@ -70,8 +70,8 @@ const DEFAULT_CRITICALITY = LOG_LEVELS.info.criticality;
  * Supported logging levels are `error`, `warn`, `info` and `debug`. &lt;br>
  * Throws an error if logging level is invalid.
  *
- * @param {'error'|'warn'|'info'|'debug'} level - The log level of the message.
- * @param {string | Error} message - The log message.
+ * @param {'error'|'warn'|'info'|'debug'} level - The log level for the message
+ * @param {string | Error} message - The message to log, either a string or Error object
  */ function log(level, message) {
     const logLevel = LOG_LEVELS[level];
     if (!logLevel) {
@@ -83,26 +83,24 @@ const DEFAULT_CRITICALITY = LOG_LEVELS.info.criticality;
 }
 
 /**
- * Supported primitive types for QuestDB arrays.
- */ /**
  * Type guard to check if a value is a boolean.
- * @param value - The value to check
+ * @param {unknown} value - The value to check
  * @returns True if the value is a boolean, false otherwise
  */ function isBoolean(value) {
     return typeof value === "boolean";
 }
 /**
  * Type guard to check if a value is an integer within specified bounds.
- * @param value - The value to check
- * @param lowerBound - The minimum allowed value (inclusive)
+ * @param {unknown} value - The value to check
+ * @param {number} lowerBound - The minimum allowed value (inclusive)
  * @returns True if the value is an integer >= lowerBound, false otherwise
  */ function isInteger(value, lowerBound) {
     return typeof value === "number" &amp;&amp; Number.isInteger(value) &amp;&amp; value >= lowerBound;
 }
 /**
  * Converts a timestamp from the specified unit to microseconds.
- * @param timestamp - The timestamp value as a bigint
- * @param unit - The source timestamp unit
+ * @param {bigint} timestamp - The timestamp value as a bigint
+ * @param {TimestampUnit} unit - The source timestamp unit
  * @returns The timestamp converted to microseconds
  * @throws Error if the timestamp unit is unknown
  */ function timestampToMicros(timestamp, unit) {
@@ -119,8 +117,8 @@ const DEFAULT_CRITICALITY = LOG_LEVELS.info.criticality;
 }
 /**
  * Converts a timestamp from the specified unit to nanoseconds.
- * @param timestamp - The timestamp value as a bigint
- * @param unit - The source timestamp unit
+ * @param {bigint} timestamp - The timestamp value as a bigint
+ * @param {TimestampUnit} unit - The source timestamp unit
  * @returns The timestamp converted to nanoseconds
  * @throws Error if the timestamp unit is unknown
  */ function timestampToNanos(timestamp, unit) {
@@ -137,21 +135,28 @@ const DEFAULT_CRITICALITY = LOG_LEVELS.info.criticality;
 }
 /**
  * Analyzes the dimensions of a nested array structure.
- * @param data - The array to analyze
+ * @param {unknown} data - The array to analyze
  * @returns Array of dimension sizes at each nesting level
  * @throws Error if any dimension has zero length
  */ function getDimensions(data) {
     const dimensions = [];
     while(Array.isArray(data)){
-        if (data.length === 0) {
-            throw new Error("Zero length array not supported");
-        }
         dimensions.push(data.length);
         data = data[0];
     }
     return dimensions;
 }
-function validateArray(data, dimensions) {
+/**
+ * Validates an array structure. &lt;br>
+ * Validation fails if:
+ * - &lt;i>data&lt;/i> is not an array
+ * - the array is irregular: the length of its sub-arrays are different
+ * - the array is not homogenous: the array contains mixed types
+ * @param {unknown[]} data - The array to validate
+ * @param {number[]} dimensions - The shape of the array
+ * @returns The primitive type of the array's elements
+ * @throws Error if the validation fails
+ */ function validateArray(data, dimensions) {
     if (data === null || data === undefined) {
         return null;
     }
@@ -162,7 +167,7 @@ function validateArray(data, dimensions) {
     function checkArray(array, depth = 0, path = "") {
         const expectedLength = dimensions[depth];
         if (array.length !== expectedLength) {
-            throw new Error(`Length of arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`);
+            throw new Error(`Lengths of sub-arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`);
         }
         if (depth &lt; dimensions.length - 1) {
             // intermediate level, expecting arrays
@@ -174,13 +179,13 @@ function validateArray(data, dimensions) {
             }
         } else {
             // leaf level, expecting primitives
-            if (expectedType === null) {
+            if (expectedType === null &amp;&amp; array[0] !== undefined) {
                 expectedType = typeof array[0];
             }
             for(let i = 0; i &lt; array.length; i++){
                 const currentType = typeof array[i];
                 if (currentType !== expectedType) {
-                    throw new Error(`Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]`);
+                    throw new Error(expectedType !== null ? `Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]` : `Unsupported array type [type=${currentType}]`);
                 }
             }
         }
@@ -189,22 +194,115 @@ function validateArray(data, dimensions) {
     return expectedType;
 }
 /**
- * Fetches JSON data from a URL with error handling.
+ * Fetches JSON data from a URL.
  * @template T - The expected type of the JSON response
- * @param url - The URL to fetch from
+ * @param {string} url - The URL to fetch from
+ * @param {Agent} agent - HTTP agent to be used for the request
+ * @param {number} timeout - Request timeout, query will be aborted if not finished in time
  * @returns Promise resolving to the parsed JSON data
  * @throws Error if the request fails or returns a non-OK status
- */ async function fetchJson(url) {
+ */ async function fetchJson(url, timeout, agent) {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const timeoutId = setTimeout(()=>controller.abort(), timeout);
     let response;
     try {
-        response = await fetch(url);
+        response = await fetch(url, {
+            dispatcher: agent,
+            signal
+        });
     } catch (error) {
         throw new Error(`Failed to load ${url} [error=${error}]`);
+    } finally{
+        clearTimeout(timeoutId);
     }
     if (!response.ok) {
         throw new Error(`Failed to load ${url} [statusCode=${response.status} (${response.statusText})]`);
     }
     return await response.json();
+}
+
+// @ts-check
+// HTTP status code for successful request with no content.
+const HTTP_NO_CONTENT = 204;
+// Default number of rows that trigger auto-flush for HTTP transport.
+const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
+// Default minimum throughput for HTTP requests (100 KB/sec).
+const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400;
+// Default request timeout in milliseconds (10 seconds).
+const DEFAULT_REQUEST_TIMEOUT = 10000;
+// Default retry timeout in milliseconds (10 seconds).
+const DEFAULT_RETRY_TIMEOUT = 10000;
+// HTTP status codes that should trigger request retries.
+// Includes server errors and gateway timeouts that may be transient.
+const RETRIABLE_STATUS_CODES = [
+    500,
+    503,
+    504,
+    507,
+    509,
+    523,
+    524,
+    529,
+    599
+];
+/**
+ * Abstract base class for HTTP-based transport implementations. &lt;br>
+ * Provides common configuration and functionality for HTTP and HTTPS protocols.
+ */ class HttpTransportBase {
+    /**
+   * Creates a new HttpTransportBase instance.
+   *
+   * @param {SenderOptions} options - Sender configuration options including connection and authentication details
+   * @throws Error if required protocol or host options are missing
+   */ constructor(options){
+        if (!options || !options.protocol) {
+            throw new Error("The 'protocol' option is mandatory");
+        }
+        if (!options.host) {
+            throw new Error("The 'host' option is mandatory");
+        }
+        this.log = typeof options.log === "function" ? options.log : log;
+        this.tlsVerify = isBoolean(options.tls_verify) ? options.tls_verify : true;
+        this.tlsCA = options.tls_ca ? node_fs.readFileSync(options.tls_ca) : undefined;
+        this.username = options.username;
+        this.password = options.password;
+        this.token = options.token;
+        if (!options.port) {
+            options.port = 9000;
+        }
+        this.host = options.host;
+        this.port = options.port;
+        this.requestMinThroughput = isInteger(options.request_min_throughput, 0) ? options.request_min_throughput : DEFAULT_REQUEST_MIN_THROUGHPUT;
+        this.requestTimeout = isInteger(options.request_timeout, 1) ? options.request_timeout : DEFAULT_REQUEST_TIMEOUT;
+        this.retryTimeout = isInteger(options.retry_timeout, 0) ? options.retry_timeout : DEFAULT_RETRY_TIMEOUT;
+        switch(options.protocol){
+            case HTTP:
+                this.secure = false;
+                break;
+            case HTTPS:
+                this.secure = true;
+                break;
+            default:
+                throw new Error("The 'protocol' has to be 'http' or 'https' for the HTTP transport");
+        }
+    }
+    /**
+   * HTTP transport does not require explicit connection establishment.
+   * @throws Error indicating connect is not required for HTTP transport
+   */ connect() {
+        throw new Error("'connect()' is not required for HTTP transport");
+    }
+    /**
+   * HTTP transport does not require explicit connection closure.
+   * @returns Promise that resolves immediately
+   */ async close() {}
+    /**
+   * Gets the default auto-flush row count for HTTP transport.
+   * @returns {number} Default number of rows that trigger auto-flush
+   */ getDefaultAutoFlushRows() {
+        return DEFAULT_HTTP_AUTO_FLUSH_ROWS;
+    }
 }
 
 const HTTP_PORT = 9000;
@@ -233,10 +331,10 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
  * &lt;li> &lt;b>protocol&lt;/b>: &lt;i>enum, accepted values: http, https, tcp, tcps&lt;/i> - The protocol used to communicate with the server. &lt;br>
  * When &lt;i>https&lt;/i> or &lt;i>tcps&lt;/i> used, the connection is secured with TLS encryption.
  * &lt;/li>
- * &lt;li> &lt;b>protocol_version&lt;/b>: &lt;i>enum, accepted values: auto, 1, 2&lt;/i> - The line protocol version used for data serialization. &lt;br>
- * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles and supports array columns. &lt;br>
+ * &lt;li> &lt;b>protocol_version&lt;/b>: &lt;i>enum, accepted values: auto, 1, 2&lt;/i> - The protocol version used for data serialization. &lt;br>
+ * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles. &lt;br>
  * When set to 'auto' (default for HTTP/HTTPS), the client automatically negotiates the highest supported version with the server. &lt;br>
- * TCP/TCPS connections default to version 1. Version 2 provides better performance for numeric data and enables array column support.
+ * TCP/TCPS connections default to version 1.
  * &lt;/li>
  * &lt;li> addr: &lt;i>string&lt;/i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. &lt;br>
  * If no port is specified, a default will be used. &lt;br>
@@ -314,6 +412,9 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
  * &lt;br>
  * Other options
  * &lt;ul>
+ * &lt;li> stdlib_http: &lt;i>enum, accepted values: on, off&lt;/i> - With HTTP protocol the Undici library is used by default. By setting this option
+ * to &lt;i>on&lt;/i> the client switches to node's core http and https modules.
+ * &lt;/li>
  * &lt;li> max_name_len: &lt;i>integer&lt;/i> - The maximum length of a table or column name, the Sender defaults this parameter to 127. &lt;br>
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * &lt;/li>
@@ -327,8 +428,7 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
    * - 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
    * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
    * - 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
-   * An &lt;i>undici.Agent&lt;/i> object is expected. &lt;br>
-   * If the legacy HTTP transport is used, a &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
+   * Depends on which transport implementation and protocol used, one of the followings expected: &lt;i>undici.Agent&lt;/i>, &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i>.
    */ constructor(configurationString, extraOptions){
         parseConfigurationString(this, configurationString);
         if (extraOptions) {
@@ -343,13 +443,25 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
             this.agent = extraOptions.agent;
         }
     }
-    static async resolveAuto(options) {
+    /**
+   * Resolves the protocol version, if it is set to 'auto'. &lt;br>
+   * If TCP transport is used, the protocol version will default to 1.
+   * In case of HTTP transport the &lt;i>/settings&lt;/i> endpoint of the database is used to find the protocol versions
+   * supported by the server, and the highest will be selected.
+   * When calling the &lt;i>/settings&lt;/i> endpoint the timeout and TLs options are used from the &lt;i>options&lt;/i> object.
+   * @param {SenderOptions} options SenderOptions instance needs resolving protocol version
+   */ static async resolveAuto(options) {
         parseProtocolVersion(options);
         if (options.protocol_version !== PROTOCOL_VERSION_AUTO) {
             return options;
         }
         const url = `${options.protocol}://${options.host}:${options.port}/settings`;
-        const settings = await fetchJson(url);
+        const settings = await fetchJson(url, isInteger(options.request_timeout, 1) ? options.request_timeout : DEFAULT_REQUEST_TIMEOUT, new undici.Agent({
+            connect: {
+                ca: options.tls_ca ? node_fs.readFileSync(options.tls_ca) : undefined,
+                rejectUnauthorized: isBoolean(options.tls_verify) ? options.tls_verify : true
+            }
+        }));
         const supportedVersions = (settings.config[LINE_PROTO_SUPPORT_VERSION] ?? []).map((version)=>String(version));
         if (supportedVersions.length === 0) {
             options.protocol_version = PROTOCOL_VERSION_V1;
@@ -389,7 +501,7 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
    * - 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
    * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
    * - 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
-   * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
+   * Depends on which transport implementation and protocol used, one of the followings expected: &lt;i>undici.Agent&lt;/i>, &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i>.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
    */ static async fromConfig(configurationString, extraOptions) {
@@ -402,9 +514,9 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
    *
    * @param {object} extraOptions - Optional extra configuration. &lt;br>
    * - 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
-  }in  /**br>
+   * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
    * - 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
-   * A &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i> object is expected.
+   * Depends on which transport implementation and protocol used, one of the followings expected: &lt;i>undici.Agent&lt;/i>, &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i>.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
    */ static async fromEnv(extraOptions) {
@@ -424,7 +536,7 @@ function parseConfigurationString(options, configString) {
     parseTlsOptions(options);
     parseRequestTimeoutOptions(options);
     parseMaxNameLength(options);
-    parseLegacyTransport(options);
+    parseStdlibTransport(options);
 }
 function parseSettings(options, configString, position) {
     let index = configString.indexOf(";", position);
@@ -470,8 +582,8 @@ const ValidConfigKeys = [
     "init_buf_size",
     "max_buf_size",
     "max_name_len",
+    "stdlib_http",
     "tls_verify",
-    "legacy_http",
     "tls_ca",
     "tls_roots",
     "tls_roots_password"
@@ -589,8 +701,8 @@ function parseRequestTimeoutOptions(options) {
 function parseMaxNameLength(options) {
     parseInteger(options, "max_name_len", "max name length", 1);
 }
-function parseLegacyTransport(options) {
-    parseBoolean(options, "legacy_http", "legacy http");
+function parseStdlibTransport(options) {
+    parseBoolean(options, "stdlib_http", "stdlib http");
 }
 function parseBoolean(options, property, description, offValue = OFF) {
     if (options[property]) {
@@ -617,88 +729,6 @@ function parseInteger(options, property, description, lowerBound) {
         if (!Number.isInteger(options[property]) || options[property] &lt; lowerBound) {
             throw new Error(`Invalid ${description} option: ${options[property]}`);
         }
-    }
-}
-
-// @ts-check
-// HTTP status code for successful request with no content.
-const HTTP_NO_CONTENT = 204;
-// Default number of rows that trigger auto-flush for HTTP transport.
-const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
-// Default minimum throughput for HTTP requests (100 KB/sec).
-const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400;
-// Default request timeout in milliseconds (10 seconds).
-const DEFAULT_REQUEST_TIMEOUT = 10000;
-// Default retry timeout in milliseconds (10 seconds).
-const DEFAULT_RETRY_TIMEOUT = 10000;
-// HTTP status codes that should trigger request retries.
-// Includes server errors and gateway timeouts that may be transient.
-const RETRIABLE_STATUS_CODES = [
-    500,
-    503,
-    504,
-    507,
-    509,
-    523,
-    524,
-    529,
-    599
-];
-/**
- * Abstract base class for HTTP-based transport implementations. &lt;br>
- * Provides common configuration and functionality for HTTP and HTTPS protocols.
- */ class HttpTransportBase {
-    /**
-   * Creates a new HttpTransportBase instance.
-   * @param options - Sender configuration options including connection and authentication details
-   * @throws Error if required protocol or host options are missing
-   */ constructor(options){
-        if (!options || !options.protocol) {
-            throw new Error("The 'protocol' option is mandatory");
-        }
-        if (!options.host) {
-            throw new Error("The 'host' option is mandatory");
-        }
-        this.log = typeof options.log === "function" ? options.log : log;
-        this.tlsVerify = isBoolean(options.tls_verify) ? options.tls_verify : true;
-        this.tlsCA = options.tls_ca ? node_fs.readFileSync(options.tls_ca) : undefined;
-        this.username = options.username;
-        this.password = options.password;
-        this.token = options.token;
-        if (!options.port) {
-            options.port = 9000;
-        }
-        this.host = options.host;
-        this.port = options.port;
-        this.requestMinThroughput = isInteger(options.request_min_throughput, 0) ? options.request_min_throughput : DEFAULT_REQUEST_MIN_THROUGHPUT;
-        this.requestTimeout = isInteger(options.request_timeout, 1) ? options.request_timeout : DEFAULT_REQUEST_TIMEOUT;
-        this.retryTimeout = isInteger(options.retry_timeout, 0) ? options.retry_timeout : DEFAULT_RETRY_TIMEOUT;
-        switch(options.protocol){
-            case HTTP:
-                this.secure = false;
-                break;
-            case HTTPS:
-                this.secure = true;
-                break;
-            default:
-                throw new Error("The 'protocol' has to be 'http' or 'https' for the HTTP transport");
-        }
-    }
-    /**
-   * HTTP transport does not require explicit connection establishment.
-   * @throws Error indicating connect is not required for HTTP transport
-   */ connect() {
-        throw new Error("'connect()' is not required for HTTP transport");
-    }
-    /**
-   * HTTP transport does not require explicit connection closure.
-   * @returns Promise that resolves immediately
-   */ async close() {}
-    /**
-   * Gets the default auto-flush row count for HTTP transport.
-   * @returns Default number of rows that trigger auto-flush
-   */ getDefaultAutoFlushRows() {
-        return DEFAULT_HTTP_AUTO_FLUSH_ROWS;
     }
 }
 
@@ -777,8 +807,9 @@ const RETRIABLE_STATUS_CODES = [
         });
     }
     /**
-   * Sends data to QuestDB using HTTP POST with retry logic and authentication.
-   * @param data - Buffer containing line protocol data to send
+   * Sends data to QuestDB using HTTP POST.
+   *
+   * @param {Buffer} data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
    * @throws Error if request fails after all retries or times out
    */ async send(data) {
@@ -815,7 +846,9 @@ const RETRIABLE_STATUS_CODES = [
         const body = await responseData.body.arrayBuffer();
         if (statusCode === HTTP_NO_CONTENT) {
             if (body.byteLength > 0) {
-                this.log("warn", `Unexpected message from server: ${node_buffer.Buffer.from(body).toString()}`);
+                const message = node_buffer.Buffer.from(body).toString();
+                const logMessage = message.length &lt; 256 ? message : `${message.substring(0, 256)}... (truncated, full length=${message.length})`;
+                this.log("warn", `Unexpected message from server: ${logMessage}`);
             }
             return true;
         } else {
@@ -823,6 +856,7 @@ const RETRIABLE_STATUS_CODES = [
         }
     }
     /**
+   * @ignore
    * Gets or creates the default HTTP agent with standard configuration.
    * Uses a singleton pattern to reuse the same agent across instances.
    * @returns The default Undici agent instance
@@ -837,21 +871,20 @@ const RETRIABLE_STATUS_CODES = [
 // @ts-check
 // Default number of rows that trigger auto-flush for TCP transport.
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
-// Arbitrary public key coordinates used to construct valid JWK tokens.
-// These are not used for actual authentication, only for crypto API compatibility.
+// Arbitrary public key, used to construct valid JWK tokens.
+// These are not used for actual authentication, only required for crypto API compatibility.
 const PUBLIC_KEY = {
     x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
     y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
 };
 /**
- * TCP transport implementation for QuestDB line protocol.
- * Supports both TCP and TCPS (TLS-encrypted) connections with JWK token authentication.
- * Provides persistent connections with challenge-response authentication flow.
+ * TCP transport implementation. &lt;br>
+ * Supports both plain TCP or secure TLS-encrypted connections with configurable JWK token authentication.
  */ class TcpTransport {
     /**
    * Creates a new TcpTransport instance.
    *
-   * @param options - Sender configuration object containing connection and authentication details
+   * @param {SenderOptions} options - Sender configuration object containing connection and authentication details
    * @throws Error if required options are missing or protocol is not 'tcp' or 'tcps'
    */ constructor(options){
         if (!options || !options.protocol) {
@@ -884,9 +917,7 @@ const PUBLIC_KEY = {
         }
     }
     /**
-   * Creates a TCP connection to the database with optional authentication. &lt;br>
-   * Handles both plain TCP and TLS-encrypted connections.
-   *
+   * Creates a TCP connection to the database.
    * @returns Promise resolving to true if the connection is established successfully
    * @throws Error if connection fails or authentication is rejected
    */ connect() {
@@ -941,9 +972,9 @@ const PUBLIC_KEY = {
     }
     /**
    * Sends data over the established TCP connection.
-   * @param data - Buffer containing the data to send
+   * @param {Buffer} data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
-   * @throws Error if the connection is not established
+   * @throws Error if the data could not be written to the socket
    */ send(data) {
         if (!this.socket || this.socket.destroyed) {
             throw new Error("TCP transport is not connected");
@@ -959,9 +990,7 @@ const PUBLIC_KEY = {
         });
     }
     /**
-   * Closes the TCP connection to the database. &lt;br>
-   * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
-   * @returns Promise that resolves when the connection is closed
+   * Closes the TCP connection to the database.
    */ async close() {
         if (this.socket) {
             const address = this.socket.remoteAddress;
@@ -978,8 +1007,9 @@ const PUBLIC_KEY = {
         return DEFAULT_TCP_AUTO_FLUSH_ROWS;
     }
     /**
+   * @ignore
    * Handles the JWK token authentication challenge-response flow.
-   * @param challenge - Challenge buffer received from the server
+   * @param {Buffer} challenge - Challenge buffer received from the server
    * @returns Promise resolving to true if authentication is successful
    */ async authenticate(challenge) {
         // Check for trailing \n which ends the challenge
@@ -1002,10 +1032,12 @@ const PUBLIC_KEY = {
         return false;
     }
 }
-// Constructs authentication configuration from username/token options.
-// @param options - Sender options that may contain authentication details
-// @throws Error if username or token is missing when authentication is intended
-function constructAuth(options) {
+/**
+ * @ignore
+ * Constructs authentication configuration from username/token options.
+ * @param {SenderOptions} options - Sender options that may contain authentication details
+ * @throws Error if username or token is missing when authentication is intended
+ */ function constructAuth(options) {
     if (!options.username &amp;&amp; !options.token &amp;&amp; !options.password) {
         // no intention to authenticate
         return;
@@ -1018,11 +1050,13 @@ function constructAuth(options) {
         token: options.token
     };
 }
-// Constructs a JWK (JSON Web Key) object for cryptographic authentication.
-// @param options - Sender options containing authentication configuration
-// @returns JWK object with key ID, private key, and public key coordinates
-// @throws Error if required authentication properties are missing or invalid
-function constructJwk(options) {
+/**
+ * @ignore
+ * Constructs a JWK (JSON Web Key) object for cryptographic authentication.
+ * @param {SenderOptions} options - Sender options containing authentication configuration
+ * @returns JWK object with key ID, private key, and public key coordinates
+ * @throws Error if required authentication properties are missing or invalid
+ */ function constructJwk(options) {
     if (options.auth) {
         if (!options.auth.keyId) {
             throw new Error("Missing username, please, specify the 'keyId' property of the 'auth' config option. " + "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})");
@@ -1059,14 +1093,13 @@ function constructJwk(options) {
     timeout: 60000
 };
 /**
- * Legacy HTTP transport implementation using Node.js built-in http/https modules. &lt;br>
- * Provides HTTP requests with manual retry logic and connection pooling. &lt;br>
+ * HTTP transport implementation using Node.js built-in http/https modules. &lt;br>
  * Supports both HTTP and HTTPS protocols with configurable authentication.
  */ class HttpTransport extends HttpTransportBase {
     /**
-   * Creates a new HttpTransport instance using legacy Node.js HTTP modules.
+   * Creates a new HttpTransport instance using Node.js HTTP modules.
    *
-   * @param options - Sender configuration object containing connection details
+   * @param {SenderOptions} options - Sender configuration object containing connection details
    * @throws Error if the protocol is not 'http' or 'https'
    */ constructor(options){
         super(options);
@@ -1082,10 +1115,11 @@ function constructJwk(options) {
         }
     }
     /**
-   * Sends data to QuestDB using HTTP POST with manual retry logic.
-   * @param data - Buffer containing line protocol data to send
-   * @param retryBegin - Internal parameter for tracking retry start time
-   * @param retryInterval - Internal parameter for tracking retry intervals
+   * Sends data to QuestDB using HTTP POST.
+   *
+   * @param {Buffer} data - Buffer containing the data to send
+   * @param {number} retryBegin - Internal parameter for tracking retry start time
+   * @param {number} retryInterval - Internal parameter for tracking retry intervals
    * @returns Promise resolving to true if data was sent successfully
    * @throws Error if request fails after all retries or times out
    */ send(data, retryBegin = -1, retryInterval = -1) {
@@ -1105,7 +1139,9 @@ function constructJwk(options) {
                 if (statusCode === HTTP_NO_CONTENT) {
                     response.on("end", ()=>{
                         if (body.length > 0) {
-                            this.log("warn", `Unexpected message from server: ${node_buffer.Buffer.concat(body)}`);
+                            const message = node_buffer.Buffer.concat(body).toString();
+                            const logMessage = message.length &lt; 256 ? message : `${message.substring(0, 256)}... (truncated, full length=${message.length})`;
+                            this.log("warn", `Unexpected message from server: ${logMessage}`);
                         }
                         resolve(true);
                     });
@@ -1152,12 +1188,13 @@ function constructJwk(options) {
         });
     }
     /**
+   * @ignore
    * Creates HTTP request options based on configuration.
-   * @param timeoutMillis - Request timeout in milliseconds
+   *
+   * @param {number} timeoutMillis - Request timeout in milliseconds
    * @returns HTTP or HTTPS request options object
    */ createRequestOptions(timeoutMillis) {
         return {
-            //protocol: this.secure ? "https:" : "http:",
             hostname: this.host,
             port: this.port,
             agent: this.agent,
@@ -1169,6 +1206,7 @@ function constructJwk(options) {
         };
     }
     /**
+   * @ignore
    * Gets or creates the default HTTP agent with standard configuration.
    * Uses a singleton pattern to reuse the same agent across instances.
    * @returns The default HTTP agent instance
@@ -1179,6 +1217,7 @@ function constructJwk(options) {
         return HttpTransport.DEFAULT_HTTP_AGENT;
     }
     /**
+   * @ignore
    * Gets or creates the default HTTPS agent with standard configuration.
    * Uses a singleton pattern to reuse the same agent across instances.
    * @returns The default HTTPS agent instance
@@ -1190,8 +1229,9 @@ function constructJwk(options) {
     }
 }
 /**
+ * @ignore
  * Determines if an HTTP status code should trigger a retry.
- * @param statusCode - HTTP status code to check
+ * @param {number} statusCode - HTTP status code to check
  * @returns True if the status code indicates a retryable error
  */ function isRetryable(statusCode) {
     return RETRIABLE_STATUS_CODES.includes(statusCode);
@@ -1200,7 +1240,7 @@ function constructJwk(options) {
 // @ts-check
 /**
  * Factory function to create appropriate transport instance based on configuration.
- * @param options - Sender configuration options including protocol and connection details
+ * @param {SenderOptions} options - Sender configuration options including protocol and connection details
  * @returns Transport instance appropriate for the specified protocol
  * @throws Error if protocol or host options are missing or invalid
  */ function createTransport(options) {
@@ -1213,7 +1253,7 @@ function constructJwk(options) {
     switch(options.protocol){
         case HTTP:
         case HTTPS:
-            return options.legacy_http ? new HttpTransport(options) : new UndiciTransport(options);
+            return options.stdlib_http ? new HttpTransport(options) : new UndiciTransport(options);
         case TCP:
         case TCPS:
             return new TcpTransport(options);
@@ -1223,11 +1263,11 @@ function constructJwk(options) {
 }
 
 /**
- * Validates a table name. &lt;br>
- * Throws an error if table name is invalid.
+ * Validates a table name.
  *
  * @param {string} name - The table name to validate.
  * @param {number} maxNameLength - The maximum length of table names.
+ * @throws Error if table name is invalid.
  */ function validateTableName(name, maxNameLength) {
     const len = name.length;
     if (len > maxNameLength) {
@@ -1284,11 +1324,11 @@ function constructJwk(options) {
     }
 }
 /**
- * Validates a column name. &lt;br>
- * Throws an error if column name is invalid.
+ * Validates a column name.
  *
  * @param {string} name - The column name to validate.
  * @param {number} maxNameLength - The maximum length of column names.
+ * @throws Error if column name is invalid.
  */ function validateColumnName(name, maxNameLength) {
     const len = name.length;
     if (len > maxNameLength) {
@@ -1341,14 +1381,14 @@ function constructJwk(options) {
 // Default maximum length for table and column names.
 const DEFAULT_MAX_NAME_LENGTH = 127;
 /**
- * Abstract base class for QuestDB line protocol buffer implementations.
- * Provides common functionality for building line protocol messages including
- * table names, symbols, columns, and timestamps.
+ * Abstract base class for SenderBuffer implementations. &lt;br>
+ * Provides common functionality for writing data into the buffer.
  */ class SenderBufferBase {
     /**
    * Creates an instance of SenderBufferBase.
    *
-   * @param options - Sender configuration object containing buffer and naming options
+   * @param {SenderOptions} options - Sender configuration object. &lt;br>
+   * See SenderOptions documentation for detailed description of configuration options.
    */ constructor(options){
         this.log = options &amp;&amp; typeof options.log === "function" ? options.log : log;
         SenderOptions.resolveDeprecated(options, this.log);
@@ -1358,32 +1398,29 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         this.reset();
     }
     /**
-   * Extends the size of the sender's buffer.
-   * Can be used to increase the size of buffer if overflown.
-   * The buffer's content is copied into the new buffer.
+   * @ignore
+   * Resizes the buffer. &lt;br>
+   * Can be used to increase the size of the buffer if data to be written would not fit.
+   * Creates a new buffer, and copies the content of the old buffer into the new one.
    *
-   * @param bufferSize - New size of the buffer used by the sender, provided in bytes
+   * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes
    * @throws Error if the requested buffer size exceeds the maximum allowed size
    */ resize(bufferSize) {
         if (bufferSize > this.maxBufferSize) {
             throw new Error(`Max buffer size is ${this.maxBufferSize} bytes, requested buffer size: ${bufferSize}`);
         }
         this.bufferSize = bufferSize;
-        // Allocating an extra byte because Buffer.write() does not fail if the length of the data to be written is
-        // longer than the size of the buffer. It simply just writes whatever it can, and returns.
-        // If we can write into the extra byte, that indicates buffer overflow.
-        // See the check in the write() function.
-        const newBuffer = node_buffer.Buffer.alloc(this.bufferSize + 1, 0);
+        const newBuffer = node_buffer.Buffer.alloc(this.bufferSize, 0);
         if (this.buffer) {
             this.buffer.copy(newBuffer);
         }
         this.buffer = newBuffer;
     }
     /**
-   * Resets the buffer, data added to the buffer will be lost. &lt;br>
-   * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
+   * Resets the buffer, data sitting in the buffer will be lost. &lt;br>
+   * In other words it clears the buffer, and sets the writing position to the beginning of the buffer.
    *
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */ reset() {
         this.position = 0;
         this.startNewRow();
@@ -1396,18 +1433,16 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         this.hasColumns = false;
     }
     /**
-   * @ignore
-   * @return {Buffer} Returns a cropped buffer, or null if there is nothing to send.
-   * The returned buffer is backed by the sender's buffer.
-   * Used only in tests.
+   * @return {Buffer} Returns a cropped buffer, or null if there is nothing to send. &lt;br>
+   * The returned buffer is backed by this buffer instance, meaning the view can change as the buffer is mutated.
+   * Used only in tests to assert the buffer's content.
    */ toBufferView(pos = this.endOfLastRow) {
         return pos > 0 ? this.buffer.subarray(0, pos) : null;
     }
     /**
-   * @ignore
-   * @return {Buffer|null} Returns a cropped buffer ready to send to the server, or null if there is nothing to send.
-   * The returned buffer is a copy of the sender's buffer.
-   * It also compacts the Sender's buffer.
+   * @return {Buffer} Returns a cropped buffer ready to send to the server, or null if there is nothing to send. &lt;br>
+   * The returned buffer is a copy of this buffer.
+   * It also compacts the buffer.
    */ toBufferNew(pos = this.endOfLastRow) {
         if (pos > 0) {
             const data = node_buffer.Buffer.allocUnsafe(pos);
@@ -1418,10 +1453,10 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         return null;
     }
     /**
-   * Write the table name into the buffer of the sender.
+   * Writes the table name into the buffer.
    *
    * @param {string} table - Table name.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */ table(table) {
         if (typeof table !== "string") {
             throw new Error(`Table name must be a string, received ${typeof table}`);
@@ -1438,11 +1473,12 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         return this;
     }
     /**
-   * Write a symbol name and value into the buffer of the sender.
+   * Writes a symbol name and value into the buffer. &lt;br>
+   * Use it to insert into SYMBOL columns.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */ symbol(name, value) {
         if (typeof name !== "string") {
             throw new Error(`Symbol name must be a string, received ${typeof name}`);
@@ -1464,11 +1500,12 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         return this;
     }
     /**
-   * Write a string column with its value into the buffer of the sender.
+   * Writes a string column with its value into the buffer. &lt;br>
+   * Use it to insert into VARCHAR and STRING columns.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */ stringColumn(name, value) {
         this.writeColumn(name, value, ()=>{
             this.checkCapacity([
@@ -1481,11 +1518,12 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         return this;
     }
     /**
-   * Write a boolean column with its value into the buffer of the sender.
+   * Writes a boolean column with its value into the buffer. &lt;br>
+   * Use it to insert into BOOLEAN columns.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */ booleanColumn(name, value) {
         this.writeColumn(name, value, ()=>{
             this.checkCapacity([], 1);
@@ -1494,11 +1532,13 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         return this;
     }
     /**
-   * Write an integer column with its value into the buffer of the sender.
+   * Writes a 64-bit signed integer into the buffer. &lt;br>
+   * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
+   * @throws Error if the value is not an integer
    */ intColumn(name, value) {
         if (!Number.isInteger(value)) {
             throw new Error(`Value must be an integer, received ${value}`);
@@ -1514,12 +1554,13 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         return this;
     }
     /**
-   * Write a timestamp column with its value into the buffer of the sender.
+   * Writes a timestamp column with its value into the buffer. &lt;br>
+   * Use it to insert into TIMESTAMP columns.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */ timestampColumn(name, value, unit = "us") {
         if (typeof value !== "bigint" &amp;&amp; !Number.isInteger(value)) {
             throw new Error(`Value must be an integer or BigInt, received ${value}`);
@@ -1536,7 +1577,7 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         return this;
     }
     /**
-   * Closing the row after writing the designated timestamp into the buffer of the sender.
+   * Closes the row after writing the designated timestamp into the buffer.
    *
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
@@ -1558,7 +1599,7 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         this.startNewRow();
     }
     /**
-   * Closing the row without writing designated timestamp into the buffer of the sender. &lt;br>
+   * Closes the row without writing designated timestamp into the buffer. &lt;br>
    * Designated timestamp will be populated by the server on this record.
    */ atNow() {
         if (!this.hasSymbols &amp;&amp; !this.hasColumns) {
@@ -1567,6 +1608,12 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         this.checkCapacity([], 1);
         this.write("\n");
         this.startNewRow();
+    }
+    /**
+   * Returns the current position of the buffer. &lt;br>
+   * New data will be written into the buffer starting from this position.
+   */ currentPosition() {
+        return this.position;
     }
     /**
    * Checks if the buffer has sufficient capacity for additional data and resizes if needed.
@@ -1586,7 +1633,8 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         }
     }
     /**
-   * Compacts the buffer by removing data from completed rows.
+   * @ignore
+   * Compacts the buffer by removing completed rows.
    * Moves any remaining data to the beginning of the buffer.
    */ compact() {
         if (this.endOfLastRow > 0) {
@@ -1596,9 +1644,10 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         }
     }
     /**
+   * @ignore
    * Common logic for writing column data to the buffer.
    * @param name - Column name
-   * @param value - Column value 
+   * @param value - Column value
    * @param writeValue - Function to write the value portion to the buffer
    * @param valueType - Optional expected type for validation
    */ writeColumn(name, value, writeValue, valueType) {
@@ -1619,62 +1668,35 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
         this.writeEscaped(name);
         this.write("=");
         writeValue();
-        this.assertBufferOverflow();
         this.hasColumns = true;
     }
     /**
+   * @ignore
    * Writes string data to the buffer at the current position.
    * @param data - String data to write
    */ write(data) {
         this.position += this.buffer.write(data, this.position);
     }
     /**
+   * @ignore
    * Writes a single byte to the buffer at the current position.
    * @param data - Byte value to write
    */ writeByte(data) {
         this.position = this.buffer.writeInt8(data, this.position);
     }
     /**
+   * @ignore
    * Writes a 32-bit integer to the buffer in little-endian format.
    * @param data - Integer value to write
    */ writeInt(data) {
         this.position = this.buffer.writeInt32LE(data, this.position);
     }
     /**
+   * @ignore
    * Writes a double-precision float to the buffer in little-endian format.
    * @param data - Double value to write
    */ writeDouble(data) {
         this.position = this.buffer.writeDoubleLE(data, this.position);
-    }
-    /**
-   * Writes array data to the buffer including dimensions and values.
-   * @param arr - Array to write to the buffer
-   */ writeArray(arr, dimensions, type) {
-        this.checkCapacity([], 1 + dimensions.length * 4);
-        this.writeByte(dimensions.length);
-        for(let i = 0; i &lt; dimensions.length; i++){
-            this.writeInt(dimensions[i]);
-        }
-        this.checkCapacity([], SenderBufferBase.arraySize(dimensions, type));
-        this.writeArrayValues(arr, dimensions);
-    }
-    writeArrayValues(arr, dimensions) {
-        if (Array.isArray(arr[0])) {
-            for(let i = 0; i &lt; arr.length; i++){
-                this.writeArrayValues(arr[i], dimensions);
-            }
-        } else {
-            const type = typeof arr[0];
-            switch(type){
-                case "number":
-                    for(let i = 0; i &lt; arr.length; i++){
-                        this.position = this.buffer.writeDoubleLE(arr[i], this.position);
-                    }
-                    break;
-                default:
-                    throw new Error(`Unsupported array type [type=${type}]`);
-            }
-        }
     }
     writeEscaped(data, quoted = false) {
         for (const ch of data){
@@ -1711,47 +1733,27 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
             }
         }
     }
-    static arraySize(dimensions, type) {
-        let numOfElements = 1;
-        for(let i = 0; i &lt; dimensions.length; i++){
-            numOfElements *= dimensions[i];
-        }
-        switch(type){
-            case "number":
-                return numOfElements * 8;
-            case "boolean":
-                return numOfElements;
-            case "string":
-                // in case of string[] capacity check is done separately for each array element
-                return 0;
-            default:
-                throw new Error(`Unsupported array type [type=${type}]`);
-        }
-    }
-    assertBufferOverflow() {
-        if (this.position > this.bufferSize) {
-            // should never happen, if checkCapacity() is correctly used
-            throw new Error(`Buffer overflow [position=${this.position}, bufferSize=${this.bufferSize}]`);
-        }
-    }
 }
 
 // @ts-check
 /**
- * Buffer implementation for QuestDB line protocol version 1.
- * Supports basic column types but does not support array columns.
+ * Buffer implementation for protocol version 1.
+ * Sends floating point numbers in their text form.
  */ class SenderBufferV1 extends SenderBufferBase {
     /**
    * Creates a new SenderBufferV1 instance.
-   * @param options - Sender configuration options
-   */ constructor(options){
+   *
+   * @param {SenderOptions} options - Sender configuration object. &lt;br>
+   * See SenderOptions documentation for detailed description of configuration options.   */ constructor(options){
         super(options);
     }
     /**
-   * Write a float column with its value into the buffer using v1 format.
-   * @param name - Column name
-   * @param value - Float value to write
-   * @returns Reference to this sender buffer for method chaining
+   * Writes a 64-bit floating point value into the buffer using v1 serialization (text format). &lt;br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number values.
+   * @return {Sender} Returns with a reference to this sender.
    */ floatColumn(name, value) {
         this.writeColumn(name, value, ()=>{
             const valueStr = value.toString();
@@ -1764,6 +1766,7 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
     }
     /**
    * Array columns are not supported in protocol v1.
+   *
    * @throws Error indicating arrays are not supported in v1
    */ arrayColumn() {
         throw new Error("Arrays are not supported in protocol v1");
@@ -1780,20 +1783,24 @@ const ENTITY_TYPE_DOUBLE = 16;
 // ASCII code for equals sign used in binary protocol.
 const EQUALS_SIGN = "=".charCodeAt(0);
 /**
- * Buffer implementation for QuestDB line protocol version 2.
- * Supports all column types including arrays with binary encoding for doubles.
+ * Buffer implementation for protocol version 2.
+ * Sends floating point numbers in binary form.
  */ class SenderBufferV2 extends SenderBufferBase {
     /**
    * Creates a new SenderBufferV2 instance.
-   * @param options - Sender configuration options
+   *
+   * @param {SenderOptions} options - Sender configuration object. &lt;br>
+   * See SenderOptions documentation for detailed description of configuration options.
    */ constructor(options){
         super(options);
     }
     /**
-   * Write a float column with its value into the buffer using v2 binary format.
-   * @param name - Column name
-   * @param value - Float value to write
-   * @returns Reference to this sender buffer for method chaining
+   * Writes a 64-bit floating point value into the buffer using v2 serialization (binary format). &lt;br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number values.
+   * @returns {Sender} Returns with a reference to this buffer.
    */ floatColumn(name, value) {
         this.writeColumn(name, value, ()=>{
             this.checkCapacity([], 10);
@@ -1805,10 +1812,14 @@ const EQUALS_SIGN = "=".charCodeAt(0);
     }
     /**
    * Write an array column with its values into the buffer using v2 format.
-   * @param name - Column name
-   * @param value - Array values to write (currently supports double arrays)
-   * @returns Reference to this sender buffer for method chaining
-   * @throws Error if value is not an array when provided
+   *
+   * @param {string} name - Column name
+   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
    */ arrayColumn(name, value) {
         const dimensions = getDimensions(value);
         const type = validateArray(value, dimensions);
@@ -1829,6 +1840,55 @@ const EQUALS_SIGN = "=".charCodeAt(0);
         });
         return this;
     }
+    writeArray(arr, dimensions, type) {
+        this.checkCapacity([], 1 + dimensions.length * 4);
+        this.writeByte(dimensions.length);
+        for(let i = 0; i &lt; dimensions.length; i++){
+            this.writeInt(dimensions[i]);
+        }
+        this.checkCapacity([], SenderBufferV2.arraySize(dimensions, type));
+        this.writeArrayValues(arr, dimensions);
+    }
+    writeArrayValues(arr, dimensions) {
+        if (Array.isArray(arr[0])) {
+            for(let i = 0; i &lt; arr.length; i++){
+                this.writeArrayValues(arr[i], dimensions);
+            }
+        } else {
+            const type = arr[0] !== undefined ? typeof arr[0] : null;
+            switch(type){
+                case "number":
+                    for(let i = 0; i &lt; arr.length; i++){
+                        this.position = this.buffer.writeDoubleLE(arr[i], this.position);
+                    }
+                    break;
+                case null:
+                    break;
+                default:
+                    throw new Error(`Unsupported array type [type=${type}]`);
+            }
+        }
+    }
+    static arraySize(dimensions, type) {
+        let numOfElements = 1;
+        for(let i = 0; i &lt; dimensions.length; i++){
+            numOfElements *= dimensions[i];
+        }
+        switch(type){
+            case "number":
+                return numOfElements * 8;
+            case "boolean":
+                return numOfElements;
+            case "string":
+                // in case of string[] capacity check is done separately for each array element
+                return 0;
+            case null:
+                // empty array
+                return 0;
+            default:
+                throw new Error(`Unsupported array type [type=${type}]`);
+        }
+    }
 }
 
 // @ts-check
@@ -1838,7 +1898,10 @@ const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
 const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 /**
  * Factory function to create a SenderBuffer instance based on the protocol version.
- * @param options - Sender configuration options
+ *
+ * @param {SenderOptions} options - Sender configuration object. &lt;br>
+ * See SenderOptions documentation for detailed description of configuration options.
+ *
  * @returns A SenderBuffer instance appropriate for the specified protocol version
  * @throws Error if protocol version is not specified or is unsupported
  */ function createBuffer(options) {
@@ -1888,8 +1951,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * such as Nginx to enable encryption.
  * &lt;/p>
  * &lt;p>
- * The client supports multiple protocol versions for data serialization. Protocol version 1 uses text-based 
- * serialization, while version 2 uses binary encoding for doubles and supports array columns for improved 
+ * The client supports multiple protocol versions for data serialization. Protocol version 1 uses text-based
+ * serialization, while version 2 uses binary encoding for doubles and supports array columns for improved
  * performance. The client can automatically negotiate the protocol version with the server when using HTTP/HTTPS
  * by setting the protocol_version to 'auto' (default behavior).
  * &lt;/p>
@@ -1939,7 +2002,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
    * Creates an instance of Sender.
    *
    * @param {SenderOptions} options - Sender configuration object. &lt;br>
-   * See SenderOptions documentation for detailed description of configuration options. &lt;br>
+   * See SenderOptions documentation for detailed description of configuration options.
    */ constructor(options){
         this.transport = createTransport(options);
         this.buffer = createBuffer(options);
@@ -1950,35 +2013,35 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         this.reset();
     }
     /**
-   * Creates a Sender options object by parsing the provided configuration string.
+   * Creates a Sender object by parsing the provided configuration string.
    *
    * @param {string} configurationString - Configuration string. &lt;br>
    * @param {object} extraOptions - Optional extra configuration. &lt;br>
    * - 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
    * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
-   * - 'agent' is a custom Undici agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
-   * A &lt;i>undici.Agent&lt;/i>  object is expected.
+   * - 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+   * Depends on which transport implementation and protocol used, one of the followings expected: &lt;i>undici.Agent&lt;/i>, &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i>.
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
    */ static async fromConfig(configurationString, extraOptions) {
         return new Sender(await SenderOptions.fromConfig(configurationString, extraOptions));
     }
     /**
-   * Creates a Sender options object by parsing the configuration string set in the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
+   * Creates a Sender object by parsing the configuration string set in the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
    *
    * @param {object} extraOptions - Optional extra configuration. &lt;br>
    * - 'log' is a logging function used by the &lt;a href="Sender.html">Sender&lt;/a>. &lt;br>
    * Prototype: &lt;i>(level: 'error'|'warn'|'info'|'debug', message: string) => void&lt;/i>. &lt;br>
-   * - 'agent' is a custom Undici agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
-   * A &lt;i>undici.Agent&lt;/i>  object is expected.
+   * - 'agent' is a custom http/https agent used by the &lt;a href="Sender.html">Sender&lt;/a> when http/https transport is used. &lt;br>
+   * Depends on which transport implementation and protocol used, one of the followings expected: &lt;i>undici.Agent&lt;/i>, &lt;i>http.Agent&lt;/i> or &lt;i>https.Agent&lt;/i>.
    *
    * @return {Sender} A Sender object initialized from the &lt;b>QDB_CLIENT_CONF&lt;/b> environment variable.
    */ static async fromEnv(extraOptions) {
         return new Sender(await SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions));
     }
     /**
-   * Resets the buffer, data added to the buffer will be lost. &lt;br>
-   * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
+   * Resets the sender's buffer, data sitting in the buffer will be lost. &lt;br>
+   * In other words it clears the buffer, and sets the writing position to the beginning of the buffer.
    *
    * @return {Sender} Returns with a reference to this sender.
    */ reset() {
@@ -1994,7 +2057,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         return this.transport.connect();
     }
     /**
-   * Sends the buffer's content to the database and compacts the buffer.
+   * Sends the content of the sender's buffer to the database and compacts the buffer.
    * If the last row is not finished it stays in the sender's buffer.
    *
    * @return {Promise&lt;boolean>} Resolves to true when there was data in the buffer to send, and it was sent successfully.
@@ -2008,13 +2071,17 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         await this.transport.send(dataToSend);
     }
     /**
-   * Closes the TCP connection to the database. &lt;br>
+   * Closes the connection to the database. &lt;br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
    */ async close() {
+        const pos = this.buffer.currentPosition();
+        if (pos > 0) {
+            this.log("warn", `Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=${pos}]`);
+        }
         return this.transport.close();
     }
     /**
-   * Write the table name into the buffer of the sender.
+   * Writes the table name into the buffer of the sender of the sender.
    *
    * @param {string} table - Table name.
    * @return {Sender} Returns with a reference to this sender.
@@ -2023,7 +2090,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         return this;
     }
     /**
-   * Write a symbol name and value into the buffer of the sender.
+   * Writes a symbol name and value into the buffer of the sender. &lt;br>
+   * Use it to insert into SYMBOL columns.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -2033,7 +2101,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         return this;
     }
     /**
-   * Write a string column with its value into the buffer of the sender.
+   * Writes a string column with its value into the buffer of the sender. &lt;br>
+   * Use it to insert into VARCHAR and STRING columns.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -2043,7 +2112,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         return this;
     }
     /**
-   * Write a boolean column with its value into the buffer of the sender.
+   * Writes a boolean column with its value into the buffer of the sender. &lt;br>
+   * Use it to insert into BOOLEAN columns.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -2053,7 +2123,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         return this;
     }
     /**
-   * Write a float column with its value into the buffer of the sender.
+   * Writes a 64-bit floating point value into the buffer of the sender. &lt;br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -2063,30 +2134,34 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         return this;
     }
     /**
-   * Write an array column with its values into the buffer of the sender. &lt;br>
-   * &lt;b>Note:&lt;/b> Array columns are only supported in protocol version 2. If using protocol version 1, 
-   * this method will throw an error.
+   * Writes an array column with its values into the buffer of the sender.
    *
-   * @param {string} name - Column name.
-   * @param {unknown[]} value - Array values to be written. Currently supports arrays of numbers.
-   * @return {Sender} Returns with a reference to this sender.
-   * @throws {Error} If protocol version 1 is used, as arrays are not supported.
+   * @param {string} name - Column name
+   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @returns {Sender} Returns with a reference to this sender.
+   * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
    */ arrayColumn(name, value) {
         this.buffer.arrayColumn(name, value);
         return this;
     }
     /**
-   * Write an integer column with its value into the buffer of the sender.
+   * Writes a 64-bit signed integer into the buffer of the sender. &lt;br>
+   * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
    * @return {Sender} Returns with a reference to this sender.
+   * @throws Error if the value is not an integer
    */ intColumn(name, value) {
         this.buffer.intColumn(name, value);
         return this;
     }
     /**
-   * Write a timestamp column with its value into the buffer of the sender.
+   * Writes a timestamp column with its value into the buffer of the sender. &lt;br>
+   * Use it to insert into TIMESTAMP columns.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
@@ -2097,7 +2172,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         return this;
     }
     /**
-   * Closing the row after writing the designated timestamp into the buffer of the sender.
+   * Closes the row after writing the designated timestamp into the buffer of the sender.
    *
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
@@ -2108,7 +2183,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         await this.tryFlush();
     }
     /**
-   * Closing the row without writing designated timestamp into the buffer of the sender. &lt;br>
+   * Closes the row without writing designated timestamp into the buffer of the sender. &lt;br>
    * Designated timestamp will be populated by the server on this record.
    */ async atNow() {
         this.buffer.atNow();
@@ -2139,13 +2214,13 @@ exports.Sender = Sender;
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#isRetryable">isRetryable</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateArray">validateArray</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Jul 31 2025 11:43:45 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Wed Aug 06 2025 18:31:40 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

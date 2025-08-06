@@ -144,7 +144,7 @@
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1028">line 1028</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1062">line 1062</a>
     </li></ul></dd>
     
 
@@ -207,7 +207,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line681">line 681</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line711">line 711</a>
     </li></ul></dd>
     
 
@@ -284,13 +284,19 @@ Configures keep-alive connections with 60-second timeout and single request pipe
 
             <td class="type">
             
+                
+<span class="param-type"><a href="SenderOptions.html">SenderOptions</a></span>
+
+
+            
             </td>
 
             
 
             
 
-            <td class="description last">Sender configuration options</td>
+            <td class="description last">Sender configuration object. <br>
+See SenderOptions documentation for detailed description of configuration options.</td>
         </tr>
 
     
@@ -331,7 +337,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1816">line 1816</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1879">line 1879</a>
     </li></ul></dd>
     
 
@@ -438,6 +444,11 @@ Configures keep-alive connections with 60-second timeout and single request pipe
 
             <td class="type">
             
+                
+<span class="param-type"><a href="SenderOptions.html">SenderOptions</a></span>
+
+
+            
             </td>
 
             
@@ -485,7 +496,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1178">line 1178</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1218">line 1218</a>
     </li></ul></dd>
     
 
@@ -543,7 +554,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
 
     
-    <h4 class="name" id="fetchJson"><span class="type-signature">(async) </span>fetchJson<span class="signature">(url)</span><span class="type-signature"></span></h4>
+    <h4 class="name" id="fetchJson"><span class="type-signature">(async) </span>fetchJson<span class="signature">(url, agent, timeout)</span><span class="type-signature"></span></h4>
     
 
     
@@ -551,7 +562,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
 
 
 <div class="description">
-    Fetches JSON data from a URL with error handling.
+    Fetches JSON data from a URL.
 </div>
 
 
@@ -592,6 +603,11 @@ Configures keep-alive connections with 60-second timeout and single request pipe
 
             <td class="type">
             
+                
+<span class="param-type">string</span>
+
+
+            
             </td>
 
             
@@ -599,6 +615,52 @@ Configures keep-alive connections with 60-second timeout and single request pipe
             
 
             <td class="description last">The URL to fetch from</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>agent</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Agent</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">HTTP agent to be used for the request</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>timeout</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Request timeout, query will be aborted if not finished in time</td>
         </tr>
 
     
@@ -639,7 +701,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line169">line 169</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line176">line 176</a>
     </li></ul></dd>
     
 
@@ -746,6 +808,11 @@ Configures keep-alive connections with 60-second timeout and single request pipe
 
             <td class="type">
             
+                
+<span class="param-type">unknown</span>
+
+
+            
             </td>
 
             
@@ -793,7 +860,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line115">line 115</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line113">line 113</a>
     </li></ul></dd>
     
 
@@ -900,6 +967,11 @@ Configures keep-alive connections with 60-second timeout and single request pipe
 
             <td class="type">
             
+                
+<span class="param-type">unknown</span>
+
+
+            
             </td>
 
             
@@ -947,7 +1019,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line63">line 63</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line61">line 61</a>
     </li></ul></dd>
     
 
@@ -1042,6 +1114,11 @@ Configures keep-alive connections with 60-second timeout and single request pipe
 
             <td class="type">
             
+                
+<span class="param-type">unknown</span>
+
+
+            
             </td>
 
             
@@ -1059,6 +1136,11 @@ Configures keep-alive connections with 60-second timeout and single request pipe
             
 
             <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
             
             </td>
 
@@ -1107,7 +1189,7 @@ Configures keep-alive connections with 60-second timeout and single request pipe
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line71">line 71</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line69">line 69</a>
     </li></ul></dd>
     
 
@@ -1137,148 +1219,6 @@ Configures keep-alive connections with 60-second timeout and single request pipe
         
 <div class="param-desc">
     True if the value is an integer >= lowerBound, false otherwise
-</div>
-
-
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id="isRetryable"><span class="type-signature"></span>isRetryable<span class="signature">(statusCode)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Determines if an HTTP status code should trigger a retry.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>statusCode</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">HTTP status code to check</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1168">line 1168</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    True if the status code indicates a retryable error
 </div>
 
 
@@ -1366,7 +1306,7 @@ Throws an error if logging level is invalid.
 
             
 
-            <td class="description last">The log level of the message.</td>
+            <td class="description last">The log level for the message</td>
         </tr>
 
     
@@ -1392,7 +1332,7 @@ Throws an error if logging level is invalid.
 
             
 
-            <td class="description last">The log message.</td>
+            <td class="description last">The message to log, either a string or Error object</td>
         </tr>
 
     
@@ -1518,6 +1458,11 @@ Throws an error if logging level is invalid.
 
             <td class="type">
             
+                
+<span class="param-type">bigint</span>
+
+
+            
             </td>
 
             
@@ -1535,6 +1480,11 @@ Throws an error if logging level is invalid.
             
 
             <td class="type">
+            
+                
+<span class="param-type">TimestampUnit</span>
+
+
             
             </td>
 
@@ -1583,7 +1533,7 @@ Throws an error if logging level is invalid.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line80">line 80</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line78">line 78</a>
     </li></ul></dd>
     
 
@@ -1690,6 +1640,11 @@ Throws an error if logging level is invalid.
 
             <td class="type">
             
+                
+<span class="param-type">bigint</span>
+
+
+            
             </td>
 
             
@@ -1707,6 +1662,11 @@ Throws an error if logging level is invalid.
             
 
             <td class="type">
+            
+                
+<span class="param-type">TimestampUnit</span>
+
+
             
             </td>
 
@@ -1755,7 +1715,7 @@ Throws an error if logging level is invalid.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line98">line 98</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line96">line 96</a>
     </li></ul></dd>
     
 
@@ -1813,6 +1773,192 @@ Throws an error if logging level is invalid.
     
 
     
+    <h4 class="name" id="validateArray"><span class="type-signature"></span>validateArray<span class="signature">(data, dimensions)</span><span class="type-signature"></span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Validates an array structure. <br>
+Validation fails if:
+- <i>data</i> is not an array
+- the array is irregular: the length of its sub-arrays are different
+- the array is not homogenous: the array contains mixed types
+</div>
+
+
+
+
+
+
+
+
+
+    <h5>Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>data</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;unknown></span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">The array to validate</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>dimensions</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">The shape of the array</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line131">line 131</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Throws:</h5>
+
+        
+
+    <div class="param-desc">
+    
+        Error if the validation fails
+    
+    </div>
+
+
+    
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    The primitive type of the array's elements
+</div>
+
+
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
     <h4 class="name" id="validateColumnName"><span class="type-signature"></span>validateColumnName<span class="signature">(name, maxNameLength)</span><span class="type-signature"></span></h4>
     
 
@@ -1821,8 +1967,7 @@ Throws an error if logging level is invalid.
 
 
 <div class="description">
-    Validates a column name. <br>
-Throws an error if column name is invalid.
+    Validates a column name.
 </div>
 
 
@@ -1938,7 +2083,7 @@ Throws an error if column name is invalid.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1264">line 1264</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1304">line 1304</a>
     </li></ul></dd>
     
 
@@ -1961,6 +2106,18 @@ Throws an error if column name is invalid.
 
 
 
+<h5>Throws:</h5>
+
+        
+
+    <div class="param-desc">
+    
+        Error if column name is invalid.
+    
+    </div>
+
+
+    
 
 
 
@@ -1982,8 +2139,7 @@ Throws an error if column name is invalid.
 
 
 <div class="description">
-    Validates a table name. <br>
-Throws an error if table name is invalid.
+    Validates a table name.
 </div>
 
 
@@ -2099,7 +2255,7 @@ Throws an error if table name is invalid.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1203">line 1203</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1243">line 1243</a>
     </li></ul></dd>
     
 
@@ -2122,6 +2278,18 @@ Throws an error if table name is invalid.
 
 
 
+<h5>Throws:</h5>
+
+        
+
+    <div class="param-desc">
+    
+        Error if table name is invalid.
+    
+    </div>
+
+
+    
 
 
 
@@ -2145,13 +2313,13 @@ Throws an error if table name is invalid.
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#isRetryable">isRetryable</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateArray">validateArray</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Jul 31 2025 11:43:45 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Wed Aug 06 2025 18:31:40 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

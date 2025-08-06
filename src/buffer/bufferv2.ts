@@ -22,7 +22,9 @@ const EQUALS_SIGN: number = "=".charCodeAt(0);
 class SenderBufferV2 extends SenderBufferBase {
   /**
    * Creates a new SenderBufferV2 instance.
-   * @param options - Sender configuration options
+   *
+   * @param {SenderOptions} options - Sender configuration object. <br>
+   * See SenderOptions documentation for detailed description of configuration options.
    */
   constructor(options: SenderOptions) {
     super(options);
@@ -34,7 +36,7 @@ class SenderBufferV2 extends SenderBufferBase {
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @returns {Sender} Returns with a reference to this buffer.
    */
   floatColumn(name: string, value: number): SenderBuffer {
     this.writeColumn(
@@ -53,9 +55,10 @@ class SenderBufferV2 extends SenderBufferBase {
 
   /**
    * Write an array column with its values into the buffer using v2 format.
-   * @param name - Column name
-   * @param value - Array values to write (currently supports double arrays)
-   * @returns Reference to this buffer for method chaining
+   *
+   * @param {string} name - Column name
+   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if array validation fails:
    * - value is not an array
    * - or the shape of the array is irregular: the length of sub-arrays are different

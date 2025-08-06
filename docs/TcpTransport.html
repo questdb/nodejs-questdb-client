@@ -30,9 +30,8 @@
     
         <h2><span class="attribs"><span class="type-signature"></span></span>TcpTransport<span class="signature">(options)</span><span class="type-signature"></span></h2>
         
-            <div class="class-description">TCP transport implementation for QuestDB line protocol.
-Supports both TCP and TCPS (TLS-encrypted) connections with JWK token authentication.
-Provides persistent connections with challenge-response authentication flow.</div>
+            <div class="class-description">TCP transport implementation. <br>
+Supports both plain TCP or secure TLS-encrypted connections with configurable JWK token authentication.</div>
         
     
 </header>
@@ -96,6 +95,11 @@ Provides persistent connections with challenge-response authentication flow.</di
 
             <td class="type">
             
+                
+<span class="param-type"><a href="SenderOptions.html">SenderOptions</a></span>
+
+
+            
             </td>
 
             
@@ -143,7 +147,7 @@ Provides persistent connections with challenge-response authentication flow.</di
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line822">line 822</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line855">line 855</a>
     </li></ul></dd>
     
 
@@ -211,148 +215,6 @@ Provides persistent connections with challenge-response authentication flow.</di
     
 
     
-    <h4 class="name" id="authenticate"><span class="type-signature">(async) </span>authenticate<span class="signature">(challenge)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Handles the JWK token authentication challenge-response flow.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>challenge</code></td>
-            
-
-            <td class="type">
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Challenge buffer received from the server</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line956">line 956</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Promise resolving to true if authentication is successful
-</div>
-
-
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
     <h4 class="name" id="close"><span class="type-signature">(async) </span>close<span class="signature">()</span><span class="type-signature"></span></h4>
     
 
@@ -361,8 +223,7 @@ Provides persistent connections with challenge-response authentication flow.</di
 
 
 <div class="description">
-    Closes the TCP connection to the database. <br>
-Data sitting in the Sender's buffer will be lost unless flush() is called before close().
+    Closes the TCP connection to the database.
 </div>
 
 
@@ -406,7 +267,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line937">line 937</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line966">line 966</a>
     </li></ul></dd>
     
 
@@ -431,16 +292,6 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
 
 
 
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Promise that resolves when the connection is closed
-</div>
-
-
-
-    
 
 
 
@@ -460,8 +311,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
 
 
 <div class="description">
-    Creates a TCP connection to the database with optional authentication. <br>
-Handles both plain TCP and TLS-encrypted connections.
+    Creates a TCP connection to the database.
 </div>
 
 
@@ -505,7 +355,7 @@ Handles both plain TCP and TLS-encrypted connections.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line864">line 864</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line895">line 895</a>
     </li></ul></dd>
     
 
@@ -615,7 +465,7 @@ Handles both plain TCP and TLS-encrypted connections.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line949">line 949</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line978">line 978</a>
     </li></ul></dd>
     
 
@@ -710,6 +560,11 @@ Handles both plain TCP and TLS-encrypted connections.
 
             <td class="type">
             
+                
+<span class="param-type">Buffer</span>
+
+
+            
             </td>
 
             
@@ -757,7 +612,7 @@ Handles both plain TCP and TLS-encrypted connections.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line919">line 919</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line950">line 950</a>
     </li></ul></dd>
     
 
@@ -786,7 +641,7 @@ Handles both plain TCP and TLS-encrypted connections.
 
     <div class="param-desc">
     
-        Error if the connection is not established
+        Error if the data could not be written to the socket
     
     </div>
 
@@ -825,13 +680,13 @@ Handles both plain TCP and TLS-encrypted connections.
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#isRetryable">isRetryable</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateArray">validateArray</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Jul 31 2025 11:43:45 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Wed Aug 06 2025 18:31:40 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

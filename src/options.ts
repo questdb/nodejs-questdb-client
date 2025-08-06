@@ -197,8 +197,7 @@ class SenderOptions {
    * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-   * An <i>undici.Agent</i> object is expected. <br>
-   * If the standard HTTP transport is used, a <i>http.Agent</i> or <i>https.Agent</i> object is expected.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    */
   constructor(configurationString: string, extraOptions?: ExtraOptions) {
     parseConfigurationString(this, configurationString);
@@ -225,9 +224,10 @@ class SenderOptions {
   /**
    * Resolves the protocol version, if it is set to 'auto'. <br>
    * If TCP transport is used, the protocol version will default to 1.
-   * In case of HTTP transport the /settings endpoint of the database is used to find the protocol versions
+   * In case of HTTP transport the <i>/settings</i> endpoint of the database is used to find the protocol versions
    * supported by the server, and the highest will be selected.
-   * @param options SenderOptions instance needs resolving protocol version
+   * When calling the <i>/settings</i> endpoint the timeout and TLs options are used from the <i>options</i> object.
+   * @param {SenderOptions} options SenderOptions instance needs resolving protocol version
    */
   static async resolveAuto(options: SenderOptions) {
     parseProtocolVersion(options);
@@ -312,7 +312,7 @@ class SenderOptions {
    * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-   * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
    */
@@ -330,9 +330,9 @@ class SenderOptions {
    *
    * @param {object} extraOptions - Optional extra configuration. <br>
    * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
-  }in  /**br>
+   * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-   * A <i>http.Agent</i> or <i>https.Agent</i> object is expected.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */

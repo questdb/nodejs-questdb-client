@@ -58,8 +58,8 @@ Please, note that the open source version of QuestDB does not support TLS, and r
 such as Nginx to enable encryption.
 </p>
 <p>
-The client supports multiple protocol versions for data serialization. Protocol version 1 uses text-based 
-serialization, while version 2 uses binary encoding for doubles and supports array columns for improved 
+The client supports multiple protocol versions for data serialization. Protocol version 1 uses text-based
+serialization, while version 2 uses binary encoding for doubles and supports array columns for improved
 performance. The client can automatically negotiate the protocol version with the server when using HTTP/HTTPS
 by setting the protocol_version to 'auto' (default behavior).
 </p>
@@ -179,7 +179,7 @@ of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 
             
 
             <td class="description last">Sender configuration object. <br>
-See SenderOptions documentation for detailed description of configuration options. <br></td>
+See SenderOptions documentation for detailed description of configuration options.</td>
         </tr>
 
     
@@ -220,7 +220,7 @@ See SenderOptions documentation for detailed description of configuration option
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1909">line 1909</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1972">line 1972</a>
     </li></ul></dd>
     
 
@@ -284,9 +284,7 @@ See SenderOptions documentation for detailed description of configuration option
 
 
 <div class="description">
-    Write an array column with its values into the buffer of the sender. <br>
-<b>Note:</b> Array columns are only supported in protocol version 2. If using protocol version 1, 
-this method will throw an error.
+    Writes an array column with its values into the buffer of the sender.
 </div>
 
 
@@ -338,7 +336,7 @@ this method will throw an error.
 
             
 
-            <td class="description last">Column name.</td>
+            <td class="description last">Column name</td>
         </tr>
 
     
@@ -361,7 +359,7 @@ this method will throw an error.
 
             
 
-            <td class="description last">Array values to be written. Currently supports arrays of numbers.</td>
+            <td class="description last">Array values to write (currently supports double arrays)</td>
         </tr>
 
     
@@ -402,7 +400,7 @@ this method will throw an error.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2046">line 2046</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2118">line 2118</a>
     </li></ul></dd>
     
 
@@ -429,28 +427,14 @@ this method will throw an error.
 
         
 
-<dl>
-    <dt>
-        <div class="param-desc">
-        If protocol version 1 is used, as arrays are not supported.
-        </div>
-    </dt>
-    <dd></dd>
-    <dt>
-        <dl>
-            <dt>
-                Type
-            </dt>
-            <dd>
-                
-<span class="param-type">Error</span>
-
-
-            </dd>
-        </dl>
-    </dt>
-    <dd></dd>
-</dl>
+    <div class="param-desc">
+    
+        Error if arrays are not supported by the buffer implementation, or array validation fails:
+- value is not an array
+- or the shape of the array is irregular: the length of sub-arrays are different
+- or the array is not homogeneous: its elements are not all the same type
+    
+    </div>
 
 
     
@@ -497,7 +481,7 @@ this method will throw an error.
 
 
 <div class="description">
-    Closing the row after writing the designated timestamp into the buffer of the sender.
+    Closes the row after writing the designated timestamp into the buffer of the sender.
 </div>
 
 
@@ -648,7 +632,7 @@ this method will throw an error.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2076">line 2076</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2151">line 2151</a>
     </li></ul></dd>
     
 
@@ -692,7 +676,7 @@ this method will throw an error.
 
 
 <div class="description">
-    Closing the row without writing designated timestamp into the buffer of the sender. <br>
+    Closes the row without writing designated timestamp into the buffer of the sender. <br>
 Designated timestamp will be populated by the server on this record.
 </div>
 
@@ -737,7 +721,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2085">line 2085</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2160">line 2160</a>
     </li></ul></dd>
     
 
@@ -781,7 +765,8 @@ Designated timestamp will be populated by the server on this record.
 
 
 <div class="description">
-    Write a boolean column with its value into the buffer of the sender.
+    Writes a boolean column with its value into the buffer of the sender. <br>
+Use it to insert into BOOLEAN columns.
 </div>
 
 
@@ -897,7 +882,7 @@ Designated timestamp will be populated by the server on this record.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2023">line 2023</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2093">line 2093</a>
     </li></ul></dd>
     
 
@@ -963,7 +948,7 @@ Designated timestamp will be populated by the server on this record.
 
 
 <div class="description">
-    Closes the TCP connection to the database. <br>
+    Closes the connection to the database. <br>
 Data sitting in the Sender's buffer will be lost unless flush() is called before close().
 </div>
 
@@ -1008,7 +993,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1985">line 1985</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2048">line 2048</a>
     </li></ul></dd>
     
 
@@ -1096,7 +1081,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1965">line 1965</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2028">line 2028</a>
     </li></ul></dd>
     
 
@@ -1162,7 +1147,8 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
 
 
 <div class="description">
-    Write a float column with its value into the buffer of the sender.
+    Writes a 64-bit floating point value into the buffer of the sender. <br>
+Use it to insert into DOUBLE or FLOAT database columns.
 </div>
 
 
@@ -1278,7 +1264,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2033">line 2033</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2104">line 2104</a>
     </li></ul></dd>
     
 
@@ -1344,7 +1330,7 @@ Data sitting in the Sender's buffer will be lost unless flush() is called before
 
 
 <div class="description">
-    Sends the buffer's content to the database and compacts the buffer.
+    Sends the content of the sender's buffer to the database and compacts the buffer.
 If the last row is not finished it stays in the sender's buffer.
 </div>
 
@@ -1389,7 +1375,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1973">line 1973</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2036">line 2036</a>
     </li></ul></dd>
     
 
@@ -1455,7 +1441,8 @@ If the last row is not finished it stays in the sender's buffer.
 
 
 <div class="description">
-    Write an integer column with its value into the buffer of the sender.
+    Writes a 64-bit signed integer into the buffer of the sender. <br>
+Use it to insert into LONG, INT, SHORT and BYTE columns.
 </div>
 
 
@@ -1571,7 +1558,7 @@ If the last row is not finished it stays in the sender's buffer.
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2056">line 2056</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2130">line 2130</a>
     </li></ul></dd>
     
 
@@ -1594,6 +1581,18 @@ If the last row is not finished it stays in the sender's buffer.
 
 
 
+<h5>Throws:</h5>
+
+        
+
+    <div class="param-desc">
+    
+        Error if the value is not an integer
+    
+    </div>
+
+
+    
 
 
 <h5>Returns:</h5>
@@ -1637,8 +1636,8 @@ If the last row is not finished it stays in the sender's buffer.
 
 
 <div class="description">
-    Resets the buffer, data added to the buffer will be lost. <br>
-In other words it clears the buffer and sets the writing position to the beginning of the buffer.
+    Resets the sender's buffer, data sitting in the buffer will be lost. <br>
+In other words it clears the buffer, and sets the writing position to the beginning of the buffer.
 </div>
 
 
@@ -1682,7 +1681,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1956">line 1956</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2019">line 2019</a>
     </li></ul></dd>
     
 
@@ -1748,7 +1747,8 @@ In other words it clears the buffer and sets the writing position to the beginni
 
 
 <div class="description">
-    Write a string column with its value into the buffer of the sender.
+    Writes a string column with its value into the buffer of the sender. <br>
+Use it to insert into VARCHAR and STRING columns.
 </div>
 
 
@@ -1864,7 +1864,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2013">line 2013</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2082">line 2082</a>
     </li></ul></dd>
     
 
@@ -1930,7 +1930,8 @@ In other words it clears the buffer and sets the writing position to the beginni
 
 
 <div class="description">
-    Write a symbol name and value into the buffer of the sender.
+    Writes a symbol name and value into the buffer of the sender. <br>
+Use it to insert into SYMBOL columns.
 </div>
 
 
@@ -2046,7 +2047,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2003">line 2003</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2071">line 2071</a>
     </li></ul></dd>
     
 
@@ -2112,7 +2113,7 @@ In other words it clears the buffer and sets the writing position to the beginni
 
 
 <div class="description">
-    Write the table name into the buffer of the sender.
+    Writes the table name into the buffer of the sender of the sender.
 </div>
 
 
@@ -2205,7 +2206,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1993">line 1993</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2060">line 2060</a>
     </li></ul></dd>
     
 
@@ -2271,7 +2272,8 @@ In other words it clears the buffer and sets the writing position to the beginni
 
 
 <div class="description">
-    Write a timestamp column with its value into the buffer of the sender.
+    Writes a timestamp column with its value into the buffer of the sender. <br>
+Use it to insert into TIMESTAMP columns.
 </div>
 
 
@@ -2457,7 +2459,7 @@ In other words it clears the buffer and sets the writing position to the beginni
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2067">line 2067</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2142">line 2142</a>
     </li></ul></dd>
     
 
@@ -2523,7 +2525,7 @@ In other words it clears the buffer and sets the writing position to the beginni
 
 
 <div class="description">
-    Creates a Sender options object by parsing the provided configuration string.
+    Creates a Sender object by parsing the provided configuration string.
 </div>
 
 
@@ -2601,8 +2603,8 @@ In other words it clears the buffer and sets the writing position to the beginni
             <td class="description last">Optional extra configuration. <br>
 - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
 Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-- 'agent' is a custom Undici agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-A <i>undici.Agent</i>  object is expected.</td>
+- 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.</td>
         </tr>
 
     
@@ -2643,7 +2645,7 @@ A <i>undici.Agent</i>  object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1935">line 1935</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1998">line 1998</a>
     </li></ul></dd>
     
 
@@ -2709,7 +2711,7 @@ A <i>undici.Agent</i>  object is expected.</td>
 
 
 <div class="description">
-    Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
+    Creates a Sender object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
 </div>
 
 
@@ -2764,8 +2766,8 @@ A <i>undici.Agent</i>  object is expected.</td>
             <td class="description last">Optional extra configuration. <br>
 - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
 Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-- 'agent' is a custom Undici agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-A <i>undici.Agent</i>  object is expected.</td>
+- 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.</td>
         </tr>
 
     
@@ -2806,7 +2808,7 @@ A <i>undici.Agent</i>  object is expected.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="index.js.html">index.js</a>, <a href="index.js.html#line1948">line 1948</a>
+        <a href="index.js.html">index.js</a>, <a href="index.js.html#line2011">line 2011</a>
     </li></ul></dd>
     
 
@@ -2874,13 +2876,13 @@ A <i>undici.Agent</i>  object is expected.</td>
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#isRetryable">isRetryable</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateArray">validateArray</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Jul 31 2025 11:43:45 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Wed Aug 06 2025 18:31:40 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

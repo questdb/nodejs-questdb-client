@@ -94,7 +94,8 @@ class UndiciTransport extends HttpTransportBase {
 
   /**
    * Sends data to QuestDB using HTTP POST.
-   * @param data - Buffer containing data to send
+   *
+   * @param {Buffer} data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
    * @throws Error if request fails after all retries or times out
    */
@@ -155,6 +156,7 @@ class UndiciTransport extends HttpTransportBase {
   }
 
   /**
+   * @ignore
    * Gets or creates the default HTTP agent with standard configuration.
    * Uses a singleton pattern to reuse the same agent across instances.
    * @returns The default Undici agent instance

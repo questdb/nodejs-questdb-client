@@ -13,7 +13,7 @@ type TimestampUnit = "ns" | "us" | "ms";
 
 /**
  * Type guard to check if a value is a boolean.
- * @param value - The value to check
+ * @param {unknown} value - The value to check
  * @returns True if the value is a boolean, false otherwise
  */
 function isBoolean(value: unknown): value is boolean {
@@ -22,8 +22,8 @@ function isBoolean(value: unknown): value is boolean {
 
 /**
  * Type guard to check if a value is an integer within specified bounds.
- * @param value - The value to check
- * @param lowerBound - The minimum allowed value (inclusive)
+ * @param {unknown} value - The value to check
+ * @param {number} lowerBound - The minimum allowed value (inclusive)
  * @returns True if the value is an integer >= lowerBound, false otherwise
  */
 function isInteger(value: unknown, lowerBound: number): value is number {
@@ -34,8 +34,8 @@ function isInteger(value: unknown, lowerBound: number): value is number {
 
 /**
  * Converts a timestamp from the specified unit to microseconds.
- * @param timestamp - The timestamp value as a bigint
- * @param unit - The source timestamp unit
+ * @param {bigint} timestamp - The timestamp value as a bigint
+ * @param {TimestampUnit} unit - The source timestamp unit
  * @returns The timestamp converted to microseconds
  * @throws Error if the timestamp unit is unknown
  */
@@ -54,8 +54,8 @@ function timestampToMicros(timestamp: bigint, unit: TimestampUnit) {
 
 /**
  * Converts a timestamp from the specified unit to nanoseconds.
- * @param timestamp - The timestamp value as a bigint
- * @param unit - The source timestamp unit
+ * @param {bigint} timestamp - The timestamp value as a bigint
+ * @param {TimestampUnit} unit - The source timestamp unit
  * @returns The timestamp converted to nanoseconds
  * @throws Error if the timestamp unit is unknown
  */
@@ -74,7 +74,7 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
 
 /**
  * Analyzes the dimensions of a nested array structure.
- * @param data - The array to analyze
+ * @param {unknown} data - The array to analyze
  * @returns Array of dimension sizes at each nesting level
  * @throws Error if any dimension has zero length
  */
@@ -92,9 +92,9 @@ function getDimensions(data: unknown) {
  * Validation fails if:
  * - <i>data</i> is not an array
  * - the array is irregular: the length of its sub-arrays are different
- *  - the array is not homogenous: the array contains mixed types
- * @param data - The array to validate
- * @param dimensions - The shape of the array
+ * - the array is not homogenous: the array contains mixed types
+ * @param {unknown[]} data - The array to validate
+ * @param {number[]} dimensions - The shape of the array
  * @returns The primitive type of the array's elements
  * @throws Error if the validation fails
  */
@@ -158,9 +158,9 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
 /**
  * Fetches JSON data from a URL.
  * @template T - The expected type of the JSON response
- * @param url - The URL to fetch from
- * @param agent - HTTP agent to be used for the request
- * @param timeout - Request timeout, query will be aborted if not finished in time
+ * @param {string} url - The URL to fetch from
+ * @param {Agent} agent - HTTP agent to be used for the request
+ * @param {number} timeout - Request timeout, query will be aborted if not finished in time
  * @returns Promise resolving to the parsed JSON data
  * @throws Error if the request fails or returns a non-OK status
  */

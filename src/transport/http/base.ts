@@ -50,7 +50,8 @@ abstract class HttpTransportBase implements SenderTransport {
 
   /**
    * Creates a new HttpTransportBase instance.
-   * @param options - Sender configuration options including connection and authentication details
+   *
+   * @param {SenderOptions} options - Sender configuration options including connection and authentication details
    * @throws Error if required protocol or host options are missing
    */
   protected constructor(options: SenderOptions) {
@@ -115,7 +116,7 @@ abstract class HttpTransportBase implements SenderTransport {
 
   /**
    * Gets the default auto-flush row count for HTTP transport.
-   * @returns Default number of rows that trigger auto-flush
+   * @returns {number} Default number of rows that trigger auto-flush
    */
   getDefaultAutoFlushRows(): number {
     return DEFAULT_HTTP_AUTO_FLUSH_ROWS;
@@ -124,7 +125,7 @@ abstract class HttpTransportBase implements SenderTransport {
   /**
    * Sends data to the QuestDB server via HTTP.
    * Must be implemented by concrete HTTP transport classes.
-   * @param data - Buffer containing the data to send
+   * @param {Buffer} data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
    */
   abstract send(data: Buffer): Promise<boolean>;

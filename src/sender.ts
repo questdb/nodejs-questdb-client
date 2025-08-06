@@ -36,8 +36,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * such as Nginx to enable encryption.
  * </p>
  * <p>
- * The client supports multiple protocol versions for data serialization. Protocol version 1 uses text-based 
- * serialization, while version 2 uses binary encoding for doubles and supports array columns for improved 
+ * The client supports multiple protocol versions for data serialization. Protocol version 1 uses text-based
+ * serialization, while version 2 uses binary encoding for doubles and supports array columns for improved
  * performance. The client can automatically negotiate the protocol version with the server when using HTTP/HTTPS
  * by setting the protocol_version to 'auto' (default behavior).
  * </p>
@@ -100,7 +100,7 @@ class Sender {
    * Creates an instance of Sender.
    *
    * @param {SenderOptions} options - Sender configuration object. <br>
-   * See SenderOptions documentation for detailed description of configuration options. <br>
+   * See SenderOptions documentation for detailed description of configuration options.
    */
   constructor(options: SenderOptions) {
     this.transport = createTransport(options);
@@ -120,14 +120,14 @@ class Sender {
   }
 
   /**
-   * Creates a Sender options object by parsing the provided configuration string.
+   * Creates a Sender object by parsing the provided configuration string.
    *
    * @param {string} configurationString - Configuration string. <br>
    * @param {object} extraOptions - Optional extra configuration. <br>
    * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-   * - 'agent' is a custom Undici agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-   * A <i>undici.Agent</i>  object is expected.
+   * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
    */
@@ -141,13 +141,13 @@ class Sender {
   }
 
   /**
-   * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
+   * Creates a Sender object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
    *
    * @param {object} extraOptions - Optional extra configuration. <br>
    * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-   * - 'agent' is a custom Undici agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
-   * A <i>undici.Agent</i>  object is expected.
+   * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
@@ -158,8 +158,8 @@ class Sender {
   }
 
   /**
-   * Resets the buffer, data added to the buffer will be lost. <br>
-   * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
+   * Resets the sender's buffer, data sitting in the buffer will be lost. <br>
+   * In other words it clears the buffer, and sets the writing position to the beginning of the buffer.
    *
    * @return {Sender} Returns with a reference to this sender.
    */
@@ -179,7 +179,7 @@ class Sender {
   }
 
   /**
-   * Sends the buffer's content to the database and compacts the buffer.
+   * Sends the content of the sender's buffer to the database and compacts the buffer.
    * If the last row is not finished it stays in the sender's buffer.
    *
    * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send, and it was sent successfully.
@@ -215,7 +215,7 @@ class Sender {
   }
 
   /**
-   * Writes the table name into the buffer of the sender.
+   * Writes the table name into the buffer of the sender of the sender.
    *
    * @param {string} table - Table name.
    * @return {Sender} Returns with a reference to this sender.
@@ -226,7 +226,8 @@ class Sender {
   }
 
   /**
-   * Writes a symbol name and value into the buffer of the sender.
+   * Writes a symbol name and value into the buffer of the sender. <br>
+   * Use it to insert into SYMBOL columns.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -238,7 +239,8 @@ class Sender {
   }
 
   /**
-   * Writes a string column with its value into the buffer of the sender.
+   * Writes a string column with its value into the buffer of the sender. <br>
+   * Use it to insert into VARCHAR and STRING columns.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -250,7 +252,8 @@ class Sender {
   }
 
   /**
-   * Writes a boolean column with its value into the buffer of the sender.
+   * Writes a boolean column with its value into the buffer of the sender. <br>
+   * Use it to insert into BOOLEAN columns.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -262,7 +265,8 @@ class Sender {
   }
 
   /**
-   * Writes a float column with its value into the buffer of the sender.
+   * Writes a 64-bit floating point value into the buffer of the sender. <br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -274,14 +278,15 @@ class Sender {
   }
 
   /**
-   * Write an array column with its values into the buffer of the sender. <br>
-   * <b>Note:</b> Array columns are only supported in protocol version 2. If using protocol version 1, 
-   * this method will throw an error.
+   * Writes an array column with its values into the buffer of the sender.
    *
-   * @param {string} name - Column name.
-   * @param {unknown[]} value - Array values to be written. Currently supports arrays of numbers.
-   * @return {Sender} Returns with a reference to this sender.
-   * @throws {Error} If protocol version 1 is used, as arrays are not supported.
+   * @param {string} name - Column name
+   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @returns {Sender} Returns with a reference to this sender.
+   * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
    */
   arrayColumn(name: string, value: unknown[]): Sender {
     this.buffer.arrayColumn(name, value);
@@ -289,11 +294,13 @@ class Sender {
   }
 
   /**
-   * Writes an integer column with its value into the buffer of the sender.
+   * Writes a 64-bit signed integer into the buffer of the sender. <br>
+   * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
    * @return {Sender} Returns with a reference to this sender.
+   * @throws Error if the value is not an integer
    */
   intColumn(name: string, value: number): Sender {
     this.buffer.intColumn(name, value);
@@ -301,7 +308,8 @@ class Sender {
   }
 
   /**
-   * Writes a timestamp column with its value into the buffer of the sender.
+   * Writes a timestamp column with its value into the buffer of the sender. <br>
+   * Use it to insert into TIMESTAMP columns.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
