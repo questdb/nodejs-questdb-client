@@ -134,7 +134,7 @@ function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
       }
     } else {
       // leaf level, expecting primitives
-      if (expectedType === null && array[0]) {
+      if (expectedType === null && array[0] !== undefined) {
         expectedType = typeof array[0] as ArrayPrimitive;
       }
 
@@ -171,7 +171,7 @@ async function fetchJson<T>(
 ): Promise<T> {
   const controller = new AbortController();
   const { signal } = controller;
-  setTimeout(() => controller.abort(), timeout);
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   let response: globalThis.Response;
   try {
@@ -181,6 +181,8 @@ async function fetchJson<T>(
     });
   } catch (error) {
     throw new Error(`Failed to load ${url} [error=${error}]`);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!response.ok) {

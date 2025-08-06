@@ -29,7 +29,8 @@ class SenderBufferV2 extends SenderBufferBase {
   }
 
   /**
-   * Writes a float column with its value into the buffer using v2 serialization (binary format).
+   * Writes a 64-bit floating point value into the buffer using v2 serialization (binary format). <br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -104,7 +105,7 @@ class SenderBufferV2 extends SenderBufferBase {
         this.writeArrayValues(arr[i] as unknown[], dimensions);
       }
     } else {
-      const type = arr[0] ? typeof arr[0] : null;
+      const type = arr[0] !== undefined ? typeof arr[0] : null;
       switch (type) {
         case "number":
           for (let i = 0; i < arr.length; i++) {
