@@ -1,5 +1,7 @@
 import { Agent } from "undici";
 
+type ArrayPrimitive = "number" | "boolean" | "string" | null;
+
 type TimestampUnit = "ns" | "us" | "ms";
 
 function isBoolean(value: unknown): value is boolean {
@@ -36,6 +38,72 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
     default:
       throw new Error(`Unknown timestamp unit: ${unit}`);
   }
+}
+
+function getDimensions(data: unknown) {
+  const dimensions: number[] = [];
+  while (Array.isArray(data)) {
+    dimensions.push(data.length);
+    data = data[0];
+  }
+  return dimensions;
+}
+
+function validateArray(data: unknown[], dimensions: number[]): ArrayPrimitive {
+  if (data === null || data === undefined) {
+    return null;
+  }
+  if (!Array.isArray(data)) {
+    throw new Error(
+      `The value must be an array [value=${JSON.stringify(data)}, type=${typeof data}]`,
+    );
+  }
+
+  let expectedType: ArrayPrimitive = null;
+
+  function checkArray(
+    array: unknown[],
+    depth: number = 0,
+    path: string = "",
+  ): void {
+    const expectedLength = dimensions[depth];
+    if (array.length !== expectedLength) {
+      throw new Error(
+        `Lengths of sub-arrays do not match [expected=${expectedLength}, actual=${array.length}, dimensions=[${dimensions}], path=${path}]`,
+      );
+    }
+
+    if (depth < dimensions.length - 1) {
+      // intermediate level, expecting arrays
+      for (let i = 0; i < array.length; i++) {
+        if (!Array.isArray(array[i])) {
+          throw new Error(
+            `Mixed types found [expected=array, current=${typeof array[i]}, path=${path}[${i}]]`,
+          );
+        }
+        checkArray(array[i] as unknown[], depth + 1, `${path}[${i}]`);
+      }
+    } else {
+      // leaf level, expecting primitives
+      if (expectedType === null && array[0] !== undefined) {
+        expectedType = typeof array[0] as ArrayPrimitive;
+      }
+
+      for (let i = 0; i < array.length; i++) {
+        const currentType = typeof array[i] as ArrayPrimitive;
+        if (currentType !== expectedType) {
+          throw new Error(
+            expectedType !== null
+              ? `Mixed types found [expected=${expectedType}, current=${currentType}, path=${path}[${i}]]`
+              : `Unsupported array type [type=${currentType}]`,
+          );
+        }
+      }
+    }
+  }
+
+  checkArray(data);
+  return expectedType;
 }
 
 /**
@@ -83,4 +151,7 @@ export {
   timestampToNanos,
   TimestampUnit,
   fetchJson,
+  getDimensions,
+  validateArray,
+  ArrayPrimitive,
 };

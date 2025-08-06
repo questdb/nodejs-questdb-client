@@ -167,6 +167,281 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("does not support arrays with protocol v1", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() =>
+      sender.table("tableName").arrayColumn("arrayCol", [12.3, 23.4]),
+    ).toThrow("Arrays are not supported in protocol v1");
+    await sender.close();
+  });
+
+  it("supports arrays with protocol v2", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", [12.3, 23.4])
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 01 02 00 00 00 9a 99 99 99 99 99 28 40 66 66 66 66 66 66 37 40 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("supports arrays with zeros", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("tableName").arrayColumn("arrayCol", [0.0, 0.0]).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 01 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("supports multidimensional arrays with protocol v2", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", [[12.3], [23.4]])
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 02 02 00 00 00 01 00 00 00 9a 99 99 99 99 99 28 40 66 66 66 66 66 66 37 40 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("accepts empty array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("tableName").arrayColumn("arrayCol", []).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") + " 0e 0a 01 00 00 00 00 " + toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("accepts multi dimensional empty array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", [
+        [[], []],
+        [[], []],
+        [[], []],
+      ])
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 0a 03 03 00 00 00 02 00 00 00 00 00 00 00 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("does not accept irregularly sized array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() =>
+      sender.table("tableName").arrayColumn("arrayCol", [
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [[1.1, 2.2], [3.3], [5.5, 6.6]],
+      ]),
+    ).toThrow(
+      "Lengths of sub-arrays do not match [expected=2, actual=1, dimensions=[4,3,2], path=[3][1]]",
+    );
+    await sender.close();
+  });
+
+  it("does not accept non-homogenous array", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    sender.table("tableName");
+    expect(() =>
+      sender.arrayColumn("arrayCol", [
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, "4.4"],
+          [5.5, 6.6],
+        ],
+      ]),
+    ).toThrow(
+      "Mixed types found [expected=number, current=string, path=[3][1][1]]",
+    );
+    expect(() =>
+      sender.arrayColumn("arrayCol", [
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [
+          [1.1, 2.2],
+          [3.3, 4.4],
+          [5.5, 6.6],
+        ],
+        [[1.1, 2.2], 3.3, [5.5, 6.6]],
+      ]),
+    ).toThrow(
+      "Mixed types found [expected=array, current=number, path=[3][1]]",
+    );
+    await sender.close();
+  });
+
+  it("does not accept unsupported types", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    sender.table("tableName");
+    expect(() => sender.arrayColumn("col", ["str"])).toThrow(
+      "Unsupported array type [type=string]",
+    );
+    expect(() => sender.arrayColumn("col", [true])).toThrow(
+      "Unsupported array type [type=boolean]",
+    );
+    expect(() => sender.arrayColumn("col", [{}])).toThrow(
+      "Unsupported array type [type=object]",
+    );
+    expect(() => sender.arrayColumn("col", [null])).toThrow(
+      "Unsupported array type [type=object]",
+    );
+    expect(() => sender.arrayColumn("col", [undefined])).toThrow(
+      "Unsupported array type [type=undefined]",
+    );
+    await sender.close();
+  });
+
+  it("does not accept non-array types", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    sender.table("tableName");
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", 12.345)).toThrow(
+      "The value must be an array [value=12.345, type=number]",
+    );
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", 42)).toThrow(
+      "The value must be an array [value=42, type=number]",
+    );
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", "str")).toThrow(
+      'The value must be an array [value="str", type=string]',
+    );
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", "")).toThrow(
+      'The value must be an array [value="", type=string]',
+    );
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", true)).toThrow(
+      "The value must be an array [value=true, type=boolean]",
+    );
+    // @ts-expect-error - Testing invalid input
+    expect(() => sender.arrayColumn("col", {})).toThrow(
+      "The value must be an array [value={}, type=object]",
+    );
+    await sender.close();
+  });
+
+  it("supports arrays with NULL value", async function () {
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("tableName").arrayColumn("arrayCol", undefined).atNow();
+    await sender.table("tableName").arrayColumn("arrayCol", null).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName arrayCol==") +
+        " 0e 21 " +
+        toHex("\ntableName arrayCol==") +
+        " 0e 21 " +
+        toHex("\n"),
+    );
+    await sender.close();
+  });
+
   it("supports timestamp field as number", async function () {
     const sender = new Sender({
       protocol: "tcp",

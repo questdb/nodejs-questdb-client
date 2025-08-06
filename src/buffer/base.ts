@@ -26,8 +26,8 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
 abstract class SenderBufferBase implements SenderBuffer {
   private bufferSize: number;
   private readonly maxBufferSize: number;
-  private buffer: Buffer<ArrayBuffer>;
-  private position: number;
+  protected buffer: Buffer<ArrayBuffer>;
+  protected position: number;
   private endOfLastRow: number;
 
   private hasTable: boolean;
@@ -233,6 +233,15 @@ abstract class SenderBufferBase implements SenderBuffer {
   abstract floatColumn(name: string, value: number): SenderBuffer;
 
   /**
+   * Writes an array column with its values into the buffer.
+   *
+   * @param {string} name - Column name.
+   * @param {unknown[]} value - Column value, accepts only arrays.
+   * @return {Sender} Returns with a reference to this sender.
+   */
+  abstract arrayColumn(name: string, value: unknown[]): SenderBuffer;
+
+  /**
    * Writes a 64-bit signed integer into the buffer. <br>
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
@@ -384,6 +393,10 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   protected writeByte(data: number) {
     this.position = this.buffer.writeInt8(data, this.position);
+  }
+
+  protected writeInt(data: number) {
+    this.position = this.buffer.writeInt32LE(data, this.position);
   }
 
   protected writeDouble(data: number) {

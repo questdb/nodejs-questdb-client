@@ -104,6 +104,8 @@ interface SenderBuffer {
    */
   floatColumn(name: string, value: number): SenderBuffer;
 
+  arrayColumn(name: string, value: unknown[]): SenderBuffer;
+
   /**
    * Writes an integer column with its value into the buffer.
    *

@@ -33,6 +33,10 @@ class SenderBufferV1 extends SenderBufferBase {
     );
     return this;
   }
+
+  arrayColumn(): SenderBuffer {
+    throw new Error("Arrays are not supported in protocol v1");
+  }
 }
 
 export { SenderBufferV1 };
