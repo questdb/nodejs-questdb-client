@@ -2,8 +2,8 @@
 import { log, Logger } from "./logging";
 import { SenderOptions, ExtraOptions } from "./options";
 import { SenderTransport, createTransport } from "./transport";
+import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
-import { SenderBuffer } from "./buffer";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
@@ -72,7 +72,7 @@ class Sender {
    */
   constructor(options: SenderOptions) {
     this.transport = createTransport(options);
-    this.buffer = new SenderBuffer(options);
+    this.buffer = createBuffer(options);
 
     this.log = typeof options.log === "function" ? options.log : log;
 
@@ -99,12 +99,12 @@ class Sender {
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
    */
-  static fromConfig(
+  static async fromConfig(
     configurationString: string,
     extraOptions?: ExtraOptions,
-  ): Sender {
+  ): Promise<Sender> {
     return new Sender(
-      SenderOptions.fromConfig(configurationString, extraOptions),
+      await SenderOptions.fromConfig(configurationString, extraOptions),
     );
   }
 
@@ -119,9 +119,9 @@ class Sender {
    *
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
-  static fromEnv(extraOptions?: ExtraOptions): Sender {
+  static async fromEnv(extraOptions?: ExtraOptions): Promise<Sender> {
     return new Sender(
-      SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions),
+      await SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions),
     );
   }
 
@@ -183,7 +183,7 @@ class Sender {
   }
 
   /**
-   * Write the table name into the buffer of the sender.
+   * Writes the table name into the buffer of the sender.
    *
    * @param {string} table - Table name.
    * @return {Sender} Returns with a reference to this sender.
@@ -194,7 +194,7 @@ class Sender {
   }
 
   /**
-   * Write a symbol name and value into the buffer of the sender.
+   * Writes a symbol name and value into the buffer of the sender.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -206,7 +206,7 @@ class Sender {
   }
 
   /**
-   * Write a string column with its value into the buffer of the sender.
+   * Writes a string column with its value into the buffer of the sender.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -218,7 +218,7 @@ class Sender {
   }
 
   /**
-   * Write a boolean column with its value into the buffer of the sender.
+   * Writes a boolean column with its value into the buffer of the sender.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -230,7 +230,7 @@ class Sender {
   }
 
   /**
-   * Write a float column with its value into the buffer of the sender.
+   * Writes a float column with its value into the buffer of the sender.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -242,7 +242,7 @@ class Sender {
   }
 
   /**
-   * Write an integer column with its value into the buffer of the sender.
+   * Writes an integer column with its value into the buffer of the sender.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -254,7 +254,7 @@ class Sender {
   }
 
   /**
-   * Write a timestamp column with its value into the buffer of the sender.
+   * Writes a timestamp column with its value into the buffer of the sender.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
@@ -271,7 +271,7 @@ class Sender {
   }
 
   /**
-   * Closing the row after writing the designated timestamp into the buffer of the sender.
+   * Closes the row after writing the designated timestamp into the buffer of the sender.
    *
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
@@ -284,7 +284,7 @@ class Sender {
   }
 
   /**
-   * Closing the row without writing designated timestamp into the buffer of the sender. <br>
+   * Closes the row without writing designated timestamp into the buffer of the sender. <br>
    * Designated timestamp will be populated by the server on this record.
    */
   async atNow() {

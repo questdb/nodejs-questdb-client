@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 
 import { Sender } from "../src";
+import { SenderOptions } from "../src/options";
 
 describe("Client interop test suite", function () {
   it("runs client tests as per json test config", async function () {
@@ -15,12 +16,14 @@ describe("Client interop test suite", function () {
     for (const testCase of testCases) {
       console.info(`test name: ${testCase.testName}`);
 
-      const sender = new Sender({
-        protocol: "tcp",
-        host: "host",
-        auto_flush: false,
-        init_buf_size: 1024,
-      });
+      const sender = new Sender(
+        await SenderOptions.resolveAuto({
+          protocol: "tcp",
+          host: "host",
+          auto_flush: false,
+          init_buf_size: 1024,
+        }),
+      );
 
       let errorMessage: string;
       try {
@@ -94,6 +97,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws on invalid timestamp unit", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       auto_flush: false,
       init_buf_size: 1024,
@@ -143,6 +147,7 @@ describe("Sender message builder test suite (anything not covered in client inte
 
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 256,
     });
@@ -165,6 +170,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as number", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -182,6 +188,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as ns number", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -199,6 +206,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as us number", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -216,6 +224,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as ms number", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -233,6 +242,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as BigInt", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -250,6 +260,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as ns BigInt", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -267,6 +278,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as us BigInt", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -284,6 +296,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports timestamp field as ms BigInt", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -301,6 +314,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws on invalid designated timestamp unit", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -320,6 +334,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports setting designated us timestamp as number from client", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -337,6 +352,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports setting designated ms timestamp as number from client", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -354,6 +370,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports setting designated timestamp as BigInt from client", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -371,6 +388,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports setting designated ns timestamp as BigInt from client", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -388,6 +406,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports setting designated us timestamp as BigInt from client", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -405,6 +424,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("supports setting designated ms timestamp as BigInt from client", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -422,6 +442,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if table name is not a string", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -435,6 +456,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if table name is too long", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -450,6 +472,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if table name is set more times", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -462,6 +485,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if symbol name is not a string", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -475,6 +499,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if symbol name is empty string", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -487,6 +512,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if column name is not a string", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -500,6 +526,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if column name is empty string", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -512,6 +539,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if column name is too long", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -530,6 +558,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if column value is not the right type", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -543,6 +572,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if adding column without setting table name", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -555,6 +585,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if adding symbol without setting table name", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -567,6 +598,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if adding symbol after columns", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -584,6 +616,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("returns null if preparing an empty buffer for send", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -597,6 +630,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("leaves unfinished rows in the sender's buffer when preparing a copy of the buffer for send", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -620,6 +654,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if a float is passed as integer field", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -632,6 +667,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if a float is passed as timestamp field", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -644,6 +680,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if designated timestamp is not an integer or bigint", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -663,6 +700,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if designated timestamp is invalid", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -680,6 +718,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("throws exception if designated timestamp is set without any fields added", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -693,9 +732,10 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("extends the size of the buffer if data does not fit", async function () {
+  it("extends the size of the buffer v1 if data does not fit", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 8,
     });
@@ -727,8 +767,41 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("extends the size of the buffer v2 if data does not fit", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 8,
+    });
+    expect(bufferSize(sender)).toBe(8);
+    expect(bufferPosition(sender)).toBe(0);
+    sender.table("tableName");
+    expect(bufferSize(sender)).toBe(24);
+    expect(bufferPosition(sender)).toBe("tableName".length);
+    sender.floatColumn("floatField", 123.456);
+    expect(bufferSize(sender)).toBe(48);
+    expect(bufferPosition(sender)).toBe("tableName floatField=".length + 10);
+    sender.stringColumn("strField", "hoho");
+    expect(bufferSize(sender)).toBe(96);
+    expect(bufferPosition(sender)).toBe(
+      "tableName floatField=".length + 10 + ',strField="hoho"'.length,
+    );
+    await sender.atNow();
+    expect(bufferSize(sender)).toBe(96);
+    expect(bufferPosition(sender)).toBe(
+      "tableName floatField=".length + 10 + ',strField="hoho"\n'.length,
+    );
+    expect(bufferContentHex(sender)).toBe(
+      toHex("tableName floatField=") +
+        " 3d 10 77 be 9f 1a 2f dd 5e 40 " +
+        toHex(',strField="hoho"\n'),
+    );
+    await sender.close();
+  });
+
   it("throws exception if tries to extend the size of the buffer above max buffer size", async function () {
-    const sender = Sender.fromConfig(
+    const sender = await Sender.fromConfig(
       "tcp::addr=host;init_buf_size=8;max_buf_size=64;",
     );
     expect(bufferSize(sender)).toBe(8);
@@ -761,6 +834,7 @@ describe("Sender message builder test suite (anything not covered in client inte
   it("is possible to clear the buffer by calling reset()", async function () {
     const sender = new Sender({
       protocol: "tcp",
+      protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
@@ -795,6 +869,21 @@ describe("Sender message builder test suite (anything not covered in client inte
 function bufferContent(sender: Sender) {
   // @ts-expect-error - Accessing private field
   return sender.buffer.toBufferView().toString();
+}
+
+function bufferContentHex(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return toHexString(sender.buffer.toBufferView());
+}
+
+function toHex(str: string) {
+  return toHexString(Buffer.from(str));
+}
+
+function toHexString(buffer: Buffer) {
+  return Array.from(buffer)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join(" ");
 }
 
 function bufferSize(sender: Sender) {

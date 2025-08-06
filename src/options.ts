@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
 import { PathOrFileDescriptor } from "fs";
 import { Agent } from "undici";
 import http from "http";
 import https from "https";
 
 import { Logger } from "./logging";
+import { fetchJson, isBoolean, isInteger } from "./utils";
+import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
@@ -16,6 +19,12 @@ const TCPS = "tcps";
 const ON = "on";
 const OFF = "off";
 const UNSAFE_OFF = "unsafe_off";
+
+const PROTOCOL_VERSION_AUTO = "auto";
+const PROTOCOL_VERSION_V1 = "1";
+const PROTOCOL_VERSION_V2 = "2";
+
+const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
 
 type ExtraOptions = {
   log?: Logger;
@@ -43,6 +52,11 @@ type DeprecatedOptions = {
  * <ul>
  * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps</i> - The protocol used to communicate with the server. <br>
  * When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
+ * </li>
+ * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used for data serialization. <br>
+ * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles. <br>
+ * When set to 'auto' (default for HTTP/HTTPS), the client automatically negotiates the highest supported version with the server. <br>
+ * TCP/TCPS connections default to version 1.
  * </li>
  * <li> addr: <i>string</i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. <br>
  * If no port is specified, a default will be used. <br>
@@ -130,6 +144,8 @@ type DeprecatedOptions = {
  */
 class SenderOptions {
   protocol: string;
+  protocol_version?: string;
+
   addr?: string;
   host?: string; // derived from addr
   port?: number; // derived from addr
@@ -205,6 +221,55 @@ class SenderOptions {
     }
   }
 
+  /**
+   * Resolves the protocol version, if it is set to 'auto'. <br>
+   * If TCP transport is used, the protocol version will default to 1.
+   * In case of HTTP transport the /settings endpoint of the database is used to find the protocol versions
+   * supported by the server, and the highest will be selected.
+   * @param options SenderOptions instance needs resolving protocol version
+   */
+  static async resolveAuto(options: SenderOptions) {
+    parseProtocolVersion(options);
+    if (options.protocol_version !== PROTOCOL_VERSION_AUTO) {
+      return options;
+    }
+
+    const url = `${options.protocol}://${options.host}:${options.port}/settings`;
+    const settings: {
+      config: { [LINE_PROTO_SUPPORT_VERSION]: number[] };
+    } = await fetchJson(
+      url,
+      isInteger(options.request_timeout, 1)
+        ? options.request_timeout
+        : DEFAULT_REQUEST_TIMEOUT,
+      new Agent({
+        connect: {
+          ca: options.tls_ca ? readFileSync(options.tls_ca) : undefined,
+          rejectUnauthorized: isBoolean(options.tls_verify)
+            ? options.tls_verify
+            : true,
+        },
+      }),
+    );
+    const supportedVersions: string[] = (
+      settings.config[LINE_PROTO_SUPPORT_VERSION] ?? []
+    ).map((version: unknown) => String(version));
+
+    if (supportedVersions.length === 0) {
+      options.protocol_version = PROTOCOL_VERSION_V1;
+    } else if (supportedVersions.includes(PROTOCOL_VERSION_V2)) {
+      options.protocol_version = PROTOCOL_VERSION_V2;
+    } else if (supportedVersions.includes(PROTOCOL_VERSION_V1)) {
+      options.protocol_version = PROTOCOL_VERSION_V1;
+    } else {
+      throw new Error(
+        "Unsupported protocol versions received from server: " +
+          supportedVersions,
+      );
+    }
+    return options;
+  }
+
   static resolveDeprecated(
     options: SenderOptions & DeprecatedOptions,
     log: Logger,
@@ -250,11 +315,13 @@ class SenderOptions {
    *
    * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
    */
-  static fromConfig(
+  static async fromConfig(
     configurationString: string,
     extraOptions?: ExtraOptions,
-  ): SenderOptions {
-    return new SenderOptions(configurationString, extraOptions);
+  ): Promise<SenderOptions> {
+    const options = new SenderOptions(configurationString, extraOptions);
+    await SenderOptions.resolveAuto(options);
+    return options;
   }
 
   /**
@@ -268,8 +335,11 @@ class SenderOptions {
    *
    * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
-  static fromEnv(extraOptions?: ExtraOptions): SenderOptions {
-    return SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions);
+  static async fromEnv(extraOptions?: ExtraOptions): Promise<SenderOptions> {
+    return await SenderOptions.fromConfig(
+      process.env.QDB_CLIENT_CONF,
+      extraOptions,
+    );
   }
 }
 
@@ -283,6 +353,7 @@ function parseConfigurationString(
 
   const position = parseProtocol(options, configString);
   parseSettings(options, configString, position);
+  parseProtocolVersion(options);
   parseAddress(options);
   parseBufferSizes(options);
   parseAutoFlushOptions(options);
@@ -336,6 +407,7 @@ function parseSetting(
 }
 
 const ValidConfigKeys = [
+  "protocol_version",
   "addr",
   "username",
   "password",
@@ -399,6 +471,30 @@ function parseProtocol(options: SenderOptions, configString: string) {
       );
   }
   return index + 2;
+}
+
+function parseProtocolVersion(options: SenderOptions) {
+  const protocol_version = options.protocol_version ?? PROTOCOL_VERSION_AUTO;
+  switch (protocol_version) {
+    case PROTOCOL_VERSION_AUTO:
+      switch (options.protocol) {
+        case HTTP:
+        case HTTPS:
+          options.protocol_version = PROTOCOL_VERSION_AUTO;
+          break;
+        default:
+          options.protocol_version = PROTOCOL_VERSION_V1;
+      }
+      break;
+    case PROTOCOL_VERSION_V1:
+    case PROTOCOL_VERSION_V2:
+      break;
+    default:
+      throw new Error(
+        `Invalid protocol version: '${protocol_version}', accepted values: 'auto', '1', '2'`,
+      );
+  }
+  return;
 }
 
 function parseAddress(options: SenderOptions) {
@@ -523,4 +619,14 @@ function parseInteger(
   }
 }
 
-export { SenderOptions, ExtraOptions, HTTP, HTTPS, TCP, TCPS };
+export {
+  SenderOptions,
+  ExtraOptions,
+  HTTP,
+  HTTPS,
+  TCP,
+  TCPS,
+  PROTOCOL_VERSION_AUTO,
+  PROTOCOL_VERSION_V1,
+  PROTOCOL_VERSION_V2,
+};
