@@ -7,28 +7,23 @@ import { SenderOptions, HTTP, HTTPS } from "../../options";
 import { SenderTransport } from "../index";
 import { isBoolean, isInteger } from "../../utils";
 
-const HTTP_NO_CONTENT = 204; // success
+// HTTP status code for successful request with no content.
+const HTTP_NO_CONTENT = 204;
 
+// Default number of rows that trigger auto-flush for HTTP transport.
 const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
 
-const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400; // 100 KB/sec
-const DEFAULT_REQUEST_TIMEOUT = 10000; // 10 sec
-const DEFAULT_RETRY_TIMEOUT = 10000; // 10 sec
+// Default minimum throughput for HTTP requests (100 KB/sec).
+const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400;
 
-/*
-We are retrying on the following response codes (copied from the Rust client):
-500:  Internal Server Error
-503:  Service Unavailable
-504:  Gateway Timeout
+// Default request timeout in milliseconds (10 seconds).
+const DEFAULT_REQUEST_TIMEOUT = 10000;
 
-// Unofficial extensions
-507:  Insufficient Storage
-509:  Bandwidth Limit Exceeded
-523:  Origin is Unreachable
-524:  A Timeout Occurred
-529:  Site is overloaded
-599:  Network Connect Timeout Error
-*/
+// Default retry timeout in milliseconds (10 seconds).
+const DEFAULT_RETRY_TIMEOUT = 10000;
+
+// HTTP status codes that should trigger request retries.
+// Includes server errors and gateway timeouts that may be transient.
 const RETRIABLE_STATUS_CODES = [500, 503, 504, 507, 509, 523, 524, 529, 599];
 
 /**
@@ -55,7 +50,8 @@ abstract class HttpTransportBase implements SenderTransport {
 
   /**
    * Creates a new HttpTransportBase instance.
-   * @param options - Sender configuration options including connection and authentication details
+   *
+   * @param {SenderOptions} options - Sender configuration options including connection and authentication details
    * @throws Error if required protocol or host options are missing
    */
   protected constructor(options: SenderOptions) {
@@ -120,7 +116,7 @@ abstract class HttpTransportBase implements SenderTransport {
 
   /**
    * Gets the default auto-flush row count for HTTP transport.
-   * @returns Default number of rows that trigger auto-flush
+   * @returns {number} Default number of rows that trigger auto-flush
    */
   getDefaultAutoFlushRows(): number {
     return DEFAULT_HTTP_AUTO_FLUSH_ROWS;
@@ -129,7 +125,7 @@ abstract class HttpTransportBase implements SenderTransport {
   /**
    * Sends data to the QuestDB server via HTTP.
    * Must be implemented by concrete HTTP transport classes.
-   * @param data - Buffer containing the data to send
+   * @param {Buffer} data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
    */
   abstract send(data: Buffer): Promise<boolean>;

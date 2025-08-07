@@ -42,7 +42,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Creates an instance of SenderBufferBase.
    *
    * @param {SenderOptions} options - Sender configuration object. <br>
-   * See SenderOptions documentation for detailed description of configuration options. <br>
+   * See SenderOptions documentation for detailed description of configuration options.
    */
   protected constructor(options: SenderOptions) {
     this.log = options && typeof options.log === "function" ? options.log : log;
@@ -67,11 +67,13 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Extends the size of the buffer. <br>
-   * Can be used to increase the size of buffer if overflown.
-   * The buffer's content is copied into the new buffer.
+   * @ignore
+   * Resizes the buffer. <br>
+   * Can be used to increase the size of the buffer if data to be written would not fit.
+   * Creates a new buffer, and copies the content of the old buffer into the new one.
    *
-   * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes.
+   * @param {number} bufferSize - New size of the buffer used by the sender, provided in bytes
+   * @throws Error if the requested buffer size exceeds the maximum allowed size
    */
   private resize(bufferSize: number) {
     if (bufferSize > this.maxBufferSize) {
@@ -88,10 +90,10 @@ abstract class SenderBufferBase implements SenderBuffer {
   }
 
   /**
-   * Resets the buffer, data added to the buffer will be lost. <br>
-   * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
+   * Resets the buffer, data sitting in the buffer will be lost. <br>
+   * In other words it clears the buffer, and sets the writing position to the beginning of the buffer.
    *
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   reset(): SenderBuffer {
     this.position = 0;
@@ -134,7 +136,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Writes the table name into the buffer.
    *
    * @param {string} table - Table name.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   table(table: string): SenderBuffer {
     if (typeof table !== "string") {
@@ -156,7 +158,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   symbol(name: string, value: unknown): SenderBuffer {
     if (typeof name !== "string") {
@@ -184,7 +186,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   stringColumn(name: string, value: string): SenderBuffer {
     this.writeColumn(
@@ -207,7 +209,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   booleanColumn(name: string, value: boolean): SenderBuffer {
     this.writeColumn(
@@ -228,16 +230,20 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   abstract floatColumn(name: string, value: number): SenderBuffer;
 
   /**
    * Writes an array column with its values into the buffer.
    *
-   * @param {string} name - Column name.
-   * @param {unknown[]} value - Column value, accepts only arrays.
-   * @return {Sender} Returns with a reference to this sender.
+   * @param {string} name - Column name
+   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @returns {SenderBuffer} Returns with a reference to this buffer.
+   * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
    */
   abstract arrayColumn(name: string, value: unknown[]): SenderBuffer;
 
@@ -247,7 +253,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    * @throws Error if the value is not an integer
    */
   intColumn(name: string, value: number): SenderBuffer {
@@ -270,7 +276,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
-   * @return {Sender} Returns with a reference to this sender.
+   * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   timestampColumn(
     name: string,
@@ -339,6 +345,11 @@ abstract class SenderBufferBase implements SenderBuffer {
     return this.position;
   }
 
+  /**
+   * Checks if the buffer has sufficient capacity for additional data and resizes if needed.
+   * @param data - Array of strings to calculate the required capacity for
+   * @param base - Base number of bytes to add to the calculation
+   */
   protected checkCapacity(data: string[], base = 0) {
     let length = base;
     for (const str of data) {
@@ -353,6 +364,11 @@ abstract class SenderBufferBase implements SenderBuffer {
     }
   }
 
+  /**
+   * @ignore
+   * Compacts the buffer by removing completed rows.
+   * Moves any remaining data to the beginning of the buffer.
+   */
   private compact() {
     if (this.endOfLastRow > 0) {
       this.buffer.copy(this.buffer, 0, this.endOfLastRow, this.position);
@@ -361,6 +377,14 @@ abstract class SenderBufferBase implements SenderBuffer {
     }
   }
 
+  /**
+   * @ignore
+   * Common logic for writing column data to the buffer.
+   * @param name - Column name
+   * @param value - Column value
+   * @param writeValue - Function to write the value portion to the buffer
+   * @param valueType - Optional expected type for validation
+   */
   protected writeColumn(
     name: string,
     value: unknown,
@@ -387,18 +411,38 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.hasColumns = true;
   }
 
+  /**
+   * @ignore
+   * Writes string data to the buffer at the current position.
+   * @param data - String data to write
+   */
   protected write(data: string) {
     this.position += this.buffer.write(data, this.position);
   }
 
+  /**
+   * @ignore
+   * Writes a single byte to the buffer at the current position.
+   * @param data - Byte value to write
+   */
   protected writeByte(data: number) {
     this.position = this.buffer.writeInt8(data, this.position);
   }
 
+  /**
+   * @ignore
+   * Writes a 32-bit integer to the buffer in little-endian format.
+   * @param data - Integer value to write
+   */
   protected writeInt(data: number) {
     this.position = this.buffer.writeInt32LE(data, this.position);
   }
 
+  /**
+   * @ignore
+   * Writes a double-precision float to the buffer in little-endian format.
+   * @param data - Double value to write
+   */
   protected writeDouble(data: number) {
     this.position = this.buffer.writeDoubleLE(data, this.position);
   }

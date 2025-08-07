@@ -49,8 +49,10 @@
 <h2>Installation</h2>
 <pre class="prettyprint source lang-shell"><code># With npm
 npm i -s @questdb/nodejs-client
+
 # With yarn
 yarn add @questdb/nodejs-client
+
 # With pnpm
 pnpm add @questdb/nodejs-client
 </code></pre>
@@ -58,21 +60,21 @@ pnpm add @questdb/nodejs-client
 <table>
 <thead>
 <tr>
-<th>QuestDB version</th>
-<th>Node.js client version</th>
+<th>QuestDB client version</th>
+<th>Node.js version</th>
 <th>HTTP Agent</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>^5.0.0</td>
+<td>^4.0.0</td>
 <td>&gt;=v20.X.X</td>
 <td>Undici Agent</td>
 </tr>
 <tr>
-<td>^4.0.0</td>
+<td>^3.0.0</td>
 <td>&lt;v20.X.X</td>
-<td>Http.Agent</td>
+<td>Http Agent</td>
 </tr>
 </tbody>
 </table>
@@ -86,36 +88,64 @@ For more details, please, check the <a href="https://questdb.github.io/nodejs-qu
 <pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
 
 async function run() {
-  // create a sender using HTTP protocol
-  const sender = Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;);
+    // create a sender
+    const sender = await Sender.fromConfig('http::addr=localhost:9000');
 
-  // add rows to the buffer of the sender
-  await sender
-    .table(&quot;trades&quot;)
-    .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
-    .symbol(&quot;side&quot;, &quot;sell&quot;)
-    .floatColumn(&quot;price&quot;, 2615.54)
-    .floatColumn(&quot;amount&quot;, 0.00044)
-    .at(Date.now(), &quot;ms&quot;);
+    // order book snapshots
+    const orderBooks = [
+        {
+            symbol: 'BTC-USD',
+            exchange: 'COINBASE',
+            timestamp: Date.now(),
+            bidPrices: [50100.25, 50100.20, 50100.15, 50100.10, 50100.05],
+            bidSizes: [0.5, 1.2, 2.1, 0.8, 3.5],
+            askPrices: [50100.30, 50100.35, 50100.40, 50100.45, 50100.50],
+            askSizes: [0.6, 1.5, 1.8, 2.2, 4.0]
+        },
+        {
+            symbol: 'ETH-USD',
+            exchange: 'COINBASE',
+            timestamp: Date.now(),
+            bidPrices: [2850.50, 2850.45, 2850.40, 2850.35, 2850.30],
+            bidSizes: [5.0, 8.2, 12.5, 6.8, 15.0],
+            askPrices: [2850.55, 2850.60, 2850.65, 2850.70, 2850.75],
+            askSizes: [4.5, 7.8, 10.2, 8.5, 20.0]
+        }
+    ];
 
-  // flush the buffer of the sender, sending the data to QuestDB
-  // the buffer is cleared after the data is sent, and the sender is ready to accept new data
-  await sender.flush();
+    try {
+        // add rows to the buffer of the sender
+        for (const orderBook of orderBooks) {
+            await sender
+                .table('order_book_l2')
+                .symbol('symbol', orderBook.symbol)
+                .symbol('exchange', orderBook.exchange)
+                .arrayColumn('bid_prices', orderBook.bidPrices)
+                .arrayColumn('bid_sizes', orderBook.bidSizes)
+                .arrayColumn('ask_prices', orderBook.askPrices)
+                .arrayColumn('ask_sizes', orderBook.askSizes)
+                .at(orderBook.timestamp, 'ms');
+        }
 
-  // close the connection after all rows ingested
-  // unflushed data will be lost
-  await sender.close();
+        // flush the buffer of the sender, sending the data to QuestDB
+        // the buffer is cleared after the data is sent, and the sender is ready to accept new data
+        await sender.flush();
+    } finally {
+      // close the connection after all rows ingested
+      await sender.close();
+    }
 }
 
 run().then(console.log).catch(console.error);
 </code></pre>
 <h3>Authentication and secure connection</h3>
+<h4>Username and password authentication</h4>
 <pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
 
 async function run() {
   // create a sender using HTTPS protocol with username and password authentication
   const sender = Sender.fromConfig(
-    &quot;https::addr=127.0.0.1:9000;username=admin;password=quest;&quot;,
+    &quot;https::addr=127.0.0.1:9000;username=admin;password=quest&quot;,
   );
 
   // send the data over the authenticated and secure connection
@@ -134,13 +164,13 @@ async function run() {
 
 run().catch(console.error);
 </code></pre>
-<h3>TypeScript example</h3>
+<h4>Token authentication</h4>
 <pre class="prettyprint source lang-typescript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
 
 async function run(): Promise&lt;void> {
   // create a sender using HTTPS protocol with bearer token authentication
   const sender: Sender = Sender.fromConfig(
-    &quot;https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk;&quot;,
+    &quot;https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk&quot;,
   );
 
   // send the data over the authenticated and secure connection
@@ -244,7 +274,12 @@ function rndInt(limit) {
 }
 
 run().then(console.log).catch(console.error);
-</code></pre></article>
+</code></pre>
+<h2>Community</h2>
+<p>If you need help, have additional questions or want to provide feedback, you
+may find us on our <a href="https://community.questdb.io/">Community Forum</a>.</p>
+<p>You can also <a href="https://questdb.io/contributors/">sign up to our mailing list</a>
+to get notified of new releases.</p></article>
     </section>
 
 
@@ -255,13 +290,13 @@ run().then(console.log).catch(console.error);
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Sender.html">Sender</a></li><li><a href="SenderOptions.html">SenderOptions</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpTransport.html">HttpTransport</a></li><li><a href="HttpTransportBase.html">HttpTransportBase</a></li><li><a href="Sender.html">Sender</a></li><li><a href="SenderBufferBase.html">SenderBufferBase</a></li><li><a href="SenderBufferV1.html">SenderBufferV1</a></li><li><a href="SenderBufferV2.html">SenderBufferV2</a></li><li><a href="SenderOptions.html">SenderOptions</a></li><li><a href="TcpTransport.html">TcpTransport</a></li><li><a href="UndiciTransport.html">UndiciTransport</a></li></ul><h3>Global</h3><ul><li><a href="global.html#DEFAULT_HTTP_AGENT_CONFIG">DEFAULT_HTTP_AGENT_CONFIG</a></li><li><a href="global.html#DEFAULT_HTTP_OPTIONS">DEFAULT_HTTP_OPTIONS</a></li><li><a href="global.html#createBuffer">createBuffer</a></li><li><a href="global.html#createTransport">createTransport</a></li><li><a href="global.html#fetchJson">fetchJson</a></li><li><a href="global.html#getDimensions">getDimensions</a></li><li><a href="global.html#isBoolean">isBoolean</a></li><li><a href="global.html#isInteger">isInteger</a></li><li><a href="global.html#log">log</a></li><li><a href="global.html#timestampToMicros">timestampToMicros</a></li><li><a href="global.html#timestampToNanos">timestampToNanos</a></li><li><a href="global.html#validateArray">validateArray</a></li><li><a href="global.html#validateColumnName">validateColumnName</a></li><li><a href="global.html#validateTableName">validateTableName</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Mon Dec 09 2024 02:16:59 GMT+0100 (hora estándar de Europa central)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Aug 07 2025 12:45:55 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

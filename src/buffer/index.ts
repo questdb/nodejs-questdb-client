@@ -11,9 +11,21 @@ import { TimestampUnit } from "../utils";
 import { SenderBufferV1 } from "./bufferv1";
 import { SenderBufferV2 } from "./bufferv2";
 
+// Default initial buffer size in bytes (64 KB).
 const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
+
+// Default maximum buffer size in bytes (100 MB).
 const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
 
+/**
+ * Factory function to create a SenderBuffer instance based on the protocol version.
+ *
+ * @param {SenderOptions} options - Sender configuration object. <br>
+ * See SenderOptions documentation for detailed description of configuration options.
+ *
+ * @returns A SenderBuffer instance appropriate for the specified protocol version
+ * @throws Error if protocol version is not specified or is unsupported
+ */
 function createBuffer(options: SenderOptions): SenderBuffer {
   switch (options.protocol_version) {
     case PROTOCOL_VERSION_V2:
@@ -39,8 +51,8 @@ function createBuffer(options: SenderOptions): SenderBuffer {
  */
 interface SenderBuffer {
   /**
-   * Resets the buffer, data added to the buffer will be lost. <br>
-   * In other words it clears the buffer and sets the writing position to the beginning of the buffer.
+   * Resets the buffer, data sitting in the buffer will be lost. <br>
+   * In other words it clears the buffer, and sets the writing position to the beginning of the buffer.
    *
    * @return {Sender} Returns with a reference to this sender.
    */
@@ -69,7 +81,8 @@ interface SenderBuffer {
   table(table: string): SenderBuffer;
 
   /**
-   * Writes a symbol name and value into the buffer.
+   * Writes a symbol name and value into the buffer. <br>
+   * Use it to insert into SYMBOL columns.
    *
    * @param {string} name - Symbol name.
    * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
@@ -78,7 +91,8 @@ interface SenderBuffer {
   symbol(name: string, value: unknown): SenderBuffer;
 
   /**
-   * Writes a string column with its value into the buffer.
+   * Writes a string column with its value into the buffer. <br>
+   * Use it to insert into VARCHAR and STRING columns.
    *
    * @param {string} name - Column name.
    * @param {string} value - Column value, accepts only string values.
@@ -87,7 +101,8 @@ interface SenderBuffer {
   stringColumn(name: string, value: string): SenderBuffer;
 
   /**
-   * Writes a boolean column with its value into the buffer.
+   * Writes a boolean column with its value into the buffer. <br>
+   * Use it to insert into BOOLEAN columns.
    *
    * @param {string} name - Column name.
    * @param {boolean} value - Column value, accepts only boolean values.
@@ -96,7 +111,8 @@ interface SenderBuffer {
   booleanColumn(name: string, value: boolean): SenderBuffer;
 
   /**
-   * Writes a float column with its value into the buffer.
+   * Writes a 64-bit floating point value into the buffer. <br>
+   * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -104,10 +120,22 @@ interface SenderBuffer {
    */
   floatColumn(name: string, value: number): SenderBuffer;
 
+  /**
+   * Writes an array column with its values into the buffer.
+   *
+   * @param {string} name - Column name
+   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
+   */
   arrayColumn(name: string, value: unknown[]): SenderBuffer;
 
   /**
-   * Writes an integer column with its value into the buffer.
+   * Writes a 64-bit signed integer into the buffer. <br>
+   * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
@@ -117,7 +145,8 @@ interface SenderBuffer {
   intColumn(name: string, value: number): SenderBuffer;
 
   /**
-   * Writes a timestamp column with its value into the buffer.
+   * Writes a timestamp column with its value into the buffer. <br>
+   * Use it to insert into TIMESTAMP columns.
    *
    * @param {string} name - Column name.
    * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.

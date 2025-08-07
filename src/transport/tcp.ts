@@ -10,6 +10,7 @@ import { SenderOptions, TCP, TCPS } from "../options";
 import { SenderTransport } from "./index";
 import { isBoolean } from "../utils";
 
+// Default number of rows that trigger auto-flush for TCP transport.
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 
 // Arbitrary public key, used to construct valid JWK tokens.
@@ -39,7 +40,7 @@ class TcpTransport implements SenderTransport {
   /**
    * Creates a new TcpTransport instance.
    *
-   * @param options - Sender configuration object containing connection and authentication details
+   * @param {SenderOptions} options - Sender configuration object containing connection and authentication details
    * @throws Error if required options are missing or protocol is not 'tcp' or 'tcps'
    */
   constructor(options: SenderOptions) {
@@ -155,7 +156,7 @@ class TcpTransport implements SenderTransport {
 
   /**
    * Sends data over the established TCP connection.
-   * @param data - Buffer containing the data to send
+   * @param {Buffer} data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
    * @throws Error if the data could not be written to the socket
    */
@@ -175,7 +176,7 @@ class TcpTransport implements SenderTransport {
   }
 
   /**
-   * Closes the TCP connection to the database. <br>
+   * Closes the TCP connection to the database.
    */
   async close(): Promise<void> {
     if (this.socket) {
@@ -187,10 +188,20 @@ class TcpTransport implements SenderTransport {
     }
   }
 
+  /**
+   * Gets the default auto-flush row count for TCP transport.
+   * @returns Default number of rows that trigger auto-flush
+   */
   getDefaultAutoFlushRows(): number {
     return DEFAULT_TCP_AUTO_FLUSH_ROWS;
   }
 
+  /**
+   * @ignore
+   * Handles the JWK token authentication challenge-response flow.
+   * @param {Buffer} challenge - Challenge buffer received from the server
+   * @returns Promise resolving to true if authentication is successful
+   */
   private async authenticate(challenge: Buffer): Promise<boolean> {
     // Check for trailing \n which ends the challenge
     if (challenge.subarray(-1).readInt8() === 10) {
@@ -221,6 +232,12 @@ class TcpTransport implements SenderTransport {
   }
 }
 
+/**
+ * @ignore
+ * Constructs authentication configuration from username/token options.
+ * @param {SenderOptions} options - Sender options that may contain authentication details
+ * @throws Error if username or token is missing when authentication is intended
+ */
 function constructAuth(options: SenderOptions) {
   if (!options.username && !options.token && !options.password) {
     // no intention to authenticate
@@ -239,6 +256,13 @@ function constructAuth(options: SenderOptions) {
   };
 }
 
+/**
+ * @ignore
+ * Constructs a JWK (JSON Web Key) object for cryptographic authentication.
+ * @param {SenderOptions} options - Sender options containing authentication configuration
+ * @returns JWK object with key ID, private key, and public key coordinates
+ * @throws Error if required authentication properties are missing or invalid
+ */
 function constructJwk(options: SenderOptions) {
   if (options.auth) {
     if (!options.auth.keyId) {

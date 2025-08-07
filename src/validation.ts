@@ -1,9 +1,9 @@
 /**
- * Validates a table name. <br>
- * Throws an error if table name is invalid.
+ * Validates a table name.
  *
  * @param {string} name - The table name to validate.
  * @param {number} maxNameLength - The maximum length of table names.
+ * @throws Error if table name is invalid.
  */
 function validateTableName(name: string, maxNameLength: number) {
   const len = name.length;
@@ -65,11 +65,11 @@ function validateTableName(name: string, maxNameLength: number) {
 }
 
 /**
- * Validates a column name. <br>
- * Throws an error if column name is invalid.
+ * Validates a column name.
  *
  * @param {string} name - The column name to validate.
  * @param {number} maxNameLength - The maximum length of column names.
+ * @throws Error if column name is invalid.
  */
 function validateColumnName(name: string, maxNameLength: number) {
   const len = name.length;

@@ -34,7 +34,7 @@ class HttpTransport extends HttpTransportBase {
   /**
    * Creates a new HttpTransport instance using Node.js HTTP modules.
    *
-   * @param options - Sender configuration object containing connection details
+   * @param {SenderOptions} options - Sender configuration object containing connection details
    * @throws Error if the protocol is not 'http' or 'https'
    */
   constructor(options: SenderOptions) {
@@ -62,13 +62,18 @@ class HttpTransport extends HttpTransportBase {
 
   /**
    * Sends data to QuestDB using HTTP POST.
-   * @param data - Buffer containing data to send
-   * @param retryBegin - Internal parameter for tracking retry start time
-   * @param retryInterval - Internal parameter for tracking retry intervals
+   *
+   * @param {Buffer} data - Buffer containing the data to send
+   * @param {number} retryBegin - Internal parameter for tracking retry start time
+   * @param {number} retryInterval - Internal parameter for tracking retry intervals
    * @returns Promise resolving to true if data was sent successfully
    * @throws Error if request fails after all retries or times out
    */
-  send(data: Buffer, retryBegin = -1, retryInterval = -1): Promise<boolean> {
+  send(
+    data: Buffer,
+    retryBegin: number = -1,
+    retryInterval: number = -1,
+  ): Promise<boolean> {
     const request = this.secure ? https.request : http.request;
 
     const timeoutMillis =
@@ -157,6 +162,13 @@ class HttpTransport extends HttpTransportBase {
     });
   }
 
+  /**
+   * @ignore
+   * Creates HTTP request options based on configuration.
+   *
+   * @param {number} timeoutMillis - Request timeout in milliseconds
+   * @returns HTTP or HTTPS request options object
+   */
   private createRequestOptions(
     timeoutMillis: number,
   ): http.RequestOptions | https.RequestOptions {
@@ -174,7 +186,9 @@ class HttpTransport extends HttpTransportBase {
 
   /**
    * @ignore
-   * @return {http.Agent} Returns the default http agent.
+   * Gets or creates the default HTTP agent with standard configuration.
+   * Uses a singleton pattern to reuse the same agent across instances.
+   * @returns The default HTTP agent instance
    */
   private static getDefaultHttpAgent(): http.Agent {
     if (!HttpTransport.DEFAULT_HTTP_AGENT) {
@@ -187,7 +201,9 @@ class HttpTransport extends HttpTransportBase {
 
   /**
    * @ignore
-   * @return {https.Agent} Returns the default https agent.
+   * Gets or creates the default HTTPS agent with standard configuration.
+   * Uses a singleton pattern to reuse the same agent across instances.
+   * @returns The default HTTPS agent instance
    */
   private static getDefaultHttpsAgent(): https.Agent {
     if (!HttpTransport.DEFAULT_HTTPS_AGENT) {
@@ -199,6 +215,12 @@ class HttpTransport extends HttpTransportBase {
   }
 }
 
+/**
+ * @ignore
+ * Determines if an HTTP status code should trigger a retry.
+ * @param {number} statusCode - HTTP status code to check
+ * @returns True if the status code indicates a retryable error
+ */
 function isRetryable(statusCode: number) {
   return RETRIABLE_STATUS_CODES.includes(statusCode);
 }

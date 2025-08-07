@@ -4,12 +4,15 @@ import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
 import { ArrayPrimitive, getDimensions, validateArray } from "../utils";
 
+// Column type constants for protocol v2.
 const COLUMN_TYPE_DOUBLE: number = 10;
 const COLUMN_TYPE_NULL: number = 33;
 
+// Entity type constants for protocol v2.
 const ENTITY_TYPE_ARRAY: number = 14;
 const ENTITY_TYPE_DOUBLE: number = 16;
 
+// ASCII code for equals sign used in binary protocol.
 const EQUALS_SIGN: number = "=".charCodeAt(0);
 
 /**
@@ -17,6 +20,12 @@ const EQUALS_SIGN: number = "=".charCodeAt(0);
  * Sends floating point numbers in binary form.
  */
 class SenderBufferV2 extends SenderBufferBase {
+  /**
+   * Creates a new SenderBufferV2 instance.
+   *
+   * @param {SenderOptions} options - Sender configuration object. <br>
+   * See SenderOptions documentation for detailed description of configuration options.
+   */
   constructor(options: SenderOptions) {
     super(options);
   }
@@ -27,7 +36,7 @@ class SenderBufferV2 extends SenderBufferBase {
    *
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number values.
-   * @return {Sender} Returns with a reference to this sender.
+   * @returns {Sender} Returns with a reference to this buffer.
    */
   floatColumn(name: string, value: number): SenderBuffer {
     this.writeColumn(
@@ -44,6 +53,17 @@ class SenderBufferV2 extends SenderBufferBase {
     return this;
   }
 
+  /**
+   * Write an array column with its values into the buffer using v2 format.
+   *
+   * @param {string} name - Column name
+   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if array validation fails:
+   * - value is not an array
+   * - or the shape of the array is irregular: the length of sub-arrays are different
+   * - or the array is not homogeneous: its elements are not all the same type
+   */
   arrayColumn(name: string, value: unknown[]): SenderBuffer {
     const dimensions = getDimensions(value);
     const type = validateArray(value, dimensions);
