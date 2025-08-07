@@ -40,8 +40,8 @@ For more details, please, check the <a href="https://questdb.github.io/nodejs-qu
 import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
-    // create a sender with protocol version 2
-    const sender = await Sender.fromConfig('http::addr=localhost:9000;protocol_version=2');
+    // create a sender
+    const sender = await Sender.fromConfig('http::addr=localhost:9000');
 
     // order book snapshots
     const orderBooks = [
