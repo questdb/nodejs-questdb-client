@@ -221,7 +221,7 @@ class HttpTransport extends HttpTransportBase {
  * @param {number} statusCode - HTTP status code to check
  * @returns True if the status code indicates a retryable error
  */
-function isRetryable(statusCode: number) {
+function isRetryable(statusCode: number): boolean {
   return RETRIABLE_STATUS_CODES.includes(statusCode);
 }
 

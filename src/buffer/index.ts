@@ -41,7 +41,7 @@ function createBuffer(options: SenderOptions): SenderBuffer {
       );
     default:
       throw new Error(
-        "Unsupported protocol version: " + options.protocol_version,
+        `Unsupported protocol version: ${options.protocol_version}`,
       );
   }
 }

@@ -39,7 +39,7 @@ function isInteger(value: unknown, lowerBound: number): value is number {
  * @returns The timestamp converted to microseconds
  * @throws Error if the timestamp unit is unknown
  */
-function timestampToMicros(timestamp: bigint, unit: TimestampUnit) {
+function timestampToMicros(timestamp: bigint, unit: TimestampUnit): bigint {
   switch (unit) {
     case "ns":
       return timestamp / 1000n;
@@ -59,7 +59,7 @@ function timestampToMicros(timestamp: bigint, unit: TimestampUnit) {
  * @returns The timestamp converted to nanoseconds
  * @throws Error if the timestamp unit is unknown
  */
-function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
+function timestampToNanos(timestamp: bigint, unit: TimestampUnit): bigint {
   switch (unit) {
     case "ns":
       return timestamp;
@@ -78,7 +78,7 @@ function timestampToNanos(timestamp: bigint, unit: TimestampUnit) {
  * @returns Array of dimension sizes at each nesting level
  * @throws Error if any dimension has zero length
  */
-function getDimensions(data: unknown) {
+function getDimensions(data: unknown): number[] {
   const dimensions: number[] = [];
   while (Array.isArray(data)) {
     dimensions.push(data.length);

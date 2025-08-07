@@ -264,8 +264,7 @@ class SenderOptions {
       options.protocol_version = PROTOCOL_VERSION_V1;
     } else {
       throw new Error(
-        "Unsupported protocol versions received from server: " +
-          supportedVersions,
+        `Unsupported protocol versions received from server: ${supportedVersions}`,
       );
     }
     return options;
@@ -556,8 +555,7 @@ function parseTlsOptions(options: SenderOptions) {
 
   if (options.tls_roots || options.tls_roots_password) {
     throw new Error(
-      "'tls_roots' and 'tls_roots_password' options are not supported, please, " +
-        "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
+      `'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead`,
     );
   }
 }

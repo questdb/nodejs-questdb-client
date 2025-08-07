@@ -197,13 +197,14 @@ class Sender {
     this.resetAutoFlush();
 
     await this.transport.send(dataToSend);
+    return true;
   }
 
   /**
    * Closes the connection to the database. <br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
    */
-  async close() {
+  async close(): Promise<void> {
     const pos = this.buffer.currentPosition();
     if (pos > 0) {
       this.log(
@@ -331,7 +332,10 @@ class Sender {
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    */
-  async at(timestamp: number | bigint, unit: TimestampUnit = "us") {
+  async at(
+    timestamp: number | bigint,
+    unit: TimestampUnit = "us",
+  ): Promise<void> {
     this.buffer.at(timestamp, unit);
     this.pendingRowCount++;
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
@@ -342,7 +346,7 @@ class Sender {
    * Closes the row without writing designated timestamp into the buffer of the sender. <br>
    * Designated timestamp will be populated by the server on this record.
    */
-  async atNow() {
+  async atNow(): Promise<void> {
     this.buffer.atNow();
     this.pendingRowCount++;
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
@@ -355,7 +359,7 @@ class Sender {
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
   }
 
-  private async tryFlush() {
+  private async tryFlush(): Promise<void> {
     if (
       this.autoFlush &&
       this.pendingRowCount > 0 &&
