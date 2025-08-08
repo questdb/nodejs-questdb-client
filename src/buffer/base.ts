@@ -26,7 +26,7 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
 abstract class SenderBufferBase implements SenderBuffer {
   private bufferSize: number;
   private readonly maxBufferSize: number;
-  protected buffer: Buffer<ArrayBuffer>;
+  protected buffer: Buffer;
   protected position: number;
   private endOfLastRow: number;
 

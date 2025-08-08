@@ -1,6 +1,6 @@
 // @ts-check
-import http from "http";
-import https from "https";
+import * as http from "http";
+import * as https from "https";
 import { Buffer } from "node:buffer";
 
 import { SenderOptions, HTTP, HTTPS } from "../../options";

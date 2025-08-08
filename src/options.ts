@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { PathOrFileDescriptor } from "fs";
 import { Agent } from "undici";
-import http from "http";
-import https from "https";
+import * as http from "http";
+import * as https from "https";
 
 import { Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
