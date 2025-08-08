@@ -32,6 +32,9 @@ jobs:
       - name: Tests
         run: pnpm test
 
+      - name: Build
+        run: pnpm build
+
       - name: Publish
         uses: JS-DevTools/npm-publish@v3
         with:
