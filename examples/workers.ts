@@ -1,10 +1,5 @@
-const { Sender } = require("@questdb/nodejs-client");
-const {
-  Worker,
-  isMainThread,
-  parentPort,
-  workerData,
-} = require("worker_threads");
+import { Sender } from "@questdb/nodejs-client";
+import { Worker, isMainThread, parentPort, workerData } from "worker_threads";
 
 // fake venue
 // generates random prices and amounts for a ticker for max 5 seconds, then the feed closes
@@ -34,7 +29,7 @@ async function run() {
     const tickers = ["ETH-USD", "BTC-USD", "SOL-USD", "DOGE-USD"];
     // main thread to start a worker thread for each ticker
     for (let ticker of tickers) {
-      const worker = new Worker(__filename, { workerData: { ticker: ticker } })
+      new Worker(__filename, { workerData: { ticker: ticker } })
         .on("error", (err) => {
           throw err;
         })
@@ -48,7 +43,7 @@ async function run() {
   } else {
     // it is important that each worker has a dedicated sender object
     // threads cannot share the sender because they would write into the same buffer
-    const sender = Sender.fromConfig("http::addr=127.0.0.1:9000");
+    const sender = await Sender.fromConfig("http::addr=127.0.0.1:9000");
 
     // subscribe for the market data of the ticker assigned to the worker
     // ingest each price update into the database using the sender
@@ -73,11 +68,11 @@ async function run() {
   }
 }
 
-function sleep(ms) {
+function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function rndInt(limit) {
+function rndInt(limit: number) {
   return Math.floor(Math.random() * limit + 1);
 }
 

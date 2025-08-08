@@ -31,7 +31,7 @@
     port: 9009
 - name: ilp-from-conf
   lang: javascript
-  path: examples/from_conf.js
+  path: examples/basic.js
   header: |-
     NodeJS client library [repo](https://github.com/questdb/nodejs-questdb-client).
   conf: http::addr=localhost:9000

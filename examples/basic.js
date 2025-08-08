@@ -1,22 +1,16 @@
 const { Sender } = require("@questdb/nodejs-client");
 
 async function run() {
-  // create a sender with a 4KB buffer
-  const sender = new Sender({
-    protocol: "tcp",
-    host: "127.0.0.1",
-    port: 9009,
-    bufferSize: 4096,
-  });
-  await sender.connect();
+  // create a sender using HTTP protocol
+  const sender = await Sender.fromConfig("http::addr=127.0.0.1:9000");
 
   // add rows to the buffer of the sender
   await sender
     .table("trades")
-    .symbol("symbol", "ETH-USD")
+    .symbol("symbol", "BTC-USD")
     .symbol("side", "sell")
-    .floatColumn("price", 2615.54)
-    .floatColumn("amount", 0.00044)
+    .floatColumn("price", 39269.98)
+    .floatColumn("amount", 0.011)
     .at(Date.now(), "ms");
 
   // flush the buffer of the sender, sending the data to QuestDB
