@@ -40,8 +40,8 @@ type DeprecatedOptions = {
   bufferSize?: number;
 };
 
-/** @classdesc
- * <a href="Sender.html">Sender</a> configuration options. <br>
+/**
+ * {@link Sender} configuration options.
  * <br>
  * Properties of the object are initialized through a configuration string. <br>
  * The configuration string has the following format: <i>&ltprotocol&gt::&ltkey&gt=&ltvalue&gt;&ltkey&gt=&ltvalue&gt;...;</i> <br>
@@ -194,9 +194,9 @@ class SenderOptions {
    *
    * @param {string} configurationString - Configuration string. <br>
    * @param {object} extraOptions - Optional extra configuration. <br>
-   * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
+   * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-   * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+   * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
    * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    */
   constructor(configurationString: string, extraOptions?: ExtraOptions) {
@@ -264,8 +264,7 @@ class SenderOptions {
       options.protocol_version = PROTOCOL_VERSION_V1;
     } else {
       throw new Error(
-        "Unsupported protocol versions received from server: " +
-          supportedVersions,
+        `Unsupported protocol versions received from server: ${supportedVersions}`,
       );
     }
     return options;
@@ -309,9 +308,9 @@ class SenderOptions {
    *
    * @param {string} configurationString - Configuration string. <br>
    * @param {object} extraOptions - Optional extra configuration. <br>
-   * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
+   * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-   * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+   * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
    * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
@@ -329,9 +328,9 @@ class SenderOptions {
    * Creates a Sender options object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
    *
    * @param {object} extraOptions - Optional extra configuration. <br>
-   * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
+   * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-   * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+   * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
    * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
@@ -556,8 +555,7 @@ function parseTlsOptions(options: SenderOptions) {
 
   if (options.tls_roots || options.tls_roots_password) {
     throw new Error(
-      "'tls_roots' and 'tls_roots_password' options are not supported, please, " +
-        "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead",
+      `'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead`,
     );
   }
 }

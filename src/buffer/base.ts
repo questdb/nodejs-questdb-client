@@ -20,7 +20,7 @@ import {
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
 /**
- * Abstract base class for SenderBuffer implementations. <br>
+ * Abstract base class for sender buffer implementations. <br>
  * Provides common functionality for writing data into the buffer.
  */
 abstract class SenderBufferBase implements SenderBuffer {

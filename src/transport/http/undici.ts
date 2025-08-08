@@ -110,7 +110,7 @@ class UndiciTransport extends HttpTransportBase {
 
     const controller = new AbortController();
     const { signal } = controller;
-    setTimeout(() => controller.abort(), this.retryTimeout);
+    const timeoutId = setTimeout(() => controller.abort(), this.retryTimeout);
 
     let responseData: Dispatcher.ResponseData;
     try {
@@ -134,6 +134,8 @@ class UndiciTransport extends HttpTransportBase {
       } else {
         throw err;
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
 
     const { statusCode } = responseData;

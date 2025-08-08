@@ -32,7 +32,7 @@ type Logger = (
 function log(
   level: "error" | "warn" | "info" | "debug",
   message: string | Error,
-) {
+): void {
   const logLevel = LOG_LEVELS[level];
   if (!logLevel) {
     throw new Error(`Invalid log level: '${level}'`);

@@ -7,7 +7,7 @@ import { isBoolean, isInteger, TimestampUnit } from "./utils";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
-/** @classdesc
+/**
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection. <br>
  * The client supports multiple transport protocols.
  * <p>
@@ -52,7 +52,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * If the Sender is created via its constructor, at least the SenderOptions configuration object should be
  * initialized from a configuration string to make sure that the parameters are validated. <br>
  * Detailed description of the Sender's configuration options can be found in
- * the <a href="SenderOptions.html">SenderOptions</a> documentation.
+ * the {@link SenderOptions} documentation.
  * </p>
  * <p>
  * <b>Transport Configuration Examples:</b>
@@ -124,9 +124,9 @@ class Sender {
    *
    * @param {string} configurationString - Configuration string. <br>
    * @param {object} extraOptions - Optional extra configuration. <br>
-   * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
+   * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-   * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+   * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
    * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
@@ -144,9 +144,9 @@ class Sender {
    * Creates a Sender object by parsing the configuration string set in the <b>QDB_CLIENT_CONF</b> environment variable.
    *
    * @param {object} extraOptions - Optional extra configuration. <br>
-   * - 'log' is a logging function used by the <a href="Sender.html">Sender</a>. <br>
+   * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
-   * - 'agent' is a custom http/https agent used by the <a href="Sender.html">Sender</a> when http/https transport is used. <br>
+   * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
    * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
    *
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
@@ -197,13 +197,14 @@ class Sender {
     this.resetAutoFlush();
 
     await this.transport.send(dataToSend);
+    return true;
   }
 
   /**
    * Closes the connection to the database. <br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
    */
-  async close() {
+  async close(): Promise<void> {
     const pos = this.buffer.currentPosition();
     if (pos > 0) {
       this.log(
@@ -331,7 +332,10 @@ class Sender {
    * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
    * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
    */
-  async at(timestamp: number | bigint, unit: TimestampUnit = "us") {
+  async at(
+    timestamp: number | bigint,
+    unit: TimestampUnit = "us",
+  ): Promise<void> {
     this.buffer.at(timestamp, unit);
     this.pendingRowCount++;
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
@@ -342,7 +346,7 @@ class Sender {
    * Closes the row without writing designated timestamp into the buffer of the sender. <br>
    * Designated timestamp will be populated by the server on this record.
    */
-  async atNow() {
+  async atNow(): Promise<void> {
     this.buffer.atNow();
     this.pendingRowCount++;
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
@@ -355,7 +359,7 @@ class Sender {
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
   }
 
-  private async tryFlush() {
+  private async tryFlush(): Promise<void> {
     if (
       this.autoFlush &&
       this.pendingRowCount > 0 &&

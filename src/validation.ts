@@ -5,7 +5,7 @@
  * @param {number} maxNameLength - The maximum length of table names.
  * @throws Error if table name is invalid.
  */
-function validateTableName(name: string, maxNameLength: number) {
+function validateTableName(name: string, maxNameLength: number): void {
   const len = name.length;
   if (len > maxNameLength) {
     throw new Error(`Table name is too long, max length is ${maxNameLength}`);
@@ -71,7 +71,7 @@ function validateTableName(name: string, maxNameLength: number) {
  * @param {number} maxNameLength - The maximum length of column names.
  * @throws Error if column name is invalid.
  */
-function validateColumnName(name: string, maxNameLength: number) {
+function validateColumnName(name: string, maxNameLength: number): void {
   const len = name.length;
   if (len > maxNameLength) {
     throw new Error(`Column name is too long, max length is ${maxNameLength}`);

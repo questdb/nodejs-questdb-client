@@ -12,7 +12,7 @@ import { HttpTransport } from "./http/stdlib";
  */
 interface SenderTransport {
   /**
-   * Establishes a connection to the database server. <br>
+   * Establishes a connection to the database server.
    * Should not be called on HTTP transports.
    * @returns Promise resolving to true if connection is successful
    */
@@ -20,13 +20,13 @@ interface SenderTransport {
 
   /**
    * Sends the data to the database server.
-   * @param {Buffer} data - Buffer containing the data to send
+   * @param data - Buffer containing the data to send
    * @returns Promise resolving to true if data was sent successfully
    */
   send(data: Buffer): Promise<boolean>;
 
   /**
-   * Closes the connection to the database server. <br>
+   * Closes the connection to the database server.
    * Should not be called on HTTP transports.
    * @returns Promise that resolves when the connection is closed
    */
@@ -41,7 +41,7 @@ interface SenderTransport {
 
 /**
  * Factory function to create appropriate transport instance based on configuration.
- * @param {SenderOptions} options - Sender configuration options including protocol and connection details
+ * @param options - Sender configuration options including protocol and connection details
  * @returns Transport instance appropriate for the specified protocol
  * @throws Error if protocol or host options are missing or invalid
  */
