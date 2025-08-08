@@ -27,7 +27,7 @@ const DEFAULT_RETRY_TIMEOUT = 10000;
 const RETRIABLE_STATUS_CODES = [500, 503, 504, 507, 509, 523, 524, 529, 599];
 
 /**
- * Abstract base class for HTTP-based transport implementations. <br>
+ * Abstract base class for HTTP-based transports, implements the SenderTransport interface. <br>
  * Provides common configuration and functionality for HTTP and HTTPS protocols.
  */
 abstract class HttpTransportBase implements SenderTransport {

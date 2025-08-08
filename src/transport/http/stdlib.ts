@@ -22,7 +22,8 @@ const DEFAULT_HTTP_AGENT_CONFIG = {
 };
 
 /**
- * HTTP transport implementation using Node.js built-in http/https modules. <br>
+ * HTTP transport implementation using Node.js built-in http/https modules,
+ * extends the HttpTransportBase abstract base class. <br>
  * Supports both HTTP and HTTPS protocols with configurable authentication.
  */
 class HttpTransport extends HttpTransportBase {

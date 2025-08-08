@@ -24,7 +24,7 @@ const PUBLIC_KEY = {
 const NEWLINE = 10;
 
 /**
- * TCP transport implementation. <br>
+ * TCP transport, implements the SenderTransport interface. <br>
  * Supports both plain TCP or secure TLS-encrypted connections with configurable JWK token authentication.
  */
 class TcpTransport implements SenderTransport {
