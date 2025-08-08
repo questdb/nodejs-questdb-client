@@ -35,6 +35,11 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Check for build artifacts
+        run: |
+          [ -f dist/cjs/index.js ] || (echo "CJS build missing" && exit 1)
+          [ -f dist/es/index.mjs ] || (echo "ESM build missing" && exit 1)
+
       - name: Publish
         uses: JS-DevTools/npm-publish@v3
         with:
