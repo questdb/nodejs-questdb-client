@@ -230,7 +230,7 @@ async function run() {
 run().then(console.log).catch(console.error);
 ```
 
-### Worker threads example (typescript)
+### Worker threads example (TypeScript)
 
 ```typescript
 import { Sender } from "@questdb/nodejs-client";
