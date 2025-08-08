@@ -16,8 +16,7 @@ const ENTITY_TYPE_DOUBLE: number = 16;
 const EQUALS_SIGN: number = "=".charCodeAt(0);
 
 /**
- * Buffer implementation for protocol version 2,
- * extends the {@link SenderBufferBase} abstract base class.
+ * Buffer implementation for protocol version 2. <br>
  * Sends floating point numbers in binary form, and provides support for arrays.
  */
 class SenderBufferV2 extends SenderBufferBase {

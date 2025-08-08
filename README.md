@@ -1,5 +1,3 @@
-# QuestDB Node.js Client
-
 ## Installation
 
 ```shell
@@ -30,17 +28,17 @@ Use the <i>stdlib_http</i> option to switch to the standard HTTP/HTTPS modules.
 ## Configuration options
 
 Detailed description of the client's configuration options can be found in
-the <a href="https://questdb.github.io/nodejs-questdb-client/SenderOptions.html">SenderOptions</a> documentation.
+the {@link SenderOptions} documentation.
 
 ## Examples
 
 The examples below demonstrate how to use the client. <br>
-For more details, please, check the <a href="https://questdb.github.io/nodejs-questdb-client/Sender.html">Sender</a>'s documentation.
+For more details, please, check the {@link Sender}'s documentation.
 
 ### Basic API usage
 
-```javascript
-const { Sender } = require("@questdb/nodejs-client");
+```typescript
+import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
   // create a sender using HTTP protocol
@@ -71,8 +69,8 @@ run().then(console.log).catch(console.error);
 
 #### Username and password authentication with HTTP transport
 
-```javascript
-const { Sender } = require("@questdb/nodejs-client");
+```typescript
+import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
   // authentication details
@@ -106,8 +104,8 @@ run().catch(console.error);
 
 #### REST token authentication with HTTP transport
 
-```javascript
-const { Sender } = require("@questdb/nodejs-client");
+```typescript
+import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
   // authentication details
@@ -140,8 +138,8 @@ run().catch(console.error);
 
 #### JWK token authentication with TCP transport
 
-```javascript
-const { Sender } = require("@questdb/nodejs-client");
+```typescript
+import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
   // authentication details
@@ -173,7 +171,7 @@ async function run() {
 run().catch(console.error);
 ```
 
-### Array usage example (TypeScript)
+### Array usage example
 
 ```typescript
 import { Sender } from "@questdb/nodejs-client";
@@ -230,7 +228,7 @@ async function run() {
 run().then(console.log).catch(console.error);
 ```
 
-### Worker threads example (TypeScript)
+### Worker threads example
 
 ```typescript
 import { Sender } from "@questdb/nodejs-client";

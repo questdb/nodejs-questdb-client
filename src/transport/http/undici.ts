@@ -23,8 +23,7 @@ const DEFAULT_HTTP_OPTIONS: Agent.Options = {
 };
 
 /**
- * HTTP transport implementation using the Undici library,
- * extends the {@link HttpTransportBase} abstract base class. <br>
+ * HTTP transport implementation using the Undici library. <br>
  * Provides high-performance HTTP requests with connection pooling and retry logic. <br>
  * Supports both HTTP and HTTPS protocols with configurable authentication.
  */

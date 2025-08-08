@@ -1,0 +1,27 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["./src/index.ts"],
+  "out": "docs",
+  "name": "QuestDB Node.js Client",
+  "readme": "./README.md",
+  "tsconfig": "./tsconfig.json",
+  "exclude": ["**/test/**/*", "**/examples/**/*", "**/node_modules/**/*"],
+  "excludePrivate": true,
+  "excludeProtected": false,
+  "excludeInternal": true,
+  "includeVersion": true,
+  "disableSources": false,
+  "searchInComments": true,
+  "navigationLinks": {
+    "GitHub": "https://github.com/questdb/nodejs-questdb-client",
+    "QuestDB": "https://questdb.io"
+  },
+  "categorizeByGroup": true,
+  "sort": ["source-order"],
+  "visibilityFilters": {
+    "protected": true,
+    "private": false,
+    "inherited": true,
+    "external": false
+  }
+}

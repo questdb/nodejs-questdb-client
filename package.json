@@ -8,7 +8,7 @@
     "eslint": "eslint src/**",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write '{src,test}/**/*.{ts,js,json}'",
-    "docs": "pnpm run build && jsdoc ./dist/cjs/index.js README.md -d docs",
+    "docs": "typedoc --out docs src/index.ts",
     "preview:docs": "serve docs"
   },
   "files": [
@@ -36,13 +36,14 @@
   "homepage": "https://questdb.github.io/nodejs-questdb-client",
   "devDependencies": {
     "@eslint/js": "^9.16.0",
+    "@microsoft/tsdoc": "^0.15.1",
     "@types/node": "^22.15.17",
     "bunchee": "^6.5.1",
     "eslint": "^9.26.0",
-    "jsdoc": "^4.0.4",
     "prettier": "^3.5.3",
     "serve": "^14.2.4",
     "testcontainers": "^10.25.0",
+    "typedoc": "^0.28.9",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.32.0",
     "vitest": "^3.1.3"
