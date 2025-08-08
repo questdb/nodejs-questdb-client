@@ -44,8 +44,6 @@
 
     <section>
         <article><h1>QuestDB Node.js Client</h1>
-<h2>Requirements</h2>
-<p>The client requires Node.js v20 or newer version.</p>
 <h2>Installation</h2>
 <pre class="prettyprint source lang-shell"><code># With npm
 npm i -s @questdb/nodejs-client
@@ -61,23 +59,28 @@ pnpm add @questdb/nodejs-client
 <thead>
 <tr>
 <th>QuestDB client version</th>
-<th>Node.js version</th>
-<th>HTTP Agent</th>
+<th>Supported Node.js versions</th>
+<th>Default HTTP Agent</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>^4.0.0</td>
-<td>&gt;=v20.X.X</td>
-<td>Undici Agent</td>
+<td>v20 and above</td>
+<td>Undici Http Agent</td>
 </tr>
 <tr>
 <td>^3.0.0</td>
-<td>&lt;v20.X.X</td>
-<td>Http Agent</td>
+<td>v16 and above</td>
+<td>Standard Http Agent</td>
 </tr>
 </tbody>
 </table>
+<p>The current version of the client requires Node.js v20 or newer version.
+Versions up to and including 3.0.0 are compatible with Node.js v16 and above.</p>
+<p>The Undici HTTP agent was introduced in 4.0.0, and it is the default HTTP transport.
+The standard HTTP/HTTPS modules of Node.js are still supported for backwards compatibility.
+Use the <i>stdlib_http</i> option to switch to the standard HTTP/HTTPS modules.</p>
 <h2>Configuration options</h2>
 <p>Detailed description of the client's configuration options can be found in
 the <a href="https://questdb.github.io/nodejs-questdb-client/SenderOptions.html">SenderOptions</a> documentation.</p>
@@ -85,70 +88,48 @@ the <a href="https://questdb.github.io/nodejs-questdb-client/SenderOptions.html"
 <p>The examples below demonstrate how to use the client. <br>
 For more details, please, check the <a href="https://questdb.github.io/nodejs-questdb-client/Sender.html">Sender</a>'s documentation.</p>
 <h3>Basic API usage</h3>
-<pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
+<pre class="prettyprint source lang-javascript"><code>const { Sender } = require(&quot;@questdb/nodejs-client&quot;);
 
 async function run() {
-    // create a sender
-    const sender = await Sender.fromConfig('http::addr=localhost:9000');
+  // create a sender using HTTP protocol
+  const sender = await Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;);
 
-    // order book snapshots
-    const orderBooks = [
-        {
-            symbol: 'BTC-USD',
-            exchange: 'COINBASE',
-            timestamp: Date.now(),
-            bidPrices: [50100.25, 50100.20, 50100.15, 50100.10, 50100.05],
-            bidSizes: [0.5, 1.2, 2.1, 0.8, 3.5],
-            askPrices: [50100.30, 50100.35, 50100.40, 50100.45, 50100.50],
-            askSizes: [0.6, 1.5, 1.8, 2.2, 4.0]
-        },
-        {
-            symbol: 'ETH-USD',
-            exchange: 'COINBASE',
-            timestamp: Date.now(),
-            bidPrices: [2850.50, 2850.45, 2850.40, 2850.35, 2850.30],
-            bidSizes: [5.0, 8.2, 12.5, 6.8, 15.0],
-            askPrices: [2850.55, 2850.60, 2850.65, 2850.70, 2850.75],
-            askSizes: [4.5, 7.8, 10.2, 8.5, 20.0]
-        }
-    ];
+  // add rows to the buffer of the sender
+  await sender
+    .table(&quot;trades&quot;)
+    .symbol(&quot;symbol&quot;, &quot;BTC-USD&quot;)
+    .symbol(&quot;side&quot;, &quot;sell&quot;)
+    .floatColumn(&quot;price&quot;, 39269.98)
+    .floatColumn(&quot;amount&quot;, 0.011)
+    .at(Date.now(), &quot;ms&quot;);
 
-    try {
-        // add rows to the buffer of the sender
-        for (const orderBook of orderBooks) {
-            await sender
-                .table('order_book_l2')
-                .symbol('symbol', orderBook.symbol)
-                .symbol('exchange', orderBook.exchange)
-                .arrayColumn('bid_prices', orderBook.bidPrices)
-                .arrayColumn('bid_sizes', orderBook.bidSizes)
-                .arrayColumn('ask_prices', orderBook.askPrices)
-                .arrayColumn('ask_sizes', orderBook.askSizes)
-                .at(orderBook.timestamp, 'ms');
-        }
+  // flush the buffer of the sender, sending the data to QuestDB
+  // the buffer is cleared after the data is sent, and the sender is ready to accept new data
+  await sender.flush();
 
-        // flush the buffer of the sender, sending the data to QuestDB
-        // the buffer is cleared after the data is sent, and the sender is ready to accept new data
-        await sender.flush();
-    } finally {
-      // close the connection after all rows ingested
-      await sender.close();
-    }
+  // close the connection after all rows ingested
+  // unflushed data will be lost
+  await sender.close();
 }
 
 run().then(console.log).catch(console.error);
 </code></pre>
 <h3>Authentication and secure connection</h3>
-<h4>Username and password authentication</h4>
-<pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
+<h4>Username and password authentication with HTTP transport</h4>
+<pre class="prettyprint source lang-javascript"><code>const { Sender } = require(&quot;@questdb/nodejs-client&quot;);
 
 async function run() {
-  // create a sender using HTTPS protocol with username and password authentication
-  const sender = Sender.fromConfig(
-    &quot;https::addr=127.0.0.1:9000;username=admin;password=quest&quot;,
+  // authentication details
+  const USER = &quot;admin&quot;;
+  const PWD = &quot;quest&quot;;
+
+  // pass the authentication details to the sender
+  // for secure connection use 'https' protocol instead of 'http'
+  const sender = await Sender.fromConfig(
+    `http::addr=127.0.0.1:9000;username=${USER};password=${PWD}`
   );
 
-  // send the data over the authenticated and secure connection
+  // add rows to the buffer of the sender
   await sender
     .table(&quot;trades&quot;)
     .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
@@ -156,6 +137,8 @@ async function run() {
     .floatColumn(&quot;price&quot;, 2615.54)
     .floatColumn(&quot;amount&quot;, 0.00044)
     .at(Date.now(), &quot;ms&quot;);
+
+  // flush the buffer of the sender, sending the data to QuestDB
   await sender.flush();
 
   // close the connection after all rows ingested
@@ -164,39 +147,126 @@ async function run() {
 
 run().catch(console.error);
 </code></pre>
-<h4>Token authentication</h4>
+<h4>REST token authentication with HTTP transport</h4>
+<pre class="prettyprint source lang-javascript"><code>const { Sender } = require(&quot;@questdb/nodejs-client&quot;);
+
+async function run() {
+  // authentication details
+  const TOKEN = &quot;Xyvd3er6GF87ysaHk&quot;;
+
+  // pass the authentication details to the sender
+  // for secure connection use 'https' protocol instead of 'http'
+  const sender = await Sender.fromConfig(
+    `http::addr=127.0.0.1:9000;token=${TOKEN}`
+  );
+
+  // add rows to the buffer of the sender
+  await sender
+    .table(&quot;trades&quot;)
+    .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
+    .symbol(&quot;side&quot;, &quot;sell&quot;)
+    .floatColumn(&quot;price&quot;, 2615.54)
+    .floatColumn(&quot;amount&quot;, 0.00044)
+    .at(Date.now(), &quot;ms&quot;);
+
+  // flush the buffer of the sender, sending the data to QuestDB
+  await sender.flush();
+
+  // close the connection after all rows ingested
+  await sender.close();
+}
+
+run().catch(console.error);
+</code></pre>
+<h4>JWK token authentication with TCP transport</h4>
+<pre class="prettyprint source lang-javascript"><code>const { Sender } = require(&quot;@questdb/nodejs-client&quot;);
+
+async function run() {
+  // authentication details
+  const CLIENT_ID = &quot;admin&quot;;
+  const PRIVATE_KEY = &quot;ZRxmCOQBpZoj2fZ-lEtqzVDkCre_ouF3ePpaQNDwoQk&quot;;
+
+  // pass the authentication details to the sender
+  const sender = await Sender.fromConfig(
+    `tcp::addr=127.0.0.1:9009;username=${CLIENT_ID};token=${PRIVATE_KEY}`
+  );
+  await sender.connect();
+
+  // add rows to the buffer of the sender
+  await sender
+    .table(&quot;trades&quot;)
+    .symbol(&quot;symbol&quot;, &quot;BTC-USD&quot;)
+    .symbol(&quot;side&quot;, &quot;sell&quot;)
+    .floatColumn(&quot;price&quot;, 39269.98)
+    .floatColumn(&quot;amount&quot;, 0.001)
+    .at(Date.now(), &quot;ms&quot;);
+
+  // flush the buffer of the sender, sending the data to QuestDB
+  await sender.flush();
+
+  // close the connection after all rows ingested
+  await sender.close();
+}
+
+run().catch(console.error);
+</code></pre>
+<h3>Array usage example (typescript)</h3>
 <pre class="prettyprint source lang-typescript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
 
-async function run(): Promise&lt;void> {
-  // create a sender using HTTPS protocol with bearer token authentication
-  const sender: Sender = Sender.fromConfig(
-    &quot;https::addr=127.0.0.1:9000;token=Xyvd3er6GF87ysaHk&quot;,
-  );
+async function run() {
+  // create a sender
+  const sender = await Sender.fromConfig('http::addr=localhost:9000');
 
-  // send the data over the authenticated and secure connection
-  await sender
-    .table(&quot;trades&quot;)
-    .symbol(&quot;symbol&quot;, &quot;ETH-USD&quot;)
-    .symbol(&quot;side&quot;, &quot;sell&quot;)
-    .floatColumn(&quot;price&quot;, 2615.54)
-    .floatColumn(&quot;amount&quot;, 0.00044)
-    .at(Date.now(), &quot;ms&quot;);
-  await sender.flush();
+  // order book snapshots to ingest
+  const orderBooks = [
+    {
+      symbol: 'BTC-USD',
+      exchange: 'Coinbase',
+      timestamp: Date.now(),
+      bidPrices: [50100.25, 50100.20, 50100.15, 50100.10, 50100.05],
+      bidSizes: [0.5, 1.2, 2.1, 0.8, 3.5],
+      askPrices: [50100.30, 50100.35, 50100.40, 50100.45, 50100.50],
+      askSizes: [0.6, 1.5, 1.8, 2.2, 4.0]
+    },
+    {
+      symbol: 'ETH-USD',
+      exchange: 'Coinbase',
+      timestamp: Date.now(),
+      bidPrices: [2850.50, 2850.45, 2850.40, 2850.35, 2850.30],
+      bidSizes: [5.0, 8.2, 12.5, 6.8, 15.0],
+      askPrices: [2850.55, 2850.60, 2850.65, 2850.70, 2850.75],
+      askSizes: [4.5, 7.8, 10.2, 8.5, 20.0]
+    }
+  ];
 
-  // close the connection after all rows ingested
-  await sender.close();
+  try {
+    // add rows to the buffer of the sender
+    for (const orderBook of orderBooks) {
+      await sender
+        .table('order_book_l2')
+        .symbol('symbol', orderBook.symbol)
+        .symbol('exchange', orderBook.exchange)
+        .arrayColumn('bid_prices', orderBook.bidPrices)
+        .arrayColumn('bid_sizes', orderBook.bidSizes)
+        .arrayColumn('ask_prices', orderBook.askPrices)
+        .arrayColumn('ask_sizes', orderBook.askSizes)
+        .at(orderBook.timestamp, 'ms');
+    }
+
+    // flush the buffer of the sender, sending the data to QuestDB
+    // the buffer is cleared after the data is sent, and the sender is ready to accept new data
+    await sender.flush();
+  } finally {
+    // close the connection after all rows ingested
+    await sender.close();
+  }
 }
 
-run().catch(console.error);
+run().then(console.log).catch(console.error);
 </code></pre>
-<h3>Worker threads example</h3>
-<pre class="prettyprint source lang-javascript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
-const {
-  Worker,
-  isMainThread,
-  parentPort,
-  workerData,
-} = require(&quot;worker_threads&quot;);
+<h3>Worker threads example (typescript)</h3>
+<pre class="prettyprint source lang-typescript"><code>import { Sender } from &quot;@questdb/nodejs-client&quot;;
+import { Worker, isMainThread, parentPort, workerData } from &quot;worker_threads&quot;;
 
 // fake venue
 // generates random prices and amounts for a ticker for max 5 seconds, then the feed closes
@@ -226,7 +296,7 @@ async function run() {
     const tickers = [&quot;ETH-USD&quot;, &quot;BTC-USD&quot;, &quot;SOL-USD&quot;, &quot;DOGE-USD&quot;];
     // main thread to start a worker thread for each ticker
     for (let ticker of tickers) {
-      const worker = new Worker(__filename, { workerData: { ticker: ticker } })
+      new Worker(__filename, { workerData: { ticker: ticker } })
         .on(&quot;error&quot;, (err) => {
           throw err;
         })
@@ -240,7 +310,7 @@ async function run() {
   } else {
     // it is important that each worker has a dedicated sender object
     // threads cannot share the sender because they would write into the same buffer
-    const sender = Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;);
+    const sender = await Sender.fromConfig(&quot;http::addr=127.0.0.1:9000&quot;);
 
     // subscribe for the market data of the ticker assigned to the worker
     // ingest each price update into the database using the sender
@@ -265,11 +335,11 @@ async function run() {
   }
 }
 
-function sleep(ms) {
+function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function rndInt(limit) {
+function rndInt(limit: number) {
   return Math.floor(Math.random() * limit + 1);
 }
 
@@ -296,7 +366,7 @@ to get notified of new releases.</p></article>
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Aug 07 2025 12:45:55 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Fri Aug 08 2025 02:31:21 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>

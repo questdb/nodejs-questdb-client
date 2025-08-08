@@ -247,7 +247,7 @@ const RETRIABLE_STATUS_CODES = [
     599
 ];
 /**
- * Abstract base class for HTTP-based transport implementations. &lt;br>
+ * Abstract base class for HTTP-based transports, implements the {@link SenderTransport} interface. &lt;br>
  * Provides common configuration and functionality for HTTP and HTTPS protocols.
  */ class HttpTransportBase {
     /**
@@ -470,7 +470,7 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
         } else if (supportedVersions.includes(PROTOCOL_VERSION_V1)) {
             options.protocol_version = PROTOCOL_VERSION_V1;
         } else {
-            throw new Error("Unsupported protocol versions received from server: " + supportedVersions);
+            throw new Error(`Unsupported protocol versions received from server: ${supportedVersions}`);
         }
         return options;
     }
@@ -690,7 +690,7 @@ function parseAutoFlushOptions(options) {
 function parseTlsOptions(options) {
     parseBoolean(options, "tls_verify", "TLS verify", UNSAFE_OFF);
     if (options.tls_roots || options.tls_roots_password) {
-        throw new Error("'tls_roots' and 'tls_roots_password' options are not supported, please, " + "use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead");
+        throw new Error(`'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead`);
     }
 }
 function parseRequestTimeoutOptions(options) {
@@ -744,7 +744,8 @@ function parseInteger(options, property, description, lowerBound) {
     keepAliveTimeout: 60000
 };
 /**
- * HTTP transport implementation using the Undici library. &lt;br>
+ * HTTP transport implementation using the Undici library,
+ * extends the {@link HttpTransportBase} abstract base class. &lt;br>
  * Provides high-performance HTTP requests with connection pooling and retry logic. &lt;br>
  * Supports both HTTP and HTTPS protocols with configurable authentication.
  */ class UndiciTransport extends HttpTransportBase {
@@ -821,7 +822,7 @@ function parseInteger(options, property, description, lowerBound) {
         }
         const controller = new AbortController();
         const { signal } = controller;
-        setTimeout(()=>controller.abort(), this.retryTimeout);
+        const timeoutId = setTimeout(()=>controller.abort(), this.retryTimeout);
         let responseData;
         try {
             const timeoutMillis = data.length / this.requestMinThroughput * 1000 + this.requestTimeout;
@@ -841,6 +842,8 @@ function parseInteger(options, property, description, lowerBound) {
             } else {
                 throw err;
             }
+        } finally{
+            clearTimeout(timeoutId);
         }
         const { statusCode } = responseData;
         const body = await responseData.body.arrayBuffer();
@@ -877,8 +880,10 @@ const PUBLIC_KEY = {
     x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
     y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg"
 };
+// New Line character
+const NEWLINE = 10;
 /**
- * TCP transport implementation. &lt;br>
+ * TCP transport, implements the {@link SenderTransport} interface. &lt;br>
  * Supports both plain TCP or secure TLS-encrypted connections with configurable JWK token authentication.
  */ class TcpTransport {
     /**
@@ -955,7 +960,12 @@ const PUBLIC_KEY = {
                 this.log("info", `Successfully connected to ${connOptions.host}:${connOptions.port}`);
                 if (this.jwk) {
                     this.log("info", `Authenticating with ${connOptions.host}:${connOptions.port}`);
-                    this.socket.write(`${this.jwk.kid}\n`, (err)=>err ? reject(err) : ()=>{});
+                    this.socket.write(`${this.jwk.kid}\n`, (err)=>{
+                        if (err) {
+                            this.log("error", `Failed to send authentication: ${err.message}`);
+                            reject(err);
+                        }
+                    });
                 } else {
                     authenticated = true;
                     if (!this.secure || !this.tlsVerify) {
@@ -966,6 +976,9 @@ const PUBLIC_KEY = {
                 this.log("error", err);
                 if (this.tlsVerify || !err.code || err.code !== "SELF_SIGNED_CERT_IN_CHAIN") {
                     reject(err);
+                } else {
+                    // Warn about accepting self-signed certificate
+                    this.log("warn", "Accepting self-signed certificate. This is insecure and should only be used in development environments.");
                 }
             });
         });
@@ -996,7 +1009,7 @@ const PUBLIC_KEY = {
             const address = this.socket.remoteAddress;
             const port = this.socket.remotePort;
             this.socket.destroy();
-            this.socket = null;
+            this.socket = undefined;
             this.log("info", `Connection to ${address}:${port} is closed`);
         }
     }
@@ -1013,7 +1026,7 @@ const PUBLIC_KEY = {
    * @returns Promise resolving to true if authentication is successful
    */ async authenticate(challenge) {
         // Check for trailing \n which ends the challenge
-        if (challenge.subarray(-1).readInt8() === 10) {
+        if (challenge.subarray(-1).readInt8() === NEWLINE) {
             const keyObject = crypto__default.default.createPrivateKey({
                 key: this.jwk,
                 format: "jwk"
@@ -1043,7 +1056,7 @@ const PUBLIC_KEY = {
         return;
     }
     if (!options.username || !options.token) {
-        throw new Error("TCP transport requires a username and a private key for authentication, " + "please, specify the 'username' and 'token' config options");
+        throw new Error(`TCP transport requires a username and a private key for authentication, please, specify the 'username' and 'token' config options`);
     }
     options.auth = {
         keyId: options.username,
@@ -1059,16 +1072,16 @@ const PUBLIC_KEY = {
  */ function constructJwk(options) {
     if (options.auth) {
         if (!options.auth.keyId) {
-            throw new Error("Missing username, please, specify the 'keyId' property of the 'auth' config option. " + "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})");
+            throw new Error(`Missing username, please, specify the 'keyId' property of the 'auth' config option. For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})`);
         }
         if (typeof options.auth.keyId !== "string") {
-            throw new Error("Please, specify the 'keyId' property of the 'auth' config option as a string. " + "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})");
+            throw new Error(`Please, specify the 'keyId' property of the 'auth' config option as a string. For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})`);
         }
         if (!options.auth.token) {
-            throw new Error("Missing private key, please, specify the 'token' property of the 'auth' config option. " + "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})");
+            throw new Error(`Missing private key, please, specify the 'token' property of the 'auth' config option. For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})`);
         }
         if (typeof options.auth.token !== "string") {
-            throw new Error("Please, specify the 'token' property of the 'auth' config option as a string. " + "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})");
+            throw new Error(`Please, specify the 'token' property of the 'auth' config option as a string. For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})`);
         }
         return {
             kid: options.auth.keyId,
@@ -1093,7 +1106,8 @@ const PUBLIC_KEY = {
     timeout: 60000
 };
 /**
- * HTTP transport implementation using Node.js built-in http/https modules. &lt;br>
+ * HTTP transport implementation using Node.js built-in http/https modules,
+ * extends the {@link HttpTransportBase} abstract base class. &lt;br>
  * Supports both HTTP and HTTPS protocols with configurable authentication.
  */ class HttpTransport extends HttpTransportBase {
     /**
@@ -1241,7 +1255,7 @@ const PUBLIC_KEY = {
 /**
  * Factory function to create appropriate transport instance based on configuration.
  * @param {SenderOptions} options - Sender configuration options including protocol and connection details
- * @returns Transport instance appropriate for the specified protocol
+ * @returns {SenderTransport} Transport instance appropriate for the specified protocol
  * @throws Error if protocol or host options are missing or invalid
  */ function createTransport(options) {
     if (!options || !options.protocol) {
@@ -1381,7 +1395,7 @@ const PUBLIC_KEY = {
 // Default maximum length for table and column names.
 const DEFAULT_MAX_NAME_LENGTH = 127;
 /**
- * Abstract base class for SenderBuffer implementations. &lt;br>
+ * Abstract base class for sender buffers, implements the {@link SenderBuffer} interface. &lt;br>
  * Provides common functionality for writing data into the buffer.
  */ class SenderBufferBase {
     /**
@@ -1737,7 +1751,8 @@ const DEFAULT_MAX_NAME_LENGTH = 127;
 
 // @ts-check
 /**
- * Buffer implementation for protocol version 1.
+ * Buffer implementation for protocol version 1,
+ * extends the {@link SenderBufferBase} abstract base class.
  * Sends floating point numbers in their text form.
  */ class SenderBufferV1 extends SenderBufferBase {
     /**
@@ -1783,8 +1798,9 @@ const ENTITY_TYPE_DOUBLE = 16;
 // ASCII code for equals sign used in binary protocol.
 const EQUALS_SIGN = "=".charCodeAt(0);
 /**
- * Buffer implementation for protocol version 2.
- * Sends floating point numbers in binary form.
+ * Buffer implementation for protocol version 2,
+ * extends the {@link SenderBufferBase} abstract base class.
+ * Sends floating point numbers in binary form, and provides support for arrays.
  */ class SenderBufferV2 extends SenderBufferBase {
     /**
    * Creates a new SenderBufferV2 instance.
@@ -1902,7 +1918,7 @@ const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
  * @param {SenderOptions} options - Sender configuration object. &lt;br>
  * See SenderOptions documentation for detailed description of configuration options.
  *
- * @returns A SenderBuffer instance appropriate for the specified protocol version
+ * @returns {SenderBuffer} A SenderBuffer instance appropriate for the specified protocol version
  * @throws Error if protocol version is not specified or is unsupported
  */ function createBuffer(options) {
     switch(options.protocol_version){
@@ -1916,7 +1932,7 @@ const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
         case "":
             throw new Error("Provide the 'protocol_version' option, or call 'await SenderOptions.resolveAuto(options)' first");
         default:
-            throw new Error("Unsupported protocol version: " + options.protocol_version);
+            throw new Error(`Unsupported protocol version: ${options.protocol_version}`);
     }
 }
 
@@ -2069,6 +2085,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
         this.log("debug", `Flushing, number of flushed rows: ${this.pendingRowCount}`);
         this.resetAutoFlush();
         await this.transport.send(dataToSend);
+        return true;
     }
     /**
    * Closes the connection to the database. &lt;br>
@@ -2220,7 +2237,7 @@ exports.Sender = Sender;
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Thu Aug 07 2025 12:45:55 GMT+0100 (British Summer Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.4</a> on Fri Aug 08 2025 02:31:21 GMT+0100 (British Summer Time)
 </footer>
 
 <script> prettyPrint(); </script>
