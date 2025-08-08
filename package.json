@@ -1,6 +1,6 @@
 {
   "name": "@questdb/nodejs-client",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "QuestDB Node.js Client",
   "scripts": {
     "test": "vitest",
@@ -15,6 +15,10 @@
     "dist/cjs",
     "dist/es"
   ],
+  "main": "dist/cjs/index.js",
+  "module": "dist/es/index.mjs",
+  "types": "dist/cjs/index.d.ts",
+  "type": "module",
   "exports": {
     "import": {
       "types": "./dist/es/index.d.mts",
