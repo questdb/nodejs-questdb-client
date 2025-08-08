@@ -23,7 +23,7 @@ const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
  * @param {SenderOptions} options - Sender configuration object. <br>
  * See SenderOptions documentation for detailed description of configuration options.
  *
- * @returns A SenderBuffer instance appropriate for the specified protocol version
+ * @returns {SenderBuffer} A SenderBuffer instance appropriate for the specified protocol version
  * @throws Error if protocol version is not specified or is unsupported
  */
 function createBuffer(options: SenderOptions): SenderBuffer {

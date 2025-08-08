@@ -42,7 +42,7 @@ interface SenderTransport {
 /**
  * Factory function to create appropriate transport instance based on configuration.
  * @param {SenderOptions} options - Sender configuration options including protocol and connection details
- * @returns Transport instance appropriate for the specified protocol
+ * @returns {SenderTransport} Transport instance appropriate for the specified protocol
  * @throws Error if protocol or host options are missing or invalid
  */
 function createTransport(options: SenderOptions): SenderTransport {

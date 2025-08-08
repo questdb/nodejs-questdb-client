@@ -4,7 +4,8 @@ import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
 
 /**
- * Buffer implementation for protocol version 1, extends the SenderBufferBase abstract base class.
+ * Buffer implementation for protocol version 1,
+ * extends the {@link SenderBufferBase} abstract base class.
  * Sends floating point numbers in their text form.
  */
 class SenderBufferV1 extends SenderBufferBase {
