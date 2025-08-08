@@ -173,7 +173,7 @@ async function run() {
 run().catch(console.error);
 ```
 
-### Array usage example (typescript)
+### Array usage example (TypeScript)
 
 ```typescript
 import { Sender } from "@questdb/nodejs-client";
