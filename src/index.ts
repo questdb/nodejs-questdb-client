@@ -4,7 +4,8 @@
  */
 
 export { Sender } from "./sender";
-export type { SenderOptions, ExtraOptions } from "./options";
+export { SenderOptions } from "./options";
+export type { ExtraOptions } from "./options";
 export type { TimestampUnit } from "./utils";
 export type { SenderBuffer } from "./buffer";
 export { SenderBufferV1 } from "./buffer/bufferv1";
