@@ -455,7 +455,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000)
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n",
     );
     await sender.close();
   });
@@ -473,7 +473,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000, "ns")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000n\n",
     );
     await sender.close();
   });
@@ -491,7 +491,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000, "us")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n",
     );
     await sender.close();
   });
@@ -509,7 +509,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000, "ms")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n",
     );
     await sender.close();
   });
@@ -527,7 +527,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000n)
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n",
     );
     await sender.close();
   });
@@ -545,7 +545,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000000n, "ns")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n",
     );
     await sender.close();
   });
@@ -563,7 +563,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000n, "us")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n",
     );
     await sender.close();
   });
@@ -581,7 +581,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000n, "ms")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n",
     );
     await sender.close();
   });
@@ -619,7 +619,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000, "us");
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n 1658484769000000000\n",
     );
     await sender.close();
   });
@@ -637,7 +637,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000, "ms");
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n 1658484769000000000\n",
     );
     await sender.close();
   });
@@ -655,7 +655,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000n);
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n 1658484769000000000\n",
     );
     await sender.close();
   });
@@ -673,7 +673,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000123n, "ns");
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000123\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n 1658484769000000123\n",
     );
     await sender.close();
   });
@@ -691,7 +691,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000000n, "us");
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n 1658484769000000000\n",
     );
     await sender.close();
   });
@@ -709,7 +709,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484765000000)
       .at(1658484769000n, "ms");
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t 1658484769000000000\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n 1658484769000000000\n",
     );
     await sender.close();
   });
@@ -1124,8 +1124,8 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484766000000)
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName boolCol=t,timestampCol=1658484765000000t\n" +
-        "tableName boolCol=f,timestampCol=1658484766000000t\n",
+      "tableName boolCol=t,timestampCol=1658484765000000000n\n" +
+        "tableName boolCol=f,timestampCol=1658484766000000000n\n",
     );
 
     sender.reset();
@@ -1135,7 +1135,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       .timestampColumn("timestampCol", 1658484767000000)
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName floatCol=1234567890,timestampCol=1658484767000000t\n",
+      "tableName floatCol=1234567890,timestampCol=1658484767000000000n\n",
     );
     await sender.close();
   });

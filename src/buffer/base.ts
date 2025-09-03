@@ -287,11 +287,11 @@ abstract class SenderBufferBase implements SenderBuffer {
       throw new Error(`Value must be an integer or BigInt, received ${value}`);
     }
     this.writeColumn(name, value, () => {
-      const valueMicros = timestampToMicros(BigInt(value), unit);
-      const valueStr = valueMicros.toString();
+      const valueNanos = timestampToNanos(BigInt(value), unit);
+      const valueStr = valueNanos.toString();
       this.checkCapacity([valueStr], 1);
       this.write(valueStr);
-      this.write("t");
+      this.write("n");
     });
     return this;
   }
