@@ -44,7 +44,7 @@ type DeprecatedOptions = {
  * {@link Sender} configuration options.
  * <br>
  * Properties of the object are initialized through a configuration string. <br>
- * The configuration string has the following format: <i>&ltprotocol&gt::&ltkey&gt=&ltvalue&gt;&ltkey&gt=&ltvalue&gt;...;</i> <br>
+ * The configuration string has the following format: <i>protocol</i>::<i>key</i>=<i>value</i>;<i>key</i>=<i>value</i>...</i> <br>
  * The keys are case-sensitive, the trailing semicolon is optional. <br>
  * The values are validated and an error is thrown if the format is invalid. <br>
  * <br>
