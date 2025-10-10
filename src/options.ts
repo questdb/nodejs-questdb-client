@@ -226,7 +226,7 @@ class SenderOptions {
    * If TCP transport is used, the protocol version will default to 1.
    * In case of HTTP transport the <i>/settings</i> endpoint of the database is used to find the protocol versions
    * supported by the server, and the highest will be selected.
-   * When calling the <i>/settings</i> endpoint the timeout and TLs options are used from the <i>options</i> object.
+   * When calling the <i>/settings</i> endpoint the timeout and TLS options are used from the <i>options</i> object.
    * @param {SenderOptions} options SenderOptions instance needs resolving protocol version
    */
   static async resolveAuto(options: SenderOptions) {
