@@ -9,7 +9,7 @@ import {
   vi,
 } from "vitest";
 
-import { Logger } from "../src/logging";
+import { Logger } from "../src";
 
 describe("Default logging suite", function () {
   const error = vi.spyOn(console, "error").mockImplementation(() => {});

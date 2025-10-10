@@ -4,10 +4,7 @@ import { readFileSync } from "fs";
 import { Agent } from "undici";
 import http from "http";
 
-import { Sender } from "../src";
-import { SenderOptions } from "../src/options";
-import { UndiciTransport } from "../src/transport/http/undici";
-import { HttpTransport } from "../src/transport/http/stdlib";
+import { Sender, SenderOptions, UndiciTransport, HttpTransport } from "../src";
 import { MockProxy } from "./util/mockproxy";
 import { MockHttp } from "./util/mockhttp";
 

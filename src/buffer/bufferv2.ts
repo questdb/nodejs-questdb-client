@@ -2,7 +2,13 @@
 import { SenderOptions } from "../options";
 import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
-import { ArrayPrimitive, getDimensions, validateArray } from "../utils";
+import {
+  ArrayPrimitive,
+  getDimensions,
+  timestampToMicros,
+  TimestampUnit,
+  validateArray,
+} from "../utils";
 
 // Column type constants for protocol v2.
 const COLUMN_TYPE_DOUBLE: number = 10;
@@ -51,6 +57,28 @@ class SenderBufferV2 extends SenderBufferBase {
       "number",
     );
     return this;
+  }
+
+  protected writeTimestamp(
+    value: number | bigint,
+    unit: TimestampUnit = "us",
+  ): void {
+    let biValue: bigint;
+    let suffix: string;
+    switch (unit) {
+      case "ns":
+        biValue = BigInt(value);
+        suffix = "n";
+        break;
+      default:
+        biValue = timestampToMicros(BigInt(value), unit);
+        suffix = "t";
+    }
+
+    const timestampStr = biValue.toString();
+    this.checkCapacity([timestampStr], 2);
+    this.write(timestampStr);
+    this.write(suffix);
   }
 
   /**

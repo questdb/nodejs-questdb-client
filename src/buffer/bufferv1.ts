@@ -2,6 +2,7 @@
 import { SenderOptions } from "../options";
 import { SenderBuffer } from "./index";
 import { SenderBufferBase } from "./base";
+import { timestampToMicros, timestampToNanos, TimestampUnit } from "../utils";
 
 /**
  * Buffer implementation for protocol version 1. <br>
@@ -37,6 +38,23 @@ class SenderBufferV1 extends SenderBufferBase {
       "number",
     );
     return this;
+  }
+
+  protected writeTimestamp(
+    timestamp: number | bigint,
+    unit: TimestampUnit = "us",
+    designated: boolean,
+  ): void {
+    const biValue = BigInt(timestamp);
+    const timestampValue = designated
+      ? timestampToNanos(biValue, unit)
+      : timestampToMicros(biValue, unit);
+    const timestampStr = timestampValue.toString();
+    this.checkCapacity([timestampStr], 2);
+    this.write(timestampStr);
+    if (!designated) {
+      this.write("t");
+    }
   }
 
   /**
