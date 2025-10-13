@@ -461,20 +461,20 @@ describe("Sender message builder test suite (anything not covered in client inte
     sender.reset();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000)
+      .timestampColumn("ts", 1658484765123456)
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000, "us")
+      .timestampColumn("ts", 1658484765123456, "us")
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000, "ms")
+      .timestampColumn("ts", 1658484765123, "ms")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000t\n",
+      "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123000t\n",
     );
     await sender.close();
   });
@@ -499,20 +499,20 @@ describe("Sender message builder test suite (anything not covered in client inte
     sender.reset();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000)
+      .timestampColumn("ts", 1658484765123456)
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000, "us")
+      .timestampColumn("ts", 1658484765123456, "us")
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000, "ms")
+      .timestampColumn("ts", 1658484765123, "ms")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000t\n",
+      "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123000t\n",
     );
     await sender.close();
   });
@@ -526,25 +526,25 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000n)
+      .timestampColumn("ts", 1658484765123456n)
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000n, "ns")
+      .timestampColumn("ts", 1658484765123456789n, "ns")
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000n, "us")
+      .timestampColumn("ts", 1658484765123456n, "us")
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000n, "ms")
+      .timestampColumn("ts", 1658484765123n, "ms")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000t\n" +
-        "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000t\n",
+      "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123000t\n",
     );
     await sender.close();
   });
@@ -558,25 +558,25 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000n)
+      .timestampColumn("ts", 1658484765123456n)
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000n, "ns")
+      .timestampColumn("ts", 1658484765123456789n, "ns")
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000000n, "us")
+      .timestampColumn("ts", 1658484765123456n, "us")
       .atNow();
     await sender
       .table("tableName")
-      .timestampColumn("ts", 1658484765000n, "ms")
+      .timestampColumn("ts", 1658484765123n, "ms")
       .atNow();
     expect(bufferContent(sender)).toBe(
-      "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000n\n" +
-        "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000t\n",
+      "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123456789n\n" +
+        "tableName ts=1658484765123456t\n" +
+        "tableName ts=1658484765123000t\n",
     );
     await sender.close();
   });
