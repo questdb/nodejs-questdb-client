@@ -285,7 +285,14 @@ abstract class SenderBufferBase implements SenderBuffer {
     unit: TimestampUnit = "us",
   ): SenderBuffer {
     if (typeof value !== "bigint" && !Number.isInteger(value)) {
-      throw new Error(`Value must be an integer or BigInt, received ${value}`);
+      throw new Error(
+        `Timestamp value must be an integer or BigInt, received ${value}`,
+      );
+    }
+    if (unit == "ns" && typeof value !== "bigint") {
+      throw new Error(
+        `Timestamp value must be a BigInt if it is set in nanoseconds`,
+      );
     }
     this.writeColumn(name, value, () =>
       this.writeTimestamp(value, unit, false),
@@ -308,6 +315,11 @@ abstract class SenderBufferBase implements SenderBuffer {
     if (typeof timestamp !== "bigint" && !Number.isInteger(timestamp)) {
       throw new Error(
         `Designated timestamp must be an integer or BigInt, received ${timestamp}`,
+      );
+    }
+    if (unit == "ns" && typeof timestamp !== "bigint") {
+      throw new Error(
+        `Designated timestamp must be a BigInt if it is set in nanoseconds`,
       );
     }
     this.checkCapacity([], 1);

@@ -441,20 +441,27 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("supports timestamp field as number with protocol v1", async function () {
+  it("supports timestamp field as number for 'us' and 'ms' units with protocol v1", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
+    await expect(
+      async () =>
+        await sender
+          .table("tableName")
+          .timestampColumn("ts", 1658484765000000, "ns")
+          .atNow(),
+    ).rejects.toThrow(
+      "Timestamp value must be a BigInt if it is set in nanoseconds",
+    );
+
+    sender.reset();
     await sender
       .table("tableName")
       .timestampColumn("ts", 1658484765000000)
-      .atNow();
-    await sender
-      .table("tableName")
-      .timestampColumn("ts", 1658484765000000, "ns")
       .atNow();
     await sender
       .table("tableName")
@@ -466,27 +473,33 @@ describe("Sender message builder test suite (anything not covered in client inte
       .atNow();
     expect(bufferContent(sender)).toBe(
       "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000t\n" +
         "tableName ts=1658484765000000t\n" +
         "tableName ts=1658484765000000t\n",
     );
     await sender.close();
   });
 
-  it("supports timestamp field as number with protocol v2", async function () {
+  it("supports timestamp field as number for 'us' and 'ms' units with protocol v2", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "2",
       host: "host",
       init_buf_size: 1024,
     });
+    await expect(
+      async () =>
+        await sender
+          .table("tableName")
+          .timestampColumn("ts", 1658484765000000, "ns")
+          .atNow(),
+    ).rejects.toThrow(
+      "Timestamp value must be a BigInt if it is set in nanoseconds",
+    );
+
+    sender.reset();
     await sender
       .table("tableName")
       .timestampColumn("ts", 1658484765000000)
-      .atNow();
-    await sender
-      .table("tableName")
-      .timestampColumn("ts", 1658484765000000, "ns")
       .atNow();
     await sender
       .table("tableName")
@@ -498,7 +511,6 @@ describe("Sender message builder test suite (anything not covered in client inte
       .atNow();
     expect(bufferContent(sender)).toBe(
       "tableName ts=1658484765000000t\n" +
-        "tableName ts=1658484765000000n\n" +
         "tableName ts=1658484765000000t\n" +
         "tableName ts=1658484765000000t\n",
     );
@@ -589,18 +601,25 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("supports designated timestamp as number with protocol v1", async function () {
+  it("supports designated timestamp as number for 'us' and 'ms' units with protocol v1", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "1",
       host: "host",
       init_buf_size: 1024,
     });
+    await expect(
+      async () =>
+        await sender
+          .table("tableName")
+          .intColumn("c1", 42)
+          .at(1658484769000000, "ns"),
+    ).rejects.toThrow(
+      "Designated timestamp must be a BigInt if it is set in nanoseconds",
+    );
+
+    sender.reset();
     await sender.table("tableName").intColumn("c1", 42).at(1658484769000000);
-    await sender
-      .table("tableName")
-      .intColumn("c1", 42)
-      .at(1658484769000000, "ns");
     await sender
       .table("tableName")
       .intColumn("c1", 42)
@@ -608,25 +627,31 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.table("tableName").intColumn("c1", 42).at(1658484769000, "ms");
     expect(bufferContent(sender)).toBe(
       "tableName c1=42i 1658484769000000000\n" +
-        "tableName c1=42i 1658484769000000\n" +
         "tableName c1=42i 1658484769000000000\n" +
         "tableName c1=42i 1658484769000000000\n",
     );
     await sender.close();
   });
 
-  it("supports designated timestamp as number with protocol v2", async function () {
+  it("supports designated timestamp as number for 'us' and 'ms' units with protocol v2", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "2",
       host: "host",
       init_buf_size: 1024,
     });
+    await expect(
+      async () =>
+        await sender
+          .table("tableName")
+          .intColumn("c1", 42)
+          .at(1658484769000000, "ns"),
+    ).rejects.toThrow(
+      "Designated timestamp must be a BigInt if it is set in nanoseconds",
+    );
+
+    sender.reset();
     await sender.table("tableName").intColumn("c1", 42).at(1658484769000000);
-    await sender
-      .table("tableName")
-      .intColumn("c1", 42)
-      .at(1658484769000000, "ns");
     await sender
       .table("tableName")
       .intColumn("c1", 42)
@@ -634,7 +659,6 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.table("tableName").intColumn("c1", 42).at(1658484769000, "ms");
     expect(bufferContent(sender)).toBe(
       "tableName c1=42i 1658484769000000t\n" +
-        "tableName c1=42i 1658484769000000n\n" +
         "tableName c1=42i 1658484769000000t\n" +
         "tableName c1=42i 1658484769000000t\n",
     );
@@ -933,7 +957,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     expect(() =>
       sender.table("tableName").timestampColumn("intField", 123.222),
-    ).toThrow("Value must be an integer or BigInt, received 123.222");
+    ).toThrow("Timestamp value must be an integer or BigInt, received 123.222");
     await sender.close();
   });
 
