@@ -9,12 +9,7 @@ import {
   DEFAULT_BUFFER_SIZE,
   DEFAULT_MAX_BUFFER_SIZE,
 } from "./index";
-import {
-  isInteger,
-  timestampToMicros,
-  timestampToNanos,
-  TimestampUnit,
-} from "../utils";
+import { isInteger, TimestampUnit } from "../utils";
 
 // Default maximum length for table and column names.
 const DEFAULT_MAX_NAME_LENGTH = 127;
@@ -269,6 +264,12 @@ abstract class SenderBufferBase implements SenderBuffer {
     return this;
   }
 
+  protected abstract writeTimestamp(
+    timestamp: number | bigint,
+    unit: TimestampUnit,
+    designated: boolean,
+  ): void;
+
   /**
    * Writes a timestamp column with its value into the buffer. <br>
    * Use it to insert into TIMESTAMP columns.
@@ -284,15 +285,18 @@ abstract class SenderBufferBase implements SenderBuffer {
     unit: TimestampUnit = "us",
   ): SenderBuffer {
     if (typeof value !== "bigint" && !Number.isInteger(value)) {
-      throw new Error(`Value must be an integer or BigInt, received ${value}`);
+      throw new Error(
+        `Timestamp value must be an integer or BigInt, received ${value}`,
+      );
     }
-    this.writeColumn(name, value, () => {
-      const valueMicros = timestampToMicros(BigInt(value), unit);
-      const valueStr = valueMicros.toString();
-      this.checkCapacity([valueStr], 1);
-      this.write(valueStr);
-      this.write("t");
-    });
+    if (unit == "ns" && typeof value !== "bigint") {
+      throw new Error(
+        `Timestamp value must be a BigInt if it is set in nanoseconds`,
+      );
+    }
+    this.writeColumn(name, value, () =>
+      this.writeTimestamp(value, unit, false),
+    );
     return this;
   }
 
@@ -313,11 +317,14 @@ abstract class SenderBufferBase implements SenderBuffer {
         `Designated timestamp must be an integer or BigInt, received ${timestamp}`,
       );
     }
-    const timestampNanos = timestampToNanos(BigInt(timestamp), unit);
-    const timestampStr = timestampNanos.toString();
-    this.checkCapacity([timestampStr], 2);
+    if (unit == "ns" && typeof timestamp !== "bigint") {
+      throw new Error(
+        `Designated timestamp must be a BigInt if it is set in nanoseconds`,
+      );
+    }
+    this.checkCapacity([], 1);
     this.write(" ");
-    this.write(timestampStr);
+    this.writeTimestamp(timestamp, unit, true);
     this.write("\n");
     this.startNewRow();
   }

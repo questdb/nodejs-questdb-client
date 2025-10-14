@@ -3,8 +3,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { GenericContainer, StartedTestContainer } from "testcontainers";
 import http from "http";
 
-import { Sender } from "../src";
-import { SenderOptions } from "../src/options";
+import { Sender, SenderOptions } from "../src";
 
 const HTTP_OK = 200;
 

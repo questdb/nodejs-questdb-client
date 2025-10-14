@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Agent } from "undici";
 
-import { SenderOptions } from "../src/options";
+import { SenderOptions } from "../src";
 import { MockHttp } from "./util/mockhttp";
 import { readFileSync } from "fs";
 
