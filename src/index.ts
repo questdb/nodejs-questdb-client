@@ -17,3 +17,4 @@ export { TcpTransport } from "./transport/tcp";
 export { HttpTransport } from "./transport/http/stdlib";
 export { UndiciTransport } from "./transport/http/undici";
 export type { Logger } from "./logging";
+export { bigintToTwosComplementBytes } from "./utils";

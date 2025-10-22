@@ -236,9 +236,9 @@ describe("Configuration string parser suite", function () {
     // invalid protocol version
     await expect(
       async () =>
-        await SenderOptions.fromConfig("tcp::addr=hostname;protocol_version=3"),
+        await SenderOptions.fromConfig("tcp::addr=hostname;protocol_version=4"),
     ).rejects.toThrow(
-      "Invalid protocol version: '3', accepted values: 'auto', '1', '2'",
+      "Invalid protocol version: '4', accepted values: 'auto', '1', '2', '3'",
     );
     await expect(
       async () =>
@@ -246,7 +246,7 @@ describe("Configuration string parser suite", function () {
           "http::addr=hostname;protocol_version=0",
         ),
     ).rejects.toThrow(
-      "Invalid protocol version: '0', accepted values: 'auto', '1', '2'",
+      "Invalid protocol version: '0', accepted values: 'auto', '1', '2', '3'",
     );
     await expect(
       async () =>
@@ -254,7 +254,7 @@ describe("Configuration string parser suite", function () {
           "http::addr=hostname;protocol_version=-1",
         ),
     ).rejects.toThrow(
-      "Invalid protocol version: '-1', accepted values: 'auto', '1', '2'",
+      "Invalid protocol version: '-1', accepted values: 'auto', '1', '2', '3'",
     );
     await expect(
       async () =>
@@ -262,12 +262,12 @@ describe("Configuration string parser suite", function () {
           "https::addr=hostname;protocol_version=automatic",
         ),
     ).rejects.toThrow(
-      "Invalid protocol version: 'automatic', accepted values: 'auto', '1', '2'",
+      "Invalid protocol version: 'automatic', accepted values: 'auto', '1', '2', '3'",
     );
 
     let options: SenderOptions;
 
-    // defaults with supported versions: 1,2
+    // defaults with supported versions: 1,2,3
     mockHttp.reset();
     mockHttps.reset();
     options = await SenderOptions.fromConfig("tcp::addr=localhost");
@@ -277,11 +277,11 @@ describe("Configuration string parser suite", function () {
     options = await SenderOptions.fromConfig(
       `http::addr=localhost:${MOCK_HTTP_PORT}`,
     );
-    expect(options.protocol_version).toBe("2");
+    expect(options.protocol_version).toBe("3");
     options = await SenderOptions.fromConfig(
       `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`,
     );
-    expect(options.protocol_version).toBe("2");
+    expect(options.protocol_version).toBe("3");
 
     // defaults with supported versions: 1
     const only1 = {
@@ -328,7 +328,7 @@ describe("Configuration string parser suite", function () {
     // defaults with no match with supported versions
     const no1and2 = {
       settings: {
-        config: { "line.proto.support.versions": [3, 5] },
+        config: { "line.proto.support.versions": [4, 5] },
       },
     };
     mockHttp.reset(no1and2);
@@ -343,7 +343,7 @@ describe("Configuration string parser suite", function () {
           `http::addr=localhost:${MOCK_HTTP_PORT};tls_verify=unsafe_off`,
         ),
     ).rejects.toThrow(
-      "Unsupported protocol versions received from server: 3,5",
+      "Unsupported protocol versions received from server: 4,5",
     );
     await expect(
       async () =>
@@ -351,7 +351,7 @@ describe("Configuration string parser suite", function () {
           `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off`,
         ),
     ).rejects.toThrow(
-      "Unsupported protocol versions received from server: 3,5",
+      "Unsupported protocol versions received from server: 4,5",
     );
 
     // auto, 1, 2 with each protocol (tcp, tcps, http, https), supported versions: 1,2
@@ -366,6 +366,10 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("2");
     options = await SenderOptions.fromConfig(
+      "tcp::addr=localhost;protocol_version=3",
+    );
+    expect(options.protocol_version).toBe("3");
+    options = await SenderOptions.fromConfig(
       "tcp::addr=localhost;protocol_version=auto",
     );
     expect(options.protocol_version).toBe("1");
@@ -378,6 +382,10 @@ describe("Configuration string parser suite", function () {
       "tcps::addr=localhost;protocol_version=2",
     );
     expect(options.protocol_version).toBe("2");
+    options = await SenderOptions.fromConfig(
+      "tcps::addr=localhost;protocol_version=3",
+    );
+    expect(options.protocol_version).toBe("3");
     options = await SenderOptions.fromConfig(
       "tcps::addr=localhost;protocol_version=auto",
     );
@@ -392,9 +400,13 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("2");
     options = await SenderOptions.fromConfig(
+      `http::addr=localhost:${MOCK_HTTP_PORT};protocol_version=3`,
+    );
+    expect(options.protocol_version).toBe("3");
+    options = await SenderOptions.fromConfig(
       `http::addr=localhost:${MOCK_HTTP_PORT};protocol_version=auto`,
     );
-    expect(options.protocol_version).toBe("2");
+    expect(options.protocol_version).toBe("3");
 
     options = await SenderOptions.fromConfig(
       `https::addr=localhost:${MOCK_HTTPS_PORT};protocol_version=1`,
@@ -405,9 +417,13 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol_version).toBe("2");
     options = await SenderOptions.fromConfig(
+      `https::addr=localhost:${MOCK_HTTPS_PORT};protocol_version=3`,
+    );
+    expect(options.protocol_version).toBe("3");
+    options = await SenderOptions.fromConfig(
       `https::addr=localhost:${MOCK_HTTPS_PORT};tls_verify=unsafe_off;protocol_version=auto`,
     );
-    expect(options.protocol_version).toBe("2");
+    expect(options.protocol_version).toBe("3");
   });
 
   it("fails if port is not a positive integer", async function () {
@@ -666,10 +682,11 @@ describe("Configuration string parser suite", function () {
       async () => await SenderOptions.fromConfig(""),
     ).rejects.toThrow("Configuration string is missing");
     await expect(
-      async () => await SenderOptions.fromConfig(null),
+      async () => await SenderOptions.fromConfig(null as unknown as string),
     ).rejects.toThrow("Configuration string is missing");
     await expect(
-      async () => await SenderOptions.fromConfig(undefined),
+      async () =>
+        await SenderOptions.fromConfig(undefined as unknown as string),
     ).rejects.toThrow("Configuration string is missing");
   });
 

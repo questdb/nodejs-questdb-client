@@ -6,10 +6,12 @@ import {
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,
   PROTOCOL_VERSION_AUTO,
+  PROTOCOL_VERSION_V3,
 } from "../options";
 import { TimestampUnit } from "../utils";
 import { SenderBufferV1 } from "./bufferv1";
 import { SenderBufferV2 } from "./bufferv2";
+import { SenderBufferV3 } from "./bufferv3";
 
 // Default initial buffer size in bytes (64 KB).
 const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
@@ -26,6 +28,8 @@ const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
  */
 function createBuffer(options: SenderOptions): SenderBuffer {
   switch (options.protocol_version) {
+    case PROTOCOL_VERSION_V3:
+      return new SenderBufferV3(options);
     case PROTOCOL_VERSION_V2:
       return new SenderBufferV2(options);
     case PROTOCOL_VERSION_V1:
@@ -151,6 +155,35 @@ interface SenderBuffer {
     name: string,
     value: number | bigint,
     unit: TimestampUnit,
+  ): SenderBuffer;
+
+  /**
+   * Writes a decimal value into the buffer using the text format.
+   *
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number/string values.
+   * @returns {Sender} Returns with a reference to this buffer.
+   */
+  decimalColumnText(name: string, value: string | number): SenderBuffer;
+
+  /**
+   * Writes a decimal value into the buffer using the binary format.
+   *
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} unscaled - The unscaled value of the decimal in two's
+   * complement representation and big-endian byte order.
+   * An empty array represents the NULL value.
+   * @param {number} scale - The scale of the decimal value.
+   * @returns {Sender} Returns with a reference to this buffer.
+   */
+  decimalColumnUnscaled(
+    name: string,
+    unscaled: Int8Array | bigint,
+    scale: number,
   ): SenderBuffer;
 
   /**

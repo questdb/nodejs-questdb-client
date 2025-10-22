@@ -65,6 +65,66 @@ async function run() {
 run().then(console.log).catch(console.error);
 ```
 
+### DECIMAL columns (ILP v3)
+
+```typescript
+import { Sender } from "@questdb/nodejs-client";
+
+async function runDecimals() {
+  const sender = await Sender.fromConfig(
+    "tcp::addr=127.0.0.1:9009;protocol_version=3",
+  );
+
+  await sender
+    .table("fx")
+    // textual ILP form keeps the literal and its exact scale
+    .decimalColumnText("mid", "1.234500")
+    .atNow();
+
+  await sender.flush();
+  await sender.close();
+}
+
+runDecimals().catch(console.error);
+// Resulting ILP line: fx mid=1.234500d
+```
+
+For binary ILP v3, decimals are transmitted as an unscaled integer with an explicit scale:
+
+```text
+fx mid==\x17\x06\x03\x12\xD6\x44
+```
+
+- `0x17` is the decimal entity type.
+- `0x06` is the scale (six decimal places).
+- `0x03` is the payload length.
+- `0x12 0xD6 0x44` is the two's complement big-endian encoding of the unscaled value `1234500`.
+
+Any client that emits the same scale (`6`) and unscaled integer (`1234500n`) will store the value `1.234500` exactly, including its trailing zeros.
+
+A shorter payload works the same way. For example, the decimal `123.456` has an unscaled integer of `123456` and a scale of `3`, so the binary payload is:
+
+```text
+\x17 0x03 0x03 0x01 0xE2 0x40
+```
+
+- `0x03` is the scale.
+- `0x03` is the length of the integer payload.
+- `0x01 0xE2 0x40` is the big-endian byte array for `123456`.
+
+In JavaScript you can generate the payload bytes like this:
+
+```typescript
+import { bigintToTwosComplementBytes } from "@questdb/nodejs-client";
+
+function decimalPayload(unscaled: bigint, scale: number): number[] {
+  const magnitude = bigintToTwosComplementBytes(unscaled);
+  return [0x17, scale, magnitude.length, ...magnitude];
+}
+
+decimalPayload(123456n, 3); // [0x17, 0x03, 0x03, 0x01, 0xE2, 0x40] → 123.456
+```
+
 ### Authentication and secure connection
 
 #### Username and password authentication with HTTP transport

@@ -438,7 +438,7 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   /**
    * @ignore
-   * Writes a 32-bit integer to the buffer in little-endian format.
+   * Writes a 32-bit integer to the buffer in big-endian format.
    * @param data - Integer value to write
    */
   protected writeInt(data: number) {
@@ -447,7 +447,7 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   /**
    * @ignore
-   * Writes a double-precision float to the buffer in little-endian format.
+   * Writes a double-precision float to the buffer in big-endian format.
    * @param data - Double value to write
    */
   protected writeDouble(data: number) {
@@ -489,6 +489,38 @@ abstract class SenderBufferBase implements SenderBuffer {
           break;
       }
     }
+  }
+
+  /**
+   * Writes a decimal value into the buffer.
+   *
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number/string values.
+   * @returns {Sender} Returns with a reference to this buffer.
+   */
+  decimalColumnText(name: string, value: string | number): SenderBuffer {
+    throw new Error("Decimals are not supported in protocol v1/v2");
+  }
+
+  /**
+   * Writes a decimal value into the buffer in text format.
+   *
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} unscaled - The unscaled value of the decimal in two's
+   * complement representation and big-endian byte order.
+   * @param {number} scale - The scale of the decimal value.
+   * @returns {Sender} Returns with a reference to this buffer.
+   */
+  decimalColumnUnscaled(
+    name: string,
+    unscaled: Int8Array | bigint,
+    scale: number,
+  ): SenderBuffer {
+    throw new Error("Decimals are not supported in protocol v1/v2");
   }
 }
 
