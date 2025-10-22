@@ -1,14 +1,7 @@
 // @ts-check
 import { SenderOptions } from "../options";
 import { SenderBuffer } from "./index";
-import {
-  ArrayPrimitive,
-  bigintToTwosComplementBytes,
-  getDimensions,
-  timestampToMicros,
-  TimestampUnit,
-  validateArray,
-} from "../utils";
+import { bigintToTwosComplementBytes } from "../utils";
 import { SenderBufferV2 } from "./bufferv2";
 import { validateDecimalText } from "../validation";
 
