@@ -438,7 +438,7 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   /**
    * @ignore
-   * Writes a 32-bit integer to the buffer in big-endian format.
+   * Writes a 32-bit integer to the buffer in little-endian format.
    * @param data - Integer value to write
    */
   protected writeInt(data: number) {
@@ -447,7 +447,7 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   /**
    * @ignore
-   * Writes a double-precision float to the buffer in big-endian format.
+   * Writes a double-precision float to the buffer in little-endian format.
    * @param data - Double value to write
    */
   protected writeDouble(data: number) {
