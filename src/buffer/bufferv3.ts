@@ -18,7 +18,7 @@ const EQUALS_SIGN: number = "=".charCodeAt(0);
  */
 class SenderBufferV3 extends SenderBufferV2 {
   /**
-   * Creates a new SenderBufferV2 instance.
+   * Creates a new SenderBufferV3 instance.
    *
    * @param {SenderOptions} options - Sender configuration object.
    *
@@ -37,13 +37,18 @@ class SenderBufferV3 extends SenderBufferV2 {
    * @param {number} value - Column value, accepts only number/string values.
    * @returns {Sender} Returns with a reference to this buffer.
    */
-  decimalColumnText(name: string, value: string | number): SenderBuffer {
+  decimalColumnText(
+    name: string,
+    value: string | number | null | undefined,
+  ): SenderBuffer {
     let str = "";
     if (typeof value === "string") {
       validateDecimalText(value);
       str = value;
     } else if (typeof value === "number") {
       str = value.toString();
+    } else if (value === null || value === undefined) {
+      return this;
     } else {
       throw new TypeError(`Invalid decimal value type: ${typeof value}`);
     }
@@ -69,7 +74,7 @@ class SenderBufferV3 extends SenderBufferV2 {
    */
   decimalColumnUnscaled(
     name: string,
-    unscaled: Int8Array | bigint,
+    unscaled: Int8Array | bigint | null | undefined,
     scale: number,
   ): SenderBuffer {
     if (scale < 0 || scale > 76) {
@@ -80,6 +85,8 @@ class SenderBufferV3 extends SenderBufferV2 {
       arr = bigintToTwosComplementBytes(unscaled);
     } else if (unscaled instanceof Int8Array) {
       arr = Array.from(unscaled);
+    } else if (unscaled === null || unscaled === undefined) {
+      return this;
     } else {
       throw new TypeError(
         `Invalid unscaled value type: ${typeof unscaled}, expected Int8Array or bigint`,

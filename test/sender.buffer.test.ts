@@ -1382,6 +1382,81 @@ describe("Sender message builder test suite (anything not covered in client inte
     sender.reset();
     await sender.close();
   });
+
+  it("doesn't send the decimal text column when undefined is passed as value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    try {
+      await sender.table("fx").decimalColumnText("mid", undefined).atNow();
+    } catch (e: Error | any) {
+      expect(e.message).toEqual(
+        "The row must have a symbol or column set before it is closed",
+      );
+    }
+    sender.reset();
+    await sender.close();
+  });
+
+  it("doesn't send the decimal text column when null is passed as value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    try {
+      await sender.table("fx").decimalColumnText("mid", null).atNow();
+    } catch (e: Error | any) {
+      expect(e.message).toEqual(
+        "The row must have a symbol or column set before it is closed",
+      );
+    }
+    sender.reset();
+    await sender.close();
+  });
+
+  it("doesn't send the decimal unscaled column when undefined is passed as value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    try {
+      await sender
+        .table("fx")
+        .decimalColumnUnscaled("mid", undefined, 0)
+        .atNow();
+    } catch (e: Error | any) {
+      expect(e.message).toEqual(
+        "The row must have a symbol or column set before it is closed",
+      );
+    }
+    sender.reset();
+    await sender.close();
+  });
+
+  it("doesn't send the decimal unscaled column when null is passed as value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    try {
+      await sender.table("fx").decimalColumnUnscaled("mid", null, 0).atNow();
+    } catch (e: Error | any) {
+      expect(e.message).toEqual(
+        "The row must have a symbol or column set before it is closed",
+      );
+    }
+    sender.reset();
+    await sender.close();
+  });
 });
 
 function bufferContent(sender: Sender) {

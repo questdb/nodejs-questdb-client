@@ -336,7 +336,10 @@ class Sender {
    * - value is not a number/string
    * - or the string contains invalid characters
    */
-  decimalColumnText(name: string, value: string | number): Sender {
+  decimalColumnText(
+    name: string,
+    value: string | number | undefined | null,
+  ): Sender {
     this.buffer.decimalColumnText(name, value);
     return this;
   }
@@ -355,7 +358,7 @@ class Sender {
    */
   decimalColumnUnscaled(
     name: string,
-    unscaled: Int8Array | bigint,
+    unscaled: Int8Array | bigint | undefined | null,
     scale: number,
   ): Sender {
     this.buffer.decimalColumnUnscaled(name, unscaled, scale);
