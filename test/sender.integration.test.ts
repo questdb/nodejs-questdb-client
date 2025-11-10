@@ -181,7 +181,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     const schema = [
       { name: "location", type: "SYMBOL" },
       { name: "temperature", type: "DOUBLE" },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
     ];
 
     const sender = await Sender.fromConfig(
@@ -204,7 +204,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     expect(select1Result.count).toBe(1);
     expect(select1Result.columns).toStrictEqual(schema);
     expect(select1Result.dataset).toStrictEqual([
-      ["us", 17.1, "2022-07-22T10:12:45.000000Z"],
+      ["us", 17.1, "2022-07-22T10:12:45.000000000Z"],
     ]);
 
     // ingest via client, add new column
@@ -232,14 +232,14 @@ describe("Sender tests with containerized QuestDB instance", () => {
     expect(select2Result.columns).toStrictEqual([
       { name: "location", type: "SYMBOL" },
       { name: "temperature", type: "DOUBLE" },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
       { name: "city", type: "SYMBOL" },
     ]);
     expect(select2Result.dataset).toStrictEqual([
-      ["us", 17.1, "2022-07-22T10:12:45.000000Z", null],
-      ["us", 17.36, "2022-07-22T10:12:45.000666Z", null],
-      ["emea", 17.41, "2022-07-22T10:12:45.000999Z", null],
-      ["emea", 18.81, "2022-07-22T10:12:45.001234Z", "london"],
+      ["us", 17.1, "2022-07-22T10:12:45.000000000Z", null],
+      ["us", 17.36, "2022-07-22T10:12:45.000666000Z", null],
+      ["emea", 17.41, "2022-07-22T10:12:45.000999000Z", null],
+      ["emea", 18.81, "2022-07-22T10:12:45.001234000Z", "london"],
     ]);
 
     await sender.close();
@@ -250,7 +250,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     const schema = [
       { name: "location", type: "SYMBOL" },
       { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 1 },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
     ];
 
     const sender = await Sender.fromConfig(
@@ -273,7 +273,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     expect(select1Result.count).toBe(1);
     expect(select1Result.columns).toStrictEqual(schema);
     expect(select1Result.dataset).toStrictEqual([
-      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000Z"],
+      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000000Z"],
     ]);
 
     // ingest via client, add new columns
@@ -297,23 +297,23 @@ describe("Sender tests with containerized QuestDB instance", () => {
     expect(select2Result.columns).toStrictEqual([
       { name: "location", type: "SYMBOL" },
       { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 1 },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
       { name: "city", type: "SYMBOL" },
       { name: "daily_avg_temp", type: "DOUBLE" },
     ]);
     expect(select2Result.dataset).toStrictEqual([
-      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000Z", null, null],
+      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000000Z", null, null],
       [
         "us",
         [17.36, 18.4, 19.6, 18.7],
-        "2022-07-22T10:12:45.000666Z",
+        "2022-07-22T10:12:45.000666000Z",
         null,
         null,
       ],
       [
         "emea",
         [18.5, 18.4, 19.2],
-        "2022-07-22T10:12:45.001234Z",
+        "2022-07-22T10:12:45.001234000Z",
         "london",
         18.7,
       ],
@@ -339,11 +339,11 @@ describe("Sender tests with containerized QuestDB instance", () => {
       .table(tableName)
       .symbol("location", "us")
       .arrayColumn("temperatures", [17.1, 17.7, 18.4])
-      .at(1658484765000000000n, "ns");
+      .at(1658484765000000n);
     await sender
       .table(tableName)
       .symbol("location", "gb")
-      .at(1658484765000666000n, "ns");
+      .at(1658484765000666n);
     await sender.flush();
 
     // wait for the table
@@ -382,7 +382,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
         [17.1, 17.7, 18.4],
         [17.1, 17.7, 18.4],
       ])
-      .at(1658484765000000000n, "ns");
+      .at(1658484765000000n, "us");
     await sender
       .table(tableName)
       .symbol("location", "gb")
@@ -390,7 +390,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
       ])
-      .at(1658484765000666000n, "ns");
+      .at(1658484765000666n, "us");
     await sender.flush();
 
     // wait for the table
@@ -428,7 +428,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     const schema = [
       { name: "location", type: "SYMBOL" },
       { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 1 },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
     ];
 
     const sender = await Sender.fromConfig(
@@ -457,8 +457,8 @@ describe("Sender tests with containerized QuestDB instance", () => {
     expect(select1Result.count).toBe(2);
     expect(select1Result.columns).toStrictEqual(schema);
     expect(select1Result.dataset).toStrictEqual([
-      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000Z"],
-      ["gb", [], "2022-07-22T10:12:45.000666Z"],
+      ["us", [17.1, 17.7, 18.4], "2022-07-22T10:12:45.000000000Z"],
+      ["gb", [], "2022-07-22T10:12:45.000666000Z"],
     ]);
 
     await sender.close();
@@ -469,7 +469,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     const schema = [
       { name: "location", type: "SYMBOL" },
       { name: "temperatures", type: "ARRAY", elemType: "DOUBLE", dim: 2 },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
     ];
 
     const sender = await Sender.fromConfig(
@@ -507,11 +507,11 @@ describe("Sender tests with containerized QuestDB instance", () => {
           [17.1, 17.7],
           [18.4, 18.7],
         ],
-        "2022-07-22T10:12:45.000000Z",
+        "2022-07-22T10:12:45.000000000Z",
       ],
       // todo: this should be [[], []]
       //  probably a server bug
-      ["gb", [], "2022-07-22T10:12:45.000666Z"],
+      ["gb", [], "2022-07-22T10:12:45.000666000Z"],
     ]);
 
     await sender.close();
@@ -522,7 +522,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     const schema = [
       { name: "location", type: "SYMBOL" },
       { name: "temperature", type: "DOUBLE" },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
     ];
 
     const sender = await Sender.fromConfig(
@@ -548,7 +548,7 @@ describe("Sender tests with containerized QuestDB instance", () => {
     expect(select1Result.count).toBe(1);
     expect(select1Result.columns).toStrictEqual(schema);
     expect(select1Result.dataset).toStrictEqual([
-      ["us", 17.1, "2022-07-22T10:12:45.000000Z"],
+      ["us", 17.1, "2022-07-22T10:12:45.000000000Z"],
     ]);
 
     // ingest via client, add new column
@@ -579,14 +579,14 @@ describe("Sender tests with containerized QuestDB instance", () => {
     expect(select2Result.columns).toStrictEqual([
       { name: "location", type: "SYMBOL" },
       { name: "temperature", type: "DOUBLE" },
-      { name: "timestamp", type: "TIMESTAMP" },
+      { name: "timestamp", type: "TIMESTAMP_NS" },
       { name: "city", type: "SYMBOL" },
     ]);
     expect(select2Result.dataset).toStrictEqual([
-      ["us", 17.1, "2022-07-22T10:12:45.000000Z", null],
-      ["us", 17.36, "2022-07-22T10:12:45.000666Z", null],
-      ["emea", 17.41, "2022-07-22T10:12:45.000999Z", null],
-      ["emea", 18.81, "2022-07-22T10:12:45.001234Z", "london"],
+      ["us", 17.1, "2022-07-22T10:12:45.000000000Z", null],
+      ["us", 17.36, "2022-07-22T10:12:45.000666000Z", null],
+      ["emea", 17.41, "2022-07-22T10:12:45.000999000Z", null],
+      ["emea", 18.81, "2022-07-22T10:12:45.001234000Z", "london"],
     ]);
 
     await sender.close();

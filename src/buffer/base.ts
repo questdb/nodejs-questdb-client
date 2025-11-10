@@ -271,13 +271,29 @@ abstract class SenderBufferBase implements SenderBuffer {
   ): void;
 
   /**
-   * Writes a timestamp column with its value into the buffer. <br>
-   * Use it to insert into TIMESTAMP columns.
+   * Writes a timestamp column and its value into the buffer.
    *
-   * @param {string} name - Column name.
-   * @param {number | bigint} value - Epoch timestamp, accepts numbers or BigInts.
-   * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
-   * @return {SenderBuffer} Returns with a reference to this buffer.
+   * Use this method to insert data into `TIMESTAMP` or `TIMESTAMP_NS` columns.
+   *
+   * **Precision rules**:
+   * - **Protocol v2 and higher:**
+   *   Timestamps passed with unit `'ns'` (nanoseconds) are sent with full nanosecond precision.
+   *   All other timestamps are sent with microsecond precision.
+   * - **Protocol v1:**
+   *   Always uses microsecond precision, even if the timestamp is specified in nanoseconds.
+   *
+   * @param {string} name - The column name.
+   * @param {number | bigint} value - The epoch timestamp. Must be an integer or a `BigInt`.
+   * @param {'ns' | 'us' | 'ms'} [unit='us'] - The time unit of the timestamp.
+   * Supported values:
+   *   - `'ns'` — nanoseconds (requires `BigInt`)
+   *   - `'us'` — microseconds *(default)*
+   *   - `'ms'` — milliseconds
+   *
+   * @returns {SenderBuffer} Returns with a reference to this buffer.
+   *
+   * @throws {Error} If `value` is not an integer or `BigInt`.
+   * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
    */
   timestampColumn(
     name: string,
@@ -303,8 +319,24 @@ abstract class SenderBufferBase implements SenderBuffer {
   /**
    * Closes the row after writing the designated timestamp into the buffer.
    *
-   * @param {number | bigint} timestamp - Designated epoch timestamp, accepts numbers or BigInts.
-   * @param {string} [unit=us] - Timestamp unit. Supported values: 'ns' - nanoseconds, 'us' - microseconds, 'ms' - milliseconds. Defaults to 'us'.
+   * **Precision rules**:
+   * - **Protocol v2 and higher:**
+   *   Timestamps passed with unit `'ns'` (nanoseconds) are sent with full nanosecond precision.
+   *   All other timestamps are sent with microsecond precision.
+   * - **Protocol v1:**
+   *   Always uses microsecond precision, even if the timestamp is specified in nanoseconds.
+   *
+   * @param {number | bigint} timestamp - Designated epoch timestamp. Must be an integer or a `BigInt`.
+   * @param {'ns' | 'us' | 'ms'} [unit='us'] - The time unit of the timestamp.
+   * Supported values:
+   *   - `'ns'` — nanoseconds (requires `BigInt`)
+   *   - `'us'` — microseconds *(default)*
+   *   - `'ms'` — milliseconds
+   *
+   * @returns {SenderBuffer} Returns with a reference to this buffer.
+   *
+   * @throws {Error} If `value` is not an integer or `BigInt`.
+   * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
    */
   at(timestamp: number | bigint, unit: TimestampUnit = "us") {
     if (!this.hasSymbols && !this.hasColumns) {
