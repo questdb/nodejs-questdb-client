@@ -3,6 +3,29 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 
 import { Sender, SenderOptions } from "../src";
+import { PROTOCOL_VERSION_V3 } from "../src/options";
+
+type Column = { name: string } & (
+  | { type: "STRING"; value: string }
+  | { type: "LONG"; value: number }
+  | { type: "DOUBLE"; value: number }
+  | { type: "BOOLEAN"; value: boolean }
+  | { type: "TIMESTAMP"; value: number | bigint }
+  | { type: "DECIMAL"; value: string }
+);
+
+interface TestCase {
+  testName: string;
+  table: string;
+  symbols: Array<{ name: string; value: string }>;
+  columns: Array<Column>;
+  result: {
+    status: string;
+    line?: string;
+    anyLines?: Array<string>;
+    binaryBase64?: string;
+  };
+}
 
 describe("Client interop test suite", function () {
   it("runs client tests as per json test config", async function () {
@@ -10,7 +33,7 @@ describe("Client interop test suite", function () {
       readFileSync(
         "./questdb-client-test/ilp-client-interop-test.json",
       ).toString(),
-    );
+    ) as TestCase[];
 
     for (const testCase of testCases) {
       console.info(`test name: ${testCase.testName}`);
@@ -21,10 +44,11 @@ describe("Client interop test suite", function () {
           host: "host",
           auto_flush: false,
           init_buf_size: 1024,
+          protocol_version: PROTOCOL_VERSION_V3,
         }),
       );
 
-      let errorMessage: string;
+      let errorMessage: string | undefined = undefined;
       try {
         sender.table(testCase.table);
         for (const symbol of testCase.symbols) {
@@ -47,6 +71,10 @@ describe("Client interop test suite", function () {
             case "TIMESTAMP":
               sender.timestampColumn(column.name, column.value);
               break;
+            case "DECIMAL":
+              const [unscaled, scale] = parseDecimal(column.value);
+              sender.decimalColumn(column.name, unscaled, scale);
+              break;
             default:
               errorMessage = "Unsupported column type";
           }
@@ -60,16 +88,20 @@ describe("Client interop test suite", function () {
           // error is expected, continue to next test case
           continue;
         }
-        errorMessage = `Unexpected error: ${e.message}`;
+        errorMessage = `Unexpected error: ${(e as Error).message}`;
       }
 
       if (!errorMessage) {
         const actualLine = bufferContent(sender);
 
         if (testCase.result.status === "SUCCESS") {
-          if (testCase.result.line) {
-            expect(actualLine).toBe(testCase.result.line + "\n");
-          } else {
+          if (testCase.result.binaryBase64) {
+            const expectedBuffer = Buffer.from(
+              testCase.result.binaryBase64,
+              "base64",
+            );
+            expect(buffer(sender)).toEqual(expectedBuffer);
+          } else if (testCase.result.anyLines) {
             let foundMatch = false;
             for (const expectedLine of testCase.result.anyLines) {
               if (actualLine === expectedLine + "\n") {
@@ -80,6 +112,10 @@ describe("Client interop test suite", function () {
             if (!foundMatch) {
               errorMessage = `Line is not matching any of the expected results: ${actualLine}`;
             }
+          } else if (testCase.result.line) {
+            expect(actualLine).toBe(testCase.result.line + "\n");
+          } else {
+            errorMessage = "No expected result line provided";
           }
         } else {
           errorMessage = `Expected error missing, buffer's content: ${actualLine}`;
@@ -408,8 +444,14 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    await sender.table("tableName").arrayColumn("arrayCol", undefined).atNow();
-    await sender.table("tableName").arrayColumn("arrayCol", null).atNow();
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", undefined as unknown as unknown[])
+      .atNow();
+    await sender
+      .table("tableName")
+      .arrayColumn("arrayCol", null as unknown as unknown[])
+      .atNow();
     expect(bufferContentHex(sender)).toBe(
       toHex("tableName arrayCol==") +
         " 0e 21 " +
@@ -973,7 +1015,7 @@ describe("Sender message builder test suite (anything not covered in client inte
         .table("tableName")
         .symbol("name", "value")
         .at(23232322323.05);
-    } catch (e) {
+    } catch (e: Error | any) {
       expect(e.message).toEqual(
         "Designated timestamp must be an integer or BigInt, received 23232322323.05",
       );
@@ -991,7 +1033,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     try {
       // @ts-expect-error - Invalid options
       await sender.table("tableName").symbol("name", "value").at("invalid_dts");
-    } catch (e) {
+    } catch (e: Error | any) {
       expect(e.message).toEqual(
         "Designated timestamp must be an integer or BigInt, received invalid_dts",
       );
@@ -1008,7 +1050,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     try {
       await sender.table("tableName").at(12345678n, "ns");
-    } catch (e) {
+    } catch (e: Error | any) {
       expect(e.message).toEqual(
         "The row must have a symbol or column set before it is closed",
       );
@@ -1107,7 +1149,7 @@ describe("Sender message builder test suite (anything not covered in client inte
         .intColumn("intField", 125)
         .stringColumn("strField", "test")
         .atNow();
-    } catch (err) {
+    } catch (err: Error | any) {
       expect(err.message).toBe(
         "Max buffer size is 64 bytes, requested buffer size: 96",
       );
@@ -1148,6 +1190,195 @@ describe("Sender message builder test suite (anything not covered in client inte
     );
     await sender.close();
   });
+
+  it("writes decimal columns in text format with protocol v3", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("fx").decimalColumnText("mid", "1.234500").atNow();
+    expect(bufferContent(sender)).toBe("fx mid=1.234500d\n");
+    await sender.close();
+  });
+
+  it("writes decimal columns in binary format with bigint input small", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("fx").decimalColumn("mid", 12345n, 2).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("fx mid==") + " 17 02 02 30 39 " + toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("writes decimal columns in binary format with bigint input", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("fx").decimalColumn("mid", 1234500n, 6).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("fx mid==") + " 17 06 03 12 d6 44 " + toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("writes decimal columns in binary format with Int8Array input", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("fx")
+      .decimalColumn("mid", new Int8Array([0xff, 0xf6]), 2)
+      .atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("fx mid==") + " 17 02 02 ff f6 " + toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("accepts numeric inputs for decimalColumnText", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("fx").decimalColumnText("mid", -42.5).atNow();
+    expect(bufferContent(sender)).toBe("fx mid=-42.5d\n");
+    await sender.close();
+  });
+
+  it("throws on invalid decimal text literal", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() => sender.table("fx").decimalColumnText("mid", "1.2.3")).toThrow(
+      "Invalid decimal text: 1.2.3",
+    );
+    sender.reset();
+    await sender.close();
+  });
+
+  it("throws on unsupported decimal text value type", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() =>
+      sender.table("fx").decimalColumnText("mid", true as unknown as number),
+    ).toThrow("Invalid decimal value type: boolean");
+    sender.reset();
+    await sender.close();
+  });
+
+  it("encodes positive bigint decimals that require sign extension", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("fx").decimalColumn("mid", 255n, 1).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("fx mid==") + " 17 01 02 00 ff " + toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("encodes negative bigint decimals with the proper two's complement payload", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("fx").decimalColumn("mid", -10n, 2).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("fx mid==") + " 17 02 02 ff f6 " + toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("encodes null decimals when unscaled payload is empty", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender.table("fx").decimalColumn("mid", new Int8Array(0), 0).atNow();
+    expect(bufferContentHex(sender)).toBe(
+      toHex("fx mid==") + " 17 00 00 " + toHex("\n"),
+    );
+    await sender.close();
+  });
+
+  it("throws when decimal scale is outside the accepted range", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() => sender.table("fx").decimalColumn("mid", 1n, -1)).toThrow(
+      "Scale must be between 0 and 76",
+    );
+    sender.reset();
+    expect(() => sender.table("fx").decimalColumn("mid", 1n, 77)).toThrow(
+      "Scale must be between 0 and 76",
+    );
+    sender.reset();
+    await sender.close();
+  });
+
+  it("throws when unscaled payload is not Int8Array or bigint", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() =>
+      sender
+        .table("fx")
+        .decimalColumn("mid", "oops" as unknown as Int8Array, 1),
+    ).toThrow(
+      "Invalid unscaled value type: string, expected Int8Array or bigint",
+    );
+    sender.reset();
+    await sender.close();
+  });
+
+  it("throws when unscaled payload exceeds maximum length", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    expect(() =>
+      sender.table("fx").decimalColumn("mid", new Int8Array(128), 0),
+    ).toThrow("Unscaled value length must be between 0 and 32 bytes");
+    sender.reset();
+    await sender.close();
+  });
 });
 
 function bufferContent(sender: Sender) {
@@ -1170,6 +1401,11 @@ function toHexString(buffer: Buffer) {
     .join(" ");
 }
 
+function buffer(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.toBufferView();
+}
+
 function bufferSize(sender: Sender) {
   // @ts-expect-error - Accessing private field
   return sender.buffer.bufferSize;
@@ -1178,4 +1414,30 @@ function bufferSize(sender: Sender) {
 function bufferPosition(sender: Sender) {
   // @ts-expect-error - Accessing private field
   return sender.buffer.position;
+}
+
+// parseDecimal quick and dirty parser for a decimal value from its string representation
+function parseDecimal(s: string): [bigint, number] {
+  // Remove whitespace
+  s = s.trim();
+
+  // Check for empty string
+  if (s === "") {
+    throw new Error("invalid decimal64: empty string");
+  }
+
+  // Find the decimal point and remove it
+  const pointIndex = s.indexOf(".");
+  if (pointIndex !== -1) {
+    s = s.replace(/\./g, "");
+  }
+
+  // Parse the integer part
+  const unscaled = BigInt(s);
+  let scale = 0;
+  if (pointIndex !== -1) {
+    scale = s.length - pointIndex;
+  }
+
+  return [unscaled, scale];
 }

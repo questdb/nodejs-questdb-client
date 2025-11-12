@@ -23,6 +23,7 @@ const UNSAFE_OFF = "unsafe_off";
 const PROTOCOL_VERSION_AUTO = "auto";
 const PROTOCOL_VERSION_V1 = "1";
 const PROTOCOL_VERSION_V2 = "2";
+const PROTOCOL_VERSION_V3 = "3";
 
 const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
 
@@ -258,6 +259,8 @@ class SenderOptions {
 
     if (supportedVersions.length === 0) {
       options.protocol_version = PROTOCOL_VERSION_V1;
+    } else if (supportedVersions.includes(PROTOCOL_VERSION_V3)) {
+      options.protocol_version = PROTOCOL_VERSION_V3;
     } else if (supportedVersions.includes(PROTOCOL_VERSION_V2)) {
       options.protocol_version = PROTOCOL_VERSION_V2;
     } else if (supportedVersions.includes(PROTOCOL_VERSION_V1)) {
@@ -488,10 +491,11 @@ function parseProtocolVersion(options: SenderOptions) {
       break;
     case PROTOCOL_VERSION_V1:
     case PROTOCOL_VERSION_V2:
+    case PROTOCOL_VERSION_V3:
       break;
     default:
       throw new Error(
-        `Invalid protocol version: '${protocol_version}', accepted values: 'auto', '1', '2'`,
+        `Invalid protocol version: '${protocol_version}', accepted values: 'auto', '1', '2', '3'`,
       );
   }
   return;
@@ -628,4 +632,5 @@ export {
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,
+  PROTOCOL_VERSION_V3,
 };

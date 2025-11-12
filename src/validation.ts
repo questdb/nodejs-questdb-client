@@ -119,4 +119,23 @@ function validateColumnName(name: string, maxNameLength: number): void {
   }
 }
 
-export { validateTableName, validateColumnName };
+/**
+ * Validates a decimal text.
+ * 
+ * This is a partial validation to catch obvious errors early.
+ * We only accept numeric digits, signs, decimal point (.), exponent (e, E), and NaN/Infinity.
+ * 
+ * @param {string} value - The decimal text to validate.
+ * @throws Error if decimal text is invalid.
+ */
+function validateDecimalText(value: string): void {
+  if (value.length === 0) {
+    throw new Error("Decimal text cannot be empty");
+  }
+  const decimalRegex = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$|^[-+]?Infinity$|^NaN$/;
+  if (!decimalRegex.test(value)) {
+    throw new Error(`Invalid decimal text: ${value}`);
+  }
+}
+
+export { validateTableName, validateColumnName, validateDecimalText };

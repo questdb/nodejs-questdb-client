@@ -343,6 +343,47 @@ class Sender {
   }
 
   /**
+   * Writes a decimal value into the buffer using the text format.
+   *
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number/string values.
+   * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
+   * - string value is not a valid decimal representation
+   */
+  decimalColumnText(name: string, value: string | number): Sender {
+    this.buffer.decimalColumnText(name, value);
+    return this;
+  }
+
+  /**
+   * Writes a decimal value into the buffer using the binary format.
+   *
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} unscaled - The unscaled value of the decimal in two's
+   * complement representation and big-endian byte order.
+   * An empty array represents the NULL value.
+   * @param {number} scale - The scale of the decimal value.
+   * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
+   * - unscaled value length is not between 0 and 32 bytes
+   * - scale is not between 0 and 76
+   * - unscaled value contains invalid bytes
+   */
+  decimalColumn(
+    name: string,
+    unscaled: Int8Array | bigint,
+    scale: number,
+  ): Sender {
+    this.buffer.decimalColumn(name, unscaled, scale);
+    return this;
+  }
+
+  /**
    * Closes the row after writing the designated timestamp into the buffer of the sender.
    *
    * **Precision rules**:

@@ -24,7 +24,7 @@ class MockHttp {
   reset(mockConfig: MockConfig = {}) {
     if (!mockConfig.settings) {
       mockConfig.settings = {
-        config: { "line.proto.support.versions": [1, 2] },
+        config: { "line.proto.support.versions": [1, 2, 3] },
       };
     }
 

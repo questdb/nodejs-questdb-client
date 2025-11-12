@@ -312,6 +312,60 @@ function rndInt(limit: number) {
 run().then(console.log).catch(console.error);
 ```
 
+### Decimal usage example
+
+Since v9.2.0, QuestDB supports the DECIMAL data type.
+Decimals can be ingested with ILP protocol v3 using either textual or binary representation.
+
+#### Textual representation
+
+```typescript
+import { Sender } from "@questdb/nodejs-client";
+
+async function runDecimals() {
+  const sender = await Sender.fromConfig(
+    "tcp::addr=127.0.0.1:9009;protocol_version=3",
+  );
+
+  await sender
+    .table("fx")
+    // textual ILP form keeps the literal and its exact scale
+    .decimalColumnText("mid", "1.234500")
+    .atNow();
+
+  await sender.flush();
+  await sender.close();
+}
+
+runDecimals().catch(console.error);
+// Resulting ILP line: fx mid=1.234500d
+```
+
+#### Binary representation
+
+It is recommended to use the binary representation for better ingestion performance and reduced payload size (for bigger decimals).
+
+```typescript
+import { Sender } from "@questdb/nodejs-client";
+
+async function runDecimals() {
+  const sender = await Sender.fromConfig(
+    "tcp::addr=127.0.0.1:9009;protocol_version=3",
+  );
+
+  await sender
+    .table("fx")
+    // textual ILP form keeps the literal and its exact scale
+    .decimalColumn("mid", 123456n, 3) // 123456 * 10^-3 = 123.456
+    .atNow();
+
+  await sender.flush();
+  await sender.close();
+}
+
+runDecimals().catch(console.error);
+```
+
 ## Community
 
 If you need help, have additional questions or want to provide feedback, you

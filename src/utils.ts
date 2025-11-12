@@ -193,6 +193,44 @@ async function fetchJson<T>(
   return (await response.json()) as T;
 }
 
+/**
+ * Converts a bigint into a two's complement big-endian byte array.
+ * Produces the minimal-width representation that preserves the sign.
+ * @param {bigint} value - The value to serialise
+ * @returns {number[]} Byte array in big-endian order
+ */
+function bigintToTwosComplementBytes(value: bigint): number[] {
+  if (value === 0n) {
+    return [0];
+  }
+
+  const bytes: number[] = [];
+  const byteMask = 0xffn;
+
+  if (value > 0n) {
+    let tmp = value;
+    while (tmp > 0n) {
+      bytes.unshift(Number(tmp & byteMask));
+      tmp >>= 8n;
+    }
+    if (bytes[0] & 0x80) {
+      bytes.unshift(0);
+    }
+    return bytes;
+  }
+
+  let tmp = value;
+  while (tmp < -1n) {
+    bytes.unshift(Number(tmp & byteMask));
+    tmp >>= 8n;
+  }
+  bytes.unshift(Number(tmp & byteMask));
+  if (!(bytes[0] & 0x80)) {
+    bytes.unshift(0xff);
+  }
+  return bytes;
+}
+
 export {
   isBoolean,
   isInteger,
@@ -203,4 +241,5 @@ export {
   getDimensions,
   validateArray,
   ArrayPrimitive,
+  bigintToTwosComplementBytes,
 };
