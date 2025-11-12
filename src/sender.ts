@@ -343,19 +343,17 @@ class Sender {
   }
 
   /**
-   * Writes a decimal column into the buffer of the sender in the text format.
+   * Writes a decimal value into the buffer using the text format.
    *
-   * @param {string} name - Column name
-   * @param {unknown[]} value - Column value to write, accepts only number/string values.
-   * @returns {Sender} Returns with a reference to this sender.
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number/string values.
+   * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
-   * - value is not a number/string
-   * - or the string contains invalid characters
+   * - string value is not a valid decimal representation
    */
-  decimalColumnText(
-    name: string,
-    value: string | number | undefined | null,
-  ): Sender {
+  decimalColumnText(name: string, value: string | number): Sender {
     this.buffer.decimalColumnText(name, value);
     return this;
   }
@@ -371,13 +369,17 @@ class Sender {
    * An empty array represents the NULL value.
    * @param {number} scale - The scale of the decimal value.
    * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
+   * - unscaled value length is not between 0 and 32 bytes
+   * - scale is not between 0 and 76
+   * - unscaled value contains invalid bytes
    */
-  decimalColumnUnscaled(
+  decimalColumn(
     name: string,
-    unscaled: Int8Array | bigint | undefined | null,
+    unscaled: Int8Array | bigint,
     scale: number,
   ): Sender {
-    this.buffer.decimalColumnUnscaled(name, unscaled, scale);
+    this.buffer.decimalColumn(name, unscaled, scale);
     return this;
   }
 

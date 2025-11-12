@@ -73,7 +73,7 @@ describe("Client interop test suite", function () {
               break;
             case "DECIMAL":
               const [unscaled, scale] = parseDecimal(column.value);
-              sender.decimalColumnUnscaled(column.name, unscaled, scale);
+              sender.decimalColumn(column.name, unscaled, scale);
               break;
             default:
               errorMessage = "Unsupported column type";
@@ -1210,7 +1210,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    await sender.table("fx").decimalColumnUnscaled("mid", 12345n, 2).atNow();
+    await sender.table("fx").decimalColumn("mid", 12345n, 2).atNow();
     expect(bufferContentHex(sender)).toBe(
       toHex("fx mid==") + " 17 02 02 30 39 " + toHex("\n"),
     );
@@ -1224,7 +1224,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    await sender.table("fx").decimalColumnUnscaled("mid", 1234500n, 6).atNow();
+    await sender.table("fx").decimalColumn("mid", 1234500n, 6).atNow();
     expect(bufferContentHex(sender)).toBe(
       toHex("fx mid==") + " 17 06 03 12 d6 44 " + toHex("\n"),
     );
@@ -1240,7 +1240,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     await sender
       .table("fx")
-      .decimalColumnUnscaled("mid", new Int8Array([0xff, 0xf6]), 2)
+      .decimalColumn("mid", new Int8Array([0xff, 0xf6]), 2)
       .atNow();
     expect(bufferContentHex(sender)).toBe(
       toHex("fx mid==") + " 17 02 02 ff f6 " + toHex("\n"),
@@ -1295,7 +1295,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    await sender.table("fx").decimalColumnUnscaled("mid", 255n, 1).atNow();
+    await sender.table("fx").decimalColumn("mid", 255n, 1).atNow();
     expect(bufferContentHex(sender)).toBe(
       toHex("fx mid==") + " 17 01 02 00 ff " + toHex("\n"),
     );
@@ -1309,7 +1309,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    await sender.table("fx").decimalColumnUnscaled("mid", -10n, 2).atNow();
+    await sender.table("fx").decimalColumn("mid", -10n, 2).atNow();
     expect(bufferContentHex(sender)).toBe(
       toHex("fx mid==") + " 17 02 02 ff f6 " + toHex("\n"),
     );
@@ -1323,10 +1323,7 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    await sender
-      .table("fx")
-      .decimalColumnUnscaled("mid", new Int8Array(0), 0)
-      .atNow();
+    await sender.table("fx").decimalColumn("mid", new Int8Array(0), 0).atNow();
     expect(bufferContentHex(sender)).toBe(
       toHex("fx mid==") + " 17 00 00 " + toHex("\n"),
     );
@@ -1340,13 +1337,13 @@ describe("Sender message builder test suite (anything not covered in client inte
       host: "host",
       init_buf_size: 1024,
     });
-    expect(() =>
-      sender.table("fx").decimalColumnUnscaled("mid", 1n, -1),
-    ).toThrow("Scale must be between 0 and 76");
+    expect(() => sender.table("fx").decimalColumn("mid", 1n, -1)).toThrow(
+      "Scale must be between 0 and 76",
+    );
     sender.reset();
-    expect(() =>
-      sender.table("fx").decimalColumnUnscaled("mid", 1n, 77),
-    ).toThrow("Scale must be between 0 and 76");
+    expect(() => sender.table("fx").decimalColumn("mid", 1n, 77)).toThrow(
+      "Scale must be between 0 and 76",
+    );
     sender.reset();
     await sender.close();
   });
@@ -1361,7 +1358,7 @@ describe("Sender message builder test suite (anything not covered in client inte
     expect(() =>
       sender
         .table("fx")
-        .decimalColumnUnscaled("mid", "oops" as unknown as Int8Array, 1),
+        .decimalColumn("mid", "oops" as unknown as Int8Array, 1),
     ).toThrow(
       "Invalid unscaled value type: string, expected Int8Array or bigint",
     );
@@ -1377,83 +1374,8 @@ describe("Sender message builder test suite (anything not covered in client inte
       init_buf_size: 1024,
     });
     expect(() =>
-      sender.table("fx").decimalColumnUnscaled("mid", new Int8Array(128), 0),
-    ).toThrow("Unscaled value length must be between 0 and 127 bytes");
-    sender.reset();
-    await sender.close();
-  });
-
-  it("doesn't send the decimal text column when undefined is passed as value", async function () {
-    const sender = new Sender({
-      protocol: "tcp",
-      protocol_version: "3",
-      host: "host",
-      init_buf_size: 1024,
-    });
-    try {
-      await sender.table("fx").decimalColumnText("mid", undefined).atNow();
-    } catch (e: Error | any) {
-      expect(e.message).toEqual(
-        "The row must have a symbol or column set before it is closed",
-      );
-    }
-    sender.reset();
-    await sender.close();
-  });
-
-  it("doesn't send the decimal text column when null is passed as value", async function () {
-    const sender = new Sender({
-      protocol: "tcp",
-      protocol_version: "3",
-      host: "host",
-      init_buf_size: 1024,
-    });
-    try {
-      await sender.table("fx").decimalColumnText("mid", null).atNow();
-    } catch (e: Error | any) {
-      expect(e.message).toEqual(
-        "The row must have a symbol or column set before it is closed",
-      );
-    }
-    sender.reset();
-    await sender.close();
-  });
-
-  it("doesn't send the decimal unscaled column when undefined is passed as value", async function () {
-    const sender = new Sender({
-      protocol: "tcp",
-      protocol_version: "3",
-      host: "host",
-      init_buf_size: 1024,
-    });
-    try {
-      await sender
-        .table("fx")
-        .decimalColumnUnscaled("mid", undefined, 0)
-        .atNow();
-    } catch (e: Error | any) {
-      expect(e.message).toEqual(
-        "The row must have a symbol or column set before it is closed",
-      );
-    }
-    sender.reset();
-    await sender.close();
-  });
-
-  it("doesn't send the decimal unscaled column when null is passed as value", async function () {
-    const sender = new Sender({
-      protocol: "tcp",
-      protocol_version: "3",
-      host: "host",
-      init_buf_size: 1024,
-    });
-    try {
-      await sender.table("fx").decimalColumnUnscaled("mid", null, 0).atNow();
-    } catch (e: Error | any) {
-      expect(e.message).toEqual(
-        "The row must have a symbol or column set before it is closed",
-      );
-    }
+      sender.table("fx").decimalColumn("mid", new Int8Array(128), 0),
+    ).toThrow("Unscaled value length must be between 0 and 32 bytes");
     sender.reset();
     await sender.close();
   });

@@ -356,7 +356,7 @@ async function runDecimals() {
   await sender
     .table("fx")
     // textual ILP form keeps the literal and its exact scale
-    .decimalColumnUnscaled("mid", 123456n, 3) // 123456 * 10^-3 = 123.456
+    .decimalColumn("mid", 123456n, 3) // 123456 * 10^-3 = 123.456
     .atNow();
 
   await sender.flush();

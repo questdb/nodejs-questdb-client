@@ -525,23 +525,36 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   /* eslint-disable @typescript-eslint/no-unused-vars */
   /**
-   * Decimal columns are only supported since protocol v3.
+   * Writes a decimal value into the buffer using the text format.
    *
-   * @throws Error indicating decimals are not supported in v1 and v2
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} value - Column value, accepts only number/string values.
+   * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
+   * - string value is not a valid decimal representation
    */
-  decimalColumnText(_name: string, _value: string | number): SenderBuffer {
+  decimalColumnText(name: string, value: string | number): SenderBuffer {
     throw new Error("Decimals are not supported in protocol v1/v2");
   }
 
   /**
-   * Decimal columns are only supported since protocol v3.
+   * Writes a decimal value into the buffer using the binary format.
    *
-   * @throws Error indicating decimals are not supported in v1 and v2
+   * Use it to insert into DECIMAL database columns.
+   *
+   * @param {string} name - Column name.
+   * @param {number} unscaled - The unscaled value of the decimal in two's
+   * complement representation and big-endian byte order.
+   * An empty array represents the NULL value.
+   * @param {number} scale - The scale of the decimal value.
+   * @returns {Sender} Returns with a reference to this buffer.
    */
-  decimalColumnUnscaled(
-    _name: string,
-    _unscaled: Int8Array | bigint,
-    _scale: number,
+  decimalColumn(
+    name: string,
+    unscaled: Int8Array | bigint,
+    scale: number,
   ): SenderBuffer {
     throw new Error("Decimals are not supported in protocol v1/v2");
   }

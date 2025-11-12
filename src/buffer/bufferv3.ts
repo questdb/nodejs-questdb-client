@@ -36,19 +36,16 @@ class SenderBufferV3 extends SenderBufferV2 {
    * @param {string} name - Column name.
    * @param {number} value - Column value, accepts only number/string values.
    * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
+   * - string value is not a valid decimal representation
    */
-  decimalColumnText(
-    name: string,
-    value: string | number | null | undefined,
-  ): SenderBuffer {
+  decimalColumnText(name: string, value: string | number): SenderBuffer {
     let str = "";
     if (typeof value === "string") {
       validateDecimalText(value);
       str = value;
     } else if (typeof value === "number") {
       str = value.toString();
-    } else if (value === null || value === undefined) {
-      return this;
     } else {
       throw new TypeError(`Invalid decimal value type: ${typeof value}`);
     }
@@ -71,10 +68,14 @@ class SenderBufferV3 extends SenderBufferV2 {
    * An empty array represents the NULL value.
    * @param {number} scale - The scale of the decimal value.
    * @returns {Sender} Returns with a reference to this buffer.
+   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
+   * - unscaled value length is not between 0 and 32 bytes
+   * - scale is not between 0 and 76
+   * - unscaled value contains invalid bytes
    */
-  decimalColumnUnscaled(
+  decimalColumn(
     name: string,
-    unscaled: Int8Array | bigint | null | undefined,
+    unscaled: Int8Array | bigint,
     scale: number,
   ): SenderBuffer {
     if (scale < 0 || scale > 76) {
@@ -85,16 +86,14 @@ class SenderBufferV3 extends SenderBufferV2 {
       arr = bigintToTwosComplementBytes(unscaled);
     } else if (unscaled instanceof Int8Array) {
       arr = Array.from(unscaled);
-    } else if (unscaled === null || unscaled === undefined) {
-      return this;
     } else {
       throw new TypeError(
         `Invalid unscaled value type: ${typeof unscaled}, expected Int8Array or bigint`,
       );
     }
-    if (arr.length > 127) {
+    if (arr.length > 32) {
       throw new RangeError(
-        "Unscaled value length must be between 0 and 127 bytes",
+        "Unscaled value length must be between 0 and 32 bytes",
       );
     }
     this.writeColumn(name, unscaled, () => {

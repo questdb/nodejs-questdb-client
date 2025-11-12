@@ -197,7 +197,7 @@ interface SenderBuffer {
    * @param {number} scale - The scale of the decimal value.
    * @returns {Sender} Returns with a reference to this buffer.
    */
-  decimalColumnUnscaled(
+  decimalColumn(
     name: string,
     unscaled: Int8Array | bigint,
     scale: number,
