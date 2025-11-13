@@ -13,7 +13,8 @@ class SenderBufferV1 extends SenderBufferBase {
    * Creates a new SenderBufferV1 instance.
    *
    * @param {SenderOptions} options - Sender configuration object. <br>
-   * See SenderOptions documentation for detailed description of configuration options.   */
+   * See SenderOptions documentation for detailed description of configuration options.
+   */
   constructor(options: SenderOptions) {
     super(options);
   }

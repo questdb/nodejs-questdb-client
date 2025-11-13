@@ -29,15 +29,18 @@ class SenderBufferV3 extends SenderBufferV2 {
   }
 
   /**
-   * Writes a decimal value into the buffer using the text format.
+   * Writes a decimal value into the buffer using its text format.
    *
    * Use it to insert into DECIMAL database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number/string values.
+   * @param {string | number} value - The decimal value to write.
+   *   - Accepts either a `number` or a `string` containing a valid decimal representation.
+   *   - String values should follow standard decimal notation (e.g., `"123.45"` or `"-0.001"`).
    * @returns {Sender} Returns with a reference to this buffer.
-   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
-   * - string value is not a valid decimal representation
+   * @throws Error If decimals are not supported by the buffer implementation, or validation fails.
+   * Possible validation errors:
+   * - The provided string is not a valid decimal representation.
    */
   decimalColumnText(name: string, value: string | number): SenderBuffer {
     let str = "";
@@ -58,24 +61,27 @@ class SenderBufferV3 extends SenderBufferV2 {
   }
 
   /**
-   * Writes a decimal value into the buffer using the binary format.
+   * Writes a decimal value into the buffer using its binary format.
    *
    * Use it to insert into DECIMAL database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} unscaled - The unscaled value of the decimal in two's
-   * complement representation and big-endian byte order.
-   * An empty array represents the NULL value.
-   * @param {number} scale - The scale of the decimal value.
-   * @returns {Sender} Returns with a reference to this buffer.
-   * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
-   * - unscaled value length is not between 0 and 32 bytes
-   * - scale is not between 0 and 76
-   * - unscaled value contains invalid bytes
+   * @param {bigint | Int8Array} unscaled - The unscaled integer portion of the decimal value.
+   *   - If a `bigint` is provided, it will be converted automatically.
+   *   - If an `Int8Array` is provided, it must contain the two’s complement representation
+   *     of the unscaled value in **big-endian** byte order.
+   *   - An empty `Int8Array` represents a `NULL` value.
+   * @param {number} scale - The number of fractional digits (the scale) of the decimal value.
+   * @returns {SenderBuffer} Returns with a reference to this buffer.
+   * @throws {Error} If decimals are not supported by the buffer implementation, or validation fails.
+   * Possible validation errors:
+   * - `unscaled` length is not between 0 and 32 bytes.
+   * - `scale` is not between 0 and 76.
+   * - `unscaled` contains invalid bytes.
    */
   decimalColumn(
     name: string,
-    unscaled: Int8Array | bigint,
+    unscaled: bigint | Int8Array,
     scale: number,
   ): SenderBuffer {
     if (scale < 0 || scale > 76) {
