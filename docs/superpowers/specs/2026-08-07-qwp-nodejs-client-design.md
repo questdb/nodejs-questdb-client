@@ -226,6 +226,8 @@ Both error strings are very likely asserted verbatim in `sender.config.test.ts`,
 so PR 3 touches those tests.
 
 **Hazard — `createBuffer` must branch on protocol before `protocol_version`.**
+(Java's stronger rule — reject an explicitly supplied `protocol_version` under
+`ws::` — is in 9.2 and should be adopted alongside this.)
 `parseProtocolVersion` has a `default:` arm assigning `PROTOCOL_VERSION_V1` to
 any protocol that is not HTTP/HTTPS. A `ws::` sender therefore reaches
 `createBuffer` carrying `protocol_version = 1`, and `createBuffer` switches on
@@ -1193,12 +1195,12 @@ unlinking, and fsyncs it **again** after the batch. Close uses the same covering
 order, so the durable watermark always guards any acknowledged segment a host
 crash restores.
 
-`sf_durability` selects one of exactly four modes — `memory`, `periodic`,
-`flush`, `append` — and any other value is rejected. `sf_sync_interval_millis`
-sets the periodic barrier. Both keys are **WebSocket-only**: Java throws
-`"sf_durability is only supported for WebSocket transport"` if they appear with
-another protocol, and the Node port must reject them the same way for `http::`
-and `tcp::`.
+`sf_durability` **parses** four values — `memory`, `periodic`, `flush`,
+`append` — but only **two are usable**: `build()` rejects `flush` and `append`
+with "not yet supported (use sf_durability=memory or periodic)". Implement all
+four in the parser so the error is the right one, and reject the reserved pair at
+construction. `sf_sync_interval_millis` sets the periodic barrier. See 9.2 for
+the cross-key rules that bind these together.
 
 **Two consequences of the Node primitives** (expected deviations, but they change
 the cost model rather than just the mechanism):
@@ -1356,7 +1358,7 @@ ignore".
 
 **There is no `zstd` configuration key.** `zstd` is an enum *value* of the
 egress-side `compression` key (`zstd` | `raw` | `auto`). Ingest-side zstd is
-therefore purely a handshake negotiation (9.2) with no connect-string control —
+therefore purely a handshake negotiation (9.3) with no connect-string control —
 do not invent a key for it.
 
 ### 9.1 Defaults differ from ILP — do not inherit the ILP ones
@@ -1436,7 +1438,50 @@ misconfiguration in the whole config surface.
 `flush`, `append`}, rejected with the allowed set named. `auto_flush` and the
 other on/off keys take `on`/`off`.
 
-### 9.2 zstd and the Node version floor
+### 9.2 Cross-key validation
+
+Java validates combinations at construction, not just individual values. The spec
+previously had none of this, and several rules are load-bearing.
+
+**Every ingest QWP key is WebSocket-only.** Not just `sf_durability` and
+`sf_sync_interval_millis` as 8.2 implied — the whole `Side.INGRESS` set throws
+"<key> is only supported for WebSocket transport" when combined with `http::` or
+`tcp::`. Reproduce this per key so a misplaced key names itself.
+
+**Keys rejected *for* WebSocket** — these are ILP-only and must error, not be
+silently ignored:
+
+| Rejected with `ws::` | Message |
+|---|---|
+| `protocol_version` | "protocol version is not supported for WebSocket protocol" |
+| `auto_flush=off` (interval disabled) | "disabling auto-flush is not supported for WebSocket protocol" |
+| ILP `max_backoff` | "max backoff is not supported for WebSocket protocol" |
+
+The `protocol_version` rule is stronger than 3.5 assumed. 3.5 says
+`parseProtocolVersion` must leave `ws`/`wss` unset; Java additionally makes an
+*explicitly supplied* `protocol_version` an error under `ws::`. Adopt that — it
+converts the silent-ILP-fallback hazard into a loud failure.
+
+Note also that auto-flush cannot be fully disabled on WebSocket, which follows
+from 9.1: with `auto_flush_bytes` off by default, the interval and row triggers
+are the only ones left.
+
+**Dependency rules:**
+
+- `sf_durability=periodic` **requires** `sf_dir`.
+- `sf_sync_interval_millis` **requires** `sf_durability=periodic`.
+- `drain_orphans` **requires** `sf_dir`.
+- `tls_roots` **cannot** be combined with `tls_verify=unsafe_off`. Java's message
+  names both escapes — "remove tls_verify to use custom roots, or remove
+  tls_roots to disable certificate validation" — and is worth copying verbatim.
+- WebSocket requires at least one `host:port` pair in `addr` (1.2).
+
+**Mode selection is implicit.** There is no `store_and_forward=on` key: **`sf_dir`
+present means disk mode, absent means memory mode.** That single fact drives
+memory-vs-disk throughout section 8, including the mode-dependent
+`sf_max_total_bytes` default (9.1), and the spec never stated it.
+
+### 9.3 zstd and the Node version floor
 
 `node:zlib`'s `zstdCompress` landed in **Node 22.15.0**. The client's documented
 floor is Node 20 and CI runs `[20, 22, latest]`. A naive "require Node 22" rule
