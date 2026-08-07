@@ -758,7 +758,22 @@ accept.
 
 Request: `GET /write/v4` with `Sec-WebSocket-Key`, `Sec-WebSocket-Version: 13`,
 `X-QWP-Client-Id`, `X-QWP-Max-Version: 1`, and `Authorization: Basic|Bearer`
-derived from `user`/`password`/`token`.
+derived from `username`/`password`/`token`.
+
+Auth selection is validated, not inferred:
+
+- `username` and `password` must be supplied **together** — either half alone
+  throws "username and password must be provided together";
+- `token` is **mutually exclusive** with `username`/`password` — "cannot use both
+  token and username/password authentication";
+- the setters are one-shot: configuring either mechanism twice throws "already
+  configured" rather than last-write-wins.
+
+Java notes it deliberately emits *the same message text* as the egress query
+client for the first rule, so a connect string shared between a sender and a
+query client fails identically on both sides. The Node port should match those
+strings for the same reason — someone debugging a shared `ws::` string should
+not get two different diagnoses from two clients.
 
 `X-QWP-Client-Id` follows Java's convention of `<lang>/<protocol-client-version>`
 — Java 1.3.7 sends the constant `"java/1.0.2"`, which is deliberately **not** the
@@ -804,6 +819,11 @@ Note the asymmetry — version mismatch retries forever, durable-ack mismatch
 fails immediately — and that both arrive *after* a successful handshake.
 
 ### 6.5.2 TLS — `tls_roots` does not port directly
+
+**All three TLS keys require the `wss::` schema.** Supplying `tls_verify`,
+`tls_roots` or `tls_roots_password` with plain `ws::` throws
+"tls_verify/tls_roots/tls_roots_password require the wss:: schema" — they are not
+silently ignored. `tls_roots_password` additionally requires `tls_roots`.
 
 `tls_verify` maps cleanly: `on` → default verification, `unsafe_off` →
 `rejectUnauthorized: false`. Java additionally enforces that **a custom trust
@@ -1558,7 +1578,12 @@ are the only ones left.
 - `tls_roots` **cannot** be combined with `tls_verify=unsafe_off`. Java's message
   names both escapes — "remove tls_verify to use custom roots, or remove
   tls_roots to disable certificate validation" — and is worth copying verbatim.
-- WebSocket requires at least one `host:port` pair in `addr` (1.2).
+- `tls_roots_password` **requires** `tls_roots`.
+- All three TLS keys **require `wss::`** — rejected under plain `ws::` (6.5.2).
+- `username` **requires** `password` and vice versa; `token` **excludes** both
+  (6.5).
+- WebSocket requires at least one `host:port` pair in `addr` (1.2); an empty
+  `addr` fails with "addr is missing".
 
 **Mode selection is implicit.** There is no `store_and_forward=on` key: **`sf_dir`
 present means disk mode, absent means memory mode.** That single fact drives
