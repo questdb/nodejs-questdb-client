@@ -98,7 +98,8 @@ src/qwp/
                columnWriter.ts  tableBuffer.ts  frameEncoder.ts
                symbolDict.ts  response.ts
   sf/          engine.ts  ring.ts  segment.ts  manifest.ts
-               ackWatermark.ts  slotLock.ts  orphanScanner.ts  drainer.ts
+               ackWatermark.ts  symbolDictFile.ts  crc32c.ts
+               slotLock.ts  orphanScanner.ts  drainer.ts
   sendLoop.ts
   transport.ts
   buffer.ts
@@ -112,7 +113,8 @@ src/qwp/
 - **`protocol/`** — pure functions over `Buffer`. No I/O, no `async`. Directly
   testable against golden vectors.
 - **`sf/`** — store-and-forward. Ports `CursorSendEngine`, `SegmentRing`,
-  `SegmentManager`, `OrphanScanner`, `BackgroundDrainer`.
+  `MmapSegment`, `SegmentManager`, `SfManifest`, `AckWatermark`,
+  `PersistedSymbolDict`, `SlotLock`, `OrphanScanner`, `BackgroundDrainer`.
 - **`sendLoop.ts`** — publish → wire → ACK → trim. Port of
   `CursorWebSocketSendLoop`.
 
@@ -491,8 +493,78 @@ Node README already documents for ILP ("each worker thread needs its own Sender
 instance"), so it introduces nothing new for users — but it does mean a slot
 directory is owned by exactly one `Sender` at a time, which 8.3 enforces.
 
-Memory mode (PR 10) and disk mode (PR 11) share the ring; disk mode adds
-file-backed segments, a manifest, and a persisted ack watermark.
+Memory mode (PR 10) and disk mode (PR 11) share the ring **and the segment
+abstraction**: Java's `MmapSegment` has a `memoryBacked` flag selecting a
+malloc'd buffer instead of a file mapping, with the same cursor architecture.
+Port that flag rather than writing two segment types.
+
+**Publish barrier.** Each segment carries an `appendCursor` (producer-only) and a
+`publishedCursor`. The consumer **must not read any byte at offset
+`>= publishedOffset()`**. That single rule is what makes the whole thing
+lock-free, and it is easy to lose in a port where `await` interleaves differently
+than Java's threads.
+
+### 8.1.1 Segment file format (`MmapSegment`)
+
+```
+24-byte header:
+  u32 magic 'SF01' (0x31304653) | u8 version=1 | u8 flags | u16 reserved=0
+  u64 baseSeq | u64 createdMicros
+
+then frames, each:
+  u32 crc32c | u32 payloadLen | payloadLen bytes
+```
+
+The CRC32C covers **`payloadLen` and the payload together**, not the payload
+alone. `flags` bit 0 is `MANIFEST_REQUIRED_FLAG`. Segment files use the `.sfa`
+extension and the mapping is sized at construction and never grows — when an
+append does not fit, the caller rotates.
+
+Java exposes both a legacy `msync`-only flush and a checked `syncPublished()`
+mapping-plus-fd barrier; only the latter is a portable power-loss barrier, so
+the Node port implements the `syncPublished()` semantics (write + `fdatasync`)
+and does not reproduce the legacy path.
+
+### 8.1.2 Persisted symbol dictionary — load-bearing, not an optimisation
+
+`<slot>/.symbol-dict` (`PersistedSymbolDict`) is the component most easily
+missed, and omitting it makes delta-encoded recovery silently impossible.
+
+Delta-encoded SF frames are **not self-sufficient**: a frame carries only the
+symbols it introduces. Recovering a slot after a restart, or adopting an orphan
+slot, therefore requires re-registering the *whole* dictionary against the fresh
+server before those frames can replay. Unlike `.ack-watermark` — a discardable
+optimisation guarded by a monotonic clamp — this file is load-bearing: **a
+surviving frame that references an id missing from it is unrecoverable.**
+
+```
+offset 0: u32 magic 'SYD1'
+offset 4: u8 version = 1
+offset 5: 3 bytes reserved (zero)
+offset 8: chunks, each
+          [entryCount: varint][entryBytes: varint][entries][crc32c: u32]
+          entries = [len: varint][utf8] x entryCount, occupying exactly
+          entryBytes bytes; the CRC-32C covers BOTH header varints and the
+          entry region.
+```
+
+Rules that must survive the port:
+
+- **One chunk = one append = exactly the symbols one frame introduces.** The
+  producer persists a frame's new symbols in a single call *before* publishing
+  that frame.
+- **Ids are implicit.** Symbol id `i` is the `i`-th entry across all chunks; ids
+  are dense from 0, so no id is stored. A wrong chunk boundary silently
+  renumbers every later symbol.
+- **CRC is per chunk, deliberately not per entry.** Every `deltaStart` is a chunk
+  boundary, so per-entry granularity recovers no additional prefix while adding
+  a checksum call per symbol on the producer path.
+- **Write-ahead, but not fsynced.** Symbols are appended before the frame is
+  published, matching the rest of SF's page-cache (not disk) durability. This is
+  sufficient for a process crash — the page cache survives — but is explicitly
+  *not* a host-power-loss guarantee.
+- **`open` never destroys it.** Only a fresh start truncates, via `openClean`,
+  and a failed truncation must refuse the slot outright rather than proceed.
 
 ### 8.2 Durability — two crash-safe boundary records
 
@@ -523,8 +595,12 @@ unlinking, and fsyncs it **again** after the batch. Close uses the same covering
 order, so the durable watermark always guards any acknowledged segment a host
 crash restores.
 
-`sf_durability` governs when `fdatasync` runs; `sf_sync_interval_millis` sets the
-periodic barrier.
+`sf_durability` selects one of exactly four modes — `memory`, `periodic`,
+`flush`, `append` — and any other value is rejected. `sf_sync_interval_millis`
+sets the periodic barrier. Both keys are **WebSocket-only**: Java throws
+`"sf_durability is only supported for WebSocket transport"` if they appear with
+another protocol, and the Node port must reject them the same way for `http::`
+and `tcp::`.
 
 **Two consequences of the Node primitives** (expected deviations, but they change
 the cost model rather than just the mechanism):
@@ -537,13 +613,40 @@ the cost model rather than just the mechanism):
    ISO-HDLC and will not interoperate. A small CRC32C implementation is required
    in `sf/`, and its vectors should be part of the golden-fixture set.
 
-### 8.3 Slot locking without `flock`
+### 8.3 Slot locking — two locks, not one
 
-Each slot directory holds a `.lock` file created `O_EXCL` containing pid and
-boot id. A lock whose boot id differs from the current boot is stale by
-definition. A lock with a matching boot id but a dead pid is stale after a
-liveness probe. Anything else is live and the slot is skipped. This replaces
-Java's `flock`, whose kernel-drops-on-exit property we lose and must emulate.
+Java's `SlotLock` provides **two distinct advisory locks**, and the second is not
+optional — the orphan-adoption sequence depends on it:
+
+1. **Slot lock** — `acquire()` locks `<slot>/.lock` for the entire lifetime of
+   the owning engine.
+2. **Logical lock** — `acquireLogical()` locks a sibling file under
+   `<sfDir>/.slot-locks/`, used for short-lived pathname transitions and orphan
+   adoption. It lives **outside** the slot directory precisely so it stays valid
+   if that directory is renamed.
+
+A drainer therefore adopts an orphan by: taking the parent-anchored logical lock
+→ revalidating the scanner snapshot → taking the slot's `.lock` → releasing the
+logical lock.
+
+Java uses real `flock` / `LockFileEx`, and writes the holder's PID to a separate
+`.lock.pid` file so a failed acquisition can name the offending process. The PID
+is a separate file because Windows' `LockFileEx` is a *mandatory* range lock —
+while `.lock` is held, a second handle cannot read its own bytes.
+
+The contract being protected: two senders on one slot dir would interleave their
+FSN sequences on disk and corrupt recovery. Detecting the collision at
+acquisition and refusing to start is correct, because no data is on disk yet.
+
+**Node deviation.** Core Node exposes no `flock`, so both locks are emulated with
+an `O_EXCL` lockfile containing pid + boot id: a differing boot id is stale by
+definition; a matching boot id with a dead pid is stale after a liveness probe;
+anything else is live and the slot is skipped. The property genuinely lost is the
+kernel's automatic release on hard exit, which the boot-id/liveness probe
+reconstructs. Both lock kinds and the four-step adoption order above must still
+be implemented — only the primitive changes. The `.lock.pid` split is unnecessary
+for us (our lockfile is advisory and readable), but the PID-in-error-message
+diagnostic should be kept.
 
 ### 8.4 Recovery and orphans
 
@@ -676,8 +779,8 @@ Four tiers, all four required.
 
 ## 11. PR stack
 
-Thirteen stacked PRs, each independently reviewable and green. PRs 1–8 are the
-wire; 9–12 are the reliability story; PR 3 is the first point at which a user
+Fourteen stacked PRs, each independently reviewable and green. PRs 1–8 are the
+wire; 9–13 are the reliability story; PR 3 is the first point at which a user
 could actually use the feature.
 
 | # | PR | Gate |
@@ -692,9 +795,10 @@ could actually use the feature.
 | 8 | defer-commit + zstd (feature-detected) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, poison detector | mock server |
 | 10 | Memory-mode ring — makes publish semantics safe | mock + e2e |
-| 11 | Disk segments, manifest, ack watermark, `fdatasync` | crash tests |
-| 12 | Slot locks, orphan scan, drainers, `DATA_LOSS`/`ABANDONED` | crash tests |
-| 13 | Docs, examples, README support matrix, 4.3.0 release | — |
+| 11 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
+| 12 | `.symbol-dict` persistence + delta replay after recovery | crash tests |
+| 13 | Slot locks (both kinds), orphan scan, drainers, `DATA_LOSS`/`ABANDONED` | crash tests |
+| 14 | Docs, examples, README support matrix, 4.3.0 release | — |
 
 ## 12. Risks
 
