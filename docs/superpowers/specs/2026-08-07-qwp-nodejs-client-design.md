@@ -43,6 +43,7 @@ Several Java classes look ingest-relevant and are not — do not port them here:
   frames between the producer and I/O threads, which the event loop makes
   unnecessary, and the rest are replaced wholesale by `Buffer`. Neither carries
   protocol semantics.
+
 `QwpHostHealthTracker` **is** ported — see 1.2.
 
 ### 1.2 Multi-host addressing and failover
@@ -80,19 +81,22 @@ Port `QwpHostHealthTracker`. Selection is a **round**: `pickNext()` returns the
 highest-priority endpoint not yet attempted this round; the caller advances with
 `beginRound()`; a round can be exhausted.
 
-Priority is the lexicographic tuple `(state, zoneTier)`, with **state
-outranking zone**, so a known-good cross-zone host is preferred over an untried
-local one. Host states rank:
+**For the ingest sender, rank by host state alone:**
 
 `HEALTHY` → `UNKNOWN` → `TRANSIENT_REJECT` → `TRANSPORT_ERROR` → `TOPOLOGY_REJECT`
 
-**The ingest sender is zone-blind.** It constructs the tracker with the
-single-argument form, which passes `clientZone=null, targetPrimary=false` and
-collapses every host's zone tier to `SAME` — so ingest selection is
-**state-only**. Zone tiers (`SAME` → `UNKNOWN` → `OTHER`) and `target=primary`
-belong to the query client. This is why `zone` and `target` remain accept-and-ignore
-in section 9 even though failover is in scope: porting zone ranking into the
-sender would build something Java's sender does not have.
+Java's full priority is the lexicographic tuple `(state, zoneTier)` with state
+outranking zone — but **the ingest sender is zone-blind**. It constructs the
+tracker with the single-argument form, passing `clientZone=null,
+targetPrimary=false`, which collapses every host's zone tier to `SAME` and
+degenerates the tuple to state alone. Zone tiers (`SAME` → `UNKNOWN` → `OTHER`)
+and `target=primary` are used only by the query client.
+
+So **do not implement zone tiers here.** That is also why `zone` and `target`
+remain accept-and-ignore in section 9 even though failover is in scope: porting
+zone ranking into the sender would build something Java's sender does not have.
+Leave the ranking function shaped so a zone tier can be added later without
+restructuring it.
 
 #### Concurrency: drainers must not consume the shared round
 
@@ -123,6 +127,7 @@ machine and they do not agree with each other.
 | Status-code reference | `https://questdb.com/docs/connect/wire-protocols/qwp-ingress-websocket/` — the URL `WebSocketResponse` itself cites |
 | NACK policy rationale | `java-questdb-client/design/qwp-nack-policy-v2.md` — **rationale only**, see 2.1 |
 | Second reference implementation | `c-questdb-client` (Rust): `src/ws/`, `src/egress/`, `src/ingress/sender/qwp_ws*` |
+| Third reference implementation | the **.NET** client — Java's `QwpHostHealthTracker` javadoc states it mirrors .NET's, so that is the best cross-check for endpoint selection (1.2) |
 
 **Stale — do not use:** `docs/qwp/{wire-ingress,sf-client,wire-egress,failover}.md`
 in the parent `questdb` repo. These were **deleted from master** by `d1c5b03415`
@@ -184,6 +189,7 @@ src/qwp/
   sf/          engine.ts  ring.ts  segment.ts  manifest.ts
                ackWatermark.ts  symbolDictFile.ts  crc32c.ts
                slotLock.ts  orphanScanner.ts  drainer.ts
+  endpoints.ts  hostTracker.ts
   sendLoop.ts
   transport.ts
   buffer.ts
@@ -196,6 +202,17 @@ src/qwp/
   `permessage-deflate`, so no WebSocket library is used. Control frames are still
   fully implemented (see 3.2.1) — "no fragmentation" applies to data, not to the
   RFC's control obligations.
+
+- **`protocol/`** — pure functions over `Buffer`. No I/O, no `async`. Directly
+  testable against golden vectors.
+- **`sf/`** — store-and-forward. Ports `CursorSendEngine`, `SegmentRing`,
+  `MmapSegment`, `SegmentManager`, `SfManifest`, `AckWatermark`,
+  `PersistedSymbolDict`, `SlotLock`, `OrphanScanner`, `BackgroundDrainer`.
+- **`endpoints.ts` / `hostTracker.ts`** — `addr` list parsing and the
+  state-ranked, round-based endpoint selection of 1.2. Port of
+  `QwpHostHealthTracker`.
+- **`sendLoop.ts`** — publish → wire → ACK → trim. Port of
+  `CursorWebSocketSendLoop`.
 
 #### 3.2.1 Control frames are not optional
 
@@ -214,13 +231,6 @@ under backpressure must never have a control frame interleaved into the middle o
 its byte stream. Either write data frames as a single `socket.write()` call, or
 queue control frames behind the in-flight frame — never both writers into one
 partially-written frame.
-- **`protocol/`** — pure functions over `Buffer`. No I/O, no `async`. Directly
-  testable against golden vectors.
-- **`sf/`** — store-and-forward. Ports `CursorSendEngine`, `SegmentRing`,
-  `MmapSegment`, `SegmentManager`, `SfManifest`, `AckWatermark`,
-  `PersistedSymbolDict`, `SlotLock`, `OrphanScanner`, `BackgroundDrainer`.
-- **`sendLoop.ts`** — publish → wire → ACK → trim. Port of
-  `CursorWebSocketSendLoop`.
 
 ### 3.3 Why hand-roll the WebSocket layer
 
@@ -246,7 +256,8 @@ Java's three threads collapse onto the event loop:
 | producer thread | the caller's own code |
 | I/O send loop thread | an async task per connection |
 | segment manager thread | an async task using `fs.promises` (libuv threadpool) |
-| background drainer threads | async tasks, each owning its own WebSocket |
+| background drainer threads | async tasks, each owning its own WebSocket **and its own round cursor** (1.2) |
+| lock-serialized foreground connect walk | a single in-flight connect promise; `pickNext`→`record` must not interleave (1.2) |
 
 No `worker_threads`, no native dependencies. Two Java primitives have no core
 Node equivalent and are replaced:
@@ -311,7 +322,8 @@ Unchanged from the user's point of view — the protocol is a connect-string
 change:
 
 ```ts
-const sender = Sender.fromConfig("ws::addr=localhost:9000;");
+// addr is a list; the sender walks it and fails over (1.2)
+const sender = Sender.fromConfig("ws::addr=node1:9000,node2:9000,[::1]:9000;");
 await sender.table("trades")
   .symbol("symbol", "ETH-USD")
   .floatColumn("price", 2615.54)
@@ -326,7 +338,15 @@ await sender.flush();                    // publish; does NOT wait for ACK
 const fsn = await sender.flushAndGetSequence();  // highest FSN published, or -1
 const ok  = await sender.drain(30_000);  // flush + await ACK watermark
 sender.reset();                          // discard buffered rows (see 4.1)
+
+// three separate callback surfaces (4.2)
+sender.onError((e) => { /* e.category, e.policy, e.fromFsn, e.toFsn */ });
+sender.onConnectionEvent((e) => { /* e.kind, e.host, e.attempt, e.round */ });
+sender.onProgress((ackedFsn) => { /* watermark advanced */ });
 ```
+
+Construction may or may not connect, depending on a **derived** default — see
+4.3 before assuming either.
 
 ### 4.1 `reset()` must also roll back the symbol watermark
 
@@ -1672,7 +1692,12 @@ Four tiers, all four required.
    drives the whole error matrix on demand: each NACK status, malformed frames,
    mid-frame disconnect, slow-consumer backpressure, server-initiated close, and
    poison-detector escalation. A real QuestDB will not produce `INTERNAL_ERROR`
-   or a torn frame to order. Escalation needs **both** its conditions exercised
+   or a torn frame to order. It must also be startable as **several endpoints at
+   once**, to exercise 1.2: rotation on `RETRIABLE_OTHER`, a `421` role reject
+   that resolves when a primary appears, `FAILED_OVER` and
+   `ALL_ENDPOINTS_UNREACHABLE`, state ranking preferring a known-good host over
+   an untried one, and a drainer's private cursor not consuming the foreground
+   round. Escalation needs **both** its conditions exercised
    (7.4): a case that accrues 4 strikes *inside* the dwell window and asserts
    that escalation does **not** fire, alongside one that crosses both.
 3. **Testcontainers integration.** Extends the existing
