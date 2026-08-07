@@ -458,6 +458,54 @@ With the flag set, per `writeTimestampColumn`:
 So a Gorilla-advertising client must still emit the byte for tiny columns. DATE
 is excluded from this path entirely.
 
+### 6.3.2 Gorilla bitstream
+
+The delta-of-delta stream, in full — this is the one codec where reading the
+Java beats guessing and re-running golden vectors.
+
+```
+DoD = (t[n] - t[n-1]) - (t[n-1] - t[n-2])
+
+DoD == 0                 -> '0'               1 bit
+DoD in [-64, 63]         -> '10'   + 7 bits   9 bits
+DoD in [-256, 255]       -> '110'  + 9 bits   12 bits
+DoD in [-2048, 2047]     -> '1110' + 12 bits  16 bits
+otherwise (fits int32)   -> '1111' + 32 bits  36 bits
+```
+
+- **The first two timestamps ship uncompressed**, 8 bytes each; only `t[2]`
+  onward enter the bitstream. Encoded size is
+  `8 + 8 + ceil(totalBits / 8)` for `count > 2`, `8` for `count == 1`, `16` for
+  `count == 2`, `0` for `count == 0`.
+- Bucket ranges are ordinary two's-complement signed ranges, so a value is
+  emitted as its low *n* bits.
+- Bits are packed **LSB-first within each byte**, the same order as the null
+  bitmap (6.2.1). Trailing partial bits are zero-padded to a byte boundary.
+- Pre-validate before encoding: if any DoD falls outside signed int32, Gorilla
+  is unusable for that column — emit `ENCODING_UNCOMPRESSED` (`0x00`) and raw
+  int64s instead (6.3.1). Java computes feasibility and encoded size in a single
+  pass and returns `-1` for "cannot encode".
+
+**The prefix constants are bit-reversed relative to how they read.** Because
+packing is LSB-first, `writeBits(value, n)` emits bit 0 of `value` first, so the
+logical prefix string must be reversed when expressed as a number:
+
+| Logical prefix | Value passed | Width |
+|---|---|---|
+| `'0'` | `0b0` | 1 |
+| `'10'` | `0b01` | 2 |
+| `'110'` | `0b011` | 3 |
+| `'1110'` | `0b0111` | 4 |
+| `'1111'` | `0b1111` | 4 |
+
+Writing `0b10` for `'10'` is the obvious mistake and produces a stream that
+decodes into plausible-but-wrong timestamps rather than failing loudly. Java's
+encoder carries a javadoc table saying exactly this, which is a good sign it has
+caught people before.
+
+Client and server bucket constants were confirmed identical, and the server's
+encoder javadoc states the two share a wire format with the decoder.
+
 ### 6.4 Limits (mirror server constants; enforce client-side before sending)
 
 `MAX_COLUMNS_PER_TABLE` 2048 · `MAX_COLUMN_NAME_LENGTH` 127 ·
@@ -1068,7 +1116,7 @@ could actually use the feature.
 | 4 | Remaining scalar types + null bitmap | golden + e2e |
 | 5 | VARCHAR/BINARY/arrays/decimals/geohash/uuid/long256/char/ipv4 | golden + e2e |
 | 6 | Symbol dictionary: full-dict mode, then delta mode + `DICTIONARY_GAP` (5.2) | golden + e2e |
-| 7 | Gorilla timestamps + raw fallback | golden + e2e |
+| 7 | Gorilla timestamps (6.3.2) + int32-overflow raw fallback | golden + e2e |
 | 8 | defer-commit + zstd (feature-detected) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
 | 10 | Memory-mode ring — makes publish semantics safe | mock + e2e |
@@ -1090,6 +1138,12 @@ could actually use the feature.
   accept them and land corrupt data rather than NACK. Golden vectors must include
   a column with nulls in the first, middle, and last row, and a fully-null
   column.
+- **Gorilla's prefix constants are bit-reversed** (6.3.2), and getting them wrong
+  yields plausible-but-wrong timestamps rather than a decode failure. Vectors
+  must cover every DoD bucket boundary (0, ±64, ±256, ±2048, int32 edges), a
+  stream that trips the raw fallback, and columns of exactly 0, 1, 2 and 3
+  values — the sub-3 cases take a different path (6.3.1) and are where an
+  off-by-one hides.
 - **Publish-semantics `flush()` before PR 10.** Between PR 3 and PR 10 there is
   no retention, so an unacked frame lost to a disconnect is lost. PRs 3–9 must
   document this in-tree and the feature must not be announced as
