@@ -25,6 +25,23 @@ Each of these is a separate future spec:
 - multi-host HA failover (`failover_*` keys, roles and zones);
 - the UDP sender.
 
+### 1.2 Single endpoint — and what that degrades
+
+Because multi-host failover is out of scope, this stack connects to **one**
+endpoint and reconnects to that same endpoint. Several behaviours ported from
+Java are phrased in terms of endpoint rotation; their *shapes* are kept intact so
+the later HA spec is additive rather than a rewrite, but their single-host
+meaning must be stated or an implementer will either build HA by accident or
+silently drop them.
+
+| Behaviour | Single-endpoint meaning |
+|---|---|
+| `RETRIABLE_OTHER` (7.2) | Keep the distinct policy and category, but with nothing to rotate to it behaves as `RETRIABLE` with the zero-progress pacer. Do not collapse the enum. |
+| `FAILED_OVER`, `ALL_ENDPOINTS_UNREACHABLE` (4.2) | Defined but never emitted. `ENDPOINT_ATTEMPT_FAILED`, `CONNECTED`, `RECONNECTED`, `AUTH_FAILED` all still fire. |
+| Cap changing mid-stream (5.1) | Still reachable — a reconnect to a restarted or upgraded server can advertise a different `X-QWP-Max-Batch-Size`. The snapshot-once rule stands on its own merits. |
+| Catch-up cap gap (7.5) | Effectively unreachable single-host, but retained: it costs one counter and becomes live the moment HA lands. |
+| `addr` | Parsed as a single `host:port`. Accept a comma-separated list syntactically if Java does, but use only the first entry, and say so rather than failing obscurely. |
+
 ## 2. Normative sources — and which ones are traps
 
 Pin these exactly. There are many checkouts of the QuestDB repo on any given
@@ -264,7 +281,7 @@ Java exposes three separate surfaces; the Node port mirrors all three:
 | Java | Fires on |
 |---|---|
 | `SenderErrorHandler` | rejections — carries category, policy, `fromFsn`/`toFsn`, `quarantinedPath` |
-| `SenderConnectionListener` | `CONNECTED`, `RECONNECTED`, `FAILED_OVER`, `ENDPOINT_ATTEMPT_FAILED`, `ALL_ENDPOINTS_UNREACHABLE`, `AUTH_FAILED` |
+| `SenderConnectionListener` | `CONNECTED`, `RECONNECTED`, `FAILED_OVER`, `ENDPOINT_ATTEMPT_FAILED`, `ALL_ENDPOINTS_UNREACHABLE`, `AUTH_FAILED` — two of these are never emitted single-endpoint (1.2) |
 | `SenderProgressHandler` | the ACK watermark advancing |
 
 They share one delivery contract that must survive the port:
@@ -601,7 +618,7 @@ discards data without saying so.
 | Policy | Behaviour |
 |---|---|
 | `RETRIABLE` | recycle the connection, replay from `ackedFsn + 1`; handler delivery is informational |
-| `RETRIABLE_OTHER` | same replay, but rotate endpoints rather than back off against the same node |
+| `RETRIABLE_OTHER` | same replay, but rotate endpoints rather than back off against the same node (single-endpoint behaviour: 1.2) |
 | `TERMINAL` | latch; next producer call throws; bytes stay on disk |
 | `ABANDONED` | the rows are gone; nothing throws and the sender keeps running; bytes preserved at `quarantinedPath` |
 
@@ -1026,7 +1043,8 @@ registry's classification verbatim.
 
 **`Side.COMMON` + `Side.INGRESS` — implemented by our sender:**
 
-`addr` (host:port list), `username`, `password`, `token`, `tls_verify`,
+`addr` (single `host:port` in this stack — see 1.2), `username`, `password`,
+`token`, `tls_verify`,
 `tls_roots`, `tls_roots_password`, `auth_timeout_ms`, `connect_timeout`,
 `auto_flush`, `auto_flush_bytes`, `auto_flush_interval`, `auto_flush_rows`,
 `close_flush_timeout_millis`, `connection_listener_inbox_capacity`,
@@ -1130,17 +1148,24 @@ Four tiers, all four required.
 2. **TypeScript mock QWP server.** Performs the upgrade, decodes frames, and
    drives the whole error matrix on demand: each NACK status, malformed frames,
    mid-frame disconnect, slow-consumer backpressure, server-initiated close, and
-   poison-detector escalation at 4 strikes. A real QuestDB will not produce
-   `INTERNAL_ERROR` or a torn frame to order.
+   poison-detector escalation. A real QuestDB will not produce `INTERNAL_ERROR`
+   or a torn frame to order. Escalation needs **both** its conditions exercised
+   (7.4): a case that accrues 4 strikes *inside* the dwell window and asserts
+   that escalation does **not** fire, alongside one that crosses both.
 3. **Testcontainers integration.** Extends the existing
    `sender.integration.test.ts` pattern: ingest over `ws://`, then verify via SQL
    that rows, types, nulls and symbols landed exactly. Requires an image with
    QWP ingress enabled.
 4. **Crash-recovery tests.** Spawn a child process, ingest, `SIGKILL` mid-flight,
-   then assert a fresh Sender recovers the orphan slot, replays from
-   `ackedFsn + 1`, and rows land exactly once. Plus the abandonment path: corrupt
-   a slot, assert it is quarantined with `quarantinedPath` set, `DATA_LOSS` /
-   `ABANDONED` is delivered, and the sender keeps running.
+   then assert a fresh Sender recovers the orphan slot and replays from
+   `ackedFsn + 1` with **no row lost**. Assert *at-least-once*, not
+   exactly-once — replay and cap-split retry both legitimately duplicate (5.1),
+   so the assertion is "every row present", not "every row once", and a
+   duplicate must not fail the test. Plus the abandonment path: corrupt a slot,
+   assert it is quarantined with `quarantinedPath` set, `DATA_LOSS` /
+   `ABANDONED` is delivered, and the sender keeps running. Plus the liveness
+   floor (8.1.2): a slot whose side files alone approach `sf_max_total_bytes`
+   must still accept writes.
 
 ## 11. PR stack
 
