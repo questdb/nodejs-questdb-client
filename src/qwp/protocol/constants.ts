@@ -44,3 +44,6 @@ export const MAX_ROWS_PER_TABLE = 1_000_000;
 export const MAX_SYMBOL_DICTIONARY_SIZE = 1_000_000;
 
 export const WRITE_PATH = "/write/v4";
+
+/** "Not advertised" is not "unbounded": cap dictionary catch-up when the cap is unknown (spec 7.5). */
+export const UNCAPPED_CATCHUP_PACKING_LIMIT = 64 * 1024;

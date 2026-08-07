@@ -1,10 +1,16 @@
 import { Buffer } from "node:buffer";
 import { SenderTransport } from "../transport";
 import { SenderOptions } from "../options";
-import { QwpWebSocket } from "./ws/socket";
+import { QwpWebSocket, QwpWebSocketOptions } from "./ws/socket";
+import { QwpUpgradeError } from "./ws/handshake";
 import { decodeResponse, STATUS } from "./protocol/response";
+import { UNCAPPED_CATCHUP_PACKING_LIMIT } from "./protocol/constants";
+import { encodeFrame } from "./protocol/frameEncoder";
+import { SymbolDict } from "./protocol/symbolDict";
 import { AckTracker } from "./ackTracker";
 import { Category, Policy, SenderError, classify, defaultPolicyFor } from "./errors";
+import { HostTracker, HostState } from "./hostTracker";
+import { Endpoint, parseAddrList } from "./endpoints";
 
 const QWP_DEFAULT_AUTO_FLUSH_ROWS = 1000; // spec 9.1
 const CLIENT_ID = "nodejs/1.0.0"; // protocol client version, not the package version (spec 6.5)
@@ -15,6 +21,11 @@ export class QwpTransport implements SenderTransport {
   private readonly acks = new AckTracker();
   private errorHandler?: (e: SenderError) => void;
   private inFlight = 0;
+  private endpoints: Endpoint[] = [];
+  private tracker!: HostTracker;
+  private current?: Endpoint;
+  private readonly dict = new SymbolDict();
+  private confirmedMaxId = -1;
 
   constructor(options: SenderOptions) {
     this.options = options;
@@ -37,25 +48,100 @@ export class QwpTransport implements SenderTransport {
   }
 
   async connect(): Promise<boolean> {
-    const auth = this.options.username && this.options.password
+    this.endpoints = parseAddrList(this.options.addr!, 9000);
+    this.tracker = new HostTracker(this.endpoints.length);
+    return this.connectLoop();
+  }
+
+  get connectedEndpoint(): Endpoint | undefined {
+    return this.current;
+  }
+
+  private auth(): string | undefined {
+    return this.options.username && this.options.password
       ? "Basic " +
         Buffer.from(`${this.options.username}:${this.options.password}`).toString("base64")
       : this.options.token
         ? `Bearer ${this.options.token}`
         : undefined;
+  }
 
-    this.ws = await QwpWebSocket.connect({
-      host: this.options.host!,
-      port: this.options.port!,
+  private wsOptions(ep: Endpoint): QwpWebSocketOptions {
+    return {
+      host: ep.host,
+      port: ep.port,
       tls: this.options.protocol === "wss",
       clientId: CLIENT_ID,
-      authorization: auth,
+      authorization: this.auth(),
       rejectUnauthorized: this.options.tls_verify !== false,
       onBinary: (p) => this.onResponse(p),
       onClose: () => this.onDisconnected(),
-    });
-    this.acks.onConnected(0);
-    return true;
+    };
+  }
+
+  private backoffMillis(): number {
+    return this.options.reconnect_initial_backoff_millis ?? 100;
+  }
+
+  private async connectLoop(): Promise<boolean> {
+    for (;;) {
+      const idx = this.tracker.pickNext();
+      if (idx === null) {
+        this.tracker.beginRound();
+        // A fully-rejected round means no primary is reachable yet; retry
+        // indefinitely rather than giving up (spec 6.5.1).
+        await new Promise((r) => setTimeout(r, this.backoffMillis()));
+        continue;
+      }
+      const ep = this.endpoints[idx];
+      try {
+        this.ws = await QwpWebSocket.connect(this.wsOptions(ep));
+        this.tracker.record(idx, HostState.HEALTHY);
+        this.current = ep;
+        this.acks.onConnected(this.acks.acked + 1);
+        await this.sendDictCatchUp();
+        return true;
+      } catch (e) {
+        if (e instanceof QwpUpgradeError) {
+          if (e.kind === "auth") throw e; // terminal, never rotate
+          this.tracker.record(
+            idx,
+            e.kind === "role-reject" ? HostState.TOPOLOGY_REJECT : HostState.TRANSPORT_ERROR,
+          );
+        } else {
+          this.tracker.record(idx, HostState.TRANSPORT_ERROR);
+        }
+      }
+    }
+  }
+
+  /**
+   * The server's dictionary is connection-scoped and empty after a reconnect,
+   * so re-register from id 0 before any data frame or every delta frame earns
+   * DICTIONARY_GAP (spec 7.5).
+   */
+  private async sendDictCatchUp(): Promise<void> {
+    if (this.dict.size() === 0) return;
+    const cap = this.ws?.maxBatchSize ?? UNCAPPED_CATCHUP_PACKING_LIMIT;
+    const frame = encodeFrame([], { gorilla: false, dict: this.dict, confirmedMaxId: -1 });
+    if (frame.length > cap) {
+      throw new Error(`dictionary catch-up exceeds the batch cap [size=${frame.length}, cap=${cap}]`);
+    }
+    await this.ws!.sendBinary(frame);
+    this.confirmedMaxId = this.dict.size() - 1;
+  }
+
+  /** Test hook: register a symbol in the transport-owned dictionary. */
+  registerSymbolForTest(s: string): void {
+    this.dict.getOrAdd(s);
+  }
+
+  /** Test hook: tear down and re-establish the connection (dict catch-up path). */
+  async reconnectForTest(): Promise<void> {
+    await this.ws?.close();
+    this.ws = undefined;
+    this.tracker.beginRound();
+    await this.connectLoop();
   }
 
   async send(data: Buffer): Promise<boolean> {

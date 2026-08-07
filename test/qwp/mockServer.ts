@@ -96,11 +96,16 @@ class MaskedFrameReader {
 
 export class MockQwpServer {
   private server?: Server;
+  private readonly sockets = new Set<Socket>();
   readonly frames: Buffer[] = [];
 
   async start(opts: MockOptions = {}): Promise<number> {
     return new Promise((resolve) => {
-      this.server = createServer((sock: Socket) => this.onConn(sock, opts));
+      this.server = createServer((sock: Socket) => {
+        this.sockets.add(sock);
+        sock.on("close", () => this.sockets.delete(sock));
+        this.onConn(sock, opts);
+      });
       this.server.listen(0, "127.0.0.1", () =>
         resolve((this.server!.address() as any).port),
       );
@@ -108,6 +113,10 @@ export class MockQwpServer {
   }
 
   async stop(): Promise<void> {
+    // Destroy any lingering half-open sockets first, or server.close() waits
+    // for them and the callback never fires.
+    for (const s of this.sockets) s.destroy();
+    this.sockets.clear();
     await new Promise<void>((r) => this.server?.close(() => r()));
   }
 
