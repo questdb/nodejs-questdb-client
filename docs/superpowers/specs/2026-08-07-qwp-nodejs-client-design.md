@@ -22,8 +22,11 @@ Each of these is a separate future spec:
 
 - the query client (`QwpQueryClient`, result-batch decode, bind values);
 - the `QuestDB` facade and its sender/query pooling;
-- multi-host HA failover (`failover_*` keys, roles and zones);
+- **zone-aware and role-aware endpoint *ranking*** (`zone=`, `target=primary|replica`)
+  — see 1.2, this is an egress-side feature and the ingest sender does not use it;
 - the UDP sender.
+
+Multi-host addressing and failover **are** in scope (1.2).
 
 Several Java classes look ingest-relevant and are not — do not port them here:
 
@@ -40,24 +43,71 @@ Several Java classes look ingest-relevant and are not — do not port them here:
   frames between the producer and I/O threads, which the event loop makes
   unnecessary, and the rest are replaced wholesale by `Buffer`. Neither carries
   protocol semantics.
-- `QwpHostHealthTracker` is multi-host (1.1, 1.2).
+`QwpHostHealthTracker` **is** ported — see 1.2.
 
-### 1.2 Single endpoint — and what that degrades
+### 1.2 Multi-host addressing and failover
 
-Because multi-host failover is out of scope, this stack connects to **one**
-endpoint and reconnects to that same endpoint. Several behaviours ported from
-Java are phrased in terms of endpoint rotation; their *shapes* are kept intact so
-the later HA spec is additive rather than a rewrite, but their single-host
-meaning must be stated or an implementer will either build HA by accident or
-silently drop them.
+`addr` is a **list**, and the sender walks it. Every rotation-flavoured behaviour
+elsewhere in this spec — `RETRIABLE_OTHER`'s endpoint rotation (7.2), the
+`FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` events (4.2), the `421` role reject
+retried indefinitely until a primary appears (6.5.1), the mid-stream cap change
+that forces the snapshot-once rule (5.1), and the catch-up cap gap on a
+smaller-cap node (7.5) — is live rather than vestigial.
 
-| Behaviour | Single-endpoint meaning |
+#### `addr` grammar (`ConfigView.parseEntry`)
+
+Comma-separated, IPv6-aware, and **duplicates are rejected** — the key is
+`(host, port)`, so the same host twice on different ports is fine.
+
+| Form | Meaning |
 |---|---|
-| `RETRIABLE_OTHER` (7.2) | Keep the distinct policy and category, but with nothing to rotate to it behaves as `RETRIABLE` with the zero-progress pacer. Do not collapse the enum. |
-| `FAILED_OVER`, `ALL_ENDPOINTS_UNREACHABLE` (4.2) | Defined but never emitted. `ENDPOINT_ATTEMPT_FAILED`, `CONNECTED`, `RECONNECTED`, `AUTH_FAILED` all still fire. |
-| Cap changing mid-stream (5.1) | Still reachable — a reconnect to a restarted or upgraded server can advertise a different `X-QWP-Max-Batch-Size`. The snapshot-once rule stands on its own merits. |
-| Catch-up cap gap (7.5) | Effectively unreachable single-host, but retained: it costs one counter and becomes live the moment HA lands. |
-| `addr` | Parsed as a single `host:port`. Accept a comma-separated list syntactically if Java does, but use only the first entry, and say so rather than failing obscurely. |
+| `host` | default port |
+| `host:9000` | explicit port |
+| `[::1]:9000` | bracketed IPv6 with port |
+| `[::1]` | bracketed IPv6, default port |
+| `::1` | **unbracketed multi-colon = bare IPv6, default port** |
+
+A custom port on IPv6 therefore **requires** brackets. Distinct errors exist for
+a missing `]`, a non-`:` following `]`, an empty host, and a duplicate entry.
+Default port for `ws`/`wss` is 9000 (3.5).
+
+Note Java's `resolveIPv4` throws "IPv6 addresses are not supported" — that is
+**UDP-only** (it needs a raw IPv4 int) and does not constrain WebSocket.
+
+#### Endpoint selection — state-ranked, in rounds
+
+Port `QwpHostHealthTracker`. Selection is a **round**: `pickNext()` returns the
+highest-priority endpoint not yet attempted this round; the caller advances with
+`beginRound()`; a round can be exhausted.
+
+Priority is the lexicographic tuple `(state, zoneTier)`, with **state
+outranking zone**, so a known-good cross-zone host is preferred over an untried
+local one. Host states rank:
+
+`HEALTHY` → `UNKNOWN` → `TRANSIENT_REJECT` → `TRANSPORT_ERROR` → `TOPOLOGY_REJECT`
+
+**The ingest sender is zone-blind.** It constructs the tracker with the
+single-argument form, which passes `clientZone=null, targetPrimary=false` and
+collapses every host's zone tier to `SAME` — so ingest selection is
+**state-only**. Zone tiers (`SAME` → `UNKNOWN` → `OTHER`) and `target=primary`
+belong to the query client. This is why `zone` and `target` remain accept-and-ignore
+in section 9 even though failover is in scope: porting zone ranking into the
+sender would build something Java's sender does not have.
+
+#### Concurrency: drainers must not consume the shared round
+
+`pickNext` and `recordX` are individually synchronized but **not atomic as a
+pair**, so the foreground connect walk must be serialized single-file.
+
+Background orphan drainers (8.4) must **not** consume or poison the shared
+round. They take a **private round cursor** with a walker-local attempted set
+(claim-at-pick, so concurrent cursors never race the pick→record pair) and record
+**health-only** results — state updates flow into the shared ledger that orders
+everyone's picks, but the shared round is untouched. Getting this wrong makes a
+drainer silently steal endpoints from the foreground sender's round.
+
+A third reference implementation exists for this component: the tracker mirrors
+the **.NET** client's `QwpHostHealthTracker`.
 
 ## 2. Normative sources — and which ones are traps
 
@@ -328,7 +378,7 @@ Java exposes three separate surfaces; the Node port mirrors all three:
 | Java | Fires on |
 |---|---|
 | `SenderErrorHandler` | rejections — carries category, policy, `fromFsn`/`toFsn`, `quarantinedPath` |
-| `SenderConnectionListener` | seven kinds: `CONNECTED`, `DISCONNECTED`, `RECONNECTED`, `FAILED_OVER`, `ENDPOINT_ATTEMPT_FAILED`, `ALL_ENDPOINTS_UNREACHABLE`, `AUTH_FAILED` — two are never emitted single-endpoint (1.2) |
+| `SenderConnectionListener` | seven kinds: `CONNECTED`, `DISCONNECTED`, `RECONNECTED`, `FAILED_OVER`, `ENDPOINT_ATTEMPT_FAILED`, `ALL_ENDPOINTS_UNREACHABLE`, `AUTH_FAILED` — all live, given multi-host (1.2) |
 | `SenderProgressHandler` | the ACK watermark advancing |
 
 They share one delivery contract that must survive the port:
@@ -365,7 +415,8 @@ They share one delivery contract that must survive the port:
 A connection event is not just a kind. It carries the host and port, the
 **previous** host and port, an attempt number, a round number, a cause, and a
 timestamp — the attempt/round pair is what makes reconnect storms diagnosable, so
-carry it even though single-endpoint (1.2) pins the round. `AUTH_FAILED`'s cause
+carry it — with multi-host (1.2) the round number is what distinguishes one
+sweep of the endpoint list from the next. `AUTH_FAILED`'s cause
 is the auth failure from the upgrade (6.5.1), which is how the terminal
 credential case reaches the listener before the producer-side throw.
 
@@ -922,7 +973,7 @@ discards data without saying so.
 | Policy | Behaviour |
 |---|---|
 | `RETRIABLE` | recycle the connection, replay from `ackedFsn + 1`; handler delivery is informational |
-| `RETRIABLE_OTHER` | same replay, but rotate endpoints rather than back off against the same node (single-endpoint behaviour: 1.2) |
+| `RETRIABLE_OTHER` | same replay, but rotate to the next endpoint rather than back off against the same node (1.2) |
 | `TERMINAL` | latch; next producer call throws; bytes stay on disk |
 | `ABANDONED` | the rows are gone; nothing throws and the sender keeps running; bytes preserved at `quarantinedPath` |
 
@@ -1400,7 +1451,7 @@ registry's classification verbatim.
 
 **`Side.COMMON` + `Side.INGRESS` — implemented by our sender:**
 
-`addr` (single `host:port` in this stack — see 1.2), `username`, `password`,
+`addr` (comma-separated host:port list — grammar in 1.2), `username`, `password`,
 `token`, `tls_verify`,
 `tls_roots`, `tls_roots_password`, `auth_timeout_ms`, `connect_timeout`,
 `auto_flush`, `auto_flush_bytes`, `auto_flush_interval`, `auto_flush_rows`,
@@ -1421,7 +1472,12 @@ Plus two pre-existing Node-client keys with no Java counterpart, carried over so
 `ws::` behaves like the other Node protocols: `init_buf_size`, `max_buf_size`.
 
 **`Side.EGRESS` — accept-and-ignore.** These configure the query client, and a
-shared connect string must not break the sender: `target`, `failover`,
+shared connect string must not break the sender. This still holds with failover
+in scope (1.2): the ingest sender always walks the `addr` list, ranked by host
+state, with no on/off switch and no zone/role input — its retry budget comes from
+the `reconnect_*` keys, which are `Side.INGRESS`. The `failover_*`, `target` and
+`zone` keys tune the *query* client's selection, so the sender accepts and
+ignores them: `target`, `failover`,
 `failover_max_attempts`, `failover_backoff_initial_ms`, `failover_backoff_max_ms`,
 `failover_max_duration_ms`, `max_batch_rows`, `initial_credit`,
 `buffer_pool_size`, `compression`, `compression_level`, `client_id`, `zone`.
@@ -1636,8 +1692,9 @@ Four tiers, all four required.
 
 ## 11. PR stack
 
-Fourteen stacked PRs, each independently reviewable and green. PRs 1–8 are the
-wire; 9–13 are the reliability story; PR 3 is the first point at which a user
+Sixteen stacked PRs, each independently reviewable and green. PRs 1–8 are the
+wire; 9–13 are the reliability story, including multi-host failover at 9a/9b;
+PR 3 is the first point at which a user
 could actually use the feature.
 
 | # | PR | Gate |
@@ -1651,10 +1708,12 @@ could actually use the feature.
 | 7 | Gorilla timestamps (6.3.2) + int32-overflow raw fallback | golden + e2e |
 | 8 | defer-commit + commit frame (5.1.1) + zstd (feature-detected) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
+| 9a | Multi-host `addr` grammar incl. IPv6 + duplicate rejection (1.2) | unit |
+| 9b | Host health tracker: state ranking, rounds, `RETRIABLE_OTHER` rotation, `FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` | mock server, multi-endpoint |
 | 10 | Memory-mode ring — makes publish semantics safe | mock + e2e |
 | 11 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
 | 12 | `.symbol-dict` persistence + delta replay after recovery | crash tests |
-| 13 | Slot locks (both kinds), orphan scan, drainers, `DATA_LOSS`/`ABANDONED` | crash tests |
+| 13 | Slot locks (both kinds), orphan scan, drainers with private round cursors (1.2), `DATA_LOSS`/`ABANDONED` | crash tests |
 | 14 | Docs, examples, README support matrix, 4.3.0 release | — |
 
 ## 12. Risks
@@ -1712,6 +1771,11 @@ could actually use the feature.
   oversized one after a cancelled row or an empty flush. Java hit this; the
   golden vectors must include a commit frame emitted after `cancelRow` and after
   an empty flush.
+- **A drainer consuming the foreground round.** Background drainers must use a
+  private round cursor and health-only recording (1.2). Sharing the round lets a
+  drainer silently steal endpoints from the foreground sender's sweep, which
+  presents as unexplained `ALL_ENDPOINTS_UNREACHABLE` under load rather than as
+  an obvious bug.
 - **Inverted upgrade-failure retry.** Treating `401`/`403` as retriable spins
   forever against a server that will never accept the credentials; treating
   `421` as terminal kills a sender during an ordinary failover window (6.5.1).
