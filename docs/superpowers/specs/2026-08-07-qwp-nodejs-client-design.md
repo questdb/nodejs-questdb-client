@@ -613,7 +613,7 @@ baseline as **both** bounds so the range is `[baseline+1 .. baseline]`. This is
 the only shape that is unconditionally correct in both dictionary modes (5.2):
 
 - **Delta mode** — the commit path does *not* write-ahead-persist the dictionary
-  (8.1.5). Shipping a symbol here would put an id on the wire that a recovered
+  (8.1.6). Shipping a symbol here would put an id on the wire that a recovered
   slot cannot rebuild from `.symbol-dict`, diverging the producer's dictionary
   from the surviving frames and **silently misattributing reused ids after a
   crash**.
@@ -645,7 +645,7 @@ The delta dictionary is not simply on or off:
 - **Delta mode** — each frame carries only ids above the last shipped id. Used in
   memory mode, and in disk mode *once the persisted `.symbol-dict` has opened*.
   Safe only because a reconnect re-registers via the catch-up frame (7.5) and
-  recovery reseeds from the persisted file (8.1.5).
+  recovery reseeds from the persisted file (8.1.6).
 
 The mode is therefore a consequence of what durable state exists, not a user
 toggle. A build that has delta encoding but no `.symbol-dict` must use full-dict
@@ -666,7 +666,7 @@ side file at all, so degrading costs wire size and keeps ingestion alive.
 On fallback: the delta baseline stops being consulted (it reports `-1`, the
 empty-delta value from 5.1.1) and the write-ahead persist becomes a no-op.
 
-Note this is the *second* defence against the same root cause. §8.1.2's liveness
+Note this is the *second* defence against the same root cause. §8.1.3's liveness
 floor stops `.symbol-dict`'s monotonic growth from wedging the producer against
 `sf_max_total_bytes`; this stops it from wedging the producer when the filesystem
 itself refuses. Implement both — they cover different failures.
@@ -1260,13 +1260,44 @@ abstraction**: Java's `MmapSegment` has a `memoryBacked` flag selecting a
 malloc'd buffer instead of a file mapping, with the same cursor architecture.
 Port that flag rather than writing two segment types.
 
+### 8.1.1 Where FSNs come from
+
+The spec references FSNs throughout — `publishedFsn`, `ackedFsn`, replay from
+`ackedFsn + 1`, `fsnAtZero` (6.6.1) — without ever saying where they originate.
+They are **not** a counter the process initialises to zero.
+
+Every segment header carries `baseSeq`, the FSN of its **first** frame (8.1.5),
+and a segment's frame count is derived by scanning it. The ring computes:
+
+```
+nextSeq      = activeSegment.baseSeq + activeSegment.frameCount
+publishedFsn = nextSeq - 1
+```
+
+So a fresh ring starts at `nextSeq = 0`, `publishedFsn = -1`, and a **recovered
+ring continues numbering where the previous process stopped**. FSNs therefore
+persist across restarts and are unique for the life of the store-and-forward log
+— which is precisely why the connection-scoped wire `seq` needs translating
+through `fsnAtZero` (6.6.1) rather than being used directly.
+
+**Recovery must order and validate the chain**, not just collect files:
+
+- sealed segments are held in `baseSeq` order, oldest first, and sorted on open;
+- contiguity is checked — each segment's `baseSeq + frameCount` must meet the
+  next segment's `baseSeq`, and the chain head must match the manifest's
+  recorded head;
+- a segment with a **negative `baseSeq`** is excluded from the chain and
+  quarantined (8.4) rather than being treated as position zero. A corrupt file
+  whose own `baseSeq` is unreadable is the case this guards, and admitting one
+  would silently renumber every frame after it.
+
 **Publish barrier.** Each segment carries an `appendCursor` (producer-only) and a
 `publishedCursor`. The consumer **must not read any byte at offset
 `>= publishedOffset()`**. That single rule is what makes the whole thing
 lock-free, and it is easy to lose in a port where `await` interleaves differently
 than Java's threads.
 
-### 8.1.1 Hot-spare provisioning — the producer never creates a segment
+### 8.1.2 Hot-spare provisioning — the producer never creates a segment
 
 `SegmentManager` is a background worker that keeps every registered ring
 supplied with a **pre-created hot-spare segment**, and trims segments once their
@@ -1290,7 +1321,7 @@ already-existing spare; it never waits on file creation.
 Omitting hot spares does not fail a test; it just moves an `open`+`allocate`
 onto the producer at every rotation. Port it.
 
-### 8.1.2 The `.symbol-dict` liveness-floor deadlock — do not reintroduce
+### 8.1.3 The `.symbol-dict` liveness-floor deadlock — do not reintroduce
 
 `sf_max_total_bytes` must **not** be enforced as a naive sum of everything in the
 slot directory. Java guards this with
@@ -1308,7 +1339,7 @@ the shortfall. The producer stalls **permanently, and across restarts**, while
 the disk-full warning points at a trim that cannot help. Guaranteeing the minimum
 working set is what turns that permanent deadlock into ordinary backpressure.
 
-### 8.1.3 Two distinct append failures
+### 8.1.4 Two distinct append failures
 
 `SegmentRing.appendOrFsn` has two sentinels and they need opposite handling:
 
@@ -1320,7 +1351,7 @@ working set is what turns that permanent deadlock into ordinary backpressure.
 Treating `PAYLOAD_TOO_LARGE` as backpressure would burn the full append deadline
 before failing, and report a timeout instead of the real cause.
 
-### 8.1.4 Segment file format (`MmapSegment`)
+### 8.1.5 Segment file format (`MmapSegment`)
 
 ```
 24-byte header:
@@ -1341,7 +1372,7 @@ mapping-plus-fd barrier; only the latter is a portable power-loss barrier, so
 the Node port implements the `syncPublished()` semantics (write + `fdatasync`)
 and does not reproduce the legacy path.
 
-### 8.1.5 Persisted symbol dictionary — load-bearing, not an optimisation
+### 8.1.6 Persisted symbol dictionary — load-bearing, not an optimisation
 
 `<slot>/.symbol-dict` (`PersistedSymbolDict`) is the component most easily
 missed, and omitting it makes delta-encoded recovery silently impossible.
@@ -1449,7 +1480,7 @@ and reject them at construction.
 **Disk mode alone is not power-loss durability.** `sf_dir` selects disk mode
 (9.2), but durability still defaults to `memory` — files are written and never
 explicitly synced. Power-loss survival requires `sf_durability=periodic`, which
-in turn requires `sf_dir`. Section 8.1.5's note that `.symbol-dict` is
+in turn requires `sf_dir`. Section 8.1.6's note that `.symbol-dict` is
 "page-cache durable, not host-crash durable" is the same property, and it applies
 to the segments too under the default.
 
@@ -1902,7 +1933,7 @@ Four tiers, all four required.
    duplicate must not fail the test. Plus the abandonment path: corrupt a slot,
    assert it is quarantined with `quarantinedPath` set, `DATA_LOSS` /
    `ABANDONED` is delivered, and the sender keeps running. Plus the liveness
-   floor (8.1.2): a slot whose side files alone approach `sf_max_total_bytes`
+   floor (8.1.3): a slot whose side files alone approach `sf_max_total_bytes`
    must still accept writes.
 
 ## 11. PR stack
@@ -1986,6 +2017,12 @@ could actually use the feature.
   oversized one after a cancelled row or an empty flush. Java hit this; the
   golden vectors must include a commit frame emitted after `cancelRow` and after
   an empty flush.
+- **FSNs restarting at zero on recovery.** They derive from the segment chain's
+  `baseSeq`, not a process-local counter (8.1.1), so a recovered ring must
+  continue the previous numbering. Reinitialising to zero makes recovered frames
+  collide with new ones and corrupts every watermark that depends on FSN
+  uniqueness. A segment with a negative `baseSeq` must be quarantined, not
+  treated as position zero.
 - **Treating `seq` as an FSN.** The ACK sequence is connection-scoped and
   restarts at 0 on every reconnect (6.6.1). Storing it as an FSN works until the
   first reconnect, then trims from near the start of the log and discards
@@ -2030,7 +2067,7 @@ could actually use the feature.
   default of off means a crashed process's slot persists and is never replayed
   (9.1). Users will read `sf_dir` as "crash recovery" and get only half of it.
 - **Permanent stalls that look like disk-full.** The `.symbol-dict` liveness
-  floor (8.1.2) is the clearest example: enforce `sf_max_total_bytes` as a
+  floor (8.1.3) is the clearest example: enforce `sf_max_total_bytes` as a
   naive directory-byte sum and a producer can wedge forever, across restarts,
   while logging a trim warning that can never help. Crash tests must include a
   slot whose side files alone approach the cap.
