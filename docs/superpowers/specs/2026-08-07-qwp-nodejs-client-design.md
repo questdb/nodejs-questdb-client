@@ -651,6 +651,33 @@ The mode is therefore a consequence of what durable state exists, not a user
 toggle. A build that has delta encoding but no `.symbol-dict` must use full-dict
 mode — which is what makes PR 6 shippable before PR 14.
 
+**Delta mode must be able to fall back at runtime.** The transition is one-way,
+delta → full-dict, permanent for the rest of the sender's life, and triggered by
+the `.symbol-dict` side file proving unwritable mid-run.
+
+The reasoning is worth keeping verbatim in a comment. That file can start
+failing appends — full disk, exhausted quota — while SF's own segments stay
+writable, *because the segments are pre-allocated and the dictionary is the one
+thing still growing*. If the mode were fixed at startup, every subsequent
+`flush()` would throw forever, and a condition store-and-forward exists to
+survive would become total, permanent ingestion loss. Full-dict frames need no
+side file at all, so degrading costs wire size and keeps ingestion alive.
+
+On fallback: the delta baseline stops being consulted (it reports `-1`, the
+empty-delta value from 5.1.1) and the write-ahead persist becomes a no-op.
+
+Note this is the *second* defence against the same root cause. §8.1.2's liveness
+floor stops `.symbol-dict`'s monotonic growth from wedging the producer against
+`sf_max_total_bytes`; this stops it from wedging the producer when the filesystem
+itself refuses. Implement both — they cover different failures.
+
+**When the baseline advances matters.** It moves only after a frame carrying the
+batch's symbols is **queued onto the ring**, never at symbol-allocation time, and
+only ever forward — a batch that introduced no new symbols leaves it untouched.
+That ordering is what makes a failed publish safe: ids allocated but never
+shipped stay reclaimable (4.1), and no frame on the wire references an id the
+persisted dictionary lacks.
+
 ### 5.3 The staging buffer and its swap
 
 Sections 5.1 and 8.3.1 refer to "seal and swap the buffer" without saying what
@@ -1021,6 +1048,42 @@ error        : status:u8 | seq:u64 | errLen:u16 | utf8
 ```
 
 `MAX_ERROR_MESSAGE_LENGTH` is 1024.
+
+### 6.6.1 Correlating an ACK to a frame — `seq` is **not** an FSN
+
+This is the bridge between section 6's wire format and section 8's FSNs, and
+assuming `seq == fsn` is the natural mistake. It works until the first
+reconnect, then silently corrupts the trim watermark.
+
+The `seq` on an OK frame is a **connection-scoped wire sequence**: the count of
+frames sent **on the current connection**, starting at 0. FSNs, by contrast, are
+monotonic for the life of the store-and-forward log and survive reconnects. The
+client therefore keeps two values per connection:
+
+- `nextWireSeq` — how many frames it has sent on this connection;
+- `fsnAtZero` — the FSN that wire sequence 0 corresponds to.
+
+and translates every ACK as:
+
+```
+ackedFsn = fsnAtZero + seq
+```
+
+After a reconnect, `nextWireSeq` restarts at 0 and `fsnAtZero` is re-established
+at the replay start point (`ackedFsn + 1`). An implementation that stores the raw
+`seq` as an FSN will, on the first reconnect, trim from near the start of the log
+and discard unacknowledged data.
+
+**Clamp before applying.** Never trust an ACK beyond what has actually been sent:
+
+```
+capped = min(seq, nextWireSeq - 1), floored at 0
+```
+
+Log when clamping fires. Java's reasoning is specific — a malformed or replayed
+server response would otherwise force a trim of segments the *new* server has
+never seen. An ACK arriving before any send on the connection
+(`nextWireSeq == 0`) is ignored outright.
 
 ## 7. Error handling
 
@@ -1923,6 +1986,14 @@ could actually use the feature.
   oversized one after a cancelled row or an empty flush. Java hit this; the
   golden vectors must include a commit frame emitted after `cancelRow` and after
   an empty flush.
+- **Treating `seq` as an FSN.** The ACK sequence is connection-scoped and
+  restarts at 0 on every reconnect (6.6.1). Storing it as an FSN works until the
+  first reconnect, then trims from near the start of the log and discards
+  unacknowledged data. Tests must reconnect mid-stream and assert the trim
+  watermark did not move backwards.
+- **A fixed dictionary mode.** If `.symbol-dict` becomes unwritable and there is
+  no delta→full-dict fallback (5.2), every later flush throws forever and a
+  survivable condition becomes permanent ingestion loss.
 - **A drainer consuming the foreground round.** Background drainers must use a
   private round cursor and health-only recording (1.2). Sharing the round lets a
   drainer silently steal endpoints from the foreground sender's sweep, which
