@@ -6,6 +6,7 @@ import * as https from "https";
 
 import { Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
+import { parseAddrList, Endpoint } from "./qwp/endpoints";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 
 const HTTP_PORT = 9000;
@@ -152,6 +153,8 @@ class SenderOptions {
   addr?: string;
   host?: string; // derived from addr
   port?: number; // derived from addr
+  /** ws/wss only: the parsed multi-host list; host/port point at the first entry. */
+  endpoints?: Endpoint[];
 
   // replaces `auth` and `jwk` options
   username?: string;
@@ -514,6 +517,16 @@ function parseProtocolVersion(options: SenderOptions) {
 function parseAddress(options: SenderOptions) {
   if (!options.addr) {
     throw new Error("Invalid configuration, 'addr' is required");
+  }
+
+  // ws/wss addr is a comma-separated, IPv6-aware endpoint LIST (spec 1.2).
+  // host/port are kept pointing at the first entry so existing transport paths
+  // that read them continue to work.
+  if (options.protocol === WS || options.protocol === WSS) {
+    options.endpoints = parseAddrList(options.addr, HTTP_PORT);
+    options.host = options.endpoints[0].host;
+    options.port = options.endpoints[0].port;
+    return;
   }
 
   const index = options.addr.indexOf(":");
