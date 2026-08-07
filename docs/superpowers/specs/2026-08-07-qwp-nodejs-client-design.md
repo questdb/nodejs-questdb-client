@@ -110,10 +110,10 @@ src/qwp/
   HTTP response parser. QWP *data* frames are binary-only, always `FIN=1`, never
   fragmented, and use zstd at the protocol layer rather than
   `permessage-deflate`, so no WebSocket library is used. Control frames are still
-  fully implemented (see 3.3.1) — "no fragmentation" applies to data, not to the
+  fully implemented (see 3.2.1) — "no fragmentation" applies to data, not to the
   RFC's control obligations.
 
-#### 3.3.1 Control frames are not optional
+#### 3.2.1 Control frames are not optional
 
 - **PING → PONG**, echoing the payload. A server that pings and gets no pong
   will drop the connection.
@@ -208,10 +208,61 @@ New surface, mirroring Java:
 await sender.flush();                    // publish; does NOT wait for ACK
 const fsn = await sender.flushAndGetSequence();  // highest FSN published, or -1
 const ok  = await sender.drain(30_000);  // flush + await ACK watermark
-sender.onError((e: SenderError) => { /* e.category, e.policy, e.fromFsn, e.toFsn */ });
+sender.reset();                          // discard buffered rows (see 4.1)
 ```
 
-### 4.1 Flush semantics
+### 4.1 `reset()` must also roll back the symbol watermark
+
+`reset()` discards every buffered row across **all** table buffers — but
+discarding rows alone is a trap. The delta section of a later flush is encoded as
+`[sentMaxSymbolId + 1 .. currentBatchMaxSymbolId]`. If the discarded batch's
+watermark survives, even a single-row batch after `reset()` still carries the
+whole abandoned symbol range — hitting the very cap rejection `reset()` exists to
+clear, and leaving the sender **unable to flush anything at all**.
+
+So `reset()` must additionally set the batch symbol watermark back to `-1` (the
+same value a successful flush leaves behind, and read as an empty delta) and
+**reclaim the symbol ids that were allocated but never shipped**. This is what
+1.3.7's "Return never-shipped symbol ids on reset()" does, and omitting it
+produces a permanently wedged sender rather than a visible error.
+
+### 4.2 Three async callbacks, not one
+
+Java exposes three separate surfaces; the Node port mirrors all three:
+
+| Java | Fires on |
+|---|---|
+| `SenderErrorHandler` | rejections — carries category, policy, `fromFsn`/`toFsn`, `quarantinedPath` |
+| `SenderConnectionListener` | `CONNECTED`, `RECONNECTED`, `FAILED_OVER`, `ENDPOINT_ATTEMPT_FAILED`, `ALL_ENDPOINTS_UNREACHABLE`, `AUTH_FAILED` |
+| `SenderProgressHandler` | the ACK watermark advancing |
+
+They share one delivery contract that must survive the port:
+
+- **Never invoked on the I/O or producer path.** Java uses a dedicated daemon
+  dispatcher thread so a slow handler cannot stall publishing or reconnect. Node
+  has no such thread, so callbacks must be dispatched via a queue drained on a
+  `setImmediate`-style tick — never called inline from the socket handler.
+- **Bounded inbox, surplus dropped.** Capacity comes from `error_inbox_capacity`
+  and `connection_listener_inbox_capacity` (minimum **16**), and drops are
+  counted and readable. Without the bound, a slow user callback becomes unbounded
+  memory growth.
+- **Handler exceptions are caught and logged**; the sender keeps running.
+- **Success connection events fire on every transition; failure events may be
+  coalesced** under inbox pressure. `AUTH_FAILED` fires *before* the
+  corresponding error is observable on the producer side.
+
+Progress-handler semantics are narrower than they look: the watermark advances
+**only on server OK frames** — a rejection never advances it — values are
+strictly increasing, and one call may skip several FSNs when the server batches
+frames into a single OK. Callers should compare `ackedFsn` against a target
+rather than assume one call per flush.
+
+**A plain OK is not durability.** In non-durable-ack mode an OK acknowledges
+server-side *commit*, not object-store durability. Anything gating downstream
+side effects on durability must opt into `request_durable_ack`. This distinction
+belongs in the README, not just here.
+
+### 4.3 Flush semantics
 
 `flush()` resolves once the frame is **published into the store-and-forward
 engine** — in RAM for memory mode, on disk for disk mode. It does *not* wait for
@@ -289,7 +340,7 @@ The delta dictionary is not simply on or off:
 - **Delta mode** — each frame carries only ids above the last shipped id. Used in
   memory mode, and in disk mode *once the persisted `.symbol-dict` has opened*.
   Safe only because a reconnect re-registers via the catch-up frame (7.5) and
-  recovery reseeds from the persisted file (8.1.2).
+  recovery reseeds from the persisted file (8.1.5).
 
 The mode is therefore a consequence of what durable state exists, not a user
 toggle. A build that has delta encoding but no `.symbol-dict` must use full-dict
@@ -623,7 +674,7 @@ Port that flag rather than writing two segment types.
 lock-free, and it is easy to lose in a port where `await` interleaves differently
 than Java's threads.
 
-### 8.1.0 Hot-spare provisioning — the producer never creates a segment
+### 8.1.1 Hot-spare provisioning — the producer never creates a segment
 
 `SegmentManager` is a background worker that keeps every registered ring
 supplied with a **pre-created hot-spare segment**, and trims segments once their
@@ -647,7 +698,7 @@ already-existing spare; it never waits on file creation.
 Omitting hot spares does not fail a test; it just moves an `open`+`allocate`
 onto the producer at every rotation. Port it.
 
-### 8.1.0.1 The `.symbol-dict` liveness-floor deadlock — do not reintroduce
+### 8.1.2 The `.symbol-dict` liveness-floor deadlock — do not reintroduce
 
 `sf_max_total_bytes` must **not** be enforced as a naive sum of everything in the
 slot directory. Java guards this with
@@ -665,7 +716,7 @@ the shortfall. The producer stalls **permanently, and across restarts**, while
 the disk-full warning points at a trim that cannot help. Guaranteeing the minimum
 working set is what turns that permanent deadlock into ordinary backpressure.
 
-### 8.1.0.2 Two distinct append failures
+### 8.1.3 Two distinct append failures
 
 `SegmentRing.appendOrFsn` has two sentinels and they need opposite handling:
 
@@ -677,7 +728,7 @@ working set is what turns that permanent deadlock into ordinary backpressure.
 Treating `PAYLOAD_TOO_LARGE` as backpressure would burn the full append deadline
 before failing, and report a timeout instead of the real cause.
 
-### 8.1.1 Segment file format (`MmapSegment`)
+### 8.1.4 Segment file format (`MmapSegment`)
 
 ```
 24-byte header:
@@ -698,7 +749,7 @@ mapping-plus-fd barrier; only the latter is a portable power-loss barrier, so
 the Node port implements the `syncPublished()` semantics (write + `fdatasync`)
 and does not reproduce the legacy path.
 
-### 8.1.2 Persisted symbol dictionary — load-bearing, not an optimisation
+### 8.1.5 Persisted symbol dictionary — load-bearing, not an optimisation
 
 `<slot>/.symbol-dict` (`PersistedSymbolDict`) is the component most easily
 missed, and omitting it makes delta-encoded recovery silently impossible.
@@ -1062,7 +1113,7 @@ could actually use the feature.
   turns one of Java's synchronous sections into an async one. Prefer locals
   captured at entry over field reads.
 - **Permanent stalls that look like disk-full.** The `.symbol-dict` liveness
-  floor (8.1.0.1) is the clearest example: enforce `sf_max_total_bytes` as a
+  floor (8.1.2) is the clearest example: enforce `sf_max_total_bytes` as a
   naive directory-byte sum and a producer can wedge forever, across restarts,
   while logging a trim warning that can never help. Crash tests must include a
   slot whose side files alone approach the cap.
