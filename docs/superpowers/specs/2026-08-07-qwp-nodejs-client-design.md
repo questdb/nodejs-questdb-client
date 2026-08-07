@@ -51,12 +51,21 @@ Several Java classes look ingest-relevant and are not — do not port them here:
 
 ### 1.2 Multi-host addressing and failover
 
-`addr` is a **list**, and the sender walks it. Every rotation-flavoured behaviour
-elsewhere in this spec — `RETRIABLE_OTHER`'s endpoint rotation (7.2), the
-`FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` events (4.2), the `421` role reject
-retried indefinitely until a primary appears (6.5.1), the mid-stream cap change
-that forces the snapshot-once rule (5.1), and the catch-up cap gap on a
-smaller-cap node (7.5) — is live rather than vestigial.
+`addr` is a **list**, and the sender walks it. Behaviours that were vestigial
+under a single endpoint are now live: the `FAILED_OVER` /
+`ALL_ENDPOINTS_UNREACHABLE` events (4.2), the `421` role reject retried
+indefinitely until a primary appears (6.5.1), the mid-stream cap change that
+forces the snapshot-once rule (5.1), and the catch-up cap gap on a smaller-cap
+node (7.5).
+
+**What actually drives rotation is connect-time failure, not a NACK policy.**
+The tracker records `TRANSPORT_ERROR` for a failed connect and `TOPOLOGY_REJECT`
+for a `421` role reject, and those states demote a host in the next pick. The
+`RETRIABLE_OTHER` policy (7.2) is the *mid-stream* rotation path, and its only
+category — `NOT_WRITABLE` (0x0C) — is **reserved and not currently emitted by any
+server** (7.1). So keep `RETRIABLE_OTHER` mapped and implemented, but do not
+expect to reach it: today's servers signal the same condition with a
+reconnect-eligible close, which routes through the transport path above.
 
 #### `addr` grammar (`ConfigView.parseEntry`)
 
@@ -1007,7 +1016,7 @@ discards data without saying so.
 | Policy | Behaviour |
 |---|---|
 | `RETRIABLE` | recycle the connection, replay from `ackedFsn + 1`; handler delivery is informational |
-| `RETRIABLE_OTHER` | same replay, but rotate to the next endpoint rather than back off against the same node (1.2) |
+| `RETRIABLE_OTHER` | same replay, but rotate to the next endpoint rather than back off against the same node. **Unreachable today** — its only category `NOT_WRITABLE` is reserved (7.1); real rotation comes from connect-time failures (1.2) |
 | `TERMINAL` | latch; next producer call throws; bytes stay on disk |
 | `ABANDONED` | the rows are gone; nothing throws and the sender keeps running; bytes preserved at `quarantinedPath` |
 
@@ -1729,7 +1738,7 @@ Four tiers, all four required.
    mid-frame disconnect, slow-consumer backpressure, server-initiated close, and
    poison-detector escalation. A real QuestDB will not produce `INTERNAL_ERROR`
    or a torn frame to order. It must also be startable as **several endpoints at
-   once**, to exercise 1.2: rotation on `RETRIABLE_OTHER`, a `421` role reject
+   once**, to exercise 1.2: rotation on a transport failure, a `421` role reject
    that resolves when a primary appears, `FAILED_OVER` and
    `ALL_ENDPOINTS_UNREACHABLE`, state ranking preferring a known-good host over
    an untried one, and a drainer's private cursor not consuming the foreground
@@ -1770,7 +1779,7 @@ could actually use the feature.
 | 8 | defer-commit + commit frame (5.1.1) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
 | 10 | Multi-host `addr` grammar incl. IPv6 + duplicate rejection (1.2) | unit |
-| 11 | Host health tracker: state ranking, rounds, `RETRIABLE_OTHER` rotation, `FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` | mock server, multi-endpoint |
+| 11 | Host health tracker: state ranking, rounds, rotation on transport error / `421`, `FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` | mock server, multi-endpoint |
 | 12 | Memory-mode ring — makes publish semantics safe | mock + e2e |
 | 13 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
 | 14 | `.symbol-dict` persistence + delta replay after recovery | crash tests |
