@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SfEngine } from "../../../src/qwp/sf/engine";
 import { readBoundary } from "../../../src/qwp/sf/boundary";
+import { readManifest, MANIFEST_FILE_NAME } from "../../../src/qwp/sf/manifest";
 import { quarantineSlot, MAX_QUARANTINED, QUARANTINE_INFIX } from "../../../src/qwp/sf/quarantine";
 import { SenderError, Category, Policy } from "../../../src/qwp/errors";
 
@@ -119,6 +120,96 @@ describe("SfEngine durability barrier (spec 8.2, handoff A3/C1)", () => {
     await e.close();
     // No ACK -> no dirty watermark -> nothing written by the final barrier.
     expect(existsSync(join(dir, "default", ".ack-watermark"))).toBe(false);
+  });
+});
+
+describe("SfEngine sf-manifest.bin (spec 8.2, handoff C2)", () => {
+  function manPath(dir: string) {
+    return join(dir, "default", MANIFEST_FILE_NAME);
+  }
+
+  it("records the active chain head on segment creation and re-opens consistently", async () => {
+    const dir = tmpSfDir();
+    const e = engine(dir);
+    await e.open();
+    await e.append(FRAME); // fsn 0 -> segment head 0
+    await e.close();
+
+    expect(existsSync(manPath(dir))).toBe(true);
+    const m = readManifest(readFileSync(manPath(dir)));
+    expect(m).not.toBeNull();
+    expect(m!.headBaseSeq).toBe(0);
+
+    // Re-open: the scanned chain head matches the manifest head, so it recovers.
+    const e2 = engine(dir);
+    await e2.open();
+    expect(e2.publishedFsn).toBe(0);
+    await e2.close();
+  });
+
+  it("advances the recorded head across a segment rotation", async () => {
+    const dir = tmpSfDir();
+    // Small segments force a rotation after a few frames.
+    const e = new SfEngine({
+      segmentBytes: 32,
+      maxTotalBytes: 16 * 1024 * 1024,
+      sfDir: dir,
+      senderId: "default",
+      syncIntervalMillis: 60_000,
+    });
+    await e.open();
+    const big = Buffer.alloc(20);
+    await e.append(big); // fsn 0 -> segment head 0
+    await e.append(big); // fsn 1 -> 20+20>32 -> rotation -> segment head 1
+    await e.close();
+
+    const m = readManifest(readFileSync(manPath(dir)));
+    expect(m!.headBaseSeq).toBe(1);
+
+    const e2 = new SfEngine({
+      segmentBytes: 32,
+      maxTotalBytes: 16 * 1024 * 1024,
+      sfDir: dir,
+      senderId: "default",
+      syncIntervalMillis: 60_000,
+    });
+    await e2.open();
+    expect(e2.framesFrom(1)).toHaveLength(1);
+    await e2.close();
+  });
+
+  it("quarantines when the manifest head is ahead of the scanned chain (lost tail)", async () => {
+    const dir = tmpSfDir();
+    const slot = join(dir, "default");
+    mkdirSync(slot, { recursive: true });
+    const e = engine(dir);
+    await e.open();
+    await e.append(FRAME); // segment head 0
+    await e.close();
+    expect(existsSync(manPath(dir))).toBe(true);
+
+    // Simulate a lost tail: delete the only segment so the scanned head drops
+    // below the manifest's recorded head 0 -> real data loss -> quarantine.
+    rmSync(join(slot, "0.sfa"), { force: true });
+
+    const e2 = engine(dir);
+    const err = await e2.open().then(
+      () => null as SenderError | null,
+      (x) => x as SenderError,
+    );
+    expect(err).toBeInstanceOf(SenderError);
+    expect(err!.category).toBe(Category.DATA_LOSS);
+    expect(err!.quarantinedPath).toContain(QUARANTINE_INFIX);
+  });
+
+  it("sets MANIFEST_REQUIRED_FLAG (bit 0) on segments it writes", async () => {
+    const dir = tmpSfDir();
+    const e = engine(dir);
+    await e.open();
+    await e.append(FRAME);
+    await e.close();
+    const seg = readFileSync(join(dir, "default", "0.sfa"));
+    expect(seg.readUInt8(5) & 1).toBe(1); // flags bit 0
   });
 });
 

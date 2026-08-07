@@ -6,12 +6,15 @@ import { SegmentRing } from "./ring";
 import { acquireSlot, releaseSlot, SlotHandle } from "./slotLock";
 import { appendFrame, scanSegment, SEGMENT_HEADER_SIZE } from "./segment";
 import { writeBoundary, readBoundary, BOUNDARY_FILE_SIZE } from "./boundary";
+import { writeManifest, readManifest, MANIFEST_FILE_NAME, MANIFEST_FILE_SIZE } from "./manifest";
 import { encodeChunk, decodeDictFile, DICT_HEADER } from "./symbolDictFile";
 import { SymbolDict } from "../protocol/symbolDict";
 import { quarantineSlot } from "./quarantine";
 import { SenderError, Category, Policy } from "../errors";
 
 export const SEGMENT_EXT = ".sfa";
+/** Segment flags bit 0: this file is governed by an sf-manifest.bin (spec 8.1.5). */
+export const MANIFEST_REQUIRED_FLAG = 1;
 const ACK_WATERMARK = ".ack-watermark";
 const SYMBOL_DICT = ".symbol-dict";
 const DEFAULT_SYNC_INTERVAL_MILLIS = 5000; // spec 9.1
@@ -50,6 +53,12 @@ export class SfEngine {
   private watermarkDirty = false;
   private barrierTimer?: ReturnType<typeof setInterval>;
   private barrierInFlight = false;
+
+  // sf-manifest.bin state (spec 8.2, 8.1.1): records the chain head so
+  // recovery can cross-check the scanned segment chain. Same alternating
+  // generation scheme as the ack watermark; written on rotation, never per frame.
+  private manBuf = Buffer.alloc(MANIFEST_FILE_SIZE);
+  private manifestGen = 0;
 
   // symbol dictionary file (load-bearing for delta mode; spec 8.1.6)
   private dict = new SymbolDict();
@@ -145,6 +154,25 @@ export class SfEngine {
    * whether to quarantine (owner) or drop a .failed sentinel (drainer).
    */
   private async recover(slotDir: string): Promise<void> {
+    // sf-manifest.bin -> chain-head cross-check (spec 8.1.1, 8.2). The manifest
+    // is written only after the new segment's header exists, so on a crash the
+    // manifest is never AHEAD of a segment that is already on disk. Equality or
+    // a manifest behind the scanned head (the rotation write-order race) is a
+    // benign, recoverable state; a manifest strictly ahead of the scanned head
+    // means a recorded tail segment vanished from disk = real data loss.
+    const manData = await readFile(join(slotDir, MANIFEST_FILE_NAME)).catch(
+      () => undefined,
+    );
+    let manifestHead: number | undefined;
+    if (manData && manData.length > 0) {
+      manData.copy(this.manBuf);
+      const m = readManifest(this.manBuf);
+      if (m) {
+        manifestHead = m.headBaseSeq;
+        this.manifestGen = m.generation + 1;
+      }
+    }
+
     // ack watermark (discardable optimisation, guarded by monotonic clamp)
     let recoveredWm: number | undefined;
     try {
@@ -175,6 +203,22 @@ export class SfEngine {
       const data = await readFile(join(slotDir, f));
       const sr = scanSegment(data);
       chain.push({ baseSeq: sr.baseSeq, frames: sr.frames });
+    }
+    // Cross-check the manifest head against the scanned chain (spec 8.1.1).
+    // A valid manifest is only ever written after a new segment header exists,
+    // so the manifest is never ahead of an existing file on a benign crash.
+    // A manifest Ahead of the scanned head therefore means a recorded tail
+    // segment (or its entire chain) vanished from disk = real data loss.
+    if (manifestHead !== undefined) {
+      let head = -1;
+      for (const c of chain) if (c.baseSeq > head) head = c.baseSeq;
+      if (head < 0 || head < manifestHead) {
+        const detail =
+          chain.length === 0
+            ? "no segments found but the manifest records head " + manifestHead
+            : `manifest head ${manifestHead} ahead of scanned chain head ${head}`;
+        throw new Error("sf lost-tail detected: " + detail);
+      }
     }
     if (chain.length > 0) {
       this.ring = SegmentRing.recovered(chain, {
@@ -280,10 +324,30 @@ export class SfEngine {
     const header = Buffer.alloc(SEGMENT_HEADER_SIZE);
     header.write("SF01", 0, "ascii");
     header.writeUInt8(1, 4);
+    header.writeUInt8(MANIFEST_REQUIRED_FLAG, 5); // governed by sf-manifest.bin
     header.writeBigUInt64LE(BigInt(baseSeq), 8);
     await this.fh.write(header, 0, SEGMENT_HEADER_SIZE, 0);
     this.activeOffset = SEGMENT_HEADER_SIZE;
     this.activeDataBytes = 0;
+    // Record the new chain head AFTER the segment header exists (see recover),
+    // so a crash here can never leave the manifest ahead of an existing file
+    // and falsely quarantine a recoverable slot (spec 8.2 alternating scheme).
+    await this.persistManifest(baseSeq);
+  }
+
+  /** Writes the chain head into sf-manifest.bin, alternating records by generation. */
+  private async persistManifest(head: number): Promise<void> {
+    if (!this.isDisk || !this.slot) return;
+    this.manifestGen++;
+    writeManifest(this.manBuf, this.manifestGen, head);
+    const path = join(this.slot.slotDir, MANIFEST_FILE_NAME);
+    const fh = await open(path, "w");
+    try {
+      await fh.write(this.manBuf);
+      if (this.durability === "periodic") await fh.sync();
+    } finally {
+      await fh.close();
+    }
   }
 
   private async persistFrame(fsn: number, frame: Buffer): Promise<void> {

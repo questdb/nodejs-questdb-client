@@ -65,6 +65,12 @@ senders do, and each one can surprise a user who assumes otherwise:
   releasing the slot. A terminal failure drops a `.failed` sentinel so the slot
   is retried only after an operator clears it; a transient outage is retried
   indefinitely. Requires `sf_dir`.
+- In disk mode, recovery cross-checks the scanned segment chain against
+  `sf-manifest.bin`, a crash-safe boundary record (magic `SFM1`) written on
+  each segment rotation using the same alternating-generation scheme as the ack
+  watermark, and quarantines the slot when the manifest's recorded chain head is
+  ahead of what is actually on disk (a vanished tail segment = real data loss).
+- `tls_roots` accepts PEM or PKCS#12.
 - `tls_roots` accepts PEM or PKCS#12. **JKS keystores are not supported** by
   Node; convert them first.
 
