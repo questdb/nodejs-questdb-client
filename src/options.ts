@@ -624,8 +624,8 @@ function parseQwpOptions(options: SenderOptions) {
   parseInteger(options, "reconnect_initial_backoff_millis", "reconnect initial backoff", 0);
   parseInteger(options, "reconnect_max_backoff_millis", "reconnect max backoff", 0);
   parseInteger(options, "reconnect_max_duration_millis", "reconnect max duration", 0);
-  parseInteger(options, "error_inbox_capacity", "error inbox capacity", 1);
-  parseInteger(options, "connection_listener_inbox_capacity", "connection listener inbox capacity", 1);
+  parseInteger(options, "error_inbox_capacity", "error inbox capacity", 16);
+  parseInteger(options, "connection_listener_inbox_capacity", "connection listener inbox capacity", 16);
   parseInteger(options, "max_frame_rejections", "max frame rejections", 1);
   parseInteger(options, "poison_min_escalation_window_millis", "poison min escalation window", 0);
 }
