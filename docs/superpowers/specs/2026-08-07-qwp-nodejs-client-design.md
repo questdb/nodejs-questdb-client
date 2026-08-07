@@ -223,6 +223,19 @@ sender.table("t").symbol("s","x").doubleColumn("p",1.5).at(ts)
 
 All little-endian, byte-level.
 
+### 6.0 Primitives
+
+- **`varint`** — unsigned **LEB128**: 7 data bits per byte, high bit `0x80` set
+  means another byte follows. `MAX_VARINT_BYTES = 10` for a 64-bit value. It is
+  *unsigned*; there is no implicit zig-zag.
+- **`zigzag`** — `encode(n) = (n << 1) ^ (n >> 63)`,
+  `decode(n) = (n >>> 1) ^ -(n & 1)`. Applied only where a codec explicitly
+  calls for it (Gorilla), never implicitly by `varint`.
+- **`string`** — `varint` byte length followed by UTF-8 bytes. This is Java's
+  `putString`, and it is what every `[varint nameLen][utf8]` below expands to.
+  (`putUtf8` writes raw bytes with no length prefix and is not used in the frame
+  structure.)
+
 ### 6.1 Message header — 12 bytes
 
 ```
@@ -425,11 +438,27 @@ detector**:
 - `RETRIABLE_OTHER` never counts a strike (it is a verdict on the node, not the
   bytes);
 - orderly closes (`NORMAL_CLOSURE`, `GOING_AWAY`) never count strikes;
-- `max_frame_rejections` consecutive strikes (default
-  `DEFAULT_MAX_HEAD_FRAME_REJECTIONS = 4`) escalate to `PROTOCOL_VIOLATION`,
-  which is `TERMINAL`;
+- escalation to `PROTOCOL_VIOLATION` (which is `TERMINAL`) requires **both**
+  conditions, not just the first:
+  1. `max_frame_rejections` consecutive strikes
+     (`DEFAULT_MAX_HEAD_FRAME_REJECTIONS = 4`), **and**
+  2. the suspect frame has stayed poisoned for at least
+     `poison_min_escalation_window_millis`
+     (`DEFAULT_POISON_MIN_ESCALATION_WINDOW_MILLIS = 5_000`); `0` means escalate
+     immediately at the strike threshold;
 - the counter resets **only** on OK-level acceptance at or beyond the suspect
   frame, so re-OKs of frames *behind* it cannot launder the count.
+
+The dwell window is not optional polish. Java's reasoning: a strike count
+measures "how many times did we look", not "how long has this been true", and
+with pacing four strikes can accrue in well under a second — for example an
+accepting load balancer that closes each cycle while its backend is briefly
+down. Count alone would escalate that transient into a producer-fatal terminal.
+Implementing only the count is a correctness bug, not a simplification.
+
+The orphan drainer's symbol-dict catch-up cap gap uses the same two-condition
+shape: `MAX_CATCHUP_CAP_GAP_ATTEMPTS = 16` attempts **and**
+`catch_up_cap_gap_min_escalation_window_millis` of dwell.
 
 Below the threshold a `RETRIABLE` recycle is **paced**: the server is reachable
 (it just answered), so the failed-connect backoff never engages. The recycle
@@ -537,46 +566,56 @@ wait on ACKs that cannot arrive.
 
 ## 9. Configuration
 
-Every key that exists in Java's `ConfigSchema` keeps its Java name exactly. Two
-keys below (`init_buf_size`, `max_buf_size`) are pre-existing Node-client keys
-with no Java counterpart; they carry over unchanged so `ws::` behaves like the
-other Node protocols. Three tiers — the third is the one that is easy to get
-wrong.
+Java's `ConfigSchema` is a single static registry in which **every key carries a
+`Side`**, and the side determines who applies it. Do not infer a key's owner from
+its name — several plausible-looking keys belong to the query client. Port the
+registry's classification verbatim.
 
-**Implemented:** `addr`, `auto_flush`, `auto_flush_rows`, `auto_flush_bytes`,
-`auto_flush_interval`, `user`, `password`, `token`, `tls_verify`, `tls_roots`,
-`tls_roots_password`, `init_buf_size`, `max_buf_size`, `client_id`,
-`connect_timeout`, `auth_timeout_ms`, `sf_dir`, `sf_max_total_bytes`,
-`sf_max_segment_bytes`, `sf_durability`, `sf_append_deadline_millis`,
-`sf_sync_interval_millis`, `reconnect_initial_backoff_millis`,
-`reconnect_max_backoff_millis`, `reconnect_max_duration_millis`,
-`max_frame_rejections`, `zstd`, `compression`, `compression_level`,
-`request_durable_ack`, `transaction`, `drain_orphans`,
-`max_background_drainers`, `close_flush_timeout_millis`,
-`error_inbox_capacity`, `connection_listener_inbox_capacity`,
-`initial_connect_retry`, `lazy_connect`, `max_batch_rows`, `max_name_len`,
-`initial_credit`, `durable_ack_keepalive_interval_millis`,
+**`Side.COMMON` + `Side.INGRESS` — implemented by our sender:**
+
+`addr` (host:port list), `username`, `password`, `token`, `tls_verify`,
+`tls_roots`, `tls_roots_password`, `auth_timeout_ms`, `connect_timeout`,
+`auto_flush`, `auto_flush_bytes`, `auto_flush_interval`, `auto_flush_rows`,
+`close_flush_timeout_millis`, `connection_listener_inbox_capacity`,
+`drain_orphans`, `durable_ack_keepalive_interval_millis`, `error_inbox_capacity`,
+`initial_connect_retry`, `max_background_drainers`, `max_frame_rejections`,
 `poison_min_escalation_window_millis`,
-`catch_up_cap_gap_min_escalation_window_millis`.
+`catch_up_cap_gap_min_escalation_window_millis`, `max_name_len`,
+`reconnect_initial_backoff_millis`, `reconnect_max_backoff_millis`,
+`reconnect_max_duration_millis`, `request_durable_ack`, `sender_id`,
+`sf_append_deadline_millis`, `sf_dir`, `sf_durability`, `sf_max_segment_bytes`,
+`sf_max_total_bytes`, `sf_sync_interval_millis`, `transaction`.
 
-**Out of scope, belongs to the facade/pooling spec** — reject for now, since no
-pooling exists to configure: `sender_pool_min`, `sender_pool_max`,
-`buffer_pool_size`, `acquire_timeout_ms`, `idle_timeout_ms`, `max_lifetime_ms`,
-`housekeeper_interval_ms`, `sender_id`.
+`user` and `pass` are **aliases** of `username` and `password`, registered via
+`alias()`; both spellings must resolve.
 
-**Accept-and-ignore, reserved** (Java: `Side.RESERVED`): `on_internal_error`,
-`on_parse_error`, `on_schema_error`, `on_security_error`, `on_server_error`,
-`on_write_error`.
+Plus two pre-existing Node-client keys with no Java counterpart, carried over so
+`ws::` behaves like the other Node protocols: `init_buf_size`, `max_buf_size`.
 
-**Accept-and-ignore, egress/failover** — so one connect string serves both the
-sender and a future query client: `target`, `failover`, `failover_backoff_initial_ms`,
-`failover_backoff_max_ms`, `failover_max_attempts`, `failover_max_duration_ms`,
-`query_pool_min`, `query_pool_max`, `query_close_timeout_ms`, `zone`.
+**`Side.EGRESS` — accept-and-ignore.** These configure the query client, and a
+shared connect string must not break the sender: `target`, `failover`,
+`failover_max_attempts`, `failover_backoff_initial_ms`, `failover_backoff_max_ms`,
+`failover_max_duration_ms`, `max_batch_rows`, `initial_credit`,
+`buffer_pool_size`, `compression`, `compression_level`, `client_id`, `zone`.
+
+**`Side.POOL` — accept-and-ignore.** The facade applies these and "the two
+clients ignore" them, so we ignore them too rather than reject: `sender_pool_min`,
+`sender_pool_max`, `query_pool_min`, `query_pool_max`, `acquire_timeout_ms`,
+`query_close_timeout_ms`, `idle_timeout_ms`, `max_lifetime_ms`,
+`housekeeper_interval_ms`, `lazy_connect`.
+
+**`Side.RESERVED` — accept-and-ignore:** `on_internal_error`, `on_parse_error`,
+`on_schema_error`, `on_security_error`, `on_server_error`, `on_write_error`.
 
 **Reject:** everything else. Unknown-key rejection is required, which is exactly
-why both ignore-lists must be explicit rather than a catch-all. Java implements
+why the ignore-lists must be explicit rather than a catch-all. Java implements
 this the same way and comments that "forward-compat is via the spec, not silent
 ignore".
+
+**There is no `zstd` configuration key.** `zstd` is an enum *value* of the
+egress-side `compression` key (`zstd` | `raw` | `auto`). Ingest-side zstd is
+therefore purely a handshake negotiation (9.2) with no connect-string control —
+do not invent a key for it.
 
 ### 9.1 Defaults differ from ILP — do not inherit the ILP ones
 
@@ -591,7 +630,9 @@ transports (whose auto-flush row default is far higher):
 | `auth_timeout_ms` | 15,000 |
 | background connect timeout | 15,000 ms |
 | `max_frame_rejections` | 4 |
+| `poison_min_escalation_window_millis` | 5,000 |
 | `sf_append_deadline_millis` | 30,000 |
+| `reconnect_max_backoff_millis` | 5,000 |
 
 `auto_flush_bytes` must additionally be clamped to the server-advertised
 `X-QWP-Max-Batch-Size` (default 16 MiB) once the handshake completes.
@@ -672,6 +713,16 @@ could actually use the feature.
   no retention, so an unacked frame lost to a disconnect is lost. PRs 3–9 must
   document this in-tree and the feature must not be announced as
   production-ready until PR 10 lands.
+- **Config-key ownership cannot be guessed.** `ConfigSchema` assigns every key a
+  `Side`, and several ingest-sounding keys (`max_batch_rows`, `initial_credit`,
+  `compression`, `client_id`) are `Side.EGRESS`. Port the registry as data with
+  its sides intact, and add a guard test asserting our classification matches
+  Java's key-for-key, rather than re-deriving it from key names.
+- **Two-condition escalations.** Both the poison detector and the catch-up cap
+  gap require a strike count **and** a wall-clock dwell. Implementing the count
+  alone turns brief outages into producer-fatal terminals. The mock-server tests
+  must include a "4 strikes inside the dwell window" case that asserts *no*
+  escalation.
 - **Slot-lock emulation.** `O_EXCL` + pid/boot-id is weaker than `flock`, which
   the kernel releases on hard exit. A wrong liveness probe either strands data
   (too conservative) or races two processes onto one slot (too aggressive). This
