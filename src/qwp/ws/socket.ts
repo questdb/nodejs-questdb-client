@@ -12,18 +12,33 @@ export interface QwpWebSocketOptions {
   authorization?: string;
   rejectUnauthorized?: boolean;
   ca?: Buffer | Buffer[];
+  /** Inbound binary payloads (response frames) are handed here. */
+  onBinary?: (payload: Buffer) => void;
+  /** Fires once when the connection is dropped or closed externally. */
+  onClose?: () => void;
 }
 
 export class QwpWebSocket {
   private readonly socket: Socket;
   private readonly parser = new FrameParser();
   private closed = false;
+  private readonly onBinary?: (payload: Buffer) => void;
+  private readonly onClose?: () => void;
   readonly maxBatchSize?: number;
 
-  private constructor(socket: Socket, maxBatchSize?: number) {
+  private constructor(
+    socket: Socket,
+    maxBatchSize?: number,
+    onBinary?: (payload: Buffer) => void,
+    onClose?: () => void,
+  ) {
     this.socket = socket;
     this.maxBatchSize = maxBatchSize;
+    this.onBinary = onBinary;
+    this.onClose = onClose;
     this.socket.on("data", (chunk: Buffer) => this.onData(chunk));
+    this.socket.on("close", () => this.handleClosed());
+    this.socket.on("error", () => this.handleClosed());
   }
 
   static connect(opts: QwpWebSocketOptions): Promise<QwpWebSocket> {
@@ -55,7 +70,12 @@ export class QwpWebSocket {
             if (res.accept !== computeAccept(key)) {
               throw new Error("websocket: Sec-WebSocket-Accept mismatch");
             }
-            const ws = new QwpWebSocket(socket, res.maxBatchSize);
+            const ws = new QwpWebSocket(
+              socket,
+              res.maxBatchSize,
+              opts.onBinary,
+              opts.onClose,
+            );
             if (res.leftover.length > 0) ws.onData(res.leftover);
             resolve(ws);
           } catch (e) {
@@ -82,9 +102,12 @@ export class QwpWebSocket {
             this.socket.write(encodeClientFrame(OPCODE.CLOSE, m.payload));
             this.socket.end();
           }
+          this.onClose?.();
+          break;
+        case OPCODE.BINARY:
+          this.onBinary?.(m.payload);
           break;
         default:
-          // Response frames are decoded in a later plan (ACK handling).
           break;
       }
     }
@@ -97,6 +120,15 @@ export class QwpWebSocket {
       const frame = encodeClientFrame(OPCODE.BINARY, payload);
       this.socket.write(frame, (err) => (err ? reject(err) : resolve()));
     });
+  }
+
+  private handleClosed(): void {
+    // Fires on external drop (server teardown / socket error) OR on a remote
+    // CLOSE handshake. Our own close() sets `closed` first, so it is excluded
+    // and the transport is never told a graceful shutdown was a failure.
+    if (this.closed) return;
+    this.closed = true;
+    this.onClose?.();
   }
 
   close(): Promise<void> {
