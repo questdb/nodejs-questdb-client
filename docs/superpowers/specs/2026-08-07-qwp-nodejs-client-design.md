@@ -335,11 +335,23 @@ They share one delivery contract that must survive the port:
   dispatcher thread so a slow handler cannot stall publishing or reconnect. Node
   has no such thread, so callbacks must be dispatched via a queue drained on a
   `setImmediate`-style tick — never called inline from the socket handler.
-- **Bounded inbox, surplus dropped.** Capacity comes from `error_inbox_capacity`
-  and `connection_listener_inbox_capacity` (minimum **16**), and drops are
-  counted and readable. Without the bound, a slow user callback becomes unbounded
-  memory growth.
+- **Bounded inbox that drops the OLDEST.** Capacity is `error_inbox_capacity` /
+  `connection_listener_inbox_capacity`, **default 256**, minimum **16**. When
+  full, the producer drops the **head** to admit the new entry — it never
+  blocks, spins, or rejects the newcomer. Drop-newest is the intuitive
+  implementation and is **wrong**: watermarks are monotonic, so the newest entry
+  is always the most informative, and dropping the oldest *compresses*
+  information instead of losing it. This needs a deque, not a plain queue.
+  Drops are counted and readable so a non-zero count tells an operator the
+  handler is too slow.
+- **Started lazily**, on first delivery, so a workload that never errors pays
+  nothing. In Node that means not creating the dispatch machinery until the
+  first notification.
+- **Handlers are swappable after connect**, deliberately — installing one is not
+  a pre-connect-only concern.
 - **Handler exceptions are caught and logged**; the sender keeps running.
+- **Close drains** remaining entries under a short deadline (100 ms in Java)
+  rather than discarding them.
 - **Success connection events fire on every transition; failure events may be
   coalesced** under inbox pressure. `AUTH_FAILED` fires *before* the
   corresponding error is observable on the producer side.
@@ -1244,6 +1256,14 @@ an error instance the user already caught from an earlier call. Java snapshots t
 already-surfaced error once, precisely so a terminal latched between two reads
 cannot be misattributed as user-owned and silently dropped.
 
+The suppression test is narrower than it looks, and getting it wrong disables the
+safety net. Java tracks **two** facts: whether a custom handler ever received
+*any* error, and whether it received **the** terminal error — the exact one the
+I/O loop latched. `close()` consults only the second. Using the first would let a
+routine `RETRIABLE` rejection delivered minutes earlier suppress the close-time
+report of a later, genuinely unsurfaced `TERMINAL` error. "Any error ever" is too
+coarse a signal to gate this on.
+
 Deferred commits interact here: frames above the last commit-bearing
 (non-`DEFER_COMMIT`) FSN belong to a transaction whose commit was never
 published, so the server will never ACK them. Close-time drain must target the
@@ -1352,6 +1372,7 @@ not have yet:
 | `reconnect_max_duration_millis` | 300,000 |
 | `catch_up_cap_gap_min_escalation_window_millis` | 300,000 |
 | segment manager poll tick | 1 ms |
+| `error_inbox_capacity` / `connection_listener_inbox_capacity` | 256 (minimum 16) |
 | catch-up packing limit when cap unadvertised | 64 KiB |
 | max catch-up cap-gap attempts (orphan drainer only) | 16 |
 
@@ -1458,6 +1479,10 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **Notification inbox dropping the wrong end.** Drop-newest is the intuitive
+  bounded-queue policy and inverts the intent (4.2): under load the handler would
+  keep stale entries and discard the current state. Tests must fill the inbox and
+  assert the *newest* notification survives.
 - **Decimal scale mis-ported as lock-and-reject.** Java *rescales* to the
   column's scale and only throws on precision loss or capacity overflow (6.5.3).
   A lock-and-reject port rejects data Java accepts, and the asymmetry is
