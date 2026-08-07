@@ -185,6 +185,25 @@ class Sender {
    * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send, and it was sent successfully.
    */
   async flush(): Promise<boolean> {
+    // QWP can produce several frames per flush; ILP always produces one.
+    const buf = this.buffer as unknown as {
+      sealFrames?: (cap: number) => Buffer[];
+    };
+    const tx = this.transport as unknown as {
+      sendFrames?: (f: Buffer[]) => Promise<boolean>;
+      maxBatchSize?: number;
+    };
+    if (buf.sealFrames && tx.sendFrames) {
+      const frames = buf.sealFrames(
+        tx.maxBatchSize ?? Number.MAX_SAFE_INTEGER,
+      );
+      if (frames.length === 0) return false;
+      this.log("debug", `Flushing ${frames.length} QWP frame(s)`);
+      this.resetAutoFlush();
+      await tx.sendFrames(frames);
+      return true;
+    }
+
     const dataToSend: Buffer = this.buffer.toBufferNew();
     if (!dataToSend) {
       return false; // Nothing to send

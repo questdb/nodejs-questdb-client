@@ -39,6 +39,20 @@ export class QwpTransport implements SenderTransport {
     return true;
   }
 
+  /** Sends each frame as its own WebSocket binary message. */
+  async sendFrames(frames: Buffer[]): Promise<boolean> {
+    if (!this.ws) throw new Error("QWP transport is not connected");
+    for (const f of frames) {
+      await this.ws.sendBinary(f);
+    }
+    return true;
+  }
+
+  /** Server-advertised cap, or a conservative default before the handshake. */
+  get maxBatchSize(): number {
+    return this.ws?.maxBatchSize ?? 16 * 1024 * 1024;
+  }
+
   async close(): Promise<void> {
     await this.ws?.close();
     this.ws = undefined;

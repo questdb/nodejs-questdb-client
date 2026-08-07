@@ -94,12 +94,26 @@ export class QwpBuffer implements SenderBuffer {
     this.current = undefined;
   }
 
-  toBufferNew(): Buffer | null {
+  /**
+   * Seals the buffered rows into one or more frames. A flush produces more
+   * than one frame only when the encoded batch exceeds maxBatchSize (spec 5.1);
+   * splitting itself lands in Task 9.
+   */
+  sealFrames(_maxBatchSize: number): Buffer[] {
     const dirty = this.tables.filter((t) => t.rowCount > 0);
-    if (dirty.length === 0) return null;
+    if (dirty.length === 0) return [];
     const frame = encodeFrame(dirty);
     this.reset();
-    return frame;
+    return [frame];
+  }
+
+  toBufferNew(): Buffer | null {
+    const frames = this.sealFrames(Number.MAX_SAFE_INTEGER);
+    if (frames.length === 0) return null;
+    if (frames.length > 1) {
+      throw new Error("QWP produced multiple frames; use sealFrames()");
+    }
+    return frames[0];
   }
 
   toBufferView(): Buffer {
