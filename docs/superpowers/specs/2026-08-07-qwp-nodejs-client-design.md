@@ -1372,6 +1372,42 @@ mapping-plus-fd barrier; only the latter is a portable power-loss barrier, so
 the Node port implements the `syncPublished()` semantics (write + `fdatasync`)
 and does not reproduce the legacy path.
 
+**Recovering a segment: finding where valid frames end.** This is how §8.1.1's
+"frame count is derived by scanning" actually works, and it is more careful than
+a scan-until-garbage loop.
+
+- **Read, don't map, while scanning.** Recovery walks frames through *positioned
+  reads* and only maps the file once the scan has validated it. Mapping first
+  would let a sparse or unbacked page fault the process. The file length is
+  checked before the scan, after it, and again after mapping; a short read or a
+  size change aborts recovery as an operational failure. The caller must keep
+  concurrent writers off the file throughout — no mapping-based implementation
+  can stay safe against uncoordinated mutation after the final check.
+- **The tail is the first bad CRC**, or the first frame whose declared length
+  runs past the file end. Both cursors position at the **start** of that frame,
+  so the segment resumes appending over it.
+- **Distinguish a torn tail from a clean partial fill.** Non-zero bytes after
+  the last valid frame mean a write was attempted and failed — warn and report
+  the byte count. A writer that simply never wrote past the last valid frame
+  reports zero and logs nothing.
+- **Do not destroy the residue during the scan.** After a *mid-file* tear the
+  suffix can still contain frames with valid CRCs — potentially the only
+  surviving copy of real payloads. Whether it may be zeroed is a chain-level
+  decision the segment cannot make alone, so sanitisation happens only after the
+  whole chain validates, and the justification differs by role:
+  - a **sealed** segment's suffix is zeroed on **proof** — frame accounting came
+    out complete, so the residue cannot hold a replayable frame. A tear that
+    actually cost frames **fails closed** instead, leaving every byte on disk for
+    operator extraction;
+  - the **resumed active** segment's tail is zeroed by **policy** — past a
+    mid-file tear it may hold valid-CRC frames of genuinely unacked payloads, but
+    replay can never reach them because the FSN sequence breaks at the tear, and
+    leaving them risks resurrecting stale frames on a later reseal.
+
+The asymmetry is the point: proof where proof is available, policy where it is
+not, and fail-closed rather than silently discarding bytes that might be the only
+copy.
+
 ### 8.1.6 Persisted symbol dictionary — load-bearing, not an optimisation
 
 `<slot>/.symbol-dict` (`PersistedSymbolDict`) is the component most easily
@@ -1932,7 +1968,12 @@ Four tiers, all four required.
    so the assertion is "every row present", not "every row once", and a
    duplicate must not fail the test. Plus the abandonment path: corrupt a slot,
    assert it is quarantined with `quarantinedPath` set, `DATA_LOSS` /
-   `ABANDONED` is delivered, and the sender keeps running. Plus the liveness
+   `ABANDONED` is delivered, and the sender keeps running. Plus **torn-tail
+   recovery** (8.1.5), which needs hand-built segment files rather than a real
+   crash: a truncated final frame, a frame whose declared length overruns the
+   file, a bad CRC mid-file with valid frames *after* it, and a clean partial
+   fill — asserting the first three recover to the last valid frame and that only
+   the clean fill reports zero torn bytes. Plus the liveness
    floor (8.1.3): a slot whose side files alone approach `sf_max_total_bytes`
    must still accept writes.
 
@@ -2017,6 +2058,11 @@ could actually use the feature.
   oversized one after a cancelled row or an empty flush. Java hit this; the
   golden vectors must include a commit frame emitted after `cancelRow` and after
   an empty flush.
+- **Zeroing a torn tail during the scan.** After a mid-file tear the residue can
+  hold valid-CRC frames that are the only surviving copy of real payloads
+  (8.1.5). Sanitising before the chain validates destroys them, and the loss is
+  invisible — the recovered ring looks consistent. Sanitisation must wait for
+  chain validation and fail closed when accounting comes out short.
 - **FSNs restarting at zero on recovery.** They derive from the segment chain's
   `baseSeq`, not a process-local counter (8.1.1), so a recovered ring must
   continue the previous numbering. Reinitialising to zero makes recovered frames
