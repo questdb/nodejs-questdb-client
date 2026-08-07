@@ -459,8 +459,10 @@ down. Count alone would escalate that transient into a producer-fatal terminal.
 Implementing only the count is a correctness bug, not a simplification.
 
 The orphan drainer's symbol-dict catch-up cap gap uses the same two-condition
-shape: `MAX_CATCHUP_CAP_GAP_ATTEMPTS = 16` attempts **and**
-`catch_up_cap_gap_min_escalation_window_millis` of dwell.
+shape — `MAX_CATCHUP_CAP_GAP_ATTEMPTS = 16` attempts **and**
+`catch_up_cap_gap_min_escalation_window_millis` (300,000) of dwell — for the
+same stated reason: a strike count measures "how many times did we look", not
+"how long has this been true". See 7.5.
 
 Below the threshold a `RETRIABLE` recycle is **paced**: the server is reachable
 (it just answered), so the failed-connect backoff never engages. The recycle
@@ -469,7 +471,50 @@ initial, doubling per consecutive strike against the same frame, capped, plus
 jitter. A NACK sequence that is making progress (a different frame each time)
 resets to the initial dose.
 
-### 7.5 Backpressure
+### 7.5 Reconnect requires a symbol-dictionary catch-up
+
+The delta symbol dictionary is **connection-scoped on the server**. After a
+reconnect the fresh server's dictionary is empty, while every surviving frame in
+the SF log references ids assigned on the old connection. Replaying data frames
+directly would earn `STATUS_DICTIONARY_GAP` immediately.
+
+So on every reconnect, before replaying any data frame, the send loop emits a
+**dictionary catch-up frame** re-registering the dictionary from id 0. This is
+the mechanism behind 7.3's "`DICTIONARY_GAP` → re-register and replay"; the spec
+previously named the outcome without naming the mechanism, which is not
+implementable.
+
+Chunking rules:
+
+- The catch-up is packed against the server's advertised `X-QWP-Max-Batch-Size`.
+- **"Not advertised" is not "unbounded."** If the server omits the header (older
+  build, or a derived cap that collapsed to zero), pack against
+  `UNCAPPED_CATCHUP_PACKING_LIMIT = 64 KiB` — deliberately well below the 128 KiB
+  default receive buffer. The transport still closes anything larger than the
+  receive buffer with WS 1009, and a catch-up-only close is deliberately
+  non-terminal, so an unchunked catch-up would reconnect into the identical
+  oversized frame forever.
+- The packing limit bounds **multi-entry** packing only. A single oversized entry
+  is measured against a separate, more generous limit, so an entry that already
+  shipped inside a data frame is never reclassified as unsendable.
+
+**Cap gap.** If a catch-up reaches a fresh server and finds a single entry too
+large for that server's cap, that is a cap-gap attempt. A homogeneous cluster
+never trips it — an entry that fit its data frame under a cap always fits its
+bare catch-up frame under the same cap — so it only arises in a heterogeneous or
+rolling-cap cluster after failover to a smaller-cap node.
+
+The asymmetry matters: **a foreground sender retries forever; only an orphan
+drainer may latch a terminal**, after `MAX_CATCHUP_CAP_GAP_ATTEMPTS = 16`
+consecutive cap gaps *and* `catch_up_cap_gap_min_escalation_window_millis`
+(default **300,000**, i.e. 5 min) of dwell. The counter increments *only* when a
+node was reached and an entry was oversized. A successful catch-up ends the
+episode, as does any unrelated reconnect state (connect refusal, catch-up send
+failure, upgrade or role rejection) — otherwise unrelated downtime would count
+toward the dwell. A cap-gap exception itself does *not* reset the episode, so
+consecutive small-cap nodes still accumulate.
+
+### 7.6 Backpressure
 
 The one structural difference from Java: Java spin-parks the producer thread. We
 `await` a promise resolved either by ACK-driven trim or by `socket.on('drain')`,
@@ -565,6 +610,28 @@ Rules that must survive the port:
   *not* a host-power-loss guarantee.
 - **`open` never destroys it.** Only a fresh start truncates, via `openClean`,
   and a failed truncation must refuse the slot outright rather than proceed.
+
+**Recovery replay must not de-duplicate.** Rebuilding the in-memory dictionary
+from `.symbol-dict` appends every entry unconditionally at the next sequential
+id (Java's `addRecoveredSymbol`, deliberately distinct from `getOrAddSymbol`).
+The persisted file, the on-wire delta, and the reconnect catch-up mirror all key
+on entry **position**, never on the string. If recovery collapsed two entries
+that decode to the same characters, the rebuilt dictionary would be *shorter*
+than the persisted entry count, desyncing the producer's delta baseline from the
+catch-up mirror and silently misattributing every later symbol. For the same
+reason, recovery replay is deliberately **not** capped at
+`MAX_SYMBOL_DICTIONARY_SIZE` — those entries were already admitted under the cap
+when first written. A reverse lookup may keep the highest id for a colliding
+string; both ids encode to the same bytes, so that is harmless.
+
+The colliding case in Java is malformed lone UTF-16 surrogates, which its UTF-8
+encoder maps to `'?'`. **This is a live hazard in Node, not a theoretical one:**
+JavaScript strings are UTF-16 and a lone surrogate (`"\uD800"`) is trivially
+reachable, but Node's `Buffer.from(s, "utf8")` maps it to U+FFFD (`EF BF BD`),
+not `'?'`. Node-internal consistency is preserved because everything is
+position-keyed, but **Java and Node will emit different bytes for the same input
+string**, so lone surrogates must be excluded from byte-equality golden vectors
+and covered by a separate Node-only round-trip test.
 
 ### 8.2 Durability — two crash-safe boundary records
 
@@ -735,7 +802,12 @@ transports (whose auto-flush row default is far higher):
 | `max_frame_rejections` | 4 |
 | `poison_min_escalation_window_millis` | 5,000 |
 | `sf_append_deadline_millis` | 30,000 |
+| `reconnect_initial_backoff_millis` | 100 |
 | `reconnect_max_backoff_millis` | 5,000 |
+| `reconnect_max_duration_millis` | 300,000 |
+| `catch_up_cap_gap_min_escalation_window_millis` | 300,000 |
+| catch-up packing limit when cap unadvertised | 64 KiB |
+| max catch-up cap-gap attempts (orphan drainer only) | 16 |
 
 `auto_flush_bytes` must additionally be clamped to the server-advertised
 `X-QWP-Max-Batch-Size` (default 16 MiB) once the handshake completes.
@@ -793,7 +865,7 @@ could actually use the feature.
 | 6 | Delta symbol dictionary + `DICTIONARY_GAP` handling | golden + e2e |
 | 7 | Gorilla timestamps + raw fallback | golden + e2e |
 | 8 | defer-commit + zstd (feature-detected) | e2e both on and off |
-| 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, poison detector | mock server |
+| 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
 | 10 | Memory-mode ring — makes publish semantics safe | mock + e2e |
 | 11 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
 | 12 | `.symbol-dict` persistence + delta replay after recovery | crash tests |
