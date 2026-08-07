@@ -11,15 +11,44 @@ import { AckTracker } from "./ackTracker";
 import { Category, Policy, SenderError, classify, defaultPolicyFor } from "./errors";
 import { HostTracker, HostState } from "./hostTracker";
 import { Endpoint, parseAddrList } from "./endpoints";
+import { Dispatcher } from "./dispatcher";
 
 const QWP_DEFAULT_AUTO_FLUSH_ROWS = 1000; // spec 9.1
 const CLIENT_ID = "nodejs/1.0.0"; // protocol client version, not the package version (spec 6.5)
+
+export enum ConnectMode {
+  OFF = "OFF",
+  SYNC = "SYNC",
+}
+
+export interface ConnectionEvent {
+  type: "connected" | "disconnected";
+  endpoint?: Endpoint;
+  reason?: string;
+}
+
+/**
+ * The default is DERIVED: setting any reconnect_* key implicitly upgrades
+ * construction from non-connecting to connecting-with-retry, because those
+ * knobs read as a general retry budget while the underlying path governs only
+ * reconnects from an established connection (spec 4.3).
+ */
+export function deriveConnectMode(o: SenderOptions): ConnectMode {
+  const anyReconnect =
+    o.reconnect_max_duration_millis !== undefined ||
+    o.reconnect_initial_backoff_millis !== undefined ||
+    o.reconnect_max_backoff_millis !== undefined;
+  return anyReconnect ? ConnectMode.SYNC : ConnectMode.OFF;
+}
 
 export class QwpTransport implements SenderTransport {
   private readonly options: SenderOptions;
   private ws?: QwpWebSocket;
   private readonly acks = new AckTracker();
-  private errorHandler?: (e: SenderError) => void;
+  private readonly errors: Dispatcher<SenderError>;
+  private readonly events: Dispatcher<ConnectionEvent>;
+  private errorConsumer?: (e: SenderError) => void;
+  private eventConsumer?: (e: ConnectionEvent) => void;
   private inFlight = 0;
   private endpoints: Endpoint[] = [];
   private tracker!: HostTracker;
@@ -29,10 +58,22 @@ export class QwpTransport implements SenderTransport {
 
   constructor(options: SenderOptions) {
     this.options = options;
+    this.errors = new Dispatcher(options.error_inbox_capacity ?? 256, (e) =>
+      this.errorConsumer?.(e),
+    );
+    // The connection-event inbox is a SEPARATE drop-oldest inbox at capacity
+    // 64 (spec 9.1): error and connection notifications must not share a fence.
+    this.events = new Dispatcher(options.connection_listener_inbox_capacity ?? 64, (e) =>
+      this.eventConsumer?.(e),
+    );
   }
 
   onError(h: (e: SenderError) => void): void {
-    this.errorHandler = h;
+    this.errorConsumer = h;
+  }
+
+  onConnectionEvent(h: (e: ConnectionEvent) => void): void {
+    this.eventConsumer = h;
   }
 
   get ackedFsn(): number {
@@ -40,11 +81,13 @@ export class QwpTransport implements SenderTransport {
   }
 
   private emit(e: SenderError): void {
-    try {
-      this.errorHandler?.(e);
-    } catch {
-      /* a handler must never break the sender (spec 4.2) */
-    }
+    // Delivered async via the drop-oldest inbox; a handler must never break the
+    // sender (spec 4.2).
+    this.errors.offer(e);
+  }
+
+  private emitConnectionEvent(e: ConnectionEvent): void {
+    this.events.offer(e);
   }
 
   async connect(): Promise<boolean> {
@@ -98,6 +141,7 @@ export class QwpTransport implements SenderTransport {
         this.ws = await QwpWebSocket.connect(this.wsOptions(ep));
         this.tracker.record(idx, HostState.HEALTHY);
         this.current = ep;
+        this.emitConnectionEvent({ type: "connected", endpoint: ep });
         this.acks.onConnected(this.acks.acked + 1);
         await this.sendDictCatchUp();
         return true;
@@ -192,6 +236,7 @@ export class QwpTransport implements SenderTransport {
       );
       this.inFlight = 0;
     }
+    this.emitConnectionEvent({ type: "disconnected", endpoint: this.current });
   }
 
   /** Server-advertised cap, or a conservative default before the handshake. */

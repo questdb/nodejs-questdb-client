@@ -1,8 +1,9 @@
 // @ts-check
 import { log, Logger } from "./logging";
-import { SenderOptions, ExtraOptions } from "./options";
+import { SenderOptions, ExtraOptions, WS, WSS } from "./options";
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
+import { deriveConnectMode, ConnectMode } from "./qwp/transport";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
@@ -117,6 +118,18 @@ class Sender {
       : DEFAULT_AUTO_FLUSH_INTERVAL;
 
     this.reset();
+
+    // Derived connect mode (spec 4.3): any reconnect_* key upgrades construction
+    // from non-connecting to connecting-with-retry. Fire-and-forget because
+    // construction is synchronous; an eventual fatal failure surfaces through
+    // the error dispatcher rather than as an unhandled rejection.
+    if (options.protocol === WS || options.protocol === WSS) {
+      if (deriveConnectMode(options) === ConnectMode.SYNC) {
+        this.connect().catch((e) =>
+          this.log("warn", `initial QWP connect failed: ${(e as Error).message}`),
+        );
+      }
+    }
   }
 
   /**
