@@ -25,6 +25,11 @@ Each of these is a separate future spec:
 - multi-host HA failover (`failover_*` keys, roles and zones);
 - the UDP sender.
 
+Two Java classes look ingest-relevant and are not — do not port them here:
+`QwpServerInfo` / `QwpServerInfoDecoder` decode a `SERVER_INFO` frame sent by a
+QWP **egress** server as its first frame after the upgrade; the ingest path never
+receives one. `QwpBatchBuffer` is likewise egress (`RESULT_BATCH` decode).
+
 ### 1.2 Single endpoint — and what that degrades
 
 Because multi-host failover is out of scope, this stack connects to **one**
@@ -274,6 +279,9 @@ same value a successful flush leaves behind, and read as an empty delta) and
 1.3.7's "Return never-shipped symbol ids on reset()" does, and omitting it
 produces a permanently wedged sender rather than a visible error.
 
+`reset()` is also the documented recovery from a batch that fits no split (5.1):
+it discards the retained oversized batch and leaves the sender usable.
+
 ### 4.1.1 A throwing column setter must roll back the row
 
 This is a columnar-specific invariant with no ILP analogue, and it is easy to
@@ -390,6 +398,23 @@ snapshot taken at the top of the flush; if they re-read it independently, a
 failover *between* the reads sizes frames against different caps and breaks the
 all-or-nothing guarantee. In Node every `await` inside the flush is exactly that
 failover window, so this must be a local variable, not a field read.
+
+**A batch that fits no split needs its own error type.** When a batch cannot fit
+the cap *however* it is divided, Java raises a distinct
+`BatchTooLargeForCapException` rather than a generic error, and the distinction
+is load-bearing rather than cosmetic:
+
+- the batch is **retained**, so it can still go out later against a larger-cap
+  node;
+- `close()` must **recognise the type and discard the batch**, because letting it
+  escape would skip commit and drain and abandon every row an earlier successful
+  flush already published (8.3.1);
+- `reset()` discards the retained batch and leaves the sender usable — the
+  non-destructive recovery;
+- Java notes explicitly that matching on the message text instead would silently
+  swallow unrelated failures.
+
+So this must be a real error class in the Node port, not a string check.
 
 **The split is deliberately not atomic across frames.** A publish failure at
 frame `k > 1` (backpressure deadline, recycle timeout) leaves frames `1..k-1` on
@@ -664,6 +689,24 @@ The `421` rule is why §8.4 can say a transient all-replica window is never
 quarantined on a wall-clock budget: connect-time role rejects retry forever by
 design.
 
+**A successful 101 can still fail**, in two ways the above table does not cover:
+
+- **Unsupported `X-QWP-Version`.** The upgrade completed but the server
+  advertised a version outside our range. This is **transient at every layer**
+  and must never be classified as a security error: a rolling upgrade can leave
+  one node ahead of its peers. The background reconnect loop retries
+  indefinitely; a blocking initial connect consumes its retry budget and only
+  then surfaces an error. Implementing "unsupported version" as fatal — the
+  obvious reading — is backwards.
+- **Durable-ack capability gap.** `request_durable_ack=on` but the server did not
+  echo `X-QWP-Durable-Ack: enabled` (or every endpoint role-rejected, so no
+  primary was reached). This one **is terminal and fails fast**: retrying the
+  same endpoints will not turn a non-primary into a durable-ack-capable primary,
+  so it must not burn the reconnect budget.
+
+Note the asymmetry — version mismatch retries forever, durable-ack mismatch
+fails immediately — and that both arrive *after* a successful handshake.
+
 ### 6.5.2 TLS — `tls_roots` does not port directly
 
 `tls_verify` maps cleanly: `on` → default verification, `unsafe_off` →
@@ -683,6 +726,47 @@ file by its magic bytes (`0xFEEDFEED`) and fail with an explicit "JKS keystores
 are not supported by the Node client; convert to PKCS#12 or PEM" — not a parse
 error. A connect string that works against Java may therefore fail here, so this
 belongs in the README's compatibility notes, not only in this spec.
+
+### 6.5.3 Per-column accumulation rules (PR 4 / PR 5)
+
+These live in `QwpTableBuffer.ColumnBuffer` and are the substance of PRs 4 and 5.
+None are inferable from the wire format alone.
+
+**Row and column lifecycle**
+
+- **Columns are created on first sight and their type is locked.** A later value
+  of a different type for the same name throws a type-mismatch error naming both
+  types. Column count is capped at `MAX_COLUMNS_PER_TABLE` (2048) at creation.
+- **Column names** must be non-empty, pass QuestDB's valid-name check, and be
+  ≤ 127 bytes. "Too long" and "illegal characters" are *distinct* errors.
+- **Duplicate column within one row: first value wins, silently.** If a column
+  already holds a value for the in-progress row, the second write is ignored with
+  no error — matching ILP server behaviour. Detected as
+  `column.size > rowCount`.
+- **Row completion back-fills nulls.** At end-of-row every column that did not
+  receive a value this row has a null appended, so all columns stay at equal
+  length. This is the mechanism behind the null bitmap (6.2.1), and it is the
+  same invariant that a throwing setter must not break (4.1.1).
+- **Per-row size guard.** After back-filling, a row whose encoded size exceeds
+  the server batch cap throws "row too large for server batch cap". This is a
+  *per-row* check, separate from the per-frame split in 5.1 — a single row larger
+  than the cap can never be sent by any split, so it fails early rather than
+  wedging the splitter.
+
+**Type-specific rules**
+
+| Type | Rule |
+|---|---|
+| GEOHASH | Precision is 1–60 and **locked on the column's first value**; a differing precision throws. This is why the wire carries one precision varint per column (6.3). |
+| DECIMAL64/128/256 | Scale is **locked on the first value**, and a later value with a different scale is **automatically rescaled** to the column's scale — not rejected. Rescaling throws if it would lose precision, or if the result exceeds the type's capacity (e.g. "Decimal128 overflow"). |
+| BINARY | A null must be expressed via the null bitmap, never as a null value or negative length — both throw. A non-empty value with a zero pointer throws. |
+| DOUBLE_ARRAY / LONG_ARRAY | Shapes must be regular; jagged input throws "irregular array shape". Supplying more values than the declared shape throws. Total element count must fit in an int. |
+| VARCHAR / BINARY | Aggregate string data is capped at **2 GiB per batch**; the error tells the caller to flush more frequently. |
+| SYMBOL | A column may not mix global symbol ids with local dictionary values; doing so throws. This falls out of the two dictionary modes (5.2) — the mode is per-connection, so a column must not straddle it. |
+
+The decimal auto-rescale is the one most likely to be mis-ported as a simple
+lock-and-reject. It changes user-visible behaviour: writing `1.5` then `1.25` to
+a scale-1 column is an error, while `1.25` then `1.5` is not.
 
 ### 6.6 Server responses
 
@@ -1282,8 +1366,8 @@ could actually use the feature.
 | 1 | `ws/`: framing, masking, handshake, upgrade-failure classification (6.5.1), TLS mapping (6.5.2), net/tls socket | unit + mock server |
 | 2 | `protocol/`: header, varint/zigzag, LONG/DOUBLE/TIMESTAMP/SYMBOL inline | golden vectors |
 | 3 | Sender wiring: `ws://` config (4 sites, 3.5), `QwpBuffer`/`QwpTransport`, byte + interval auto-flush, cap-split (5.1) | **testcontainers e2e green** |
-| 4 | Remaining scalar types + null bitmap | golden + e2e |
-| 5 | VARCHAR/BINARY/arrays/decimals/geohash/uuid/long256/char/ipv4 | golden + e2e |
+| 4 | Remaining scalar types, null bitmap, row lifecycle rules (6.5.3) | golden + e2e |
+| 5 | VARCHAR/BINARY/arrays/decimals/geohash/uuid/long256/char/ipv4 + their per-type rules (6.5.3) | golden + e2e |
 | 6 | Symbol dictionary: full-dict mode, then delta mode + `DICTIONARY_GAP` (5.2) | golden + e2e |
 | 7 | Gorilla timestamps (6.3.2) + int32-overflow raw fallback | golden + e2e |
 | 8 | defer-commit + commit frame (5.1.1) + zstd (feature-detected) | e2e both on and off |
@@ -1327,6 +1411,10 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **Decimal scale mis-ported as lock-and-reject.** Java *rescales* to the
+  column's scale and only throws on precision loss or capacity overflow (6.5.3).
+  A lock-and-reject port rejects data Java accepts, and the asymmetry is
+  order-dependent — `1.25` after `1.5` differs from `1.5` after `1.25`.
 - **A throwing setter desynchronising the columns.** Unequal per-column lengths
   (4.1.1) corrupt every subsequent frame from that table buffer while each frame
   still looks structurally valid. Tests must throw from a setter mid-row — first
