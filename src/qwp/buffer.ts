@@ -30,6 +30,8 @@ export class QwpBuffer implements SenderBuffer {
   private rows = 0;
   private dict?: SymbolDict;
   private confirmedMaxId = -1;
+  private gorilla = true;
+  private deferCommit = false;
 
   /** Attach a connection-scoped symbol dictionary (delta mode), or undefined to stay in full-dict mode. */
   attachDict(d: SymbolDict | undefined): void {
@@ -38,6 +40,10 @@ export class QwpBuffer implements SenderBuffer {
 
   setConfirmedMaxId(id: number): void {
     this.confirmedMaxId = id;
+  }
+
+  setDeferCommit(on: boolean): void {
+    this.deferCommit = on;
   }
 
   reset(): SenderBuffer {
@@ -140,17 +146,43 @@ export class QwpBuffer implements SenderBuffer {
    * splitting itself lands in Task 9.
    */
   sealFrames(maxBatchSize: number): Buffer[] {
-    // Splitting against maxBatchSize lands in Task 9.
-    void maxBatchSize;
     const dirty = this.tables.filter((t) => t.rowCount > 0);
     if (dirty.length === 0) return [];
-    const frame = encodeFrame(dirty, {
-      gorilla: false,
+
+    const opts = {
+      gorilla: this.gorilla,
       dict: this.dict,
       confirmedMaxId: this.confirmedMaxId,
+    };
+    const combined = encodeFrame(dirty, {
+      ...opts,
+      deferCommit: this.deferCommit,
     });
+    if (combined.length <= maxBatchSize) {
+      this.reset();
+      return [combined];
+    }
+
+    // Pre-flight EVERY split frame before publishing any: discovering an
+    // oversized frame mid-publish strands the already-sent prefix and a later
+    // commit delivers a partial batch (spec 5.1).
+    const parts: Buffer[] = [];
+    for (let i = 0; i < dirty.length; i++) {
+      const isLast = i === dirty.length - 1;
+      const f = encodeFrame([dirty[i]], {
+        ...opts,
+        deferCommit: this.deferCommit ? true : !isLast,
+      });
+      if (f.length > maxBatchSize) {
+        throw new Error(
+          `batch cannot fit the server cap however it is split ` +
+            `[table=${dirty[i].name}, frameSize=${f.length}, cap=${maxBatchSize}]`,
+        );
+      }
+      parts.push(f);
+    }
     this.reset();
-    return [frame];
+    return parts;
   }
 
   toBufferNew(): Buffer | null {

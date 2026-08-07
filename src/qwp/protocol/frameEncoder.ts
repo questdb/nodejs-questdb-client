@@ -103,3 +103,20 @@ export function encodeFrame(tables: QwpTableBuffer[], opts: FrameOpts): Buffer {
   }
   return buf;
 }
+
+/**
+ * A commit carries no rows and MUST carry no symbols. The empty delta is built
+ * by construction from [baseline+1 .. baseline] — deriving the bound from batch
+ * state re-ships the whole dictionary in a frame no chunker covers (spec 5.1.1).
+ */
+export function encodeCommitFrame(
+  dict: SymbolDict | undefined,
+  baseline: number,
+): Buffer {
+  return encodeFrame([], {
+    gorilla: false,
+    dict,
+    confirmedMaxId: baseline,
+    deferCommit: false,
+  });
+}
