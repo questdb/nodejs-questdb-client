@@ -3,7 +3,7 @@ import { SenderBuffer } from "../buffer";
 import { TimestampUnit } from "../utils";
 import { QwpTableBuffer } from "./protocol/tableBuffer";
 import { encodeFrame } from "./protocol/frameEncoder";
-import { TYPE_DOUBLE, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP } from "./protocol/constants";
+import { TYPE_DOUBLE, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR } from "./protocol/constants";
 
 function toMicros(value: number | bigint, unit: TimestampUnit): bigint {
   const v = typeof value === "bigint" ? value : BigInt(Math.trunc(value));
@@ -127,8 +127,12 @@ export class QwpBuffer implements SenderBuffer {
   }
 
   // Column types arriving in a later plan — fail loudly rather than emit wrong bytes.
-  stringColumn(): SenderBuffer {
-    return unsupported("stringColumn");
+  stringColumn(name: string, value: string): SenderBuffer {
+    if (typeof value !== "string")
+      throw new Error("stringColumn accepts only string values");
+    const col = this.require().getOrCreateColumn(name, TYPE_VARCHAR);
+    if (col) col.values.push(value);
+    return this;
   }
   booleanColumn(): SenderBuffer {
     return unsupported("booleanColumn");
