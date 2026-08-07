@@ -12,7 +12,8 @@ import { SenderError, classify, defaultPolicyFor } from "./errors";
 import { HostTracker, HostState } from "./hostTracker";
 import { Endpoint, parseAddrList } from "./endpoints";
 import { Dispatcher } from "./dispatcher";
-import { SegmentRing, BACKPRESSURE_NO_SPARE, PAYLOAD_TOO_LARGE } from "./sf/ring";
+import { SfEngine } from "./sf/engine";
+import { BACKPRESSURE_NO_SPARE, PAYLOAD_TOO_LARGE } from "./sf/ring";
 
 const QWP_DEFAULT_AUTO_FLUSH_ROWS = 1000; // spec 9.1
 // Memory-mode store-and-forward defaults (spec 9.1, 9.2). The ring lives on
@@ -20,6 +21,7 @@ const QWP_DEFAULT_AUTO_FLUSH_ROWS = 1000; // spec 9.1
 const MEMORY_SEGMENT_BYTES = 4 * 1024 * 1024;
 const MEMORY_MAX_TOTAL_BYTES = 128 * 1024 * 1024;
 const SF_APPEND_DEADLINE_MILLIS = 30_000; // spec 4.4
+const DEFAULT_SENDER_ID = "default";
 const CLIENT_ID = "nodejs/1.0.0"; // protocol client version, not the package version (spec 6.5)
 
 export enum ConnectMode {
@@ -60,10 +62,7 @@ export class QwpTransport implements SenderTransport {
   private current?: Endpoint;
   private readonly dict = new SymbolDict();
   private confirmedMaxId = -1;
-  private readonly ring = new SegmentRing({
-    segmentBytes: MEMORY_SEGMENT_BYTES,
-    maxTotalBytes: MEMORY_MAX_TOTAL_BYTES,
-  });
+  private engine: SfEngine;
   /** Highest FSN sent on the current connection (wire replay start). */
   private sentUpTo = -1;
   private reconnecting = false;
@@ -71,6 +70,12 @@ export class QwpTransport implements SenderTransport {
 
   constructor(options: SenderOptions) {
     this.options = options;
+    this.engine = new SfEngine({
+      segmentBytes: options.sf_segment_bytes ?? MEMORY_SEGMENT_BYTES,
+      maxTotalBytes: options.sf_max_total_bytes ?? MEMORY_MAX_TOTAL_BYTES,
+      sfDir: options.sf_dir,
+      senderId: options.sender_id ?? DEFAULT_SENDER_ID,
+    });
     this.errors = new Dispatcher(options.error_inbox_capacity ?? 256, (e) =>
       this.errorConsumer?.(e),
     );
@@ -90,7 +95,7 @@ export class QwpTransport implements SenderTransport {
   }
 
   get ackedFsn(): number {
-    return this.ring.ackedFsn;
+    return this.engine.ackedFsn;
   }
 
   private emit(e: SenderError): void {
@@ -104,6 +109,7 @@ export class QwpTransport implements SenderTransport {
   }
 
   async connect(): Promise<boolean> {
+    await this.engine.open();
     this.endpoints = parseAddrList(this.options.addr!, 9000);
     this.tracker = new HostTracker(this.endpoints.length);
     return this.connectLoop();
@@ -156,12 +162,12 @@ export class QwpTransport implements SenderTransport {
         this.tracker.record(idx, HostState.HEALTHY);
         this.current = ep;
         this.emitConnectionEvent({ type: "connected", endpoint: ep });
-        this.acks.onConnected(this.ring.ackedFsn + 1);
+        this.acks.onConnected(this.engine.ackedFsn + 1);
         await this.sendDictCatchUp();
         // Replay frames published beyond the acked FSN (memory-mode retention):
         // after a reconnect the dictionary is re-registered first, then every
         // unacked frame is re-sent from ackedFsn + 1 (spec 7.5, 8.1.1).
-        this.sentUpTo = this.ring.ackedFsn;
+        this.sentUpTo = this.engine.ackedFsn;
         await this.drain();
         return true;
       } catch (e) {
@@ -223,7 +229,7 @@ export class QwpTransport implements SenderTransport {
     const deadline = Date.now() + SF_APPEND_DEADLINE_MILLIS;
     for (const f of frames) {
       for (;;) {
-        const fsn = this.ring.append(f);
+        const fsn = await this.engine.append(f);
         if (fsn === PAYLOAD_TOO_LARGE) {
           throw new Error(`frame does not fit a fresh segment [size=${f.length}]`);
         }
@@ -244,7 +250,7 @@ export class QwpTransport implements SenderTransport {
   /** Sends everything published beyond what the current connection has sent. */
   private async drain(): Promise<void> {
     if (!this.ws) return;
-    const pending = this.ring.framesFrom(this.sentUpTo + 1);
+    const pending = this.engine.framesFrom(this.sentUpTo + 1);
     for (const f of pending) {
       await this.ws.sendBinary(f);
       this.acks.onFrameSent();
@@ -256,7 +262,7 @@ export class QwpTransport implements SenderTransport {
     const r = decodeResponse(payload);
     if (r.status === STATUS.OK) {
       const fsn = this.acks.onAck(r.sequence);
-      if (fsn !== null) this.ring.acknowledge(fsn);
+      if (fsn !== null) this.engine.acknowledge(fsn);
       return;
     }
     if (r.status === STATUS.DURABLE_ACK) return;
@@ -300,6 +306,7 @@ export class QwpTransport implements SenderTransport {
     this.closed = true;
     await this.ws?.close();
     this.ws = undefined;
+    await this.engine.close();
   }
 
   getDefaultAutoFlushRows(): number {
