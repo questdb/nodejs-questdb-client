@@ -326,7 +326,7 @@ Java exposes three separate surfaces; the Node port mirrors all three:
 | Java | Fires on |
 |---|---|
 | `SenderErrorHandler` | rejections — carries category, policy, `fromFsn`/`toFsn`, `quarantinedPath` |
-| `SenderConnectionListener` | `CONNECTED`, `RECONNECTED`, `FAILED_OVER`, `ENDPOINT_ATTEMPT_FAILED`, `ALL_ENDPOINTS_UNREACHABLE`, `AUTH_FAILED` — two of these are never emitted single-endpoint (1.2) |
+| `SenderConnectionListener` | seven kinds: `CONNECTED`, `DISCONNECTED`, `RECONNECTED`, `FAILED_OVER`, `ENDPOINT_ATTEMPT_FAILED`, `ALL_ENDPOINTS_UNREACHABLE`, `AUTH_FAILED` — two are never emitted single-endpoint (1.2) |
 | `SenderProgressHandler` | the ACK watermark advancing |
 
 They share one delivery contract that must survive the port:
@@ -335,8 +335,10 @@ They share one delivery contract that must survive the port:
   dispatcher thread so a slow handler cannot stall publishing or reconnect. Node
   has no such thread, so callbacks must be dispatched via a queue drained on a
   `setImmediate`-style tick — never called inline from the socket handler.
-- **Bounded inbox that drops the OLDEST.** Capacity is `error_inbox_capacity` /
-  `connection_listener_inbox_capacity`, **default 256**, minimum **16**. When
+- **Bounded inbox that drops the OLDEST.** Capacities differ per dispatcher and
+  are not interchangeable: errors **256**, progress **256**, connection events
+  **64** — connection events are sparse compared with per-batch server errors.
+  The connect-string minimum is 16. When
   full, the producer drops the **head** to admit the new entry — it never
   blocks, spins, or rejects the newcomer. Drop-newest is the intuitive
   implementation and is **wrong**: watermarks are monotonic, so the newest entry
@@ -355,6 +357,13 @@ They share one delivery contract that must survive the port:
 - **Success connection events fire on every transition; failure events may be
   coalesced** under inbox pressure. `AUTH_FAILED` fires *before* the
   corresponding error is observable on the producer side.
+
+A connection event is not just a kind. It carries the host and port, the
+**previous** host and port, an attempt number, a round number, a cause, and a
+timestamp — the attempt/round pair is what makes reconnect storms diagnosable, so
+carry it even though single-endpoint (1.2) pins the round. `AUTH_FAILED`'s cause
+is the auth failure from the upgrade (6.5.1), which is how the terminal
+credential case reaches the listener before the producer-side throw.
 
 Progress-handler semantics are narrower than they look: the watermark advances
 **only on server OK frames** — a rejection never advances it — values are
@@ -1372,7 +1381,9 @@ not have yet:
 | `reconnect_max_duration_millis` | 300,000 |
 | `catch_up_cap_gap_min_escalation_window_millis` | 300,000 |
 | segment manager poll tick | 1 ms |
-| `error_inbox_capacity` / `connection_listener_inbox_capacity` | 256 (minimum 16) |
+| `error_inbox_capacity` | 256 (config minimum 16) |
+| `connection_listener_inbox_capacity` | **64** (config minimum 16) |
+| progress inbox capacity | 256 |
 | catch-up packing limit when cap unadvertised | 64 KiB |
 | max catch-up cap-gap attempts (orphan drainer only) | 16 |
 
