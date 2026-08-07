@@ -244,6 +244,34 @@ its byte stream. Either write data frames as a single `socket.write()` call, or
 queue control frames behind the in-flight frame — never both writers into one
 partially-written frame.
 
+#### 3.2.2 Frame parsing — what PR 1 actually needs
+
+"Never fragmented" (3.2) describes what we **send**. It does not describe what we
+must **accept**, and reading it that way produces a client that fails on valid
+traffic.
+
+- **Inbound fragmentation must be supported.** Java maintains a dedicated
+  fragment buffer and accumulates continuation frames into it, growing by
+  doubling and capped at the maximum receive size; exceeding that cap is an
+  error, not a silent truncation. A server response or an intermediary may
+  fragment even though our data frames never do.
+- **Parsing is incremental.** TCP delivers arbitrary byte boundaries, so the
+  parser is a state machine — awaiting header, awaiting payload, complete,
+  error — resumed across reads. In Node that means accumulating across `data`
+  events and never assuming one event is one frame.
+- **Receive buffer**: 64 KiB default, grown when the write position comes within
+  1 KiB of the end, capped at a configured maximum.
+- **Control frames** carry at most **125** payload bytes (RFC 6455) and must
+  never be fragmented.
+- **RSV bits must be zero** — we negotiate no extensions, so any set RSV bit is a
+  protocol error.
+- **Server→client frames are never masked** (RFC 6455); a masked inbound frame is
+  a protocol error. Only our outbound frames are masked (3.2.1).
+- Java exposes a strict mode rejecting **non-minimal length encodings** and
+  leaves it **off** by default. Match that: accept a non-minimal length on
+  receive rather than failing a connection over it, but always *emit* minimal
+  lengths.
+
 ### 3.3 Why hand-roll the WebSocket layer
 
 Both existing reference implementations hand-roll it, and the Rust client
@@ -1114,11 +1142,12 @@ Chunking rules:
 - The catch-up is packed against the server's advertised `X-QWP-Max-Batch-Size`.
 - **"Not advertised" is not "unbounded."** If the server omits the header (older
   build, or a derived cap that collapsed to zero), pack against
-  `UNCAPPED_CATCHUP_PACKING_LIMIT = 64 KiB` — deliberately well below the 128 KiB
-  default receive buffer. The transport still closes anything larger than the
-  receive buffer with WS 1009, and a catch-up-only close is deliberately
-  non-terminal, so an unchunked catch-up would reconnect into the identical
-  oversized frame forever.
+  `UNCAPPED_CATCHUP_PACKING_LIMIT = 64 KiB` — deliberately well below the
+  **server's** 128 KiB default receive buffer (not to be confused with the
+  *client's* 64 KiB one in 3.2.2). The transport still closes anything larger
+  than the server's receive buffer with WS 1009, and a catch-up-only close is
+  deliberately non-terminal, so an unchunked catch-up would reconnect into the
+  identical oversized frame forever.
 - The packing limit bounds **multi-entry** packing only. A single oversized entry
   is measured against a separate, more generous limit, so an entry that already
   shipped inside a data frame is never reclassified as unsendable.
@@ -1822,7 +1851,7 @@ could actually use the feature.
 
 | # | PR | Gate |
 |---|---|---|
-| 1 | `ws/`: framing, masking, handshake, upgrade-failure classification (6.5.1), TLS mapping (6.5.2), net/tls socket | unit + mock server |
+| 1 | `ws/`: incremental framing + inbound defragmentation (3.2.2), control frames (3.2.1), masking, handshake, upgrade-failure classification (6.5.1), TLS mapping (6.5.2), net/tls socket | unit + mock server |
 | 2 | `protocol/`: header, varint/zigzag, LONG/DOUBLE/TIMESTAMP/SYMBOL inline | golden vectors |
 | 3 | Sender wiring: `ws://` config (4 sites, 3.5), `QwpBuffer`/`QwpTransport`, byte + interval auto-flush, cap-split (5.1) | **testcontainers e2e green** |
 | 4 | Remaining scalar types, null bitmap, row lifecycle rules (6.5.3) | golden + e2e |
@@ -1899,6 +1928,11 @@ could actually use the feature.
   drainer silently steal endpoints from the foreground sender's sweep, which
   presents as unexplained `ALL_ENDPOINTS_UNREACHABLE` under load rather than as
   an obvious bug.
+- **Reading "never fragmented" as an inbound rule.** It describes what we send;
+  the client must still defragment inbound continuation frames (3.2.2). A parser
+  that rejects them fails on valid traffic, and only under whatever conditions
+  cause a peer or intermediary to fragment — so it passes local tests and breaks
+  in someone's deployment.
 - **Inverted upgrade-failure retry.** Treating `401`/`403` as retriable spins
   forever against a server that will never accept the credentials; treating
   `421` as terminal kills a sender during an ordinary failover window (6.5.1).
