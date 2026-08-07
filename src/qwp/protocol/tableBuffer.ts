@@ -10,6 +10,8 @@ export interface ColumnBuffer {
   nulls: boolean[];
   /** Rows accounted for so far, including nulls. */
   size: number;
+  geohashPrecision?: number;
+  decimalScale?: number;
 }
 
 export class QwpTableBuffer {

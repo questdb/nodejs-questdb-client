@@ -99,7 +99,9 @@ export class QwpBuffer implements SenderBuffer {
    * than one frame only when the encoded batch exceeds maxBatchSize (spec 5.1);
    * splitting itself lands in Task 9.
    */
-  sealFrames(_maxBatchSize: number): Buffer[] {
+  sealFrames(maxBatchSize: number): Buffer[] {
+    // Splitting against maxBatchSize lands in Task 9.
+    void maxBatchSize;
     const dirty = this.tables.filter((t) => t.rowCount > 0);
     if (dirty.length === 0) return [];
     const frame = encodeFrame(dirty);
