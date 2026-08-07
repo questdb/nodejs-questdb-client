@@ -5,7 +5,7 @@ export const BOUNDARY_FILE_SIZE = 8192;
 const RECORD_SIZE = 64;
 const SLOT_STRIDE = 4096;
 const CRC_OFFSET = 60;
-const MAGIC = 0x314b5741; // 'AKW1'
+const MAGIC = 0x31574b41; // 'AKW1' (LE: 41 4b 57 31)
 
 export interface Boundary {
   generation: number;

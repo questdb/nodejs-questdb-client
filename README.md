@@ -44,10 +44,14 @@ senders do, and each one can surprise a user who assumes otherwise:
   `DEDUP` table if you need idempotence.
 - An acknowledgement means server-side **commit**, not object-store durability.
   Set `request_durable_ack=on` if durability gates downstream work.
-- `sf_dir` enables on-disk buffering but **not** power-loss durability on its
-  own — add `sf_durability=periodic`.
-- `drain_orphans` is **off** by default, so a crashed process's buffered data is
-  not replayed automatically.
+- `sf_dir` alone is **not** power-loss durability. The default
+  `sf_durability=memory` never fsyncs, so bytes survive a *process* crash but
+  not a power loss. `sf_durability=periodic` is accepted but its background
+  checkpoint cadence is **not yet implemented** — the only wired durability is
+  `memory`.
+- `drain_orphans` is **off** by default, and is **not yet implemented**: a
+  crashed process's buffered data is not replayed automatically, and enabling
+  the option fails at construction.
 - `tls_roots` accepts PEM or PKCS#12. **JKS keystores are not supported** by
   Node; convert them first.
 

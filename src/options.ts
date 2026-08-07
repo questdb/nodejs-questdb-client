@@ -660,9 +660,12 @@ function parseSfOptions(options: SenderOptions) {
   parseBoolean(options, "drain_orphans", "drain orphans");
   parseBoolean(options, "request_durable_ack", "request durable ack");
   if (options.sf_durability) {
-    switch (options.sf_durability) {
+    // Enum values are case-insensitive (spec 9.1.1).
+    const d = options.sf_durability.toLowerCase();
+    switch (d) {
       case "memory":
       case "periodic":
+        options.sf_durability = d;
         break;
       case "flush":
       case "append":

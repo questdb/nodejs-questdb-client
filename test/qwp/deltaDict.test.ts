@@ -36,4 +36,17 @@ describe("delta symbol dictionary", () => {
     const count = readVarint(f, start.offset);
     expect(count.value).toBe(0);
   });
+
+  it("encodes delta ids >= 128 without overrunning the frame", () => {
+    // ids >= 128 occupy two varint bytes; the size path must use the id, not
+    // the stored {id,text} object, or the frame ends up undersized (spec 6.0).
+    const dict = new SymbolDict();
+    // register 300 symbols so the frame's symbol id is comfortably > 127
+    for (let i = 0; i < 300; i++) dict.getOrAdd(`s${i}`);
+    const t = new QwpTableBuffer("t");
+    const col = t.getOrCreateColumn("s", TYPE_SYMBOL)!;
+    col.values.push({ id: dict.getOrAdd("big") /* ~300 */, text: "big" });
+    t.nextRow();
+    expect(() => encodeFrame([t], { gorilla: false, dict, confirmedMaxId: 0 })).not.toThrow();
+  });
 });

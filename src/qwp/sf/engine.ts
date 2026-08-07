@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { open, readFile, writeFile, readdir } from "node:fs/promises";
-import { writeSync, closeSync } from "node:fs";
+import { openSync, writeSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { SegmentRing } from "./ring";
 import { acquireSlot, releaseSlot, SlotHandle } from "./slotLock";
@@ -89,6 +89,15 @@ export class SfEngine {
     // segments -> contiguous FSN chain
     const entries = await readdir(this.slot.slotDir).catch(() => []);
     const segFiles = entries.filter((e) => e.endsWith(SEGMENT_EXT)).sort();
+    // Resume the file counter PAST any existing segment so continued appends
+    // open fresh files rather than truncating a recovered one that may still
+    // hold unacked frames (spec 8.1.5).
+    let maxIdx = -1;
+    for (const f of segFiles) {
+      const n = Number(f.slice(0, -SEGMENT_EXT.length));
+      if (Number.isFinite(n) && n > maxIdx) maxIdx = n;
+    }
+    this.fileNo = maxIdx + 1;
     const chain: { baseSeq: number; frames: Buffer[] }[] = [];
     for (const f of segFiles) {
       const data = await readFile(join(this.slot.slotDir, f));
@@ -108,7 +117,7 @@ export class SfEngine {
     if (dictData && dictData.length > 0) {
       for (const e of decodeDictFile(dictData)) this.dict.addRecovered(e);
     }
-    this.dictFd = (await open(join(this.slot.slotDir, SYMBOL_DICT), "a")).fd;
+    this.dictFd = openSync(join(this.slot.slotDir, SYMBOL_DICT), "a");
   }
 
   /**
@@ -164,6 +173,11 @@ export class SfEngine {
    * Write-ahead persist a batch of newly introduced symbols before the frame
    * carrying them is published (spec 8.1.6). Synchronous because the buffer's
    * persist hook is sync and must complete before the frame goes on the wire.
+   *
+   * KNOWN GAP (plan 3→4 handoff): the Sender does not yet attach the buffer to
+   * the transport-owned dict, so this persists nothing at runtime and delta
+   * mode is not active end-to-end — frames go out full-dict/self-sufficient.
+   * This is exercised only by the buffer unit test until that wiring lands.
    */
   persistSymbols(entries: string[]): void {
     if (!this.isDisk || entries.length === 0 || this.dictFd === undefined) return;

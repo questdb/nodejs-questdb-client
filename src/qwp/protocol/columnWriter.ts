@@ -99,7 +99,7 @@ export function columnPayloadSize(
   if (col.type === T.TYPE_SYMBOL) {
     if (opts.delta) {
       let n2 = 0;
-      for (const id of col.values as number[]) n2 += varintSize(id);
+      for (const v of col.values) n2 += varintSize(symbolId(v));
       return n + n2;
     }
     const dict = [...new Set(col.values.map((v) => symbolText(v)) as string[])];
