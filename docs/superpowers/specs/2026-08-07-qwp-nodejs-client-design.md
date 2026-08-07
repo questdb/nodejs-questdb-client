@@ -340,7 +340,9 @@ They share one delivery contract that must survive the port:
 - **Bounded inbox that drops the OLDEST.** Capacities differ per dispatcher and
   are not interchangeable: errors **256**, progress **256**, connection events
   **64** — connection events are sparse compared with per-batch server errors.
-  The connect-string minimum is 16. When
+  The connect-string minimum is 16, chosen so a bursty error stream cannot let
+  drop-oldest erase the trailing distribution of *categories* — 16 comfortably
+  exceeds the ten categories in 7.1. When
   full, the producer drops the **head** to admit the new entry — it never
   blocks, spins, or rejects the newcomer. Drop-newest is the intuitive
   implementation and is **wrong**: watermarks are monotonic, so the newest entry
@@ -1321,6 +1323,12 @@ routine `RETRIABLE` rejection delivered minutes earlier suppress the close-time
 report of a later, genuinely unsurfaced `TERMINAL` error. "Any error ever" is too
 coarse a signal to gate this on.
 
+**Close bounds the wait, not the connect.** The close-time shutdown await
+(30 s by default) caps how long `close()` waits for the I/O side to finish its
+current send/receive and unwind — it is *not* a connect timeout. A `close()`
+racing an in-flight connect **cancels** that connect rather than waiting it out,
+so a legitimately slow successful connect is never truncated by this bound.
+
 Deferred commits interact here: frames above the last commit-bearing
 (non-`DEFER_COMMIT`) FSN belong to a transaction whose commit was never
 published, so the server will never ACK them. Close-time drain must target the
@@ -1340,6 +1348,23 @@ exits; future scans skip that slot until an operator clears it — bounded
 automatic retry, then human-in-the-loop. Abandonment fires `DATA_LOSS` /
 `ABANDONED` with `quarantinedPath` set. Note that a transient all-replica
 failover window is **not** terminal and is retried indefinitely.
+
+**Quarantine is a rename plus a sentinel, and it is capped.** Setting a torn slot
+aside is two steps, not one:
+
+1. **Rename** the slot to carry a quarantine infix — deliberately *not* the
+   sender's own slot name, so a restarting sender does not re-adopt it as its
+   own working slot;
+2. **mark it `.failed`**, so the orphan drainer skips it too.
+
+Both are needed: the rename stops the owner reclaiming it, the sentinel stops the
+drainer replaying it, and between them the bytes stay put for a human to inspect
+and resend.
+
+At most **64** quarantined copies of one slot may accumulate under `sf_dir`
+before construction refuses to set aside another. Each is an unreplayable slot
+someone must look at, and letting them pile up without bound turns a disk-space
+problem into a second incident.
 
 Frames above the last commit-bearing (non-`DEFER_COMMIT`) FSN in a recovered
 ring belong to a transaction whose commit frame was never published; the server
@@ -1425,6 +1450,9 @@ not have yet:
 | `max_background_drainers` | 4 |
 | `max_name_len` | 127 |
 | `sender_id` | `"default"` |
+| `durable_ack_keepalive_interval_millis` | 200 (≤ 0 disables) |
+| close shutdown await | 30,000 |
+| max quarantined copies per slot | 64 |
 | `auth_timeout_ms` | 15,000 |
 | background connect timeout | 15,000 ms |
 | `max_frame_rejections` | 4 |
@@ -1476,6 +1504,23 @@ misconfiguration in the whole config surface.
 **Enum values** are case-insensitive: `sf_durability` ∈ {`memory`, `periodic`,
 `flush`, `append`}, rejected with the allowed set named. `auto_flush` and the
 other on/off keys take `on`/`off`.
+
+### 9.1.2 "Unset" and "set to the default" must stay distinguishable
+
+Java threads a `PARAMETER_NOT_SET_EXPLICITLY` sentinel through every numeric
+option rather than pre-seeding defaults, and the comment states why: it wants to
+**fail fast even when an explicitly configured value happens to equal the
+default**, because the combination is still a user error and silently accepting
+it produces hard-to-debug behaviour.
+
+This is a real constraint on the Node port, not a Java idiom. The natural JS
+shape — `const x = options.x ?? DEFAULT` — collapses "unset" and "set to the
+default value" into one state, and several rules in 9.2 depend on telling them
+apart: rejecting `protocol_version` under `ws::` must fire even if the user
+supplied the value the ILP path would have chosen, and the connect-mode
+derivation in 4.3 keys on whether a `reconnect_*` key was *supplied*, not on its
+value. Keep options as `undefined`-until-set and resolve defaults at the point of
+use.
 
 ### 9.2 Cross-key validation
 
