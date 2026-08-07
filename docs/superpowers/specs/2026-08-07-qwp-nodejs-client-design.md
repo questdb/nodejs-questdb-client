@@ -549,6 +549,60 @@ Port that flag rather than writing two segment types.
 lock-free, and it is easy to lose in a port where `await` interleaves differently
 than Java's threads.
 
+### 8.1.0 Hot-spare provisioning — the producer never creates a segment
+
+`SegmentManager` is a background worker that keeps every registered ring
+supplied with a **pre-created hot-spare segment**, and trims segments once their
+frames are ACKed. The point is to keep the expensive operations — segment
+creation (`open + allocate + map`) and trim (`unmap + unlink`) — **off both the
+producer and the I/O path entirely**. On rotation the producer swaps in an
+already-existing spare; it never waits on file creation.
+
+- One manager serves many rings (Java: typically every `Sender` in the JVM). In
+  Node this is a shared module-level async task, not one per `Sender`.
+- Poll tick default **1 ms** — short enough that a producer rarely observes
+  `BACKPRESSURE_NO_SPARE` in steady state, long enough that an idle process does
+  not burn CPU.
+- `MIN_LIVE_SEGMENTS = 2` (active + one spare) is the minimum working set for a
+  producer to advance at all.
+- Trim is staged and retried with backoff (4 ms → ~1.02 s) at three distinct
+  points — pre-barrier, unlink, post-barrier — capped at
+  `MAX_TRIMS_PER_RING_PASS = 64` per ring per pass, with disk-full warnings
+  throttled to once per 30 s.
+
+Omitting hot spares does not fail a test; it just moves an `open`+`allocate`
+onto the producer at every rotation. Port it.
+
+### 8.1.0.1 The `.symbol-dict` liveness-floor deadlock — do not reintroduce
+
+`sf_max_total_bytes` must **not** be enforced as a naive sum of everything in the
+slot directory. Java guards this with
+`livenessFloorBytes = MIN_LIVE_SEGMENTS * segmentSizeBytes`, below which the cap
+check never refuses to provision, and the reasoning is worth stating in full
+because a straightforward Node port reintroduces the bug exactly:
+
+- **Segment bytes are reclaimable.** ACK-driven trim frees them, so refusing to
+  provision on segment bytes is *productive* backpressure — it clears itself.
+- **Side-file bytes are not.** `.symbol-dict` is lifetime-monotonic; nothing
+  shrinks it.
+
+So once side-file bytes *alone* push a ring under the cap, no ACK can ever free
+the shortfall. The producer stalls **permanently, and across restarts**, while
+the disk-full warning points at a trim that cannot help. Guaranteeing the minimum
+working set is what turns that permanent deadlock into ordinary backpressure.
+
+### 8.1.0.2 Two distinct append failures
+
+`SegmentRing.appendOrFsn` has two sentinels and they need opposite handling:
+
+| Sentinel | Meaning | Handling |
+|---|---|---|
+| `BACKPRESSURE_NO_SPARE` (-1) | active is full, no spare ready | wait — the manager or an ACK will clear it; this is the `sf_append_deadline_millis` path |
+| `PAYLOAD_TOO_LARGE` (-2) | the frame does not fit in a **fresh** segment | never clears; surface a user-facing error immediately |
+
+Treating `PAYLOAD_TOO_LARGE` as backpressure would burn the full append deadline
+before failing, and report a timeout instead of the real cause.
+
 ### 8.1.1 Segment file format (`MmapSegment`)
 
 ```
@@ -715,6 +769,31 @@ be implemented — only the primitive changes. The `.lock.pid` split is unnecess
 for us (our lockfile is advisory and readable), but the PID-in-error-message
 diagnostic should be kept.
 
+### 8.3.1 `close()` ordering
+
+`close()` is not just teardown; two of its properties are load-bearing.
+
+**Ordering.** The sequence is: flush user-thread state into the engine → send the
+commit message if commits are deferred → seal and swap the residual buffer →
+drain on close (up to `close_flush_timeout_millis`) → tear down. A pre-flight
+rejection of the final batch must **not** be allowed to escape before those
+later steps run: doing so skips the commit and the drain, abandoning every row an
+*earlier successful* flush already published. Java handles the rejected batch as
+discardable-on-close and proceeds.
+
+**Terminal-error surfacing.** `close()` must report a latched terminal error. A
+user who only ever calls `close()` — never `flush()` afterwards — would otherwise
+never learn that the server rejected their data. Equally it must not double-report
+an error instance the user already caught from an earlier call. Java snapshots the
+already-surfaced error once, precisely so a terminal latched between two reads
+cannot be misattributed as user-owned and silently dropped.
+
+Deferred commits interact here: frames above the last commit-bearing
+(non-`DEFER_COMMIT`) FSN belong to a transaction whose commit was never
+published, so the server will never ACK them. Close-time drain must target the
+last commit boundary, not `publishedFsn`, or it waits out the full timeout on
+ACKs that cannot arrive.
+
 ### 8.4 Recovery and orphans
 
 On startup, if `drain_orphans` is enabled, scan for slot directories not held by
@@ -732,7 +811,7 @@ failover window is **not** terminal and is retried indefinitely.
 Frames above the last commit-bearing (non-`DEFER_COMMIT`) FSN in a recovered
 ring belong to a transaction whose commit frame was never published; the server
 will never ACK them until a later commit covers them. Close-time drain must not
-wait on ACKs that cannot arrive.
+wait on ACKs that cannot arrive (8.3.1).
 
 ## 9. Configuration
 
@@ -806,6 +885,7 @@ transports (whose auto-flush row default is far higher):
 | `reconnect_max_backoff_millis` | 5,000 |
 | `reconnect_max_duration_millis` | 300,000 |
 | `catch_up_cap_gap_min_escalation_window_millis` | 300,000 |
+| segment manager poll tick | 1 ms |
 | catch-up packing limit when cap unadvertised | 64 KiB |
 | max catch-up cap-gap attempts (orphan drainer only) | 16 |
 
@@ -899,6 +979,11 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **Permanent stalls that look like disk-full.** The `.symbol-dict` liveness
+  floor (8.1.0.1) is the clearest example: enforce `sf_max_total_bytes` as a
+  naive directory-byte sum and a producer can wedge forever, across restarts,
+  while logging a trim warning that can never help. Crash tests must include a
+  slot whose side files alone approach the cap.
 - **Slot-lock emulation.** `O_EXCL` + pid/boot-id is weaker than `flock`, which
   the kernel releases on hard exit. A wrong liveness probe either strands data
   (too conservative) or races two processes onto one slot (too aggressive). This
