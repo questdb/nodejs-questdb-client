@@ -32,10 +32,30 @@ export class QwpBuffer implements SenderBuffer {
   private confirmedMaxId = -1;
   private gorilla = true;
   private deferCommit = false;
+  private persist?: (entries: string[]) => void;
 
-  /** Attach a connection-scoped symbol dictionary (delta mode), or undefined to stay in full-dict mode. */
-  attachDict(d: SymbolDict | undefined): void {
+  /**
+   * Attach a connection-scoped symbol dictionary (delta mode) plus an optional
+   * write-ahead persist callback, or undefined to stay in full-dict mode.
+   * `persist` is invoked with every batch of newly introduced symbols before
+   * the owning frame is published (spec 8.1.6); if it throws, the buffer
+   * degrades permanently to full-dict mode (spec 5.2).
+   */
+  attachDict(d: SymbolDict | undefined, persist?: (entries: string[]) => void): void {
     this.dict = d;
+    this.persist = persist;
+  }
+
+  /**
+   * One-way, permanent degradation. The side file can start failing appends
+   * while segments stay writable, because segments are pre-allocated and the
+   * dictionary is the one thing still growing. A fixed mode would turn that
+   * into total, permanent ingestion loss (spec 5.2).
+   */
+  private disableDeltaDict(): void {
+    this.dict = undefined;
+    this.persist = undefined;
+    this.confirmedMaxId = -1;
   }
 
   setConfirmedMaxId(id: number): void {
@@ -89,9 +109,10 @@ export class QwpBuffer implements SenderBuffer {
     return this.guard(() => {
       const col = this.require().getOrCreateColumn(name, TYPE_SYMBOL);
       if (col) {
-        col.values.push(
-          this.dict ? this.dict.getOrAdd(String(value)) : String(value),
-        );
+        const text = String(value);
+        // Keep the id AND the text. Delta mode encodes the id; a runtime
+        // fallback to full-dict mode needs the text back (spec 5.2).
+        col.values.push(this.dict ? { id: this.dict.getOrAdd(text), text } : text);
       }
       return this;
     });
@@ -148,6 +169,22 @@ export class QwpBuffer implements SenderBuffer {
   sealFrames(maxBatchSize: number): Buffer[] {
     const dirty = this.tables.filter((t) => t.rowCount > 0);
     if (dirty.length === 0) return [];
+
+    // Write-ahead persist this batch's new symbols before encoding any frame.
+    // With the buffer already containing this batch's rows, a failure here
+    // degrades to full-dict mode; the persisted symbols are not yet on any
+    // wire, so nothing must be retained (spec 5.2, 8.1.6).
+    if (this.dict && this.persist) {
+      const fresh = this.dict.entriesFrom(this.confirmedMaxId + 1);
+      if (fresh.length > 0) {
+        try {
+          this.persist(fresh);
+          this.confirmedMaxId = this.dict.size() - 1;
+        } catch {
+          this.disableDeltaDict();
+        }
+      }
+    }
 
     const opts = {
       gorilla: this.gorilla,

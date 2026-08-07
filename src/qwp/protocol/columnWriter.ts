@@ -10,6 +10,18 @@ export interface EncodeOpts {
   delta?: boolean;
 }
 
+/**
+ * A symbol value is either a plain string (full-dict mode from the start) or
+ * an object carrying both the global id and the text (delta mode, or a runtime
+ * fallback back to full-dict mode where the text is needed again).
+ */
+function symbolText(v: unknown): string {
+  return typeof v === "string" ? v : (v as { text: string }).text;
+}
+function symbolId(v: unknown): number {
+  return typeof v === "number" ? v : (v as { id: number }).id;
+}
+
 function nullCountOf(col: ColumnBuffer): number {
   let n = 0;
   for (const v of col.nulls) if (v) n++;
@@ -90,13 +102,13 @@ export function columnPayloadSize(
       for (const id of col.values as number[]) n2 += varintSize(id);
       return n + n2;
     }
-    const dict = [...new Set(col.values as string[])];
+    const dict = [...new Set(col.values.map((v) => symbolText(v)) as string[])];
     n += varintSize(dict.length);
     for (const s of dict) {
       const b = Buffer.byteLength(s, "utf8");
       n += varintSize(b) + b;
     }
-    for (const s of col.values as string[]) n += varintSize(dict.indexOf(s));
+    for (const v of col.values) n += varintSize(dict.indexOf(symbolText(v)));
     return n;
   }
 
@@ -242,10 +254,10 @@ export function writeColumn(
       return o;
     case T.TYPE_SYMBOL: {
       if (opts.delta) {
-        for (const id of col.values as number[]) o = writeVarint(buf, o, id);
+        for (const v of col.values) o = writeVarint(buf, o, symbolId(v));
         return o;
       }
-      const dict = [...new Set(col.values as string[])];
+      const dict = [...new Set(col.values.map((v) => symbolText(v)) as string[])];
       o = writeVarint(buf, o, dict.length);
       for (const s of dict) {
         const n = Buffer.byteLength(s, "utf8");
@@ -253,8 +265,7 @@ export function writeColumn(
         buf.write(s, o, "utf8");
         o += n;
       }
-      for (const s of col.values as string[])
-        o = writeVarint(buf, o, dict.indexOf(s));
+      for (const v of col.values) o = writeVarint(buf, o, dict.indexOf(symbolText(v)));
       return o;
     }
     case T.TYPE_VARCHAR:
