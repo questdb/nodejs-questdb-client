@@ -16,5 +16,7 @@ export { createTransport } from "./transport";
 export { TcpTransport } from "./transport/tcp";
 export { HttpTransport } from "./transport/http/stdlib";
 export { UndiciTransport } from "./transport/http/undici";
+export { QwpBuffer } from "./qwp/buffer";
+export { QwpTransport } from "./qwp/transport";
 export type { Logger } from "./logging";
 export { bigintToTwosComplementBytes } from "./utils";

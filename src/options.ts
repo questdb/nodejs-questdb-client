@@ -15,6 +15,8 @@ const HTTP = "http";
 const HTTPS = "https";
 const TCP = "tcp";
 const TCPS = "tcps";
+const WS = "ws";
+const WSS = "wss";
 
 const ON = "on";
 const OFF = "off";
@@ -467,16 +469,24 @@ function parseProtocol(options: SenderOptions, configString: string) {
     case HTTPS:
     case TCP:
     case TCPS:
+    case WS:
+    case WSS:
       break;
     default:
       throw new Error(
-        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps'`,
+        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
       );
   }
   return index + 2;
 }
 
 function parseProtocolVersion(options: SenderOptions) {
+  if (options.protocol === WS || options.protocol === WSS) {
+    if (options.protocol_version !== undefined && options.protocol_version !== null) {
+      throw new Error("protocol version is not supported for WebSocket protocol");
+    }
+    return; // stays undefined: createBuffer branches on protocol first
+  }
   const protocol_version = options.protocol_version ?? PROTOCOL_VERSION_AUTO;
   switch (protocol_version) {
     case PROTOCOL_VERSION_AUTO:
@@ -512,6 +522,8 @@ function parseAddress(options: SenderOptions) {
     switch (options.protocol) {
       case HTTP:
       case HTTPS:
+      case WS:
+      case WSS:
         options.port = HTTP_PORT;
         return;
       case TCP:
@@ -520,7 +532,7 @@ function parseAddress(options: SenderOptions) {
         return;
       default:
         throw new Error(
-          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps'`,
+          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
         );
     }
   }
@@ -629,6 +641,8 @@ export {
   HTTPS,
   TCP,
   TCPS,
+  WS,
+  WSS,
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,
