@@ -1213,6 +1213,13 @@ the cost model rather than just the mechanism):
 
 ### 8.3 Slot locking — two locks, not one
 
+A slot is `<sf_dir>/<sender_id>/`, and `sender_id` defaults to `"default"`. That
+default is fine for a single sender and is a **footgun for two**: a second sender
+sharing `sf_dir` without its own `sender_id` fails at startup with "sf slot
+already in use". That is the intended behaviour (8.1's single-producer rule), so
+the error must name `sender_id` as the fix rather than reading as a mystery
+lock conflict.
+
 Java's `SlotLock` provides **two distinct advisory locks**, and the second is not
 optional — the orphan-adoption sequence depends on it:
 
@@ -1369,8 +1376,14 @@ not have yet:
 | Setting | QWP default |
 |---|---|
 | `auto_flush_rows` | 1,000 |
-| `auto_flush_bytes` | 8 MiB |
+| `auto_flush_bytes` | **off (0)** — see below |
 | `auto_flush_interval` | 100 ms |
+| `sf_max_segment_bytes` | 4 MiB |
+| `sf_max_total_bytes` | **mode-dependent**: 128 MiB memory, 10 GiB disk |
+| `sf_sync_interval_millis` | 5,000 |
+| `max_background_drainers` | 4 |
+| `max_name_len` | 127 |
+| `sender_id` | `"default"` |
 | `auth_timeout_ms` | 15,000 |
 | background connect timeout | 15,000 ms |
 | `max_frame_rejections` | 4 |
@@ -1387,8 +1400,41 @@ not have yet:
 | catch-up packing limit when cap unadvertised | 64 KiB |
 | max catch-up cap-gap attempts (orphan drainer only) | 16 |
 
-`auto_flush_bytes` must additionally be clamped to the server-advertised
-`X-QWP-Max-Batch-Size` (default 16 MiB) once the handshake completes.
+**Byte-based auto-flush is off by default on WebSocket.** The builder's WS
+default is `0`, which is exactly what `auto_flush_bytes=off` sets — so the
+trigger is rows and interval only. `QwpWebSocketSender.DEFAULT_AUTO_FLUSH_BYTES`
+(8 MiB) is *not* the effective default; defaulting to it would make the Node
+client flush on a trigger Java does not use.
+
+When a byte trigger *is* set, it is clamped to the server-advertised
+`X-QWP-Max-Batch-Size` (default 16 MiB) after the handshake. But an explicit
+`off` is **preserved** even when the server advertises a cap — an application
+that opted out keeps the contract it asked for. Oversize rows are still caught
+by the per-row guard against `serverMaxBatchSize` (6.5.3), which is what makes
+opting out safe.
+
+### 9.1.1 Value grammars — `ConfigSchema` does not define these
+
+`ConfigSchema` registers most ingest keys as plain strings and leaves the value
+grammar to the sender's own parsers. Mirroring the key *names* without the
+grammars produces silent misconfiguration.
+
+**Byte-count values** (`auto_flush_bytes`, `sf_max_total_bytes`,
+`sf_max_segment_bytes`, buffer sizes) accept a plain decimal or a unit suffix:
+
+- `64k` / `64kb`, `64m` / `64mb`, `4g` / `4gb`, and `2t` / `2tb`
+  — note the code handles `t`, though its own javadoc lists only k/m/g;
+- suffixes are **case-insensitive**, and a trailing `b`/`B` is stripped first;
+- multipliers are **powers of 2** (1024-based), not 1000;
+- blank is rejected with "<name> cannot be empty"; a bare suffix is rejected.
+
+A Node port that reaches for `parseInt` reads `auto_flush_bytes=64m` as **64
+bytes** — a flush per row, with no error. That is the single most likely silent
+misconfiguration in the whole config surface.
+
+**Enum values** are case-insensitive: `sf_durability` ∈ {`memory`, `periodic`,
+`flush`, `append`}, rejected with the allowed set named. `auto_flush` and the
+other on/off keys take `on`/`off`.
 
 ### 9.2 zstd and the Node version floor
 
@@ -1490,6 +1536,9 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **Size suffixes parsed as plain integers.** `auto_flush_bytes=64m` read by
+  `parseInt` is 64 bytes, not 64 MiB (9.1.1) — a flush per row, silently. Config
+  tests must cover every suffix form, including the undocumented `t`.
 - **Notification inbox dropping the wrong end.** Drop-newest is the intuitive
   bounded-queue policy and inverts the intent (4.2): under load the handler would
   keep stale entries and discard the current state. Tests must fill the inbox and
