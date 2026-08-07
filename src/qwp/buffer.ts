@@ -52,29 +52,51 @@ export class QwpBuffer implements SenderBuffer {
     return this.current;
   }
 
+  /**
+   * A setter that throws mid-row must roll every column back to the last row
+   * boundary, or columns desynchronise and every later frame is malformed while
+   * still looking structurally valid (spec 4.1.1).
+   */
+  private guard<R>(fn: () => R): R {
+    try {
+      return fn();
+    } catch (e) {
+      this.current?.rollbackRow();
+      throw e;
+    }
+  }
+
   symbol(name: string, value: unknown): SenderBuffer {
-    const col = this.require().getOrCreateColumn(name, TYPE_SYMBOL);
-    if (col) col.values.push(String(value));
-    return this;
+    return this.guard(() => {
+      const col = this.require().getOrCreateColumn(name, TYPE_SYMBOL);
+      if (col) col.values.push(String(value));
+      return this;
+    });
   }
 
   intColumn(name: string, value: number): SenderBuffer {
-    if (!Number.isInteger(value)) throw new Error(`value must be an integer, received ${value}`);
-    const col = this.require().getOrCreateColumn(name, TYPE_LONG);
-    if (col) col.values.push(BigInt(value));
-    return this;
+    return this.guard(() => {
+      if (!Number.isInteger(value)) throw new Error(`value must be an integer, received ${value}`);
+      const col = this.require().getOrCreateColumn(name, TYPE_LONG);
+      if (col) col.values.push(BigInt(value));
+      return this;
+    });
   }
 
   floatColumn(name: string, value: number): SenderBuffer {
-    const col = this.require().getOrCreateColumn(name, TYPE_DOUBLE);
-    if (col) col.values.push(value);
-    return this;
+    return this.guard(() => {
+      const col = this.require().getOrCreateColumn(name, TYPE_DOUBLE);
+      if (col) col.values.push(value);
+      return this;
+    });
   }
 
   timestampColumn(name: string, value: number | bigint, unit: TimestampUnit = "us"): SenderBuffer {
-    const col = this.require().getOrCreateColumn(name, TYPE_TIMESTAMP);
-    if (col) col.values.push(toMicros(value, unit));
-    return this;
+    return this.guard(() => {
+      const col = this.require().getOrCreateColumn(name, TYPE_TIMESTAMP);
+      if (col) col.values.push(toMicros(value, unit));
+      return this;
+    });
   }
 
   at(timestamp: number | bigint, unit: TimestampUnit = "us"): void {
@@ -129,19 +151,23 @@ export class QwpBuffer implements SenderBuffer {
 
   // Column types arriving in a later plan — fail loudly rather than emit wrong bytes.
   stringColumn(name: string, value: string): SenderBuffer {
-    if (typeof value !== "string")
-      throw new Error("stringColumn accepts only string values");
-    const col = this.require().getOrCreateColumn(name, TYPE_VARCHAR);
-    if (col) col.values.push(value);
-    return this;
+    return this.guard(() => {
+      if (typeof value !== "string")
+        throw new Error("stringColumn accepts only string values");
+      const col = this.require().getOrCreateColumn(name, TYPE_VARCHAR);
+      if (col) col.values.push(value);
+      return this;
+    });
   }
   booleanColumn(): SenderBuffer {
     return unsupported("booleanColumn");
   }
   arrayColumn(name: string, value: unknown[]): SenderBuffer {
-    const col = this.require().getOrCreateColumn(name, TYPE_DOUBLE_ARRAY);
-    if (col) col.values.push(flattenArray(value));
-    return this;
+    return this.guard(() => {
+      const col = this.require().getOrCreateColumn(name, TYPE_DOUBLE_ARRAY);
+      if (col) col.values.push(flattenArray(value));
+      return this;
+    });
   }
   decimalColumnText(): SenderBuffer {
     return unsupported("decimalColumnText");

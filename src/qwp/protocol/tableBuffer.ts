@@ -111,6 +111,24 @@ export class QwpTableBuffer {
     return col.decimalScale;
   }
 
+  /** Truncates every column back to the last completed row (spec 4.1.1). */
+  rollbackRow(): void {
+    for (const c of this.cols) {
+      while (c.size > this.rows) {
+        const wasNull = c.nulls.pop();
+        c.size--;
+        if (wasNull === false) c.values.pop();
+      }
+    }
+    // Drop columns created solely by the abandoned row.
+    for (let i = this.cols.length - 1; i >= 0; i--) {
+      if (this.cols[i].size === 0 && this.rows === 0) {
+        this.byName.delete(this.cols[i].name);
+        this.cols.splice(i, 1);
+      }
+    }
+  }
+
   reset(): void {
     this.cols.length = 0;
     this.byName.clear();
