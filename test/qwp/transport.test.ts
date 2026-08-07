@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QwpTransport } from "../../src/qwp/transport";
+import { QwpBuffer } from "../../src/qwp/buffer";
+import { FLAG_DELTA_SYMBOL_DICT } from "../../src/qwp/protocol/constants";
+import { readVarint } from "../../src/qwp/protocol/varint";
 import { SenderOptions } from "../../src/options";
 import { MockQwpServer } from "./mockServer";
 
@@ -71,6 +74,35 @@ describe("QwpTransport", () => {
       new SenderOptions(`ws::addr=127.0.0.1:${port};request_durable_ack=on;`),
     );
     expect(await t.connect()).toBe(true);
+    await t.close();
+  });
+
+  it("delta mode wires buffer->transport and advances the baseline on publish (spec 5.2, 8.1.6)", async () => {
+    const s = new MockQwpServer();
+    mocks.push(s);
+    const port = await s.start();
+    const t = new QwpTransport(new SenderOptions(`ws::addr=127.0.0.1:${port};`));
+    const b = new QwpBuffer();
+    t.attachSymbolBuffer(b);
+    await t.connect();
+
+    // First batch introduces alpha; the emitted frame must carry a delta flag.
+    b.table("t").symbol("s", "alpha").intColumn("x", 1);
+    b.at(1n, "us");
+    await t.sendFrames(b.sealFrames(1 << 20));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(s.frames[0].readUInt8(5) & FLAG_DELTA_SYMBOL_DICT).toBe(FLAG_DELTA_SYMBOL_DICT);
+
+    // Second batch reuses confirmed alpha and introduces only beta, so its
+    // delta must begin at id 1 (baseline 0) and carry exactly one entry.
+    b.table("t").symbol("s", "beta").intColumn("x", 2);
+    b.at(2n, "us");
+    await t.sendFrames(b.sealFrames(1 << 20));
+    await new Promise((r) => setTimeout(r, 100));
+    const start = readVarint(s.frames[1], 12);
+    const count = readVarint(s.frames[1], start.offset);
+    expect(start.value).toBe(1);
+    expect(count.value).toBe(1);
     await t.close();
   });
 });

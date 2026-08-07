@@ -13,6 +13,7 @@ import { HostTracker, HostState } from "./hostTracker";
 import { Endpoint, parseAddrList } from "./endpoints";
 import { Dispatcher } from "./dispatcher";
 import { SfEngine } from "./sf/engine";
+import { QwpBuffer } from "./buffer";
 import { BACKPRESSURE_NO_SPARE, PAYLOAD_TOO_LARGE } from "./sf/ring";
 
 const QWP_DEFAULT_AUTO_FLUSH_ROWS = 1000; // spec 9.1
@@ -66,6 +67,8 @@ export class QwpTransport implements SenderTransport {
   private readonly dict = new SymbolDict();
   private confirmedMaxId = -1;
   private engine: SfEngine;
+  /** The producer's buffer, once the Sender has attached it (delta wiring). */
+  private buffer?: QwpBuffer;
   /** Highest FSN sent on the current connection (wire replay start). */
   private sentUpTo = -1;
   private reconnecting = false;
@@ -102,6 +105,17 @@ export class QwpTransport implements SenderTransport {
     this.eventConsumer = h;
   }
 
+  /**
+   * Attach the producer's buffer so delta symbol-dictionary mode can run
+   * end-to-end (spec 8.1.6). Shares the transport-owned connection dictionary
+   * with the buffer and installs the engine's write-ahead persist hook. Must be
+   * called once, before connect(), from the Sender construction path.
+   */
+  attachSymbolBuffer(b: QwpBuffer): void {
+    this.buffer = b;
+    b.attachDict(this.dict, (entries) => this.engine.persistSymbols(entries));
+  }
+
   get ackedFsn(): number {
     return this.engine.ackedFsn;
   }
@@ -130,6 +144,20 @@ export class QwpTransport implements SenderTransport {
 
   private async doConnect(): Promise<boolean> {
     await this.engine.open();
+    // Recovery seeding (spec 8.1.6, 5.2): the engine's recovered dictionary is a
+    // DIFFERENT SymbolDict from the transport's connection-scoped one. Seed ours
+    // positionally via addRecovered (never getOrAdd, which de-dupes and would
+    // desync the persisted id scheme), and tell the buffer the recovered count is
+    // already confirmed. That way the first flush only persists/ships NEW
+    // symbols and does not re-write the recovered baseline to .symbol-dict. The
+    // recovered symbols themselves reach the fresh server via the catch-up frame
+    // in connectLoop (spec 7.5).
+    if (this.engine.isDisk) {
+      const recovered = this.engine.symbolDict;
+      const recoveredSize = recovered.size();
+      for (const s of recovered.entriesFrom(0)) this.dict.addRecovered(s);
+      if (recoveredSize > 0) this.buffer?.setConfirmedMaxId(recoveredSize - 1);
+    }
     this.endpoints = parseAddrList(this.options.addr!, 9000);
     this.tracker = new HostTracker(this.endpoints.length);
     return this.connectLoop();
@@ -240,6 +268,10 @@ export class QwpTransport implements SenderTransport {
     }
     await this.ws!.sendBinary(frame);
     this.confirmedMaxId = this.dict.size() - 1;
+    // The fresh server now knows the whole dictionary, so no old id is delta-pending
+    // any more: re-pin the buffer baseline to the dictionary tail so only truly new
+    // symbols are persisted/shipped going forward (spec 5.2, 7.5).
+    this.buffer?.setConfirmedMaxId(this.confirmedMaxId);
     return 1;
   }
 
@@ -285,6 +317,14 @@ export class QwpTransport implements SenderTransport {
         // Space frees only via ACK-driven trim on the I/O side; yield to it.
         await new Promise((r) => setTimeout(r, 10));
       }
+      // The frame is queued onto the ring: this is the point where the delta
+      // baseline may advance (spec 5.2). Only reaches here on append success;
+      // a PAYLOAD_TOO_LARGE or backpressure deadline above throws before it, and
+      // the baseline stays put so ids never ship as a delta the server lacks.
+      // Replayed frames (drain) never call this, so a reconnect cannot double-
+      // advance it. It is idempotent and forward-only, so per-frame and
+      // per-(whole-)batch confirmation are equivalent.
+      this.buffer?.confirmDeltaPublished();
     }
     await this.drain();
     return true;

@@ -6,7 +6,7 @@ import { SegmentRing } from "./ring";
 import { acquireSlot, releaseSlot, SlotHandle } from "./slotLock";
 import { appendFrame, scanSegment, SEGMENT_HEADER_SIZE } from "./segment";
 import { writeBoundary, readBoundary, BOUNDARY_FILE_SIZE } from "./boundary";
-import { encodeChunk, decodeDictFile } from "./symbolDictFile";
+import { encodeChunk, decodeDictFile, DICT_HEADER } from "./symbolDictFile";
 import { SymbolDict } from "../protocol/symbolDict";
 import { quarantineSlot } from "./quarantine";
 import { SenderError, Category, Policy } from "../errors";
@@ -145,6 +145,12 @@ export class SfEngine {
       for (const e of decodeDictFile(dictData)) this.dict.addRecovered(e);
     }
     this.dictFd = openSync(join(this.slot.slotDir, SYMBOL_DICT), "a");
+    // A fresh (or zero-length) slot has no file header yet: write the SYD1
+    // header before any chunk so recovery can parse it (spec 8.1.6). An append
+    // write lands at EOF, which is offset 0 on an empty file.
+    if (!dictData || dictData.length === 0) {
+      writeSync(this.dictFd, DICT_HEADER, 0, DICT_HEADER.length, undefined);
+    }
 
     // Start the throttled durability barrier. In memory mode it coalesces the
     // page-cache watermark write across ACKs (spec 8.2 consequence 1); in
@@ -281,14 +287,15 @@ export class SfEngine {
    * carrying them is published (spec 8.1.6). Synchronous because the buffer's
    * persist hook is sync and must complete before the frame goes on the wire.
    *
-   * KNOWN GAP (plan 3→4 handoff): the Sender does not yet attach the buffer to
-   * the transport-owned dict, so this persists nothing at runtime and delta
-   * mode is not active end-to-end — frames go out full-dict/self-sufficient.
-   * This is exercised only by the buffer unit test until that wiring lands.
+   * Wired end-to-end by the Sender: `QwpTransport.attachSymbolBuffer` installs
+   * this as the buffer's persist hook, so delta mode is live in memory mode and
+   * (once `.symbol-dict` has opened) in disk mode. The engine writes the SYD1
+   * header on a fresh slot, then one chunk per frame; recovery re-reads it
+   * positionally (spec 8.1.6, handoff B1).
    */
   persistSymbols(entries: string[]): void {
     if (!this.isDisk || entries.length === 0 || this.dictFd === undefined) return;
-    const buf = Buffer.concat([encodeChunk(entries)]);
+    const buf = encodeChunk(entries);
     writeSync(this.dictFd, buf, 0, buf.length, undefined);
   }
 

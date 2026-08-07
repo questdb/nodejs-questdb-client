@@ -33,6 +33,13 @@ export class QwpBuffer implements SenderBuffer {
   private gorilla = true;
   private deferCommit = false;
   private persist?: (entries: string[]) => void;
+  /**
+   * Baseline to advance `confirmedMaxId` to once THIS sealed batch's frame(s)
+   * have been queued onto the store-and-forward ring (spec 5.2). Populated by
+   * {@link sealFrames} from the write-ahead persist; -1 when delta mode is not
+   * active or the batch introduced no new symbols. See {@link confirmDeltaPublished}.
+   */
+  private deltaTarget = -1;
 
   /**
    * Attach a connection-scoped symbol dictionary (delta mode) plus an optional
@@ -66,12 +73,32 @@ export class QwpBuffer implements SenderBuffer {
     this.deferCommit = on;
   }
 
+  /**
+   * Report the delta baseline this sealed batch should advance to once its
+   * frames are queued onto the ring, or -1 when nothing advances (spec 5.2).
+   * Consumed by the transport's publish path.
+   */
+  get pendingDeltaTarget(): number {
+    return this.deltaTarget;
+  }
+
+  /**
+   * Advance the confirmed delta baseline because the sealed batch's frame(s)
+   * were successfully queued onto the ring. Only ever forward; a batch that
+   * introduced no new symbols leaves it untouched (spec 5.2).
+   */
+  confirmDeltaPublished(): void {
+    if (this.deltaTarget >= 0) this.confirmedMaxId = this.deltaTarget;
+  }
+
   reset(): SenderBuffer {
+    // Clears the staging tables only. The confirmed delta baseline and the
+    // write-ahead dictionary survive: they describe the connection-scoped
+    // dictionary, which is independent of any one buffered batch (spec 5.2).
     this.tables = [];
     this.byName = new Map();
     this.current = undefined;
     this.rows = 0;
-    this.confirmedMaxId = -1;
     return this;
   }
 
@@ -169,20 +196,32 @@ export class QwpBuffer implements SenderBuffer {
   sealFrames(maxBatchSize: number): Buffer[] {
     const dirty = this.tables.filter((t) => t.rowCount > 0);
     if (dirty.length === 0) return [];
+    this.deltaTarget = -1;
 
     // Write-ahead persist this batch's new symbols before encoding any frame.
     // With the buffer already containing this batch's rows, a failure here
     // degrades to full-dict mode; the persisted symbols are not yet on any
     // wire, so nothing must be retained (spec 5.2, 8.1.6).
-    if (this.dict && this.persist) {
-      const fresh = this.dict.entriesFrom(this.confirmedMaxId + 1);
+    //
+    // Only the PERSIST cursor moves here; the delta baseline (confirmedMaxId)
+    // is deliberately NOT advanced. Per spec 5.2 it may move only after a
+    // frame carrying these symbols is queued onto the ring (a failed publish
+    // would otherwise advance the baseline past ids the server never saw and
+    // earn a DICTIONARY_GAP on the next frame). The transport calls
+    // confirmDeltaPublished() on that ring-append success.
+    const delta = this.dict !== undefined;
+    if (delta) {
+      const fresh = this.dict!.entriesFrom(this.confirmedMaxId + 1);
       if (fresh.length > 0) {
         try {
-          this.persist(fresh);
-          this.confirmedMaxId = this.dict.size() - 1;
+          this.persist?.(fresh);
+          this.deltaTarget = this.dict!.size() - 1;
         } catch {
           this.disableDeltaDict();
         }
+      } else {
+        // The batch reuses only confirmed symbols; nothing to advance.
+        this.deltaTarget = -1;
       }
     }
 
@@ -206,8 +245,16 @@ export class QwpBuffer implements SenderBuffer {
     const parts: Buffer[] = [];
     for (let i = 0; i < dirty.length; i++) {
       const isLast = i === dirty.length - 1;
+      // Delta-split: the FIRST part carries the whole batch's delta; later
+      // parts reference only ids that first part registered, so their delta is
+      // empty. Encoding them against the pre-advance baseline would re-ship
+      // the same entries and re-register them positionally on the server,
+      // silently renumbering later ids. Pin later parts to the post-batch
+      // baseline (spec 5.2) — safe because they publish only after part 0.
+      const partBaseline = delta && i > 0 ? this.dict!.size() - 1 : opts.confirmedMaxId;
       const f = encodeFrame([dirty[i]], {
         ...opts,
+        confirmedMaxId: partBaseline,
         deferCommit: this.deferCommit ? true : !isLast,
       });
       if (f.length > maxBatchSize) {

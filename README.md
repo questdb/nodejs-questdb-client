@@ -42,6 +42,11 @@ senders do, and each one can surprise a user who assumes otherwise:
   server acknowledges them. This differs from `http::`.
 - Delivery is **at-least-once**. A retried batch can duplicate rows; use a
   `DEDUP` table if you need idempotence.
+- Symbol columns are serialized in **delta mode**: a connection dictionary is
+  shared with the buffer and persisted to `<sf_dir>/.symbol-dict` in disk mode,
+  so only newly-introduced symbols ride each frame. Recovery re-seeds it
+  positionally, keeping ids dense from 0 — so **don't** assume symbol ids are
+  stable across senders or restarts.
 - An acknowledgement means server-side **commit**, not object-store durability.
   Set `request_durable_ack=on` if durability gates downstream work — the client
   then requests durable ACKs and **fails fast at connect** if the server cannot

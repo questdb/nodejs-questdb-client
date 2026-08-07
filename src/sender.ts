@@ -3,7 +3,8 @@ import { log, Logger } from "./logging";
 import { SenderOptions, ExtraOptions, WS, WSS } from "./options";
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
-import { deriveConnectMode, ConnectMode } from "./qwp/transport";
+import { deriveConnectMode, ConnectMode, QwpTransport } from "./qwp/transport";
+import { QwpBuffer } from "./qwp/buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
@@ -107,6 +108,16 @@ class Sender {
     this.transport = createTransport(options);
     this.buffer = createBuffer(options);
 
+    // Wire the producer buffer into the QWP transport so delta symbol-dictionary
+    // mode runs end-to-end: the transport shares its connection dictionary with
+    // the buffer and installs the engine's write-ahead persist hook, and recovery
+    // seeding (transport.doConnect) then re-pins the buffer baseline (spec 8.1.6).
+    if (options.protocol === WS || options.protocol === WSS) {
+      (this.transport as unknown as QwpTransport).attachSymbolBuffer(
+        this.buffer as unknown as QwpBuffer,
+      );
+    }
+    
     this.log = typeof options.log === "function" ? options.log : log;
 
     this.autoFlush = isBoolean(options.auto_flush) ? options.auto_flush : true;

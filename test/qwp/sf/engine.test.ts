@@ -168,3 +168,31 @@ describe("SfEngine quarantine (spec 8.4, handoff A2)", () => {
     );
   });
 });
+
+describe("SfEngine persisted symbol dictionary (spec 8.1.6, handoff B1)", () => {
+  it("writes a recoverable SYD1 file that re-opens positionally without de-duping", async () => {
+    const dir = tmpSfDir();
+    const e1 = engine(dir);
+    await e1.open();
+    e1.persistSymbols(["alpha", "beta"]);
+    e1.persistSymbols(["alpha", "gamma"]); // alpha collides but must NOT de-dupe
+    await e1.close();
+
+    const dictPath = join(dir, "default", ".symbol-dict");
+    const raw = readFileSync(dictPath);
+    expect(raw.subarray(0, 4).toString("ascii")).toBe("SYD1");
+
+    const e2 = engine(dir);
+    await e2.open();
+    // Recovered positionally: alpha,beta,alpha,gamma -> size 4, ids dense from 0.
+    expect(e2.symbolDict.size()).toBe(4);
+    expect(e2.symbolDict.entriesFrom(0)).toEqual(["alpha", "beta", "alpha", "gamma"]);
+    await e2.close();
+
+    // A second reopen sees the same on-disk state (idempotent).
+    const e3 = engine(dir);
+    await e3.open();
+    expect(e3.symbolDict.size()).toBe(4);
+    await e3.close();
+  });
+});

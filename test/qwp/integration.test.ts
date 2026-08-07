@@ -139,4 +139,61 @@ describe.skipIf(!canRun)("QWP ingest end-to-end", () => {
     expect(rows[0][3]).toBe(42);
     expect(rows[0][4]).toBeCloseTo(1.25, 5);
   }, 180_000);
+
+  it("delta mode persists the symbol dictionary and recovers it across a restart", async () => {
+    // Disk mode + a growing dictionary exercises the full B1 wiring: recovery
+    // seeding -> reconnect catch-up -> delta frames -> write-ahead persist.
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "qwp-delta-"));
+    const table = `qwp_delta_${Date.now()}`;
+    try {
+      // Phase 1: distinct symbols across several flushes so delta mode is real.
+      const s1 = await Sender.fromConfig(
+        `ws::addr=${host}:${httpPort};sf_dir=${dir};`,
+      );
+      await s1.connect();
+      for (let i = 0; i < 5; i++) {
+        s1.table(table).symbol("sym", `sym_${i}`).intColumn("n", i);
+        await s1.at(1_700_000_000_000_000n + BigInt(i), "us");
+        await s1.flush();
+      }
+      // Let the server ACKs land and the close-time watermark barrier record
+      // them, so the reopened engine does not replay the already-delivered frames
+      // (at-least-once semantics make an un-acked close a duplicate, not a loss).
+      await new Promise((r) => setTimeout(r, 300));
+      await s1.close();
+
+      // Phase 2: a brand-new Sender configured with the same sf_dir must recover
+      // the dictionary (positionally) and keep ingesting in delta mode.
+      const s2 = await Sender.fromConfig(
+        `ws::addr=${host}:${httpPort};sf_dir=${dir};`,
+      );
+      await s2.connect();
+      for (let i = 5; i < 10; i++) {
+        s2.table(table).symbol("sym", `sym_${i}`).intColumn("n", i);
+        await s2.at(1_700_000_000_000_000n + BigInt(i), "us");
+        await s2.flush();
+      }
+      await s2.close();
+
+      let rows: (string | number)[][] = [];
+      for (let i = 0; i < 60; i++) {
+        const r = await query(
+          `select sym, n from ${table} order by n`,
+        );
+        rows = r.dataset ?? [];
+        if (rows.length >= 10) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      expect(rows.length).toBe(10);
+      for (let i = 0; i < 10; i++) {
+        expect(rows[i][0]).toBe(`sym_${i}`);
+        expect(rows[i][1]).toBe(i);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 180_000);
 });
