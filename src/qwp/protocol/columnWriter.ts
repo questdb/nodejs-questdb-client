@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { writeVarint, varintSize } from "./varint";
 import { ColumnBuffer } from "./tableBuffer";
 import * as T from "./constants";
+import { gorillaSize, encodeGorilla } from "./gorilla";
 
 export interface EncodeOpts {
   gorilla: boolean;
@@ -29,8 +30,6 @@ function fixedWidth(type: number): number | undefined {
     case T.TYPE_LONG:
     case T.TYPE_DOUBLE:
     case T.TYPE_DATE:
-    case T.TYPE_TIMESTAMP:
-    case T.TYPE_TIMESTAMP_NANOS:
       return 8;
     case T.TYPE_UUID:
       return 16;
@@ -73,6 +72,14 @@ export function columnPayloadSize(
   const v = col.values.length;
 
   if (col.type === T.TYPE_BOOLEAN) return n + Math.ceil(v / 8);
+
+  if (col.type === T.TYPE_TIMESTAMP || col.type === T.TYPE_TIMESTAMP_NANOS) {
+    if (!opts.gorilla) return n + v * 8;
+    const ts = col.values.map((x) => BigInt(x as bigint));
+    const size = ts.length > 2 ? gorillaSize(ts) : -1;
+    if (size > 0) return n + 1 + size;
+    return n + 1 + ts.length * 8;
+  }
 
   const w = fixedWidth(col.type);
   if (w !== undefined) return n + v * w;
@@ -187,13 +194,34 @@ export function writeColumn(
       return o;
     case T.TYPE_LONG:
     case T.TYPE_DATE:
-    case T.TYPE_TIMESTAMP:
-    case T.TYPE_TIMESTAMP_NANOS:
       for (const v of col.values) {
         buf.writeBigInt64LE(BigInt(v as number | bigint), o);
         o += 8;
       }
       return o;
+    case T.TYPE_TIMESTAMP:
+    case T.TYPE_TIMESTAMP_NANOS: {
+      const ts = col.values.map((x) => BigInt(x as bigint));
+      if (!opts.gorilla) {
+        for (const v of ts) {
+          buf.writeBigInt64LE(v, o);
+          o += 8;
+        }
+        return o;
+      }
+      const size = ts.length > 2 ? gorillaSize(ts) : -1;
+      if (size > 0) {
+        buf.writeUInt8(T.ENCODING_GORILLA, o++);
+        encodeGorilla(ts).copy(buf, o);
+        return o + size;
+      }
+      buf.writeUInt8(T.ENCODING_UNCOMPRESSED, o++);
+      for (const v of ts) {
+        buf.writeBigInt64LE(v, o);
+        o += 8;
+      }
+      return o;
+    }
     case T.TYPE_DOUBLE:
       for (const v of col.values) {
         buf.writeDoubleLE(Number(v), o);
