@@ -25,10 +25,22 @@ Each of these is a separate future spec:
 - multi-host HA failover (`failover_*` keys, roles and zones);
 - the UDP sender.
 
-Two Java classes look ingest-relevant and are not — do not port them here:
-`QwpServerInfo` / `QwpServerInfoDecoder` decode a `SERVER_INFO` frame sent by a
-QWP **egress** server as its first frame after the upgrade; the ingest path never
-receives one. `QwpBatchBuffer` is likewise egress (`RESULT_BATCH` decode).
+Several Java classes look ingest-relevant and are not — do not port them here:
+
+- `QwpServerInfo` / `QwpServerInfoDecoder` decode a `SERVER_INFO` frame sent by a
+  QWP **egress** server as its first frame after the upgrade; the ingest path
+  never receives one.
+- `QwpBatchBuffer`, `QwpColumnBatch`, `RowView`, `ColumnView`, `RowCallback`,
+  `QwpColumnLayout`, `QwpBindValues`, `QwpBindSetter`, `QueryEvent`,
+  `QwpEgressIoThread`, `QwpResultBatchDecoder` are all result-batch decode and
+  belong to the query spec.
+- `QwpSpscQueue`, `NativeBufferWriter`, `SegmentedNativeBufferWriter`,
+  `NativeSegmentList`, `OffHeapAppendMemory` are threading and off-heap
+  allocation machinery with no Node analogue: the SPSC queue exists to hand
+  frames between the producer and I/O threads, which the event loop makes
+  unnecessary, and the rest are replaced wholesale by `Buffer`. Neither carries
+  protocol semantics.
+- `QwpHostHealthTracker` is multi-host (1.1, 1.2).
 
 ### 1.2 Single endpoint — and what that degrades
 
@@ -476,6 +488,41 @@ The delta dictionary is not simply on or off:
 The mode is therefore a consequence of what durable state exists, not a user
 toggle. A build that has delta encoding but no `.symbol-dict` must use full-dict
 mode — which is what makes PR 6 shippable before PR 12.
+
+### 5.3 The staging buffer and its swap
+
+Sections 5.1 and 8.3.1 refer to "seal and swap the buffer" without saying what
+is swapped. Java stages encoded messages in a `MicrobatchBuffer` between the
+encoder and the SF ring, with a four-state lifecycle —
+`FILLING → SEALED → SENDING → RECYCLED` — and keeps **two** of them.
+
+`sealAndSwapBuffer` does, in order:
+
+1. return immediately if the active buffer holds no data (this is why an empty
+   flush publishes nothing, and part of why the commit frame cannot rely on
+   batch state being reset — 5.1.1);
+2. seal the active buffer;
+3. swap the *other* buffer in as active;
+4. **if that buffer is still in use, wait for it to be recycled**, bounded at
+   30 s, throwing "Timeout waiting for buffer to be recycled" on expiry — this is
+   the buffer-recycle timeout 5.1 names as a mid-split failure cause;
+5. reset the newly active buffer;
+6. mark the sealed buffer `SENDING` and hand it to the engine, which appends and
+   returns once published.
+
+The buffer stays pinned until the wire send completes, which is what the second
+buffer is for: the producer keeps filling while the previous batch is in flight.
+
+**Node decision.** The pin exists because the buffer is read asynchronously after
+handoff. In Node the same hazard appears at every `await` inside append, so
+choose one and state it: either **copy on append** — the segment write takes
+ownership of its own bytes, one staging buffer suffices, and the swap machinery
+disappears — or **port the two-buffer swap** with an equivalent bounded wait.
+Copy-on-append is recommended: Node must copy into a `Buffer` for the write
+anyway, so the copy Java avoids is not actually avoidable here, and it removes
+a timeout error path rather than reproducing it. If copy-on-append is chosen,
+the 30 s recycle timeout referenced in 5.1 becomes unreachable and should be
+dropped from that list rather than left as dead prose.
 
 ## 6. Wire format
 
