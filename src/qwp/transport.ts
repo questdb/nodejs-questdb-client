@@ -8,12 +8,18 @@ import { UNCAPPED_CATCHUP_PACKING_LIMIT } from "./protocol/constants";
 import { encodeFrame } from "./protocol/frameEncoder";
 import { SymbolDict } from "./protocol/symbolDict";
 import { AckTracker } from "./ackTracker";
-import { Category, Policy, SenderError, classify, defaultPolicyFor } from "./errors";
+import { SenderError, classify, defaultPolicyFor } from "./errors";
 import { HostTracker, HostState } from "./hostTracker";
 import { Endpoint, parseAddrList } from "./endpoints";
 import { Dispatcher } from "./dispatcher";
+import { SegmentRing, BACKPRESSURE_NO_SPARE, PAYLOAD_TOO_LARGE } from "./sf/ring";
 
 const QWP_DEFAULT_AUTO_FLUSH_ROWS = 1000; // spec 9.1
+// Memory-mode store-and-forward defaults (spec 9.1, 9.2). The ring lives on
+// the transport for every sender; disk mode swaps the engine in later.
+const MEMORY_SEGMENT_BYTES = 4 * 1024 * 1024;
+const MEMORY_MAX_TOTAL_BYTES = 128 * 1024 * 1024;
+const SF_APPEND_DEADLINE_MILLIS = 30_000; // spec 4.4
 const CLIENT_ID = "nodejs/1.0.0"; // protocol client version, not the package version (spec 6.5)
 
 export enum ConnectMode {
@@ -49,12 +55,19 @@ export class QwpTransport implements SenderTransport {
   private readonly events: Dispatcher<ConnectionEvent>;
   private errorConsumer?: (e: SenderError) => void;
   private eventConsumer?: (e: ConnectionEvent) => void;
-  private inFlight = 0;
   private endpoints: Endpoint[] = [];
   private tracker!: HostTracker;
   private current?: Endpoint;
   private readonly dict = new SymbolDict();
   private confirmedMaxId = -1;
+  private readonly ring = new SegmentRing({
+    segmentBytes: MEMORY_SEGMENT_BYTES,
+    maxTotalBytes: MEMORY_MAX_TOTAL_BYTES,
+  });
+  /** Highest FSN sent on the current connection (wire replay start). */
+  private sentUpTo = -1;
+  private reconnecting = false;
+  private closed = false;
 
   constructor(options: SenderOptions) {
     this.options = options;
@@ -77,7 +90,7 @@ export class QwpTransport implements SenderTransport {
   }
 
   get ackedFsn(): number {
-    return this.acks.acked;
+    return this.ring.ackedFsn;
   }
 
   private emit(e: SenderError): void {
@@ -128,6 +141,7 @@ export class QwpTransport implements SenderTransport {
 
   private async connectLoop(): Promise<boolean> {
     for (;;) {
+      if (this.closed) return false;
       const idx = this.tracker.pickNext();
       if (idx === null) {
         this.tracker.beginRound();
@@ -142,8 +156,13 @@ export class QwpTransport implements SenderTransport {
         this.tracker.record(idx, HostState.HEALTHY);
         this.current = ep;
         this.emitConnectionEvent({ type: "connected", endpoint: ep });
-        this.acks.onConnected(this.acks.acked + 1);
+        this.acks.onConnected(this.ring.ackedFsn + 1);
         await this.sendDictCatchUp();
+        // Replay frames published beyond the acked FSN (memory-mode retention):
+        // after a reconnect the dictionary is re-registered first, then every
+        // unacked frame is re-sent from ackedFsn + 1 (spec 7.5, 8.1.1).
+        this.sentUpTo = this.ring.ackedFsn;
+        await this.drain();
         return true;
       } catch (e) {
         if (e instanceof QwpUpgradeError) {
@@ -182,6 +201,7 @@ export class QwpTransport implements SenderTransport {
 
   /** Test hook: tear down and re-establish the connection (dict catch-up path). */
   async reconnectForTest(): Promise<void> {
+    this.closed = false;
     await this.ws?.close();
     this.ws = undefined;
     this.tracker.beginRound();
@@ -194,22 +214,49 @@ export class QwpTransport implements SenderTransport {
     return true;
   }
 
-  /** Sends each frame as its own WebSocket binary message. */
+  /**
+   * Publishes frames into the store-and-forward ring, then drains what the
+   * current connection has not yet sent. flush() therefore resolves on
+   * publish, not on server ACK (spec 4.4).
+   */
   async sendFrames(frames: Buffer[]): Promise<boolean> {
-    if (!this.ws) throw new Error("QWP transport is not connected");
+    const deadline = Date.now() + SF_APPEND_DEADLINE_MILLIS;
     for (const f of frames) {
-      this.inFlight++;
-      this.acks.onFrameSent();
-      await this.ws.sendBinary(f);
+      for (;;) {
+        const fsn = this.ring.append(f);
+        if (fsn === PAYLOAD_TOO_LARGE) {
+          throw new Error(`frame does not fit a fresh segment [size=${f.length}]`);
+        }
+        if (fsn !== BACKPRESSURE_NO_SPARE) break;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            "store-and-forward append deadline exceeded while waiting for space",
+          );
+        }
+        // Space frees only via ACK-driven trim on the I/O side; yield to it.
+        await new Promise((r) => setTimeout(r, 10));
+      }
     }
+    await this.drain();
     return true;
+  }
+
+  /** Sends everything published beyond what the current connection has sent. */
+  private async drain(): Promise<void> {
+    if (!this.ws) return;
+    const pending = this.ring.framesFrom(this.sentUpTo + 1);
+    for (const f of pending) {
+      await this.ws.sendBinary(f);
+      this.acks.onFrameSent();
+      this.sentUpTo++;
+    }
   }
 
   private onResponse(payload: Buffer): void {
     const r = decodeResponse(payload);
     if (r.status === STATUS.OK) {
-      this.inFlight = Math.max(0, this.inFlight - 1);
-      this.acks.onAck(r.sequence);
+      const fsn = this.acks.onAck(r.sequence);
+      if (fsn !== null) this.ring.acknowledge(fsn);
       return;
     }
     if (r.status === STATUS.DURABLE_ACK) return;
@@ -225,18 +272,23 @@ export class QwpTransport implements SenderTransport {
   }
 
   private onDisconnected(): void {
-    if (this.inFlight > 0) {
-      // No retention until Plan 4: these frames are gone. Say so.
-      this.emit(
-        new SenderError(
-          Category.DATA_LOSS,
-          Policy.ABANDONED,
-          `connection lost with ${this.inFlight} frame(s) in flight and no retention configured`,
-        ),
-      );
-      this.inFlight = 0;
-    }
     this.emitConnectionEvent({ type: "disconnected", endpoint: this.current });
+    this.current = undefined;
+    this.ws = undefined;
+    // With store-and-forward retention in place a disconnect no longer loses
+    // in-flight frames: they are replayed from the ring on reconnect. Make the
+    // reconnect automatic instead of surfacing DATA_LOSS (spec 8.1.1).
+    void this.reconnect();
+  }
+
+  private async reconnect(): Promise<void> {
+    if (this.reconnecting || this.closed) return;
+    this.reconnecting = true;
+    try {
+      await this.connectLoop();
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   /** Server-advertised cap, or a conservative default before the handshake. */
@@ -245,6 +297,7 @@ export class QwpTransport implements SenderTransport {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     await this.ws?.close();
     this.ws = undefined;
   }

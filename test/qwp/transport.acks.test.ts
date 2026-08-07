@@ -35,13 +35,17 @@ describe("QwpTransport ack handling", () => {
     await t.close();
   });
 
-  it("reports in-flight loss when the connection drops (no retention yet)", async () => {
+  it("replays the frame instead of reporting loss when the connection drops", async () => {
     const errors: any[] = [];
     const t = await connected({ dropAfter: 1 });
     t.onError((e) => errors.push(e));
-    await t.sendFrames([Buffer.from("QWP1----------")]);
-    await new Promise((r) => setTimeout(r, 200));
-    expect(errors.some((e) => e.category === Category.DATA_LOSS)).toBe(true);
+    const payload = Buffer.from("QWP1----------");
+    await t.sendFrames([payload]);
+    await new Promise((r) => setTimeout(r, 300));
+    // Retention replaces in-flight-loss: no DATA_LOSS, and the frame is replayed.
+    expect(errors.some((e) => e.category === Category.DATA_LOSS)).toBe(false);
+    const matching = mock!.frames.filter((f) => f.equals(payload));
+    expect(matching.length).toBeGreaterThanOrEqual(2);
     await t.close();
   });
 });
