@@ -247,29 +247,76 @@ if DELTA_SYMBOL_DICT:  varint deltaStart, varint deltaCount,
 
 per table:  [varint nameLen][utf8][varint rowCount][varint columnCount]
             schema:  columnCount x [varint nameLen][utf8][typeCode:u8]
-            columns: [null bitmap ceil(rowCount/8)] + type-specific payload
+            columns: per column, in schema order:
+                     [nullHeader:u8]
+                     if nullHeader != 0: [null bitmap ceil(rowCount/8)]
+                     type-specific payload, for valueCount values
 ```
 
 The schema section carries **no mode byte and no schema id** — columns are
-always inline (post-#7200).
+always inline (post-#7200). The type byte is written verbatim: the client's
+`QwpColumnDef.getWireTypeCode()` returns `typeCode` unchanged. Some javadoc
+refers to a "null bitmap flag" in the type code; that phrasing is vestigial and
+there is no such flag bit — nullability is the `nullHeader` byte below.
+
+### 6.2.1 Null encoding — read this carefully
+
+Every column payload begins with a **1-byte null header**: `0` means no nulls
+and no bitmap follows; non-zero means a bitmap of `ceil(rowCount/8)` bytes
+follows. Java writes `1`; a decoder must treat any non-zero value as "bitmap
+present".
+
+Bitmap semantics (`QwpNullBitmap`): **bit `i` set means row `i` is NULL**, bit
+order **LSB-first within each byte**. Row 9 is therefore byte 1, bit 1.
+
+Critically, **values are compacted**: the payload carries only the non-null
+values. Java computes `valueCount = rowCount - nullCount` and every writer is
+driven by `valueCount`, not `rowCount`. There are no placeholder slots for null
+rows. This applies to fixed-width values, VARCHAR/BINARY offsets, symbol
+indices, array entries — everything. Getting this wrong produces a frame whose
+length is right for the wrong data.
 
 ### 6.3 Column payloads
 
+`V` below is `valueCount` — the **non-null** row count (see 6.2.1), never
+`rowCount`.
+
 | Type | Code | Wire |
 |---|---|---|
-| BOOLEAN | 0x01 | bit-packed, 1 bit/value |
-| BYTE / SHORT / INT / LONG | 0x02/0x03/0x04/0x05 | 1/2/4/8 B LE |
-| FLOAT / DOUBLE | 0x06/0x07 | IEEE 754 4/8 B |
-| SYMBOL | 0x09 | non-delta: varint dictSize, entries `[varint len][utf8]`, then varint index per non-null value. Delta mode: indices into the connection dictionary |
-| TIMESTAMP / TIMESTAMP_NANOS / DATE | 0x0A/0x10/0x0B | int64; under `FLAG_GORILLA` a per-column encoding byte precedes, `0x00` = raw |
-| UUID | 0x0C | 16 B LE |
-| LONG256 | 0x0D | 32 B LE |
-| GEOHASH | 0x0E | varint precision + `ceil(precision/8)` B per value |
-| VARCHAR / BINARY | 0x0F/0x17 | `(N+1) x u32` offsets + concatenated bytes |
-| DOUBLE_ARRAY / LONG_ARRAY | 0x11/0x12 | `[nDims:u8][dimLen:u32 x N][flattened LE]` |
-| DECIMAL64/128/256 | 0x13/0x14/0x15 | scale (1 B, in schema) + LE unscaled 8/16/32 B |
-| CHAR | 0x16 | 2 B UTF-16 code unit |
-| IPv4 | 0x18 | 4 B LE, as INT |
+| BOOLEAN | 0x01 | bit-packed over `V` values, `ceil(V/8)` bytes, LSB-first |
+| BYTE / SHORT / INT / LONG | 0x02/0x03/0x04/0x05 | `V x` 1/2/4/8 B LE |
+| FLOAT / DOUBLE | 0x06/0x07 | `V x` IEEE 754 4/8 B |
+| SYMBOL | 0x09 | non-delta: `varint dictSize`, `dictSize x [varint len][utf8]`, then `V x varint` index. Delta mode: **no dictionary**, just `V x varint` global id |
+| TIMESTAMP / TIMESTAMP_NANOS | 0x0A/0x10 | see 6.3.1 |
+| DATE | 0x0B | `V x` 8 B LE — **never Gorilla-encoded**, no encoding byte |
+| UUID | 0x0C | `V x` 16 B (lo then hi, matching wire order) |
+| LONG256 | 0x0D | `V x` 32 B (4 contiguous LE longs) |
+| GEOHASH | 0x0E | `varint precision` **once per column**, then `V x ceil(precision/8)` B LE |
+| VARCHAR / BINARY | 0x0F/0x17 | `(V+1) x u32` offsets + concatenated bytes. BINARY shares VARCHAR's layout exactly; only the byte-stream contract differs (opaque vs UTF-8) |
+| DOUBLE_ARRAY / LONG_ARRAY | 0x11/0x12 | **per value**: `[nDims:u8][dimLen:u32 x nDims][prod(dims) x 8 B LE]`. Shape is per row, not per column |
+| DECIMAL64/128/256 | 0x13/0x14/0x15 | `scale:u8` **once, at the start of the column payload**, then `V x` LE unscaled 8/16/32 B |
+| CHAR | 0x16 | `V x` 2 B UTF-16 code unit |
+| IPv4 | 0x18 | `V x` 4 B LE, as INT |
+
+Note on DECIMAL: `QwpConstants`' javadoc says *"[scale (1B in schema)]"*. That
+is wrong — `writeDecimal64Column` emits `buffer.putByte(scale)` into the
+**column payload**, and the schema section carries only name and type. Trust the
+code.
+
+### 6.3.1 Timestamp encoding byte
+
+The encoding byte exists **only when `FLAG_GORILLA` is set on the message**. If
+the flag is clear, timestamps are raw `V x 8 B` with no prefix byte at all.
+
+With the flag set, per `writeTimestampColumn`:
+
+- `V > 2` and the delta-of-delta fits: `0x01` (`ENCODING_GORILLA`) + bit-packed
+  payload;
+- `V > 2` but it does not fit: `0x00` (`ENCODING_UNCOMPRESSED`) + raw `V x 8 B`;
+- `V <= 2`: `0x00` + raw `V x 8 B`.
+
+So a Gorilla-advertising client must still emit the byte for tiny columns. DATE
+is excluded from this path entirely.
 
 ### 6.4 Limits (mirror server constants; enforce client-side before sending)
 
@@ -285,8 +332,13 @@ accept.
 ### 6.5 Handshake
 
 Request: `GET /write/v4` with `Sec-WebSocket-Key`, `Sec-WebSocket-Version: 13`,
-`X-QWP-Client-Id: nodejs/<pkg version>`, `X-QWP-Max-Version: 1`, and
-`Authorization: Basic|Bearer` derived from `user`/`password`/`token`.
+`X-QWP-Client-Id`, `X-QWP-Max-Version: 1`, and `Authorization: Basic|Bearer`
+derived from `user`/`password`/`token`.
+
+`X-QWP-Client-Id` follows Java's convention of `<lang>/<protocol-client-version>`
+— Java 1.3.7 sends the constant `"java/1.0.2"`, which is deliberately **not** the
+artifact version. Node therefore sends `nodejs/<qwp-client-version>` from a
+dedicated constant, not `package.json`'s version.
 
 From the `101` response read: `X-QWP-Version`, `X-QWP-Max-Batch-Size`,
 `X-QWP-Content-Encoding`, `X-QWP-Durable-Ack`, `X-QuestDB-Role`,
@@ -413,12 +465,48 @@ directory is owned by exactly one `Sender` at a time, which 8.3 enforces.
 Memory mode (PR 10) and disk mode (PR 11) share the ring; disk mode adds
 file-backed segments, a manifest, and a persisted ack watermark.
 
-### 8.2 Durability
+### 8.2 Durability — two crash-safe boundary records
+
+Both on-disk boundary records use the **same alternating-generation scheme**, and
+it must be ported exactly:
+
+- `sf-manifest.bin` (`SfManifest`) — 8 KiB, magic `SFM1` (`0x314d4653`),
+  version 1.
+- `<slot>/.ack-watermark` (`AckWatermark`) — magic `AKW1`; record layout is
+  `u32 magic | u32 version | i64 generation | i64 fsn | zero-fill to 59 |
+  u32 CRC32C of bytes [0,60)`.
+
+Each file holds **two independently CRC-protected 64-byte records, at offsets 0
+and 4096**. Writes alternate between them; the CRC is stored last. Recovery
+selects the valid record with the greatest `generation`. The 4 KiB separation is
+deliberate — it prevents a single aligned 512-byte or 4 KiB sector tear from
+damaging both records. A torn update falls back to the older valid record; if
+neither validates, recovery falls back to the segment-derived seed.
+
+Durable ACKs are cumulative (`STATUS_DURABLE_ACK fsn=N` means "everything
+`<= N` is durable"), so one monotonic watermark suffices — no per-frame bitmap.
+`update()` applies a monotonic clamp.
+
+**fsync cadence.** Ordinary ACK-only updates stay syscall-free in Java (a store
+into the mmap'd inactive record). Each non-empty background disk-trim quantum
+does one `msync` plus one fd `fsync`, fsyncs the slot directory **before**
+unlinking, and fsyncs it **again** after the batch. Close uses the same covering
+order, so the durable watermark always guards any acknowledged segment a host
+crash restores.
 
 `sf_durability` governs when `fdatasync` runs; `sf_sync_interval_millis` sets the
-periodic barrier. Ordering rule: a segment's bytes must be durable before the
-manifest entry that references them, so recovery never sees a manifest pointing
-at bytes that are not there.
+periodic barrier.
+
+**Two consequences of the Node primitives** (expected deviations, but they change
+the cost model rather than just the mechanism):
+
+1. Without mmap, ACK-only watermark updates are no longer free — each becomes a
+   positional `write()`. The trim-quantum cadence above therefore matters more in
+   Node than in Java, and the implementation must not write the watermark per
+   ACK.
+2. The checksum is **CRC32C (Castagnoli)**, not CRC-32. `zlib.crc32` is
+   ISO-HDLC and will not interoperate. A small CRC32C implementation is required
+   in `sf/`, and its vectors should be part of the golden-fixture set.
 
 ### 8.3 Slot locking without `flock`
 
@@ -465,7 +553,16 @@ wrong.
 `max_frame_rejections`, `zstd`, `compression`, `compression_level`,
 `request_durable_ack`, `transaction`, `drain_orphans`,
 `max_background_drainers`, `close_flush_timeout_millis`,
-`error_inbox_capacity`, `connection_listener_inbox_capacity`.
+`error_inbox_capacity`, `connection_listener_inbox_capacity`,
+`initial_connect_retry`, `lazy_connect`, `max_batch_rows`, `max_name_len`,
+`initial_credit`, `durable_ack_keepalive_interval_millis`,
+`poison_min_escalation_window_millis`,
+`catch_up_cap_gap_min_escalation_window_millis`.
+
+**Out of scope, belongs to the facade/pooling spec** — reject for now, since no
+pooling exists to configure: `sender_pool_min`, `sender_pool_max`,
+`buffer_pool_size`, `acquire_timeout_ms`, `idle_timeout_ms`, `max_lifetime_ms`,
+`housekeeper_interval_ms`, `sender_id`.
 
 **Accept-and-ignore, reserved** (Java: `Side.RESERVED`): `on_internal_error`,
 `on_parse_error`, `on_schema_error`, `on_security_error`, `on_server_error`,
@@ -474,15 +571,32 @@ wrong.
 **Accept-and-ignore, egress/failover** — so one connect string serves both the
 sender and a future query client: `target`, `failover`, `failover_backoff_initial_ms`,
 `failover_backoff_max_ms`, `failover_max_attempts`, `failover_max_duration_ms`,
-`query_pool_min`, `query_pool_max`, `query_close_timeout_ms`, `zone`,
-`sender_pool_min`, `sender_pool_max`, `sender_id`, and the other pool keys.
+`query_pool_min`, `query_pool_max`, `query_close_timeout_ms`, `zone`.
 
 **Reject:** everything else. Unknown-key rejection is required, which is exactly
 why both ignore-lists must be explicit rather than a catch-all. Java implements
 this the same way and comments that "forward-compat is via the spec, not silent
 ignore".
 
-### 9.1 zstd and the Node version floor
+### 9.1 Defaults differ from ILP — do not inherit the ILP ones
+
+QWP's defaults come from `QwpWebSocketSender`, not from the existing Node ILP
+transports (whose auto-flush row default is far higher):
+
+| Setting | QWP default |
+|---|---|
+| `auto_flush_rows` | 1,000 |
+| `auto_flush_bytes` | 8 MiB |
+| `auto_flush_interval` | 100 ms |
+| `auth_timeout_ms` | 15,000 |
+| background connect timeout | 15,000 ms |
+| `max_frame_rejections` | 4 |
+| `sf_append_deadline_millis` | 30,000 |
+
+`auto_flush_bytes` must additionally be clamped to the server-advertised
+`X-QWP-Max-Batch-Size` (default 16 MiB) once the handshake completes.
+
+### 9.2 zstd and the Node version floor
 
 `node:zlib`'s `zstdCompress` landed in **Node 22.15.0**. The client's documented
 floor is Node 20 and CI runs `[20, 22, latest]`. A naive "require Node 22" rule
@@ -544,7 +658,16 @@ could actually use the feature.
 ## 12. Risks
 
 - **Silent wire divergence.** Mitigated by golden vectors pinned to a Java SHA.
-  The `schema_id` trap in section 2 is a live example of how this goes wrong.
+  Section 2's `schema_id` trap and section 6.3's "scale in schema" javadoc error
+  are both live examples: in each case the prose was wrong and only the code was
+  right. Golden vectors are generated from the *code*, which is why they are the
+  primary defence rather than a nice-to-have.
+- **Null compaction (6.2.1) is the single most likely correctness bug.** A
+  decoder that assumes `rowCount` values instead of `valueCount` produces frames
+  that are self-consistent in length but wrong in content, so the server may
+  accept them and land corrupt data rather than NACK. Golden vectors must include
+  a column with nulls in the first, middle, and last row, and a fully-null
+  column.
 - **Publish-semantics `flush()` before PR 10.** Between PR 3 and PR 10 there is
   no retention, so an unacked frame lost to a disconnect is lost. PRs 3–9 must
   document this in-tree and the feature must not be announced as
