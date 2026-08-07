@@ -274,6 +274,31 @@ same value a successful flush leaves behind, and read as an empty delta) and
 1.3.7's "Return never-shipped symbol ids on reset()" does, and omitting it
 produces a permanently wedged sender rather than a visible error.
 
+### 4.1.1 A throwing column setter must roll back the row
+
+This is a columnar-specific invariant with no ILP analogue, and it is easy to
+miss because the row-oriented client never needed it.
+
+In ILP a half-written row is just trailing bytes in one buffer — truncate and
+continue. In QWP each column has its own value array, so a setter that throws
+midway through a row leaves the table buffer **desynchronised**: some columns
+hold `N` values, the ones already set hold `N+1`. Every later frame from that
+buffer is then malformed, and the null-bitmap/`valueCount` accounting (6.2.1)
+silently attributes values to the wrong rows.
+
+Java wraps every column setter in `catch (RuntimeException | Error e) {
+rollbackRow(); throw e; }`. The Node port must do the same: any throw from a
+column setter — validation failure, cap rejection, type error — rolls the
+in-progress row back to the last committed row boundary across **all** columns
+before propagating.
+
+Java also exposes `cancelRow()` for explicit abandonment. The Node `Sender` has
+no such method today; adding it is optional for this stack, but the internal
+rollback it shares is **not** optional. Note the interaction in 5.1.1: a
+cancelled or rolled-back row can leave a symbol registered in the dictionary,
+which is harmless provided the commit frame pins both delta bounds to the
+baseline.
+
 ### 4.2 Three async callbacks, not one
 
 Java exposes three separate surfaces; the Node port mirrors all three:
@@ -378,6 +403,39 @@ absorbs the duplicate — and the symbol-dict state stays consistent on retry,
 because the re-sent frames carry empty deltas. Document it; do not quietly
 promise exactly-once.
 
+### 5.1.1 The commit frame
+
+Deferred commits need a message that commits without carrying data. It is a
+normal QWP frame with `tableCount = 0`, no rows, `FLAG_DEFER_COMMIT` **cleared**
+— and, critically, **no symbols**.
+
+The empty delta must be produced *by construction*, by passing the current
+baseline as **both** bounds so the range is `[baseline+1 .. baseline]`. This is
+the only shape that is unconditionally correct in both dictionary modes (5.2):
+
+- **Delta mode** — the commit path does *not* write-ahead-persist the dictionary
+  (8.1.5). Shipping a symbol here would put an id on the wire that a recovered
+  slot cannot rebuild from `.symbol-dict`, diverging the producer's dictionary
+  from the surviving frames and **silently misattributing reused ids after a
+  crash**.
+- **Full-dict mode** — the baseline is `-1`, so the frame carries `deltaStart 0`
+  with a zero count. Nothing needs registering; the group's data frames already
+  did it.
+
+Deriving the upper bound from the current batch's max symbol id instead is a
+**bug Java already fixed**, and the failure mode is worth knowing because it is
+invisible in the common case. That value is not reliably reset: `flushPendingRows`
+returns early without clearing it when there are no pending rows or every table
+is empty, and `cancelRow` leaves a registered symbol's id behind. A commit
+reaching that window re-shipped the **entire dictionary from id 0**, in a frame
+that no cap check and no chunker covers — reintroducing the oversized-frame wall
+on the single path that bypasses the splitter (5.1).
+
+Any symbol leaked by a cancelled row is picked up by the next real flush, whose
+write-ahead persist resumes from the persisted dictionary's size. The commit
+frame also sets the last-commit-boundary FSN, which close-time drain depends on
+(8.3.1).
+
 ### 5.2 Two symbol-dictionary modes, not one
 
 The delta dictionary is not simply on or off:
@@ -418,6 +476,11 @@ All little-endian, byte-level.
 ```
 
 `MAGIC_MESSAGE = 0x31505751`, `VERSION = 1`.
+
+`payloadLen` counts the payload **only**; total message length is
+`HEADER_SIZE + payloadLen`. One QWP message is carried as exactly one WebSocket
+binary frame — the QWP header is the first byte of the WS payload, never split
+across frames.
 
 Flags: `DEFER_COMMIT 0x01`, `GORILLA 0x04`, `DELTA_SYMBOL_DICT 0x08`,
 `ZSTD 0x10`.
@@ -558,8 +621,13 @@ encoder javadoc states the two share a wire format with the decoder.
 
 `MAX_COLUMNS_PER_TABLE` 2048 · `MAX_COLUMN_NAME_LENGTH` 127 ·
 `MAX_TABLE_NAME_LENGTH` 127 · `MAX_SYMBOL_DICTIONARY_SIZE` 1,000,000 ·
+`DEFAULT_MAX_ROWS_PER_TABLE` 1,000,000 ·
+`DEFAULT_MAX_TABLES_PER_CONNECTION` 10,000 ·
 `DEFAULT_MAX_BATCH_SIZE` 16 MiB (the server advertises the real value via
 `X-QWP-Max-Batch-Size`).
+
+`tableCount` is a `u16`, so 65,535 is a hard structural ceiling independent of
+`DEFAULT_MAX_TABLES_PER_CONNECTION`.
 
 The symbol cap must be enforced at registration time, before the row is
 buffered, so that everything already buffered references ids the server will
@@ -1218,7 +1286,7 @@ could actually use the feature.
 | 5 | VARCHAR/BINARY/arrays/decimals/geohash/uuid/long256/char/ipv4 | golden + e2e |
 | 6 | Symbol dictionary: full-dict mode, then delta mode + `DICTIONARY_GAP` (5.2) | golden + e2e |
 | 7 | Gorilla timestamps (6.3.2) + int32-overflow raw fallback | golden + e2e |
-| 8 | defer-commit + zstd (feature-detected) | e2e both on and off |
+| 8 | defer-commit + commit frame (5.1.1) + zstd (feature-detected) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
 | 10 | Memory-mode ring — makes publish semantics safe | mock + e2e |
 | 11 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
@@ -1259,6 +1327,17 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **A throwing setter desynchronising the columns.** Unequal per-column lengths
+  (4.1.1) corrupt every subsequent frame from that table buffer while each frame
+  still looks structurally valid. Tests must throw from a setter mid-row — first
+  column, middle, last — and assert the next flush is byte-identical to one where
+  the row was never started.
+- **The commit frame re-shipping the whole dictionary.** Deriving its symbol
+  bound from batch state rather than pinning both bounds to the baseline (5.1.1)
+  produces a correct-looking frame in the common case and an unsplittable
+  oversized one after a cancelled row or an empty flush. Java hit this; the
+  golden vectors must include a commit frame emitted after `cancelRow` and after
+  an empty flush.
 - **Inverted upgrade-failure retry.** Treating `401`/`403` as retriable spins
   forever against a server that will never accept the credentials; treating
   `421` as terminal kills a sender during an ordinary failover window (6.5.1).
