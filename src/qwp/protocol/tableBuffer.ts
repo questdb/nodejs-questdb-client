@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { MAX_COLUMNS_PER_TABLE, MAX_NAME_LENGTH } from "./constants";
+import { MAX_COLUMNS_PER_TABLE, MAX_NAME_LENGTH, TYPE_TIMESTAMP } from "./constants";
 
 export interface ColumnBuffer {
   name: string;
@@ -36,7 +36,12 @@ export class QwpTableBuffer {
 
   /** Returns null when the column already holds a value for the in-progress row. */
   getOrCreateColumn(name: string, type: number): ColumnBuffer | null {
-    if (!name) throw new Error("column name cannot be empty");
+    // An empty name is reserved for the designated timestamp column (TYPE_TIMESTAMP):
+    // QwpSchema allows nameLen=0 to signal the designated timestamp, and the server
+    // names it "timestamp". A non-empty name of any other type must not be empty.
+    if (!name && type !== TYPE_TIMESTAMP) {
+      throw new Error("column name cannot be empty");
+    }
     const existing = this.byName.get(name);
     if (existing) {
       if (existing.type !== type) {

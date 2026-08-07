@@ -78,7 +78,9 @@ export class QwpBuffer implements SenderBuffer {
 
   at(timestamp: number | bigint, unit: TimestampUnit = "us"): void {
     const t = this.require();
-    const col = t.getOrCreateColumn("timestamp", TYPE_TIMESTAMP);
+    // Designated timestamp column: an empty schema name signals the designated
+    // timestamp (QwpSchema nameLen=0); the server names it "timestamp".
+    const col = t.getOrCreateColumn("", TYPE_TIMESTAMP);
     if (col) col.values.push(toMicros(timestamp, unit));
     t.nextRow();
     this.rows++;

@@ -57,7 +57,7 @@ describe.skipIf(!dockerAvailable())("QWP ingest end-to-end", () => {
     // WAL apply is asynchronous — poll rather than sleeping a fixed interval.
     let rows: any[] = [];
     for (let i = 0; i < 60; i++) {
-      const r = await query("select sym, price, qty from qwp_e2e");
+      const r = await query("select sym, price, qty, timestamp from qwp_e2e");
       rows = r.dataset ?? [];
       if (rows.length > 0) break;
       await new Promise((r) => setTimeout(r, 500));
@@ -67,5 +67,7 @@ describe.skipIf(!dockerAvailable())("QWP ingest end-to-end", () => {
     expect(rows[0][0]).toBe("ETH-USD");
     expect(rows[0][1]).toBeCloseTo(2615.54, 5);
     expect(rows[0][2]).toBe(7);
+    // The designated timestamp lands with OUR value, not receive time.
+    expect(rows[0][3]).toBe("2023-11-14T22:13:20.000000Z");
   }, 180_000);
 });
