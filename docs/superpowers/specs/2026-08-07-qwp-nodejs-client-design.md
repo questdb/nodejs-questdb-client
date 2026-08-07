@@ -732,6 +732,12 @@ and no bitmap follows; non-zero means a bitmap of `ceil(rowCount/8)` bytes
 follows. Java writes `1`; a decoder must treat any non-zero value as "bitmap
 present".
 
+Nullability is a **per-column construction choice**, not a per-value one:
+`getOrCreateColumn(name, type, useNullBitmap)` takes it as a parameter, and a
+column created without it cannot represent a null at all. The Node port needs the
+same decision point — a column's first write determines whether it carries a
+bitmap for the life of the batch.
+
 Bitmap semantics (`QwpNullBitmap`): **bit `i` set means row `i` is NULL**, bit
 order **LSB-first within each byte**. Row 9 is therefore byte 1, bit 1.
 
@@ -1756,12 +1762,36 @@ Four tiers, all four required.
    tests assert byte-for-byte equality. This catches endianness, varint,
    zig-zag, bit-packing and null-bitmap drift at the point of the mistake rather
    than as a mysterious server NACK, and the recorded SHA makes drift visible.
+
+   **This is verified to be buildable, not assumed.** `QwpWebSocketEncoderTest`
+   already drives the encoder standalone with no server, and every class the
+   harness needs is public. The shape is:
+
+   ```java
+   try (QwpWebSocketEncoder encoder = new QwpWebSocketEncoder();
+        QwpTableBuffer buffer = new QwpTableBuffer("trades")) {
+       QwpTableBuffer.ColumnBuffer col =
+           buffer.getOrCreateColumn("x", TYPE_LONG, /*useNullBitmap*/ false);
+       col.addLong(1);
+       buffer.nextRow();
+       int size = encoder.encode(buffer);          // single-table convenience
+       // bytes: encoder.getBuffer().getBufferPtr(), length `size`
+   }
+   ```
+
+   Two practical notes. `encode(buffer)` is a one-call path for a single table;
+   the `beginMessage` / `addTable` / `finishMessage` sequence is only needed for
+   multi-table frames and for controlling the delta-dictionary bounds (5.1.1).
+   And the buffer is **native memory** — the existing tests wrap in
+   `assertMemoryLeak`, so the harness must copy out and free rather than leak
+   per fixture.
 2. **TypeScript mock QWP server.** Performs the upgrade, decodes frames, and
    drives the whole error matrix on demand: each NACK status, malformed frames,
    mid-frame disconnect, slow-consumer backpressure, server-initiated close, and
    poison-detector escalation. A real QuestDB will not produce `INTERNAL_ERROR`
    or a torn frame to order. It must also be startable as **several endpoints at
-   once**, to exercise 1.2: rotation on a transport failure, a `421` role reject
+   once**, to exercise 1.2 — `QwpWebSocketSenderMultiEndpointTest` is the Java
+   reference for this — covering rotation on a transport failure, a `421` role reject
    that resolves when a primary appears, `FAILED_OVER` and
    `ALL_ENDPOINTS_UNREACHABLE`, state ranking preferring a known-good host over
    an untried one, and a drainer's private cursor not consuming the foreground
