@@ -29,7 +29,7 @@ describe("QwpBuffer", () => {
   it("throws for column types this plan does not encode", () => {
     const b = new QwpBuffer();
     b.table("t");
-    expect(() => b.booleanColumn("flag", true)).toThrow(/not supported/i);
+    expect(() => b.decimalColumnText("d", "1.5")).toThrow(/not supported/i);
   });
 
   it("clears state after sealing", () => {
