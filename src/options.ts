@@ -165,6 +165,17 @@ class SenderOptions {
   max_frame_rejections?: number;
   poison_min_escalation_window_millis?: number;
 
+  // ws/wss store-and-forward (spec 8, 9).
+  sf_dir?: string;
+  sender_id?: string;
+  sf_durability?: string;
+  drain_orphans?: boolean;
+  sf_max_total_bytes?: number;
+  sf_segment_bytes?: number;
+  sf_append_deadline_millis?: number;
+  request_durable_ack?: boolean;
+  max_background_drainers?: number;
+
   // replaces `auth` and `jwk` options
   username?: string;
   password?: string;
@@ -379,6 +390,7 @@ function parseConfigurationString(
   parseMaxNameLength(options);
   parseStdlibTransport(options);
   parseQwpOptions(options);
+  parseSfOptions(options);
 }
 
 function parseSettings(
@@ -453,6 +465,15 @@ const ValidConfigKeys = [
   "connection_listener_inbox_capacity",
   "max_frame_rejections",
   "poison_min_escalation_window_millis",
+  "sf_dir",
+  "sender_id",
+  "sf_durability",
+  "drain_orphans",
+  "sf_max_total_bytes",
+  "sf_segment_bytes",
+  "sf_append_deadline_millis",
+  "request_durable_ack",
+  "max_background_drainers",
 ];
 
 function validateConfigKey(key: string) {
@@ -628,6 +649,41 @@ function parseQwpOptions(options: SenderOptions) {
   parseInteger(options, "connection_listener_inbox_capacity", "connection listener inbox capacity", 16);
   parseInteger(options, "max_frame_rejections", "max frame rejections", 1);
   parseInteger(options, "poison_min_escalation_window_millis", "poison min escalation window", 0);
+}
+
+function parseSfOptions(options: SenderOptions) {
+  if (options.protocol !== WS && options.protocol !== WSS) return;
+  parseInteger(options, "sf_max_total_bytes", "sf max total bytes", 1);
+  parseInteger(options, "sf_segment_bytes", "sf segment bytes", 1);
+  parseInteger(options, "sf_append_deadline_millis", "sf append deadline", 1);
+  parseInteger(options, "max_background_drainers", "max background drainers", 1);
+  parseBoolean(options, "drain_orphans", "drain orphans");
+  parseBoolean(options, "request_durable_ack", "request durable ack");
+  if (options.sf_durability) {
+    switch (options.sf_durability) {
+      case "memory":
+      case "periodic":
+        break;
+      case "flush":
+      case "append":
+        throw new Error(
+          `sf_durability=${options.sf_durability} is not yet supported (use sf_durability=memory or periodic)`,
+        );
+      default:
+        throw new Error(`Invalid sf_durability option: '${options.sf_durability}'`);
+    }
+  }
+  if (options.sf_dir && options.sf_dir.includes(";")) {
+    throw new Error("Invalid sf_dir option: ';' is not allowed");
+  }
+  if (!options.sf_dir && options.sf_durability === "periodic") {
+    // spec 9.2: periodic durability requires disk mode.
+    throw new Error("sf_durability=periodic requires sf_dir");
+  }
+  if (options.drain_orphans) {
+    // Reduced scope (plan 4 self-review): automatic orphan adoption is not built.
+    throw new Error("drain_orphans is not yet implemented");
+  }
 }
 
 function parseBoolean(
