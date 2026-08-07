@@ -378,7 +378,31 @@ server-side *commit*, not object-store durability. Anything gating downstream
 side effects on durability must opt into `request_durable_ack`. This distinction
 belongs in the README, not just here.
 
-### 4.3 Flush semantics
+### 4.3 Connect timing — and a default that changes it silently
+
+The spec has said nothing about *when* the initial connection happens. Java has
+three modes — `OFF`, `SYNC`, `ASYNC` — and, crucially, **the default is derived
+from other keys**:
+
+- if any `reconnect_*` key is set (`reconnect_max_duration_millis`,
+  `reconnect_initial_backoff_millis`, `reconnect_max_backoff_millis`) → **SYNC**:
+  construction connects, retrying under that budget;
+- otherwise → **OFF**: construction does not connect.
+
+The reasoning is worth keeping. The `reconnect_*` knobs read as a generic retry
+budget, but the underlying path governs only reconnects *from an already
+established connection*. A user who sets a retry budget and then gets no retry on
+the very first connect has hit what Java calls "the canonical footgun"; the
+implicit upgrade to `SYNC` removes it.
+
+So setting a `reconnect_*` key changes construction from non-connecting to
+connecting. Port the derivation, not just the modes — implementing the three
+modes with a fixed default reintroduces exactly the footgun the derivation
+exists to remove. `initial_connect_mode` itself is builder-only and is **not** a
+connect-string key; `initial_connect_retry` is the connect-string key in this
+area.
+
+### 4.4 Flush semantics
 
 `flush()` resolves once the frame is **published into the store-and-forward
 engine** — in RAM for memory mode, on disk for disk mode. It does *not* wait for
@@ -1195,12 +1219,27 @@ unlinking, and fsyncs it **again** after the batch. Close uses the same covering
 order, so the durable watermark always guards any acknowledged segment a host
 crash restores.
 
-`sf_durability` **parses** four values — `memory`, `periodic`, `flush`,
-`append` — but only **two are usable**: `build()` rejects `flush` and `append`
-with "not yet supported (use sf_durability=memory or periodic)". Implement all
-four in the parser so the error is the right one, and reject the reserved pair at
-construction. `sf_sync_interval_millis` sets the periodic barrier. See 9.2 for
-the cross-key rules that bind these together.
+`sf_durability` **parses** four values but only **two are usable**:
+
+| Value | Meaning |
+|---|---|
+| `memory` | **Default.** Never fsync explicitly — bytes live in the OS page cache. Survives a **process** crash, **not** an OS or power crash. Lowest latency. |
+| `periodic` | Background checkpoint of published frames every `sf_sync_interval_millis`. The interval is a *target cadence*: scheduler and storage latency add to the real power-loss window, so it is not a bound. |
+| `flush` | Reserved for a future synchronous `flush()` barrier — rejected by `build()`. |
+| `append` | Reserved for a future per-append barrier — rejected by `build()`. |
+
+Implement all four in the parser so a user of the reserved pair gets "not yet
+supported (use sf_durability=memory or periodic)" rather than "unknown value",
+and reject them at construction.
+
+**Disk mode alone is not power-loss durability.** `sf_dir` selects disk mode
+(9.2), but durability still defaults to `memory` — files are written and never
+explicitly synced. Power-loss survival requires `sf_durability=periodic`, which
+in turn requires `sf_dir`. Section 8.1.5's note that `.symbol-dict` is
+"page-cache durable, not host-crash durable" is the same property, and it applies
+to the segments too under the default.
+
+See 9.2 for the cross-key rules binding these together.
 
 **Two consequences of the Node primitives** (expected deviations, but they change
 the cost model rather than just the mechanism):
