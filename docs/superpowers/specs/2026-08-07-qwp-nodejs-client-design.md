@@ -107,9 +107,29 @@ src/qwp/
 
 - **`ws/`** — RFC 6455, hand-rolled over `net.Socket` / `tls.TLSSocket`. Ports
   Java's `WebSocketFrameParser`/`WebSocketFrameWriter` and the Rust client's
-  HTTP response parser. QWP frames are binary-only, always `FIN=1`, never
+  HTTP response parser. QWP *data* frames are binary-only, always `FIN=1`, never
   fragmented, and use zstd at the protocol layer rather than
-  `permessage-deflate`, so no WebSocket library is used.
+  `permessage-deflate`, so no WebSocket library is used. Control frames are still
+  fully implemented (see 3.3.1) — "no fragmentation" applies to data, not to the
+  RFC's control obligations.
+
+#### 3.3.1 Control frames are not optional
+
+- **PING → PONG**, echoing the payload. A server that pings and gets no pong
+  will drop the connection.
+- **CLOSE → echo a CLOSE back** before closing, per RFC 6455 §5.5.1.
+- Outbound PING is supported (Java exposes `sendPing`), used for liveness.
+- Every client→server frame must be masked with a **fresh 4-byte key drawn
+  per frame from the OS CSPRNG** (`crypto.randomFillSync`), per RFC 6455 §10.3.
+  Do not seed a userspace PRNG once and reuse it.
+
+**Control frames need their own send buffer.** Java keeps a `controlFrameBuffer`
+distinct from the data send buffer precisely so emitting a pong cannot clobber an
+in-progress data frame. The Node analogue: a large data frame written in chunks
+under backpressure must never have a control frame interleaved into the middle of
+its byte stream. Either write data frames as a single `socket.write()` call, or
+queue control frames behind the in-flight frame — never both writers into one
+partially-written frame.
 - **`protocol/`** — pure functions over `Buffer`. No I/O, no `async`. Directly
   testable against golden vectors.
 - **`sf/`** — store-and-forward. Ports `CursorSendEngine`, `SegmentRing`,
@@ -215,11 +235,65 @@ sender.table("t").symbol("s","x").doubleColumn("p",1.5).at(ts)
    -> auto_flush_rows | auto_flush_bytes | auto_flush_interval, or flush()
    -> frameEncoder.seal(): all dirty tables -> ONE frame, assigned an FSN
       (payload optionally zstd-compressed when negotiated)
+      ...unless the encoded frame exceeds the server's cap, in which case
+      it is split -- see 5.1
    -> sf.append(frame)              <-- flush() resolves here
    -> sendLoop: frames after sentFsn -> WS binary frames, honouring
       socket.write() backpressure and the server's X-QWP-Max-Batch-Size
    -> ACK -> ackedFsn advances -> ring trims -> space frees
 ```
+
+### 5.1 Splitting a flush that exceeds the server cap
+
+When the combined encoded frame exceeds `serverMaxBatchSize` (from
+`X-QWP-Max-Batch-Size`), the flush is split so that **each non-empty table gets
+its own message**. All messages except the last carry `FLAG_DEFER_COMMIT` — the
+server appends without committing — and the final message omits it, triggering
+the commit for the whole set. If the user already enabled deferred commit, *all*
+messages carry the flag.
+
+Two rules make this safe, and both are easy to omit:
+
+**Pre-flight every split frame before publishing any of them.** If a later
+table's frame is only discovered oversized mid-publish, the already-published
+prefix strands on the ring and a subsequent commit delivers it as a *partial
+batch*.
+
+**Snapshot the cap exactly once per flush.** `serverMaxBatchSize` is mutable: the
+I/O side lowers it on a mid-stream failover to a smaller-cap node. Dictionary
+pre-registration, the split pre-flight and the publish loop must all use one
+snapshot taken at the top of the flush; if they re-read it independently, a
+failover *between* the reads sizes frames against different caps and breaks the
+all-or-nothing guarantee. In Node every `await` inside the flush is exactly that
+failover window, so this must be a local variable, not a field read.
+
+**The split is deliberately not atomic across frames.** A publish failure at
+frame `k > 1` (backpressure deadline, recycle timeout) leaves frames `1..k-1` on
+the ring as deferred-but-uncommitted. The error propagates past the
+reset-table-buffers step, so the source rows survive and the *next* flush re-emits
+the whole batch; the eventual commit then commits the already-published prefix
+alongside the re-sent copies. Those rows are therefore delivered
+**at-least-once (duplicated), not exactly-once**. This is within
+store-and-forward's at-least-once contract — a DEDUP table or a durable-ack await
+absorbs the duplicate — and the symbol-dict state stays consistent on retry,
+because the re-sent frames carry empty deltas. Document it; do not quietly
+promise exactly-once.
+
+### 5.2 Two symbol-dictionary modes, not one
+
+The delta dictionary is not simply on or off:
+
+- **Full-dict mode** — every frame is self-sufficient, carrying the whole
+  dictionary from id 0. Recovery or orphan-drain replay to a fresh server can
+  therefore never dangle a symbol id.
+- **Delta mode** — each frame carries only ids above the last shipped id. Used in
+  memory mode, and in disk mode *once the persisted `.symbol-dict` has opened*.
+  Safe only because a reconnect re-registers via the catch-up frame (7.5) and
+  recovery reseeds from the persisted file (8.1.2).
+
+The mode is therefore a consequence of what durable state exists, not a user
+toggle. A build that has delta encoding but no `.symbol-dict` must use full-dict
+mode — which is what makes PR 6 shippable before PR 12.
 
 ## 6. Wire format
 
@@ -939,10 +1013,10 @@ could actually use the feature.
 |---|---|---|
 | 1 | `ws/`: framing, masking, handshake, net/tls socket | unit + mock server |
 | 2 | `protocol/`: header, varint/zigzag, LONG/DOUBLE/TIMESTAMP/SYMBOL inline | golden vectors |
-| 3 | Sender wiring: `ws://` config, `QwpBuffer`/`QwpTransport`, auto-flush | **testcontainers e2e green** |
+| 3 | Sender wiring: `ws://` config, `QwpBuffer`/`QwpTransport`, auto-flush, cap-split (5.1) | **testcontainers e2e green** |
 | 4 | Remaining scalar types + null bitmap | golden + e2e |
 | 5 | VARCHAR/BINARY/arrays/decimals/geohash/uuid/long256/char/ipv4 | golden + e2e |
-| 6 | Delta symbol dictionary + `DICTIONARY_GAP` handling | golden + e2e |
+| 6 | Symbol dictionary: full-dict mode, then delta mode + `DICTIONARY_GAP` (5.2) | golden + e2e |
 | 7 | Gorilla timestamps + raw fallback | golden + e2e |
 | 8 | defer-commit + zstd (feature-detected) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
@@ -979,6 +1053,14 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **Delivery is at-least-once, not exactly-once.** A cap-split flush that fails
+  partway re-emits the whole batch on the next flush, duplicating the published
+  prefix (5.1). This is contractual, not a defect — but it must reach the README,
+  because users will otherwise assume the opposite from a durable client.
+- **Mutable state re-read across an `await`.** The `serverMaxBatchSize` snapshot
+  rule (5.1) is the known instance; the same hazard applies anywhere the port
+  turns one of Java's synchronous sections into an async one. Prefer locals
+  captured at entry over field reads.
 - **Permanent stalls that look like disk-full.** The `.symbol-dict` liveness
   floor (8.1.0.1) is the clearest example: enforce `sf_max_total_bytes` as a
   naive directory-byte sum and a producer can wedge forever, across restarts,
