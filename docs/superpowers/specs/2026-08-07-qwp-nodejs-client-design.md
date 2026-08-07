@@ -175,18 +175,49 @@ Node equivalent and are replaced:
 
 ### 3.5 Integration points in existing code
 
-All additive:
+Backwards-compatible, but **not** merely "add a case" — verified against the
+current `main`, the existing code branches on protocol in four places and on
+`protocol_version` in a fifth.
 
-- `src/options.ts` — add `WS`/`WSS` protocol constants and the QWP config keys
-  (section 9).
-- `src/transport/index.ts` — `case WS: case WSS: return new QwpTransport(options)`.
-- `src/buffer/index.ts` — return `QwpBuffer` for `ws`/`wss`. `protocol_version`
-  negotiation stays an ILP-only concern and is not consulted for QWP.
-- `src/sender.ts` — public builder chain unchanged; the flush path internally
-  gains a publish-vs-send distinction.
-- `src/index.ts` — export the new types.
+`src/options.ts` — four edit sites:
 
-Version bump is a **minor** (4.3.0): nothing here changes existing behaviour.
+1. The protocol token switch (`case HTTP: case HTTPS: case TCP: case TCPS:`) and
+   its error string enumerating `'http', 'https', 'tcp', 'tcps'`.
+2. `parseProtocolVersion` — see the hazard below.
+3. `parseAddress`'s port-defaulting switch and *its own* copy of that same error
+   string. `ws`/`wss` default to **9000**, the HTTP port, not 9009.
+4. The `SenderOptions` doc comment listing accepted protocols.
+
+Both error strings are very likely asserted verbatim in `sender.config.test.ts`,
+so PR 3 touches those tests.
+
+**Hazard — `createBuffer` must branch on protocol before `protocol_version`.**
+`parseProtocolVersion` has a `default:` arm assigning `PROTOCOL_VERSION_V1` to
+any protocol that is not HTTP/HTTPS. A `ws::` sender therefore reaches
+`createBuffer` carrying `protocol_version = 1`, and `createBuffer` switches on
+`protocol_version` alone — so it returns `SenderBufferV1`, the **ILP text
+buffer**, for a QWP sender. Silently: no error, wrong bytes on the wire. No
+`protocol_version` value means QWP, so adding a case to that switch is not an
+option. `createBuffer` must consult `options.protocol` first and return
+`QwpBuffer` before reaching the version switch, and `parseProtocolVersion` must
+leave `ws`/`wss` unset rather than stamping V1.
+
+`SenderOptions.resolveAuto` happens to need no guard: it calls
+`parseProtocolVersion`, sees a non-`auto` value and returns early, so it never
+builds a `ws://host:port/settings` URL. That is accidental rather than designed,
+so it warrants a regression test.
+
+`src/transport/index.ts` — `case WS: case WSS: return new QwpTransport(options)`.
+
+`src/sender.ts` — the public builder chain is unchanged, but two auto-flush gaps
+must close (see 9.1): the client has **no `auto_flush_bytes` option at all**, and
+`DEFAULT_AUTO_FLUSH_INTERVAL` is a hardcoded 1 s module constant with no
+per-transport hook — unlike rows, which already delegate to
+`transport.getDefaultAutoFlushRows()`.
+
+`src/index.ts` — export the new types.
+
+Version bump is a **minor** (4.3.0): no existing behaviour changes.
 
 ## 4. Public API
 
@@ -1042,7 +1073,16 @@ do not invent a key for it.
 ### 9.1 Defaults differ from ILP — do not inherit the ILP ones
 
 QWP's defaults come from `QwpWebSocketSender`, not from the existing Node ILP
-transports (whose auto-flush row default is far higher):
+transports (whose auto-flush row default is far higher). Two rows below are
+**not** merely different defaults — they are functionality the Node client does
+not have yet:
+
+- **`auto_flush_bytes` does not exist** in the Node client at all. Byte-based
+  auto-flush must be added to `Sender`, not just defaulted.
+- **`auto_flush_interval` has no per-transport hook.** It is a hardcoded 1 s
+  module constant in `sender.ts`; rows already delegate to
+  `transport.getDefaultAutoFlushRows()`, and the interval needs the same
+  treatment to reach QWP's 100 ms.
 
 | Setting | QWP default |
 |---|---|
@@ -1112,7 +1152,7 @@ could actually use the feature.
 |---|---|---|
 | 1 | `ws/`: framing, masking, handshake, net/tls socket | unit + mock server |
 | 2 | `protocol/`: header, varint/zigzag, LONG/DOUBLE/TIMESTAMP/SYMBOL inline | golden vectors |
-| 3 | Sender wiring: `ws://` config, `QwpBuffer`/`QwpTransport`, auto-flush, cap-split (5.1) | **testcontainers e2e green** |
+| 3 | Sender wiring: `ws://` config (4 sites, 3.5), `QwpBuffer`/`QwpTransport`, byte + interval auto-flush, cap-split (5.1) | **testcontainers e2e green** |
 | 4 | Remaining scalar types + null bitmap | golden + e2e |
 | 5 | VARCHAR/BINARY/arrays/decimals/geohash/uuid/long256/char/ipv4 | golden + e2e |
 | 6 | Symbol dictionary: full-dict mode, then delta mode + `DICTIONARY_GAP` (5.2) | golden + e2e |
@@ -1158,6 +1198,11 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **A `ws::` sender silently falling back to ILP v1.** `parseProtocolVersion`
+  stamps `PROTOCOL_VERSION_V1` on any non-HTTP protocol and `createBuffer`
+  switches on that value alone (3.5). Get the ordering wrong and QWP emits ILP
+  text with no error at all. PR 3 needs an explicit test that a `ws::` sender
+  produces a `QwpBuffer`.
 - **Delivery is at-least-once, not exactly-once.** A cap-split flush that fails
   partway re-emits the whole batch on the next flush, duplicating the published
   prefix (5.1). This is contractual, not a defect — but it must reach the README,
