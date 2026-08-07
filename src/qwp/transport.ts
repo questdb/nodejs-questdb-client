@@ -13,6 +13,7 @@ import { HostTracker, HostState } from "./hostTracker";
 import { Endpoint, parseAddrList } from "./endpoints";
 import { Dispatcher } from "./dispatcher";
 import { SfEngine } from "./sf/engine";
+import { startOrphanDrainers, OrphanDrainer } from "./sf/drainer";
 import { QwpBuffer } from "./buffer";
 import { BACKPRESSURE_NO_SPARE, PAYLOAD_TOO_LARGE } from "./sf/ring";
 
@@ -73,6 +74,9 @@ export class QwpTransport implements SenderTransport {
   private sentUpTo = -1;
   private reconnecting = false;
   private closed = false;
+  /** Orphan drainers launched on startup (spec 8.4); stopped on close(). */
+  private drainStarted = false;
+  private drainers: OrphanDrainer[] = [];
   /** In-flight public connect, so an explicit connect() reuses the constructor's
    *  fire-and-forget one instead of double-opening the engine (spec 4.3). */
   private connectPromise?: Promise<boolean>;
@@ -160,6 +164,24 @@ export class QwpTransport implements SenderTransport {
     }
     this.endpoints = parseAddrList(this.options.addr!, 9000);
     this.tracker = new HostTracker(this.endpoints.length);
+    // Orphan scan + background drainers (spec 8.4): recover slots abandoned by
+    // a crashed producer. Runs once on startup, after our own slot is locked so
+    // it is never mistaken for an orphan. Drainers use private round cursors so
+    // they never steal from the foreground connect round (spec 1.2).
+    if (
+      !this.drainStarted &&
+      this.options.drain_orphans === true &&
+      this.engine.isDisk
+    ) {
+      this.drainStarted = true;
+      void startOrphanDrainers(
+        this.options,
+        this.endpoints,
+        this.tracker,
+        (e) => this.emit(e),
+        (d) => this.drainers.push(d), // register eagerly so close() can stop them
+      );
+    }
     return this.connectLoop();
   }
 
@@ -387,6 +409,8 @@ export class QwpTransport implements SenderTransport {
 
   async close(): Promise<void> {
     this.closed = true;
+    for (const d of this.drainers) d.stop();
+    await Promise.all(this.drainers.map((d) => d.finished.catch(() => undefined)));
     await this.ws?.close();
     this.ws = undefined;
     await this.engine.close();

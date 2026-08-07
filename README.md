@@ -57,9 +57,14 @@ senders do, and each one can surprise a user who assumes otherwise:
   background barrier every `sf_sync_interval_millis` that fsyncs the active
   segment and the ack watermark, making bytes survive an OS/power crash up to
   that cadence.
-- `drain_orphans` is **off** by default, and is **not yet implemented**: a
-  crashed process's buffered data is not replayed automatically, and enabling
-  the option fails at construction.
+- `drain_orphans` (off by default) replays slots left by a crashed process: on
+  startup, the client scans `<sf_dir>/` for slot directories not held by a live
+  lock and hands each to a background drainer (bounded by
+  `max_background_drainers`) that opens its own WebSocket, re-registers the
+  recovered symbol dictionary, and replays unacked frames to the server before
+  releasing the slot. A terminal failure drops a `.failed` sentinel so the slot
+  is retried only after an operator clears it; a transient outage is retried
+  indefinitely. Requires `sf_dir`.
 - `tls_roots` accepts PEM or PKCS#12. **JKS keystores are not supported** by
   Node; convert them first.
 

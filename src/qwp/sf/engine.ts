@@ -54,6 +54,8 @@ export class SfEngine {
   // symbol dictionary file (load-bearing for delta mode; spec 8.1.6)
   private dict = new SymbolDict();
   private dictFd?: number;
+  /** True when the slot had no (or an empty) symbol-dict file on open. */
+  private dictFresh = false;
 
   constructor(private readonly opts: EngineOptions) {
     this.ring = new SegmentRing({
@@ -87,68 +89,20 @@ export class SfEngine {
     if (!this.isDisk) return;
     const { sfDir, senderId } = this.opts;
     this.slot = await acquireSlot(sfDir, senderId);
-
-    // ack watermark (discardable optimisation, guarded by monotonic clamp)
-    let recoveredWm: number | undefined;
+    // A slot that cannot be recovered is set aside (rename + .failed sentinel)
+    // and surfaced as DATA_LOSS/ABANDONED rather than failing the sender with
+    // an unlabelled error (spec 8.4). This covers both a corrupt segment chain
+    // and a corrupt, load-bearing symbol dictionary (spec 8.1.6).
     try {
-      const wmData = await readFile(join(this.slot.slotDir, ACK_WATERMARK)).catch(() => undefined);
-      if (wmData && wmData.length > 0) {
-        wmData.copy(this.wmBuf);
-        const b = readBoundary(this.wmBuf);
-        if (b) recoveredWm = Number(b.value);
-      }
-    } catch {
-      /* fall back to the segment-derived seed (spec 8.2) */
-    }
-
-    // segments -> contiguous FSN chain
-    const entries = await readdir(this.slot.slotDir).catch(() => []);
-    const segFiles = entries.filter((e) => e.endsWith(SEGMENT_EXT)).sort();
-    // Resume the file counter PAST any existing segment so continued appends
-    // open fresh files rather than truncating a recovered one that may still
-    // hold unacked frames (spec 8.1.5).
-    let maxIdx = -1;
-    for (const f of segFiles) {
-      const n = Number(f.slice(0, -SEGMENT_EXT.length));
-      if (Number.isFinite(n) && n > maxIdx) maxIdx = n;
-    }
-    this.fileNo = maxIdx + 1;
-    const chain: { baseSeq: number; frames: Buffer[] }[] = [];
-    let segmentRecoverError: unknown;
-    try {
-      for (const f of segFiles) {
-        const data = await readFile(join(this.slot.slotDir, f));
-        const sr = scanSegment(data);
-        chain.push({ baseSeq: sr.baseSeq, frames: sr.frames });
-      }
-      if (chain.length > 0) {
-        this.ring = SegmentRing.recovered(chain, {
-          segmentBytes: this.opts.segmentBytes,
-          maxTotalBytes: this.opts.maxTotalBytes,
-        });
-        if (recoveredWm !== undefined) this.ring.acknowledge(recoveredWm);
-      }
+      await this.recover(this.slot.slotDir);
     } catch (e) {
-      // A corrupt / non-contiguous slot cannot be recovered in place. Set it
-      // aside (rename + .failed sentinel) and surface DATA_LOSS with the
-      // quarantined path rather than failing the sender with an unlabelled
-      // error (spec 8.4).
-      segmentRecoverError = e;
-    }
-    if (segmentRecoverError) {
-      await this.failQuarantined(sfDir, senderId, segmentRecoverError);
-    }
-
-    // symbol dictionary (load-bearing; positions preserved, never de-duped)
-    const dictData = await readFile(join(this.slot.slotDir, SYMBOL_DICT)).catch(() => undefined);
-    if (dictData && dictData.length > 0) {
-      for (const e of decodeDictFile(dictData)) this.dict.addRecovered(e);
+      await this.failQuarantined(sfDir, senderId, e);
     }
     this.dictFd = openSync(join(this.slot.slotDir, SYMBOL_DICT), "a");
     // A fresh (or zero-length) slot has no file header yet: write the SYD1
     // header before any chunk so recovery can parse it (spec 8.1.6). An append
     // write lands at EOF, which is offset 0 on an empty file.
-    if (!dictData || dictData.length === 0) {
+    if (this.dictFresh) {
       writeSync(this.dictFd, DICT_HEADER, 0, DICT_HEADER.length, undefined);
     }
 
@@ -161,6 +115,81 @@ export class SfEngine {
       this.barrierTimer = setInterval(() => void this.runBarrier(), interval);
       this.barrierTimer.unref?.();
     }
+  }
+
+  /**
+   * Read-only recovery for orphan drainers, which already hold the slot lock and
+   * must never write (spec 8.4). Populates the recovered ring and symbol
+   * dictionary without taking a lock, opening write descriptors, or starting the
+   * durability barrier. Throws on a slot that cannot be recovered.
+   */
+  static async openReadOnly(
+    opts: EngineOptions,
+    sfDir: string,
+    senderId: string,
+  ): Promise<SfEngine> {
+    const e = new SfEngine({
+      ...opts,
+      sfDir: undefined, // never let a read-only view think it can write
+      durability: "memory",
+      syncIntervalMillis: 0,
+    });
+    await e.recover(join(sfDir, senderId));
+    return e;
+  }
+
+  /**
+   * Shared recovery: reads the ack watermark, the contiguous segment chain into
+   * the ring, and the loaded symbol dictionary. Throws on a slot that cannot be
+   * recovered (corrupt chain, bad magic, broken dictionary); the caller decides
+   * whether to quarantine (owner) or drop a .failed sentinel (drainer).
+   */
+  private async recover(slotDir: string): Promise<void> {
+    // ack watermark (discardable optimisation, guarded by monotonic clamp)
+    let recoveredWm: number | undefined;
+    try {
+      const wmData = await readFile(join(slotDir, ACK_WATERMARK)).catch(() => undefined);
+      if (wmData && wmData.length > 0) {
+        wmData.copy(this.wmBuf);
+        const b = readBoundary(this.wmBuf);
+        if (b) recoveredWm = Number(b.value);
+      }
+    } catch {
+      /* fall back to the segment-derived seed (spec 8.2) */
+    }
+
+    // segments -> contiguous FSN chain
+    const entries = await readdir(slotDir).catch(() => []);
+    const segFiles = entries.filter((e) => e.endsWith(SEGMENT_EXT)).sort();
+    // Resume the file counter PAST any existing segment so continued appends
+    // open fresh files rather than truncating a recovered one that may still
+    // hold unacked frames (spec 8.1.5).
+    let maxIdx = -1;
+    for (const f of segFiles) {
+      const n = Number(f.slice(0, -SEGMENT_EXT.length));
+      if (Number.isFinite(n) && n > maxIdx) maxIdx = n;
+    }
+    this.fileNo = maxIdx + 1;
+    const chain: { baseSeq: number; frames: Buffer[] }[] = [];
+    for (const f of segFiles) {
+      const data = await readFile(join(slotDir, f));
+      const sr = scanSegment(data);
+      chain.push({ baseSeq: sr.baseSeq, frames: sr.frames });
+    }
+    if (chain.length > 0) {
+      this.ring = SegmentRing.recovered(chain, {
+        segmentBytes: this.opts.segmentBytes,
+        maxTotalBytes: this.opts.maxTotalBytes,
+      });
+      if (recoveredWm !== undefined) this.ring.acknowledge(recoveredWm);
+    }
+
+    // symbol dictionary (load-bearing; positions preserved, never de-duped)
+    const dictData = await readFile(join(slotDir, SYMBOL_DICT)).catch(() => undefined);
+    if (dictData && dictData.length > 0) {
+      for (const e of decodeDictFile(dictData)) this.dict.addRecovered(e);
+    }
+    this.dictFresh = !dictData || dictData.length === 0;
   }
 
   /**

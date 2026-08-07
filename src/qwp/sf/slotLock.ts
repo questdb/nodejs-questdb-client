@@ -1,5 +1,5 @@
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export interface SlotHandle {
   slotDir: string;
@@ -23,6 +23,64 @@ function isAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/** A lockfile holder is live only when the boot id matches AND the pid is alive. */
+export function lockHolderLive(pid: number, boot: string): boolean {
+  return boot === bootId() && isAlive(pid);
+}
+
+/**
+ * Reads a lockfile (pid + boot id) and reports whether its holder is live.
+ * Used by the orphan scanner to tell live-held slots from abandoned ones.
+ */
+export async function isLiveLock(lockPath: string): Promise<boolean> {
+  const data = await readFile(lockPath, "utf8").catch(() => undefined);
+  if (!data) return false;
+  const [pidStr, boot] = data.split("\n");
+  const pid = Number.parseInt(pidStr, 10);
+  if (!Number.isFinite(pid)) return false;
+  return lockHolderLive(pid, boot);
+}
+
+/**
+ * The parent-anchored logical lock (spec 8.3), used to serialise short-lived
+ * orphan-adoption pathname transitions. It lives OUTSIDE the slot directory so
+ * it stays valid if that directory is renamed, and the orphan drainer takes it
+ * first (then revalidates, then takes the slot lock, then releases it).
+ */
+const LOGICAL_LOCK_DIR = ".slot-locks";
+
+export async function acquireLogicalLock(
+  sfDir: string,
+  senderId: string,
+): Promise<void> {
+  const lockPath = join(sfDir, LOGICAL_LOCK_DIR, senderId);
+  await mkdir(dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(lockPath, "wx");
+      await fh.writeFile(`${process.pid}\n${bootId()}\n`, "utf8");
+      await fh.close();
+      return;
+    } catch (e: unknown) {
+      const code = (e as { code?: string }).code;
+      if (code !== "EEXIST") throw e;
+      if (attempt === 0 && !(await isLiveLock(lockPath))) {
+        await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      throw new Error(`logical lock in use [dir=${lockPath}]`);
+    }
+  }
+  throw new Error(`logical lock in use [dir=${join(sfDir, LOGICAL_LOCK_DIR, senderId)}]`);
+}
+
+export async function releaseLogicalLock(
+  sfDir: string,
+  senderId: string,
+): Promise<void> {
+  await unlink(join(sfDir, LOGICAL_LOCK_DIR, senderId)).catch(() => undefined);
 }
 
 /** Emulates flock; the kernel's release-on-exit is reconstructed by liveness. */

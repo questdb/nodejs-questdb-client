@@ -690,9 +690,9 @@ function parseSfOptions(options: SenderOptions) {
     // spec 9.2: the sync interval only makes sense against a periodic barrier.
     throw new Error("sf_sync_interval_millis requires sf_durability=periodic");
   }
-  if (options.drain_orphans) {
-    // Reduced scope (plan 4 self-review): automatic orphan adoption is not built.
-    throw new Error("drain_orphans is not yet implemented");
+  if (options.drain_orphans && !options.sf_dir) {
+    // spec 9.2: orphan draining replays slot files, which requires disk mode.
+    throw new Error("drain_orphans requires sf_dir");
   }
 }
 
