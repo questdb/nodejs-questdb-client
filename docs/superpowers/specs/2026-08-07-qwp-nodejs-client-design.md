@@ -580,6 +580,42 @@ From the `101` response read: `X-QWP-Version`, `X-QWP-Max-Batch-Size`,
 `X-QWP-Content-Encoding`, `X-QWP-Durable-Ack`, `X-QuestDB-Role`,
 `X-QuestDB-Zone`.
 
+### 6.5.1 Upgrade failure classification
+
+A non-101 response is not one error. Java classifies three ways, and getting
+this wrong inverts the retry behaviour — a credential failure retried forever, a
+transient role reject treated as fatal:
+
+| Response | Meaning | Handling |
+|---|---|---|
+| `421` **with** an `X-QuestDB-Role` header | Role reject: this node cannot accept writes (read-only replica, demoting primary) | **Retried indefinitely** — never terminal. This is the connect-time half of the read-only case whose mid-stream half arrives as a reconnect-eligible close (7.4). |
+| `401` / `403` | Credential failure | Terminal. Emits `AUTH_FAILED` on the connection listener *before* the producer-side error becomes observable (4.2). |
+| anything else, **including `404`** | Generic upgrade failure — `404` specifically means a per-endpoint path mismatch | Surfaced as-is; not specially classified. |
+
+The `421` rule is why §8.4 can say a transient all-replica window is never
+quarantined on a wall-clock budget: connect-time role rejects retry forever by
+design.
+
+### 6.5.2 TLS — `tls_roots` does not port directly
+
+`tls_verify` maps cleanly: `on` → default verification, `unsafe_off` →
+`rejectUnauthorized: false`. Java additionally enforces that **a custom trust
+store may not be combined with disabled validation** (its constructor throws);
+reproduce that validation rather than silently ignoring one of the two.
+
+`tls_roots` / `tls_roots_password` do **not** port cleanly. Java takes a
+`trustStorePath` plus a `char[]` password — a JVM keystore. Node's `tls.connect`
+accepts `ca` as PEM, or `pfx` + `passphrase` for PKCS#12. **JKS is not readable
+by Node at all**, and no amount of option-mapping changes that.
+
+Decision for this stack: accept **PEM** for `tls_roots` (mapped to `ca`, password
+ignored, and warn if one is supplied since PEM roots are not encrypted), and
+accept **PKCS#12** (`.p12`/`.pfx`, mapped to `pfx` + `passphrase`). Detect a JKS
+file by its magic bytes (`0xFEEDFEED`) and fail with an explicit "JKS keystores
+are not supported by the Node client; convert to PKCS#12 or PEM" — not a parse
+error. A connect string that works against Java may therefore fail here, so this
+belongs in the README's compatibility notes, not only in this spec.
+
 ### 6.6 Server responses
 
 ```
@@ -1175,7 +1211,7 @@ could actually use the feature.
 
 | # | PR | Gate |
 |---|---|---|
-| 1 | `ws/`: framing, masking, handshake, net/tls socket | unit + mock server |
+| 1 | `ws/`: framing, masking, handshake, upgrade-failure classification (6.5.1), TLS mapping (6.5.2), net/tls socket | unit + mock server |
 | 2 | `protocol/`: header, varint/zigzag, LONG/DOUBLE/TIMESTAMP/SYMBOL inline | golden vectors |
 | 3 | Sender wiring: `ws://` config (4 sites, 3.5), `QwpBuffer`/`QwpTransport`, byte + interval auto-flush, cap-split (5.1) | **testcontainers e2e green** |
 | 4 | Remaining scalar types + null bitmap | golden + e2e |
@@ -1223,6 +1259,15 @@ could actually use the feature.
   alone turns brief outages into producer-fatal terminals. The mock-server tests
   must include a "4 strikes inside the dwell window" case that asserts *no*
   escalation.
+- **Inverted upgrade-failure retry.** Treating `401`/`403` as retriable spins
+  forever against a server that will never accept the credentials; treating
+  `421` as terminal kills a sender during an ordinary failover window (6.5.1).
+  The two are easy to conflate because both are "the server refused the
+  upgrade". Mock-server tests must cover `421`-with-role, `401`, `403`, `404`.
+- **A connect string that works on Java failing on Node.** `tls_roots` with a
+  JKS keystore is unsupportable in Node (6.5.2). Fail with an explicit message
+  naming the conversion, and document it — a silent parse failure here looks
+  like a client bug.
 - **A `ws::` sender silently falling back to ILP v1.** `parseProtocolVersion`
   stamps `PROTOCOL_VERSION_V1` on any non-HTTP protocol and `createBuffer`
   switches on that value alone (3.5). Get the ordering wrong and QWP emits ILP
