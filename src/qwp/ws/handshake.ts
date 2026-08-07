@@ -28,6 +28,8 @@ export interface UpgradeResult {
   qwpVersion?: number;
   maxBatchSize?: number;
   role?: string;
+  /** "enabled" when this connection is durable-ack capable (spec 6.5.1). */
+  durableAck?: string;
   /** Bytes already received after the header terminator. */
   leftover: Buffer;
 }
@@ -41,6 +43,7 @@ export function buildUpgradeRequest(opts: {
   port: number;
   clientId: string;
   authorization?: string;
+  requestDurableAck?: boolean;
 }): { request: Buffer; key: string } {
   const key = randomBytes(16).toString("base64");
   const lines = [
@@ -54,6 +57,11 @@ export function buildUpgradeRequest(opts: {
     `X-QWP-Client-Id: ${opts.clientId}`,
   ];
   if (opts.authorization) lines.push(`Authorization: ${opts.authorization}`);
+  // Durable-ack opt-in. The server echoes X-QWP-Durable-Ack: enabled only when
+  // it can back this connection with its durable-ack registry (spec 6.5.1); an
+  // opted-in client treats a missing echo as a hard capability gap and fails
+  // fast rather than silently running without the durability it asked for.
+  if (opts.requestDurableAck) lines.push("X-QWP-Request-Durable-Ack: true");
   return { request: Buffer.from(lines.join("\r\n") + "\r\n\r\n", "ascii"), key };
 }
 
@@ -93,6 +101,7 @@ export function parseUpgradeResponse(raw: Buffer): UpgradeResult {
     qwpVersion: version ? Number.parseInt(version, 10) : undefined,
     maxBatchSize: cap ? Number.parseInt(cap, 10) : undefined,
     role: headers.get("x-questdb-role"),
+    durableAck: headers.get("x-qwp-durable-ack"),
     leftover,
   };
 }

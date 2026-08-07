@@ -169,6 +169,7 @@ class SenderOptions {
   sf_dir?: string;
   sender_id?: string;
   sf_durability?: string;
+  sf_sync_interval_millis?: number;
   drain_orphans?: boolean;
   sf_max_total_bytes?: number;
   sf_segment_bytes?: number;
@@ -468,6 +469,7 @@ const ValidConfigKeys = [
   "sf_dir",
   "sender_id",
   "sf_durability",
+  "sf_sync_interval_millis",
   "drain_orphans",
   "sf_max_total_bytes",
   "sf_segment_bytes",
@@ -656,6 +658,7 @@ function parseSfOptions(options: SenderOptions) {
   parseInteger(options, "sf_max_total_bytes", "sf max total bytes", 1);
   parseInteger(options, "sf_segment_bytes", "sf segment bytes", 1);
   parseInteger(options, "sf_append_deadline_millis", "sf append deadline", 1);
+  parseInteger(options, "sf_sync_interval_millis", "sf sync interval millis", 1);
   parseInteger(options, "max_background_drainers", "max background drainers", 1);
   parseBoolean(options, "drain_orphans", "drain orphans");
   parseBoolean(options, "request_durable_ack", "request durable ack");
@@ -682,6 +685,10 @@ function parseSfOptions(options: SenderOptions) {
   if (!options.sf_dir && options.sf_durability === "periodic") {
     // spec 9.2: periodic durability requires disk mode.
     throw new Error("sf_durability=periodic requires sf_dir");
+  }
+  if (options.sf_sync_interval_millis !== undefined && options.sf_durability !== "periodic") {
+    // spec 9.2: the sync interval only makes sense against a periodic barrier.
+    throw new Error("sf_sync_interval_millis requires sf_durability=periodic");
   }
   if (options.drain_orphans) {
     // Reduced scope (plan 4 self-review): automatic orphan adoption is not built.

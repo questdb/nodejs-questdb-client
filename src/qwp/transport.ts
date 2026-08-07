@@ -29,6 +29,9 @@ export enum ConnectMode {
   SYNC = "SYNC",
 }
 
+/** Terminal durable-ack capability gap; escapes the rotation loop (spec 6.5.1). */
+class DurableAckMismatchError extends Error {}
+
 export interface ConnectionEvent {
   type: "connected" | "disconnected";
   endpoint?: Endpoint;
@@ -67,6 +70,9 @@ export class QwpTransport implements SenderTransport {
   private sentUpTo = -1;
   private reconnecting = false;
   private closed = false;
+  /** In-flight public connect, so an explicit connect() reuses the constructor's
+   *  fire-and-forget one instead of double-opening the engine (spec 4.3). */
+  private connectPromise?: Promise<boolean>;
 
   constructor(options: SenderOptions) {
     this.options = options;
@@ -75,6 +81,8 @@ export class QwpTransport implements SenderTransport {
       maxTotalBytes: options.sf_max_total_bytes ?? MEMORY_MAX_TOTAL_BYTES,
       sfDir: options.sf_dir,
       senderId: options.sender_id ?? DEFAULT_SENDER_ID,
+      durability: options.sf_durability === "periodic" ? "periodic" : "memory",
+      syncIntervalMillis: options.sf_sync_interval_millis,
     });
     this.errors = new Dispatcher(options.error_inbox_capacity ?? 256, (e) =>
       this.errorConsumer?.(e),
@@ -109,6 +117,18 @@ export class QwpTransport implements SenderTransport {
   }
 
   async connect(): Promise<boolean> {
+    // Idempotent: the constructor may already have kicked off a fire-and-forget
+    // connect (derived SYNC mode). An explicit connect() must join that in-flight
+    // attempt rather than open the engine a second time (spec 4.3, 8.3 slot lock).
+    if (this.ws) return true;
+    if (this.connectPromise) return this.connectPromise;
+    this.connectPromise = this.doConnect().finally(() => {
+      this.connectPromise = undefined;
+    });
+    return this.connectPromise;
+  }
+
+  private async doConnect(): Promise<boolean> {
     await this.engine.open();
     this.endpoints = parseAddrList(this.options.addr!, 9000);
     this.tracker = new HostTracker(this.endpoints.length);
@@ -136,6 +156,7 @@ export class QwpTransport implements SenderTransport {
       clientId: CLIENT_ID,
       authorization: this.auth(),
       rejectUnauthorized: this.options.tls_verify !== false,
+      requestDurableAck: this.options.request_durable_ack === true,
       onBinary: (p) => this.onResponse(p),
       onClose: () => this.onDisconnected(),
     };
@@ -159,11 +180,30 @@ export class QwpTransport implements SenderTransport {
       const ep = this.endpoints[idx];
       try {
         this.ws = await QwpWebSocket.connect(this.wsOptions(ep));
+        // Durable-ack capability gap (spec 6.5.1): an opted-in client that did
+        // not get the X-QWP-Durable-Ack: enabled confirmation must fail fast.
+        // Retrying the same endpoints cannot turn a non-capable server into a
+        // capable one, so this is terminal, not a rotation.
+        if (
+          this.options.request_durable_ack === true &&
+          this.ws.durableAck !== true
+        ) {
+          const err = new DurableAckMismatchError(
+            `server did not confirm X-QWP-Durable-Ack while request_durable_ack=on [endpoint=${ep.host}:${ep.port}]`,
+          );
+          await this.ws.close().catch(() => undefined);
+          this.ws = undefined;
+          throw err;
+        }
         this.tracker.record(idx, HostState.HEALTHY);
         this.current = ep;
         this.emitConnectionEvent({ type: "connected", endpoint: ep });
-        this.acks.onConnected(this.engine.ackedFsn + 1);
-        await this.sendDictCatchUp();
+        // Re-register the dictionary FIRST. The catch-up frame(s) occupy the
+        // lowest connection-scoped wire seqs, so onConnected must know how many
+        // precede the ring replay or the first ring-frame ACK over-trims (spec
+        // 6.6.1).
+        const catchUpFrames = await this.sendDictCatchUp();
+        this.acks.onConnected(this.engine.ackedFsn + 1, catchUpFrames);
         // Replay frames published beyond the acked FSN (memory-mode retention):
         // after a reconnect the dictionary is re-registered first, then every
         // unacked frame is re-sent from ackedFsn + 1 (spec 7.5, 8.1.1).
@@ -171,6 +211,7 @@ export class QwpTransport implements SenderTransport {
         await this.drain();
         return true;
       } catch (e) {
+        if (e instanceof DurableAckMismatchError) throw e;
         if (e instanceof QwpUpgradeError) {
           if (e.kind === "auth") throw e; // terminal, never rotate
           this.tracker.record(
@@ -187,10 +228,11 @@ export class QwpTransport implements SenderTransport {
   /**
    * The server's dictionary is connection-scoped and empty after a reconnect,
    * so re-register from id 0 before any data frame or every delta frame earns
-   * DICTIONARY_GAP (spec 7.5).
+   * DICTIONARY_GAP (spec 7.5). Returns the number of catch-up frames sent so
+   * the caller can account for the wire seqs they consume (spec 6.6.1).
    */
-  private async sendDictCatchUp(): Promise<void> {
-    if (this.dict.size() === 0) return;
+  private async sendDictCatchUp(): Promise<number> {
+    if (this.dict.size() === 0) return 0;
     const cap = this.ws?.maxBatchSize ?? UNCAPPED_CATCHUP_PACKING_LIMIT;
     const frame = encodeFrame([], { gorilla: false, dict: this.dict, confirmedMaxId: -1 });
     if (frame.length > cap) {
@@ -198,6 +240,7 @@ export class QwpTransport implements SenderTransport {
     }
     await this.ws!.sendBinary(frame);
     this.confirmedMaxId = this.dict.size() - 1;
+    return 1;
   }
 
   /** Test hook: register a symbol in the transport-owned dictionary. */

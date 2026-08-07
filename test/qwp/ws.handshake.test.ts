@@ -23,6 +23,35 @@ describe("qwp handshake", () => {
     expect(s.endsWith("\r\n\r\n")).toBe(true);
   });
 
+  it("requests durable acks via X-QWP-Request-Durable-Ack when opted in (spec 6.5.1)", () => {
+    const off = buildUpgradeRequest({ host: "h", port: 9000, clientId: "c" }).request
+      .toString("ascii");
+    expect(off).not.toMatch(/X-QWP-Request-Durable-Ack/);
+    const on = buildUpgradeRequest({
+      host: "h",
+      port: 9000,
+      clientId: "c",
+      requestDurableAck: true,
+    }).request.toString("ascii");
+    expect(on).toMatch(/\r\nX-QWP-Request-Durable-Ack: true\r\n/);
+  });
+
+  it("reads the X-QWP-Durable-Ack confirmation from the 101", () => {
+    const raw = Buffer.from(
+      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+        "Connection: Upgrade\r\nSec-WebSocket-Accept: abc\r\n" +
+        "X-QWP-Version: 1\r\nX-QWP-Durable-Ack: enabled\r\n\r\n",
+      "ascii",
+    );
+    expect(parseUpgradeResponse(raw).durableAck).toBe("enabled");
+    const rawOff = Buffer.from(
+      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+        "Connection: Upgrade\r\nSec-WebSocket-Accept: abc\r\n\r\n",
+      "ascii",
+    );
+    expect(parseUpgradeResponse(rawOff).durableAck).toBeUndefined();
+  });
+
   it("classifies 421 with a role header as a retriable role reject", () => {
     const raw = Buffer.from(
       "HTTP/1.1 421 Misdirected Request\r\nX-QuestDB-Role: replica\r\n\r\n",

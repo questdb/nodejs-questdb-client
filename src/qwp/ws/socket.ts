@@ -12,6 +12,7 @@ export interface QwpWebSocketOptions {
   authorization?: string;
   rejectUnauthorized?: boolean;
   ca?: Buffer | Buffer[];
+  requestDurableAck?: boolean;
   /** Inbound binary payloads (response frames) are handed here. */
   onBinary?: (payload: Buffer) => void;
   /** Fires once when the connection is dropped or closed externally. */
@@ -25,15 +26,19 @@ export class QwpWebSocket {
   private readonly onBinary?: (payload: Buffer) => void;
   private readonly onClose?: () => void;
   readonly maxBatchSize?: number;
+  /** True when the server confirmed durable-ack capability (spec 6.5.1). */
+  readonly durableAck: boolean;
 
   private constructor(
     socket: Socket,
-    maxBatchSize?: number,
+    maxBatchSize: number | undefined,
+    durableAck: boolean,
     onBinary?: (payload: Buffer) => void,
     onClose?: () => void,
   ) {
     this.socket = socket;
     this.maxBatchSize = maxBatchSize;
+    this.durableAck = durableAck;
     this.onBinary = onBinary;
     this.onClose = onClose;
     this.socket.on("data", (chunk: Buffer) => this.onData(chunk));
@@ -73,6 +78,7 @@ export class QwpWebSocket {
             const ws = new QwpWebSocket(
               socket,
               res.maxBatchSize,
+              res.durableAck === "enabled",
               opts.onBinary,
               opts.onClose,
             );

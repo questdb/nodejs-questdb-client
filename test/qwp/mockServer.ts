@@ -10,6 +10,8 @@ export interface MockOptions {
   dropAfter?: number;
   upgradeStatus?: number;
   upgradeHeaders?: string;
+  /** Echo X-QWP-Durable-Ack: enabled on the 101 (durable-ack capable server). */
+  durableAck?: boolean;
 }
 
 export function okResponse(seq: number): Buffer {
@@ -140,7 +142,8 @@ export class MockQwpServer {
         sock.write(
           "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
             `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n` +
-            "X-QWP-Version: 1\r\nX-QWP-Max-Batch-Size: 1048576\r\n\r\n",
+            "X-QWP-Version: 1\r\nX-QWP-Max-Batch-Size: 1048576\r\n" +
+            `${opts.durableAck ? "X-QWP-Durable-Ack: enabled\r\n" : ""}\r\n`,
         );
         handshaken = true;
         return;

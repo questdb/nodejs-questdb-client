@@ -43,12 +43,15 @@ senders do, and each one can surprise a user who assumes otherwise:
 - Delivery is **at-least-once**. A retried batch can duplicate rows; use a
   `DEDUP` table if you need idempotence.
 - An acknowledgement means server-side **commit**, not object-store durability.
-  Set `request_durable_ack=on` if durability gates downstream work.
+  Set `request_durable_ack=on` if durability gates downstream work — the client
+  then requests durable ACKs and **fails fast at connect** if the server cannot
+  confirm them (`X-QWP-Durable-Ack: enabled`).
 - `sf_dir` alone is **not** power-loss durability. The default
   `sf_durability=memory` never fsyncs, so bytes survive a *process* crash but
-  not a power loss. `sf_durability=periodic` is accepted but its background
-  checkpoint cadence is **not yet implemented** — the only wired durability is
-  `memory`.
+  not a power loss. `sf_durability=periodic` (requires `sf_dir`) runs a
+  background barrier every `sf_sync_interval_millis` that fsyncs the active
+  segment and the ack watermark, making bytes survive an OS/power crash up to
+  that cadence.
 - `drain_orphans` is **off** by default, and is **not yet implemented**: a
   crashed process's buffered data is not replayed automatically, and enabling
   the option fails at construction.

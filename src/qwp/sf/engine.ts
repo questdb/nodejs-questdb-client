@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { open, readFile, writeFile, readdir } from "node:fs/promises";
+import { open, readFile, readdir } from "node:fs/promises";
 import { openSync, writeSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { SegmentRing } from "./ring";
@@ -8,16 +8,23 @@ import { appendFrame, scanSegment, SEGMENT_HEADER_SIZE } from "./segment";
 import { writeBoundary, readBoundary, BOUNDARY_FILE_SIZE } from "./boundary";
 import { encodeChunk, decodeDictFile } from "./symbolDictFile";
 import { SymbolDict } from "../protocol/symbolDict";
+import { quarantineSlot } from "./quarantine";
+import { SenderError, Category, Policy } from "../errors";
 
 export const SEGMENT_EXT = ".sfa";
 const ACK_WATERMARK = ".ack-watermark";
 const SYMBOL_DICT = ".symbol-dict";
+const DEFAULT_SYNC_INTERVAL_MILLIS = 5000; // spec 9.1
 
 export interface EngineOptions {
   segmentBytes: number;
   maxTotalBytes: number;
   sfDir?: string;
   senderId: string;
+  /** spec 8.2: page-cache only (default) vs a periodic background barrier. */
+  durability?: "memory" | "periodic";
+  /** Target cadence for the periodic barrier (spec 9.1 default 5000). */
+  syncIntervalMillis?: number;
 }
 
 /**
@@ -35,10 +42,14 @@ export class SfEngine {
   private activeDataBytes = 0;
   private closed = false;
 
-  // ack watermark state
+  // ack watermark state (spec 8.2). Written on a cadence, never per-ACK (C1),
+  // and fsynced only in periodic durability.
   private wmBuf = Buffer.alloc(BOUNDARY_FILE_SIZE);
   private wmGen = 0;
   private lastWm = -1n;
+  private watermarkDirty = false;
+  private barrierTimer?: ReturnType<typeof setInterval>;
+  private barrierInFlight = false;
 
   // symbol dictionary file (load-bearing for delta mode; spec 8.1.6)
   private dict = new SymbolDict();
@@ -66,6 +77,10 @@ export class SfEngine {
   /** The recovered symbol dictionary, for catch-up re-registration (spec 7.5). */
   get symbolDict(): SymbolDict {
     return this.dict;
+  }
+
+  get durability(): "memory" | "periodic" {
+    return this.opts.durability ?? "memory";
   }
 
   async open(): Promise<void> {
@@ -99,17 +114,29 @@ export class SfEngine {
     }
     this.fileNo = maxIdx + 1;
     const chain: { baseSeq: number; frames: Buffer[] }[] = [];
-    for (const f of segFiles) {
-      const data = await readFile(join(this.slot.slotDir, f));
-      const sr = scanSegment(data);
-      chain.push({ baseSeq: sr.baseSeq, frames: sr.frames });
+    let segmentRecoverError: unknown;
+    try {
+      for (const f of segFiles) {
+        const data = await readFile(join(this.slot.slotDir, f));
+        const sr = scanSegment(data);
+        chain.push({ baseSeq: sr.baseSeq, frames: sr.frames });
+      }
+      if (chain.length > 0) {
+        this.ring = SegmentRing.recovered(chain, {
+          segmentBytes: this.opts.segmentBytes,
+          maxTotalBytes: this.opts.maxTotalBytes,
+        });
+        if (recoveredWm !== undefined) this.ring.acknowledge(recoveredWm);
+      }
+    } catch (e) {
+      // A corrupt / non-contiguous slot cannot be recovered in place. Set it
+      // aside (rename + .failed sentinel) and surface DATA_LOSS with the
+      // quarantined path rather than failing the sender with an unlabelled
+      // error (spec 8.4).
+      segmentRecoverError = e;
     }
-    if (chain.length > 0) {
-      this.ring = SegmentRing.recovered(chain, {
-        segmentBytes: this.opts.segmentBytes,
-        maxTotalBytes: this.opts.maxTotalBytes,
-      });
-      if (recoveredWm !== undefined) this.ring.acknowledge(recoveredWm);
+    if (segmentRecoverError) {
+      await this.failQuarantined(sfDir, senderId, segmentRecoverError);
     }
 
     // symbol dictionary (load-bearing; positions preserved, never de-duped)
@@ -118,6 +145,87 @@ export class SfEngine {
       for (const e of decodeDictFile(dictData)) this.dict.addRecovered(e);
     }
     this.dictFd = openSync(join(this.slot.slotDir, SYMBOL_DICT), "a");
+
+    // Start the throttled durability barrier. In memory mode it coalesces the
+    // page-cache watermark write across ACKs (spec 8.2 consequence 1); in
+    // periodic mode it additionally fsyncs the active segment (spec 8.1.5
+    // syncPublished semantics).
+    const interval = this.opts.syncIntervalMillis ?? DEFAULT_SYNC_INTERVAL_MILLIS;
+    if (interval > 0) {
+      this.barrierTimer = setInterval(() => void this.runBarrier(), interval);
+      this.barrierTimer.unref?.();
+    }
+  }
+
+  /**
+   * Releases the slot lock, quarantines the corrupt slot, and throws a
+   * DATA_LOSS/ABANDONED SenderError carrying the quarantined path (spec 8.4).
+   */
+  private async failQuarantined(
+    sfDir: string,
+    senderId: string,
+    cause: unknown,
+  ): Promise<never> {
+    const slot = this.slot!;
+    this.slot = undefined;
+    await releaseSlot(slot);
+    let quarantinedPath: string | undefined;
+    try {
+      quarantinedPath = await quarantineSlot(sfDir, senderId, slot.slotDir);
+    } catch {
+      // The cap refused the rename; keep the original path as context.
+      quarantinedPath = slot.slotDir;
+    }
+    const detail = (cause as Error)?.message ?? String(cause);
+    throw new SenderError(
+      Category.DATA_LOSS,
+      Policy.ABANDONED,
+      `sf slot '${senderId}' could not be recovered and was quarantined: ${detail}`,
+      -1,
+      -1,
+      -1,
+      quarantinedPath,
+    );
+  }
+
+  /**
+   * Background / close-time durability barrier. Coalesces the ACK watermark
+   * write (C1) and, in periodic mode, fsyncs the active segment.
+   */
+  private async runBarrier(): Promise<void> {
+    // NOT gated on this.closed: close() relies on a final barrier after it has
+    // already cleared the timer and set closed, and runBarrier is protected from
+    // overlap by barrierInFlight (the timer is cleared before the final call).
+    if (!this.isDisk || !this.slot || this.barrierInFlight) return;
+    this.barrierInFlight = true;
+    try {
+      // Periodic covering order: make the active segment durable first, then
+      // the watermark that guards it (spec 8.1.5, 8.2).
+      if (this.durability === "periodic" && this.fh) {
+        await this.fh.sync();
+      }
+      if (this.watermarkDirty) {
+        this.wmGen++;
+        writeBoundary(this.wmBuf, this.wmGen, this.lastWm);
+        const path = join(this.slot.slotDir, ACK_WATERMARK);
+        const fh = await open(path, "w");
+        try {
+          await fh.write(this.wmBuf);
+          if (this.durability === "periodic") await fh.sync();
+        } finally {
+          await fh.close();
+        }
+        this.watermarkDirty = false;
+      }
+      // Note: Node exposes no directory fsync, so the slot-dir covering fsync
+      // of spec 8.2 has no portable Node analogue; the file fsyncs above are
+      // the load-bearing part.
+    } catch {
+      // Durability is best-effort on a failing filesystem; leave the dirty flag
+      // set so the next barrier retries.
+    } finally {
+      this.barrierInFlight = false;
+    }
   }
 
   /**
@@ -161,11 +269,10 @@ export class SfEngine {
   acknowledge(fsn: number): void {
     this.ring.acknowledge(fsn);
     if (this.isDisk && this.slot && fsn >= 0 && BigInt(fsn) > this.lastWm) {
-      // memory durability: page-cache write, no explicit fsync (spec 8.2).
+      // Memory durability is a page-cache write coalesced onto the barrier
+      // cadence, never a per-ACK syscall (spec 8.2 consequence 1).
       this.lastWm = BigInt(fsn);
-      this.wmGen++;
-      writeBoundary(this.wmBuf, this.wmGen, this.lastWm);
-      writeFile(join(this.slot.slotDir, ACK_WATERMARK), this.wmBuf).catch(() => undefined);
+      this.watermarkDirty = true;
     }
   }
 
@@ -193,6 +300,12 @@ export class SfEngine {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.barrierTimer) {
+      clearInterval(this.barrierTimer);
+      this.barrierTimer = undefined;
+    }
+    // Final barrier: persist any un-flushed ACK watermark before the files close.
+    await this.runBarrier();
     if (this.fh) await this.fh.close();
     if (this.dictFd !== undefined) closeSync(this.dictFd);
     if (this.slot) await releaseSlot(this.slot);

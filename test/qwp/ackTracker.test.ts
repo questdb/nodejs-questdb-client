@@ -42,4 +42,30 @@ describe("AckTracker", () => {
     expect(t.onAck(1)).toBe(1);
     expect(t.onAck(0)).toBe(1);
   });
+
+  it("does not let a catch-up ACK over-trim the first ring frame (handoff B1b)", () => {
+    // A reconnect with a populated dictionary emits one catch-up frame first,
+    // which the server assigns wire seq 0. onConnected(100, 1) says so.
+    const t = new AckTracker();
+    t.onConnected(100, 1); // 1 catch-up frame; ring replay resumes at FSN 100
+    // The catch-up frame is counted by onConnected's initial nextWireSeq=1.
+    t.onFrameSent(); // ring frame 0 sent -> nextWireSeq = 2
+
+    // The catch-up ACK (wire seq 0) must NOT trim ring frame 0.
+    expect(t.onAck(0)).toBeNull();
+    // The real ACK for ring frame 0 (wire seq 1) maps to FSN 100.
+    expect(t.onAck(1)).toBe(100);
+
+    t.onFrameSent(); // ring frame 1 sent -> nextWireSeq = 3
+    expect(t.onAck(2)).toBe(101); // ring frame 1 (FSN 101)
+  });
+
+  it("behaves identically with no catch-up frames", () => {
+    const t = new AckTracker();
+    t.onConnected(100, 0);
+    t.onFrameSent();
+    expect(t.onAck(0)).toBe(100);
+    t.onFrameSent();
+    expect(t.onAck(1)).toBe(101);
+  });
 });
