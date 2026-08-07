@@ -1508,6 +1508,10 @@ registry's classification verbatim.
 `sf_append_deadline_millis`, `sf_dir`, `sf_durability`, `sf_max_segment_bytes`,
 `sf_max_total_bytes`, `sf_sync_interval_millis`, `transaction`.
 
+Two of those names do not say what they do: **`transaction`** is the
+defer-commit switch (5.1.1, `FLAG_DEFER_COMMIT`), and **`sf_dir`** is what
+selects disk mode — there is no `store_and_forward` key (9.2).
+
 `user` and `pass` are **aliases** of `username` and `password`, registered via
 `alias()`; both spellings must resolve.
 
@@ -1524,6 +1528,11 @@ ignores them: `target`, `failover`,
 `failover_max_attempts`, `failover_backoff_initial_ms`, `failover_backoff_max_ms`,
 `failover_max_duration_ms`, `max_batch_rows`, `initial_credit`,
 `buffer_pool_size`, `compression`, `compression_level`, `client_id`, `zone`.
+
+`client_id` being egress-side does **not** mean the sender omits
+`X-QWP-Client-Id`. The sender always sends its own constant (6.5); the
+connect-string key only lets a *query* client override its identifier, so we
+accept and ignore it while still emitting the header.
 
 **`Side.POOL` — accept-and-ignore.** The facade applies these and "the two
 clients ignore" them, so we ignore them too rather than reject: `sender_pool_min`,
@@ -1570,6 +1579,11 @@ not have yet:
 | `max_background_drainers` | 4 |
 | `max_name_len` | 127 |
 | `sender_id` | `"default"` |
+| `sf_durability` | `memory` (8.2 — **not** power-loss durable) |
+| `sf_dir` | unset ⇒ **memory mode** (9.2) |
+| `drain_orphans` | **off** — see below |
+| `request_durable_ack` | off |
+| `transaction` (defer commit) | off |
 | `durable_ack_keepalive_interval_millis` | 200 (≤ 0 disables) |
 | close shutdown await | 30,000 |
 | max quarantined copies per slot | 64 |
@@ -1588,6 +1602,15 @@ not have yet:
 | progress inbox capacity | 256 |
 | catch-up packing limit when cap unadvertised | 64 KiB |
 | max catch-up cap-gap attempts (orphan drainer only) | 16 |
+
+**Orphan draining is off by default**, and that combination deserves stating
+plainly: with `sf_dir` set but `drain_orphans` unset, a crashed process's slot is
+written to disk, survives, and is **never drained automatically**. Nothing
+replays it until an operator enables the flag or another sender adopts the slot.
+The default is defensible — draining opens background connections at startup —
+but a user who configures `sf_dir` expecting crash recovery gets durability
+without recovery unless they also opt in. This belongs in the README next to
+`sf_dir`, not only here.
 
 **Byte-based auto-flush is off by default on WebSocket.** The builder's WS
 default is `0`, which is exactly what `auto_flush_bytes=off` sets — so the
@@ -1868,6 +1891,9 @@ could actually use the feature.
   rule (5.1) is the known instance; the same hazard applies anywhere the port
   turns one of Java's synchronous sections into an async one. Prefer locals
   captured at entry over field reads.
+- **Durability without recovery.** `sf_dir` set and `drain_orphans` left at its
+  default of off means a crashed process's slot persists and is never replayed
+  (9.1). Users will read `sf_dir` as "crash recovery" and get only half of it.
 - **Permanent stalls that look like disk-full.** The `.symbol-dict` liveness
   floor (8.1.2) is the clearest example: enforce `sf_max_total_bytes` as a
   naive directory-byte sum and a producer can wedge forever, across restarts,
