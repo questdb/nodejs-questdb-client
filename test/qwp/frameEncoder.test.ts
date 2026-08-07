@@ -8,7 +8,7 @@ describe("encodeFrame", () => {
     const t = new QwpTableBuffer("t");
     t.getOrCreateColumn("a", TYPE_LONG)!.values.push(7);
     t.nextRow();
-    const f = encodeFrame([t]);
+    const f = encodeFrame([t], { gorilla: false });
     expect(f.subarray(0, 4).toString("ascii")).toBe("QWP1");
     expect(f.readUInt8(4)).toBe(1); // version
     expect(f.readUInt8(5)).toBe(0); // flags: none in this plan
@@ -22,7 +22,7 @@ describe("encodeFrame", () => {
     t.nextRow();
     t.getOrCreateColumn("a", TYPE_LONG)!.values.push(2);
     t.nextRow();
-    const f = encodeFrame([t]);
+    const f = encodeFrame([t], { gorilla: false });
     // ...header, table name "t", rowCount 2, colCount 1, schema "a"+type, then column
     // nullHeader is the byte immediately after the schema entry.
     const idx = f.indexOf(TYPE_LONG, HEADER_SIZE);
@@ -36,7 +36,7 @@ describe("encodeFrame", () => {
     t.getOrCreateColumn("a", TYPE_LONG)!.values.push(1);
     t.nextRow();
     t.nextRow(); // row 1: "a" not set -> null
-    const f = encodeFrame([t]);
+    const f = encodeFrame([t], { gorilla: false });
     const idx = f.indexOf(TYPE_LONG, HEADER_SIZE);
     expect(f.readUInt8(idx + 1)).toBe(1); // bitmap present
     expect(f.readUInt8(idx + 2)).toBe(0b00000010); // bit 1 set -> row 1 is NULL

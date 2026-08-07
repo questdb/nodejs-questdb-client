@@ -3,6 +3,7 @@ import { SenderBuffer } from "../buffer";
 import { TimestampUnit } from "../utils";
 import { QwpTableBuffer } from "./protocol/tableBuffer";
 import { encodeFrame } from "./protocol/frameEncoder";
+import { SymbolDict } from "./protocol/symbolDict";
 import { flattenArray } from "./protocol/columnWriter";
 import { TYPE_DOUBLE, TYPE_DOUBLE_ARRAY, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR } from "./protocol/constants";
 
@@ -27,12 +28,24 @@ export class QwpBuffer implements SenderBuffer {
   private byName = new Map<string, QwpTableBuffer>();
   private current?: QwpTableBuffer;
   private rows = 0;
+  private dict?: SymbolDict;
+  private confirmedMaxId = -1;
+
+  /** Attach a connection-scoped symbol dictionary (delta mode), or undefined to stay in full-dict mode. */
+  attachDict(d: SymbolDict | undefined): void {
+    this.dict = d;
+  }
+
+  setConfirmedMaxId(id: number): void {
+    this.confirmedMaxId = id;
+  }
 
   reset(): SenderBuffer {
     this.tables = [];
     this.byName = new Map();
     this.current = undefined;
     this.rows = 0;
+    this.confirmedMaxId = -1;
     return this;
   }
 
@@ -69,7 +82,11 @@ export class QwpBuffer implements SenderBuffer {
   symbol(name: string, value: unknown): SenderBuffer {
     return this.guard(() => {
       const col = this.require().getOrCreateColumn(name, TYPE_SYMBOL);
-      if (col) col.values.push(String(value));
+      if (col) {
+        col.values.push(
+          this.dict ? this.dict.getOrAdd(String(value)) : String(value),
+        );
+      }
       return this;
     });
   }
@@ -127,7 +144,11 @@ export class QwpBuffer implements SenderBuffer {
     void maxBatchSize;
     const dirty = this.tables.filter((t) => t.rowCount > 0);
     if (dirty.length === 0) return [];
-    const frame = encodeFrame(dirty);
+    const frame = encodeFrame(dirty, {
+      gorilla: false,
+      dict: this.dict,
+      confirmedMaxId: this.confirmedMaxId,
+    });
     this.reset();
     return [frame];
   }
