@@ -496,7 +496,8 @@ If the ring is at its `sf_max_total_bytes` cap, `flush()` awaits space for up to
 sender.table("t").symbol("s","x").doubleColumn("p",1.5).at(ts)
    -> QwpBuffer routes into a per-table TableBuffer (column-wise typed arrays;
       a column not set in a given row is marked null in that row's bitmap)
-   -> auto_flush_rows | auto_flush_bytes | auto_flush_interval, or flush()
+   -> auto_flush_rows | auto_flush_interval, or flush()
+      (auto_flush_bytes is a fourth trigger but is OFF by default -- see 9.1)
    -> frameEncoder.seal(): all dirty tables -> ONE frame, assigned an FSN
       (payload optionally zstd-compressed when negotiated)
       ...unless the encoded frame exceeds the server's cap, in which case
@@ -549,7 +550,8 @@ is load-bearing rather than cosmetic:
 So this must be a real error class in the Node port, not a string check.
 
 **The split is deliberately not atomic across frames.** A publish failure at
-frame `k > 1` (backpressure deadline, recycle timeout) leaves frames `1..k-1` on
+frame `k > 1` — in Node, the `sf_append_deadline_millis` backpressure deadline
+(5.3 removes Java's other cause, the buffer-recycle timeout) — leaves frames `1..k-1` on
 the ring as deferred-but-uncommitted. The error propagates past the
 reset-table-buffers step, so the source rows survive and the *next* flush re-emits
 the whole batch; the eventual commit then commits the already-published prefix
@@ -607,7 +609,7 @@ The delta dictionary is not simply on or off:
 
 The mode is therefore a consequence of what durable state exists, not a user
 toggle. A build that has delta encoding but no `.symbol-dict` must use full-dict
-mode — which is what makes PR 6 shippable before PR 12.
+mode — which is what makes PR 6 shippable before PR 14.
 
 ### 5.3 The staging buffer and its swap
 
@@ -625,7 +627,8 @@ encoder and the SF ring, with a four-state lifecycle —
 3. swap the *other* buffer in as active;
 4. **if that buffer is still in use, wait for it to be recycled**, bounded at
    30 s, throwing "Timeout waiting for buffer to be recycled" on expiry — this is
-   the buffer-recycle timeout 5.1 names as a mid-split failure cause;
+   the buffer-recycle timeout — which the Node port does **not** inherit, per the
+   decision below;
 5. reset the newly active buffer;
 6. mark the sealed buffer `SENDING` and hand it to the engine, which appends and
    returns once published.
@@ -633,16 +636,21 @@ encoder and the SF ring, with a four-state lifecycle —
 The buffer stays pinned until the wire send completes, which is what the second
 buffer is for: the producer keeps filling while the previous batch is in flight.
 
-**Node decision.** The pin exists because the buffer is read asynchronously after
-handoff. In Node the same hazard appears at every `await` inside append, so
-choose one and state it: either **copy on append** — the segment write takes
-ownership of its own bytes, one staging buffer suffices, and the swap machinery
-disappears — or **port the two-buffer swap** with an equivalent bounded wait.
-Copy-on-append is recommended: Node must copy into a `Buffer` for the write
-anyway, so the copy Java avoids is not actually avoidable here, and it removes
-a timeout error path rather than reproducing it. If copy-on-append is chosen,
-the 30 s recycle timeout referenced in 5.1 becomes unreachable and should be
-dropped from that list rather than left as dead prose.
+**Node decision: copy on append.** The pin exists because the buffer is read
+asynchronously after handoff, and in Node that hazard recurs at every `await`
+inside append. The segment write takes ownership of its own bytes, so **one**
+staging buffer suffices and the swap machinery disappears entirely.
+
+This is the decision, not a recommendation: Node must copy into a `Buffer` for
+the write regardless, so the copy Java's double-buffering avoids is not actually
+avoidable here — we would pay it *and* carry a timeout error path. Consequently
+the 30 s recycle wait has **no Node analogue** and must not appear as a failure
+cause anywhere in this spec (5.1 has been corrected accordingly).
+
+*Rejected alternative:* port the two-buffer swap with an equivalent bounded wait.
+It reproduces a timeout that cannot fire for any reason a Node implementation
+would recognise, and buys nothing, since the copy it exists to avoid is
+unavoidable.
 
 ## 6. Wire format
 
@@ -1134,7 +1142,7 @@ Node README already documents for ILP ("each worker thread needs its own Sender
 instance"), so it introduces nothing new for users — but it does mean a slot
 directory is owned by exactly one `Sender` at a time, which 8.3 enforces.
 
-Memory mode (PR 10) and disk mode (PR 11) share the ring **and the segment
+Memory mode (PR 12) and disk mode (PR 13) share the ring **and the segment
 abstraction**: Java's `MmapSegment` has a `memoryBacked` flag selecting a
 malloc'd buffer instead of a file mapping, with the same cursor architecture.
 Port that flag rather than writing two segment types.
@@ -1718,7 +1726,7 @@ Four tiers, all four required.
 ## 11. PR stack
 
 Sixteen stacked PRs, each independently reviewable and green. PRs 1–8 are the
-wire; 9–13 are the reliability story, including multi-host failover at 9a/9b;
+wire; 9–11 are error handling and failover; 12–15 are durability; 16 ships it.
 PR 3 is the first point at which a user
 could actually use the feature.
 
@@ -1733,13 +1741,13 @@ could actually use the feature.
 | 7 | Gorilla timestamps (6.3.2) + int32-overflow raw fallback | golden + e2e |
 | 8 | defer-commit + commit frame (5.1.1) + zstd (feature-detected) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
-| 9a | Multi-host `addr` grammar incl. IPv6 + duplicate rejection (1.2) | unit |
-| 9b | Host health tracker: state ranking, rounds, `RETRIABLE_OTHER` rotation, `FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` | mock server, multi-endpoint |
-| 10 | Memory-mode ring — makes publish semantics safe | mock + e2e |
-| 11 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
-| 12 | `.symbol-dict` persistence + delta replay after recovery | crash tests |
-| 13 | Slot locks (both kinds), orphan scan, drainers with private round cursors (1.2), `DATA_LOSS`/`ABANDONED` | crash tests |
-| 14 | Docs, examples, README support matrix, 4.3.0 release | — |
+| 10 | Multi-host `addr` grammar incl. IPv6 + duplicate rejection (1.2) | unit |
+| 11 | Host health tracker: state ranking, rounds, `RETRIABLE_OTHER` rotation, `FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` | mock server, multi-endpoint |
+| 12 | Memory-mode ring — makes publish semantics safe | mock + e2e |
+| 13 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
+| 14 | `.symbol-dict` persistence + delta replay after recovery | crash tests |
+| 15 | Slot locks (both kinds), orphan scan, drainers with private round cursors (1.2), `DATA_LOSS`/`ABANDONED` | crash tests |
+| 16 | Docs, examples, README support matrix, 4.3.0 release | — |
 
 ## 12. Risks
 
@@ -1760,10 +1768,10 @@ could actually use the feature.
   stream that trips the raw fallback, and columns of exactly 0, 1, 2 and 3
   values — the sub-3 cases take a different path (6.3.1) and are where an
   off-by-one hides.
-- **Publish-semantics `flush()` before PR 10.** Between PR 3 and PR 10 there is
-  no retention, so an unacked frame lost to a disconnect is lost. PRs 3–9 must
+- **Publish-semantics `flush()` before PR 12.** Between PR 3 and PR 12 there is
+  no retention, so an unacked frame lost to a disconnect is lost. PRs 3–11 must
   document this in-tree and the feature must not be announced as
-  production-ready until PR 10 lands.
+  production-ready until PR 12 lands.
 - **Config-key ownership cannot be guessed.** `ConfigSchema` assigns every key a
   `Side`, and several ingest-sounding keys (`max_batch_rows`, `initial_credit`,
   `compression`, `client_id`) are `Side.EGRESS`. Port the registry as data with
