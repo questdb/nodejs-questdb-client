@@ -25,6 +25,32 @@ The Undici HTTP agent was introduced in 4.0.0, and it is the default HTTP transp
 The standard HTTP/HTTPS modules of Node.js are still supported for backwards compatibility.
 Use the <i>stdlib_http</i> option to switch to the standard HTTP/HTTPS modules.
 
+## Transport support matrix
+
+| Protocol | Transport | Notes |
+|---|---|---|
+| `http` / `https` | HTTP | ILP, request/response |
+| `tcp` / `tcps` | TCP | ILP, persistent |
+| `ws` / `wss` | WebSocket | **QWP** — columnar binary, store-and-forward |
+
+### QWP caveats
+
+These properties of the WebSocket (QWP) sender differ from what the HTTP/ILP
+senders do, and each one can surprise a user who assumes otherwise:
+
+- `flush()` resolves once rows are **published** to the send log, not when the
+  server acknowledges them. This differs from `http::`.
+- Delivery is **at-least-once**. A retried batch can duplicate rows; use a
+  `DEDUP` table if you need idempotence.
+- An acknowledgement means server-side **commit**, not object-store durability.
+  Set `request_durable_ack=on` if durability gates downstream work.
+- `sf_dir` enables on-disk buffering but **not** power-loss durability on its
+  own — add `sf_durability=periodic`.
+- `drain_orphans` is **off** by default, so a crashed process's buffered data is
+  not replayed automatically.
+- `tls_roots` accepts PEM or PKCS#12. **JKS keystores are not supported** by
+  Node; convert them first.
+
 ## Configuration options
 
 Detailed description of the client's configuration options can be found in
