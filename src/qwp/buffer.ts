@@ -5,7 +5,7 @@ import { QwpTableBuffer } from "./protocol/tableBuffer";
 import { encodeFrame } from "./protocol/frameEncoder";
 import { SymbolDict } from "./protocol/symbolDict";
 import { flattenArray } from "./protocol/columnWriter";
-import { TYPE_DOUBLE, TYPE_DOUBLE_ARRAY, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR } from "./protocol/constants";
+import { TYPE_BOOLEAN, TYPE_DOUBLE, TYPE_DOUBLE_ARRAY, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR } from "./protocol/constants";
 
 function toMicros(value: number | bigint, unit: TimestampUnit): bigint {
   const v = typeof value === "bigint" ? value : BigInt(Math.trunc(value));
@@ -212,8 +212,12 @@ export class QwpBuffer implements SenderBuffer {
       return this;
     });
   }
-  booleanColumn(): SenderBuffer {
-    return unsupported("booleanColumn");
+  booleanColumn(name: string, value: boolean): SenderBuffer {
+    return this.guard(() => {
+      const col = this.require().getOrCreateColumn(name, TYPE_BOOLEAN);
+      if (col) col.values.push(value);
+      return this;
+    });
   }
   arrayColumn(name: string, value: unknown[]): SenderBuffer {
     return this.guard(() => {

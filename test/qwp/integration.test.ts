@@ -105,4 +105,38 @@ describe.skipIf(!canRun)("QWP ingest end-to-end", () => {
     // The designated timestamp lands with OUR value, not receive time.
     expect(rows[0][3]).toBe("2023-11-14T22:13:20.000000Z");
   }, 180_000);
+
+  it("round-trips every supported column type", async () => {
+    const table = `qwp_types_${Date.now()}`;
+    const sender = await Sender.fromConfig(
+      `ws::addr=${host}:${httpPort};`,
+    );
+    await sender.connect();
+    await sender
+      .table(table)
+      .symbol("sym", "A")
+      .stringColumn("str", "hello")
+      .booleanColumn("flag", true)
+      .intColumn("i", 42)
+      .floatColumn("d", 1.25)
+      .timestampColumn("ts2", 1_700_000_000_000_000n, "us")
+      .at(1_700_000_000_000_000n, "us");
+    await sender.flush();
+    await sender.close();
+
+    let rows: any[] = [];
+    for (let i = 0; i < 60; i++) {
+      const r = await query(
+        `select sym, str, flag, i, d from ${table}`,
+      );
+      rows = r.dataset ?? [];
+      if (rows.length > 0) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(rows[0][0]).toBe("A");
+    expect(rows[0][1]).toBe("hello");
+    expect(rows[0][2]).toBe(true);
+    expect(rows[0][3]).toBe(42);
+    expect(rows[0][4]).toBeCloseTo(1.25, 5);
+  }, 180_000);
 });
