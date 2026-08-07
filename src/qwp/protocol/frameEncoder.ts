@@ -18,7 +18,7 @@ function utf8Size(s: string): number {
 /** varint length + utf8 bytes (spec 6.0 "string"). */
 function writeString(buf: Buffer, offset: number, s: string): number {
   const n = utf8Size(s);
-  let o = writeVarint(buf, offset, n);
+  const o = writeVarint(buf, offset, n);
   buf.write(s, o, "utf8");
   return o + n;
 }

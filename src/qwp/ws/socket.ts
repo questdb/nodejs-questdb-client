@@ -1,0 +1,110 @@
+import { Buffer } from "node:buffer";
+import { connect as netConnect, Socket } from "node:net";
+import { connect as tlsConnect } from "node:tls";
+import { encodeClientFrame, FrameParser, OPCODE } from "./frame";
+import { buildUpgradeRequest, computeAccept, parseUpgradeResponse } from "./handshake";
+
+export interface QwpWebSocketOptions {
+  host: string;
+  port: number;
+  tls: boolean;
+  clientId: string;
+  authorization?: string;
+  rejectUnauthorized?: boolean;
+  ca?: Buffer | Buffer[];
+}
+
+export class QwpWebSocket {
+  private readonly socket: Socket;
+  private readonly parser = new FrameParser();
+  private closed = false;
+  readonly maxBatchSize?: number;
+
+  private constructor(socket: Socket, maxBatchSize?: number) {
+    this.socket = socket;
+    this.maxBatchSize = maxBatchSize;
+    this.socket.on("data", (chunk: Buffer) => this.onData(chunk));
+  }
+
+  static connect(opts: QwpWebSocketOptions): Promise<QwpWebSocket> {
+    return new Promise((resolve, reject) => {
+      const socket: Socket = opts.tls
+        ? tlsConnect({
+            host: opts.host,
+            port: opts.port,
+            rejectUnauthorized: opts.rejectUnauthorized !== false,
+            ca: opts.ca,
+          })
+        : netConnect({ host: opts.host, port: opts.port });
+
+      const onError = (e: Error) => reject(e);
+      socket.once("error", onError);
+
+      socket.once(opts.tls ? "secureConnect" : "connect", () => {
+        const { request, key } = buildUpgradeRequest(opts);
+        socket.write(request);
+
+        let acc = Buffer.alloc(0);
+        const onHeaderData = (chunk: Buffer) => {
+          acc = Buffer.concat([acc, chunk]);
+          if (acc.indexOf("\r\n\r\n") < 0) return;
+          socket.off("data", onHeaderData);
+          socket.off("error", onError);
+          try {
+            const res = parseUpgradeResponse(acc);
+            if (res.accept !== computeAccept(key)) {
+              throw new Error("websocket: Sec-WebSocket-Accept mismatch");
+            }
+            const ws = new QwpWebSocket(socket, res.maxBatchSize);
+            if (res.leftover.length > 0) ws.onData(res.leftover);
+            resolve(ws);
+          } catch (e) {
+            socket.destroy();
+            reject(e);
+          }
+        };
+        socket.on("data", onHeaderData);
+      });
+    });
+  }
+
+  private onData(chunk: Buffer): void {
+    this.parser.push(chunk);
+    for (let m = this.parser.next(); m; m = this.parser.next()) {
+      switch (m.opcode) {
+        case OPCODE.PING:
+          this.socket.write(encodeClientFrame(OPCODE.PONG, m.payload));
+          break;
+        case OPCODE.CLOSE:
+          // RFC 6455 §5.5.1: echo the close before tearing down.
+          if (!this.closed) {
+            this.closed = true;
+            this.socket.write(encodeClientFrame(OPCODE.CLOSE, m.payload));
+            this.socket.end();
+          }
+          break;
+        default:
+          // Response frames are decoded in a later plan (ACK handling).
+          break;
+      }
+    }
+  }
+
+  /** One write per frame, so a control frame can never interleave mid-frame. */
+  sendBinary(payload: Buffer): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.closed) return reject(new Error("websocket is closed"));
+      const frame = encodeClientFrame(OPCODE.BINARY, payload);
+      this.socket.write(frame, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  close(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.closed) return resolve();
+      this.closed = true;
+      this.socket.write(encodeClientFrame(OPCODE.CLOSE, Buffer.alloc(0)));
+      this.socket.end(() => resolve());
+    });
+  }
+}
