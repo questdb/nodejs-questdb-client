@@ -24,7 +24,10 @@ Each of these is a separate future spec:
 - the `QuestDB` facade and its sender/query pooling;
 - **zone-aware and role-aware endpoint *ranking*** (`zone=`, `target=primary|replica`)
   — see 1.2, this is an egress-side feature and the ingest sender does not use it;
-- the UDP sender.
+- the UDP sender;
+- **payload compression** — `FLAG_ZSTD`, `X-QWP-Accept-Encoding`,
+  `compression` / `compression_level` are all egress-only (9.3); the ingest path
+  never compresses.
 
 Multi-host addressing and failover **are** in scope (1.2).
 
@@ -499,7 +502,7 @@ sender.table("t").symbol("s","x").doubleColumn("p",1.5).at(ts)
    -> auto_flush_rows | auto_flush_interval, or flush()
       (auto_flush_bytes is a fourth trigger but is OFF by default -- see 9.1)
    -> frameEncoder.seal(): all dirty tables -> ONE frame, assigned an FSN
-      (payload optionally zstd-compressed when negotiated)
+      (no compression on the ingest path -- see 9.3)
       ...unless the encoded frame exceeds the server's cap, in which case
       it is split -- see 5.1
    -> sf.append(frame)              <-- flush() resolves here
@@ -684,6 +687,9 @@ across frames.
 
 Flags: `DEFER_COMMIT 0x01`, `GORILLA 0x04`, `DELTA_SYMBOL_DICT 0x08`,
 `ZSTD 0x10`.
+
+An ingest client sets at most the first three. **`ZSTD` is egress-only** — it
+appears on `RESULT_BATCH` frames and is never set by a sender (9.3).
 
 Both `GORILLA` and `DELTA_SYMBOL_DICT` are genuinely optional on the wire —
 `QwpMessageCursor` branches on `isGorillaEnabled()` / `isDeltaSymbolDictEnabled()`
@@ -1524,10 +1530,11 @@ why the ignore-lists must be explicit rather than a catch-all. Java implements
 this the same way and comments that "forward-compat is via the spec, not silent
 ignore".
 
-**There is no `zstd` configuration key.** `zstd` is an enum *value* of the
-egress-side `compression` key (`zstd` | `raw` | `auto`). Ingest-side zstd is
-therefore purely a handshake negotiation (9.3) with no connect-string control —
-do not invent a key for it.
+**There is no `zstd` configuration key, and no ingest-side compression at all
+(9.3).** `zstd` is an enum *value* of the egress-side `compression` key
+(`zstd` | `raw` | `auto`), which configures how the server compresses **result
+batches**. Do not invent an ingest compression key, and do not implement ingest
+compression.
 
 ### 9.1 Defaults differ from ILP — do not inherit the ILP ones
 
@@ -1674,16 +1681,37 @@ present means disk mode, absent means memory mode.** That single fact drives
 memory-vs-disk throughout section 8, including the mode-dependent
 `sf_max_total_bytes` default (9.1), and the spec never stated it.
 
-### 9.3 zstd and the Node version floor
+### 9.3 There is no ingest-side compression
 
-`node:zlib`'s `zstdCompress` landed in **Node 22.15.0**. The client's documented
-floor is Node 20 and CI runs `[20, 22, latest]`. A naive "require Node 22" rule
-would still be wrong for 22.0–22.14.
+**Correction to an earlier decision.** This spec previously required zstd on the
+ingest path, feature-detected against Node's `zstdCompress` (which landed in
+22.15.0) so the Node 20 floor could be kept. That was built on a false premise.
 
-Therefore: **feature-detect**. Probe for `zstdCompressSync` at connect time. If
-present, send `X-QWP-Content-Encoding: zstd` and set `FLAG_ZSTD`; if absent,
-negotiate uncompressed. The floor stays at Node 20 and the CI matrix is
-unchanged.
+`FLAG_ZSTD` is **egress-only**. The server-side constant is explicit: *"Set only
+on `RESULT_BATCH` frames and only after the handshake negotiated zstd."* Every
+reference to it in the Java client is on the decode side —
+`QwpResultBatchDecoder`, `QwpQueryClient`, and a comment in `WebSocketClient`.
+The ingest encoder sets `FLAG_GORILLA` and ORs in `FLAG_DELTA_SYMBOL_DICT`, and
+**never sets `FLAG_ZSTD`**.
+
+The negotiation is likewise about the *response* direction. The client sends
+`X-QWP-Accept-Encoding` (e.g. `zstd;level=1,raw`) to tell the server how to
+compress **result batches**; when the header is omitted the server ships them
+uncompressed. The echoed `X-QWP-Content-Encoding` is parsed only so callers can
+observe the level the server actually applied.
+
+Consequences:
+
+- the ingest sender performs **no compression at all**, and PR 8 carries only
+  defer-commit and the commit frame;
+- the Node version floor question **evaporates** — nothing on this path needs
+  `zstdCompress`, so Node 20 is fine for reasons that have nothing to do with
+  feature detection;
+- `compression` / `compression_level` are `Side.EGRESS` (section 9) precisely
+  because they configure this, which is corroborating evidence rather than a
+  coincidence;
+- compression belongs to the query spec, alongside `X-QWP-Accept-Encoding` and
+  `X-QWP-Max-Batch-Rows`.
 
 ## 10. Testing
 
@@ -1739,7 +1767,7 @@ could actually use the feature.
 | 5 | VARCHAR/BINARY/arrays/decimals/geohash/uuid/long256/char/ipv4 + their per-type rules (6.5.3) | golden + e2e |
 | 6 | Symbol dictionary: full-dict mode, then delta mode + `DICTIONARY_GAP` (5.2) | golden + e2e |
 | 7 | Gorilla timestamps (6.3.2) + int32-overflow raw fallback | golden + e2e |
-| 8 | defer-commit + commit frame (5.1.1) + zstd (feature-detected) | e2e both on and off |
+| 8 | defer-commit + commit frame (5.1.1) | e2e both on and off |
 | 9 | ACK/NACK matrix, `defaultPolicyFor`, reconnect, replay, dict catch-up (7.5), poison detector | mock server |
 | 10 | Multi-host `addr` grammar incl. IPv6 + duplicate rejection (1.2) | unit |
 | 11 | Host health tracker: state ranking, rounds, `RETRIABLE_OTHER` rotation, `FAILED_OVER` / `ALL_ENDPOINTS_UNREACHABLE` | mock server, multi-endpoint |
