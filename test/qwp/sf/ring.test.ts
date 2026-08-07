@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SegmentRing, BACKPRESSURE_NO_SPARE, PAYLOAD_TOO_LARGE } from "../../../src/qwp/sf/ring";
+import { SegmentRing, PAYLOAD_TOO_LARGE } from "../../../src/qwp/sf/ring";
 
 describe("SegmentRing", () => {
   it("assigns FSNs from 0 on a fresh ring", () => {

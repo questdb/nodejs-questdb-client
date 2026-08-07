@@ -47,6 +47,7 @@
     "prettier": "^3.5.3",
     "serve": "^14.2.4",
     "testcontainers": "^10.25.0",
+    "tsx": "^4.23.9",
     "typedoc": "^0.28.9",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.32.0",
