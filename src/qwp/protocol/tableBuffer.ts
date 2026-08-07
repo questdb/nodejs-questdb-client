@@ -5,7 +5,7 @@ export interface ColumnBuffer {
   name: string;
   type: number;
   /** Non-null values only — the wire is compacted (spec 6.2.1). */
-  values: (number | bigint | string)[];
+  values: unknown[];
   /** One entry per row; true means NULL. */
   nulls: boolean[];
   /** Rows accounted for so far, including nulls. */
@@ -89,6 +89,26 @@ export class QwpTableBuffer {
         c.size++;
       }
     }
+  }
+
+  /** Precision is 1-60 and locked on the column's first value (spec 6.5.3). */
+  setGeoHashPrecision(col: ColumnBuffer, precision: number): void {
+    if (precision < 1 || precision > 60) {
+      throw new Error(`invalid GeoHash precision: ${precision} (must be 1-60)`);
+    }
+    if (col.geohashPrecision === undefined) {
+      col.geohashPrecision = precision;
+    } else if (col.geohashPrecision !== precision) {
+      throw new Error(
+        `GeoHash precision mismatch: column has ${col.geohashPrecision} bits, got ${precision}`,
+      );
+    }
+  }
+
+  /** Scale locks on the first value; later values rescale (spec 6.5.3). */
+  setDecimalScale(col: ColumnBuffer, scale: number): number {
+    if (col.decimalScale === undefined) col.decimalScale = scale;
+    return col.decimalScale;
   }
 
   reset(): void {

@@ -3,7 +3,8 @@ import { SenderBuffer } from "../buffer";
 import { TimestampUnit } from "../utils";
 import { QwpTableBuffer } from "./protocol/tableBuffer";
 import { encodeFrame } from "./protocol/frameEncoder";
-import { TYPE_DOUBLE, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR } from "./protocol/constants";
+import { flattenArray } from "./protocol/columnWriter";
+import { TYPE_DOUBLE, TYPE_DOUBLE_ARRAY, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR } from "./protocol/constants";
 
 function toMicros(value: number | bigint, unit: TimestampUnit): bigint {
   const v = typeof value === "bigint" ? value : BigInt(Math.trunc(value));
@@ -137,8 +138,10 @@ export class QwpBuffer implements SenderBuffer {
   booleanColumn(): SenderBuffer {
     return unsupported("booleanColumn");
   }
-  arrayColumn(): SenderBuffer {
-    return unsupported("arrayColumn");
+  arrayColumn(name: string, value: unknown[]): SenderBuffer {
+    const col = this.require().getOrCreateColumn(name, TYPE_DOUBLE_ARRAY);
+    if (col) col.values.push(flattenArray(value));
+    return this;
   }
   decimalColumnText(): SenderBuffer {
     return unsupported("decimalColumnText");
