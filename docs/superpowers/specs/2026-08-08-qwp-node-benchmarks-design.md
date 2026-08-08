@@ -15,6 +15,12 @@ Note the SF question is deliberately narrow: this suite measures append cost, no
 what fraction of a whole flush SF represents. §8 explains why that ratio is not
 asserted.
 
+"Memory versus on disk" is also narrower than it sounds. Memory mode never
+reaches `persistFrame`, so it never rolls a segment and never rewrites
+`sf-manifest.bin`; the disk arm does both on roughly every tenth iteration. The
+gap between the arms is therefore segment management *plus* writing, and must not
+be quoted as "the cost of durability".
+
 Run **ad hoc**. No CI job, no PR gate, no nightly. The consumer is a developer
 asking "is this fast enough, and did my change hurt it".
 

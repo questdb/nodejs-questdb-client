@@ -1416,6 +1416,21 @@ definitions, and they work wherever the gate is satisfied:
 covers 10,000 rows, so rows/s is `hz × 10_000`. This is the easiest way to
 write down a number that is wrong by four orders of magnitude.
 
+**The disk arm spikes every tenth iteration, and that is real.** `APPENDS × 4 KiB
+= 400 KiB` per iteration against `segmentBytes: 4 << 20`, so a segment roll fires
+on roughly every 10th body. A roll closes the active fd, creates the next `.sfa`,
+writes its header, and rewrites the whole 8 KiB `sf-manifest.bin` (`persistManifest`
+in `sf/engine.ts`, added by the C2 work in handoff 8 — *after* this plan was first
+drafted). At the default durability there is no `fsync` on that path, so the spike
+is syscalls and a file creation rather than a device round-trip. Read **p75 as
+steady-state append cost** and `max`/`p999` as roughly the cost of a roll: a
+bimodal distribution here is the benchmark working, not noise or GC.
+
+It also means **the memory arm is not the disk arm minus the disk.** Memory mode
+never reaches `persistFrame`, so it never rolls and never writes a manifest — the
+gap between the two arms is segment management *plus* writing, not writing alone.
+Don't quote the ratio as "the cost of durability".
+
 **`rme` is the relative margin of error.** Check it before believing a
 difference: a 5% gap between two arms each carrying ±3% rme is not a result.
 
@@ -1530,6 +1545,39 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Forty-fourth to forty-eighth review passes — one defect, found by checking the
+plan against the source as it stands *now* rather than when it was written.**
+
+Plan B was drafted against the post-Plan-4 tree. Handoffs 5-8 then landed the
+delta wiring (B1), orphan drainers (A1), durable-ack (C3) and the `SFM1` manifest
+(C2). This batch re-read the plan against current `src/`.
+
+67. **The disk arm spikes every tenth iteration and nothing said so.**
+    `APPENDS × 4 KiB = 400 KiB` per body against `segmentBytes: 4 << 20` puts a
+    segment roll on ~every 10th iteration, and C2 added an 8 KiB
+    `sf-manifest.bin` rewrite to that path (`persistManifest`) *after* this plan
+    was drafted. A reader sees a bimodal distribution and reasonably blames noise
+    or GC. Now documented: p75 is steady-state append, `max`/`p999` is roughly a
+    roll. Second consequence, also now recorded: memory mode never reaches
+    `persistFrame`, so it never rolls and never writes a manifest — the arm gap is
+    segment management *plus* writing, and must not be quoted as "the cost of
+    durability". That framing was in the spec's §1 goal and is now corrected there.
+
+*Clean, and verified rather than assumed:*
+
+- **Stale "unimplemented" claims — none.** The design spec and `README.md` were
+  checked against source for every item handoffs 5-8 closed. `drain_orphans` no
+  longer throws, `sf_sync_interval_millis` is in `ValidConfigKeys`,
+  `request_durable_ack` reaches `drainer.ts`. The docs never claimed otherwise.
+- **C2 does not break Plan B's hand-built segments.** `scanSegment` reads magic,
+  version and `baseSeq` and **never reads the flags byte**, so a synthetic segment
+  without `MANIFEST_REQUIRED_FLAG` scans identically. Recovery treats an absent
+  manifest as a clean fallback and throws only when the manifest sits strictly
+  *ahead* of the scanned head. Task 7 is safe as written.
+- **Delta assertions survive B1.** Spec §8's delta pair drives `QwpBuffer`
+  directly with an explicit `setConfirmedMaxId`, so wiring `attachDict` into the
+  transport changes what production does without changing what those two assert.
 
 **Thirty-ninth to forty-third review passes — three defects, one of which the
 reviewer walked into during the review itself.**
