@@ -160,8 +160,8 @@ finding.
 
 ## 8. Validation assertions
 
-What makes this "validate the code" rather than "produce numbers". These live in
-a single file, `benchmarks/validate.test.ts`, and run under `pnpm test` rather
+What makes this "validate the code" rather than "produce numbers". **Six**
+assertions live in a single file, `benchmarks/validate.test.ts`, and run under `pnpm test` rather
 than `pnpm bench` — they are correctness checks expressed through the benchmark
 workloads. They run **before** any measurement task, so nobody spends four tasks
 benchmarking code whose correctness was never checked.
@@ -182,6 +182,10 @@ benchmarking code whose correctness was never checked.
   call degrades a number silently instead of failing a test.
 - **the gorilla flag does not leak** — a LONG column encodes identically with the
   flag on and off. Gorilla applies to TIMESTAMP only.
+- **gorilla actually compresses** — a regularly spaced TIMESTAMP column encodes
+  to under half its uncompressed size. Without this the suite would assert only
+  that gorilla does *nothing* to LONG, and would pass with an encoder that never
+  compressed anything.
 
 **Deliberately not asserted: "SF append does not dominate whole-flush cost."**
 An earlier draft listed it, but nothing in this suite measures whole-flush cost

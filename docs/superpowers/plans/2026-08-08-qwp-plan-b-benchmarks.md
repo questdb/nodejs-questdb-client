@@ -105,7 +105,7 @@ function scanSegment(buf: Buffer): ScanResult
 | `benchmarks/buffer.bench.ts` | `QwpBuffer` builder chain |
 | `benchmarks/sf.bench.ts` | `SfEngine.append`, `scanSegment`, disk baseline |
 | `benchmarks/e2e.ts` | Live-server latency, both flush contracts |
-| `benchmarks/validate.test.ts` | The five spec §8 assertions, run by `pnpm test` |
+| `benchmarks/validate.test.ts` | The **six** spec §8 assertions, run by `pnpm test` |
 | `package.json` | **modify** — `bench` and `bench:e2e` scripts |
 | `vitest.config.ts` | **modify or create** — include `benchmarks/` for bench mode |
 
@@ -170,7 +170,7 @@ describe("workloads", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/nick/repos/nodejs-questdb-client && npx vitest run benchmarks/workloads.test.ts`
+Run: `npx vitest run benchmarks/workloads.test.ts` (from the repo root, as every other command in this plan)
 Expected: FAIL — cannot resolve `./workloads`.
 
 - [ ] **Step 3: Write the implementation**
@@ -195,15 +195,25 @@ export interface Workload {
   rows(count: number): Row[];
 }
 
-/** xorshift32 — deterministic and dependency-free. */
+/**
+ * xorshift32 — deterministic and dependency-free.
+ *
+ * The first outputs from a small seed are near zero (seed 1 yields 0.00006,
+ * then 0.01575) because the state has not diffused. Left unwarmed, `sparse`
+ * would make row 0's leading columns deterministically null and `trades` would
+ * open with its minimum price. Discarding the first 16 rounds costs nothing at
+ * setup time and makes the early rows as representative as the rest.
+ */
 function rng(seed: number): () => number {
   let x = seed || 0x9e3779b9;
-  return () => {
+  const next = () => {
     x ^= x << 13;
     x ^= x >>> 17;
     x ^= x << 5;
     return (x >>> 0) / 0x100000000;
   };
+  for (let i = 0; i < 16; i++) next();
+  return next;
 }
 
 const BASE_TS = 1_700_000_000_000_000n;
@@ -465,9 +475,10 @@ In `package.json`, alongside the existing `"test"` script:
     "bench:e2e": "npx tsx benchmarks/e2e.ts"
 ```
 
-`npx tsx`, not bare `tsx`. `tsx` is deliberately **not** a dependency (see Global
-Constraints), so it is not in `node_modules/.bin` and a bare invocation fails
-with "command not found". `npx` fetches it on demand.
+`npx tsx`, not bare `tsx`. `tsx` is not a manifest entry, so it is absent from
+`node_modules/.bin` and a bare invocation fails with "command not found". `npx`
+fetches it on demand — which, as Global Constraints records, means the suite is
+not strictly dependency-free; it just adds nothing to `package.json`.
 
 And **pin vitest exactly**, dropping the caret. Vitest prints a warning on every
 bench run that benchmarking is experimental and may break outside SemVer; a
@@ -477,9 +488,6 @@ format:
 ```json
     "vitest": "3.1.3"
 ```
-
-`tsx` is invoked via `npx` at run time and is **not** added as a dependency —
-`npx tsx` resolves it on demand, keeping the constraint that this plan adds none.
 
 - [ ] **Step 4: Verify the split**
 
@@ -518,10 +526,11 @@ import { QwpBuffer } from "../src/qwp/buffer";
 import { SymbolDict } from "../src/qwp/protocol/symbolDict";
 import { QwpTableBuffer } from "../src/qwp/protocol/tableBuffer";
 import { encodeFrame } from "../src/qwp/protocol/frameEncoder";
-import { TYPE_LONG } from "../src/qwp/protocol/constants";
+import { TYPE_LONG, TYPE_TIMESTAMP } from "../src/qwp/protocol/constants";
 import { WORKLOADS } from "./workloads";
 
 const CAP = 1 << 30;
+const BASE = 1_700_000_000_000_000n;
 
 /**
  * `confirmedMaxId` lives on the BUFFER, starts at -1, and only advances via
@@ -604,10 +613,14 @@ describe("wire-format invariants", () => {
     build(rows, dict);
     const coldAgain = build(rows, dict).reduce((a, f) => a + f.length, 0);
 
-    expect(coldAgain).toBeGreaterThan(full * 0.5);
+    // Both ship every symbol string once — cold delta in the delta section,
+    // full-dict in a per-column inline dictionary — so they should land within
+    // a few percent. A 0.5 threshold would also pass if the baseline were
+    // partially advancing, which is the bug this guards.
+    expect(coldAgain).toBeGreaterThan(full * 0.9);
   });
 
-  it("gorilla shrinks regularly spaced timestamps", () => {
+  it("the gorilla flag does not leak into non-timestamp columns", () => {
     const t = new QwpTableBuffer("g");
     for (let i = 0; i < 5000; i++) {
       t.getOrCreateColumn("v", TYPE_LONG)?.values.push(BigInt(i));
@@ -615,9 +628,24 @@ describe("wire-format invariants", () => {
     }
     const off = encodeFrame([t], { gorilla: false }).length;
     const on = encodeFrame([t], { gorilla: true }).length;
-    // LONG is not gorilla-encoded, so these must match exactly. A difference
-    // means the flag is leaking into a column type it should not touch.
+    // LONG is not gorilla-encoded, so these must match EXACTLY. A difference
+    // means the flag is reaching a column type it should not touch.
     expect(on).toBe(off);
+  });
+
+  it("gorilla actually shrinks a regularly spaced timestamp column", () => {
+    // The positive case. Without this, the suite asserts only that gorilla does
+    // nothing to LONG — it would pass with the encoder never compressing at all.
+    const t = new QwpTableBuffer("g_ts");
+    for (let i = 0; i < 5000; i++) {
+      t.getOrCreateColumn("ts", TYPE_TIMESTAMP)?.values.push(BASE + BigInt(i) * 1000n);
+      t.nextRow();
+    }
+    const off = encodeFrame([t], { gorilla: false }).length;
+    const on = encodeFrame([t], { gorilla: true }).length;
+    // Constant spacing means every delta-of-delta is 0 — one bit per row after
+    // the first two raw values, versus 8 bytes each uncompressed.
+    expect(on).toBeLessThan(off / 2);
   });
 });
 ```
@@ -734,6 +762,11 @@ describe("floor comparison", () => {
 });
 
 describe("varchar floor comparison", () => {
+  // `wide` strings are "v0".."v99" — 2 to 3 bytes each. With a 4-byte offset
+  // per value, the offset array outweighs the payload, so this arm chiefly
+  // measures offset-table overhead rather than string copying. That is the
+  // interesting comparison for short symbols-as-text, but do not read it as a
+  // large-varchar number.
   const strs = WORKLOADS.wide.rows(N).flatMap((r) => r.strings.map(([, v]) => v));
 
   bench("FLOOR utf8 write loop", () => {
@@ -1411,7 +1444,7 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 | §7 guard 2 — `dd` baseline before results | 7 |
 | §7 guard 3 — one server, both arms | 8 |
 | §7 guard 4 — three repeats, report spread | 8 |
-| §8 five assertions | 4 |
+| §8 **six** assertions | 4 |
 | §9 out of scope | honoured; nothing benchmarks reconnect, replay, drainers or concurrency |
 
 No spec clause is unimplemented. Two *were*, and both were resolved by changing
@@ -1450,6 +1483,57 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Nineteenth to twenty-third review passes — seven further defects.**
+
+*Nineteenth — the generators, read for statistical rather than structural
+soundness:*
+
+47. **All three seeds emitted a near-zero first output** (0.00006, 0.00013,
+    0.00025) — a weakly-seeded xorshift whose state has not diffused. `sparse`
+    would therefore make row 0's leading columns deterministically null, and
+    `trades` would open at its minimum price. The generator now discards 16
+    rounds before returning; deterministic as required, but representative from
+    the first row.
+48. **`wide`'s strings are `"v0".."v99"`** — 2 to 3 bytes each. With a 4-byte
+    offset per value, the offset table outweighs the payload, so the varchar
+    floor arm added in the sixteenth pass chiefly measures offset overhead.
+    Stated at the arm so it is not read as a large-varchar number.
+
+*Twentieth — every runnable command in the plan:*
+
+49. **The tsx justification contradicted the Global Constraint that the ninth
+    pass had just corrected.** One paragraph still claimed "this plan adds
+    none", while the constraint now admits `npx tsx` fetches a dependency on
+    demand. My own fix had not propagated to the place that repeated the claim.
+50. **One `Run:` line carried a machine-specific absolute path** while every
+    other command is repo-relative — it would break for anyone else.
+
+*Twenty-first — do the assertions prove what they claim:*
+
+51. **A test's title contradicted its assertion.** "gorilla shrinks regularly
+    spaced timestamps" built a **LONG** column and asserted the encoding is
+    *identical* with the flag on and off. The body was right and the title was
+    wrong, so anyone scanning test names would believe the suite proved
+    compression it never tested. Renamed to what it checks: that the flag does
+    not leak.
+52. **Nothing asserted that Gorilla compresses anything.** With only the leak
+    test, the suite passes against an encoder that never compresses at all — a
+    hole under the one codec the design spec spent most space on. Added: a
+    regularly spaced TIMESTAMP column must encode to under half its
+    uncompressed size.
+53. **The cold-delta guard was too loose to do its job.** `> full * 0.5` would
+    also pass if the baseline were *partially* advancing, which is the bug it
+    guards. Both arms ship every symbol string once, so they should land within
+    a few percent: tightened to `> full * 0.9`.
+
+*Twenty-second and twenty-third — propagation and coherence.* Adding the sixth
+assertion immediately desynchronised the count in three places, which is the
+drift class the seventeenth pass made counts explicit to catch. Reconciled to
+six across spec, plan and the File Structure table. The compaction assertion was
+re-derived and does discriminate: a broken encoder writing placeholder slots
+would make `sparse` *larger* than `dense`, since it pays the same values plus
+the bitmaps. **No further defects.**
 
 **Fourteenth to eighteenth review passes — six further defects.**
 
