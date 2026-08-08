@@ -862,6 +862,31 @@ import { buildSegment, scanSegment } from "../src/qwp/sf/segment";
 
 let dir: string;
 
+/**
+ * Where the SF benchmark writes. os.tmpdir() is /tmp on most Linux boxes and
+ * /tmp is frequently tmpfs -- i.e. RAM. Both the dd baseline and the SF
+ * benchmark would then measure memory while claiming to measure disk, and the
+ * baseline would report a *great* number, so the guard fails silently in the
+ * most reassuring possible direction. Point QWP_BENCH_DIR at real storage.
+ */
+function benchRoot(): string {
+  const override = process.env.QWP_BENCH_DIR;
+  if (override) return override;
+  const t = tmpdir();
+  if (t.startsWith("/dev/shm") || t.startsWith("/run")) {
+    console.log(
+      `\n[disk baseline] ${t} is almost certainly tmpfs (RAM). ` +
+        "SF numbers below are NOT disk numbers. Set QWP_BENCH_DIR to real storage.",
+    );
+  } else {
+    console.log(
+      `\n[disk baseline] using ${t} — if this is tmpfs, these are RAM numbers. ` +
+        "Check with: df -T " + t,
+    );
+  }
+  return t;
+}
+
 /** Prints a dd throughput figure so a degraded disk is visible, not silent. */
 function diskBaseline(path: string): void {
   try {
@@ -870,66 +895,73 @@ function diskBaseline(path: string): void {
       ["if=/dev/zero", `of=${join(path, "dd.tmp")}`, "bs=1M", "count=256", "oflag=direct"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
-    console.log(`\n[disk baseline] ${out.trim().split("\n").pop()}`);
+    console.log(`[disk baseline] ${out.trim().split("\n").pop()}`);
   } catch {
-    console.log("\n[disk baseline] unavailable (dd or O_DIRECT not supported) — treat SF numbers with caution");
+    console.log(
+      "[disk baseline] unavailable (dd missing, or O_DIRECT unsupported — " +
+        "which itself suggests tmpfs). Treat SF numbers with caution.",
+    );
   } finally {
     rmSync(join(path, "dd.tmp"), { force: true });
   }
 }
 
-beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), "qwp-bench-"));
+// Engines are opened ONCE, not per iteration — see the note on withEngine below.
+let memEngine: SfEngine;
+let diskEngine: SfEngine;
+
+beforeAll(async () => {
+  dir = mkdtempSync(join(benchRoot(), "qwp-bench-"));
   diskBaseline(dir);
-  return () => rmSync(dir, { recursive: true, force: true });
+  memEngine = new SfEngine({
+    segmentBytes: 4 << 20,
+    maxTotalBytes: 1 << 30,
+    senderId: "bench-mem",
+  });
+  await memEngine.open();
+  diskEngine = new SfEngine({
+    segmentBytes: 4 << 20,
+    maxTotalBytes: 1 << 30,
+    sfDir: dir,
+    senderId: "bench-disk",
+  });
+  await diskEngine.open();
+  return async () => {
+    await memEngine.close();
+    await diskEngine.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
 });
 
 const FRAME = Buffer.alloc(4096, 0x41);
 
+const APPENDS = 100;
+
 /**
- * open() is REQUIRED before append(). append() guards its write with
- * `if (this.isDisk && this.slot)`, and `slot` is only set by open() -- so an
- * unopened disk engine silently skips the write and reports memory-mode
- * numbers under a "disk mode" label. close() is equally required: open()
- * starts a setInterval durability barrier that keeps the process alive.
+ * Engines are opened once in beforeAll, NOT per iteration.
+ *
+ * Creating one inside the bench body would put acquireSlot (an exclusive
+ * lockfile), recovery, a dict fd open and a setInterval start inside the timed
+ * window — setup that dwarfs 100 appends, so the benchmark would report
+ * engine-open cost under an "append" label.
+ *
+ * The cost of hoisting is that the ring accumulates across iterations, so each
+ * body acknowledges what it just published to keep trim running. acknowledge()
+ * is cheap and is on the real ACK path anyway, so its inclusion is honest
+ * rather than a distortion.
  */
-async function withEngine(
-  opts: ConstructorParameters<typeof SfEngine>[0],
-  body: (e: SfEngine) => Promise<void>,
-): Promise<void> {
-  const e = new SfEngine(opts);
-  await e.open();
-  try {
-    await body(e);
-  } finally {
-    await e.close();
-  }
+async function appendBatch(e: SfEngine): Promise<void> {
+  for (let i = 0; i < APPENDS; i++) await e.append(FRAME);
+  e.acknowledge(e.publishedFsn);
 }
 
 describe("SfEngine.append", () => {
-  bench("memory mode", async () => {
-    await withEngine(
-      { segmentBytes: 4 << 20, maxTotalBytes: 128 << 20, senderId: "bench-mem" },
-      async (e) => {
-        for (let i = 0; i < 100; i++) await e.append(FRAME);
-      },
-    );
+  bench(`memory mode / ${APPENDS} appends`, async () => {
+    await appendBatch(memEngine);
   });
 
-  bench("disk mode", async () => {
-    await withEngine(
-      {
-        segmentBytes: 4 << 20,
-        maxTotalBytes: 128 << 20,
-        sfDir: dir,
-        // A fresh slot per iteration: acquireSlot() takes an exclusive lock,
-        // so reusing one senderId across iterations would fail on the second.
-        senderId: `bench-disk-${process.hrtime.bigint()}`,
-      },
-      async (e) => {
-        for (let i = 0; i < 100; i++) await e.append(FRAME);
-      },
-    );
+  bench(`disk mode / ${APPENDS} appends`, async () => {
+    await appendBatch(diskEngine);
   });
 });
 
@@ -964,7 +996,9 @@ starts a `setInterval` barrier that holds the event loop open.
 
 - [ ] **Step 3: Sanity-check against the baseline**
 
-If the `dd` figure is far below what the hardware should do (a NVMe SSD reporting tens of MB/s rather than hundreds), stop and fix the machine before recording any SF number. A degraded or untrimmed drive makes these results meaningless.
+**First confirm you are measuring disk at all.** Run `df -T $(node -p "require('os').tmpdir()")`. If the type is `tmpfs`, both the `dd` figure and every SF number are RAM measurements — and the `dd` figure will look *excellent*, which is why this check has to be explicit rather than left to judgement. Set `QWP_BENCH_DIR` to a path on real storage and re-run.
+
+Then: if the `dd` figure is far below what the hardware should do (an NVMe SSD reporting tens of MB/s rather than hundreds), stop and fix the machine before recording any SF number. A degraded or untrimmed drive makes these results meaningless.
 
 - [ ] **Step 4: Commit**
 
@@ -986,12 +1020,23 @@ git commit -m "bench: add store-and-forward benchmarks with a disk baseline"
 
 ```ts
 // benchmarks/e2e.ts
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { Sender } from "../src";
 import { WORKLOADS } from "./workloads";
 
 const ADDR = process.env.QDB_ADDR ?? "localhost:9000";
 const ROWS = Number(process.env.BENCH_ROWS ?? 5000);
+const WARMUP = 500;
 const REPEATS = 3;
+
+/**
+ * Where the sf-on arm writes. Defaults to the OS temp dir, which on most Linux
+ * boxes is /tmp and is frequently tmpfs — i.e. RAM. The sf-on number is
+ * "durable locally", so measuring it against RAM makes it look dramatically
+ * better than any real deployment. Set QWP_BENCH_DIR to real storage.
+ */
+const SF_ROOT = process.env.QWP_BENCH_DIR ?? process.env.TMPDIR ?? "/tmp";
 
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return NaN;
@@ -1013,27 +1058,35 @@ function percentile(sorted: number[], p: number): number {
  */
 async function arm(config: string): Promise<number[]> {
   const sender = await Sender.fromConfig(config);
-  await sender.connect();
-  const rows = WORKLOADS.trades.rows(ROWS);
-
-  // Warmup: never measure a cold path.
-  for (const row of rows.slice(0, Math.min(500, ROWS))) {
-    sender.table(row.table).symbol("symbol", row.symbols[0][1]);
-    for (const [n, v] of row.doubles) sender.floatColumn(n, v);
-    await sender.at(row.ts, "us");
-  }
-  await sender.flush();
-
   const samples: number[] = [];
-  for (const row of rows) {
-    sender.table(row.table).symbol("symbol", row.symbols[0][1]);
-    for (const [n, v] of row.doubles) sender.floatColumn(n, v);
-    await sender.at(row.ts, "us");
-    const t0 = process.hrtime.bigint();
+  try {
+    await sender.connect();
+    // Warmup rows are DISJOINT from measured rows: re-sending the same
+    // timestamps would double-ingest them, which is harmless for latency but
+    // breaks any later row-count assertion added to this script.
+    const warm = WORKLOADS.trades.rows(WARMUP);
+    const rows = WORKLOADS.trades.rows(WARMUP + ROWS).slice(WARMUP);
+
+    for (const row of warm) {
+      sender.table(row.table).symbol("symbol", row.symbols[0][1]);
+      for (const [n, v] of row.doubles) sender.floatColumn(n, v);
+      await sender.at(row.ts, "us");
+    }
     await sender.flush();
-    samples.push(Number(process.hrtime.bigint() - t0) / 1000); // microseconds
+
+    for (const row of rows) {
+      sender.table(row.table).symbol("symbol", row.symbols[0][1]);
+      for (const [n, v] of row.doubles) sender.floatColumn(n, v);
+      await sender.at(row.ts, "us");
+      const t0 = process.hrtime.bigint();
+      await sender.flush();
+      samples.push(Number(process.hrtime.bigint() - t0) / 1000); // microseconds
+    }
+  } finally {
+    // Without this, a throw mid-loop leaks the sender and the SF barrier
+    // timer keeps the process alive.
+    await sender.close();
   }
-  await sender.close();
   samples.sort((a, b) => a - b);
   return samples;
 }
@@ -1059,10 +1112,21 @@ async function main(): Promise<void> {
 
   // SF on: flush() returns once the row is durable locally. A DIFFERENT
   // contract, not a faster version of the same one.
-  const sfDir = `${process.env.TMPDIR ?? "/tmp"}/qwp-bench-e2e`;
+  // A FRESH directory per run. Reusing a fixed path leaves slots behind, and
+  // the next run's open() would recover those segments and replay stale frames
+  // into the measurement — so run 2 would differ from run 1 for reasons that
+  // have nothing to do with the code.
+  const sfDir = mkdtempSync(join(SF_ROOT, "qwp-bench-e2e-"));
+  console.log(`sf-on arm writing to ${sfDir}`);
+  console.log(`  (check this is not tmpfs: df -T ${SF_ROOT})\n`);
+
   const sfOn: number[][] = [];
-  for (let i = 0; i < REPEATS; i++) {
-    sfOn.push(await arm(`ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`));
+  try {
+    for (let i = 0; i < REPEATS; i++) {
+      sfOn.push(await arm(`ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`));
+    }
+  } finally {
+    rmSync(sfDir, { recursive: true, force: true });
   }
   report("flush() = local durability only (sf on)", sfOn);
 
@@ -1159,6 +1223,34 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 **2. Placeholder scan.** None. Task 4 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
 
 **3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 6, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 5. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+
+**Sixth review pass — Tasks 7–9 line by line; six defects:**
+
+14. **`tmpdir()` is frequently tmpfs, so the disk guard fails in the most
+    reassuring direction.** Both the `dd` baseline and the SF benchmark default
+    to the OS temp dir; on most Linux boxes that is `/tmp`, often RAM. The
+    baseline would then report an *excellent* figure and every SF number would
+    be a memory number — the guard actively confirming a false conclusion.
+    Both Task 7 and Task 8 now honour `QWP_BENCH_DIR`, print the path they
+    chose, and tell the reader to check `df -T`.
+15. **Per-iteration engine creation made Task 7 measure the wrong thing.**
+    `withEngine` put `acquireSlot`, recovery, a dict-fd open and a `setInterval`
+    start *inside* the timed body — setup that dwarfs 100 appends, so the
+    benchmark reported engine-open cost under an "append" label. Engines are
+    now opened once in `beforeAll`, with `acknowledge(publishedFsn)` per
+    iteration to keep trim running.
+16. **The e2e sf-on arm contaminated its own reruns.** It wrote to a fixed
+    `qwp-bench-e2e` path with per-repeat `sender_id`s and never cleaned up, so a
+    second run's `open()` would recover the first run's segments and replay
+    stale frames into the measurement. Now a fresh `mkdtemp` per run, removed in
+    a `finally`.
+17. **Warmup and measured rows were the same rows**, double-ingesting the first
+    500 timestamps. Harmless for latency, but it breaks any row-count assertion
+    added later. They are now disjoint slices.
+18. **`arm()` had no `finally`**, so a throw mid-loop leaked the sender and left
+    the SF barrier timer holding the process open.
+19. **`WARMUP` was an inline literal** inside a `Math.min`, making the warmup
+    size invisible at the top of the file where the other knobs live. Hoisted.
 
 **Fifth review pass — read every code block; three defects, one of which
 invalidated an earlier fix:**
