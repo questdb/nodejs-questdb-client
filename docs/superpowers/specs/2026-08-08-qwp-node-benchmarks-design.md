@@ -7,9 +7,13 @@ Target repo: `questdb/nodejs-questdb-client`
 ## 1. Goal
 
 A TypeScript benchmark suite that **validates the QWP implementation** — does the
-encoder perform sensibly, does store-and-forward add what we expect, does
-end-to-end latency look like a working client. Ported in spirit from the Java and
-Rust client benchmarks.
+encoder perform sensibly against a hand-written floor, what does store-and-forward
+append cost in memory versus on disk, and does end-to-end flush latency look like
+a working client. Ported in spirit from the Java and Rust client benchmarks.
+
+Note the SF question is deliberately narrow: this suite measures append cost, not
+what fraction of a whole flush SF represents. §8 explains why that ratio is not
+asserted.
 
 Run **ad hoc**. No CI job, no PR gate, no nightly. The consumer is a developer
 asking "is this fast enough, and did my change hurt it".
@@ -141,6 +145,10 @@ single server instance with no restart between them. Restarting per arm makes th
 first arm pay cold-start costs and turns a methodology artefact into an apparent
 result.
 
+The arms do, however, write to **separate tables**. Sharing one would let the
+second arm ingest into a table already holding the first arm's rows — an
+asymmetry the single-server guard is meant to remove, not introduce.
+
 **Repeat before believing.** Every e2e arm runs 3× and the script reports the
 spread across repeats, not a single number. A lone outlier cannot masquerade as a
 finding.
@@ -181,5 +189,12 @@ dropped rather than faked.
 
 - Cross-language harness reuse (revisit only if the numbers here justify it).
 - A workload manifest format. Workloads are TypeScript.
-- Memory/GC profiling beyond what tinybench reports.
+- **Memory and GC profiling — entirely.** `vitest bench` reports no GC
+  information at all, so unlike Java's `GCProfiler` arm (§2) this suite has zero
+  visibility into allocation pressure. That is a real gap rather than a
+  simplification: allocation churn is a plausible cause of Node encoder slowness
+  and nothing here would show it. Reach for `--cpu-prof` or `--heap-prof`
+  separately if a number looks wrong and the floors do not explain it.
 - Multi-connection or concurrency benchmarks.
+- **Gorilla's raw fallback** — see §5; every workload has regular timestamps, so
+  the fallback never fires. §8 asserts its correctness instead.

@@ -12,12 +12,27 @@
 
 ## Global Constraints
 
-- **No new dependencies**, runtime or dev. `vitest bench` is already available.
+- **No new entries in `package.json` dependencies**, runtime or dev. `vitest
+  bench` is already available. One honest caveat: `bench:e2e` runs through
+  `npx tsx`, which fetches `tsx` on demand — so the suite is not *dependency
+  free*, it just does not add a manifest entry. Node 20 is the floor, so
+  `--experimental-strip-types` is not available as an alternative.
 - **Ad-hoc only.** Do not add a CI workflow, a PR gate, or a nightly job.
-- **Benchmarks live in `benchmarks/`**, not `test/`, so `pnpm test` stays fast.
-- **Deterministic workloads.** Every generator takes a fixed seed; no `Math.random()` without one, or two runs are not comparable.
+- **Benchmarks live in `benchmarks/`, not `test/`.** Note this does *not* keep
+  `pnpm test` untouched: `workloads.test.ts`, `floors.test.ts` and
+  `validate.test.ts` live in `benchmarks/` and are deliberately included in the
+  test run (Task 3). The split keeps `.bench.ts` files out of `pnpm test`, not
+  the whole directory. `validate.test.ts` encodes tens of thousands of rows, so
+  expect it to be the slowest file in the suite.
+- **Deterministic workloads.** `trades`, `wide` and `sparse` use a seeded
+  xorshift; `highCardSymbol` needs no randomness at all. Never `Math.random()`
+  — two runs would not be comparable.
 - Existing tests stay green: `npx vitest run && npx tsc --noEmit && npx eslint src/**`.
-- **Never quote a number from a single run.** The e2e script enforces this by repeating; for the pure layers, tinybench's own iteration count covers it.
+- **Never quote a number from a single run.** The e2e script enforces this by
+  repeating three times and printing the spread. For the pure layers, tinybench's
+  iteration count reduces noise *within* one run but says nothing about variance
+  *between* runs — so for anything you intend to quote, run `pnpm bench` twice
+  and compare.
 
 ## Harness facts, verified by running it
 
@@ -405,6 +420,14 @@ git commit -m "bench: add hand-written floor baselines"
 - Modify: `package.json`
 - Create: `vitest.config.ts` (or modify if present)
 
+**Interfaces:**
+- Consumes: nothing from earlier tasks (config only).
+- Produces: the `pnpm bench` and `pnpm bench:e2e` scripts, and a `vitest.config.ts`
+  whose `test.include` covers `benchmarks/**/*.test.ts` and whose
+  `test.benchmark.include` covers `benchmarks/**/*.bench.ts`. Every later task
+  depends on that split: `.test.ts` files run under `pnpm test`, `.bench.ts`
+  files only under `pnpm bench`.
+
 - [ ] **Step 1: Check whether a vitest config already exists**
 
 Run: `ls vitest.config.* vite.config.* 2>/dev/null || echo NONE`
@@ -475,6 +498,13 @@ git commit -m "bench: add bench scripts and split bench files from tests"
 - Create: `benchmarks/validate.test.ts`
 
 **Spec §8.** These run under `pnpm test`, not `pnpm bench` — they are correctness checks on the wire format, expressed through the benchmark workloads. They are the cheapest possible check that the rules the design spec spent most of its length on actually hold at runtime.
+
+**Interfaces:**
+- Consumes: `WORKLOADS` from Task 1 (`benchmarks/workloads.ts`). From `src/`:
+  `QwpBuffer` (`attachDict`, `setConfirmedMaxId`, `sealFrames`), `SymbolDict`
+  (`getOrAdd`, `size`), `QwpTableBuffer`, `encodeFrame`, `TYPE_LONG`.
+- Produces: `benchmarks/validate.test.ts`. No exports; later tasks do not
+  import from it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -613,6 +643,12 @@ git commit -m "test: add wire-format invariants over the benchmark workloads"
 - Create: `benchmarks/encoder.bench.ts`
 
 Covers `writeColumn` per type, whole-frame `encodeFrame`, gorilla on and off, and `SymbolDict` versus the naive floor.
+
+**Interfaces:**
+- Consumes: `WORKLOADS`, `Row` from Task 1; `floorWriteLongs(values: bigint[]): Buffer`
+  and `floorInternSymbols(values: string[]): number[]` from Task 2.
+- Produces: `benchmarks/encoder.bench.ts`, exporting `_sink(): number` purely to
+  keep the accumulator observable. Nothing else imports from it.
 
 - [ ] **Step 1: Write the benchmark**
 
@@ -756,6 +792,13 @@ git commit -m "bench: add encoder throughput benchmarks with floor comparison"
 
 Measures what the encoder benchmarks miss: map lookups, type locks, null back-fill, and the row-rollback guard on every setter.
 
+**Interfaces:**
+- Consumes: `WORKLOADS`, `Row` from Task 1. From `src/`: `QwpBuffer`
+  (`table`, `symbol`, `intColumn`, `floatColumn`, `stringColumn`, `at`,
+  `attachDict`, `setConfirmedMaxId`, `sealFrames`) and `SymbolDict`.
+- Produces: `benchmarks/buffer.bench.ts`, exporting its own `_sink(): number`.
+  Each bench file has a module-local `sink`, so the two exports do not collide.
+
 - [ ] **Step 1: Write the benchmark**
 
 ```ts
@@ -799,7 +842,10 @@ describe("QwpBuffer build + seal", () => {
     bench(`build+seal / ${name}`, () => {
       const b = new QwpBuffer();
       fill(b, rows);
-      sink += b.sealFrames(CAP).length;
+      // sealFrames returns Buffer[]; sum BYTES, not the array length --
+      // `.length` here would be the frame count (always 1 under CAP) and
+      // would leave the encoded contents unobserved.
+      for (const f of b.sealFrames(CAP)) sink += f.length;
     });
   }
 });
@@ -810,7 +856,7 @@ describe("dictionary mode", () => {
   bench("full-dict (no dict attached)", () => {
     const b = new QwpBuffer();
     fill(b, rows);
-    sink += b.sealFrames(CAP).length;
+    for (const f of b.sealFrames(CAP)) sink += f.length;
   });
 
   // Steady state needs BOTH halves: a populated dictionary and a confirmed
@@ -832,14 +878,14 @@ describe("dictionary mode", () => {
     b.attachDict(primed);
     b.setConfirmedMaxId(primed.size() - 1);
     fill(b, rows);
-    sink += b.sealFrames(CAP).length;
+    for (const f of b.sealFrames(CAP)) sink += f.length;
   });
 
   bench("delta-dict (cold, first batch)", () => {
     const b = new QwpBuffer();
     b.attachDict(new SymbolDict());
     fill(b, rows);
-    sink += b.sealFrames(CAP).length;
+    for (const f of b.sealFrames(CAP)) sink += f.length;
   });
 });
 
@@ -876,6 +922,13 @@ git commit -m "bench: add row-building benchmarks for QwpBuffer"
 - Create: `benchmarks/sf.bench.ts`
 
 **Spec §7.** The disk figure prints **before** the results so an implausible number is visible rather than silently quoted. Storage benchmarks on a degraded SSD can read an order of magnitude slow.
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks. From `src/`: `SfEngine`
+  (`new SfEngine(EngineOptions)`, `open()`, `append(Buffer)`, `acknowledge(fsn)`,
+  `publishedFsn`, `close()`) and `buildSegment` / `scanSegment`.
+- Produces: `benchmarks/sf.bench.ts`. Reads `QWP_BENCH_DIR` — the same variable
+  Task 8 reads, so both arms of the suite can be pointed at real storage at once.
 
 - [ ] **Step 1: Write the benchmark**
 
@@ -1046,6 +1099,14 @@ git commit -m "bench: add store-and-forward benchmarks with a disk baseline"
 
 **Spec §7.** Both flush contracts, **one server**, **three repeats**. Reports percentiles because ingest UX is gated by the tail, not the mean.
 
+**Interfaces:**
+- Consumes: `WORKLOADS` from Task 1; `Sender` from `src` (`fromConfig` is
+  **async**, `connect`, `table`, `symbol`, `floatColumn`, `at` is **async**,
+  `flush`, `close`).
+- Produces: `benchmarks/e2e.ts`, a standalone script rather than a bench file
+  because it computes p50/p90 itself — `vitest bench` reports neither. Reads
+  `QDB_ADDR`, `BENCH_ROWS` and `QWP_BENCH_DIR`.
+
 - [ ] **Step 1: Write the script**
 
 ```ts
@@ -1086,7 +1147,7 @@ function percentile(sorted: number[], p: number): number {
  * by the no-ops. If you change the flush cadence, disable auto-flush's row
  * trigger first.
  */
-async function arm(config: string): Promise<number[]> {
+async function arm(config: string, table: string): Promise<number[]> {
   const sender = await Sender.fromConfig(config);
   const samples: number[] = [];
   try {
@@ -1098,14 +1159,14 @@ async function arm(config: string): Promise<number[]> {
     const rows = WORKLOADS.trades.rows(WARMUP + ROWS).slice(WARMUP);
 
     for (const row of warm) {
-      sender.table(row.table).symbol("symbol", row.symbols[0][1]);
+      sender.table(table).symbol("symbol", row.symbols[0][1]);
       for (const [n, v] of row.doubles) sender.floatColumn(n, v);
       await sender.at(row.ts, "us");
     }
     await sender.flush();
 
     for (const row of rows) {
-      sender.table(row.table).symbol("symbol", row.symbols[0][1]);
+      sender.table(table).symbol("symbol", row.symbols[0][1]);
       for (const [n, v] of row.doubles) sender.floatColumn(n, v);
       await sender.at(row.ts, "us");
       const t0 = process.hrtime.bigint();
@@ -1137,7 +1198,12 @@ async function main(): Promise<void> {
 
   // SF off: flush() covers encode -> send -> server ACK.
   const sfOff: number[][] = [];
-  for (let i = 0; i < REPEATS; i++) sfOff.push(await arm(`ws::addr=${ADDR};`));
+  // A DISTINCT table per arm. Sharing one would let the sf-on arm write into a
+  // table already holding the sf-off arm's 15k rows — an asymmetry the
+  // "one server, no restart" guard was meant to remove, not introduce.
+  for (let i = 0; i < REPEATS; i++) {
+    sfOff.push(await arm(`ws::addr=${ADDR};`, "bench_e2e_sfoff"));
+  }
   report("flush() = full server round-trip (sf off)", sfOff);
 
   // SF on: flush() returns once the row is durable locally. A DIFFERENT
@@ -1153,7 +1219,9 @@ async function main(): Promise<void> {
   const sfOn: number[][] = [];
   try {
     for (let i = 0; i < REPEATS; i++) {
-      sfOn.push(await arm(`ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`));
+      sfOn.push(
+        await arm(`ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`, "bench_e2e_sfon"),
+      );
     }
   } finally {
     rmSync(sfDir, { recursive: true, force: true });
@@ -1201,6 +1269,11 @@ git commit -m "bench: add end-to-end latency script for both flush contracts"
 
 **Files:**
 - Create: `benchmarks/README.md`
+
+**Interfaces:**
+- Consumes: nothing. Documents the env vars and read-checks established in
+  Tasks 3, 5, 7 and 8.
+- Produces: `benchmarks/README.md`.
 
 - [ ] **Step 1: Write it**
 
@@ -1324,6 +1397,61 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Ninth to thirteenth review passes — ten further defects, then a clean pass.**
+
+*Ninth — Global Constraints versus what the tasks do:*
+
+31. **"No new dependencies" was not true.** `bench:e2e` runs through `npx tsx`,
+    which fetches `tsx` on demand. Restated honestly as "no new manifest
+    entries", with the reason there is no alternative (Node 20 floor rules out
+    `--experimental-strip-types`).
+32. **"Benchmarks live in `benchmarks/` so `pnpm test` stays fast" contradicted
+    Task 3**, which deliberately includes `benchmarks/**/*.test.ts` in the test
+    run. The split keeps `.bench.ts` out of `pnpm test`, not the directory.
+33. **"Every generator takes a fixed seed" was false** — `highCardSymbol` uses no
+    randomness at all.
+34. **"tinybench's iteration count covers it" overstated.** Iterations reduce
+    noise *within* a run; they say nothing about variance *between* runs. Now
+    advises running `pnpm bench` twice for anything you intend to quote.
+
+*Tenth — adversarial, trying to make each benchmark lie:*
+
+35. **Task 6's sink observed the wrong thing.** `sealFrames` returns `Buffer[]`,
+    so `.length` was the *frame count* — always 1 under `CAP` — leaving the
+    encoded bytes unobserved. `encodeFrame` returns a `Buffer`, so the identical
+    expression in Task 5 *was* bytes: the same code meant two different things
+    in two files. Now sums `f.length` per frame.
+36. **Both e2e arms wrote the same table**, so the sf-on arm ingested into a table
+    already holding the sf-off arm's 15k rows — an asymmetry the single-server
+    guard exists to remove. Each arm now has its own table.
+
+*Eleventh — writing-plans format compliance:*
+
+37. **Seven of nine tasks had no `Interfaces:` block.** That is material rather
+    than cosmetic: this plan's header recommends subagent-driven execution, where
+    each task goes to a fresh agent seeing only that task, and the block is how
+    an implementer learns neighbouring names and types. All nine now have one.
+
+*Twelfth — the spec read standalone:*
+
+38. **§1's goal claimed the suite shows "what store-and-forward adds"**, but the
+    ratio assertion was removed in the seventh pass. Narrowed to what is actually
+    delivered: append cost, memory versus disk.
+39. **§9 said "memory/GC profiling beyond what tinybench reports"**, implying
+    tinybench reports some. It reports none — so unlike Java's `GCProfiler` arm
+    this suite has *zero* allocation visibility. Named as a real gap, with
+    `--cpu-prof`/`--heap-prof` as the fallback.
+40. **§9 omitted the Gorilla raw fallback**, which §5 records as uncovered; and
+    §7's single-server guard did not mention the per-arm table split from the
+    tenth pass.
+
+*Thirteenth — verifying the review log's own claims against the shipped code.*
+Eight assertions checked: `setConfirmedMaxId`, `SfEngine.acknowledge`,
+`publishedFsn`, `QwpBuffer.stringColumn`, `TYPE_VARCHAR`, `sealFrames → Buffer[]`,
+`encodeFrame → Buffer`, `SymbolDict.size()` as a method, and
+`getOrCreateColumn → ColumnBuffer | null`. All hold. **No defects** — the first
+clean pass in thirteen.
 
 **Eighth review pass — re-read Tasks 5 and 6 after the fifth pass changed them,
 and audited this Self-Review; six defects:**
