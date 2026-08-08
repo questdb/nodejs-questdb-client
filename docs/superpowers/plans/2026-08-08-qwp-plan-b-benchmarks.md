@@ -118,6 +118,7 @@ function scanSegment(buf: Buffer): ScanResult
 - Test: `benchmarks/workloads.test.ts`
 
 **Interfaces:**
+- Consumes: nothing — this is the root of the dependency graph.
 - Produces: `interface Row { table: string; symbols: [string,string][]; longs: [string,bigint][]; doubles: [string,number][]; strings: [string,string][]; nulls: string[]; ts: bigint }`, `type Workload = { name: string; columns: number; rows(count: number): Row[] }`, and `WORKLOADS: Record<"trades"|"wide"|"highCardSymbol"|"sparse", Workload>`.
 
 Determinism matters more than realism here: two runs must produce identical input or the numbers are not comparable.
@@ -326,7 +327,9 @@ git commit -m "bench: add seeded workload generators"
 - Test: `benchmarks/floors.test.ts`
 
 **Interfaces:**
-- Produces: `floorWriteLongs(values: bigint[]): Buffer`, `floorWriteStrings(values: string[]): Buffer`, `floorInternSymbols(values: string[]): number[]`.
+- Consumes: nothing — deliberately. A floor that shared helpers with the code it
+  bounds would not be an independent baseline.
+- Produces: `floorWriteLongs(values: bigint[]): Buffer`, `floorWriteStrings(values: string[]): Buffer`, `floorInternSymbols(values: string[]): number[]`. Task 5 uses the first and third; `floorWriteStrings` is specified in §6 but **no benchmark currently calls it** — see the Self-Review.
 
 Rust's idea: the floor bounds how much measured time is protocol work versus raw byte movement. It is **not** a target — it ignores null bitmaps, schema and framing.
 
@@ -645,8 +648,8 @@ git commit -m "test: add wire-format invariants over the benchmark workloads"
 Covers `writeColumn` per type, whole-frame `encodeFrame`, gorilla on and off, and `SymbolDict` versus the naive floor.
 
 **Interfaces:**
-- Consumes: `WORKLOADS`, `Row` from Task 1; `floorWriteLongs(values: bigint[]): Buffer`
-  and `floorInternSymbols(values: string[]): number[]` from Task 2.
+- Consumes: `WORKLOADS`, `Row` from Task 1; `floorWriteLongs`, `floorWriteStrings`
+  and `floorInternSymbols` from Task 2 — all three, so no floor ships unused.
 - Produces: `benchmarks/encoder.bench.ts`, exporting `_sink(): number` purely to
   keep the accumulator observable. Nothing else imports from it.
 
@@ -666,7 +669,7 @@ import {
   TYPE_VARCHAR,
 } from "../src/qwp/protocol/constants";
 import { WORKLOADS } from "./workloads";
-import { floorWriteLongs, floorInternSymbols } from "./floors";
+import { floorWriteLongs, floorWriteStrings, floorInternSymbols } from "./floors";
 
 const N = 10_000;
 
@@ -727,6 +730,23 @@ describe("floor comparison", () => {
   }
   bench("encodeFrame single long column", () => {
     sink += encodeFrame([t], { gorilla: false }).length;
+  });
+});
+
+describe("varchar floor comparison", () => {
+  const strs = WORKLOADS.wide.rows(N).flatMap((r) => r.strings.map(([, v]) => v));
+
+  bench("FLOOR utf8 write loop", () => {
+    sink += floorWriteStrings(strs).length;
+  });
+
+  const tv = new QwpTableBuffer("floor_varchar");
+  for (const v of strs) {
+    tv.getOrCreateColumn("s", TYPE_VARCHAR)?.values.push(v);
+    tv.nextRow();
+  }
+  bench("encodeFrame single varchar column", () => {
+    sink += encodeFrame([tv], { gorilla: false }).length;
   });
 });
 
@@ -1016,6 +1036,11 @@ beforeAll(async () => {
   };
 });
 
+// A synthetic 4 KiB frame, NOT a real encoded frame. SF does not inspect
+// contents, so the shape does not matter — but the SIZE does: a real `trades`
+// frame at 10k rows is tens of KiB, and appends amortise syscall cost over
+// their size. Read the disk-mode number as "cost of a 4 KiB append", and scale
+// FRAME up if you want to model a realistic flush.
 const FRAME = Buffer.alloc(4096, 0x41);
 
 const APPENDS = 100;
@@ -1120,6 +1145,8 @@ const ADDR = process.env.QDB_ADDR ?? "localhost:9000";
 const ROWS = Number(process.env.BENCH_ROWS ?? 5000);
 const WARMUP = 500;
 const REPEATS = 3;
+/** Wide enough that repeat N never overlaps repeat N-1's timestamp range. */
+const REPEAT_TS_STRIDE = 1_000_000_000n;
 
 /**
  * Where the sf-on arm writes. Defaults to the OS temp dir, which on most Linux
@@ -1146,8 +1173,15 @@ function percentile(sorted: number[], p: number): number {
  * become a bimodal mixture of real flushes and near-no-ops, with p50 dominated
  * by the no-ops. If you change the flush cadence, disable auto-flush's row
  * trigger first.
+ *
+ * `tsOffset` keeps each repeat APPENDING. Workload rows are deterministic, so
+ * without it every repeat would resend the same timestamp range into the same
+ * table — and after repeat 1 those rows are older than what is already
+ * committed, which puts QuestDB on its out-of-order commit path. Repeat 1 would
+ * measure append while repeats 2 and 3 measure O3, and the "spread across
+ * repeats" guard would read that as machine noise.
  */
-async function arm(config: string, table: string): Promise<number[]> {
+async function arm(config: string, table: string, tsOffset: bigint): Promise<number[]> {
   const sender = await Sender.fromConfig(config);
   const samples: number[] = [];
   try {
@@ -1161,14 +1195,14 @@ async function arm(config: string, table: string): Promise<number[]> {
     for (const row of warm) {
       sender.table(table).symbol("symbol", row.symbols[0][1]);
       for (const [n, v] of row.doubles) sender.floatColumn(n, v);
-      await sender.at(row.ts, "us");
+      await sender.at(row.ts + tsOffset, "us");
     }
     await sender.flush();
 
     for (const row of rows) {
       sender.table(table).symbol("symbol", row.symbols[0][1]);
       for (const [n, v] of row.doubles) sender.floatColumn(n, v);
-      await sender.at(row.ts, "us");
+      await sender.at(row.ts + tsOffset, "us");
       const t0 = process.hrtime.bigint();
       await sender.flush();
       samples.push(Number(process.hrtime.bigint() - t0) / 1000); // microseconds
@@ -1197,12 +1231,14 @@ async function main(): Promise<void> {
   console.log("One server instance across both arms; no restart between them.\n");
 
   // SF off: flush() covers encode -> send -> server ACK.
+  // Each arm has its OWN table. Sharing one would let the second arm ingest
+  // into a table already holding the first arm's rows — an asymmetry the
+  // "one server, no restart" guard exists to remove, not introduce.
   const sfOff: number[][] = [];
-  // A DISTINCT table per arm. Sharing one would let the sf-on arm write into a
-  // table already holding the sf-off arm's 15k rows — an asymmetry the
-  // "one server, no restart" guard was meant to remove, not introduce.
   for (let i = 0; i < REPEATS; i++) {
-    sfOff.push(await arm(`ws::addr=${ADDR};`, "bench_e2e_sfoff"));
+    sfOff.push(
+      await arm(`ws::addr=${ADDR};`, "bench_e2e_sfoff", BigInt(i) * REPEAT_TS_STRIDE),
+    );
   }
   report("flush() = full server round-trip (sf off)", sfOff);
 
@@ -1220,7 +1256,11 @@ async function main(): Promise<void> {
   try {
     for (let i = 0; i < REPEATS; i++) {
       sfOn.push(
-        await arm(`ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`, "bench_e2e_sfon"),
+        await arm(
+          `ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`,
+          "bench_e2e_sfon",
+          BigInt(i) * REPEAT_TS_STRIDE,
+        ),
       );
     }
   } finally {
@@ -1366,7 +1406,7 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 | §3 harness, two entry points | 3 |
 | §4 five files and their reporting column | 3, 5, 6, 7, 8 |
 | §5 four workloads incl. varchar in `wide` | 1 |
-| §6 three floors | 2 |
+| §6 **three** floors — fixed-width, varchar, symbol intern | 2 produces all three; 5 exercises all three |
 | §7 guard 1 — write to real disk (`QWP_BENCH_DIR`) | 7, 8 |
 | §7 guard 2 — `dd` baseline before results | 7 |
 | §7 guard 3 — one server, both arms | 8 |
@@ -1374,10 +1414,23 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 | §8 five assertions | 4 |
 | §9 out of scope | honoured; nothing benchmarks reconnect, replay, drainers or concurrency |
 
-No spec clause is unimplemented. The one that *was* — "SF append does not
-dominate whole-flush cost" — was removed from the spec in the seventh pass
-rather than turned into a task, because nothing here measures whole-flush cost
-at a granularity that makes the ratio meaningful.
+No spec clause is unimplemented. Two *were*, and both were resolved by changing
+the spec rather than inventing a task:
+
+- "SF append does not dominate whole-flush cost" (§8) — removed in the seventh
+  pass, because nothing here measures whole-flush cost at a granularity that
+  makes the ratio meaningful.
+- "whole-frame encode = sum of the per-column floors" (§6) — removed in the
+  sixteenth, because summing floors ignores the schema, table header and null
+  bitmaps a real frame must write, so the ratio would flatter the encoder.
+
+A third gap was resolved the other way: `floorWriteStrings` existed but no
+benchmark called it, so §6's varchar floor was specified and unexercised. Task 5
+now has a varchar arm. **This table previously read "§6 three floors" when §6
+listed four** — a miscount that concealed both the dead floor and the
+unimplementable one, which is the same failure mode as the §8 gap it was
+rewritten to catch. Counts in this table are now stated explicitly so a
+mismatch is visible.
 
 **2. Placeholder scan.** None. Task 4 Step 3 deliberately asks the implementer to
 tighten the bytes/row bound *after* measuring — a real action, not a TODO — and
@@ -1397,6 +1450,52 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Fourteenth to eighteenth review passes — six further defects.**
+
+*Fourteenth — the e2e script read end-to-end as a program:*
+
+41. **The three "repeats" were not equivalent runs.** Workload rows are
+    deterministic, so every repeat resent the same timestamp range into the same
+    table — and after repeat 1 those rows are *older* than what is already
+    committed, putting QuestDB on its out-of-order commit path. Repeat 1 measured
+    append; repeats 2 and 3 measured O3. The "spread across repeats" guard would
+    have read that structural difference as machine noise. Each repeat now
+    carries a `REPEAT_TS_STRIDE` offset so all three append forward. This one
+    needed QuestDB knowledge rather than TypeScript reading — no amount of
+    re-reading the types would have surfaced it.
+42. The per-arm-table comment sat above the sf-off loop while explaining a
+    decision about both arms. Moved.
+
+*Fifteenth — the task dependency graph.* Every declared `Consumes` is satisfied
+by an earlier task; ordering is sound. Two gaps found while checking:
+
+43. **Tasks 1 and 2 declared `Produces` but no `Consumes`**, so the graph could
+    not be read mechanically. Both now state they consume nothing — and Task 2
+    says *why* that is deliberate: a floor sharing helpers with the code it
+    bounds is not an independent baseline.
+44. **The SF benchmark's frame is a synthetic 4 KiB buffer**, while a real
+    `trades` frame at 10k rows is tens of KiB. Appends amortise syscall cost over
+    their size, so the disk number is "cost of a 4 KiB append", not of a
+    realistic flush. Now stated at the constant.
+
+*Sixteenth and seventeenth — floors and the coverage table:*
+
+45. **Spec §6 listed four floors; the plan implemented two.**
+    `floorWriteStrings` was written in Task 2 and called by nothing, so §6's
+    varchar floor was specified and never exercised — Task 5 now has a varchar
+    arm. The fourth, "whole-frame encode = sum of the per-column floors", is
+    dropped from the spec instead: summing floors ignores the schema, table
+    header and null bitmaps a real frame must write, so the ratio would flatter
+    the encoder against a baseline doing strictly less work.
+46. **The Self-Review's coverage table said "§6 three floors" when §6 listed
+    four.** That miscount concealed both problems above — the same failure mode
+    as the §8 gap the table was rewritten to catch two passes earlier. Counts are
+    now stated explicitly so a mismatch is visible rather than plausible.
+
+*Eighteenth — coherence of the review log itself.* Defect numbering verified
+contiguous 1–46 with no duplicates; the only repeated numerals are the README's
+own list inside a fenced block. **No defects.**
 
 **Ninth to thirteenth review passes — ten further defects, then a clean pass.**
 

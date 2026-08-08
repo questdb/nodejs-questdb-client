@@ -116,10 +116,15 @@ covering it; §8 asserts the fallback's correctness instead.
 | fixed-width column write | `buf.writeBigInt64LE` in a bare loop |
 | varchar column write | `buf.write(s, o, "utf8")` in a bare loop |
 | symbol intern | naive per-row `Map.get`/`set` |
-| whole-frame encode | sum of the per-column floors |
 
 The floor is not a target — it ignores null bitmaps, schema and framing. It
 bounds how much of the measured time is protocol work versus raw byte movement.
+
+An earlier draft listed a fourth, "whole-frame encode = sum of the per-column
+floors". It is dropped: summing floors ignores the schema, table header and
+null bitmaps that a whole frame must also write, so the ratio would flatter the
+encoder by comparing it against a baseline that does strictly less work. The
+three above are each measured against a column the encoder genuinely writes.
 
 ## 7. Methodology guards
 
