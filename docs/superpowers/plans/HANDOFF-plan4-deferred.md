@@ -5,7 +5,8 @@ fully implemented and committed on top of Plans 1–3 (`git log b5399b2..HEAD`).
 suite is green: **142 passed, 2 skipped** (`npx vitest run test/qwp/` — the 2 skips are
 Docker-only). `tsc --noEmit` and `eslint src/**` are clean; `bunchee` emits ESM+CJS.
 Live e2e against real QuestDB 10.0.0 (`QWP_TEST_ADDR=localhost:9000`) passes. Release
-version bumped to 4.3.0.
+version bumped to 4.3.0 — **subsequently changed to 5.0.0**; see the note in design
+spec §3.5 for why a major rather than a minor.
 
 **Source of truth:** `docs/superpowers/specs/2026-08-07-qwp-nodejs-client-design.md`.
 Plan: `docs/superpowers/plans/2026-08-07-qwp-plan-4-store-and-forward.md`. Traps list:

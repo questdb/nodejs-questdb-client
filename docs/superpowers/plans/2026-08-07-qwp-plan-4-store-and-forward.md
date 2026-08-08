@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `flush()`'s publish semantics honest — published frames survive a disconnect and a process crash, replay after reconnect, and a crashed process's leftover data gets drained. Then ship 4.3.0.
+**Goal:** Make `flush()`'s publish semantics honest — published frames survive a disconnect and a process crash, replay after reconnect, and a crashed process's leftover data gets drained. Then ship 5.0.0.
 
 **Architecture:** A byte-capped ring of segments keyed by FSN, in memory or on disk depending on whether `sf_dir` is set. Segments carry `baseSeq` in their header, so **FSNs persist across restarts**. Two crash-safe boundary records (manifest, ack watermark) and a load-bearing persisted symbol dictionary sit beside them. Slot directories are locked, and orphaned slots are drained by background tasks with their own connections.
 
@@ -1165,7 +1165,10 @@ main().catch((e) => {
 
 - [ ] **Step 3: Bump the version**
 
-Set `"version": "4.3.0"` in `package.json`. A minor: everything added is additive.
+Set `"version": "5.0.0"` in `package.json`. A **major** — see the note in the
+design spec 3.5. Nothing removes an existing API, but `flush()` means something
+different on `ws::` than on `http::`, and `ws::` delivery is at-least-once. The
+major exists to force a changelog read, not because a signature broke.
 
 - [ ] **Step 4: Run the full gate**
 
@@ -1176,7 +1179,7 @@ Expected: all green, and the build emits both ESM and CJS.
 
 ```bash
 git add README.md examples/qwp-basic.ts package.json
-git commit -m "docs(qwp): document ws:// support and release 4.3.0"
+git commit -m "docs(qwp): document ws:// support and release 5.0.0"
 ```
 
 ---

@@ -8,7 +8,7 @@ sequential**: each consumes interfaces the previous one produced.
 | 1 | `2026-08-07-qwp-plan-1-walking-skeleton.md` | 1–3 | `ws://` ingest works end-to-end, testcontainers-green |
 | 2 | `2026-08-07-qwp-plan-2-full-codec.md` | 4–8 | All column types, symbol dictionary, Gorilla, commit frame, cap-splitting |
 | 3 | `2026-08-07-qwp-plan-3-errors-and-failover.md` | 9–11 | Response decoding, error policy, poison detector, reconnect, multi-host |
-| 4 | `2026-08-07-qwp-plan-4-store-and-forward.md` | 12–16 | Durable send log, replay, crash recovery, release 4.3.0 |
+| 4 | `2026-08-07-qwp-plan-4-store-and-forward.md` | 12–16 | Durable send log, replay, crash recovery, release 5.0.0 |
 
 **Design spec:** `../specs/2026-08-07-qwp-nodejs-client-design.md`. Every plan
 cites it by section number; when a plan and the spec disagree, the spec wins and

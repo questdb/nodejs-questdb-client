@@ -675,7 +675,20 @@ label the column honestly — quoting `hz` as a row rate understates it 10,000×
 
 Two checks before recording anything:
 - `encodeFrame single long column` should be **slower** than the floor, not faster. Faster than a bare write loop means the benchmark is optimising away — add a sink (e.g. accumulate `result.length` into a module-level variable) and re-run.
-- `gorilla on` should be **slower** than `gorilla off` on `sparse` (irregular timestamps fall back to raw and pay the feasibility scan). If it is faster, the fallback path is not being taken and the benchmark is not measuring what it claims.
+- `gorilla on` should produce a **smaller frame** than `gorilla off` on `trades`
+  and `wide`, whose timestamps are perfectly regular (`BASE_TS + i × 1000`) so
+  every delta-of-delta is 0 and each row costs one bit. If it does not, the
+  encoder is not taking the compressed path.
+- `gorilla on` on `sparse`, whose timestamps are jittered, should still be
+  smaller than `gorilla off` but by a **narrower** margin — jitter pushes
+  delta-of-delta into the 7/9/12-bit buckets instead of the 1-bit one.
+
+**What this suite does not cover.** Gorilla's raw fallback (spec 6.3.1) fires
+only when a delta-of-delta leaves signed int32 — roughly a 35-minute jump
+between consecutive gaps at microsecond resolution. No workload here produces
+that, so the fallback is never measured. It is a correctness property rather
+than a throughput one, so Task 4 asserts it instead; do not read these numbers
+as covering it.
 
 - [ ] **Step 4: Commit**
 

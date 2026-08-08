@@ -137,7 +137,8 @@ reader explicitly rather than silently assuming delta mode works end-to-end.
 
 Durable send log, the retention ring (the missing piece that makes `DATA_LOSS`
 from a quarantined slot and replay-from-`ackedFsn+1` possible), crash recovery,
-and release 4.3.0. `AckTracker.ackedFsn` is your replay baseline; `HostTracker.newCursor()`
+and release 5.0.0 (originally specified as 4.3.0 — see design spec §3.5 for why
+it became a major). `AckTracker.ackedFsn` is your replay baseline; `HostTracker.newCursor()`
 is for background drainers; the mock + `Dispatcher` + error taxonomy are ready to
 consume. Remember the trap list in `README.md` still applies — notably the `.symbol-dict`
 file fallback and never-zeroing a torn tail during the scan (spec 8.1.5/8.1.6).

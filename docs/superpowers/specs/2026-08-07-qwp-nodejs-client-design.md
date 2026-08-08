@@ -354,7 +354,23 @@ per-transport hook — unlike rows, which already delegate to
 
 `src/index.ts` — export the new types.
 
-Version bump is a **minor** (4.3.0): no existing behaviour changes.
+Version bump is **5.0.0**, a major.
+
+**Note on why major rather than the minor originally specified.** Nothing here
+removes or changes an existing ILP API, so a strict reading of semver would allow
+4.3.0 — that was this spec's original call. 5.0.0 is a deliberate override, for
+two reasons worth stating rather than leaving implicit:
+
+- **`flush()` does not mean the same thing across protocols.** On `http::` it
+  resolves once the server has responded; on `ws::` it resolves on *publish*
+  (4.4). Someone switching protocol by editing a connect string gets a different
+  durability contract with no compile-time signal. A major forces them to read
+  the changelog.
+- **Delivery is at-least-once on `ws::`** (5.1), where ILP users may reasonably
+  have assumed otherwise. That is a semantic difference significant enough to
+  gate behind a major even though no signature changed.
+
+Treat the number as a communication decision, not a claim that something broke.
 
 ## 4. Public API
 
@@ -2001,7 +2017,7 @@ could actually use the feature.
 | 13 | Disk segments (`SF01`), manifest, ack watermark, CRC32C, `fdatasync` | crash tests |
 | 14 | `.symbol-dict` persistence + delta replay after recovery | crash tests |
 | 15 | Slot locks (both kinds), orphan scan, drainers with private round cursors (1.2), `DATA_LOSS`/`ABANDONED` | crash tests |
-| 16 | Docs, examples, README support matrix, 4.3.0 release | — |
+| 16 | Docs, examples, README support matrix, 5.0.0 release | — |
 
 ## 12. Risks
 
