@@ -1556,6 +1556,45 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 five of the defects found, because each correction has three homes and early
 passes updated only one.
 
+**Fifty-ninth to sixty-third review passes — four defects, one of them a whole
+feature that is present, tested, and connected to nothing.**
+
+Same unit as the previous batch (spec 9.1 against `src/`), continued because it
+was the highest-yield one so far. It was.
+
+72. **Poison-frame detection is not wired at all.** `PoisonDetector` is **never
+    constructed anywhere in `src/`** — `grep` finds it only in its own unit test.
+    So the client has no poison escalation: a repeatedly rejected frame never
+    reaches quarantine, and the strikes-AND-dwell rule the spec and every handoff
+    trap list emphasise is inert. Both keys that tune it, `max_frame_rejections`
+    and `poison_min_escalation_window_millis`, are accepted, validated, then
+    **silently ignored** — worse than rejecting them. `sf_append_deadline_millis`
+    is the same. A sweep of all 38 accepted keys found exactly these three QWP
+    keys with no consumer outside `options.ts`.
+
+    **This is defect 68's predicted failure mode, actually occurring.**
+    `HANDOFF-plan3-to-plan4` stated the gap plainly. The `Dispatcher` half of that
+    same warning was wired; the poison half was not, and it then dropped out of
+    handoffs 4-8 in silence. Because the chain stopped mentioning items once they
+    stopped being mentioned, "fixed" and "forgotten" were indistinguishable — and
+    here one was genuinely forgotten.
+73. **Three spec-9.1 keys are not accepted at all.**
+    `durable_ack_keepalive_interval_millis`, `auth_timeout_ms` and
+    `catch_up_cap_gap_min_escalation_window_millis` are absent from
+    `ValidConfigKeys` and from `src/` under any name, so setting any of them
+    **throws as an unknown option**. The keepalive has teeth: with
+    `request_durable_ack=on` nothing bounds a durable-ack wait.
+74. **`max_background_drainers` defaults to 1, not 4** (`drainer.ts:287`) —
+    orphan slots drain 4× less concurrently than designed after a crash.
+75. **`auto_flush_interval` is still 1 s, not 100 ms.** Rows delegate through
+    `transport.getDefaultAutoFlushRows()`; no matching interval hook exists, so
+    `sender.ts:129` falls back to the hardcoded module constant. This is exactly
+    the change spec 9.1's own prose says "must be added", never made. QWP users
+    get a 10× slower flush cadence than specified.
+
+All four are code defects recorded in `HANDOFF-plan8` and **not fixed** — this
+review is document-only.
+
 **Fifty-fourth to fifty-eighth review passes — two defects, including the most
 consequential finding of the whole review: a shipped durability default that does
 not match the spec.**

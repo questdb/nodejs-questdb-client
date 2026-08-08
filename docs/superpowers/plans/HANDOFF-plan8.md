@@ -106,6 +106,48 @@ feature's headline promise rather than an edge case.
 note that `segmentBytes` needs no such branch — spec 9.1 gives one value (4 MiB)
 for both modes, so `MEMORY_SEGMENT_BYTES` is merely misnamed, not wrong.
 
+### Poison-frame detection is not wired at all
+
+`PoisonDetector` (`src/qwp/poison.ts`) is **never constructed anywhere in
+`src/`** — `grep` finds it only in its own unit test. `HANDOFF-plan3-to-plan4`
+said so plainly ("Both implemented and unit-tested; neither is yet wired into the
+transport lifecycle"); the `Dispatcher` half of that warning *was* wired
+(`transport.ts:94`, `:99`), the poison half never was, and it then dropped out of
+handoffs 4-8 without ever being closed.
+
+*Consequence:* the client has **no poison-frame escalation**. A frame that is
+repeatedly rejected never escalates to quarantine, so the strikes-AND-dwell rule
+the spec and every handoff trap list emphasise is inert in shipped code. Both
+config keys that tune it — `max_frame_rejections` (spec default 4) and
+`poison_min_escalation_window_millis` (5,000) — are accepted, validated, and then
+**silently ignored**, which is worse than rejecting them.
+
+`sf_append_deadline_millis` (spec default 30,000) is in the same state: accepted
+and parsed, never read. A systematic sweep of all 38 accepted keys found exactly
+these three QWP keys with no consumer outside `options.ts` (the other four —
+`tls_roots`, `tls_roots_password`, `token_x`, `token_y` — are pre-existing
+base-client keys, not QWP regressions).
+
+### Three spec-9.1 keys are not accepted at all
+
+`durable_ack_keepalive_interval_millis` (default 200, "≤ 0 disables"),
+`auth_timeout_ms` (15,000) and `catch_up_cap_gap_min_escalation_window_millis`
+(300,000) appear in spec 9.1 — the last one also in the spec's accepted-key list —
+but are absent from `ValidConfigKeys` and absent from `src/` under any name. Setting
+any of them **throws as an unknown option**. The keepalive is the one with teeth:
+with `request_durable_ack=on` there is nothing to bound a durable-ack wait.
+
+### Two more defaults disagree with spec 9.1
+
+- **`max_background_drainers`** — `drainer.ts:287` defaults to **1**; spec 9.1 says
+  **4**. Orphan slots drain 4× less concurrently than designed after a crash.
+- **`auto_flush_interval`** — `sender.ts:129` falls back to the hardcoded
+  `DEFAULT_AUTO_FLUSH_INTERVAL = 1000`; spec 9.1 says QWP's default is **100 ms**.
+  Rows already delegate through `transport.getDefaultAutoFlushRows()`, but no
+  matching `getDefaultAutoFlushInterval()` hook exists — which is precisely the
+  change spec 9.1's own prose says "must be added". QWP users get a 10× slower
+  flush cadence than specified.
+
 **Closure ledger for items carried from `HANDOFF-plan4-deferred`.** Those items
 stopped being mentioned once resolved, which leaves "fixed" indistinguishable
 from "forgotten" without reading source. Each was re-verified against `src/` at
