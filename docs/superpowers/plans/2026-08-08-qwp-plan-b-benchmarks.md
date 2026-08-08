@@ -1520,6 +1520,37 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 five of the defects found, because each correction has three homes and early
 passes updated only one.
 
+**Thirty-fourth to thirty-eighth review passes — four defects, all found by
+looking *outside* this document.**
+
+Every prior pass reviewed Plan B in isolation. Widening to its siblings found
+defects that in-document review structurally could not.
+
+60. **The plans index does not list Plan B.** `plans/README.md` opens "Four plans
+    implement QWP ingest" and there are five plan documents — the file someone
+    reads to orient themselves omits the newest. Added as a separate track, with
+    its own three-item trap list, because benchmarks fail differently from
+    protocol code: they produce a confident number rather than an error.
+61. **The design spec never points at the benchmark work.** A reader of its §10
+    Testing would not learn that `validate.test.ts` asserts the wire-format rules
+    that document spends most of its length on. Added §10.1.
+62. **Plan 1 carried the same machine-specific absolute path** fixed as defect 50
+    in Plan B — the defect class recurs across documents, which single-document
+    review cannot reveal.
+63. **Both early handoffs pointed at a different Java checkout than the spec
+    pins.** `questdb-enterprise-4`'s `java-questdb-client` is **1.3.3-SNAPSHOT**,
+    four behind the pinned **1.3.7-SNAPSHOT** — precisely the trap design spec §2
+    exists to prevent. Severity checked rather than assumed: that checkout's
+    *server-side* `cutlass/qwp` codecs are post-#7200 (no `schema_id`), so nobody
+    following it would have encoded the removed field. Both handoffs now carry
+    the version caution and point at the pinned checkout for client behaviour.
+
+*Thirty-eighth — sibling plans checked for Plan B's other defect classes.* Plan 4
+uses `tmpdir()`, but for crash-recovery tests where tmpfs is acceptable: those
+exercise recovery logic, not fsync timing, and the periodic-durability tests that
+would care were already out of scope. No bare `tsx` invocations anywhere.
+**Clean.**
+
 **Twenty-ninth to thirty-third review passes — one defect, four clean passes.**
 
 This is the first batch where the rate collapsed. Recording what was checked, so

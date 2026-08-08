@@ -89,7 +89,7 @@ describe("varint (unsigned LEB128)", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/nick/repos/nodejs-questdb-client && npx vitest run test/qwp/varint.test.ts`
+Run: `npx vitest run test/qwp/varint.test.ts` (from the repo root, as every other command in this plan)
 Expected: FAIL — cannot resolve `../../src/qwp/protocol/varint`.
 
 - [ ] **Step 3: Write minimal implementation**

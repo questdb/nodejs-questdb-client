@@ -14,6 +14,26 @@ sequential**: each consumes interfaces the previous one produced.
 cites it by section number; when a plan and the spec disagree, the spec wins and
 the plan should be corrected.
 
+## Plan B — benchmarks (separate track)
+
+`2026-08-08-qwp-plan-b-benchmarks.md`, spec
+`../specs/2026-08-08-qwp-node-benchmarks-design.md`.
+
+**Not** part of the sequence above. It runs *after* Plans 1–4 have shipped, adds
+nothing to `src/`, and validates the implementation rather than extending it:
+encoder throughput against hand-written floors, row-building overhead,
+store-and-forward append cost, and end-to-end flush latency. Ad hoc — no CI job,
+no gate.
+
+It carries its own trap list, disjoint from the one below, because benchmarks
+fail differently from protocol code: they produce a confident number instead of
+an error. The three worst are **`/tmp` is usually tmpfs**, so a "disk" benchmark
+silently measures RAM while its own `dd` guard reports an excellent figure;
+**`hz` is callbacks per second, not rows per second**, understating throughput
+by four orders of magnitude; and **an unconsumed result can be optimised away**,
+which corrupts a floor comparison in whichever direction happens to win. See
+that plan's own review log for the full set.
+
 ## Things that will bite, in order of likelihood
 
 These are the traps the spec review surfaced. Each is a case where the *obvious*

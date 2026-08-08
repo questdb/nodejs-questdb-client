@@ -1993,6 +1993,16 @@ Four tiers, all four required.
    floor (8.1.3): a slot whose side files alone approach `sf_max_total_bytes`
    must still accept writes.
 
+### 10.1 Related: the benchmark suite
+
+`2026-08-08-qwp-node-benchmarks-design.md` adds a fifth kind of check, run ad hoc
+after this spec ships. Most of it is performance, but its `validate.test.ts`
+asserts the wire-format rules this document spends most of its length on —
+null compaction actually compacting, delta mode beating full-dict only once the
+baseline is confirmed, the Gorilla flag reaching TIMESTAMP and not LONG. Those
+are correctness checks expressed through benchmark workloads, and they are the
+cheapest runtime evidence that §6's rules hold.
+
 ## 11. PR stack
 
 Sixteen stacked PRs, each independently reviewable and green. PRs 1–8 are the

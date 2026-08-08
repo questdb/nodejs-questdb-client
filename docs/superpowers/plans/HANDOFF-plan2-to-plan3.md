@@ -126,5 +126,5 @@ state-ranked host tracker with private cursors (zone-blind — do NOT add zone
 tiers), reconnect/rotation/dictionary catch-up, and drop-oldest notification
 dispatchers + derived connect mode (any `reconnect_*` key ⇒ eager connect).
 Re-run the ten traps in `README.md` and lean on the Java source at
-`/home/nick/repos/questdb-enterprise-4/questdb/core/src/main/java/io/questdb/cutlass/qwp/`
+`/home/nick/repos/questdb-enterprise-4/questdb/core/src/main/java/io/questdb/cutlass/qwp/` **Version caution:** that checkout's `java-questdb-client` submodule is at **1.3.3-SNAPSHOT**, four behind the **1.3.7-SNAPSHOT** the design spec §2 pins (`~/claude/wt/oss/wal-pending-negative/java-questdb-client`, HEAD `8f5ed4f9`). Its *server-side* `cutlass/qwp` codecs were checked and are post-#7200 (no `schema_id`), so they are safe for protocol ground-truth — but read client-side behaviour from the pinned checkout, and check `core/pom.xml` before trusting either.
 for any ambiguous wire byte.
