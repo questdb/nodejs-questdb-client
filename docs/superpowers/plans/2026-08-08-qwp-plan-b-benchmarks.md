@@ -1245,6 +1245,16 @@ function percentile(sorted: number[], p: number): number {
  * committed, which puts QuestDB on its out-of-order commit path. Repeat 1 would
  * measure append while repeats 2 and 3 measure O3, and the "spread across
  * repeats" guard would read that as machine noise.
+ *
+ * The same hazard exists a second time, through the symbol dictionary, and the
+ * defence is easy to delete by accident. Each repeat builds a FRESH Sender, and
+ * the sf-on arm passes `sender_id=bench-${i}` — a different id per repeat, so a
+ * different slot directory and therefore a cold `.symbol-dict` every time.
+ * Collapse that to a fixed `sender_id` and repeat 1 pays full-dict encoding plus
+ * write-ahead symbol persistence while repeats 2 and 3 recover the dictionary
+ * and run in delta mode (spec 5.2, 8.1.6). Delta wiring is live end-to-end as of
+ * handoff 6, so this is a real difference now, not a latent one. Keep the id
+ * per-repeat; it is load-bearing for comparability, not just for slot locking.
  */
 async function arm(config: string, table: string, tsOffset: bigint): Promise<number[]> {
   const sender = await Sender.fromConfig(config);
@@ -1545,6 +1555,42 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Forty-ninth to fifty-third review passes — two defects, both about claims that
+were true but unverifiable from the documents alone.**
+
+This batch audited `HANDOFF-plan8`'s assertion that "nothing else is deferred"
+against `src/`, item by item. **The assertion holds** — but establishing that
+required reading source, which is the defect.
+
+68. **The handoff chain closes items silently.** `C4` (eager-connect
+    double-connect) and `B1b` (catch-up frame seq off-by-one) are listed in
+    `HANDOFF-plan4-deferred` and `plan5-deferred`, then simply stop being
+    mentioned in 6, 7 and 8. Both are in fact **fixed** — `QwpTransport.connect()`
+    joins an in-flight `connectPromise` rather than opening the engine twice, and
+    `sendDictCatchUp()` returns its frame count for `acks.onConnected()` to
+    consume — but "fixed" was indistinguishable from "forgotten" without going to
+    the code. `B1b` in particular is a data-loss-shaped bug (mis-attributed ACK
+    over-trimming the ring), so a reader who assumed the worst would redo it.
+    `plan8` now carries a closure ledger naming each carried item and where it
+    landed, re-verified at this commit.
+69. **The e2e repeats are comparable by accident, and the accident is deletable.**
+    Defect 42 fixed timestamp contamination across repeats with `REPEAT_TS_STRIDE`.
+    The identical hazard exists through the **symbol dictionary**: repeat 1 would
+    pay full-dict encoding plus write-ahead symbol persistence while repeats 2-3
+    recover a dictionary and run delta. It does not currently bite, because each
+    repeat builds a fresh Sender and the sf-on arm varies `sender_id=bench-${i}`,
+    giving a cold slot each time. But that id was chosen for slot-lock isolation,
+    nothing recorded it as load-bearing for comparability, and "simplify to one
+    sender_id" is an obvious tidy-up. **Delta wiring went live in handoff 6**, so
+    this became a real difference rather than a latent one. Now documented where
+    the id is set.
+
+*Clean, verified against source rather than assumed:* `C1` — `SfEngine.acknowledge`
+no longer writes the watermark per ACK, only setting `watermarkDirty` for the
+barrier cadence, matching spec 8.2. `C3` — `request_durable_ack` reaches the wire
+via `drainer.ts`. `B1a` — the delta size path uses `varintSize(symbolId(v))` with
+an ids ≥ 128 regression test.
 
 **Forty-fourth to forty-eighth review passes — one defect, found by checking the
 plan against the source as it stands *now* rather than when it was written.**

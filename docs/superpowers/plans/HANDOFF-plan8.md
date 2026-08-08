@@ -83,6 +83,19 @@ at offset 0, not the reverse.
 
 ## REMAINING — none
 
+**Closure ledger for items carried from `HANDOFF-plan4-deferred`.** Those items
+stopped being mentioned once resolved, which leaves "fixed" indistinguishable
+from "forgotten" without reading source. Each was re-verified against `src/` at
+this commit:
+
+| Item | Where it landed |
+|---|---|
+| **C1** watermark written per ACK | `SfEngine.acknowledge` now only sets `watermarkDirty`; the write is coalesced onto the barrier cadence (spec 8.2 consequence 1). |
+| **C3** `request_durable_ack` parsed but not wired | reaches the wire via `drainer.ts` (`requestDurableAck`). |
+| **C4** eager-connect double-connect | `QwpTransport.connect()` is idempotent — returns early on `this.ws`, otherwise joins the in-flight `connectPromise`, so the constructor's fire-and-forget attempt and an explicit `connect()` cannot open the engine twice. |
+| **B1a** delta size vs write disagreeing on id | `varintSize(symbolId(v))`, with the ids ≥ 128 regression test in `deltaDict.test.ts`. |
+| **B1b** catch-up frame seq off-by-one | `sendDictCatchUp()` returns its frame count and `acks.onConnected(ackedFsn + 1, catchUpFrames)` consumes it, so catch-up frames no longer shift ACK attribution onto the first ring frame. |
+
 Everything deferred in earlier handoffs is done: A1 orphan scan + drainers (8.4),
 the `.symbol-dict` read-quarantine hole, and C2 manifest. No further deferred work.
 
