@@ -97,8 +97,12 @@ describe("workloads", () => {
     expect(r.doubles.length).toBe(2);
   });
 
-  it("wide has 50 columns", () => {
+  it("wide has 50 data columns across all four families", () => {
     expect(WORKLOADS.wide.columns).toBe(50);
+    const r = WORKLOADS.wide.rows(1)[0];
+    // 1 + 20 + 20 + 9 = 50. The encoded table carries 51 including the
+    // designated timestamp, which is not counted here.
+    expect(r.symbols.length + r.longs.length + r.doubles.length + r.strings.length).toBe(50);
   });
 
   it("highCardSymbol produces many distinct symbols", () => {
@@ -381,9 +385,11 @@ export default defineConfig({
     // Keep `pnpm test` fast: unit tests and the benchmark validation
     // assertions, but never the benchmarks themselves.
     include: ["test/**/*.test.ts", "benchmarks/**/*.test.ts"],
-  },
-  benchmark: {
-    include: ["benchmarks/**/*.bench.ts"],
+    // `benchmark` nests UNDER `test` — a top-level key is silently ignored
+    // and `vitest bench` then picks up its default globs instead.
+    benchmark: {
+      include: ["benchmarks/**/*.bench.ts"],
+    },
   },
 });
 ```
@@ -430,18 +436,30 @@ import { Buffer } from "node:buffer";
 import { QwpTableBuffer } from "../src/qwp/protocol/tableBuffer";
 import { encodeFrame } from "../src/qwp/protocol/frameEncoder";
 import { SymbolDict } from "../src/qwp/protocol/symbolDict";
-import { TYPE_LONG, TYPE_DOUBLE, TYPE_SYMBOL, TYPE_TIMESTAMP } from "../src/qwp/protocol/constants";
+import {
+  TYPE_LONG,
+  TYPE_DOUBLE,
+  TYPE_SYMBOL,
+  TYPE_TIMESTAMP,
+  TYPE_VARCHAR,
+} from "../src/qwp/protocol/constants";
 import { WORKLOADS } from "./workloads";
 import { floorWriteLongs, floorInternSymbols } from "./floors";
 
 const N = 10_000;
 
+/**
+ * Every column family the workloads generate must be handled here. Dropping
+ * one silently shrinks the benchmark: omitting `strings` turns `wide` from the
+ * advertised 50 columns into 42 and stops exercising varchar entirely.
+ */
 function buildTable(name: string, rows: ReturnType<typeof WORKLOADS.trades.rows>): QwpTableBuffer {
   const t = new QwpTableBuffer(name);
   for (const row of rows) {
     for (const [n, v] of row.symbols) t.getOrCreateColumn(n, TYPE_SYMBOL)?.values.push(v);
     for (const [n, v] of row.longs) t.getOrCreateColumn(n, TYPE_LONG)?.values.push(v);
     for (const [n, v] of row.doubles) t.getOrCreateColumn(n, TYPE_DOUBLE)?.values.push(v);
+    for (const [n, v] of row.strings) t.getOrCreateColumn(n, TYPE_VARCHAR)?.values.push(v);
     t.getOrCreateColumn("timestamp", TYPE_TIMESTAMP)?.values.push(row.ts);
     t.nextRow();
   }
@@ -531,12 +549,15 @@ import { WORKLOADS } from "./workloads";
 const N = 10_000;
 const CAP = 1 << 30; // large enough that nothing splits
 
+/** Handles every column family the workloads generate — see Task 4's note. */
 function fill(b: QwpBuffer, rows: ReturnType<typeof WORKLOADS.trades.rows>): void {
   for (const row of rows) {
     b.table(row.table);
     for (const [n, v] of row.symbols) b.symbol(n, v);
     for (const [n, v] of row.longs) b.intColumn(n, Number(v));
     for (const [n, v] of row.doubles) b.floatColumn(n, v);
+    for (const [n, v] of row.strings) b.stringColumn(n, v);
+    // QwpBuffer.at() is synchronous (src/qwp/buffer.ts:173) — do NOT await it.
     b.at(row.ts, "us");
   }
 }
@@ -630,20 +651,50 @@ beforeAll(() => {
 
 const FRAME = Buffer.alloc(4096, 0x41);
 
+/**
+ * open() is REQUIRED before append(). append() guards its write with
+ * `if (this.isDisk && this.slot)`, and `slot` is only set by open() -- so an
+ * unopened disk engine silently skips the write and reports memory-mode
+ * numbers under a "disk mode" label. close() is equally required: open()
+ * starts a setInterval durability barrier that keeps the process alive.
+ */
+async function withEngine(
+  opts: ConstructorParameters<typeof SfEngine>[0],
+  body: (e: SfEngine) => Promise<void>,
+): Promise<void> {
+  const e = new SfEngine(opts);
+  await e.open();
+  try {
+    await body(e);
+  } finally {
+    await e.close();
+  }
+}
+
 describe("SfEngine.append", () => {
   bench("memory mode", async () => {
-    const e = new SfEngine({ segmentBytes: 4 << 20, maxTotalBytes: 128 << 20, senderId: "bench-mem" });
-    for (let i = 0; i < 100; i++) await e.append(FRAME);
+    await withEngine(
+      { segmentBytes: 4 << 20, maxTotalBytes: 128 << 20, senderId: "bench-mem" },
+      async (e) => {
+        for (let i = 0; i < 100; i++) await e.append(FRAME);
+      },
+    );
   });
 
   bench("disk mode", async () => {
-    const e = new SfEngine({
-      segmentBytes: 4 << 20,
-      maxTotalBytes: 128 << 20,
-      sfDir: dir,
-      senderId: `bench-disk-${Math.trunc(performance.now() * 1000)}`,
-    });
-    for (let i = 0; i < 100; i++) await e.append(FRAME);
+    await withEngine(
+      {
+        segmentBytes: 4 << 20,
+        maxTotalBytes: 128 << 20,
+        sfDir: dir,
+        // A fresh slot per iteration: acquireSlot() takes an exclusive lock,
+        // so reusing one senderId across iterations would fail on the second.
+        senderId: `bench-disk-${process.hrtime.bigint()}`,
+      },
+      async (e) => {
+        for (let i = 0; i < 100; i++) await e.append(FRAME);
+      },
+    );
   });
 });
 
@@ -660,7 +711,15 @@ describe("segment recovery", () => {
 - [ ] **Step 2: Run it**
 
 Run: `npx vitest bench --run benchmarks/sf.bench.ts`
-Expected: a `[disk baseline]` line, then results. Disk mode is slower than memory mode; if it is **not**, the engine is not actually writing and `sfDir` is being ignored.
+Expected: a `[disk baseline]` line, then results.
+
+**Disk mode must be slower than memory mode.** If it is not, the likeliest cause
+is a missing `await e.open()` — `append()` silently skips its write when `slot`
+is unset, so the "disk" arm is really measuring memory mode. Check that before
+concluding anything about the disk.
+
+**If the process hangs after the results**, `close()` was not reached: `open()`
+starts a `setInterval` barrier that holds the event loop open.
 
 - [ ] **Step 3: Sanity-check against the baseline**
 
@@ -956,6 +1015,22 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 **2. Placeholder scan.** None. Task 8 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
 
 **3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 7, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 4. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+
+**Four defects found by checking this plan against the shipped code, fixed above:**
+
+1. **`SfEngine.open()` was never called** in Task 6. `append()` guards its write
+   with `if (this.isDisk && this.slot)` and `slot` is set only by `open()`, so
+   the "disk mode" arm would have silently measured memory mode and reported it
+   under a disk label — precisely the class of wrong-but-plausible number this
+   suite exists to prevent.
+2. **`SfEngine.close()` was never called.** `open()` starts a `setInterval`
+   durability barrier, so the bench process would hang after printing results.
+3. **`benchmark` was placed at the top level of the vitest config.** It nests
+   under `test`; at the top level it is silently ignored and `vitest bench` uses
+   its default globs instead.
+4. **The `strings` column family was dropped** by both `buildTable` (Task 4) and
+   `fill` (Task 5), shrinking `wide` from the advertised 50 columns to 42 and
+   removing varchar from the suite entirely.
 
 **Async boundaries, checked against the shipped code:**
 
