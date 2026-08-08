@@ -37,11 +37,17 @@ finalised. What it established:
   10,000-row workload per callback, rows/s is `hz × 10_000`. Reading `hz`
   directly as a row rate understates throughput by four orders of magnitude.
 - **An `await Promise.resolve()` alone costs ~1.4×** at these speeds (380k hz
-  sync vs 267k hz async in the probe). Task 6's `SfEngine.append` is async, so a
+  sync vs 267k hz async in the probe). Task 7's `SfEngine.append` is async, so a
   meaningful slice of that measurement is promise machinery rather than engine
   work. Do not attribute it all to the engine.
 - **`rme` is the relative margin of error.** Check it before believing any
   delta: a 5% difference between two arms with ±3% rme each is not a result.
+
+**Not covered by the probe, so treat as an assumption:** that `beforeAll` runs
+in a `.bench.ts` file. Task 7 relies on it for the temp directory and the disk
+baseline. If it turns out not to fire, move that setup to module scope — the
+file is loaded once per run, so top-level code works either way. Check this
+first when running Task 7, before concluding anything about the numbers.
 
 ## Verified API surface
 
@@ -424,8 +430,12 @@ In `package.json`, alongside the existing `"test"` script:
 
 ```json
     "bench": "vitest bench --run",
-    "bench:e2e": "tsx benchmarks/e2e.ts"
+    "bench:e2e": "npx tsx benchmarks/e2e.ts"
 ```
+
+`npx tsx`, not bare `tsx`. `tsx` is deliberately **not** a dependency (see Global
+Constraints), so it is not in `node_modules/.bin` and a bare invocation fails
+with "command not found". `npx` fetches it on demand.
 
 And **pin vitest exactly**, dropping the caret. Vitest prints a warning on every
 bench run that benchmarking is experimental and may break outside SemVer; a
@@ -453,7 +463,116 @@ git commit -m "bench: add bench scripts and split bench files from tests"
 
 ---
 
-### Task 4: Encoder benchmarks
+### Task 4: Validation assertions — run before you measure
+
+**Files:**
+- Create: `benchmarks/validate.test.ts`
+
+**Spec §8.** These run under `pnpm test`, not `pnpm bench` — they are correctness checks on the wire format, expressed through the benchmark workloads. They are the cheapest possible check that the rules the design spec spent most of its length on actually hold at runtime.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// benchmarks/validate.test.ts
+import { describe, it, expect } from "vitest";
+import { QwpBuffer } from "../src/qwp/buffer";
+import { SymbolDict } from "../src/qwp/protocol/symbolDict";
+import { QwpTableBuffer } from "../src/qwp/protocol/tableBuffer";
+import { encodeFrame } from "../src/qwp/protocol/frameEncoder";
+import { TYPE_LONG } from "../src/qwp/protocol/constants";
+import { WORKLOADS } from "./workloads";
+
+const CAP = 1 << 30;
+
+function build(rows: ReturnType<typeof WORKLOADS.trades.rows>, dict?: SymbolDict): Buffer[] {
+  const b = new QwpBuffer();
+  if (dict) b.attachDict(dict);
+  for (const row of rows) {
+    b.table(row.table);
+    for (const [n, v] of row.symbols) b.symbol(n, v);
+    for (const [n, v] of row.longs) b.intColumn(n, Number(v));
+    for (const [n, v] of row.doubles) b.floatColumn(n, v);
+    b.at(row.ts, "us");
+  }
+  return b.sealFrames(CAP);
+}
+
+describe("wire-format invariants", () => {
+  it("trades encodes to a plausible bytes/row", () => {
+    const rows = WORKLOADS.trades.rows(10_000);
+    const bytes = build(rows).reduce((a, f) => a + f.length, 0);
+    const perRow = bytes / rows.length;
+    // Well under means values are being dropped; well over means framing
+    // overhead has regressed.
+    expect(perRow).toBeGreaterThan(20);
+    expect(perRow).toBeLessThan(120);
+  });
+
+  it("null values are compacted, not written as placeholders", () => {
+    const rows = WORKLOADS.sparse.rows(2000);
+    const sparseBytes = build(rows).reduce((a, f) => a + f.length, 0);
+
+    // Same shape with every value present.
+    const dense = rows.map((r) => ({
+      ...r,
+      nulls: [],
+      longs: ["a", "b", "c", "d", "e", "f", "g", "h"].map(
+        (n) => [n, 1n] as [string, bigint],
+      ),
+    }));
+    const denseBytes = build(dense).reduce((a, f) => a + f.length, 0);
+
+    // ~30% nulls must produce a materially smaller payload (spec 6.2.1).
+    expect(sparseBytes).toBeLessThan(denseBytes * 0.9);
+  });
+
+  it("delta mode emits fewer bytes than full-dict on high cardinality", () => {
+    const rows = WORKLOADS.highCardSymbol.rows(5000);
+    const full = build(rows).reduce((a, f) => a + f.length, 0);
+
+    // Delta mode with a dictionary already primed: the second batch carries
+    // ids, not strings (spec 5.2).
+    const dict = new SymbolDict();
+    build(rows, dict); // first pass registers every symbol
+    const second = build(rows, dict).reduce((a, f) => a + f.length, 0);
+
+    expect(second).toBeLessThan(full);
+  });
+
+  it("gorilla shrinks regularly spaced timestamps", () => {
+    const t = new QwpTableBuffer("g");
+    for (let i = 0; i < 5000; i++) {
+      t.getOrCreateColumn("v", TYPE_LONG)?.values.push(BigInt(i));
+      t.nextRow();
+    }
+    const off = encodeFrame([t], { gorilla: false }).length;
+    const on = encodeFrame([t], { gorilla: true }).length;
+    // LONG is not gorilla-encoded, so these must match exactly. A difference
+    // means the flag is leaking into a column type it should not touch.
+    expect(on).toBe(off);
+  });
+});
+```
+
+- [ ] **Step 2: Run it**
+
+Run: `npx vitest run benchmarks/validate.test.ts`
+Expected: 4 tests. **If any fail, that is a real finding about the implementation, not a broken test** — investigate the encoder before adjusting a bound.
+
+- [ ] **Step 3: Record the actual bytes/row**
+
+Once green, replace the wide 20–120 band with a tighter one around the measured value, and note the measured figure in a comment. A loose bound catches nothing.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add benchmarks/validate.test.ts
+git commit -m "test: add wire-format invariants over the benchmark workloads"
+```
+
+---
+
+### Task 5: Encoder benchmarks
 
 **Files:**
 - Create: `benchmarks/encoder.bench.ts`
@@ -567,7 +686,7 @@ git commit -m "bench: add encoder throughput benchmarks with floor comparison"
 
 ---
 
-### Task 5: Row-building benchmarks
+### Task 6: Row-building benchmarks
 
 **Files:**
 - Create: `benchmarks/buffer.bench.ts`
@@ -586,7 +705,7 @@ import { WORKLOADS } from "./workloads";
 const N = 10_000;
 const CAP = 1 << 30; // large enough that nothing splits
 
-/** Handles every column family the workloads generate — see Task 4's note. */
+/** Handles every column family the workloads generate — see Task 5's note. */
 function fill(b: QwpBuffer, rows: ReturnType<typeof WORKLOADS.trades.rows>): void {
   for (const row of rows) {
     b.table(row.table);
@@ -672,7 +791,7 @@ git commit -m "bench: add row-building benchmarks for QwpBuffer"
 
 ---
 
-### Task 6: Store-and-forward benchmarks with a disk baseline
+### Task 7: Store-and-forward benchmarks with a disk baseline
 
 **Files:**
 - Create: `benchmarks/sf.bench.ts`
@@ -807,7 +926,7 @@ git commit -m "bench: add store-and-forward benchmarks with a disk baseline"
 
 ---
 
-### Task 7: End-to-end latency script
+### Task 8: End-to-end latency script
 
 **Files:**
 - Create: `benchmarks/e2e.ts`
@@ -922,7 +1041,7 @@ Expected: two blocks of percentiles, each with a spread across three repeats.
 
 - [ ] **Step 3: Sanity-check the result before recording it**
 
-- **sf-on should be faster than sf-off.** If not, either SF is not engaged (check `sf_dir` reached the transport) or the local write is pathologically slow (check the disk baseline from Task 6).
+- **sf-on should be faster than sf-off.** If not, either SF is not engaged (check `sf_dir` reached the transport) or the local write is pathologically slow (check the disk baseline from Task 7).
 - **The spread across repeats should be narrow.** If p99 varies by more than roughly 2× between repeats, the machine is too noisy to quote — close other work and re-run rather than averaging the noise away.
 
 - [ ] **Step 4: Tear down and commit**
@@ -931,115 +1050,6 @@ Expected: two blocks of percentiles, each with a spread across three repeats.
 docker rm -f qwp-bench
 git add benchmarks/e2e.ts
 git commit -m "bench: add end-to-end latency script for both flush contracts"
-```
-
----
-
-### Task 8: Validation assertions
-
-**Files:**
-- Create: `benchmarks/validate.test.ts`
-
-**Spec §8.** These run under `pnpm test`, not `pnpm bench` — they are correctness checks on the wire format, expressed through the benchmark workloads. They are the cheapest possible check that the rules the design spec spent most of its length on actually hold at runtime.
-
-- [ ] **Step 1: Write the failing test**
-
-```ts
-// benchmarks/validate.test.ts
-import { describe, it, expect } from "vitest";
-import { QwpBuffer } from "../src/qwp/buffer";
-import { SymbolDict } from "../src/qwp/protocol/symbolDict";
-import { QwpTableBuffer } from "../src/qwp/protocol/tableBuffer";
-import { encodeFrame } from "../src/qwp/protocol/frameEncoder";
-import { TYPE_LONG } from "../src/qwp/protocol/constants";
-import { WORKLOADS } from "./workloads";
-
-const CAP = 1 << 30;
-
-function build(rows: ReturnType<typeof WORKLOADS.trades.rows>, dict?: SymbolDict): Buffer[] {
-  const b = new QwpBuffer();
-  if (dict) b.attachDict(dict);
-  for (const row of rows) {
-    b.table(row.table);
-    for (const [n, v] of row.symbols) b.symbol(n, v);
-    for (const [n, v] of row.longs) b.intColumn(n, Number(v));
-    for (const [n, v] of row.doubles) b.floatColumn(n, v);
-    b.at(row.ts, "us");
-  }
-  return b.sealFrames(CAP);
-}
-
-describe("wire-format invariants", () => {
-  it("trades encodes to a plausible bytes/row", () => {
-    const rows = WORKLOADS.trades.rows(10_000);
-    const bytes = build(rows).reduce((a, f) => a + f.length, 0);
-    const perRow = bytes / rows.length;
-    // Well under means values are being dropped; well over means framing
-    // overhead has regressed.
-    expect(perRow).toBeGreaterThan(20);
-    expect(perRow).toBeLessThan(120);
-  });
-
-  it("null values are compacted, not written as placeholders", () => {
-    const rows = WORKLOADS.sparse.rows(2000);
-    const sparseBytes = build(rows).reduce((a, f) => a + f.length, 0);
-
-    // Same shape with every value present.
-    const dense = rows.map((r) => ({
-      ...r,
-      nulls: [],
-      longs: ["a", "b", "c", "d", "e", "f", "g", "h"].map(
-        (n) => [n, 1n] as [string, bigint],
-      ),
-    }));
-    const denseBytes = build(dense).reduce((a, f) => a + f.length, 0);
-
-    // ~30% nulls must produce a materially smaller payload (spec 6.2.1).
-    expect(sparseBytes).toBeLessThan(denseBytes * 0.9);
-  });
-
-  it("delta mode emits fewer bytes than full-dict on high cardinality", () => {
-    const rows = WORKLOADS.highCardSymbol.rows(5000);
-    const full = build(rows).reduce((a, f) => a + f.length, 0);
-
-    // Delta mode with a dictionary already primed: the second batch carries
-    // ids, not strings (spec 5.2).
-    const dict = new SymbolDict();
-    build(rows, dict); // first pass registers every symbol
-    const second = build(rows, dict).reduce((a, f) => a + f.length, 0);
-
-    expect(second).toBeLessThan(full);
-  });
-
-  it("gorilla shrinks regularly spaced timestamps", () => {
-    const t = new QwpTableBuffer("g");
-    for (let i = 0; i < 5000; i++) {
-      t.getOrCreateColumn("v", TYPE_LONG)?.values.push(BigInt(i));
-      t.nextRow();
-    }
-    const off = encodeFrame([t], { gorilla: false }).length;
-    const on = encodeFrame([t], { gorilla: true }).length;
-    // LONG is not gorilla-encoded, so these must match exactly. A difference
-    // means the flag is leaking into a column type it should not touch.
-    expect(on).toBe(off);
-  });
-});
-```
-
-- [ ] **Step 2: Run it**
-
-Run: `npx vitest run benchmarks/validate.test.ts`
-Expected: 4 tests. **If any fail, that is a real finding about the implementation, not a broken test** — investigate the encoder before adjusting a bound.
-
-- [ ] **Step 3: Record the actual bytes/row**
-
-Once green, replace the wide 20–120 band with a tighter one around the measured value, and note the measured figure in a comment. A loose bound catches nothing.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add benchmarks/validate.test.ts
-git commit -m "test: add wire-format invariants over the benchmark workloads"
 ```
 
 ---
@@ -1095,11 +1105,28 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 
 ## Self-Review
 
-**1. Spec coverage.** Harness and scripts (Task 3 — §3). Four workloads (Task 1 — §5). Floors (Task 2 — §6). Encoder (Task 4 — §4). Buffer (Task 5 — §4). SF plus disk baseline (Task 6 — §4, §7). E2E, both contracts, one server, three repeats (Task 7 — §4, §7). Validation assertions (Task 8 — §8). Docs (Task 9).
+**1. Spec coverage.** Four workloads (Task 1 — §5). Floors (Task 2 — §6). Harness and scripts (Task 3 — §3). Validation assertions (Task 4 — §8). Encoder (Task 5 — §4). Buffer (Task 6 — §4). SF plus disk baseline (Task 7 — §4, §7). E2E, both contracts, one server, three repeats (Task 8 — §4, §7). Docs (Task 9).
 
-**2. Placeholder scan.** None. Task 8 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
+**2. Placeholder scan.** None. Task 4 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
 
-**3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 7, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 4. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+**3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 6, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 5. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+
+**Fourth review pass — structural, three further defects:**
+
+8. **Validation ran last.** The assertions that check the wire format were Task 8,
+   after every benchmark — so the implementer would have spent four tasks
+   producing throughput numbers for code whose correctness was never checked. If
+   null compaction were broken, every benchmark would have reported happily on
+   wrong bytes. Validation depends only on Task 1's workloads, so it is now
+   Task 4, ahead of all measurement. Tasks 4–7 shifted to 5–8 and every
+   cross-reference was updated.
+9. **`bench:e2e` invoked bare `tsx`.** `tsx` is deliberately not a dependency, so
+   it is absent from `node_modules/.bin` and the script would have failed with
+   "command not found" — while Task 8's manual command used `npx tsx` and worked,
+   which would have made the failure look like a script-only problem.
+10. **`beforeAll` in a `.bench.ts` file is unverified.** Task 7 depends on it for
+    the temp directory and disk baseline. Now flagged as an assumption with the
+    fallback (module scope) written down, rather than presented as fact.
 
 **Third review pass — settled by actually running the harness.** A throwaway
 probe against `vitest bench` 3.1.3 confirmed nested `describe` and async bodies
@@ -1129,7 +1156,7 @@ All four are now recorded under "Harness facts", and Task 3 pins vitest.
 
 **First review pass — four defects found by checking this plan against the shipped code:**
 
-1. **`SfEngine.open()` was never called** in Task 6. `append()` guards its write
+1. **`SfEngine.open()` was never called** in Task 7. `append()` guards its write
    with `if (this.isDisk && this.slot)` and `slot` is set only by `open()`, so
    the "disk mode" arm would have silently measured memory mode and reported it
    under a disk label — precisely the class of wrong-but-plausible number this
@@ -1139,17 +1166,17 @@ All four are now recorded under "Harness facts", and Task 3 pins vitest.
 3. **`benchmark` was placed at the top level of the vitest config.** It nests
    under `test`; at the top level it is silently ignored and `vitest bench` uses
    its default globs instead.
-4. **The `strings` column family was dropped** by both `buildTable` (Task 4) and
-   `fill` (Task 5), shrinking `wide` from the advertised 50 columns to 42 and
+4. **The `strings` column family was dropped** by both `buildTable` (Task 5) and
+   `fill` (Task 6), shrinking `wide` from the advertised 50 columns to 42 and
    removing varchar from the suite entirely.
 
 **Async boundaries, checked against the shipped code:**
 
-- **`Sender.at()` is `async`** (`src/sender.ts:451`) — auto-flush can trigger inside it — so Task 7's `await sender.at(...)` is correct.
-- **`QwpBuffer.at()` is synchronous** (`src/qwp/buffer.ts:173`), so Task 5 calls it without `await`. Adding one there would cost a microtask tick per row and inflate the measurement.
-- **`SfEngine.append` is `async`**, so Task 6's benchmarks are async and tinybench measures promise overhead alongside the append. That is the honest number for the caller, but it means memory-mode append cannot be compared against a synchronous floor — hence no floor for that family.
+- **`Sender.at()` is `async`** (`src/sender.ts:451`) — auto-flush can trigger inside it — so Task 8's `await sender.at(...)` is correct.
+- **`QwpBuffer.at()` is synchronous** (`src/qwp/buffer.ts:173`), so Task 6 calls it without `await`. Adding one there would cost a microtask tick per row and inflate the measurement.
+- **`SfEngine.append` is `async`**, so Task 7's benchmarks are async and tinybench measures promise overhead alongside the append. That is the honest number for the caller, but it means memory-mode append cannot be compared against a synchronous floor — hence no floor for that family.
 
-**One thing that cannot be settled without running:** the real bytes/row for `trades`. Task 8 ships a deliberately wide 20–120 band and Step 3 tightens it around the measured value. Until that step runs, the assertion catches only gross breakage.
+**One thing that cannot be settled without running:** the real bytes/row for `trades`. Task 4 ships a deliberately wide 20–120 band and Step 3 tightens it around the measured value. Until that step runs, the assertion catches only gross breakage.
 
 **One deliberate omission.** No benchmark of the reconnect, replay, or drainer paths. They are dominated by network and disk timing rather than client code, so a number there measures the environment, not the implementation.
 
