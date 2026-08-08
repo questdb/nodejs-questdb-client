@@ -1556,6 +1556,42 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 five of the defects found, because each correction has three homes and early
 passes updated only one.
 
+**Fifty-fourth to fifty-eighth review passes — two defects, including the most
+consequential finding of the whole review: a shipped durability default that does
+not match the spec.**
+
+The unit this time was **spec 9.1 (config keys and defaults) against `src/`**.
+
+70. **The mode-dependent `sf_max_total_bytes` default was never implemented.**
+    Spec 9.1 specifies **128 MiB memory / 10 GiB disk**, and spec 8 leans
+    throughout on `sf_dir`-presence driving memory-vs-disk defaults. Shipped code
+    defines only `MEMORY_MAX_TOTAL_BYTES = 128 MiB` (`transport.ts:24`) and applies
+    it unconditionally (`transport.ts:88`) regardless of `sf_dir`; `drainer.ts:41`
+    hardcodes the same value. **`10 GiB` appears in no source file and no test.**
+    A disk-mode user who does not set the key explicitly gets **~80× less
+    retention than designed** — the ring caps 80× sooner during an outage and
+    starts shedding unacked frames (`DATA_LOSS`), which is precisely the guarantee
+    store-and-forward exists to provide. Recorded as OPEN in `HANDOFF-plan8` and
+    marked in the spec's defaults table; **not fixed, because this review is
+    document-only.** `segmentBytes` was checked and needs no branch: spec 9.1 gives
+    one value (4 MiB) for both modes, so `MEMORY_SEGMENT_BYTES` is misnamed, not
+    wrong.
+71. **The spec named a config key that does not exist.** Its accepted-key list and
+    defaults table both said `sf_max_segment_bytes`; `ValidConfigKeys` accepts
+    `sf_segment_bytes`, so a config string copied out of the spec is rejected as
+    an unknown option. Both occurrences corrected to the shipped name, with the
+    divergence recorded rather than silently resolved — the shipped name is
+    asymmetric with its neighbour `sf_max_total_bytes`, and a config key is public
+    API, so renaming is far cheaper before 5.0.0 ships than after.
+
+*Clean:* the **package `README.md`** is current — it describes `sf_durability=periodic`
+as a real barrier rather than the no-op it was when `HANDOFF-plan4-deferred` was
+written, and documents `drain_orphans` and `request_durable_ack` accurately. Four
+other apparent key mismatches (`auto_flush_bytes`, `max_batch_rows`,
+`max_lifetime_ms`, `max_backoff`) were checked and are **not** defects: the first
+is documented as deliberately absent, two are egress keys the sender accepts and
+ignores by design, and the last was an artefact of the matcher.
+
 **Forty-ninth to fifty-third review passes — two defects, both about claims that
 were true but unverifiable from the documents alone.**
 

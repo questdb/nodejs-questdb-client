@@ -1686,8 +1686,17 @@ registry's classification verbatim.
 `catch_up_cap_gap_min_escalation_window_millis`, `max_name_len`,
 `reconnect_initial_backoff_millis`, `reconnect_max_backoff_millis`,
 `reconnect_max_duration_millis`, `request_durable_ack`, `sender_id`,
-`sf_append_deadline_millis`, `sf_dir`, `sf_durability`, `sf_max_segment_bytes`,
+`sf_append_deadline_millis`, `sf_dir`, `sf_durability`, `sf_segment_bytes`,
 `sf_max_total_bytes`, `sf_sync_interval_millis`, `transaction`.
+
+**Name divergence, unresolved before 5.0.0 ships.** Earlier drafts of this spec
+called that key `sf_max_segment_bytes`, and the implementation shipped
+`sf_segment_bytes`. The list above and the defaults table now record the shipped
+name, which is what `ValidConfigKeys` accepts — the older name is rejected as an
+unknown option. It is worth deciding deliberately rather than by drift: the
+shipped name is asymmetric with its neighbour `sf_max_total_bytes`, and a config
+key is public API, so renaming is far cheaper before the 5.0.0 release than
+after.
 
 Two of those names do not say what they do: **`transaction`** is the
 defer-commit switch (5.1.1, `FLAG_DEFER_COMMIT`), and **`sf_dir`** is what
@@ -1754,8 +1763,8 @@ not have yet:
 | `auto_flush_rows` | 1,000 |
 | `auto_flush_bytes` | **off (0)** — see below |
 | `auto_flush_interval` | 100 ms |
-| `sf_max_segment_bytes` | 4 MiB |
-| `sf_max_total_bytes` | **mode-dependent**: 128 MiB memory, 10 GiB disk |
+| `sf_segment_bytes` | 4 MiB |
+| `sf_max_total_bytes` | **mode-dependent**: 128 MiB memory, 10 GiB disk — **not implemented, see below** |
 | `sf_sync_interval_millis` | 5,000 |
 | `max_background_drainers` | 4 |
 | `max_name_len` | 127 |

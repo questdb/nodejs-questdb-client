@@ -5,7 +5,9 @@
 **Context:** Branch `feat/qwp-design`. This session completed **C2** — the
 last deferred store-and-forward feature: the `sf-manifest.bin` / `SFM1` chain-head
 manifest (spec 8.2, 8.1.1). A1 (orphan scan + background drainers) was already
-done and remains green; nothing else is deferred.
+done and remains green; nothing else from the earlier handoffs is
+deferred — but see the OPEN spec-9.1 defaults gap below, found after this file
+was first written.
 
 Source of truth: `docs/superpowers/specs/2026-08-07-qwp-nodejs-client-design.md`
 (section numbers cited).
@@ -81,7 +83,28 @@ at offset 0, not the reverse.
 
 ---
 
-## REMAINING — none
+## REMAINING from the plan-4 deferred list — none (see the ledger below)
+
+## OPEN — found after this handoff was written (spec 9.1 vs shipped)
+
+**The mode-dependent `sf_max_total_bytes` default was never implemented.** Spec
+9.1 specifies **128 MiB in memory mode, 10 GiB in disk mode**, and spec 8 leans on
+`sf_dir`-presence driving memory-vs-disk defaults throughout. The shipped code has
+only `MEMORY_MAX_TOTAL_BYTES = 128 * 1024 * 1024` (`transport.ts:24`) and applies
+it unconditionally at `transport.ts:88`, regardless of `sf_dir`. `drainer.ts:41`
+hardcodes the same 128 MiB. **There is no disk constant anywhere in the tree** —
+`10 GiB` appears in no source file and no test.
+
+*Consequence:* a disk-mode user who does not set `sf_max_total_bytes` explicitly
+gets **~80× less retention than designed**. The ring reaches its cap 80× sooner
+during an outage and begins shedding unacked frames (`DATA_LOSS`) — which is the
+exact guarantee store-and-forward exists to provide, so the failure lands on the
+feature's headline promise rather than an edge case.
+
+*Not fixed here* (this review is document-only). The fix is a disk branch on
+`sf_dir` presence at both construction sites plus a test pinning each default;
+note that `segmentBytes` needs no such branch — spec 9.1 gives one value (4 MiB)
+for both modes, so `MEMORY_SEGMENT_BYTES` is merely misnamed, not wrong.
 
 **Closure ledger for items carried from `HANDOFF-plan4-deferred`.** Those items
 stopped being mentioned once resolved, which leaves "fixed" indistinguishable
