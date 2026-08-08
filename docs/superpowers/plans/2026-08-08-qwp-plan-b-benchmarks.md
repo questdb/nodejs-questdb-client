@@ -1556,6 +1556,44 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 five of the defects found, because each correction has three homes and early
 passes updated only one.
 
+**Sixty-fourth to sixty-eighth review passes — one defect, and a great deal of
+the wire format confirmed correct.**
+
+Continued on spec-vs-shipped, moving from 9.1 defaults to the normative wire and
+limits sections. Yield dropped sharply, which is itself informative: the
+**protocol** encoding is in good shape; the gaps are in **configuration and
+lifecycle wiring**.
+
+76. **`MAX_ROWS_PER_TABLE` is declared but never enforced.** `constants.ts:43`
+    defines 1,000,000 and nothing reads it, while all three of its neighbours are
+    enforced (`MAX_COLUMNS_PER_TABLE`, `MAX_NAME_LENGTH` in `tableBuffer.ts`,
+    `MAX_SYMBOL_DICTIONARY_SIZE` in `symbolDict.ts`) — so it reads as an oversight.
+    Reachability is narrow: `auto_flush_rows` defaults to 1,000, so it needs
+    auto-flush raised or disabled, or a long defer-commit transaction. The failure
+    is not narrow. The server rejects the oversized frame; under store-and-forward
+    that frame is already durable and replays forever; and **with `PoisonDetector`
+    unwired (defect 72) nothing ever escalates it**. The two gaps compose into a
+    permanent stall — precisely what the poison design exists to prevent. Noted in
+    `HANDOFF-plan8` with a caution about the fix: the spec calls it
+    `DEFAULT_MAX_ROWS_PER_TABLE`, a server-side default an operator may raise, so
+    a hardcoded client throw could reject frames a correct server would accept.
+
+*Verified correct — the wire format itself holds up:*
+
+- **Frame header** — `QWP1` magic, `QWP_VERSION = 1`, `HEADER_SIZE = 12`, matching
+  spec 6.1's `"QWP1"(4) | version:u8 | flags:u8 | tableCount:u16 | payloadLen:u32`.
+- **Flag bits** — `DEFER_COMMIT 0x01`, `GORILLA 0x04`, `DELTA_SYMBOL_DICT 0x08`
+  all match. `FLAG_ZSTD` (0x10) is **absent from the client, correctly**: it is
+  egress-only, which is the scope correction made during the spec review.
+- **All 24 column type codes** match spec 6.3 exactly, including the awkward ones
+  — `SYMBOL 0x09`, `TIMESTAMP/NANOS 0x0A/0x10`, `VARCHAR/BINARY 0x0F/0x17`,
+  arrays `0x11/0x12`, decimals `0x13/0x14/0x15`, `CHAR 0x16`, `IPv4 0x18`.
+- **Error taxonomy** — exactly the 10 categories and 4 policies the spec defines.
+- **Quarantine (A2)** — implemented, with `MAX_QUARANTINED = 64` scoped per slot
+  under `sf_dir`, matching spec 8.4's "at most 64 quarantined copies of one slot".
+  Its own doc comment says "64 copies per sf_dir", which is imprecise, but the
+  code is right.
+
 **Fifty-ninth to sixty-third review passes — four defects, one of them a whole
 feature that is present, tested, and connected to nothing.**
 

@@ -128,6 +128,27 @@ these three QWP keys with no consumer outside `options.ts` (the other four —
 `tls_roots`, `tls_roots_password`, `token_x`, `token_y` — are pre-existing
 base-client keys, not QWP regressions).
 
+### `MAX_ROWS_PER_TABLE` is declared but never enforced
+
+`constants.ts:43` defines it at 1,000,000 and **nothing reads it**. Its three
+neighbours are all enforced — `MAX_COLUMNS_PER_TABLE` and `MAX_NAME_LENGTH` in
+`tableBuffer.ts`, `MAX_SYMBOL_DICTIONARY_SIZE` in `symbolDict.ts` — so this one
+reads as an oversight rather than a decision.
+
+*Reachability is narrow but the failure is wide.* With `auto_flush_rows`
+defaulting to 1,000 nothing approaches the limit; it needs auto-flush raised or
+disabled, or a long defer-commit transaction. If it is crossed, the server
+rejects the frame — and under store-and-forward that frame is already durable, so
+it replays forever. **Combined with the unwired `PoisonDetector` above, that is a
+permanent stall with no escalation**: the two gaps compose into exactly the
+failure the poison design exists to prevent.
+
+*Fix with care.* The spec names it `DEFAULT_MAX_ROWS_PER_TABLE` (6.4) — a
+server-side **default** an operator may raise, not a protocol invariant. So a
+hardcoded client-side throw could reject frames a correctly configured server
+would accept. Prefer failing the frame with a clear diagnostic, or drop the
+constant rather than leaving a limit that looks enforced and is not.
+
 ### Three spec-9.1 keys are not accepted at all
 
 `durable_ack_keepalive_interval_millis` (default 200, "≤ 0 disables"),
