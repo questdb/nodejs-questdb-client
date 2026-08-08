@@ -1180,9 +1180,35 @@ git commit -m "bench: add end-to-end latency script for both flush contracts"
 Ad hoc. No CI job, no gate. Run them when you want a number.
 
 ```bash
+# Point this at REAL storage, not tmpfs — see "Am I measuring disk?" below.
+export QWP_BENCH_DIR=/var/tmp/qwp-bench
+
 pnpm bench                       # encoder, buffer, sf  (no server needed)
 pnpm bench:e2e                   # needs QuestDB on :9000
 QDB_ADDR=host:9000 pnpm bench:e2e
+```
+
+## Reading the output
+
+**`hz` is callbacks per second, not rows per second.** Each encoder callback
+covers 10,000 rows, so rows/s is `hz × 10_000`. This is the easiest way to
+write down a number that is wrong by four orders of magnitude.
+
+**`rme` is the relative margin of error.** Check it before believing a
+difference: a 5% gap between two arms each carrying ±3% rme is not a result.
+
+There is no p50 or p90 in `vitest bench` output. The e2e script computes its own
+percentiles, which is why it is a separate script.
+
+## Am I measuring disk?
+
+`os.tmpdir()` is `/tmp` on most Linux boxes, and `/tmp` is frequently **tmpfs —
+RAM**. If the SF benchmarks and the e2e sf-on arm run there, they measure memory
+while claiming to measure disk, and the `dd` baseline reports an *excellent*
+figure — so the guard confirms a false conclusion instead of catching it.
+
+```bash
+df -T "$QWP_BENCH_DIR"   # type must not be tmpfs
 ```
 
 ## Before you quote anything
@@ -1205,6 +1231,17 @@ target. The gap between floor and encoder is what the protocol costs.
 
 If the encoder ever beats its floor, the benchmark is optimising away rather
 than the encoder being fast. Add a sink and re-run.
+
+## What this suite does not cover
+
+- **Gorilla's raw fallback.** Every workload has perfectly regular timestamps,
+  so delta-of-delta is always 0 and the compressed path always wins. The
+  fallback needs a delta-of-delta beyond signed int32 — about a 35-minute jump
+  at microsecond resolution. `validate.test.ts` asserts the behaviour; these
+  numbers say nothing about it.
+- **Reconnect, replay and drainers.** Dominated by network and disk timing
+  rather than client code, so a number there measures the environment.
+- **Concurrency.** Single sender, single connection throughout.
 ````
 
 - [ ] **Step 2: Commit**
@@ -1223,6 +1260,31 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 **2. Placeholder scan.** None. Task 4 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
 
 **3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 6, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 5. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+
+**Seventh review pass — Task 9 and a spec↔plan sweep; five defects:**
+
+20. **`benchmarks/README.md` was stale against six passes of fixes.** It is the
+    artefact most likely to be read in isolation before someone quotes a number,
+    and it mentioned none of: `QWP_BENCH_DIR`, that `hz` is not rows/s, `rme`,
+    or the uncovered Gorilla fallback. All four now appear, with the tmpfs check
+    given its own section.
+21. **The spec promised output the harness does not produce.** §4 said the bench
+    layers report "rows/s, bytes/s", "bytes/row" and "appends/s, µs/append".
+    `vitest bench` emits `hz` and no bytes column at all. Corrected, with the
+    conversion spelled out.
+22. **A spec requirement had no implementing task.** §8 listed "SF append does
+    not dominate whole-flush cost", which appears nowhere in Task 4 — and cannot
+    meaningfully, since append and flush are benchmarked separately at different
+    granularities. Dropped from the spec with the reason stated, rather than
+    faked into a task.
+23. **The spec's bytes/row band (40–80) contradicted the plan's (20–120)**, and
+    neither had been measured. The spec now describes the wide-then-tighten
+    approach instead of asserting a guessed figure.
+24. **The spec's §8 list and the plan's assertions had diverged in both
+    directions** — the spec omitted the gorilla-leak check and the new cold-delta
+    guard; the plan omitted the SF-ratio claim. Reconciled to the five the plan
+    actually implements. §5 and §7 also updated for the varchar family, the
+    regular-timestamp scope limit, and the tmpfs guard.
 
 **Sixth review pass — Tasks 7–9 line by line; six defects:**
 
