@@ -19,6 +19,30 @@
 - Existing tests stay green: `npx vitest run && npx tsc --noEmit && npx eslint src/**`.
 - **Never quote a number from a single run.** The e2e script enforces this by repeating; for the pure layers, tinybench's own iteration count covers it.
 
+## Harness facts, verified by running it
+
+A throwaway probe was run against `vitest bench` 3.1.3 before this plan was
+finalised. What it established:
+
+- **Nested `describe` and `async` bench bodies both work.** The shapes this plan
+  uses are supported.
+- **Vitest prints "Benchmarking is an experimental feature. Breaking changes
+  might not follow SemVer, please pin Vitest's version when using it."** Take
+  that seriously: `package.json` currently has `"vitest": "^3.1.3"` with a
+  caret, which is exactly what the warning advises against. Task 3 pins it.
+- **The reported columns are `hz, min, max, mean, p75, p99, p995, p999, rme,
+  samples`.** There is **no p50 and no p90** — the e2e script computes those
+  itself, which is part of why it is a standalone script rather than a bench file.
+- **`hz` is callback invocations per second, not rows per second.** With a
+  10,000-row workload per callback, rows/s is `hz × 10_000`. Reading `hz`
+  directly as a row rate understates throughput by four orders of magnitude.
+- **An `await Promise.resolve()` alone costs ~1.4×** at these speeds (380k hz
+  sync vs 267k hz async in the probe). Task 6's `SfEngine.append` is async, so a
+  meaningful slice of that measurement is promise machinery rather than engine
+  work. Do not attribute it all to the engine.
+- **`rme` is the relative margin of error.** Check it before believing any
+  delta: a 5% difference between two arms with ±3% rme each is not a result.
+
 ## Verified API surface
 
 These signatures were checked against the shipped code and are what the benchmarks call:
@@ -394,13 +418,22 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 3: Add the scripts**
+- [ ] **Step 3: Add the scripts and pin vitest**
 
 In `package.json`, alongside the existing `"test"` script:
 
 ```json
     "bench": "vitest bench --run",
     "bench:e2e": "tsx benchmarks/e2e.ts"
+```
+
+And **pin vitest exactly**, dropping the caret. Vitest prints a warning on every
+bench run that benchmarking is experimental and may break outside SemVer; a
+caret range means a patch bump can silently change the numbers or the output
+format:
+
+```json
+    "vitest": "3.1.3"
 ```
 
 `tsx` is invoked via `npx` at run time and is **not** added as a dependency —
@@ -513,7 +546,11 @@ describe("symbol interning", () => {
 - [ ] **Step 2: Run it**
 
 Run: `npx vitest bench --run benchmarks/encoder.bench.ts`
-Expected: a table of ops/s per benchmark, no failures.
+Expected: a table with `hz, min, max, mean, p75, p99, p995, p999, rme, samples`.
+
+**`hz` is callbacks per second, not rows per second.** Each callback encodes
+`N = 10_000` rows, so rows/s is `hz × 10_000`. Record the multiplied figure or
+label the column honestly — quoting `hz` as a row rate understates it 10,000×.
 
 - [ ] **Step 3: Sanity-read the output before trusting it**
 
@@ -747,6 +784,12 @@ Expected: a `[disk baseline]` line, then results.
 is a missing `await e.open()` — `append()` silently skips its write when `slot`
 is unset, so the "disk" arm is really measuring memory mode. Check that before
 concluding anything about the disk.
+
+**Both arms are async, so both pay promise overhead.** The probe measured
+`await Promise.resolve()` alone at ~1.4× cost, so at these speeds a real slice
+of the memory-mode number is machinery rather than engine work. That is the
+honest number for a caller, but it means memory-mode append is not comparable
+to a synchronous floor — which is why this family has none.
 
 **If the process hangs after the results**, `close()` was not reached: `open()`
 starts a `setInterval` barrier that holds the event loop open.
@@ -1057,6 +1100,15 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 **2. Placeholder scan.** None. Task 8 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
 
 **3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 7, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 4. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+
+**Third review pass — settled by actually running the harness.** A throwaway
+probe against `vitest bench` 3.1.3 confirmed nested `describe` and async bodies
+work, and turned up four things the plan had wrong or unstated: vitest warns that
+benchmarking is experimental and asks for a pinned version (the repo had a caret
+range); the reported columns include no p50 or p90; `hz` is callbacks per second
+and reading it as rows/s understates by 10,000×; and `await Promise.resolve()`
+alone costs ~1.4×, which is a real slice of the async `SfEngine.append` number.
+All four are now recorded under "Harness facts", and Task 3 pins vitest.
 
 **Second review pass — three further defects, fixed above:**
 
