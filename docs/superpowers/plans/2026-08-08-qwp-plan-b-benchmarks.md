@@ -582,7 +582,27 @@ describe("dictionary mode", () => {
     b.sealFrames(CAP);
   });
 
-  bench("delta-dict (dict attached)", () => {
+  // A dict created INSIDE the bench body is empty on every iteration, so the
+  // delta always carries every symbol string and this arm measures the same
+  // work as full-dict. The case that matters is the steady state: a dictionary
+  // the server has already confirmed, where a frame ships varint ids only.
+  // Prime it once out here so the measured iterations are incremental.
+  const primed = new SymbolDict();
+  {
+    const warm = new QwpBuffer();
+    warm.attachDict(primed);
+    fill(warm, rows);
+    warm.sealFrames(CAP);
+  }
+
+  bench("delta-dict (primed, incremental)", () => {
+    const b = new QwpBuffer();
+    b.attachDict(primed);
+    fill(b, rows);
+    b.sealFrames(CAP);
+  });
+
+  bench("delta-dict (cold, first batch)", () => {
     const b = new QwpBuffer();
     b.attachDict(new SymbolDict());
     fill(b, rows);
@@ -594,7 +614,17 @@ describe("dictionary mode", () => {
 - [ ] **Step 2: Run it**
 
 Run: `npx vitest bench --run benchmarks/buffer.bench.ts`
-Expected: ops/s per benchmark. `wide` should be markedly slower per row than `trades` — 50 columns means 50 map lookups and 50 null-backfill checks per row. If they are close, `getOrCreateColumn` is not on the hot path you think it is.
+
+Expected: ops/s per benchmark. Two readings to make before recording anything:
+
+- **`wide` should be markedly slower per row than `trades`** — 50 columns means
+  50 map lookups and 50 null-backfill checks per row. If they are close,
+  `getOrCreateColumn` is not on the hot path you think it is.
+- **`delta-dict (primed)` should beat both `full-dict` and `delta-dict (cold)`**
+  on this workload. Primed delta ships varint ids; the other two ship 100k
+  symbol strings. If primed is not clearly ahead, the delta baseline is not
+  advancing across seals (spec 5.2) — that is a bug in the buffer, not in the
+  benchmark.
 
 - [ ] **Step 3: Commit**
 
@@ -758,7 +788,19 @@ function percentile(sorted: number[], p: number): number {
   return sorted[i];
 }
 
-async function arm(label: string, config: string): Promise<number[]> {
+/**
+ * Measures flush() per row.
+ *
+ * This is only a clean measurement BECAUSE we flush every row. Sender.at()
+ * awaits tryFlush(), which fires when pendingRowCount >= auto_flush_rows
+ * (1000) or the auto_flush_interval elapses -- and flush() resets both. Since
+ * we flush after every row, neither trigger is ever reached, so no flush
+ * happens outside the timed window. Batch rows before flushing and the samples
+ * become a bimodal mixture of real flushes and near-no-ops, with p50 dominated
+ * by the no-ops. If you change the flush cadence, disable auto-flush's row
+ * trigger first.
+ */
+async function arm(config: string): Promise<number[]> {
   const sender = await Sender.fromConfig(config);
   await sender.connect();
   const rows = WORKLOADS.trades.rows(ROWS);
@@ -801,7 +843,7 @@ async function main(): Promise<void> {
 
   // SF off: flush() covers encode -> send -> server ACK.
   const sfOff: number[][] = [];
-  for (let i = 0; i < REPEATS; i++) sfOff.push(await arm("sf-off", `ws::addr=${ADDR};`));
+  for (let i = 0; i < REPEATS; i++) sfOff.push(await arm(`ws::addr=${ADDR};`));
   report("flush() = full server round-trip (sf off)", sfOff);
 
   // SF on: flush() returns once the row is durable locally. A DIFFERENT
@@ -809,7 +851,7 @@ async function main(): Promise<void> {
   const sfDir = `${process.env.TMPDIR ?? "/tmp"}/qwp-bench-e2e`;
   const sfOn: number[][] = [];
   for (let i = 0; i < REPEATS; i++) {
-    sfOn.push(await arm("sf-on", `ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`));
+    sfOn.push(await arm(`ws::addr=${ADDR};sf_dir=${sfDir};sender_id=bench-${i};`));
   }
   report("flush() = local durability only (sf on)", sfOn);
 
@@ -1016,7 +1058,24 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 
 **3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 7, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 4. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
 
-**Four defects found by checking this plan against the shipped code, fixed above:**
+**Second review pass — three further defects, fixed above:**
+
+5. **The delta-dict benchmark measured nothing.** It built a fresh `SymbolDict`
+   *inside* the bench body, so the dictionary was empty on every iteration and
+   the delta carried every symbol string — the same work as full-dict. The case
+   that matters is the steady state, where a confirmed dictionary lets a frame
+   ship varint ids only. The dict is now primed outside the timed body, and both
+   cold and primed arms are reported so the difference between them is visible.
+6. **`arm()` took an unused `label` parameter**, which `pnpm eslint` would have
+   flagged. Removed, with both call sites updated.
+7. **The auto-flush interaction was undocumented.** `Sender.at()` awaits
+   `tryFlush()`, so a flush can fire *outside* the timed window. The measurement
+   is sound only because the script flushes every row, which keeps
+   `pendingRowCount` at 1 and resets the interval each time. That is now stated
+   at the function, with a warning that batching rows turns the samples into a
+   bimodal mixture whose p50 is dominated by no-op flushes.
+
+**First review pass — four defects found by checking this plan against the shipped code:**
 
 1. **`SfEngine.open()` was never called** in Task 6. `append()` guards its write
    with `if (this.isDisk && this.slot)` and `slot` is set only by `open()`, so
