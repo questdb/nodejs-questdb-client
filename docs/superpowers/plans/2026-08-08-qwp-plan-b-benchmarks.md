@@ -276,7 +276,12 @@ function sparse(count: number): Row[] {
   return out;
 }
 
-export const WORKLOADS: Record<string, Workload> = {
+export type WorkloadName = "trades" | "wide" | "highCardSymbol" | "sparse";
+
+// Keyed on the literal union, not `string`: Tasks 6 and 7 index this as
+// WORKLOADS[name], and a `Record<string, Workload>` would type a misspelled
+// name as a valid Workload and fail only at runtime.
+export const WORKLOADS: Record<WorkloadName, Workload> = {
   trades: { name: "trades", columns: 4, rows: trades },
   wide: { name: "wide", columns: 50, rows: wide },
   highCardSymbol: { name: "highCardSymbol", columns: 3, rows: highCardSymbol },
@@ -484,14 +489,28 @@ import { WORKLOADS } from "./workloads";
 
 const CAP = 1 << 30;
 
-function build(rows: ReturnType<typeof WORKLOADS.trades.rows>, dict?: SymbolDict): Buffer[] {
+/**
+ * `confirmedMaxId` lives on the BUFFER, starts at -1, and only advances via
+ * confirmDeltaPublished(), which the transport's publish path calls -- not
+ * sealFrames(). So a fresh QwpBuffer with a fully primed dictionary still
+ * ships every symbol, because entriesFrom(-1 + 1) returns everything. Priming
+ * the dict alone does nothing; the baseline has to be set too, which is what
+ * `confirmed` simulates.
+ */
+function build(
+  rows: ReturnType<typeof WORKLOADS.trades.rows>,
+  dict?: SymbolDict,
+  confirmed?: number,
+): Buffer[] {
   const b = new QwpBuffer();
   if (dict) b.attachDict(dict);
+  if (confirmed !== undefined) b.setConfirmedMaxId(confirmed);
   for (const row of rows) {
     b.table(row.table);
     for (const [n, v] of row.symbols) b.symbol(n, v);
     for (const [n, v] of row.longs) b.intColumn(n, Number(v));
     for (const [n, v] of row.doubles) b.floatColumn(n, v);
+    for (const [n, v] of row.strings) b.stringColumn(n, v);
     b.at(row.ts, "us");
   }
   return b.sealFrames(CAP);
@@ -530,13 +549,28 @@ describe("wire-format invariants", () => {
     const rows = WORKLOADS.highCardSymbol.rows(5000);
     const full = build(rows).reduce((a, f) => a + f.length, 0);
 
-    // Delta mode with a dictionary already primed: the second batch carries
-    // ids, not strings (spec 5.2).
+    // Steady state: the dictionary is populated AND the server has confirmed
+    // those ids, so the frame carries varint ids and an empty delta section.
+    // Both halves are required -- see the note on build() above.
     const dict = new SymbolDict();
-    build(rows, dict); // first pass registers every symbol
-    const second = build(rows, dict).reduce((a, f) => a + f.length, 0);
+    build(rows, dict); // first pass registers every symbol in the dict
+    const second = build(rows, dict, dict.size() - 1).reduce((a, f) => a + f.length, 0);
 
     expect(second).toBeLessThan(full);
+  });
+
+  it("a cold delta batch is NOT smaller — the baseline is what saves bytes", () => {
+    // Guards the mistake above: priming the dict without advancing the
+    // confirmed baseline still ships every symbol string, so this must land
+    // in the same range as full-dict rather than winning.
+    const rows = WORKLOADS.highCardSymbol.rows(5000);
+    const full = build(rows).reduce((a, f) => a + f.length, 0);
+
+    const dict = new SymbolDict();
+    build(rows, dict);
+    const coldAgain = build(rows, dict).reduce((a, f) => a + f.length, 0);
+
+    expect(coldAgain).toBeGreaterThan(full * 0.5);
   });
 
   it("gorilla shrinks regularly spaced timestamps", () => {
@@ -751,11 +785,12 @@ describe("dictionary mode", () => {
     b.sealFrames(CAP);
   });
 
-  // A dict created INSIDE the bench body is empty on every iteration, so the
-  // delta always carries every symbol string and this arm measures the same
-  // work as full-dict. The case that matters is the steady state: a dictionary
-  // the server has already confirmed, where a frame ships varint ids only.
-  // Prime it once out here so the measured iterations are incremental.
+  // Steady state needs BOTH halves: a populated dictionary and a confirmed
+  // baseline. confirmedMaxId lives on the buffer, starts at -1, and only moves
+  // via confirmDeltaPublished() from the transport's publish path -- so a
+  // fresh buffer with a primed dict still ships every symbol, because
+  // entriesFrom(-1 + 1) returns everything. Priming the dict alone measures
+  // nothing new.
   const primed = new SymbolDict();
   {
     const warm = new QwpBuffer();
@@ -764,9 +799,10 @@ describe("dictionary mode", () => {
     warm.sealFrames(CAP);
   }
 
-  bench("delta-dict (primed, incremental)", () => {
+  bench("delta-dict (primed + baseline confirmed)", () => {
     const b = new QwpBuffer();
     b.attachDict(primed);
+    b.setConfirmedMaxId(primed.size() - 1);
     fill(b, rows);
     b.sealFrames(CAP);
   });
@@ -789,11 +825,11 @@ Expected: ops/s per benchmark. Two readings to make before recording anything:
 - **`wide` should be markedly slower per row than `trades`** — 50 columns means
   50 map lookups and 50 null-backfill checks per row. If they are close,
   `getOrCreateColumn` is not on the hot path you think it is.
-- **`delta-dict (primed)` should beat both `full-dict` and `delta-dict (cold)`**
-  on this workload. Primed delta ships varint ids; the other two ship 100k
-  symbol strings. If primed is not clearly ahead, the delta baseline is not
-  advancing across seals (spec 5.2) — that is a bug in the buffer, not in the
-  benchmark.
+- **`delta-dict (primed + baseline confirmed)` should beat both `full-dict` and
+  `delta-dict (cold)`** on this workload. It ships varint ids; the other two
+  ship 100k symbol strings. If it is *not* clearly ahead, check
+  `setConfirmedMaxId` was called before suspecting the encoder — without it the
+  arm silently degrades into the cold case and the comparison is meaningless.
 
 - [ ] **Step 3: Commit**
 
@@ -1123,6 +1159,33 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 **2. Placeholder scan.** None. Task 4 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
 
 **3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 6, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 5. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+
+**Fifth review pass — read every code block; three defects, one of which
+invalidated an earlier fix:**
+
+11. **Priming the dictionary does not enable delta mode.** `confirmedMaxId` lives
+    on the *buffer*, starts at `-1`, and only advances via
+    `confirmDeltaPublished()` — which the transport's publish path calls, not
+    `sealFrames()`. So a fresh `QwpBuffer` with a fully primed dict still ships
+    every symbol, because `entriesFrom(-1 + 1)` returns everything. Both the
+    Task 4 assertion and the Task 6 "primed" arm added in the second pass were
+    therefore measuring the cold case while claiming to measure the steady
+    state. Both now call `setConfirmedMaxId` as well, and Task 4 gains a
+    guard test asserting that the cold case is *not* smaller — so if someone
+    drops the baseline call again, a test fails instead of a number quietly
+    getting worse.
+12. **The Gorilla sanity check expected an impossible outcome.** Every workload
+    uses `BASE_TS + i × 1000n`, so every delta-of-delta is 0 and Gorilla always
+    takes the 1-bit path. The check told the reader to expect a raw fallback
+    that needs a delta-of-delta beyond signed int32 — roughly a 35-minute jump
+    at microsecond resolution, which no workload approaches. Rewritten, with an
+    explicit statement that the fallback path is **not covered** by this suite.
+13. **`WORKLOADS` was declared as a literal-keyed `Record` but implemented as
+    `Record<string, Workload>`**, and Tasks 6 and 7 index it by name. The loose
+    type makes a misspelled workload name a compile-time success and a runtime
+    `undefined`. Now keyed on an exported `WorkloadName` union. `build()` in
+    Task 4 also dropped the `strings` family, the same latent trap fixed in
+    Tasks 5 and 6 last pass.
 
 **Fourth review pass — structural, three further defects:**
 
