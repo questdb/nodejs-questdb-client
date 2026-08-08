@@ -66,6 +66,10 @@ pnpm bench:e2e        # needs QuestDB on :9000
 pnpm typecheck:bench  # tsc over src + benchmarks
 ```
 
+If `pnpm <script>` fails before running anything, that is the repo's
+ignored-builds gate rather than the benchmark — invoke `./node_modules/.bin/`
+directly. Every earlier QWP handoff records hitting this.
+
 The third exists because the repo's `tsconfig.json` includes only `src` and the
 lint script is `eslint src/**` — so without a dedicated config the benchmark tree
 would be the only unchecked TypeScript in the project, with type errors surfacing

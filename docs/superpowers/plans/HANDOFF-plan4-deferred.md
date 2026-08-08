@@ -1,5 +1,11 @@
 # Handoff — Plan 4 done; deferred items for the next agent
 
+> **SUPERSEDED — do not follow this file as current state.** Superseded by
+> `HANDOFF-plan5-deferred.md`, and the head of the chain is `HANDOFF-plan8.md`.
+> Its "remaining work" lists are stale: items recorded here as gaps were
+> resolved in later sessions. Read `HANDOFF-plan8.md` first and use this file only as
+> history.
+
 **Context:** Branch `feat/qwp-design`. QWP Plan 4 (Store-and-Forward, spec PRs 12–16) is
 fully implemented and committed on top of Plans 1–3 (`git log b5399b2..HEAD`). The QWP
 suite is green: **142 passed, 2 skipped** (`npx vitest run test/qwp/` — the 2 skips are

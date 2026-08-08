@@ -1,5 +1,11 @@
 # Handoff — deferred follow-ups, completed + remaining
 
+> **SUPERSEDED — do not follow this file as current state.** Superseded by
+> `HANDOFF-plan6.md`, and the head of the chain is `HANDOFF-plan8.md`.
+> Its "remaining work" lists are stale: items recorded here as gaps were
+> resolved in later sessions. Read `HANDOFF-plan8.md` first and use this file only as
+> history.
+
 **Supersedes:** `docs/superpowers/plans/HANDOFF-plan4-deferred.md`.
 
 **Context:** Branch `feat/qwp-design`. On top of Plan 4 (`git log b5399b2..HEAD`),

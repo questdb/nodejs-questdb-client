@@ -10,6 +10,20 @@ done and remains green; nothing else is deferred.
 Source of truth: `docs/superpowers/specs/2026-08-07-qwp-nodejs-client-design.md`
 (section numbers cited).
 
+**This file is the head of the handoff chain** — `HANDOFF-plan4-deferred` through
+`HANDOFF-plan7` are superseded history and now carry banners saying so. Their
+"remaining work" lists describe gaps that later sessions closed; do not work from
+them.
+
+**The next substantial piece of work is Plan B**, `2026-08-08-qwp-plan-b-benchmarks.md`
+(spec: `specs/2026-08-08-qwp-node-benchmarks-design.md`) — a self-contained 9-task
+benchmark suite. With ingest, store-and-forward and the deferred items all closed,
+it is the only planned work left, and it is a separate track rather than a fifth
+rung of the four-plan stack. Its own trap list is in `plans/README.md`; the two
+that bite hardest are that `/tmp` is usually tmpfs (so the SF "disk" numbers
+measure RAM while a `dd` guard reports an excellent figure) and that vitest's `hz`
+is callbacks per second, not rows per second.
+
 **Green:** `tsc --noEmit` clean; `eslint src/` clean; QWP unit suite **178 passed /
 0 skipped** (was 170 passed + 3 integration-skipped; this run adds 8 manifest
 tests); live integration (`localhost:9000`, `QWP_TEST_ADDR`) 3/3. Full

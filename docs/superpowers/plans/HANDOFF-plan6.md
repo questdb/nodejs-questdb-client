@@ -1,5 +1,11 @@
 # Handoff — B1 delta wiring done + remaining deferred items
 
+> **SUPERSEDED — do not follow this file as current state.** Superseded by
+> `HANDOFF-plan7.md`, and the head of the chain is `HANDOFF-plan8.md`.
+> Its "remaining work" lists are stale: items recorded here as gaps were
+> resolved in later sessions. Read `HANDOFF-plan8.md` first and use this file only as
+> history.
+
 **Supersedes:** `docs/superpowers/plans/HANDOFF-plan5-deferred.md`.
 
 **Context:** Branch `feat/qwp-design`. This session completed **B1** — the last

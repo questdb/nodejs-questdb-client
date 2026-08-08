@@ -1,5 +1,11 @@
 # Handoff — A1 orphan scan + background drainers done
 
+> **SUPERSEDED — do not follow this file as current state.** Superseded by
+> `HANDOFF-plan8.md`.
+> Its "remaining work" lists are stale: items recorded here as gaps were
+> resolved in later sessions. Read `HANDOFF-plan8.md` first and use this file only as
+> history.
+
 **Supersedes:** `docs/superpowers/plans/HANDOFF-plan6.md`.
 
 **Context:** Branch `feat/qwp-design`. This session completed **A1** — the last

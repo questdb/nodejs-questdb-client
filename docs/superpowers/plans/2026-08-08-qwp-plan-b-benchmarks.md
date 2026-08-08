@@ -1399,6 +1399,17 @@ pnpm typecheck:bench             # tsc over src + benchmarks
 pnpm lint:bench                  # eslint over benchmarks/
 ```
 
+**If `pnpm <script>` fails before running anything**, that is this repo's
+ignored-builds check, not your benchmark. Every earlier QWP handoff hit it. Call
+the binary directly instead — the scripts above are still the canonical
+definitions, and they work wherever the gate is satisfied:
+
+```bash
+./node_modules/.bin/vitest bench --run benchmarks/          # pnpm bench
+./node_modules/.bin/tsx benchmarks/e2e.ts                   # pnpm bench:e2e
+./node_modules/.bin/tsc -p tsconfig.bench.json --noEmit     # pnpm typecheck:bench
+```
+
 ## Reading the output
 
 **`hz` is callbacks per second, not rows per second.** Each encoder callback
@@ -1519,6 +1530,39 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Thirty-ninth to forty-third review passes — three defects, one of which the
+reviewer walked into during the review itself.**
+
+Pass 34-38 widened from Plan B to its siblings. This batch widened again, to the
+*handoff chain* — the documents an executing agent actually opens first — and
+found that chain badly misleading.
+
+64. **No handoff mentions Plan B.** There are eight handoff files, not four:
+    `HANDOFF-plan4-deferred` → `5-deferred` → `6` → `7` → `8`, each superseding
+    the last, recording work that continued well past Plan 4. **None of the five
+    names Plan B or benchmarks.** An agent orienting from the current handoff
+    would conclude the deferred-items list is all that remains, when Plan B is
+    the only planned work actually left. Fixed in `HANDOFF-plan8.md`, the head.
+65. **Plan B contradicts every handoff about how to run anything.** Plan B and
+    the design spec instruct `pnpm bench` / `pnpm test` throughout, while every
+    earlier handoff records that `pnpm <script>` fails in this environment on the
+    ignored-builds gate and mandates `./node_modules/.bin/`. The executing agent
+    would hit a failure on their first command with nothing telling them it is
+    environmental. Both documents now carry the caveat and the direct invocations.
+66. **Supersession was discoverable only forwards.** Each superseding file
+    declares what it replaces, but no superseded file said it had been replaced.
+    Anyone landing on one directly — by grep, by filename guess — reads
+    four-generation-stale guidance as current. **This is not hypothetical: it
+    happened during this pass.** Defect 64's first fix was written into
+    `HANDOFF-plan4-deferred.md`, four generations dead, and was only caught by
+    listing the directory afterwards. All four superseded handoffs now open with
+    a banner naming their successor and the head of the chain.
+
+*Forty-third — version consistency.* `package.json` is `5.0.0`; every surviving
+`4.3.0` reference is an explicit record of the change rather than a stale value.
+`README.md`'s "Four plans implement QWP ingest" was checked and **deliberately
+left**: Plan B is not ingest, so the sentence is accurate. **Clean.**
 
 **Thirty-fourth to thirty-eighth review passes — four defects, all found by
 looking *outside* this document.**
