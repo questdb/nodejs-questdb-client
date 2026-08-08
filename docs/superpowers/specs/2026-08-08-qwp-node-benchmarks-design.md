@@ -61,9 +61,15 @@ script for end-to-end, because it needs a live server and reports percentiles
 rather than ops/s.
 
 ```
-pnpm bench       # vitest bench — encoder, buffer, sf
-pnpm bench:e2e   # node benchmarks/e2e.ts — needs QuestDB on :9000
+pnpm bench            # vitest bench — encoder, buffer, sf
+pnpm bench:e2e        # needs QuestDB on :9000
+pnpm typecheck:bench  # tsc over src + benchmarks
 ```
+
+The third exists because the repo's `tsconfig.json` includes only `src` and the
+lint script is `eslint src/**` — so without a dedicated config the benchmark tree
+would be the only unchecked TypeScript in the project, with type errors surfacing
+as a crash mid-run rather than at build time.
 
 ## 4. Layers
 

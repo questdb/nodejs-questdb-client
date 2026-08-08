@@ -27,7 +27,11 @@
 - **Deterministic workloads.** `trades`, `wide` and `sparse` use a seeded
   xorshift; `highCardSymbol` needs no randomness at all. Never `Math.random()`
   — two runs would not be comparable.
-- Existing tests stay green: `npx vitest run && npx tsc --noEmit && npx eslint src/**`.
+- Existing gates stay green: `npx vitest run && npx tsc --noEmit && npx eslint src/**`.
+  **Note what those do not cover.** `tsconfig.json` has `"include": ["src"]` and
+  the lint script is `eslint src/**`, so nothing in `benchmarks/` is type-checked
+  or linted by default. Task 3 adds a `typecheck:bench` script so the benchmark
+  code is not the only unchecked TypeScript in the repo.
 - **Never quote a number from a single run.** The e2e script enforces this by
   repeating three times and printing the spread. For the pure layers, tinybench's
   iteration count reduces noise *within* one run but says nothing about variance
@@ -339,7 +343,7 @@ git commit -m "bench: add seeded workload generators"
 **Interfaces:**
 - Consumes: nothing — deliberately. A floor that shared helpers with the code it
   bounds would not be an independent baseline.
-- Produces: `floorWriteLongs(values: bigint[]): Buffer`, `floorWriteStrings(values: string[]): Buffer`, `floorInternSymbols(values: string[]): number[]`. Task 5 uses the first and third; `floorWriteStrings` is specified in §6 but **no benchmark currently calls it** — see the Self-Review.
+- Produces: `floorWriteLongs(values: bigint[]): Buffer`, `floorWriteStrings(values: string[]): Buffer`, `floorInternSymbols(values: string[]): number[]`. Task 5 exercises all three — longs, varchar and symbol interning — so no floor ships unused.
 
 Rust's idea: the floor bounds how much measured time is protocol work versus raw byte movement. It is **not** a target — it ignores null bitmaps, schema and framing.
 
@@ -480,6 +484,23 @@ In `package.json`, alongside the existing `"test"` script:
 fetches it on demand — which, as Global Constraints records, means the suite is
 not strictly dependency-free; it just adds nothing to `package.json`.
 
+Add a benchmark type-check. The root `tsconfig.json` includes only `src`, so
+without this the entire `benchmarks/` tree compiles nowhere and a type error
+surfaces only as a runtime crash mid-benchmark:
+
+```jsonc
+// tsconfig.bench.json — separate so the bunchee build keeps compiling only src
+{
+  "extends": "./tsconfig.json",
+  "include": ["src", "benchmarks"]
+}
+```
+
+```json
+    "typecheck:bench": "tsc --noEmit -p tsconfig.bench.json",
+    "lint:bench": "eslint benchmarks/**"
+```
+
 And **pin vitest exactly**, dropping the caret. Vitest prints a warning on every
 bench run that benchmarking is experimental and may break outside SemVer; a
 caret range means a patch bump can silently change the numbers or the output
@@ -491,8 +512,11 @@ format:
 
 - [ ] **Step 4: Verify the split**
 
-Run: `npx vitest run` then `npx vitest bench --run`
-Expected: the first runs unit tests and finds no `.bench.ts`; the second reports "No benchmark files found" (nothing exists yet). Neither errors.
+Run: `npx vitest run`, then `npx vitest bench --run`, then
+`npx tsc --noEmit -p tsconfig.bench.json`.
+Expected: the first runs unit tests and finds no `.bench.ts`; the second reports
+"No benchmark files found" (nothing exists yet); the third succeeds with no
+files to check beyond `src`. None error.
 
 - [ ] **Step 5: Commit**
 
@@ -1362,6 +1386,9 @@ export QWP_BENCH_DIR=/var/tmp/qwp-bench
 pnpm bench                       # encoder, buffer, sf  (no server needed)
 pnpm bench:e2e                   # needs QuestDB on :9000
 QDB_ADDR=host:9000 pnpm bench:e2e
+
+pnpm typecheck:bench             # tsc over src + benchmarks
+pnpm lint:bench                  # eslint over benchmarks/
 ```
 
 ## Reading the output
@@ -1472,8 +1499,9 @@ unmeasured band.
 
 **3. Type consistency.** `Row`/`Workload`/`WorkloadName`/`WORKLOADS` (Task 1) are
 consumed in Tasks 4, 5, 6 and 8; `WORKLOADS` is keyed on the literal union so a
-misspelled name fails to compile. `floorWriteLongs`/`floorInternSymbols` (Task 2)
-are used in Task 5. Each bench file declares its own module-level `sink`, so the
+misspelled name is a type error in an editor — and, once `typecheck:bench`
+from Task 3 is wired, in CI-equivalent checking too. All three floors from Task 2 —
+`floorWriteLongs`, `floorWriteStrings`, `floorInternSymbols` — are used in Task 5. Each bench file declares its own module-level `sink`, so the
 two `_sink` exports do not collide. All `src/` imports were checked against the
 shipped code and are listed under "Verified API surface".
 
@@ -1483,6 +1511,42 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Twenty-fourth to twenty-eighth review passes — five further defects, one of
+which falsified two earlier entries in this log.**
+
+*Twenty-fourth — every `Task N` reference resolved against what that task now
+is.* All nine resolve correctly after the fourth pass's renumbering. Two were
+stale against a *later* fix:
+
+54. Task 2's Interfaces block still said `floorWriteStrings` was "specified in §6
+    but no benchmark currently calls it" — the sixteenth pass had already added
+    the varchar arm that calls it.
+55. The Self-Review's type-consistency line still listed only two floors in use.
+
+*Twenty-fifth — reading the code blocks as `tsc` would:*
+
+56. **`benchmarks/` is neither type-checked nor linted.** `tsconfig.json` has
+    `"include": ["src"]` and the lint script is `eslint src/**`. The whole
+    benchmark tree is therefore the only unchecked TypeScript in the repo, and a
+    type error would surface as a crash mid-benchmark rather than at build time.
+    Task 3 now adds a `tsconfig.bench.json` (separate, so the `bunchee` build
+    keeps compiling only `src`) plus `typecheck:bench` and `lint:bench` scripts,
+    and the Global Constraint no longer implies the existing gates cover it.
+
+*Twenty-sixth — correcting this log against that finding.* Two earlier entries
+asserted protection that does not exist:
+
+57. Defect 26 claimed `pnpm eslint` "would have flagged" the unused `Buffer`
+    import. It would not — `eslint src/**` never sees `benchmarks/`. Corrected.
+58. Defect 13 claimed the `WorkloadName` union makes a misspelled workload name
+    "fail to compile". Without `typecheck:bench` it fails in an editor only.
+    Corrected, in both the log and the Self-Review.
+
+*Twenty-seventh and twenty-eighth — propagation and sweep.* The new scripts are
+now in the spec's §3 and the README's command block, with the reason stated in
+both. A review log that asserts false protections is worse than no log, so those
+two corrections were made in place rather than appended. **No further defects.**
 
 **Nineteenth to twenty-third review passes — seven further defects.**
 
@@ -1645,8 +1709,11 @@ and audited this Self-Review; six defects:**
     of a floor is that the ratio is trustworthy. Every arm in Tasks 5 and 6 now
     accumulates into a module-level `sink`, built in rather than offered as a
     remedy after the fact.
-26. **`Buffer` was imported and unused** in `encoder.bench.ts`; `pnpm eslint`
-    would have flagged it.
+26. **`Buffer` was imported and unused** in `encoder.bench.ts`. Written up at the
+    time as "`pnpm eslint` would have flagged it" — **it would not**: the lint
+    script is `eslint src/**`, so nothing under `benchmarks/` is linted. The
+    twenty-fifth pass adds a `lint:bench` script; until that is wired, this class
+    of defect is caught by review only.
 27. **Task 5 encoded a different table name than Tasks 4 and 6** — it passed
     `WORKLOADS[name].name` (`"trades"`) while the others use `row.table`
     (`"bench_trades"`), so frame sizes differed between tasks measuring nominally
@@ -1739,8 +1806,10 @@ invalidated an earlier fix:**
     explicit statement that the fallback path is **not covered** by this suite.
 13. **`WORKLOADS` was declared as a literal-keyed `Record` but implemented as
     `Record<string, Workload>`**, and Tasks 6 and 7 index it by name. The loose
-    type makes a misspelled workload name a compile-time success and a runtime
-    `undefined`. Now keyed on an exported `WorkloadName` union. `build()` in
+    type makes a misspelled workload name a runtime `undefined`. Now keyed on an
+    exported `WorkloadName` union — with the caveat found in the twenty-fifth
+    pass: `tsconfig.json` includes only `src`, so until `typecheck:bench` exists
+    this buys editor feedback rather than a build failure. `build()` in
     Task 4 also dropped the `strings` family, the same latent trap fixed in
     Tasks 5 and 6 last pass.
 
