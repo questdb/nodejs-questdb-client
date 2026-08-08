@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -48,6 +54,24 @@ describe("slot lock", () => {
       join(slotDir, ".lock"),
       "2147483647\nunknown\nunknown\nold\n",
     );
+    const h = await acquireSlot(dir, "default");
+    expect(h).toBeTruthy();
+    await releaseSlot(h);
+  });
+
+  it("recovers an abandoned stale-takeover guard", async () => {
+    dir = mkdtempSync(join(tmpdir(), "qwp-"));
+    const slotDir = join(dir, "default");
+    mkdirSync(slotDir);
+    writeFileSync(
+      join(slotDir, ".lock"),
+      "2147483647\nunknown\nunknown\nold\n",
+    );
+    const takeover = join(slotDir, ".lock.takeover");
+    mkdirSync(takeover);
+    const old = new Date(Date.now() - 1000);
+    utimesSync(takeover, old, old);
+
     const h = await acquireSlot(dir, "default");
     expect(h).toBeTruthy();
     await releaseSlot(h);

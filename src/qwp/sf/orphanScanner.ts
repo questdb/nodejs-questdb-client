@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { access, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isLiveLock } from "./slotLock";
 
@@ -30,6 +30,13 @@ export async function scanOrphans(sfDir: string): Promise<OrphanSlot[]> {
     if (name.startsWith(".")) continue; // dotfiles / .slot-locks
     if (QUARANTINE_RE.test(name)) continue; // quarantined, human-in-the-loop
     const slotDir = join(sfDir, name);
+    // A terminal drainer failure is an operator gate. Do not retry until the
+    // sentinel is explicitly removed.
+    const failed = await access(join(slotDir, ".failed")).then(
+      () => true,
+      () => false,
+    );
+    if (failed) continue;
     const live = await isLiveLock(join(slotDir, ".lock"));
     if (!live) orphans.push({ senderId: name, slotDir });
   }

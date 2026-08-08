@@ -49,10 +49,16 @@ function maskedFrameDecoder() {
   };
 }
 
+function serverBinaryFrame(payload: Buffer): Buffer {
+  if (payload.length >= 126) throw new Error("test payload is too large");
+  return Buffer.concat([Buffer.from([0x82, payload.length]), payload]);
+}
+
 /** Minimal QWP-ish websocket server: completes the upgrade, echoes nothing. */
 function startServer(
   onBinary: (b: Buffer) => void,
   afterHandshake?: (socket: Socket) => void,
+  handshakeSuffix?: Buffer,
 ): Promise<number> {
   return new Promise((resolve) => {
     server = createServer((sock) => {
@@ -65,10 +71,16 @@ function startServer(
           const accept = createHash("sha1")
             .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", "ascii")
             .digest("base64");
-          sock.write(
+          const response = Buffer.from(
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
               `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n` +
               "X-QWP-Version: 1\r\nX-QWP-Max-Batch-Size: 1048576\r\n\r\n",
+            "ascii",
+          );
+          sock.write(
+            handshakeSuffix
+              ? Buffer.concat([response, handshakeSuffix])
+              : response,
           );
           handshaken = true;
           if (afterHandshake) setTimeout(() => afterHandshake(sock), 10);
@@ -105,6 +117,30 @@ describe("QwpWebSocket", () => {
     await ws.close();
   });
 
+  it("dispatches coalesced handshake leftovers only after connect resolves", async () => {
+    const payload = Buffer.from("early-response");
+    let connectResolved = false;
+    let callbackAfterResolve = false;
+    const port = await startServer(
+      () => undefined,
+      undefined,
+      serverBinaryFrame(payload),
+    );
+    const ws = await QwpWebSocket.connect({
+      host: "127.0.0.1",
+      port,
+      tls: false,
+      clientId: "x",
+      onBinary: (received) => {
+        callbackAfterResolve = connectResolved && received.equals(payload);
+      },
+    });
+    connectResolved = true;
+    await new Promise((r) => setImmediate(r));
+    expect(callbackAfterResolve).toBe(true);
+    await ws.close();
+  });
+
   it("turns malformed inbound framing into one abrupt close", async () => {
     const closes: { orderly: boolean; framesSent: number }[] = [];
     const port = await startServer(
@@ -126,7 +162,7 @@ describe("QwpWebSocket", () => {
   it("contains an exception thrown by the binary response callback", async () => {
     const closes: { orderly: boolean; framesSent: number }[] = [];
     const payload = Buffer.from("bad-qwp-response");
-    const frame = Buffer.concat([Buffer.from([0x82, payload.length]), payload]);
+    const frame = serverBinaryFrame(payload);
     const port = await startServer(
       () => undefined,
       (sock) => sock.write(frame),

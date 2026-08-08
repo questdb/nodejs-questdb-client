@@ -42,7 +42,8 @@ export class SegmentRing {
       }
     }
     for (const s of r.segs) {
-      if (s.baseSeq < 0) throw new Error("segment with negative baseSeq must be quarantined");
+      if (s.baseSeq < 0)
+        throw new Error("segment with negative baseSeq must be quarantined");
     }
     const last = r.segs[r.segs.length - 1];
     r.nextSeq = last.baseSeq + last.frames.length;
@@ -61,20 +62,35 @@ export class SegmentRing {
     return this.segs.reduce((a, s) => a + s.bytes, 0);
   }
 
-  /** Returns the assigned FSN, or a negative sentinel. */
-  append(frame: Buffer): number {
+  /**
+   * Returns the FSN append() would assign without mutating the ring, or a
+   * negative sentinel. Disk mode uses this to persist before publication.
+   */
+  planAppend(frame: Buffer): number {
     if (frame.length > this.opts.segmentBytes) return PAYLOAD_TOO_LARGE;
     const active = this.segs[this.segs.length - 1];
+    if (
+      active.bytes + frame.length > this.opts.segmentBytes &&
+      this.totalBytes + frame.length > this.livenessFloorAdjustedCap()
+    ) {
+      return BACKPRESSURE_NO_SPARE;
+    }
+    return this.nextSeq;
+  }
+
+  /** Returns the assigned FSN, or a negative sentinel. */
+  append(frame: Buffer): number {
+    const planned = this.planAppend(frame);
+    if (planned < 0) return planned;
+    const active = this.segs[this.segs.length - 1];
     if (active.bytes + frame.length > this.opts.segmentBytes) {
-      if (this.totalBytes + frame.length > this.livenessFloorAdjustedCap()) {
-        return BACKPRESSURE_NO_SPARE;
-      }
       this.segs.push({ baseSeq: this.nextSeq, frames: [], bytes: 0 });
     }
     const seg = this.segs[this.segs.length - 1];
     seg.frames.push(frame);
     seg.bytes += frame.length;
-    return this.nextSeq++;
+    this.nextSeq++;
+    return planned;
   }
 
   /**

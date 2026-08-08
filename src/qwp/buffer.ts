@@ -106,8 +106,8 @@ export class QwpBuffer implements SenderBuffer {
    * were successfully queued onto the ring. Only ever forward; a batch that
    * introduced no new symbols leaves it untouched (spec 5.2).
    */
-  confirmDeltaPublished(): void {
-    if (this.deltaTarget >= 0) this.confirmedMaxId = this.deltaTarget;
+  confirmDeltaPublished(target = this.deltaTarget): void {
+    if (target > this.confirmedMaxId) this.confirmedMaxId = target;
   }
 
   reset(): SenderBuffer {

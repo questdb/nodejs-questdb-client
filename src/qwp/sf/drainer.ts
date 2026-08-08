@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SenderOptions } from "../../options";
 import { QwpWebSocket, QwpWebSocketOptions } from "../ws/socket";
@@ -70,6 +71,9 @@ export class OrphanDrainer {
   private durableAcks = new DurableAckTracker();
   private acked = -1;
   private fatalResponse?: Error;
+  /** Reject late responses/closes from a recycled connection. */
+  private connectionGeneration = 0;
+  private activeConnectionGeneration = 0;
   private readonly running: Promise<void>;
 
   constructor(
@@ -88,10 +92,14 @@ export class OrphanDrainer {
 
   stop(): void {
     this.stopped = true;
-    void this.ws?.close();
+    const ws = this.ws;
+    this.activeConnectionGeneration = 0;
+    this.ws = undefined;
+    void ws?.close();
   }
 
-  private readonly onBinary = (payload: Buffer): void => {
+  private onBinary(payload: Buffer, generation: number): void {
+    if (generation !== this.activeConnectionGeneration) return;
     const r = decodeResponse(payload);
     if (r.status === STATUS.OK) {
       const f = this.acks.fsnForAck(r.sequence);
@@ -122,16 +130,27 @@ export class OrphanDrainer {
     // Any retryable NACK recycles the connection and replays from the unchanged
     // read-only watermark. A terminal NACK is observed by replay() and causes
     // the slot to receive its .failed sentinel instead of hanging forever.
+    this.recycleConnection(generation);
+  }
+
+  private onClose(generation: number): void {
+    if (generation !== this.activeConnectionGeneration) return;
+    this.activeConnectionGeneration = 0;
+    this.ws = undefined;
+  }
+
+  private recycleConnection(generation: number): void {
+    if (generation !== this.activeConnectionGeneration) return;
     const ws = this.ws;
+    this.activeConnectionGeneration = 0;
     this.ws = undefined;
     void ws?.close();
-  };
+  }
 
-  private readonly onClose = (): void => {
-    this.ws = undefined;
-  };
-
-  private buildWsOptions(ep: Endpoint): QwpWebSocketOptions {
+  private buildWsOptions(
+    ep: Endpoint,
+    generation: number,
+  ): QwpWebSocketOptions {
     const auth =
       this.options.username && this.options.password
         ? "Basic " +
@@ -151,14 +170,20 @@ export class OrphanDrainer {
       requestDurableAck: this.options.request_durable_ack === true,
       authTimeoutMs: this.options.auth_timeout_ms,
       keepaliveMs: this.options.durable_ack_keepalive_interval_millis,
-      onBinary: this.onBinary,
-      onClose: this.onClose,
+      onBinary: (payload) => this.onBinary(payload, generation),
+      onClose: () => this.onClose(generation),
     };
   }
 
   private async run(): Promise<void> {
     const sfDir = this.options.sf_dir!;
-    await acquireLogicalLock(sfDir, this.slot.senderId);
+    try {
+      await acquireLogicalLock(sfDir, this.slot.senderId);
+    } catch {
+      // Another producer/drainer won adoption. Contention is not a replay
+      // failure and must not become an unhandled rejected promise.
+      return;
+    }
     let held: SlotHandle | undefined;
     try {
       // Revalidate: a producer may have re-adopted the slot while we scanned.
@@ -190,6 +215,11 @@ export class OrphanDrainer {
       }
       try {
         await this.replay(engine);
+        if (!this.stopped && this.acked >= engine.publishedFsn) {
+          await this.retireOrphan(sfDir);
+          // The owned lock moved with the retired directory and was deleted.
+          held = undefined;
+        }
       } catch (e) {
         await this.dropFailed((e as Error)?.message ?? String(e));
       }
@@ -197,6 +227,25 @@ export class OrphanDrainer {
       await releaseLogicalLock(sfDir, this.slot.senderId);
       if (held) await releaseSlot(held);
     }
+  }
+
+  /**
+   * Make successful completion crash-safe: rename to an ignored hidden path
+   * before deletion. A crash after rename can leak bytes but cannot replay them.
+   */
+  private async retireOrphan(sfDir: string): Promise<void> {
+    const ws = this.ws;
+    this.activeConnectionGeneration = 0;
+    this.ws = undefined;
+    await ws?.close().catch(() => undefined);
+    const retired = join(
+      sfDir,
+      `.drained-${this.slot.senderId}-${randomUUID()}`,
+    );
+    await rename(this.slot.slotDir, retired);
+    // Rename is the correctness boundary; cleanup is best-effort because the
+    // hidden name is already outside scanner visibility.
+    await rm(retired, { recursive: true, force: true }).catch(() => undefined);
   }
 
   /** Terminal failure: drop the `.failed` sentinel and surface DATA_LOSS. */
@@ -253,8 +302,10 @@ export class OrphanDrainer {
           continue;
         }
         const ep = this.endpoints[idx];
+        const generation = ++this.connectionGeneration;
+        let w: QwpWebSocket | undefined;
         try {
-          const w = await QwpWebSocket.connect(this.buildWsOptions(ep));
+          w = await QwpWebSocket.connect(this.buildWsOptions(ep, generation));
           if (this.options.request_durable_ack === true && !w.durableAck) {
             await w.close();
             this.tracker.record(idx, HostState.TRANSIENT_REJECT);
@@ -265,6 +316,7 @@ export class OrphanDrainer {
           // server can ACK in the same event-loop turn.
           this.acks.onConnected(this.acked + 1, hasDict ? 1 : 0);
           this.durableAcks.reset(this.acked);
+          this.activeConnectionGeneration = generation;
           this.ws = w;
           if (hasDict) {
             // Connection-scoped dictionary is empty on a fresh server: re-register
@@ -276,6 +328,7 @@ export class OrphanDrainer {
             });
             const cap = w.maxBatchSize ?? UNCAPPED_CATCHUP_PACKING_LIMIT;
             if (frame.length > cap) {
+              this.recycleConnection(generation);
               await w.close();
               capGapAttempts++;
               if (capGapFirstAt === 0) capGapFirstAt = Date.now();
@@ -294,8 +347,15 @@ export class OrphanDrainer {
             await w.sendBinary(frame);
           }
           if (this.fatalResponse) throw this.fatalResponse;
-          if (this.ws !== w) continue;
+          if (this.activeConnectionGeneration !== generation || this.ws !== w) {
+            continue;
+          }
         } catch (e) {
+          if (this.activeConnectionGeneration === generation) {
+            this.activeConnectionGeneration = 0;
+            this.ws = undefined;
+          }
+          await w?.close().catch(() => undefined);
           if (e instanceof QwpUpgradeError) {
             if (e.kind === "auth") {
               throw new Error(`drainer authentication failed: ${e.message}`);
@@ -322,8 +382,25 @@ export class OrphanDrainer {
       const pending = engine.framesFrom(this.acked + 1);
       for (const f of pending) {
         if (this.stopped) return;
-        await this.ws.sendBinary(f);
+        const ws = this.ws;
+        const generation = this.activeConnectionGeneration;
+        if (!ws || generation === 0) break;
+        // Count the wire attempt before awaiting write completion so an
+        // immediate local ACK is correlated against this connection.
         this.acks.onFrameSent();
+        try {
+          await ws.sendBinary(f);
+        } catch {
+          // Transport failures are transient for orphan replay. Keep the slot
+          // and replay from the unchanged watermark on another connection.
+          if (generation === this.activeConnectionGeneration) {
+            this.activeConnectionGeneration = 0;
+            this.ws = undefined;
+          }
+          await ws.close().catch(() => undefined);
+          break;
+        }
+        if (generation !== this.activeConnectionGeneration) break;
       }
       // Quiesce: ACKs arrive via onBinary and advance `this.acked`; a drop
       // clears `this.ws` so the loop reconnects and re-sends what's unacked.
@@ -346,6 +423,7 @@ export async function startOrphanDrainers(
   tracker: HostTracker,
   emit: (e: SenderError) => void,
   onStart?: (d: OrphanDrainer) => void,
+  shouldStop?: () => boolean,
 ): Promise<OrphanDrainer[]> {
   const sfDir = options.sf_dir;
   if (!sfDir) return [];
@@ -354,15 +432,22 @@ export async function startOrphanDrainers(
   const running = new Set<OrphanDrainer>();
   const all: OrphanDrainer[] = [];
   for (const slot of orphans) {
+    if (shouldStop?.()) break;
     // Bound concurrency: wait until a slot frees before starting the next.
-    while (running.size >= max) {
-      await Promise.race([...running].map((d) => d.finished));
+    while (running.size >= max && !shouldStop?.()) {
+      await Promise.race(
+        [...running].map((d) => d.finished.catch(() => undefined)),
+      );
     }
+    if (shouldStop?.()) break;
     const drainer = new OrphanDrainer(options, endpoints, tracker, slot, emit);
     running.add(drainer);
     all.push(drainer);
     onStart?.(drainer);
-    void drainer.finished.finally(() => running.delete(drainer));
+    void drainer.finished.then(
+      () => running.delete(drainer),
+      () => running.delete(drainer),
+    );
   }
   return all;
 }

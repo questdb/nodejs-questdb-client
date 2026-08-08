@@ -94,6 +94,10 @@ class Sender {
   private lastFlushTime: number;
   private pendingRowCount: number;
 
+  /** QWP seals share one mutable dictionary baseline; flushes must seal in order. */
+  private qwpFlushActive = false;
+  private readonly qwpFlushQueue: Array<() => void> = [];
+
   private readonly log: Logger;
 
   /**
@@ -115,7 +119,7 @@ class Sender {
         this.buffer as unknown as QwpBuffer,
       );
     }
-    
+
     this.log = typeof options.log === "function" ? options.log : log;
 
     this.autoFlush = isBoolean(options.auto_flush) ? options.auto_flush : true;
@@ -135,7 +139,10 @@ class Sender {
     if (options.protocol === WS || options.protocol === WSS) {
       if (deriveConnectMode(options) === ConnectMode.SYNC) {
         this.connect().catch((e) =>
-          this.log("warn", `initial QWP connect failed: ${(e as Error).message}`),
+          this.log(
+            "warn",
+            `initial QWP connect failed: ${(e as Error).message}`,
+          ),
         );
       }
     }
@@ -216,14 +223,16 @@ class Sender {
       maxBatchSize?: number;
     };
     if (buf.sealFrames && tx.sendFrames) {
-      const frames = buf.sealFrames(
-        tx.maxBatchSize ?? Number.MAX_SAFE_INTEGER,
-      );
-      if (frames.length === 0) return false;
-      this.log("debug", `Flushing ${frames.length} QWP frame(s)`);
-      this.resetAutoFlush();
-      await tx.sendFrames(frames);
-      return true;
+      return this.enqueueQwpFlush(async () => {
+        const frames = buf.sealFrames!(
+          tx.maxBatchSize ?? Number.MAX_SAFE_INTEGER,
+        );
+        if (frames.length === 0) return false;
+        this.log("debug", `Flushing ${frames.length} QWP frame(s)`);
+        this.resetAutoFlush();
+        await tx.sendFrames!(frames);
+        return true;
+      });
     }
 
     const dataToSend: Buffer = this.buffer.toBufferNew();
@@ -241,6 +250,28 @@ class Sender {
     return true;
   }
 
+  private enqueueQwpFlush(work: () => Promise<boolean>): Promise<boolean> {
+    if (!this.qwpFlushActive) {
+      this.qwpFlushActive = true;
+      return this.runQwpFlush(work);
+    }
+    return new Promise<boolean>((resolve, reject) => {
+      this.qwpFlushQueue.push(() => {
+        void this.runQwpFlush(work).then(resolve, reject);
+      });
+    });
+  }
+
+  private async runQwpFlush(work: () => Promise<boolean>): Promise<boolean> {
+    try {
+      return await work();
+    } finally {
+      const next = this.qwpFlushQueue.shift();
+      if (next) queueMicrotask(next);
+      else this.qwpFlushActive = false;
+    }
+  }
+
   /**
    * Closes the connection to the database. <br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
@@ -252,6 +283,10 @@ class Sender {
         "warn",
         `Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=${pos}]`,
       );
+    }
+    if (this.qwpFlushActive) {
+      // Join every already-queued QWP flush before transport teardown.
+      await this.enqueueQwpFlush(async () => false);
     }
     return this.transport.close();
   }

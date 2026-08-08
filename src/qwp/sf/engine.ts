@@ -1,6 +1,13 @@
 import { Buffer } from "node:buffer";
-import { open, readFile, readdir } from "node:fs/promises";
-import { openSync, writeSync, closeSync } from "node:fs";
+import { open, readFile, readdir, rm } from "node:fs/promises";
+import {
+  closeSync,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
+  openSync,
+  writeSync,
+} from "node:fs";
 import { join } from "node:path";
 import { SegmentRing } from "./ring";
 import { acquireSlot, releaseSlot, SlotHandle } from "./slotLock";
@@ -12,7 +19,11 @@ import {
   MANIFEST_FILE_NAME,
   MANIFEST_FILE_SIZE,
 } from "./manifest";
-import { encodeChunk, decodeDictFile, DICT_HEADER } from "./symbolDictFile";
+import {
+  decodeDictFileState,
+  DICT_HEADER,
+  encodeChunk,
+} from "./symbolDictFile";
 import { SymbolDict } from "../protocol/symbolDict";
 import { quarantineSlot } from "./quarantine";
 import { SenderError, Category, Policy } from "../errors";
@@ -49,6 +60,7 @@ export class SfEngine {
   private activeOffset = 0;
   private activeDataBytes = 0;
   private closed = false;
+  private appendTail: Promise<void> = Promise.resolve();
 
   // ack watermark state (spec 8.2). Written on a cadence, never per-ACK (C1),
   // and fsynced only in periodic durability.
@@ -68,6 +80,8 @@ export class SfEngine {
   // symbol dictionary file (load-bearing for delta mode; spec 8.1.6)
   private dict = new SymbolDict();
   private dictFd?: number;
+  private dictValidBytes = 0;
+  private dictDirty = false;
   /** True when the slot had no (or an empty) symbol-dict file on open. */
   private dictFresh = false;
 
@@ -118,11 +132,16 @@ export class SfEngine {
       await this.failQuarantined(sfDir, senderId, e);
     }
     this.dictFd = openSync(join(this.slot.slotDir, SYMBOL_DICT), "a");
-    // A fresh (or zero-length) slot has no file header yet: write the SYD1
-    // header before any chunk so recovery can parse it (spec 8.1.6). An append
-    // write lands at EOF, which is offset 0 on an empty file.
+    // Remove a torn final chunk before appending. Otherwise every later valid
+    // chunk remains hidden behind the first invalid tail on every recovery.
+    if (!this.dictFresh && fstatSync(this.dictFd).size > this.dictValidBytes) {
+      ftruncateSync(this.dictFd, this.dictValidBytes);
+    }
+    // A fresh (or zero-length) slot has no file header yet: publish it fully.
     if (this.dictFresh) {
-      writeSync(this.dictFd, DICT_HEADER, 0, DICT_HEADER.length, undefined);
+      this.writeSyncFully(DICT_HEADER);
+      this.dictValidBytes = DICT_HEADER.length;
+      this.dictDirty = true;
     }
 
     // Start the throttled durability barrier. In memory mode it coalesces the
@@ -201,7 +220,14 @@ export class SfEngine {
 
     // segments -> contiguous FSN chain
     const entries = await readdir(slotDir).catch(() => []);
-    const segFiles = entries.filter((e) => e.endsWith(SEGMENT_EXT)).sort();
+    const segFiles = entries
+      .filter((e) => e.endsWith(SEGMENT_EXT))
+      .sort((a, b) => {
+        const ai = Number(a.slice(0, -SEGMENT_EXT.length));
+        const bi = Number(b.slice(0, -SEGMENT_EXT.length));
+        if (Number.isFinite(ai) && Number.isFinite(bi)) return ai - bi;
+        return a.localeCompare(b);
+      });
     // Resume the file counter PAST any existing segment so continued appends
     // open fresh files rather than truncating a recovered one that may still
     // hold unacked frames (spec 8.1.5).
@@ -212,15 +238,22 @@ export class SfEngine {
     }
     this.fileNo = maxIdx + 1;
     const chain: { baseSeq: number; frames: Buffer[] }[] = [];
+    let manifestRequired = false;
     for (const f of segFiles) {
       const data = await readFile(join(slotDir, f));
       const sr = scanSegment(data);
       chain.push({ baseSeq: sr.baseSeq, frames: sr.frames });
+      if (sr.frames.length > 0 && (sr.flags & MANIFEST_REQUIRED_FLAG) !== 0) {
+        manifestRequired = true;
+      }
+    }
+    if (manifestRequired && manifestHead === undefined) {
+      throw new Error("sf manifest missing or corrupt for governed segments");
     }
     // Cross-check the manifest head against the scanned chain (spec 8.1.1).
     // A valid manifest is only ever written after a new segment header exists,
     // so the manifest is never ahead of an existing file on a benign crash.
-    // A manifest Ahead of the scanned head therefore means a recorded tail
+    // A manifest ahead of the scanned head therefore means a recorded tail
     // segment (or its entire chain) vanished from disk = real data loss.
     if (manifestHead !== undefined) {
       let head = -1;
@@ -246,7 +279,11 @@ export class SfEngine {
       () => undefined,
     );
     if (dictData && dictData.length > 0) {
-      for (const e of decodeDictFile(dictData)) this.dict.addRecovered(e);
+      const decoded = decodeDictFileState(dictData);
+      for (const e of decoded.entries) this.dict.addRecovered(e);
+      this.dictValidBytes = decoded.validBytes;
+    } else {
+      this.dictValidBytes = 0;
     }
     this.dictFresh = !dictData || dictData.length === 0;
   }
@@ -282,9 +319,54 @@ export class SfEngine {
     );
   }
 
+  private async writeFully(
+    fh: Awaited<ReturnType<typeof open>>,
+    data: Buffer,
+    position = 0,
+  ): Promise<void> {
+    let offset = 0;
+    while (offset < data.length) {
+      const { bytesWritten } = await fh.write(
+        data,
+        offset,
+        data.length - offset,
+        position + offset,
+      );
+      if (bytesWritten <= 0) throw new Error("file write made no progress");
+      offset += bytesWritten;
+    }
+  }
+
+  private writeSyncFully(data: Buffer): void {
+    if (this.dictFd === undefined)
+      throw new Error("symbol dictionary is not open");
+    let offset = 0;
+    while (offset < data.length) {
+      const written = writeSync(
+        this.dictFd,
+        data,
+        offset,
+        data.length - offset,
+        undefined,
+      );
+      if (written <= 0) throw new Error("file write made no progress");
+      offset += written;
+    }
+  }
+
+  private async openForUpdate(path: string) {
+    try {
+      return await open(path, "r+");
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      return open(path, "w+");
+    }
+  }
+
   /**
    * Background / close-time durability barrier. Coalesces the ACK watermark
-   * write (C1) and, in periodic mode, fsyncs the active segment.
+   * write (C1) and, in periodic mode, fsyncs the dictionary before any segment
+   * that can reference it.
    */
   private async runBarrier(): Promise<void> {
     // NOT gated on this.closed: close() relies on a final barrier after it has
@@ -293,18 +375,20 @@ export class SfEngine {
     if (!this.isDisk || !this.slot || this.barrierInFlight) return;
     this.barrierInFlight = true;
     try {
-      // Periodic covering order: make the active segment durable first, then
-      // the watermark that guards it (spec 8.1.5, 8.2).
-      if (this.durability === "periodic" && this.fh) {
-        await this.fh.sync();
+      // Periodic covering order: the load-bearing symbol dictionary must reach
+      // disk before any segment that references its ids, then the watermark.
+      if (this.durability === "periodic" && this.dictDirty) {
+        fsyncSync(this.dictFd!);
+        this.dictDirty = false;
       }
+      if (this.durability === "periodic" && this.fh) await this.fh.sync();
       if (this.watermarkDirty) {
         this.wmGen++;
         writeBoundary(this.wmBuf, this.wmGen, this.lastWm);
         const path = join(this.slot.slotDir, ACK_WATERMARK);
-        const fh = await open(path, "w");
+        const fh = await this.openForUpdate(path);
         try {
-          await fh.write(this.wmBuf);
+          await this.writeFully(fh, this.wmBuf);
           if (this.durability === "periodic") await fh.sync();
         } finally {
           await fh.close();
@@ -326,28 +410,58 @@ export class SfEngine {
    * Publishes a frame, returning its FSN or a negative sentinel. In disk mode
    * the frame is written ahead to a segment file before returning.
    */
-  async append(frame: Buffer): Promise<number> {
-    const fsn = this.ring.append(frame);
+  append(frame: Buffer): Promise<number> {
+    if (this.closed)
+      return Promise.reject(new Error("store-and-forward engine is closed"));
+    const run = this.appendTail.then(() => this.appendOne(frame));
+    this.appendTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async appendOne(frame: Buffer): Promise<number> {
+    if (!this.isDisk || !this.slot) return this.ring.append(frame);
+    const fsn = this.ring.planAppend(frame);
     if (fsn < 0) return fsn;
-    if (this.isDisk && this.slot) await this.persistFrame(fsn, frame);
+    // Persistence is the publication boundary in disk mode. A failed write
+    // must not leave a replay-visible in-memory FSN behind.
+    await this.persistFrame(fsn, frame);
+    const committed = this.ring.append(frame);
+    if (committed !== fsn) {
+      throw new Error(
+        `store-and-forward append plan changed [planned=${fsn}, actual=${committed}]`,
+      );
+    }
     return fsn;
   }
 
   private async openActiveFile(baseSeq: number): Promise<void> {
     const path = join(this.slot!.slotDir, `${this.fileNo++}${SEGMENT_EXT}`);
-    this.fh = await open(path, "w+");
-    const header = Buffer.alloc(SEGMENT_HEADER_SIZE);
-    header.write("SF01", 0, "ascii");
-    header.writeUInt8(1, 4);
-    header.writeUInt8(MANIFEST_REQUIRED_FLAG, 5); // governed by sf-manifest.bin
-    header.writeBigUInt64LE(BigInt(baseSeq), 8);
-    await this.fh.write(header, 0, SEGMENT_HEADER_SIZE, 0);
-    this.activeOffset = SEGMENT_HEADER_SIZE;
-    this.activeDataBytes = 0;
-    // Record the new chain head AFTER the segment header exists (see recover),
-    // so a crash here can never leave the manifest ahead of an existing file
-    // and falsely quarantine a recoverable slot (spec 8.2 alternating scheme).
-    await this.persistManifest(baseSeq);
+    const fh = await open(path, "w+");
+    let headerWritten = false;
+    try {
+      const header = Buffer.alloc(SEGMENT_HEADER_SIZE);
+      header.write("SF01", 0, "ascii");
+      header.writeUInt8(1, 4);
+      header.writeUInt8(MANIFEST_REQUIRED_FLAG, 5); // governed by sf-manifest.bin
+      header.writeBigUInt64LE(BigInt(baseSeq), 8);
+      await this.writeFully(fh, header);
+      headerWritten = true;
+      // Record the new chain head AFTER the complete segment header exists.
+      await this.persistManifest(baseSeq);
+      this.fh = fh;
+      this.activeOffset = SEGMENT_HEADER_SIZE;
+      this.activeDataBytes = 0;
+    } catch (e) {
+      await fh.close().catch(() => undefined);
+      // A complete empty header is recoverable and may be left behind if the
+      // manifest update failed. A partial header can only poison recovery.
+      if (!headerWritten)
+        await rm(path, { force: true }).catch(() => undefined);
+      throw e;
+    }
   }
 
   /** Writes the chain head into sf-manifest.bin, alternating records by generation. */
@@ -356,9 +470,9 @@ export class SfEngine {
     this.manifestGen++;
     writeManifest(this.manBuf, this.manifestGen, head);
     const path = join(this.slot.slotDir, MANIFEST_FILE_NAME);
-    const fh = await open(path, "w");
+    const fh = await this.openForUpdate(path);
     try {
-      await fh.write(this.manBuf);
+      await this.writeFully(fh, this.manBuf);
       if (this.durability === "periodic") await fh.sync();
     } finally {
       await fh.close();
@@ -375,9 +489,24 @@ export class SfEngine {
     // Frame = u32 crc32c(payloadLen ++ payload) | u32 payloadLen | payload (spec 8.1.5)
     const tmp = Buffer.alloc(8 + frame.length);
     const newOff = appendFrame(tmp, 0, frame);
-    await this.fh!.write(tmp.subarray(0, newOff), 0, newOff, this.activeOffset);
-    this.activeOffset += newOff;
-    this.activeDataBytes += frame.length;
+    const oldOffset = this.activeOffset;
+    const oldDataBytes = this.activeDataBytes;
+    try {
+      await this.writeFully(
+        this.fh!,
+        tmp.subarray(0, newOff),
+        this.activeOffset,
+      );
+      this.activeOffset += newOff;
+      this.activeDataBytes += frame.length;
+    } catch (e) {
+      // Keep a failed/short record out of subsequent scans and allow a retry at
+      // the same FSN to reuse the active segment safely.
+      await this.fh!.truncate(oldOffset).catch(() => undefined);
+      this.activeOffset = oldOffset;
+      this.activeDataBytes = oldDataBytes;
+      throw e;
+    }
   }
 
   acknowledge(fsn: number): void {
@@ -405,19 +534,16 @@ export class SfEngine {
     if (!this.isDisk || entries.length === 0 || this.dictFd === undefined)
       return;
     const buf = encodeChunk(entries);
-    let offset = 0;
-    while (offset < buf.length) {
-      const written = writeSync(
-        this.dictFd,
-        buf,
-        offset,
-        buf.length - offset,
-        undefined,
-      );
-      if (written <= 0) {
-        throw new Error("failed to append the complete persisted symbol chunk");
-      }
-      offset += written;
+    const start = fstatSync(this.dictFd).size;
+    try {
+      this.writeSyncFully(buf);
+      this.dictValidBytes = start + buf.length;
+      this.dictDirty = true;
+    } catch (e) {
+      // A failed loop may already have appended a prefix. Remove it now so a
+      // later valid positional chunk is not hidden behind an invalid tail.
+      ftruncateSync(this.dictFd, start);
+      throw e;
     }
   }
 
@@ -433,6 +559,7 @@ export class SfEngine {
       clearInterval(this.barrierTimer);
       this.barrierTimer = undefined;
     }
+    await this.appendTail;
     // Final barrier: persist any un-flushed ACK watermark before the files close.
     await this.runBarrier();
     if (this.fh) await this.fh.close();

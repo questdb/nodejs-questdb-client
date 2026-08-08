@@ -1,6 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { link, mkdir, open, readFile, rmdir, unlink } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  open,
+  readFile,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export interface SlotHandle {
@@ -129,58 +138,148 @@ async function publishLock(
   }
 }
 
+const TAKEOVER_OWNER = ".owner";
+const EMPTY_GUARD_GRACE_MS = 100;
+
+function lockInUse(path: string): NodeJS.ErrnoException {
+  const e = new Error(`lock in use [path=${path}]`) as NodeJS.ErrnoException;
+  e.code = "EEXIST";
+  return e;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Serialize stale takeover. The guard is never stolen automatically: a crash in
- * this tiny administrative window may require manual cleanup, but can never let
- * two writers into one slot. Re-read under the guard before unlinking.
+ * Serialize every acquire/release pathname transition. The guard carries the
+ * same process identity as the slot lock, so a crash in takeover is recoverable
+ * instead of wedging the slot forever. Empty guards get a short grace period
+ * for the creator to publish their owner record.
  */
-async function reclaimStaleLock(lockPath: string): Promise<boolean> {
+async function acquireTransition(
+  lockPath: string,
+): Promise<string | undefined> {
   const guardPath = `${lockPath}.takeover`;
-  try {
-    await mkdir(guardPath);
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw e;
-  }
-  try {
-    const data = await readFile(lockPath, "utf8").catch(() => undefined);
-    if (!data) return true;
-    const { pid, boot, startIdentity } = parseLock(data);
-    if (Number.isFinite(pid) && lockHolderLive(pid, boot, startIdentity)) {
-      return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const token = randomUUID();
+    try {
+      await mkdir(guardPath);
+      await writeFile(join(guardPath, TAKEOVER_OWNER), lockContents(token), {
+        flag: "wx",
+      });
+      return token;
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+        await rm(guardPath, { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+        throw e;
+      }
+      const ownerPath = join(guardPath, TAKEOVER_OWNER);
+      const data = await readFile(ownerPath, "utf8").catch(() => undefined);
+      if (data) {
+        const owner = parseLock(data);
+        if (
+          Number.isFinite(owner.pid) &&
+          lockHolderLive(owner.pid, owner.boot, owner.startIdentity)
+        ) {
+          return undefined;
+        }
+      } else {
+        const info = await stat(guardPath).catch(() => undefined);
+        if (info && Date.now() - info.mtimeMs < EMPTY_GUARD_GRACE_MS) {
+          return undefined;
+        }
+      }
+      // Revalidate after a scheduling turn so a just-created live guard is not
+      // mistaken for the stale record observed above.
+      await sleep(10);
+      const current = await readFile(ownerPath, "utf8").catch(() => undefined);
+      if (current) {
+        const owner = parseLock(current);
+        if (
+          Number.isFinite(owner.pid) &&
+          lockHolderLive(owner.pid, owner.boot, owner.startIdentity)
+        ) {
+          return undefined;
+        }
+      }
+      await rm(guardPath, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
     }
-    await unlink(lockPath).catch((e: unknown) => {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    });
-    return true;
-  } finally {
-    await rmdir(guardPath).catch(() => undefined);
   }
+  return undefined;
+}
+
+async function releaseTransition(
+  lockPath: string,
+  ownerToken: string,
+): Promise<void> {
+  const guardPath = `${lockPath}.takeover`;
+  const data = await readFile(join(guardPath, TAKEOVER_OWNER), "utf8").catch(
+    () => undefined,
+  );
+  if (!data || parseLock(data).ownerToken !== ownerToken) return;
+  await rm(guardPath, { recursive: true, force: true }).catch(() => undefined);
 }
 
 async function acquireLock(lockPath: string): Promise<string> {
   await mkdir(dirname(lockPath), { recursive: true });
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const transition = await acquireTransition(lockPath);
+  if (!transition) throw lockInUse(lockPath);
+  try {
     const ownerToken = randomUUID();
     try {
       await publishLock(lockPath, ownerToken);
       return ownerToken;
     } catch (e: unknown) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      if (attempt < 2 && (await reclaimStaleLock(lockPath))) continue;
-      throw e;
+      const data = await readFile(lockPath, "utf8").catch(() => undefined);
+      if (data) {
+        const owner = parseLock(data);
+        if (
+          Number.isFinite(owner.pid) &&
+          lockHolderLive(owner.pid, owner.boot, owner.startIdentity)
+        ) {
+          throw e;
+        }
+      }
+      await unlink(lockPath).catch((unlinkError: unknown) => {
+        if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw unlinkError;
+        }
+      });
+      await publishLock(lockPath, ownerToken);
+      return ownerToken;
     }
+  } finally {
+    await releaseTransition(lockPath, transition);
   }
-  throw new Error(`lock in use [path=${lockPath}]`);
 }
 
 async function releaseOwnedLock(
   lockPath: string,
   ownerToken: string,
 ): Promise<void> {
-  const data = await readFile(lockPath, "utf8").catch(() => undefined);
-  if (!data || parseLock(data).ownerToken !== ownerToken) return;
-  await unlink(lockPath).catch(() => undefined);
+  // Acquisition and release both use the transition guard, making token check
+  // plus unlink atomic with respect to replacement publication.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const transition = await acquireTransition(lockPath);
+    if (!transition) {
+      await sleep(10);
+      continue;
+    }
+    try {
+      const data = await readFile(lockPath, "utf8").catch(() => undefined);
+      if (!data || parseLock(data).ownerToken !== ownerToken) return;
+      await unlink(lockPath).catch(() => undefined);
+      return;
+    } finally {
+      await releaseTransition(lockPath, transition);
+    }
+  }
 }
 
 const LOGICAL_LOCK_DIR = ".slot-locks";

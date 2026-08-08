@@ -7,6 +7,7 @@ export const FRAME_HEADER_SIZE = 8;
 
 export interface ScanResult {
   baseSeq: number;
+  flags: number;
   frames: Buffer[];
   /** Bytes of non-zero residue after the last valid frame. 0 = clean fill. */
   tornTailBytes: number;
@@ -14,7 +15,11 @@ export interface ScanResult {
   appendOffset: number;
 }
 
-export function buildSegment(baseSeq: number, frames: Buffer[], capacity: number): Buffer {
+export function buildSegment(
+  baseSeq: number,
+  frames: Buffer[],
+  capacity: number,
+): Buffer {
   const buf = Buffer.alloc(capacity);
   SEGMENT_MAGIC.copy(buf, 0);
   buf.writeUInt8(1, 4); // version
@@ -28,7 +33,11 @@ export function buildSegment(baseSeq: number, frames: Buffer[], capacity: number
 }
 
 /** Returns the new offset, or -1 when the frame does not fit. */
-export function appendFrame(buf: Buffer, offset: number, payload: Buffer): number {
+export function appendFrame(
+  buf: Buffer,
+  offset: number,
+  payload: Buffer,
+): number {
   const need = FRAME_HEADER_SIZE + payload.length;
   if (offset + need > buf.length) return -1;
   // CRC covers (payloadLen, payload) together -- not the payload alone.
@@ -42,10 +51,14 @@ export function appendFrame(buf: Buffer, offset: number, payload: Buffer): numbe
 }
 
 export function scanSegment(buf: Buffer): ScanResult {
-  if (buf.length < SEGMENT_HEADER_SIZE || !buf.subarray(0, 4).equals(SEGMENT_MAGIC)) {
+  if (
+    buf.length < SEGMENT_HEADER_SIZE ||
+    !buf.subarray(0, 4).equals(SEGMENT_MAGIC)
+  ) {
     throw new Error("segment: bad magic");
   }
   if (buf.readUInt8(4) !== 1) throw new Error("segment: unsupported version");
+  const flags = buf.readUInt8(5);
   const baseSeq = Number(buf.readBigUInt64LE(8));
 
   const frames: Buffer[] = [];
@@ -58,7 +71,11 @@ export function scanSegment(buf: Buffer): ScanResult {
     if (o + FRAME_HEADER_SIZE + len > buf.length) break; // declared length overruns
     const lenAndPayload = buf.subarray(o + 4, o + FRAME_HEADER_SIZE + len);
     if (crc32c(lenAndPayload) !== crc) break; // first bad CRC ends the chain
-    frames.push(Buffer.from(buf.subarray(o + FRAME_HEADER_SIZE, o + FRAME_HEADER_SIZE + len)));
+    frames.push(
+      Buffer.from(
+        buf.subarray(o + FRAME_HEADER_SIZE, o + FRAME_HEADER_SIZE + len),
+      ),
+    );
     o += FRAME_HEADER_SIZE + len;
   }
 
@@ -68,5 +85,5 @@ export function scanSegment(buf: Buffer): ScanResult {
   let torn = 0;
   for (let i = o; i < buf.length; i++) if (buf[i] !== 0) torn++;
 
-  return { baseSeq, frames, tornTailBytes: torn, appendOffset: o };
+  return { baseSeq, flags, frames, tornTailBytes: torn, appendOffset: o };
 }

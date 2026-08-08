@@ -1,17 +1,29 @@
 import { describe, it, expect } from "vitest";
-import { encodeChunk, decodeDictFile, DICT_HEADER } from "../../../src/qwp/sf/symbolDictFile";
+import {
+  encodeChunk,
+  decodeDictFile,
+  DICT_HEADER,
+} from "../../../src/qwp/sf/symbolDictFile";
 import { SymbolDict } from "../../../src/qwp/protocol/symbolDict";
 
 describe("persisted symbol dictionary", () => {
   it("round-trips chunks in order", () => {
-    const file = Buffer.concat([DICT_HEADER, encodeChunk(["a", "b"]), encodeChunk(["c"])]);
+    const file = Buffer.concat([
+      DICT_HEADER,
+      encodeChunk(["a", "b"]),
+      encodeChunk(["c"]),
+    ]);
     expect(decodeDictFile(file)).toEqual(["a", "b", "c"]);
   });
 
-  it("stops at the first bad chunk CRC, keeping the prefix", () => {
-    const file = Buffer.concat([DICT_HEADER, encodeChunk(["a"]), encodeChunk(["b"])]);
+  it("rejects a complete chunk with a bad CRC", () => {
+    const file = Buffer.concat([
+      DICT_HEADER,
+      encodeChunk(["a"]),
+      encodeChunk(["b"]),
+    ]);
     file[file.length - 1] ^= 0xff;
-    expect(decodeDictFile(file)).toEqual(["a"]);
+    expect(() => decodeDictFile(file)).toThrow(/CRC mismatch/i);
   });
 
   it("recovery preserves positional ids and does NOT de-duplicate", () => {

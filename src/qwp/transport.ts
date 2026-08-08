@@ -92,12 +92,19 @@ export class QwpTransport implements SenderTransport {
   /** Orphan drainers launched on startup (spec 8.4); stopped on close(). */
   private drainStarted = false;
   private drainers: OrphanDrainer[] = [];
+  private drainerStartPromise?: Promise<void>;
   /** Poison-frame escalation (spec 7.4): strikes AND dwell, keyed on FSN. */
   private readonly poison: PoisonDetector;
   private poisoned = false;
   /** In-flight public connect, so an explicit connect() reuses the constructor's
    *  fire-and-forget one instead of double-opening the engine (spec 4.3). */
   private connectPromise?: Promise<boolean>;
+  /** Includes post-upgrade catch-up/replay so only one loop mutates wire state. */
+  private connectLoopPromise?: Promise<boolean>;
+  /** Serialize whole publish batches so split frames and ACK correlation stay ordered. */
+  private publishTail: Promise<void> = Promise.resolve();
+  /** Reconnect replay and producer publication share one wire drain. */
+  private drainTail: Promise<void> = Promise.resolve();
 
   constructor(options: SenderOptions) {
     this.options = options;
@@ -209,15 +216,38 @@ export class QwpTransport implements SenderTransport {
       this.engine.isDisk
     ) {
       this.drainStarted = true;
-      void startOrphanDrainers(
+      this.drainerStartPromise = startOrphanDrainers(
         this.options,
         this.endpoints,
         this.tracker,
         (e) => this.emit(e),
         (d) => this.drainers.push(d), // register eagerly so close() can stop them
+        () => this.closed,
+      ).then(
+        () => undefined,
+        (e: unknown) => {
+          this.emit(
+            new SenderError(
+              Category.UNKNOWN,
+              Policy.RETRIABLE,
+              `orphan drainer startup failed: ${(e as Error)?.message ?? e}`,
+            ),
+          );
+        },
       );
     }
-    return this.connectLoop();
+    return this.runConnectLoop();
+  }
+
+  private runConnectLoop(): Promise<boolean> {
+    if (this.connectLoopPromise) return this.connectLoopPromise;
+    const running = this.connectLoop().finally(() => {
+      if (this.connectLoopPromise === running) {
+        this.connectLoopPromise = undefined;
+      }
+    });
+    this.connectLoopPromise = running;
+    return running;
   }
 
   get connectedEndpoint(): Endpoint | undefined {
@@ -298,7 +328,7 @@ export class QwpTransport implements SenderTransport {
         await this.sendDictCatchUp();
         // Replay frames published beyond the acked FSN (memory-mode retention).
         this.sentUpTo = this.engine.ackedFsn;
-        await this.drain();
+        await this.queueDrain();
         return true;
       } catch (e) {
         if (this.activeConnectionGeneration === generation) {
@@ -362,7 +392,7 @@ export class QwpTransport implements SenderTransport {
     await this.ws?.close();
     this.ws = undefined;
     this.tracker.beginRound();
-    await this.connectLoop();
+    await this.runConnectLoop();
   }
 
   async send(data: Buffer): Promise<boolean> {
@@ -379,7 +409,32 @@ export class QwpTransport implements SenderTransport {
    * current connection has not yet sent. flush() therefore resolves on
    * publish, not on server ACK (spec 4.4).
    */
-  async sendFrames(frames: Buffer[]): Promise<boolean> {
+  sendFrames(frames: Buffer[]): Promise<boolean> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
+    if (this.poisoned) {
+      return Promise.reject(
+        new Error("QWP transport is terminal (poisoned frame)"),
+      );
+    }
+    if (this.closed)
+      return Promise.reject(new Error("QWP transport is closed"));
+    // Capture this batch's dictionary target before another flush seals and
+    // overwrites the buffer's pending target.
+    const deltaTarget = this.buffer?.pendingDeltaTarget ?? -1;
+    const run = this.publishTail.then(() =>
+      this.publishFrames(frames, deltaTarget),
+    );
+    this.publishTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async publishFrames(
+    frames: Buffer[],
+    deltaTarget: number,
+  ): Promise<boolean> {
     if (this.terminalError) throw this.terminalError;
     if (this.poisoned)
       throw new Error("QWP transport is terminal (poisoned frame)");
@@ -408,19 +463,36 @@ export class QwpTransport implements SenderTransport {
       // Replayed frames (drain) never call this, so a reconnect cannot double-
       // advance it. It is idempotent and forward-only, so per-frame and
       // per-(whole-)batch confirmation are equivalent.
-      this.buffer?.confirmDeltaPublished();
+      this.buffer?.confirmDeltaPublished(deltaTarget);
     }
-    await this.drain();
+    await this.queueDrain();
     return true;
+  }
+
+  private queueDrain(): Promise<void> {
+    const run = this.drainTail.then(() => this.drain());
+    this.drainTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   /** Sends everything published beyond what the current connection has sent. */
   private async drain(): Promise<void> {
-    if (!this.ws) return;
+    const ws = this.ws;
+    const generation = this.activeConnectionGeneration;
+    if (!ws || generation === 0) return;
     const pending = this.engine.framesFrom(this.sentUpTo + 1);
     for (const f of pending) {
-      await this.ws.sendBinary(f);
+      if (ws !== this.ws || generation !== this.activeConnectionGeneration) {
+        break;
+      }
+      // Register before awaiting the write: an immediate local response can
+      // arrive before the write callback resumes this coroutine.
       this.acks.onFrameSent();
+      await ws.sendBinary(f);
+      if (generation !== this.activeConnectionGeneration) break;
       this.sentUpTo++;
     }
   }
@@ -557,8 +629,16 @@ export class QwpTransport implements SenderTransport {
     // orderly close (NORMAL/GONE) or a connection that sent nothing never counts
     // — otherwise a graceful failover would false-positive into a terminal.
     if (!info.orderly && info.framesSent > 0 && !this.poisoned) {
-      const fsn = Math.max(this.engine.ackedFsn, this.acks.acked) + 1;
-      if (fsn >= 0 && this.poison.strike(fsn)) {
+      // Poison follows the retained replay head, not the highest commit-level
+      // OK. In durable mode an accepted frame remains retained until its table
+      // watermark arrives; striking OK+1 can target an unpublished FSN and can
+      // never be cleared by replay acceptance.
+      const fsn = this.engine.ackedFsn + 1;
+      if (
+        fsn >= 0 &&
+        fsn <= this.engine.publishedFsn &&
+        this.poison.strike(fsn)
+      ) {
         this.poisonEscalated(
           fsn,
           "connection dropped repeatedly while the head-of-line frame was unacked",
@@ -576,7 +656,18 @@ export class QwpTransport implements SenderTransport {
     if (this.reconnecting || this.closed) return;
     this.reconnecting = true;
     try {
-      await this.connectLoop();
+      await this.runConnectLoop();
+    } catch (e) {
+      if (!this.closed) {
+        const auth = e instanceof QwpUpgradeError && e.kind === "auth";
+        this.latchTerminal(
+          new SenderError(
+            auth ? Category.SECURITY_ERROR : Category.PROTOCOL_VIOLATION,
+            Policy.TERMINAL,
+            `QWP reconnect failed terminally: ${(e as Error)?.message ?? e}`,
+          ),
+        );
+      }
     } finally {
       this.reconnecting = false;
     }
@@ -589,6 +680,12 @@ export class QwpTransport implements SenderTransport {
 
   async close(): Promise<void> {
     this.closed = true;
+    await this.publishTail;
+    await this.drainTail;
+    for (const d of this.drainers) d.stop();
+    // Startup may be waiting for a drainer slot. Stopping current workers wakes
+    // it; shouldStop prevents it from constructing any post-close workers.
+    await this.drainerStartPromise;
     for (const d of this.drainers) d.stop();
     await Promise.all(
       this.drainers.map((d) => d.finished.catch(() => undefined)),

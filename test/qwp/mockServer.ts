@@ -9,12 +9,18 @@ export interface MockOptions {
   statusFor?: (frameIndex: number) => number;
   /** Build a complete response payload for a frame (overrides statusFor). */
   responseFor?: (frameIndex: number, sequence: number) => Buffer;
-  /** Drop the connection after N frames. */
+  /** Build multiple responses written in one chunk (overrides responseFor). */
+  responsesFor?: (frameIndex: number, sequence: number) => Buffer[];
+  /** Drop the connection before responding after N total frames. */
   dropAfter?: number;
+  /** Drop after writing the selected response(s). */
+  dropAfterResponseFor?: (frameIndex: number) => boolean;
   upgradeStatus?: number;
   upgradeHeaders?: string;
-  /** Echo X-QWP-Durable-Ack: enabled on the 101 (durable-ack capable server). */
+  /** Echo X-QWP-Durable-Ack: enabled on every 101. */
   durableAck?: boolean;
+  /** Per-connection durable capability override. */
+  durableAckFor?: (connectionIndex: number) => boolean;
 }
 
 function tableEntries(tables: [string, bigint][]): Buffer {
@@ -134,10 +140,11 @@ export class MockQwpServer {
 
   async start(opts: MockOptions = {}): Promise<number> {
     return new Promise((resolve) => {
+      let connectionIndex = 0;
       this.server = createServer((sock: Socket) => {
         this.sockets.add(sock);
         sock.on("close", () => this.sockets.delete(sock));
-        this.onConn(sock, opts);
+        this.onConn(sock, opts, connectionIndex++);
       });
       this.server.listen(0, "127.0.0.1", () =>
         resolve((this.server!.address() as AddressInfo).port),
@@ -158,7 +165,11 @@ export class MockQwpServer {
     await new Promise<void>((r) => this.server?.close(() => r()));
   }
 
-  private onConn(sock: Socket, opts: MockOptions): void {
+  private onConn(
+    sock: Socket,
+    opts: MockOptions,
+    connectionIndex: number,
+  ): void {
     let handshaken = false;
     let seq = 0;
     const reader = new MaskedFrameReader();
@@ -183,7 +194,7 @@ export class MockQwpServer {
           "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
             `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n` +
             "X-QWP-Version: 1\r\nX-QWP-Max-Batch-Size: 1048576\r\n" +
-            `${opts.durableAck ? "X-QWP-Durable-Ack: enabled\r\n" : ""}\r\n`,
+            `${(opts.durableAckFor?.(connectionIndex) ?? opts.durableAck) ? "X-QWP-Durable-Ack: enabled\r\n" : ""}\r\n`,
         );
         handshaken = true;
         return;
@@ -199,12 +210,23 @@ export class MockQwpServer {
         }
         const currentSeq = seq++;
         const status = opts.statusFor ? opts.statusFor(idx) : STATUS.OK;
-        const body = opts.responseFor
-          ? opts.responseFor(idx, currentSeq)
-          : status === STATUS.OK
-            ? okResponse(currentSeq)
-            : errorResponse(status, currentSeq, "mock");
-        sock.write(encodeServerFrame(0x2, body));
+        const bodies = opts.responsesFor
+          ? opts.responsesFor(idx, currentSeq)
+          : [
+              opts.responseFor
+                ? opts.responseFor(idx, currentSeq)
+                : status === STATUS.OK
+                  ? okResponse(currentSeq)
+                  : errorResponse(status, currentSeq, "mock"),
+            ];
+        const responseFrames = Buffer.concat(
+          bodies.map((body) => encodeServerFrame(0x2, body)),
+        );
+        if (opts.dropAfterResponseFor?.(idx)) {
+          sock.write(responseFrames, () => sock.destroy());
+        } else {
+          sock.write(responseFrames);
+        }
       }
     });
   }

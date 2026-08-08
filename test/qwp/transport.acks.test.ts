@@ -48,6 +48,70 @@ describe("QwpTransport ack handling", () => {
     await t.close();
   });
 
+  it("does not poison an unpublished FSN while waiting for durable ACK", async () => {
+    mock = new MockQwpServer();
+    const port = await mock.start({
+      durableAck: true,
+      responseFor: (_idx, seq) => okResponse(seq, [["trades", 10n]]),
+      // Twice accept at the OK level, then drop before durability. The third
+      // connection stays up so its durable watermark can retire the frame.
+      dropAfterResponseFor: (idx) => idx < 2,
+    });
+    const t = new QwpTransport(
+      new SenderOptions(
+        `ws::addr=127.0.0.1:${port};request_durable_ack=on;` +
+          `max_frame_rejections=2;poison_min_escalation_window_millis=0;`,
+      ),
+    );
+    const errors: SenderError[] = [];
+    t.onError((e) => errors.push(e));
+    await t.connect();
+    await t.sendFrames([Buffer.from("QWP1-durable--")]);
+
+    const replayDeadline = Date.now() + 3000;
+    while (mock.frames.length < 3 && Date.now() < replayDeadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(mock.frames.length).toBeGreaterThanOrEqual(3);
+    expect(errors.some((e) => e.category === Category.PROTOCOL_VIOLATION)).toBe(
+      false,
+    );
+    expect(t.ackedFsn).toBe(-1);
+
+    mock.sendResponse(durableAckResponse([["trades", 10n]]));
+    const ackDeadline = Date.now() + 1000;
+    while (t.ackedFsn < 0 && Date.now() < ackDeadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(t.ackedFsn).toBe(0);
+    await t.close();
+  });
+
+  it("latches a reconnect capability failure without an unhandled rejection", async () => {
+    mock = new MockQwpServer();
+    const port = await mock.start({
+      durableAckFor: (connection) => connection === 0,
+      dropAfter: 1,
+    });
+    const t = new QwpTransport(
+      new SenderOptions(`ws::addr=127.0.0.1:${port};request_durable_ack=on;`),
+    );
+    const errors: SenderError[] = [];
+    t.onError((e) => errors.push(e));
+    await t.connect();
+    await t.sendFrames([Buffer.from("QWP1-reconnect-")]).catch(() => undefined);
+
+    const deadline = Date.now() + 2000;
+    while (errors.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(errors[0].policy).toBe("TERMINAL");
+    await expect(t.sendFrames([Buffer.from("QWP1-after----")])).rejects.toBe(
+      errors[0],
+    );
+    await t.close();
+  });
+
   it("latches a terminal NACK and never trims through it", async () => {
     const errors: SenderError[] = [];
     const t = await connected({

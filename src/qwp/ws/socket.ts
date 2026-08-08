@@ -66,13 +66,7 @@ export class QwpWebSocket {
     // Neither WebSocket framing errors nor application response-decoder errors
     // may escape an EventEmitter callback: an uncaught throw here terminates the
     // host process. Convert both into one abrupt-close notification instead.
-    this.socket.on("data", (chunk: Buffer) => {
-      try {
-        this.onData(chunk);
-      } catch {
-        this.failConnection();
-      }
-    });
+    this.socket.on("data", (chunk: Buffer) => this.handleDataSafely(chunk));
     this.socket.on("close", () => this.handleClosed());
     this.socket.on("error", () => this.handleClosed());
     // Keepalive PING (spec 9.1, durable_ack_keepalive_interval_millis).
@@ -140,9 +134,14 @@ export class QwpWebSocket {
               opts.onClose,
               opts.keepaliveMs,
             );
-            if (res.leftover.length > 0) ws.onData(res.leftover);
+            // Resolve before dispatching bytes coalesced with the HTTP 101.
+            // Consumers such as QwpTransport must activate their connection
+            // generation before any response/close callback can arrive.
             settled = true;
             resolve(ws);
+            if (res.leftover.length > 0) {
+              queueMicrotask(() => ws.handleDataSafely(res.leftover));
+            }
           } catch (e) {
             socket.destroy();
             fail(e as Error);
@@ -151,6 +150,15 @@ export class QwpWebSocket {
         socket.on("data", onHeaderData);
       });
     });
+  }
+
+  private handleDataSafely(chunk: Buffer): void {
+    if (this.closed) return;
+    try {
+      this.onData(chunk);
+    } catch {
+      this.failConnection();
+    }
   }
 
   private onData(chunk: Buffer): void {
