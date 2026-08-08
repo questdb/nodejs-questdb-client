@@ -44,10 +44,11 @@ finalised. What it established:
   delta: a 5% difference between two arms with ±3% rme each is not a result.
 
 **Not covered by the probe, so treat as an assumption:** that `beforeAll` runs
-in a `.bench.ts` file. Task 7 relies on it for the temp directory and the disk
-baseline. If it turns out not to fire, move that setup to module scope — the
-file is loaded once per run, so top-level code works either way. Check this
-first when running Task 7, before concluding anything about the numbers.
+in a `.bench.ts` file. Task 7 relies on it for the temp directory, the disk
+baseline *and* opening both engines. If it does not fire, the engines are
+`undefined` and the task crashes — loudly, which is the good case. Move that
+setup to module scope if so; the file is loaded once per run, so top-level code
+works either way. Check this before concluding anything about the numbers.
 
 ## Verified API surface
 
@@ -89,7 +90,7 @@ function scanSegment(buf: Buffer): ScanResult
 | `benchmarks/buffer.bench.ts` | `QwpBuffer` builder chain |
 | `benchmarks/sf.bench.ts` | `SfEngine.append`, `scanSegment`, disk baseline |
 | `benchmarks/e2e.ts` | Live-server latency, both flush contracts |
-| `benchmarks/validate.test.ts` | The four spec §8 assertions, run by `pnpm test` |
+| `benchmarks/validate.test.ts` | The five spec §8 assertions, run by `pnpm test` |
 | `package.json` | **modify** — `bench` and `bench:e2e` scripts |
 | `vitest.config.ts` | **modify or create** — include `benchmarks/` for bench mode |
 
@@ -618,7 +619,6 @@ Covers `writeColumn` per type, whole-frame `encodeFrame`, gorilla on and off, an
 ```ts
 // benchmarks/encoder.bench.ts
 import { bench, describe } from "vitest";
-import { Buffer } from "node:buffer";
 import { QwpTableBuffer } from "../src/qwp/protocol/tableBuffer";
 import { encodeFrame } from "../src/qwp/protocol/frameEncoder";
 import { SymbolDict } from "../src/qwp/protocol/symbolDict";
@@ -633,6 +633,14 @@ import { WORKLOADS } from "./workloads";
 import { floorWriteLongs, floorInternSymbols } from "./floors";
 
 const N = 10_000;
+
+/**
+ * Consumes every result so neither the encoder nor the floor can be optimised
+ * away. Built in rather than added reactively: a floor that gets eliminated
+ * while the encoder does not (or vice versa) produces a ratio that looks like
+ * a finding, and the whole point of the floor is that the ratio is trustworthy.
+ */
+let sink = 0;
 
 /**
  * Every column family the workloads generate must be handled here. Dropping
@@ -655,12 +663,16 @@ function buildTable(name: string, rows: ReturnType<typeof WORKLOADS.trades.rows>
 describe("frame encode", () => {
   for (const name of ["trades", "wide", "sparse"] as const) {
     const rows = WORKLOADS[name].rows(N);
-    const table = buildTable(WORKLOADS[name].name, rows);
+    // Use the workload's own table name, matching Tasks 4 and 6. Passing
+    // WORKLOADS[name].name instead ("trades" vs "bench_trades") would encode a
+    // different table-name length and make frame sizes differ between tasks
+    // measuring nominally the same workload.
+    const table = buildTable(rows[0].table, rows);
     bench(`encodeFrame / ${name} / gorilla off`, () => {
-      encodeFrame([table], { gorilla: false });
+      sink += encodeFrame([table], { gorilla: false }).length;
     });
     bench(`encodeFrame / ${name} / gorilla on`, () => {
-      encodeFrame([table], { gorilla: true });
+      sink += encodeFrame([table], { gorilla: true }).length;
     });
   }
 });
@@ -669,7 +681,7 @@ describe("floor comparison", () => {
   const longs = WORKLOADS.sparse.rows(N).flatMap((r) => r.longs.map(([, v]) => v));
 
   bench("FLOOR writeBigInt64LE loop", () => {
-    floorWriteLongs(longs);
+    sink += floorWriteLongs(longs).length;
   });
 
   const t = new QwpTableBuffer("floor_cmp");
@@ -678,7 +690,7 @@ describe("floor comparison", () => {
     t.nextRow();
   }
   bench("encodeFrame single long column", () => {
-    encodeFrame([t], { gorilla: false });
+    sink += encodeFrame([t], { gorilla: false }).length;
   });
 });
 
@@ -686,14 +698,18 @@ describe("symbol interning", () => {
   const syms = WORKLOADS.highCardSymbol.rows(N).map((r) => r.symbols[0][1]);
 
   bench("FLOOR naive Map intern", () => {
-    floorInternSymbols(syms);
+    sink += floorInternSymbols(syms).length;
   });
 
   bench("SymbolDict.getOrAdd", () => {
     const d = new SymbolDict();
     for (const s of syms) d.getOrAdd(s);
+    sink += d.size();
   });
 });
+
+// Keeps `sink` observable so the compiler cannot treat it as dead.
+export const _sink = () => sink;
 ```
 
 - [ ] **Step 2: Run it**
@@ -708,7 +724,7 @@ label the column honestly — quoting `hz` as a row rate understates it 10,000×
 - [ ] **Step 3: Sanity-read the output before trusting it**
 
 Two checks before recording anything:
-- `encodeFrame single long column` should be **slower** than the floor, not faster. Faster than a bare write loop means the benchmark is optimising away — add a sink (e.g. accumulate `result.length` into a module-level variable) and re-run.
+- `encodeFrame single long column` should be **slower** than the floor, not faster. The `sink` accumulator already guards against elimination; if the encoder still beats a bare write loop, something is wrong with the comparison itself, not with dead-code removal.
 - `gorilla on` should produce a **smaller frame** than `gorilla off` on `trades`
   and `wide`, whose timestamps are perfectly regular (`BASE_TS + i × 1000`) so
   every delta-of-delta is 0 and each row costs one bit. If it does not, the
@@ -752,7 +768,19 @@ import { WORKLOADS } from "./workloads";
 const N = 10_000;
 const CAP = 1 << 30; // large enough that nothing splits
 
-/** Handles every column family the workloads generate — see Task 5's note. */
+/** See Task 5's note — consumes results so nothing is optimised away. */
+let sink = 0;
+
+/**
+ * Handles every column family the workloads generate — see Task 5's note.
+ *
+ * Note `Number(v)`: `intColumn` takes a `number` while the workloads carry
+ * `bigint`, so this layer pays a per-value conversion the encoder benchmarks in
+ * Task 5 do not (they push the bigint straight into `values`). The two tasks are
+ * therefore not directly comparable — some of the gap is representation, not
+ * buffer overhead. All generated values are well under 2^53, so no precision is
+ * lost; raise N or change a generator and re-check that.
+ */
 function fill(b: QwpBuffer, rows: ReturnType<typeof WORKLOADS.trades.rows>): void {
   for (const row of rows) {
     b.table(row.table);
@@ -771,7 +799,7 @@ describe("QwpBuffer build + seal", () => {
     bench(`build+seal / ${name}`, () => {
       const b = new QwpBuffer();
       fill(b, rows);
-      b.sealFrames(CAP);
+      sink += b.sealFrames(CAP).length;
     });
   }
 });
@@ -782,7 +810,7 @@ describe("dictionary mode", () => {
   bench("full-dict (no dict attached)", () => {
     const b = new QwpBuffer();
     fill(b, rows);
-    b.sealFrames(CAP);
+    sink += b.sealFrames(CAP).length;
   });
 
   // Steady state needs BOTH halves: a populated dictionary and a confirmed
@@ -804,16 +832,18 @@ describe("dictionary mode", () => {
     b.attachDict(primed);
     b.setConfirmedMaxId(primed.size() - 1);
     fill(b, rows);
-    b.sealFrames(CAP);
+    sink += b.sealFrames(CAP).length;
   });
 
   bench("delta-dict (cold, first batch)", () => {
     const b = new QwpBuffer();
     b.attachDict(new SymbolDict());
     fill(b, rows);
-    b.sealFrames(CAP);
+    sink += b.sealFrames(CAP).length;
   });
 });
+
+export const _sink = () => sink;
 ```
 
 - [ ] **Step 2: Run it**
@@ -1229,8 +1259,9 @@ df -T "$QWP_BENCH_DIR"   # type must not be tmpfs
 byte movement — no null bitmap, no schema, no framing. The floor is not a
 target. The gap between floor and encoder is what the protocol costs.
 
-If the encoder ever beats its floor, the benchmark is optimising away rather
-than the encoder being fast. Add a sink and re-run.
+Both sides accumulate into a `sink` so neither can be optimised away. If the
+encoder still beats its floor, the comparison itself is wrong — not dead-code
+removal.
 
 ## What this suite does not cover
 
@@ -1255,11 +1286,72 @@ git commit -m "docs: how to run the QWP benchmarks and how to read them"
 
 ## Self-Review
 
-**1. Spec coverage.** Four workloads (Task 1 — §5). Floors (Task 2 — §6). Harness and scripts (Task 3 — §3). Validation assertions (Task 4 — §8). Encoder (Task 5 — §4). Buffer (Task 6 — §4). SF plus disk baseline (Task 7 — §4, §7). E2E, both contracts, one server, three repeats (Task 8 — §4, §7). Docs (Task 9).
+**1. Spec coverage**, checked clause by clause against the spec as it now stands:
 
-**2. Placeholder scan.** None. Task 4 Step 3 deliberately asks the implementer to tighten a bound *after* measuring — that is a real step with a real action, not a TODO.
+| Spec | Task |
+|---|---|
+| §3 harness, two entry points | 3 |
+| §4 five files and their reporting column | 3, 5, 6, 7, 8 |
+| §5 four workloads incl. varchar in `wide` | 1 |
+| §6 three floors | 2 |
+| §7 guard 1 — write to real disk (`QWP_BENCH_DIR`) | 7, 8 |
+| §7 guard 2 — `dd` baseline before results | 7 |
+| §7 guard 3 — one server, both arms | 8 |
+| §7 guard 4 — three repeats, report spread | 8 |
+| §8 five assertions | 4 |
+| §9 out of scope | honoured; nothing benchmarks reconnect, replay, drainers or concurrency |
 
-**3. Type consistency.** `Row`/`Workload`/`WORKLOADS` (Task 1) are consumed in Tasks 4, 5, 6, 8. `floorWriteLongs`/`floorInternSymbols` (Task 2) are used in Task 5. All `src/` imports were checked against the shipped code and are listed under "Verified API surface" above.
+No spec clause is unimplemented. The one that *was* — "SF append does not
+dominate whole-flush cost" — was removed from the spec in the seventh pass
+rather than turned into a task, because nothing here measures whole-flush cost
+at a granularity that makes the ratio meaningful.
+
+**2. Placeholder scan.** None. Task 4 Step 3 deliberately asks the implementer to
+tighten the bytes/row bound *after* measuring — a real action, not a TODO — and
+the spec now describes that wide-then-tighten approach rather than asserting an
+unmeasured band.
+
+**3. Type consistency.** `Row`/`Workload`/`WorkloadName`/`WORKLOADS` (Task 1) are
+consumed in Tasks 4, 5, 6 and 8; `WORKLOADS` is keyed on the literal union so a
+misspelled name fails to compile. `floorWriteLongs`/`floorInternSymbols` (Task 2)
+are used in Task 5. Each bench file declares its own module-level `sink`, so the
+two `_sink` exports do not collide. All `src/` imports were checked against the
+shipped code and are listed under "Verified API surface".
+
+**4. Cross-document consistency.** Every fact stated in more than one place —
+`hz` versus rows/s, the tmpfs hazard, the assertion list, the bytes/row band, the
+Gorilla scope limit — was reconciled across the spec, this plan and
+`benchmarks/README.md` in the seventh pass. That class of drift accounted for
+five of the defects found, because each correction has three homes and early
+passes updated only one.
+
+**Eighth review pass — re-read Tasks 5 and 6 after the fifth pass changed them,
+and audited this Self-Review; six defects:**
+
+25. **Neither the encoder nor its floor consumed its result**, so both could be
+    optimised away — and unequally, which would produce a ratio that looks like a
+    finding when the floor is eliminated and the encoder is not. The whole value
+    of a floor is that the ratio is trustworthy. Every arm in Tasks 5 and 6 now
+    accumulates into a module-level `sink`, built in rather than offered as a
+    remedy after the fact.
+26. **`Buffer` was imported and unused** in `encoder.bench.ts`; `pnpm eslint`
+    would have flagged it.
+27. **Task 5 encoded a different table name than Tasks 4 and 6** — it passed
+    `WORKLOADS[name].name` (`"trades"`) while the others use `row.table`
+    (`"bench_trades"`), so frame sizes differed between tasks measuring nominally
+    the same workload. Now uses `rows[0].table` throughout.
+28. **Task 6 pays a `bigint`→`number` conversion Task 5 does not**, because
+    `intColumn` takes a `number` while the workloads carry `bigint`. Part of the
+    gap between the two tasks is representation, not buffer overhead. Documented
+    at `fill()`, with the note that all values sit well under 2^53 today and that
+    raising `N` requires re-checking.
+29. **The File Structure table and the README both said "four" assertions** after
+    the fifth pass added a fifth.
+30. **This Self-Review's coverage claim was a flat list** asserting "§8"
+    wholesale — which is exactly how the missing SF-ratio assertion (defect 22)
+    stayed hidden for six passes. It is now a clause-by-clause table, with a
+    fourth check added for cross-document consistency, the class that produced
+    five of the defects found.
 
 **Seventh review pass — Task 9 and a spec↔plan sweep; five defects:**
 
