@@ -26,17 +26,28 @@ export class AckTracker {
     this.nextWireSeq++;
   }
 
-  /** Returns the new acked FSN, or null when the ACK is not applicable. */
+  /** Returns the new cumulative acked FSN, or null when the ACK is not applicable. */
   onAck(wireSeq: number): number | null {
+    const fsn = this.fsnForAck(wireSeq);
+    if (fsn === null) return null;
+    if (fsn > this.ackedFsn) this.ackedFsn = fsn;
+    return this.ackedFsn;
+  }
+
+  /**
+   * Maps an OK's wire sequence to the exact ring FSN it names, with the same
+   * catch-up exclusion and highest-sent clamp as {@link onAck}, but without
+   * advancing cumulative state. Durable-ACK mode needs the exact FSN so it can
+   * retain that frame until its table transactions are durable.
+   */
+  fsnForAck(wireSeq: number): number | null {
     // An ACK for a catch-up frame (lowest seqs) must never trim a ring frame.
     if (wireSeq < this.catchUpFrames) return null;
     const ringIndex = wireSeq - this.catchUpFrames;
     const highestRingIndex = this.nextWireSeq - 1 - this.catchUpFrames;
     if (highestRingIndex < 0) return null; // ACK before any ring send
     const capped = Math.max(0, Math.min(ringIndex, highestRingIndex));
-    const fsn = this.fsnAtZero + capped;
-    if (fsn > this.ackedFsn) this.ackedFsn = fsn;
-    return this.ackedFsn;
+    return this.fsnAtZero + capped;
   }
 
   /**

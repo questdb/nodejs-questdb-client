@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { createServer, Server } from "node:net";
+import { AddressInfo } from "node:net";
+import { createServer, Server, Socket } from "node:net";
 import { createHash } from "node:crypto";
 import { QwpWebSocket } from "../../src/qwp/ws/socket";
 import { encodeClientFrame, OPCODE } from "../../src/qwp/ws/frame";
@@ -37,7 +38,9 @@ function maskedFrameDecoder() {
       const keyLen = masked ? 4 : 0;
       if (buf.length < off + keyLen + len) break;
       const key = buf.subarray(off, off + keyLen);
-      const payload = Buffer.from(buf.subarray(off + keyLen, off + keyLen + len));
+      const payload = Buffer.from(
+        buf.subarray(off + keyLen, off + keyLen + len),
+      );
       for (let i = 0; i < payload.length; i++) payload[i] ^= key[i & 3];
       buf = buf.subarray(off + keyLen + len);
       out.push({ opcode, payload });
@@ -47,7 +50,10 @@ function maskedFrameDecoder() {
 }
 
 /** Minimal QWP-ish websocket server: completes the upgrade, echoes nothing. */
-function startServer(onBinary: (b: Buffer) => void): Promise<number> {
+function startServer(
+  onBinary: (b: Buffer) => void,
+  afterHandshake?: (socket: Socket) => void,
+): Promise<number> {
   return new Promise((resolve) => {
     server = createServer((sock) => {
       let handshaken = false;
@@ -65,15 +71,19 @@ function startServer(onBinary: (b: Buffer) => void): Promise<number> {
               "X-QWP-Version: 1\r\nX-QWP-Max-Batch-Size: 1048576\r\n\r\n",
           );
           handshaken = true;
+          if (afterHandshake) setTimeout(() => afterHandshake(sock), 10);
           return;
         }
         for (const m of decode(chunk)) {
           if (m.opcode === OPCODE.BINARY) onBinary(m.payload);
-          if (m.opcode === OPCODE.PING) sock.write(encodeClientFrame(OPCODE.PONG, m.payload));
+          if (m.opcode === OPCODE.PING)
+            sock.write(encodeClientFrame(OPCODE.PONG, m.payload));
         }
       });
     });
-    server.listen(0, "127.0.0.1", () => resolve((server!.address() as any).port));
+    server.listen(0, "127.0.0.1", () =>
+      resolve((server!.address() as AddressInfo).port),
+    );
   });
 }
 
@@ -95,6 +105,47 @@ describe("QwpWebSocket", () => {
     await ws.close();
   });
 
+  it("turns malformed inbound framing into one abrupt close", async () => {
+    const closes: { orderly: boolean; framesSent: number }[] = [];
+    const port = await startServer(
+      () => undefined,
+      (sock) => sock.write(Buffer.from([0x82, 0x80])), // masked server frame
+    );
+    const ws = await QwpWebSocket.connect({
+      host: "127.0.0.1",
+      port,
+      tls: false,
+      clientId: "x",
+      onClose: (info) => closes.push(info),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(closes).toEqual([{ orderly: false, framesSent: 0 }]);
+    await ws.close();
+  });
+
+  it("contains an exception thrown by the binary response callback", async () => {
+    const closes: { orderly: boolean; framesSent: number }[] = [];
+    const payload = Buffer.from("bad-qwp-response");
+    const frame = Buffer.concat([Buffer.from([0x82, payload.length]), payload]);
+    const port = await startServer(
+      () => undefined,
+      (sock) => sock.write(frame),
+    );
+    const ws = await QwpWebSocket.connect({
+      host: "127.0.0.1",
+      port,
+      tls: false,
+      clientId: "x",
+      onBinary: () => {
+        throw new Error("decoder rejected payload");
+      },
+      onClose: (info) => closes.push(info),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(closes).toEqual([{ orderly: false, framesSent: 0 }]);
+    await ws.close();
+  });
+
   it("rejects a bad Sec-WebSocket-Accept", async () => {
     server = createServer((sock) => {
       sock.on("data", () =>
@@ -105,10 +156,17 @@ describe("QwpWebSocket", () => {
       );
     });
     const port: number = await new Promise((r) =>
-      server!.listen(0, "127.0.0.1", () => r((server!.address() as any).port)),
+      server!.listen(0, "127.0.0.1", () =>
+        r((server!.address() as AddressInfo).port),
+      ),
     );
     await expect(
-      QwpWebSocket.connect({ host: "127.0.0.1", port, tls: false, clientId: "x" }),
+      QwpWebSocket.connect({
+        host: "127.0.0.1",
+        port,
+        tls: false,
+        clientId: "x",
+      }),
     ).rejects.toThrow(/accept/i);
   });
 });

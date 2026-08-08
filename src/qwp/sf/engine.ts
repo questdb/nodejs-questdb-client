@@ -6,7 +6,12 @@ import { SegmentRing } from "./ring";
 import { acquireSlot, releaseSlot, SlotHandle } from "./slotLock";
 import { appendFrame, scanSegment, SEGMENT_HEADER_SIZE } from "./segment";
 import { writeBoundary, readBoundary, BOUNDARY_FILE_SIZE } from "./boundary";
-import { writeManifest, readManifest, MANIFEST_FILE_NAME, MANIFEST_FILE_SIZE } from "./manifest";
+import {
+  writeManifest,
+  readManifest,
+  MANIFEST_FILE_NAME,
+  MANIFEST_FILE_SIZE,
+} from "./manifest";
 import { encodeChunk, decodeDictFile, DICT_HEADER } from "./symbolDictFile";
 import { SymbolDict } from "../protocol/symbolDict";
 import { quarantineSlot } from "./quarantine";
@@ -124,7 +129,8 @@ export class SfEngine {
     // page-cache watermark write across ACKs (spec 8.2 consequence 1); in
     // periodic mode it additionally fsyncs the active segment (spec 8.1.5
     // syncPublished semantics).
-    const interval = this.opts.syncIntervalMillis ?? DEFAULT_SYNC_INTERVAL_MILLIS;
+    const interval =
+      this.opts.syncIntervalMillis ?? DEFAULT_SYNC_INTERVAL_MILLIS;
     if (interval > 0) {
       this.barrierTimer = setInterval(() => void this.runBarrier(), interval);
       this.barrierTimer.unref?.();
@@ -181,7 +187,9 @@ export class SfEngine {
     // ack watermark (discardable optimisation, guarded by monotonic clamp)
     let recoveredWm: number | undefined;
     try {
-      const wmData = await readFile(join(slotDir, ACK_WATERMARK)).catch(() => undefined);
+      const wmData = await readFile(join(slotDir, ACK_WATERMARK)).catch(
+        () => undefined,
+      );
       if (wmData && wmData.length > 0) {
         wmData.copy(this.wmBuf);
         const b = readBoundary(this.wmBuf);
@@ -234,7 +242,9 @@ export class SfEngine {
     }
 
     // symbol dictionary (load-bearing; positions preserved, never de-duped)
-    const dictData = await readFile(join(slotDir, SYMBOL_DICT)).catch(() => undefined);
+    const dictData = await readFile(join(slotDir, SYMBOL_DICT)).catch(
+      () => undefined,
+    );
     if (dictData && dictData.length > 0) {
       for (const e of decodeDictFile(dictData)) this.dict.addRecovered(e);
     }
@@ -392,9 +402,23 @@ export class SfEngine {
    * positionally (spec 8.1.6, handoff B1).
    */
   persistSymbols(entries: string[]): void {
-    if (!this.isDisk || entries.length === 0 || this.dictFd === undefined) return;
+    if (!this.isDisk || entries.length === 0 || this.dictFd === undefined)
+      return;
     const buf = encodeChunk(entries);
-    writeSync(this.dictFd, buf, 0, buf.length, undefined);
+    let offset = 0;
+    while (offset < buf.length) {
+      const written = writeSync(
+        this.dictFd,
+        buf,
+        offset,
+        buf.length - offset,
+        undefined,
+      );
+      if (written <= 0) {
+        throw new Error("failed to append the complete persisted symbol chunk");
+      }
+      offset += written;
+    }
   }
 
   framesFrom(fsn: number): Buffer[] {

@@ -8,6 +8,7 @@ import { decodeResponse, STATUS } from "../protocol/response";
 import { encodeFrame } from "../protocol/frameEncoder";
 import { UNCAPPED_CATCHUP_PACKING_LIMIT } from "../protocol/constants";
 import { AckTracker } from "../ackTracker";
+import { DurableAckTracker } from "../durableAckTracker";
 import { HostTracker, HostState } from "../hostTracker";
 import { Endpoint } from "../endpoints";
 import { SfEngine, EngineOptions } from "./engine";
@@ -17,9 +18,16 @@ import {
   acquireLogicalLock,
   releaseLogicalLock,
   isLiveLock,
+  SlotHandle,
 } from "./slotLock";
 import { scanOrphans, OrphanSlot } from "./orphanScanner";
-import { SenderError, Category, Policy } from "../errors";
+import {
+  SenderError,
+  Category,
+  Policy,
+  classify,
+  defaultPolicyFor,
+} from "../errors";
 
 const CLIENT_ID = "nodejs/1.0.0";
 const DEFAULT_BACKOFF = 100;
@@ -59,7 +67,9 @@ export class OrphanDrainer {
   private stopped = false;
   private ws?: QwpWebSocket;
   private acks = new AckTracker();
+  private durableAcks = new DurableAckTracker();
   private acked = -1;
+  private fatalResponse?: Error;
   private readonly running: Promise<void>;
 
   constructor(
@@ -84,11 +94,37 @@ export class OrphanDrainer {
   private readonly onBinary = (payload: Buffer): void => {
     const r = decodeResponse(payload);
     if (r.status === STATUS.OK) {
-      const f = this.acks.onAck(r.sequence);
-      if (f !== null) this.acked = Math.max(this.acked, f);
+      const f = this.acks.fsnForAck(r.sequence);
+      if (f === null) return;
+      this.acks.onAck(r.sequence);
+      if (this.options.request_durable_ack === true) {
+        const durable = this.durableAcks.onOk(f, r.tables);
+        if (durable !== null) this.acked = Math.max(this.acked, durable);
+      } else {
+        this.acked = Math.max(this.acked, f);
+      }
+      return;
     }
-    // DURABLE_ACK is a no-op for replay; a rejection is drained, not fatal for
-    // a background replay (the data still exists for a later drain/recovery).
+    if (r.status === STATUS.DURABLE_ACK) {
+      if (this.options.request_durable_ack === true) {
+        const durable = this.durableAcks.onDurableAck(r.tables);
+        if (durable !== null) this.acked = Math.max(this.acked, durable);
+      }
+      return;
+    }
+    const category = classify(r.status);
+    const policy = defaultPolicyFor(category);
+    if (policy === Policy.TERMINAL) {
+      this.fatalResponse = new Error(
+        `terminal orphan replay rejection (${category}): ${r.errorMessage ?? r.status}`,
+      );
+    }
+    // Any retryable NACK recycles the connection and replays from the unchanged
+    // read-only watermark. A terminal NACK is observed by replay() and causes
+    // the slot to receive its .failed sentinel instead of hanging forever.
+    const ws = this.ws;
+    this.ws = undefined;
+    void ws?.close();
   };
 
   private readonly onClose = (): void => {
@@ -123,15 +159,17 @@ export class OrphanDrainer {
   private async run(): Promise<void> {
     const sfDir = this.options.sf_dir!;
     await acquireLogicalLock(sfDir, this.slot.senderId);
-    let held = false;
+    let held: SlotHandle | undefined;
     try {
       // Revalidate: a producer may have re-adopted the slot while we scanned.
-      if (this.stopped || (await isLiveLock(join(this.slot.slotDir, ".lock")))) {
+      if (
+        this.stopped ||
+        (await isLiveLock(join(this.slot.slotDir, ".lock")))
+      ) {
         return;
       }
       try {
-        await acquireSlot(sfDir, this.slot.senderId);
-        held = true;
+        held = await acquireSlot(sfDir, this.slot.senderId);
       } catch {
         return; // a live holder appeared; not ours to drain
       }
@@ -157,12 +195,7 @@ export class OrphanDrainer {
       }
     } finally {
       await releaseLogicalLock(sfDir, this.slot.senderId);
-      if (held) {
-        await releaseSlot({
-          slotDir: this.slot.slotDir,
-          lockPath: join(this.slot.slotDir, ".lock"),
-        });
-      }
+      if (held) await releaseSlot(held);
     }
   }
 
@@ -205,6 +238,7 @@ export class OrphanDrainer {
 
     for (;;) {
       if (this.stopped) return;
+      if (this.fatalResponse) throw this.fatalResponse;
       if (this.acked >= target) return;
 
       if (!this.ws) {
@@ -213,17 +247,33 @@ export class OrphanDrainer {
           // Private round exhausted: transient. Back off and start a fresh round
           // (a fresh walker-local attempted set, never the shared round).
           cursor = this.tracker.newCursor();
-          await sleep(this.options.reconnect_initial_backoff_millis ?? DEFAULT_BACKOFF);
+          await sleep(
+            this.options.reconnect_initial_backoff_millis ?? DEFAULT_BACKOFF,
+          );
           continue;
         }
         const ep = this.endpoints[idx];
         try {
           const w = await QwpWebSocket.connect(this.buildWsOptions(ep));
+          if (this.options.request_durable_ack === true && !w.durableAck) {
+            await w.close();
+            this.tracker.record(idx, HostState.TRANSIENT_REJECT);
+            continue;
+          }
           this.tracker.record(idx, HostState.HEALTHY);
+          // Establish response correlation before catch-up is sent; a local
+          // server can ACK in the same event-loop turn.
+          this.acks.onConnected(this.acked + 1, hasDict ? 1 : 0);
+          this.durableAcks.reset(this.acked);
+          this.ws = w;
           if (hasDict) {
             // Connection-scoped dictionary is empty on a fresh server: re-register
             // it from id 0 before any replay frame (spec 7.5).
-            const frame = encodeFrame([], { gorilla: false, dict, confirmedMaxId: -1 });
+            const frame = encodeFrame([], {
+              gorilla: false,
+              dict,
+              confirmedMaxId: -1,
+            });
             const cap = w.maxBatchSize ?? UNCAPPED_CATCHUP_PACKING_LIMIT;
             if (frame.length > cap) {
               await w.close();
@@ -243,8 +293,8 @@ export class OrphanDrainer {
             capGapFirstAt = 0;
             await w.sendBinary(frame);
           }
-          this.acks.onConnected(this.acked + 1, hasDict ? 1 : 0);
-          this.ws = w;
+          if (this.fatalResponse) throw this.fatalResponse;
+          if (this.ws !== w) continue;
         } catch (e) {
           if (e instanceof QwpUpgradeError) {
             if (e.kind === "auth") {
@@ -252,9 +302,14 @@ export class OrphanDrainer {
             }
             this.tracker.record(
               idx,
-              e.kind === "role-reject" ? HostState.TOPOLOGY_REJECT : HostState.TRANSPORT_ERROR,
+              e.kind === "role-reject"
+                ? HostState.TOPOLOGY_REJECT
+                : HostState.TRANSPORT_ERROR,
             );
-          } else if (e instanceof Error && e.message.startsWith("drainer catch-up exceeds")) {
+          } else if (
+            e instanceof Error &&
+            e.message.startsWith("drainer catch-up exceeds")
+          ) {
             throw e;
           } else {
             this.tracker.record(idx, HostState.TRANSPORT_ERROR);
@@ -273,6 +328,7 @@ export class OrphanDrainer {
       // Quiesce: ACKs arrive via onBinary and advance `this.acked`; a drop
       // clears `this.ws` so the loop reconnects and re-sends what's unacked.
       while (!this.stopped && this.acked < target && this.ws) {
+        if (this.fatalResponse) throw this.fatalResponse;
         await sleep(POLL_QUIESCE);
       }
     }

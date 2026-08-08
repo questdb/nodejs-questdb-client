@@ -5,7 +5,16 @@ import { QwpTableBuffer } from "./protocol/tableBuffer";
 import { encodeFrame } from "./protocol/frameEncoder";
 import { SymbolDict } from "./protocol/symbolDict";
 import { flattenArray } from "./protocol/columnWriter";
-import { TYPE_BOOLEAN, TYPE_DOUBLE, TYPE_DOUBLE_ARRAY, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR, MAX_ROWS_PER_TABLE } from "./protocol/constants";
+import {
+  TYPE_BOOLEAN,
+  TYPE_DOUBLE,
+  TYPE_DOUBLE_ARRAY,
+  TYPE_LONG,
+  TYPE_SYMBOL,
+  TYPE_TIMESTAMP,
+  TYPE_VARCHAR,
+  MAX_ROWS_PER_TABLE,
+} from "./protocol/constants";
 
 function toMicros(value: number | bigint, unit: TimestampUnit): bigint {
   const v = typeof value === "bigint" ? value : BigInt(Math.trunc(value));
@@ -29,6 +38,9 @@ export class QwpBuffer implements SenderBuffer {
   private current?: QwpTableBuffer;
   private rows = 0;
   private dict?: SymbolDict;
+  /** Highest id appended completely to the write-ahead side file. */
+  private persistedMaxId = -1;
+  /** Highest id confirmed as published to the store-and-forward ring. */
   private confirmedMaxId = -1;
   private gorilla = true;
   private deferCommit = false;
@@ -48,7 +60,10 @@ export class QwpBuffer implements SenderBuffer {
    * the owning frame is published (spec 8.1.6); if it throws, the buffer
    * degrades permanently to full-dict mode (spec 5.2).
    */
-  attachDict(d: SymbolDict | undefined, persist?: (entries: string[]) => void): void {
+  attachDict(
+    d: SymbolDict | undefined,
+    persist?: (entries: string[]) => void,
+  ): void {
     this.dict = d;
     this.persist = persist;
   }
@@ -62,11 +77,15 @@ export class QwpBuffer implements SenderBuffer {
   private disableDeltaDict(): void {
     this.dict = undefined;
     this.persist = undefined;
+    this.persistedMaxId = -1;
     this.confirmedMaxId = -1;
   }
 
   setConfirmedMaxId(id: number): void {
     this.confirmedMaxId = id;
+    // Recovery calls this with the tail loaded from .symbol-dict. Reconnects
+    // may call it again with the same or a later already-persisted baseline.
+    if (id > this.persistedMaxId) this.persistedMaxId = id;
   }
 
   setDeferCommit(on: boolean): void {
@@ -114,7 +133,8 @@ export class QwpBuffer implements SenderBuffer {
   }
 
   private require(): QwpTableBuffer {
-    if (!this.current) throw new Error("table name must be set before adding columns");
+    if (!this.current)
+      throw new Error("table name must be set before adding columns");
     return this.current;
   }
 
@@ -139,7 +159,9 @@ export class QwpBuffer implements SenderBuffer {
         const text = String(value);
         // Keep the id AND the text. Delta mode encodes the id; a runtime
         // fallback to full-dict mode needs the text back (spec 5.2).
-        col.values.push(this.dict ? { id: this.dict.getOrAdd(text), text } : text);
+        col.values.push(
+          this.dict ? { id: this.dict.getOrAdd(text), text } : text,
+        );
       }
       return this;
     });
@@ -147,7 +169,8 @@ export class QwpBuffer implements SenderBuffer {
 
   intColumn(name: string, value: number): SenderBuffer {
     return this.guard(() => {
-      if (!Number.isInteger(value)) throw new Error(`value must be an integer, received ${value}`);
+      if (!Number.isInteger(value))
+        throw new Error(`value must be an integer, received ${value}`);
       const col = this.require().getOrCreateColumn(name, TYPE_LONG);
       if (col) col.values.push(BigInt(value));
       return this;
@@ -162,7 +185,11 @@ export class QwpBuffer implements SenderBuffer {
     });
   }
 
-  timestampColumn(name: string, value: number | bigint, unit: TimestampUnit = "us"): SenderBuffer {
+  timestampColumn(
+    name: string,
+    value: number | bigint,
+    unit: TimestampUnit = "us",
+  ): SenderBuffer {
     return this.guard(() => {
       const col = this.require().getOrCreateColumn(name, TYPE_TIMESTAMP);
       if (col) col.values.push(toMicros(value, unit));
@@ -228,17 +255,26 @@ export class QwpBuffer implements SenderBuffer {
     // confirmDeltaPublished() on that ring-append success.
     const delta = this.dict !== undefined;
     if (delta) {
-      const fresh = this.dict!.entriesFrom(this.confirmedMaxId + 1);
+      // Persistence and publication have distinct cursors. If a side-file
+      // append succeeds but ring publication later fails, the next seal must
+      // not append the same positional symbols again; it still encodes them
+      // from confirmedMaxId so the server receives everything it lacks.
+      const fresh = this.dict!.entriesFrom(this.persistedMaxId + 1);
       if (fresh.length > 0) {
         try {
           this.persist?.(fresh);
-          this.deltaTarget = this.dict!.size() - 1;
+          this.persistedMaxId = this.dict!.size() - 1;
+          this.deltaTarget = this.persistedMaxId;
         } catch {
           this.disableDeltaDict();
         }
       } else {
-        // The batch reuses only confirmed symbols; nothing to advance.
-        this.deltaTarget = -1;
+        // Symbols can already be write-ahead persisted while still awaiting a
+        // successful ring publication from an earlier seal.
+        this.deltaTarget =
+          this.dict!.size() - 1 > this.confirmedMaxId
+            ? this.dict!.size() - 1
+            : -1;
       }
     }
 
@@ -268,7 +304,8 @@ export class QwpBuffer implements SenderBuffer {
       // the same entries and re-register them positionally on the server,
       // silently renumbering later ids. Pin later parts to the post-batch
       // baseline (spec 5.2) — safe because they publish only after part 0.
-      const partBaseline = delta && i > 0 ? this.dict!.size() - 1 : opts.confirmedMaxId;
+      const partBaseline =
+        delta && i > 0 ? this.dict!.size() - 1 : opts.confirmedMaxId;
       const f = encodeFrame([dirty[i]], {
         ...opts,
         confirmedMaxId: partBaseline,

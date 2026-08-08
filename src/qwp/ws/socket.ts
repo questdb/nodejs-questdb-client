@@ -2,7 +2,11 @@ import { Buffer } from "node:buffer";
 import { connect as netConnect, Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { encodeClientFrame, FrameParser, OPCODE } from "./frame";
-import { buildUpgradeRequest, computeAccept, parseUpgradeResponse } from "./handshake";
+import {
+  buildUpgradeRequest,
+  computeAccept,
+  parseUpgradeResponse,
+} from "./handshake";
 
 const DEFAULT_AUTH_TIMEOUT_MS = 15_000; // spec 9.1
 
@@ -35,8 +39,12 @@ export class QwpWebSocket {
   private readonly parser = new FrameParser();
   private closed = false;
   private readonly onBinary?: (payload: Buffer) => void;
-  private readonly onClose?: (info: { orderly: boolean; framesSent: number }) => void;
+  private readonly onClose?: (info: {
+    orderly: boolean;
+    framesSent: number;
+  }) => void;
   private framesSent = 0;
+  private closeNotified = false;
   private readonly keepalive?: NodeJS.Timeout;
   readonly maxBatchSize?: number;
   /** True when the server confirmed durable-ack capability (spec 6.5.1). */
@@ -55,7 +63,16 @@ export class QwpWebSocket {
     this.durableAck = durableAck;
     this.onBinary = onBinary;
     this.onClose = onClose;
-    this.socket.on("data", (chunk: Buffer) => this.onData(chunk));
+    // Neither WebSocket framing errors nor application response-decoder errors
+    // may escape an EventEmitter callback: an uncaught throw here terminates the
+    // host process. Convert both into one abrupt-close notification instead.
+    this.socket.on("data", (chunk: Buffer) => {
+      try {
+        this.onData(chunk);
+      } catch {
+        this.failConnection();
+      }
+    });
     this.socket.on("close", () => this.handleClosed());
     this.socket.on("error", () => this.handleClosed());
     // Keepalive PING (spec 9.1, durable_ack_keepalive_interval_millis).
@@ -63,7 +80,8 @@ export class QwpWebSocket {
     // bounded by a liveness signal even when no data is flowing.
     if (keepaliveMs && keepaliveMs > 0) {
       this.keepalive = setInterval(() => {
-        if (!this.closed) this.socket.write(encodeClientFrame(OPCODE.PING, Buffer.alloc(0)));
+        if (!this.closed)
+          this.socket.write(encodeClientFrame(OPCODE.PING, Buffer.alloc(0)));
       }, keepaliveMs);
     }
   }
@@ -90,7 +108,9 @@ export class QwpWebSocket {
       // black-holed endpoint would otherwise hang the sender forever.
       const authTimer = setTimeout(() => {
         socket.destroy();
-        fail(new Error(`QWP connect timed out [host=${opts.host}:${opts.port}]`));
+        fail(
+          new Error(`QWP connect timed out [host=${opts.host}:${opts.port}]`),
+        );
       }, opts.authTimeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS);
 
       const onError = (e: Error) => fail(e);
@@ -147,12 +167,13 @@ export class QwpWebSocket {
           // is not (spec 7.4 — only NON-orderly closes can count a strike).
           if (!this.closed) {
             this.closed = true;
+            if (this.keepalive) clearInterval(this.keepalive);
             this.socket.write(encodeClientFrame(OPCODE.CLOSE, m.payload));
             this.socket.end();
           }
           const code = m.payload.length >= 2 ? m.payload.readUInt16BE(0) : -1;
-          this.onClose?.({ orderly: code === 1000 || code === 1001, framesSent: this.framesSent });
-          break;
+          this.notifyClosed(code === 1000 || code === 1001);
+          return;
         }
         case OPCODE.BINARY:
           this.onBinary?.(m.payload);
@@ -173,16 +194,27 @@ export class QwpWebSocket {
     });
   }
 
+  private notifyClosed(orderly: boolean): void {
+    if (this.closeNotified) return;
+    this.closeNotified = true;
+    if (this.keepalive) clearInterval(this.keepalive);
+    this.onClose?.({ orderly, framesSent: this.framesSent });
+  }
+
+  private failConnection(): void {
+    if (!this.closed) {
+      this.closed = true;
+      this.socket.destroy();
+    }
+    this.notifyClosed(false);
+  }
+
   private handleClosed(): void {
-    // Fires on external drop (server teardown / socket error) OR on a remote
-    // CLOSE handshake. Our own close() sets `closed` first, so it is excluded
-    // and the transport is never told a graceful shutdown was a failure.
+    // Fires on external drop (server teardown / socket error). A remote CLOSE
+    // handshake notifies in onData; our own close() intentionally does not.
     if (this.closed) return;
     this.closed = true;
-    if (this.keepalive) clearInterval(this.keepalive);
-    // An abrupt drop (socket error / remote close without an orderly code):
-    // non-orderly, framesSent is whatever this connection wrote.
-    this.onClose?.({ orderly: false, framesSent: this.framesSent });
+    this.notifyClosed(false);
   }
 
   close(): Promise<void> {

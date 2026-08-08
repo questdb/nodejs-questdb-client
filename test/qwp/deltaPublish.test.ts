@@ -27,7 +27,9 @@ describe("delta publish ordering (spec 5.2)", () => {
     // Write-ahead happened before encoding...
     expect(persisted).toEqual([["alpha"]]);
     // ...and the frame still carries alpha as a delta (baseline is still 0).
-    expect(f1[0].readUInt8(5) & FLAG_DELTA_SYMBOL_DICT).toBe(FLAG_DELTA_SYMBOL_DICT);
+    expect(f1[0].readUInt8(5) & FLAG_DELTA_SYMBOL_DICT).toBe(
+      FLAG_DELTA_SYMBOL_DICT,
+    );
     expect(deltaHeader(f1[0])).toEqual({ start: 1, count: 1 });
     // ...but the baseline itself must NOT have moved yet (spec 5.2).
     expect(b.pendingDeltaTarget).toBe(1);
@@ -43,6 +45,27 @@ describe("delta publish ordering (spec 5.2)", () => {
     expect(persisted).toEqual([["alpha"], ["beta"]]);
     // The second frame's delta begins at id 2 and carries just beta.
     expect(deltaHeader(f2[0])).toEqual({ start: 2, count: 1 });
+  });
+
+  it("does not persist positional symbols twice after publication fails", () => {
+    const dict = new SymbolDict();
+    const persisted: string[][] = [];
+    const b = new QwpBuffer();
+    b.attachDict(dict, (es) => persisted.push(es));
+
+    b.table("t").symbol("s", "alpha");
+    b.at(1n, "us");
+    b.sealFrames(1 << 20);
+    // Do not confirm publication: the ring append failed after write-ahead.
+
+    b.table("t").symbol("s", "beta");
+    b.at(2n, "us");
+    const retry = b.sealFrames(1 << 20);
+
+    // The side file remains positional [alpha, beta], while the retry frame
+    // still carries both entries because the server baseline never advanced.
+    expect(persisted).toEqual([["alpha"], ["beta"]]);
+    expect(deltaHeader(retry[0])).toEqual({ start: 0, count: 2 });
   });
 
   it("a failed persist never advances the baseline (one-way delta->full-dict)", () => {

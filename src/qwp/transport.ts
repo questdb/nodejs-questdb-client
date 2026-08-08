@@ -8,7 +8,14 @@ import { UNCAPPED_CATCHUP_PACKING_LIMIT } from "./protocol/constants";
 import { encodeFrame } from "./protocol/frameEncoder";
 import { SymbolDict } from "./protocol/symbolDict";
 import { AckTracker } from "./ackTracker";
-import { SenderError, classify, defaultPolicyFor, Policy, Category } from "./errors";
+import { DurableAckTracker } from "./durableAckTracker";
+import {
+  SenderError,
+  classify,
+  defaultPolicyFor,
+  Policy,
+  Category,
+} from "./errors";
 import { HostTracker, HostState } from "./hostTracker";
 import { Endpoint, parseAddrList } from "./endpoints";
 import { Dispatcher } from "./dispatcher";
@@ -61,6 +68,7 @@ export class QwpTransport implements SenderTransport {
   private readonly options: SenderOptions;
   private ws?: QwpWebSocket;
   private readonly acks = new AckTracker();
+  private readonly durableAcks = new DurableAckTracker();
   private readonly errors: Dispatcher<SenderError>;
   private readonly events: Dispatcher<ConnectionEvent>;
   private errorConsumer?: (e: SenderError) => void;
@@ -77,6 +85,10 @@ export class QwpTransport implements SenderTransport {
   private sentUpTo = -1;
   private reconnecting = false;
   private closed = false;
+  private terminalError?: SenderError;
+  /** Ignore late callbacks from a socket that has already been recycled. */
+  private connectionGeneration = 0;
+  private activeConnectionGeneration = 0;
   /** Orphan drainers launched on startup (spec 8.4); stopped on close(). */
   private drainStarted = false;
   private drainers: OrphanDrainer[] = [];
@@ -108,8 +120,9 @@ export class QwpTransport implements SenderTransport {
     );
     // The connection-event inbox is a SEPARATE drop-oldest inbox at capacity
     // 64 (spec 9.1): error and connection notifications must not share a fence.
-    this.events = new Dispatcher(options.connection_listener_inbox_capacity ?? 64, (e) =>
-      this.eventConsumer?.(e),
+    this.events = new Dispatcher(
+      options.connection_listener_inbox_capacity ?? 64,
+      (e) => this.eventConsumer?.(e),
     );
     this.poison = new PoisonDetector(
       options.max_frame_rejections ?? 4, // spec 9.1
@@ -156,6 +169,7 @@ export class QwpTransport implements SenderTransport {
   }
 
   async connect(): Promise<boolean> {
+    if (this.terminalError) throw this.terminalError;
     // Idempotent: the constructor may already have kicked off a fire-and-forget
     // connect (derived SYNC mode). An explicit connect() must join that in-flight
     // attempt rather than open the engine a second time (spec 4.3, 8.3 slot lock).
@@ -213,13 +227,15 @@ export class QwpTransport implements SenderTransport {
   private auth(): string | undefined {
     return this.options.username && this.options.password
       ? "Basic " +
-        Buffer.from(`${this.options.username}:${this.options.password}`).toString("base64")
+          Buffer.from(
+            `${this.options.username}:${this.options.password}`,
+          ).toString("base64")
       : this.options.token
         ? `Bearer ${this.options.token}`
         : undefined;
   }
 
-  private wsOptions(ep: Endpoint): QwpWebSocketOptions {
+  private wsOptions(ep: Endpoint, generation: number): QwpWebSocketOptions {
     return {
       host: ep.host,
       port: ep.port,
@@ -230,8 +246,8 @@ export class QwpTransport implements SenderTransport {
       requestDurableAck: this.options.request_durable_ack === true,
       authTimeoutMs: this.options.auth_timeout_ms,
       keepaliveMs: this.options.durable_ack_keepalive_interval_millis,
-      onBinary: (p) => this.onResponse(p),
-      onClose: (info) => this.onDisconnected(info),
+      onBinary: (p) => this.onResponse(p, generation),
+      onClose: (info) => this.onDisconnected(info, generation),
     };
   }
 
@@ -251,45 +267,54 @@ export class QwpTransport implements SenderTransport {
         continue;
       }
       const ep = this.endpoints[idx];
+      const generation = ++this.connectionGeneration;
+      let candidate: QwpWebSocket | undefined;
       try {
-        this.ws = await QwpWebSocket.connect(this.wsOptions(ep));
+        candidate = await QwpWebSocket.connect(this.wsOptions(ep, generation));
         // Durable-ack capability gap (spec 6.5.1): an opted-in client that did
         // not get the X-QWP-Durable-Ack: enabled confirmation must fail fast.
-        // Retrying the same endpoints cannot turn a non-capable server into a
-        // capable one, so this is terminal, not a rotation.
         if (
           this.options.request_durable_ack === true &&
-          this.ws.durableAck !== true
+          candidate.durableAck !== true
         ) {
-          const err = new DurableAckMismatchError(
+          throw new DurableAckMismatchError(
             `server did not confirm X-QWP-Durable-Ack while request_durable_ack=on [endpoint=${ep.host}:${ep.port}]`,
           );
-          await this.ws.close().catch(() => undefined);
-          this.ws = undefined;
-          throw err;
         }
+        if (this.closed) {
+          await candidate.close().catch(() => undefined);
+          return false;
+        }
+        this.ws = candidate;
+        this.activeConnectionGeneration = generation;
         this.tracker.record(idx, HostState.HEALTHY);
         this.current = ep;
         this.emitConnectionEvent({ type: "connected", endpoint: ep });
-        // Re-register the dictionary FIRST. The catch-up frame(s) occupy the
-        // lowest connection-scoped wire seqs, so onConnected must know how many
-        // precede the ring replay or the first ring-frame ACK over-trims (spec
-        // 6.6.1).
-        const catchUpFrames = await this.sendDictCatchUp();
+        // Account for catch-up before sending it: an immediate server response
+        // must not be interpreted using the previous connection's sequence map.
+        const catchUpFrames = this.dict.size() === 0 ? 0 : 1;
         this.acks.onConnected(this.engine.ackedFsn + 1, catchUpFrames);
-        // Replay frames published beyond the acked FSN (memory-mode retention):
-        // after a reconnect the dictionary is re-registered first, then every
-        // unacked frame is re-sent from ackedFsn + 1 (spec 7.5, 8.1.1).
+        this.durableAcks.reset(this.engine.ackedFsn);
+        await this.sendDictCatchUp();
+        // Replay frames published beyond the acked FSN (memory-mode retention).
         this.sentUpTo = this.engine.ackedFsn;
         await this.drain();
         return true;
       } catch (e) {
+        if (this.activeConnectionGeneration === generation) {
+          this.activeConnectionGeneration = 0;
+          this.ws = undefined;
+          this.current = undefined;
+        }
+        await candidate?.close().catch(() => undefined);
         if (e instanceof DurableAckMismatchError) throw e;
         if (e instanceof QwpUpgradeError) {
           if (e.kind === "auth") throw e; // terminal, never rotate
           this.tracker.record(
             idx,
-            e.kind === "role-reject" ? HostState.TOPOLOGY_REJECT : HostState.TRANSPORT_ERROR,
+            e.kind === "role-reject"
+              ? HostState.TOPOLOGY_REJECT
+              : HostState.TRANSPORT_ERROR,
           );
         } else {
           this.tracker.record(idx, HostState.TRANSPORT_ERROR);
@@ -307,9 +332,15 @@ export class QwpTransport implements SenderTransport {
   private async sendDictCatchUp(): Promise<number> {
     if (this.dict.size() === 0) return 0;
     const cap = this.ws?.maxBatchSize ?? UNCAPPED_CATCHUP_PACKING_LIMIT;
-    const frame = encodeFrame([], { gorilla: false, dict: this.dict, confirmedMaxId: -1 });
+    const frame = encodeFrame([], {
+      gorilla: false,
+      dict: this.dict,
+      confirmedMaxId: -1,
+    });
     if (frame.length > cap) {
-      throw new Error(`dictionary catch-up exceeds the batch cap [size=${frame.length}, cap=${cap}]`);
+      throw new Error(
+        `dictionary catch-up exceeds the batch cap [size=${frame.length}, cap=${cap}]`,
+      );
     }
     await this.ws!.sendBinary(frame);
     this.confirmedMaxId = this.dict.size() - 1;
@@ -335,7 +366,9 @@ export class QwpTransport implements SenderTransport {
   }
 
   async send(data: Buffer): Promise<boolean> {
-    if (this.poisoned) throw new Error("QWP transport is terminal (poisoned frame)");
+    if (this.terminalError) throw this.terminalError;
+    if (this.poisoned)
+      throw new Error("QWP transport is terminal (poisoned frame)");
     if (!this.ws) throw new Error("QWP transport is not connected");
     await this.ws.sendBinary(data);
     return true;
@@ -347,13 +380,17 @@ export class QwpTransport implements SenderTransport {
    * publish, not on server ACK (spec 4.4).
    */
   async sendFrames(frames: Buffer[]): Promise<boolean> {
-    if (this.poisoned) throw new Error("QWP transport is terminal (poisoned frame)");
+    if (this.terminalError) throw this.terminalError;
+    if (this.poisoned)
+      throw new Error("QWP transport is terminal (poisoned frame)");
     const deadline = Date.now() + SF_APPEND_DEADLINE_MILLIS;
     for (const f of frames) {
       for (;;) {
         const fsn = await this.engine.append(f);
         if (fsn === PAYLOAD_TOO_LARGE) {
-          throw new Error(`frame does not fit a fresh segment [size=${f.length}]`);
+          throw new Error(
+            `frame does not fit a fresh segment [size=${f.length}]`,
+          );
         }
         if (fsn !== BACKPRESSURE_NO_SPARE) break;
         if (Date.now() >= deadline) {
@@ -388,43 +425,100 @@ export class QwpTransport implements SenderTransport {
     }
   }
 
-  private onResponse(payload: Buffer): void {
+  private onResponse(payload: Buffer, generation: number): void {
+    if (generation !== this.activeConnectionGeneration || this.terminalError)
+      return;
     const r = decodeResponse(payload);
     if (r.status === STATUS.OK) {
-      const fsn = this.acks.onAck(r.sequence);
-      if (fsn !== null) {
-        this.engine.acknowledge(fsn);
+      const exactFsn = this.acks.fsnForAck(r.sequence);
+      if (exactFsn !== null) {
+        this.acks.onAck(r.sequence);
         // Only acceptance AT OR BEYOND the suspect frame clears a strike (spec
-        // 7.4) — re-OKs of frames behind it must not launder the count.
-        this.poison.accept(fsn);
+        // 7.4) — re-OKs behind it must not launder the count.
+        this.poison.accept(exactFsn);
+        if (this.options.request_durable_ack === true) {
+          const durableFsn = this.durableAcks.onOk(exactFsn, r.tables);
+          if (durableFsn !== null) this.engine.acknowledge(durableFsn);
+        } else {
+          this.engine.acknowledge(exactFsn);
+        }
       }
       return;
     }
-    if (r.status === STATUS.DURABLE_ACK) return;
+    if (r.status === STATUS.DURABLE_ACK) {
+      if (this.options.request_durable_ack === true) {
+        const durableFsn = this.durableAcks.onDurableAck(r.tables);
+        if (durableFsn !== null) this.engine.acknowledge(durableFsn);
+      }
+      return;
+    }
+
     const category = classify(r.status);
     const policy = defaultPolicyFor(category);
-    // Poison escalation (spec 7.4): a server-active rejection — a RETRIABLE
-    // NACK — keys a strike on the rejected frame's FSN. RETRIABLE_OTHER never
-    // counts: it is a verdict on the node, not the bytes. Escalation needs
-    // strikes AND dwell (the detector enforces both); a brief outage answered
-    // with pacing must not become producer-fatal.
-    if (policy === Policy.RETRIABLE) {
-      const fsn = this.acks.fsnFor(r.sequence);
-      if (fsn !== null && this.poison.strike(fsn)) {
-        this.poisonEscalated(
-          fsn,
-          r.errorMessage ?? `status=0x${r.status.toString(16)}`,
-        );
-        return;
-      }
+    const fsn = this.acks.fsnForAck(r.sequence);
+    const err = new SenderError(
+      category,
+      policy,
+      r.errorMessage ??
+        `server rejected frame [status=0x${r.status.toString(16)}]`,
+      r.status,
+      fsn ?? this.engine.ackedFsn + 1,
+      fsn ?? this.engine.publishedFsn,
+    );
+
+    if (policy === Policy.TERMINAL) {
+      this.latchTerminal(err);
+      return;
     }
-    this.emit(
-      new SenderError(
-        category,
-        policy,
-        r.errorMessage ?? `server rejected frame [status=0x${r.status.toString(16)}]`,
-        r.status,
-      ),
+    // A RETRIABLE rejection is a verdict on the named bytes and counts toward
+    // poison escalation. RETRIABLE_OTHER is a node-state verdict and rotates
+    // without adding a strike.
+    if (
+      policy === Policy.RETRIABLE &&
+      fsn !== null &&
+      this.poison.strike(fsn)
+    ) {
+      this.poisonEscalated(
+        fsn,
+        r.errorMessage ?? `status=0x${r.status.toString(16)}`,
+      );
+      return;
+    }
+    this.emit(err);
+    this.recycleAfterNack(policy);
+  }
+
+  private latchTerminal(err: SenderError): void {
+    this.terminalError = err;
+    this.closed = true;
+    this.activeConnectionGeneration = 0;
+    this.emit(err);
+    const ws = this.ws;
+    this.ws = undefined;
+    this.current = undefined;
+    void ws?.close().catch(() => undefined);
+  }
+
+  private recycleAfterNack(policy: Policy): void {
+    const ws = this.ws;
+    const endpoint = this.current;
+    this.activeConnectionGeneration = 0;
+    this.ws = undefined;
+    this.current = undefined;
+    this.durableAcks.reset(this.engine.ackedFsn);
+    this.emitConnectionEvent({ type: "disconnected", endpoint });
+    if (policy === Policy.RETRIABLE) {
+      // Retry the healthy node first. RETRIABLE_OTHER deliberately preserves
+      // the current round cursor so connectLoop rotates to another endpoint.
+      this.tracker.beginRound();
+    } else if (endpoint) {
+      const idx = this.endpoints.findIndex(
+        (e) => e.host === endpoint.host && e.port === endpoint.port,
+      );
+      if (idx >= 0) this.tracker.record(idx, HostState.TRANSIENT_REJECT);
+    }
+    void (ws ? ws.close().catch(() => undefined) : Promise.resolve()).finally(
+      () => void this.reconnect(),
     );
   }
 
@@ -435,32 +529,35 @@ export class QwpTransport implements SenderTransport {
    */
   private poisonEscalated(fsn: number, detail: string): void {
     this.poisoned = true;
-    this.closed = true; // connectLoop checks this; stops reconnect
-    this.emit(
+    this.latchTerminal(
       new SenderError(
         Category.PROTOCOL_VIOLATION,
         Policy.TERMINAL,
-        `frame ${fsn} was rejected too many times within the poison escalation ` +
+        `poisoned frame ${fsn} was rejected too many times within the poison escalation ` +
           `window — terminal (${detail})`,
         -1,
         fsn,
         fsn,
       ),
     );
-    void (this.ws ? this.ws.close().catch(() => undefined) : Promise.resolve());
-    this.ws = undefined;
   }
 
-  private onDisconnected(info: { orderly: boolean; framesSent: number }): void {
+  private onDisconnected(
+    info: { orderly: boolean; framesSent: number },
+    generation: number,
+  ): void {
+    if (generation !== this.activeConnectionGeneration) return;
+    this.activeConnectionGeneration = 0;
     this.emitConnectionEvent({ type: "disconnected", endpoint: this.current });
     this.current = undefined;
     this.ws = undefined;
+    this.durableAcks.reset(this.engine.ackedFsn);
     // spec 7.4: a NON-orderly close AFTER at least one send counts a strike on
     // the head-of-line unacked frame (the first frame the reconnect replays). An
     // orderly close (NORMAL/GONE) or a connection that sent nothing never counts
     // — otherwise a graceful failover would false-positive into a terminal.
     if (!info.orderly && info.framesSent > 0 && !this.poisoned) {
-      const fsn = this.engine.ackedFsn + 1;
+      const fsn = Math.max(this.engine.ackedFsn, this.acks.acked) + 1;
       if (fsn >= 0 && this.poison.strike(fsn)) {
         this.poisonEscalated(
           fsn,
@@ -493,7 +590,9 @@ export class QwpTransport implements SenderTransport {
   async close(): Promise<void> {
     this.closed = true;
     for (const d of this.drainers) d.stop();
-    await Promise.all(this.drainers.map((d) => d.finished.catch(() => undefined)));
+    await Promise.all(
+      this.drainers.map((d) => d.finished.catch(() => undefined)),
+    );
     await this.ws?.close();
     this.ws = undefined;
     await this.engine.close();

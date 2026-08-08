@@ -1,3 +1,4 @@
+import { AddressInfo } from "node:net";
 import { createServer, Server, Socket } from "node:net";
 import { createHash } from "node:crypto";
 import { applyMask } from "../../src/qwp/ws/mask";
@@ -6,6 +7,8 @@ import { STATUS } from "../../src/qwp/protocol/response";
 export interface MockOptions {
   /** Return a status per received frame; OK by default. */
   statusFor?: (frameIndex: number) => number;
+  /** Build a complete response payload for a frame (overrides statusFor). */
+  responseFor?: (frameIndex: number, sequence: number) => Buffer;
   /** Drop the connection after N frames. */
   dropAfter?: number;
   upgradeStatus?: number;
@@ -14,15 +17,41 @@ export interface MockOptions {
   durableAck?: boolean;
 }
 
-export function okResponse(seq: number): Buffer {
-  const b = Buffer.alloc(11);
-  b.writeUInt8(STATUS.OK, 0);
-  b.writeBigUInt64LE(BigInt(seq), 1);
-  b.writeUInt16LE(0, 9);
-  return b;
+function tableEntries(tables: [string, bigint][]): Buffer {
+  const entries = tables.map(([name, txn]) => {
+    const n = Buffer.byteLength(name, "utf8");
+    const b = Buffer.alloc(2 + n + 8);
+    b.writeUInt16LE(n, 0);
+    b.write(name, 2, "utf8");
+    b.writeBigInt64LE(txn, 2 + n);
+    return b;
+  });
+  return Buffer.concat(entries);
 }
 
-export function errorResponse(status: number, seq: number, msg: string): Buffer {
+export function okResponse(
+  seq: number,
+  tables: [string, bigint][] = [],
+): Buffer {
+  const head = Buffer.alloc(11);
+  head.writeUInt8(STATUS.OK, 0);
+  head.writeBigUInt64LE(BigInt(seq), 1);
+  head.writeUInt16LE(tables.length, 9);
+  return Buffer.concat([head, tableEntries(tables)]);
+}
+
+export function durableAckResponse(tables: [string, bigint][]): Buffer {
+  const head = Buffer.alloc(3);
+  head.writeUInt8(STATUS.DURABLE_ACK, 0);
+  head.writeUInt16LE(tables.length, 1);
+  return Buffer.concat([head, tableEntries(tables)]);
+}
+
+export function errorResponse(
+  status: number,
+  seq: number,
+  msg: string,
+): Buffer {
   const b = Buffer.alloc(11 + msg.length);
   b.writeUInt8(status, 0);
   b.writeBigUInt64LE(BigInt(seq), 1);
@@ -88,7 +117,9 @@ class MaskedFrameReader {
       const payloadStart = offset + (masked ? 4 : 0);
       if (this.buf.length < payloadStart + len) return null;
 
-      const payload = Buffer.from(this.buf.subarray(payloadStart, payloadStart + len));
+      const payload = Buffer.from(
+        this.buf.subarray(payloadStart, payloadStart + len),
+      );
       if (masked) applyMask(payload, this.buf.subarray(offset, offset + 4));
       this.buf = this.buf.subarray(payloadStart + len);
       return { opcode, payload };
@@ -109,9 +140,14 @@ export class MockQwpServer {
         this.onConn(sock, opts);
       });
       this.server.listen(0, "127.0.0.1", () =>
-        resolve((this.server!.address() as any).port),
+        resolve((this.server!.address() as AddressInfo).port),
       );
     });
+  }
+
+  sendResponse(payload: Buffer): void {
+    const frame = encodeServerFrame(0x2, payload);
+    for (const socket of this.sockets) socket.write(frame);
   }
 
   async stop(): Promise<void> {
@@ -131,11 +167,15 @@ export class MockQwpServer {
       if (!handshaken) {
         const status = opts.upgradeStatus ?? 101;
         if (status !== 101) {
-          sock.write(`HTTP/1.1 ${status} X\r\n${opts.upgradeHeaders ?? ""}\r\n`);
+          sock.write(
+            `HTTP/1.1 ${status} X\r\n${opts.upgradeHeaders ?? ""}\r\n`,
+          );
           sock.end();
           return;
         }
-        const key = /Sec-WebSocket-Key: (.+)\r\n/.exec(chunk.toString("ascii"))![1];
+        const key = /Sec-WebSocket-Key: (.+)\r\n/.exec(
+          chunk.toString("ascii"),
+        )![1];
         const accept = createHash("sha1")
           .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", "ascii")
           .digest("base64");
@@ -157,9 +197,13 @@ export class MockQwpServer {
           sock.destroy();
           return;
         }
+        const currentSeq = seq++;
         const status = opts.statusFor ? opts.statusFor(idx) : STATUS.OK;
-        const body =
-          status === STATUS.OK ? okResponse(seq++) : errorResponse(status, seq++, "mock");
+        const body = opts.responseFor
+          ? opts.responseFor(idx, currentSeq)
+          : status === STATUS.OK
+            ? okResponse(currentSeq)
+            : errorResponse(status, currentSeq, "mock");
         sock.write(encodeServerFrame(0x2, body));
       }
     });

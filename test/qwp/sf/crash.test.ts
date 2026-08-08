@@ -12,8 +12,17 @@ let mocks: MockQwpServer[] = [];
 let children: ChildProcess[] = [];
 let dir: string | undefined;
 
+function killTree(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
 afterEach(async () => {
-  for (const c of children) c.kill("SIGKILL");
+  for (const c of children) killTree(c);
   children = [];
   for (const m of mocks) await m.stop();
   mocks = [];
@@ -24,10 +33,17 @@ afterEach(async () => {
 /** Spawns a tsx child, resolving once it prints FLUSHED. */
 async function spawnCrasher(addr: string, sfDir: string): Promise<void> {
   return new Promise((resolve, reject) => {
+    // Spawn the executable directly. Killing an `npx tsx ...` wrapper can leave
+    // its real tsx child alive and still legitimately holding the slot lock.
     const child = spawn(
-      "npx",
-      ["tsx", "test/qwp/sf/crashChild.ts", addr, sfDir],
-      { cwd: process.cwd() },
+      process.execPath,
+      [
+        join(process.cwd(), "node_modules/tsx/dist/cli.mjs"),
+        "test/qwp/sf/crashChild.ts",
+        addr,
+        sfDir,
+      ],
+      { cwd: process.cwd(), detached: true },
     );
     children.push(child);
     let buf = "";
@@ -52,7 +68,8 @@ async function spawnCrasher(addr: string, sfDir: string): Promise<void> {
 function collectIntValues(frames: Buffer[]): number[] {
   const out: number[] = [];
   for (const f of frames) {
-    if (f.length < 12 || f.subarray(0, 4).toString("ascii") !== "QWP1") continue;
+    if (f.length < 12 || f.subarray(0, 4).toString("ascii") !== "QWP1")
+      continue;
     const flags = f.readUInt8(5);
     const tableCount = f.readUInt16LE(6);
     let o = 12;
@@ -77,7 +94,9 @@ function collectIntValues(frames: Buffer[]): number[] {
       const specs: { name: string; type: number }[] = [];
       for (let c = 0; c < cc.value; c++) {
         const cn = readVarint(f, o);
-        const name = f.subarray(cn.offset, cn.offset + cn.value).toString("utf8");
+        const name = f
+          .subarray(cn.offset, cn.offset + cn.value)
+          .toString("utf8");
         o = cn.offset + cn.value;
         const type = f.readUInt8(o++);
         specs.push({ name, type });
@@ -108,7 +127,7 @@ describe("crash recovery", () => {
 
     await spawnCrasher(`127.0.0.1:${port}`, dir);
     // Kill implicitly via afterEach? No -- kill now, then assert the slot files.
-    for (const c of children) c.kill("SIGKILL");
+    for (const c of children) killTree(c);
     await new Promise((r) => setTimeout(r, 300));
 
     const slot = join(dir, "default");
@@ -126,11 +145,13 @@ describe("crash recovery", () => {
 
     // Produce unacked data on disk, then kill the producer (slot left orphaned).
     await spawnCrasher(`127.0.0.1:${childPort}`, dir);
-    for (const c of children) c.kill("SIGKILL");
+    for (const c of children) killTree(c);
     await new Promise((r) => setTimeout(r, 300));
 
     // A fresh sender on the same sf_dir adopts the slot and replays unacked rows.
-    const sender = await Sender.fromConfig(`ws::addr=127.0.0.1:${ackPort};sf_dir=${dir};`);
+    const sender = await Sender.fromConfig(
+      `ws::addr=127.0.0.1:${ackPort};sf_dir=${dir};`,
+    );
     await sender.connect();
     await new Promise((r) => setTimeout(r, 1000));
 
