@@ -496,6 +496,14 @@ surfaces only as a runtime crash mid-benchmark:
 }
 ```
 
+`include` is overridden rather than merged, which is what we want. Note the base
+config sets **no `strict` flag**, so `strictNullChecks` and `noImplicitAny` are
+off repo-wide: this catches wrong types and unknown `WORKLOADS` keys, but it will
+*not* catch a possibly-undefined access such as `rows[0]` on an empty array.
+Do not raise `strict` here — that is a repo-wide decision, and turning it on for
+`src` via this config would report pre-existing errors that have nothing to do
+with benchmarks.
+
 ```json
     "typecheck:bench": "tsc --noEmit -p tsconfig.bench.json",
     "lint:bench": "eslint benchmarks/**"
@@ -1511,6 +1519,42 @@ Gorilla scope limit — was reconciled across the spec, this plan and
 `benchmarks/README.md` in the seventh pass. That class of drift accounted for
 five of the defects found, because each correction has three homes and early
 passes updated only one.
+
+**Twenty-ninth to thirty-third review passes — one defect, four clean passes.**
+
+This is the first batch where the rate collapsed. Recording what was checked, so
+the absence of findings is evidence rather than fatigue.
+
+*Twenty-ninth — does `lint:bench`, added last pass, actually work?* Yes.
+`eslint.config.mjs` is a flat config with **no `files` restriction**, so it
+applies to whatever paths are passed; `eslint benchmarks/**` is honoured. The
+plan's own benchmark code was then checked against `tseslint.configs.recommended`:
+no `any`, no non-null assertions, no unused bindings. **Clean.**
+
+*Thirtieth — would `tsconfig.bench.json` compile?*
+
+59. **`strict` is unset repo-wide**, so `strictNullChecks` and `noImplicitAny`
+    are off. The new config catches wrong types and unknown `WORKLOADS` keys but
+    will *not* catch a possibly-undefined access like `rows[0]` on an empty
+    array. Recorded at the config, with an explicit instruction not to raise
+    `strict` here — that is a repo-wide decision, and enabling it for `src`
+    through this config would surface pre-existing errors unrelated to
+    benchmarks.
+
+*Thirty-first — the spec's claims about the reference clients*, asserted in the
+very first pass and never rechecked since. All six verified against source: Java
+uses `GCProfiler`, runs both `Mode.SampleTime` and `Mode.AverageTime`, and needs
+ports 9000 and 8812; Rust uses criterion, reports both `Throughput::Elements` and
+`Throughput::Bytes`, and uses `extend_from_slice` as its floor. **Clean.**
+
+*Thirty-second — every numeric claim.* Four workloads, three floors, six
+assertions, four guards, nine tasks — each matches what the documents actually
+contain. **Clean.**
+
+*Thirty-third — structure and naming.* Code fences balanced (54 triple, 2
+quadruple, both even after roughly thirty edits). All four defined scripts —
+`bench`, `bench:e2e`, `typecheck:bench`, `lint:bench` — are referenced, and every
+referenced script is defined. **Clean.**
 
 **Twenty-fourth to twenty-eighth review passes — five further defects, one of
 which falsified two earlier entries in this log.**
