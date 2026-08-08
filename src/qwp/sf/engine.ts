@@ -85,6 +85,11 @@ export class SfEngine {
     return this.ring.publishedFsn;
   }
 
+  /** The configured total-retention cap (observability/test hook). */
+  get maxTotalBytes(): number {
+    return this.opts.maxTotalBytes;
+  }
+
   /** The recovered symbol dictionary, for catch-up re-registration (spec 7.5). */
   get symbolDict(): SymbolDict {
     return this.dict;

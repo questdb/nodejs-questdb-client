@@ -38,6 +38,13 @@ interface SenderTransport {
    * @returns Default auto-flush row count
    */
   getDefaultAutoFlushRows(): number;
+
+  /**
+   * Gets the default auto-flush interval (ms) for this transport. QWP uses
+   * 100 ms (spec 9.1); the ILP transports inherit the historical 1000 ms.
+   * @returns Default auto-flush interval in milliseconds
+   */
+  getDefaultAutoFlushInterval(): number;
 }
 
 /**

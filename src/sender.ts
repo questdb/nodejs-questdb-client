@@ -7,8 +7,6 @@ import { deriveConnectMode, ConnectMode, QwpTransport } from "./qwp/transport";
 import { QwpBuffer } from "./qwp/buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
 
-const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
-
 /**
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection. <br>
  * The client supports multiple transport protocols.
@@ -126,7 +124,7 @@ class Sender {
       : this.transport.getDefaultAutoFlushRows();
     this.autoFlushInterval = isInteger(options.auto_flush_interval, 0)
       ? options.auto_flush_interval
-      : DEFAULT_AUTO_FLUSH_INTERVAL;
+      : this.transport.getDefaultAutoFlushInterval();
 
     this.reset();
 

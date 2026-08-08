@@ -26,9 +26,10 @@ const DEFAULT_BACKOFF = 100;
 const POLL_QUIESCE = 10;
 // Orphan-drainer cap-gap escalation (spec 7.5): a foreground sender retries a
 // too-large catch-up forever; only a drainer may latch terminal, after this many
-// consecutive cap gaps AND this dwell window.
+// consecutive cap gaps AND this dwell window. The dwell is defaulted in the
+// config parser (catch_up_cap_gap_min_escalation_window_millis, spec 9.1).
 const MAX_CATCHUP_CAP_GAP_ATTEMPTS = 16;
-const CATCHUP_CAP_GAP_DWELL_MILLIS = 300_000;
+const DEFAULT_CATCHUP_CAP_GAP_DWELL_MILLIS = 300_000;
 const FAILED_SENTINEL = ".failed";
 
 function sleep(ms: number): Promise<void> {
@@ -38,7 +39,10 @@ function sleep(ms: number): Promise<void> {
 function engineOptions(o: SenderOptions): EngineOptions {
   return {
     segmentBytes: o.sf_segment_bytes ?? 4 * 1024 * 1024,
-    maxTotalBytes: o.sf_max_total_bytes ?? 128 * 1024 * 1024,
+    // Drainers only ever run in disk mode (they adopt orphan slots), so the
+    // disk default applies here even when sf_max_total_bytes is unset (spec 9.1:
+    // 10 GiB disk vs 128 MiB memory).
+    maxTotalBytes: o.sf_max_total_bytes ?? 10 * 1024 * 1024 * 1024,
     senderId: o.sender_id ?? "default",
   };
 }
@@ -109,6 +113,8 @@ export class OrphanDrainer {
       authorization: auth,
       rejectUnauthorized: this.options.tls_verify !== false,
       requestDurableAck: this.options.request_durable_ack === true,
+      authTimeoutMs: this.options.auth_timeout_ms,
+      keepaliveMs: this.options.durable_ack_keepalive_interval_millis,
       onBinary: this.onBinary,
       onClose: this.onClose,
     };
@@ -192,6 +198,9 @@ export class OrphanDrainer {
     let cursor = this.tracker.newCursor();
     let capGapAttempts = 0;
     let capGapFirstAt = 0;
+    const capGapDwell =
+      this.options.catch_up_cap_gap_min_escalation_window_millis ??
+      DEFAULT_CATCHUP_CAP_GAP_DWELL_MILLIS;
     const hasDict = dict.size() > 0;
 
     for (;;) {
@@ -222,7 +231,7 @@ export class OrphanDrainer {
               if (capGapFirstAt === 0) capGapFirstAt = Date.now();
               if (
                 capGapAttempts >= MAX_CATCHUP_CAP_GAP_ATTEMPTS &&
-                Date.now() - capGapFirstAt >= CATCHUP_CAP_GAP_DWELL_MILLIS
+                Date.now() - capGapFirstAt >= capGapDwell
               ) {
                 throw new Error(
                   `drainer catch-up exceeds every server cap [size=${frame.length}]`,
@@ -284,7 +293,7 @@ export async function startOrphanDrainers(
 ): Promise<OrphanDrainer[]> {
   const sfDir = options.sf_dir;
   if (!sfDir) return [];
-  const max = options.max_background_drainers ?? 1;
+  const max = options.max_background_drainers ?? 4; // spec 9.1
   const orphans = await scanOrphans(sfDir);
   const running = new Set<OrphanDrainer>();
   const all: OrphanDrainer[] = [];

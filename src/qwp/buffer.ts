@@ -5,7 +5,7 @@ import { QwpTableBuffer } from "./protocol/tableBuffer";
 import { encodeFrame } from "./protocol/frameEncoder";
 import { SymbolDict } from "./protocol/symbolDict";
 import { flattenArray } from "./protocol/columnWriter";
-import { TYPE_BOOLEAN, TYPE_DOUBLE, TYPE_DOUBLE_ARRAY, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR } from "./protocol/constants";
+import { TYPE_BOOLEAN, TYPE_DOUBLE, TYPE_DOUBLE_ARRAY, TYPE_LONG, TYPE_SYMBOL, TYPE_TIMESTAMP, TYPE_VARCHAR, MAX_ROWS_PER_TABLE } from "./protocol/constants";
 
 function toMicros(value: number | bigint, unit: TimestampUnit): bigint {
   const v = typeof value === "bigint" ? value : BigInt(Math.trunc(value));
@@ -196,6 +196,23 @@ export class QwpBuffer implements SenderBuffer {
   sealFrames(maxBatchSize: number): Buffer[] {
     const dirty = this.tables.filter((t) => t.rowCount > 0);
     if (dirty.length === 0) return [];
+    // Spec 6.4: a single table is capped at DEFAULT_MAX_ROWS_PER_TABLE. The
+    // server raises this default operationally, so a client-side refusal could
+    // reject a frame a correctly-configured server accepts — but a frame that
+    // crosses it is refused by every default server, and under store-and-forward
+    // a refused frame is already durable and would replay forever. Fail the
+    // batch here, before any byte is published, with a diagnostic that names the
+    // table and the knob that raises it.
+    for (const t of dirty) {
+      if (t.rowCount > MAX_ROWS_PER_TABLE) {
+        throw new Error(
+          `table '${t.name}' carries ${t.rowCount} rows, exceeding the server ` +
+            `DEFAULT_MAX_ROWS_PER_TABLE of ${MAX_ROWS_PER_TABLE} — flush more ` +
+            `often (lower auto_flush_rows, or call flush()/sealFrames() sooner)` +
+            ` so each batch stays under the limit`,
+        );
+      }
+    }
     this.deltaTarget = -1;
 
     // Write-ahead persist this batch's new symbols before encoding any frame.

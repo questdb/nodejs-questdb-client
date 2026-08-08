@@ -8,10 +8,11 @@ import { UNCAPPED_CATCHUP_PACKING_LIMIT } from "./protocol/constants";
 import { encodeFrame } from "./protocol/frameEncoder";
 import { SymbolDict } from "./protocol/symbolDict";
 import { AckTracker } from "./ackTracker";
-import { SenderError, classify, defaultPolicyFor } from "./errors";
+import { SenderError, classify, defaultPolicyFor, Policy, Category } from "./errors";
 import { HostTracker, HostState } from "./hostTracker";
 import { Endpoint, parseAddrList } from "./endpoints";
 import { Dispatcher } from "./dispatcher";
+import { PoisonDetector } from "./poison";
 import { SfEngine } from "./sf/engine";
 import { startOrphanDrainers, OrphanDrainer } from "./sf/drainer";
 import { QwpBuffer } from "./buffer";
@@ -22,6 +23,8 @@ const QWP_DEFAULT_AUTO_FLUSH_ROWS = 1000; // spec 9.1
 // the transport for every sender; disk mode swaps the engine in later.
 const MEMORY_SEGMENT_BYTES = 4 * 1024 * 1024;
 const MEMORY_MAX_TOTAL_BYTES = 128 * 1024 * 1024;
+/** spec 9.1: disk-mode retention is ~80x the memory-mode ring. */
+const DISK_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
 const SF_APPEND_DEADLINE_MILLIS = 30_000; // spec 4.4
 const DEFAULT_SENDER_ID = "default";
 const CLIENT_ID = "nodejs/1.0.0"; // protocol client version, not the package version (spec 6.5)
@@ -77,6 +80,9 @@ export class QwpTransport implements SenderTransport {
   /** Orphan drainers launched on startup (spec 8.4); stopped on close(). */
   private drainStarted = false;
   private drainers: OrphanDrainer[] = [];
+  /** Poison-frame escalation (spec 7.4): strikes AND dwell, keyed on FSN. */
+  private readonly poison: PoisonDetector;
+  private poisoned = false;
   /** In-flight public connect, so an explicit connect() reuses the constructor's
    *  fire-and-forget one instead of double-opening the engine (spec 4.3). */
   private connectPromise?: Promise<boolean>;
@@ -85,7 +91,13 @@ export class QwpTransport implements SenderTransport {
     this.options = options;
     this.engine = new SfEngine({
       segmentBytes: options.sf_segment_bytes ?? MEMORY_SEGMENT_BYTES,
-      maxTotalBytes: options.sf_max_total_bytes ?? MEMORY_MAX_TOTAL_BYTES,
+      // spec 9.1: the total-retention default is mode-dependent — 128 MiB in
+      // memory mode, 10 GiB in disk mode (sf_dir present). Applying the memory
+      // figure to a disk user would cap retention ~80x early and shed unacked
+      // frames during exactly the outage store-and-forward exists to survive.
+      maxTotalBytes:
+        options.sf_max_total_bytes ??
+        (options.sf_dir ? DISK_MAX_TOTAL_BYTES : MEMORY_MAX_TOTAL_BYTES),
       sfDir: options.sf_dir,
       senderId: options.sender_id ?? DEFAULT_SENDER_ID,
       durability: options.sf_durability === "periodic" ? "periodic" : "memory",
@@ -98,6 +110,10 @@ export class QwpTransport implements SenderTransport {
     // 64 (spec 9.1): error and connection notifications must not share a fence.
     this.events = new Dispatcher(options.connection_listener_inbox_capacity ?? 64, (e) =>
       this.eventConsumer?.(e),
+    );
+    this.poison = new PoisonDetector(
+      options.max_frame_rejections ?? 4, // spec 9.1
+      options.poison_min_escalation_window_millis ?? 5_000, // spec 9.1
     );
   }
 
@@ -122,6 +138,11 @@ export class QwpTransport implements SenderTransport {
 
   get ackedFsn(): number {
     return this.engine.ackedFsn;
+  }
+
+  /** The store-and-forward engine's configured retention cap (test hook). */
+  get engineMaxTotalBytes(): number {
+    return this.engine.maxTotalBytes;
   }
 
   private emit(e: SenderError): void {
@@ -207,8 +228,10 @@ export class QwpTransport implements SenderTransport {
       authorization: this.auth(),
       rejectUnauthorized: this.options.tls_verify !== false,
       requestDurableAck: this.options.request_durable_ack === true,
+      authTimeoutMs: this.options.auth_timeout_ms,
+      keepaliveMs: this.options.durable_ack_keepalive_interval_millis,
       onBinary: (p) => this.onResponse(p),
-      onClose: () => this.onDisconnected(),
+      onClose: (info) => this.onDisconnected(info),
     };
   }
 
@@ -312,6 +335,7 @@ export class QwpTransport implements SenderTransport {
   }
 
   async send(data: Buffer): Promise<boolean> {
+    if (this.poisoned) throw new Error("QWP transport is terminal (poisoned frame)");
     if (!this.ws) throw new Error("QWP transport is not connected");
     await this.ws.sendBinary(data);
     return true;
@@ -323,6 +347,7 @@ export class QwpTransport implements SenderTransport {
    * publish, not on server ACK (spec 4.4).
    */
   async sendFrames(frames: Buffer[]): Promise<boolean> {
+    if (this.poisoned) throw new Error("QWP transport is terminal (poisoned frame)");
     const deadline = Date.now() + SF_APPEND_DEADLINE_MILLIS;
     for (const f of frames) {
       for (;;) {
@@ -367,25 +392,83 @@ export class QwpTransport implements SenderTransport {
     const r = decodeResponse(payload);
     if (r.status === STATUS.OK) {
       const fsn = this.acks.onAck(r.sequence);
-      if (fsn !== null) this.engine.acknowledge(fsn);
+      if (fsn !== null) {
+        this.engine.acknowledge(fsn);
+        // Only acceptance AT OR BEYOND the suspect frame clears a strike (spec
+        // 7.4) — re-OKs of frames behind it must not launder the count.
+        this.poison.accept(fsn);
+      }
       return;
     }
     if (r.status === STATUS.DURABLE_ACK) return;
     const category = classify(r.status);
+    const policy = defaultPolicyFor(category);
+    // Poison escalation (spec 7.4): a server-active rejection — a RETRIABLE
+    // NACK — keys a strike on the rejected frame's FSN. RETRIABLE_OTHER never
+    // counts: it is a verdict on the node, not the bytes. Escalation needs
+    // strikes AND dwell (the detector enforces both); a brief outage answered
+    // with pacing must not become producer-fatal.
+    if (policy === Policy.RETRIABLE) {
+      const fsn = this.acks.fsnFor(r.sequence);
+      if (fsn !== null && this.poison.strike(fsn)) {
+        this.poisonEscalated(
+          fsn,
+          r.errorMessage ?? `status=0x${r.status.toString(16)}`,
+        );
+        return;
+      }
+    }
     this.emit(
       new SenderError(
         category,
-        defaultPolicyFor(category),
+        policy,
         r.errorMessage ?? `server rejected frame [status=0x${r.status.toString(16)}]`,
         r.status,
       ),
     );
   }
 
-  private onDisconnected(): void {
+  /**
+   * A frame was rejected too many times within the dwell window: PROTOCOL_VIOLATION
+   * is TERMINAL (spec 7.4). Stop replaying it — under store-and-forward a poisoned
+   * frame would otherwise replay forever — and surface the error, then tear down.
+   */
+  private poisonEscalated(fsn: number, detail: string): void {
+    this.poisoned = true;
+    this.closed = true; // connectLoop checks this; stops reconnect
+    this.emit(
+      new SenderError(
+        Category.PROTOCOL_VIOLATION,
+        Policy.TERMINAL,
+        `frame ${fsn} was rejected too many times within the poison escalation ` +
+          `window — terminal (${detail})`,
+        -1,
+        fsn,
+        fsn,
+      ),
+    );
+    void (this.ws ? this.ws.close().catch(() => undefined) : Promise.resolve());
+    this.ws = undefined;
+  }
+
+  private onDisconnected(info: { orderly: boolean; framesSent: number }): void {
     this.emitConnectionEvent({ type: "disconnected", endpoint: this.current });
     this.current = undefined;
     this.ws = undefined;
+    // spec 7.4: a NON-orderly close AFTER at least one send counts a strike on
+    // the head-of-line unacked frame (the first frame the reconnect replays). An
+    // orderly close (NORMAL/GONE) or a connection that sent nothing never counts
+    // — otherwise a graceful failover would false-positive into a terminal.
+    if (!info.orderly && info.framesSent > 0 && !this.poisoned) {
+      const fsn = this.engine.ackedFsn + 1;
+      if (fsn >= 0 && this.poison.strike(fsn)) {
+        this.poisonEscalated(
+          fsn,
+          "connection dropped repeatedly while the head-of-line frame was unacked",
+        );
+        return; // terminal: do not reconnect into the same poison
+      }
+    }
     // With store-and-forward retention in place a disconnect no longer loses
     // in-flight frames: they are replayed from the ring on reconnect. Make the
     // reconnect automatic instead of surfacing DATA_LOSS (spec 8.1.1).
@@ -418,5 +501,9 @@ export class QwpTransport implements SenderTransport {
 
   getDefaultAutoFlushRows(): number {
     return QWP_DEFAULT_AUTO_FLUSH_ROWS;
+  }
+
+  getDefaultAutoFlushInterval(): number {
+    return 100; // spec 9.1
   }
 }

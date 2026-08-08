@@ -164,6 +164,12 @@ class SenderOptions {
   connection_listener_inbox_capacity?: number;
   max_frame_rejections?: number;
   poison_min_escalation_window_millis?: number;
+  /** spec 9.1: keepalive PING interval for the ws socket; < = 0 disables. */
+  durable_ack_keepalive_interval_millis?: number;
+  /** spec 9.1: connect + handshake timeout for a ws endpoint. */
+  auth_timeout_ms?: number;
+  /** spec 9.1 / 7.5: orphan-drainer catch-up cap-gap dwell window. */
+  catch_up_cap_gap_min_escalation_window_millis?: number;
 
   // ws/wss store-and-forward (spec 8, 9).
   sf_dir?: string;
@@ -466,6 +472,9 @@ const ValidConfigKeys = [
   "connection_listener_inbox_capacity",
   "max_frame_rejections",
   "poison_min_escalation_window_millis",
+  "durable_ack_keepalive_interval_millis",
+  "auth_timeout_ms",
+  "catch_up_cap_gap_min_escalation_window_millis",
   "sf_dir",
   "sender_id",
   "sf_durability",
@@ -651,6 +660,8 @@ function parseQwpOptions(options: SenderOptions) {
   parseInteger(options, "connection_listener_inbox_capacity", "connection listener inbox capacity", 16);
   parseInteger(options, "max_frame_rejections", "max frame rejections", 1);
   parseInteger(options, "poison_min_escalation_window_millis", "poison min escalation window", 0);
+  parseInteger(options, "auth_timeout_ms", "auth timeout", 1);
+  parseInteger(options, "durable_ack_keepalive_interval_millis", "durable ack keepalive interval", -1);
 }
 
 function parseSfOptions(options: SenderOptions) {
@@ -660,6 +671,7 @@ function parseSfOptions(options: SenderOptions) {
   parseInteger(options, "sf_append_deadline_millis", "sf append deadline", 1);
   parseInteger(options, "sf_sync_interval_millis", "sf sync interval millis", 1);
   parseInteger(options, "max_background_drainers", "max background drainers", 1);
+  parseInteger(options, "catch_up_cap_gap_min_escalation_window_millis", "catch-up cap-gap min escalation window", 0);
   parseBoolean(options, "drain_orphans", "drain orphans");
   parseBoolean(options, "request_durable_ack", "request durable ack");
   if (options.sf_durability) {

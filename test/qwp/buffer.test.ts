@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { QwpBuffer } from "../../src/qwp/buffer";
-import { HEADER_SIZE, TYPE_LONG, TYPE_TIMESTAMP } from "../../src/qwp/protocol/constants";
+import { HEADER_SIZE, TYPE_LONG, TYPE_TIMESTAMP, MAX_ROWS_PER_TABLE } from "../../src/qwp/protocol/constants";
 
 describe("QwpBuffer", () => {
   it("seals a frame containing the buffered rows", () => {
@@ -58,5 +58,15 @@ describe("QwpBuffer", () => {
     expect(f[o++]).toBe(TYPE_LONG); // "x"
     expect(f[o++]).toBe(0); // empty column name length -> designated timestamp
     expect(f[o++]).toBe(TYPE_TIMESTAMP);
+  });
+
+  it("fails a table that exceeds the rows-per-table limit before any byte is sent (spec 6.4)", () => {
+    const b = new QwpBuffer();
+    const rows = MAX_ROWS_PER_TABLE + 1;
+    for (let i = 0; i < rows; i++) {
+      b.table("big").intColumn("v", i);
+      b.at(BigInt(i), "us");
+    }
+    expect(() => b.sealFrames(1 << 30)).toThrow(/rows/);
   });
 });

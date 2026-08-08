@@ -13,6 +13,9 @@ const HTTP_NO_CONTENT = 204;
 // Default number of rows that trigger auto-flush for HTTP transport.
 const DEFAULT_HTTP_AUTO_FLUSH_ROWS = 75000;
 
+// Historical auto-flush interval for the ILP transports (milliseconds).
+const DEFAULT_AUTO_FLUSH_INTERVAL = 1000;
+
 // Default minimum throughput for HTTP requests (100 KB/sec).
 const DEFAULT_REQUEST_MIN_THROUGHPUT = 102400;
 
@@ -120,6 +123,10 @@ abstract class HttpTransportBase implements SenderTransport {
    */
   getDefaultAutoFlushRows(): number {
     return DEFAULT_HTTP_AUTO_FLUSH_ROWS;
+  }
+
+  getDefaultAutoFlushInterval(): number {
+    return DEFAULT_AUTO_FLUSH_INTERVAL;
   }
 
   /**

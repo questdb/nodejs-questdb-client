@@ -211,6 +211,10 @@ class TcpTransport implements SenderTransport {
     return DEFAULT_TCP_AUTO_FLUSH_ROWS;
   }
 
+  getDefaultAutoFlushInterval(): number {
+    return 1000; // historical ILP default
+  }
+
   /**
    * @ignore
    * Handles the JWK token authentication challenge-response flow.

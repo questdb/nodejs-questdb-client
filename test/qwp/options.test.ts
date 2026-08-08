@@ -61,4 +61,21 @@ describe("ws:// wiring", () => {
       /requires sf_dir|not yet implemented/i,
     );
   });
+
+  it("accepts the three spec-9.1 keys that were previously rejected as unknown", () => {
+    const o = new SenderOptions(
+      "ws::addr=localhost:9000;durable_ack_keepalive_interval_millis=200;" +
+        "auth_timeout_ms=15000;catch_up_cap_gap_min_escalation_window_millis=300000;",
+    );
+    expect(o.durable_ack_keepalive_interval_millis).toBe(200);
+    expect(o.auth_timeout_ms).toBe(15000);
+    expect(o.catch_up_cap_gap_min_escalation_window_millis).toBe(300000);
+  });
+
+  it("durable_ack_keepalive_interval_millis=0 is a valid 'disabled' value (spec 9.1)", () => {
+    const o = new SenderOptions(
+      "ws::addr=localhost:9000;durable_ack_keepalive_interval_millis=0;",
+    );
+    expect(o.durable_ack_keepalive_interval_millis).toBe(0);
+  });
 });

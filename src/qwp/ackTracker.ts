@@ -39,6 +39,17 @@ export class AckTracker {
     return this.ackedFsn;
   }
 
+  /**
+   * The FSN a given wire sequence refers to, for mapping a NACK's rejected
+   * frame back to the log (spec 7.4 poison strikes). Unlike onAck this does not
+   * clamp to the highest sent frame or advance ack state — a rejection names the
+   * exact bytes it rejected.
+   */
+  fsnFor(wireSeq: number): number | null {
+    if (wireSeq < this.catchUpFrames) return null;
+    return this.fsnAtZero + (wireSeq - this.catchUpFrames);
+  }
+
   get acked(): number {
     return this.ackedFsn;
   }
