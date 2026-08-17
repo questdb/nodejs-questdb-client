@@ -11,10 +11,17 @@ import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
+  QwpHandshakeMetadata,
 } from "./transport";
 
 export interface QwpIngressSessionOptions {
   ackTimeoutMs?: number;
+  /**
+   * Optional local ingress frame cap. Browsers cannot read WebSocket upgrade
+   * headers, so browser applications should set this to the server's configured
+   * QWP cap. When the server also advertises a cap, the smaller value wins.
+   */
+  maxBatchSizeBytes?: number;
   /**
    * Enables durable-ACK tracking and sends Node WebSocket PING frames while
    * committed table transactions are still awaiting durable upload. Zero
@@ -59,6 +66,18 @@ export class QwpIngressSessionClosedError extends Error {
   }
 }
 
+export class QwpBatchTooLargeError extends RangeError {
+  constructor(
+    readonly batchSizeBytes: number,
+    readonly maxBatchSizeBytes: number,
+  ) {
+    super(
+      `QWP batch exceeds the negotiated limit [size=${batchSizeBytes}, max=${maxBatchSizeBytes}]`,
+    );
+    this.name = "QwpBatchTooLargeError";
+  }
+}
+
 /**
  * Connection-scoped ingress sequencer.
  *
@@ -75,6 +94,7 @@ export class QwpIngressSession {
   private nextSequence = 0n;
   private sendTail: Promise<void> = Promise.resolve();
   private durablePingTimer?: ReturnType<typeof setTimeout>;
+  private readonly effectiveMaxBatchSizeBytes?: number;
   private failure?: Error;
   private closing = false;
   private readonly receiveLoop: Promise<void>;
@@ -87,6 +107,20 @@ export class QwpIngressSession {
     if (!Number.isFinite(timeout) || timeout <= 0) {
       throw new RangeError("ackTimeoutMs must be a positive finite number");
     }
+    const localBatchCap = options.maxBatchSizeBytes;
+    if (
+      localBatchCap !== undefined &&
+      (!Number.isSafeInteger(localBatchCap) || localBatchCap <= 0)
+    ) {
+      throw new RangeError("maxBatchSizeBytes must be a positive safe integer");
+    }
+    const serverBatchCap = connection.handshake.maxBatchSizeBytes;
+    this.effectiveMaxBatchSizeBytes =
+      localBatchCap === undefined
+        ? serverBatchCap
+        : serverBatchCap === undefined
+          ? localBatchCap
+          : Math.min(localBatchCap, serverBatchCap);
     const keepalive = options.durableAckKeepaliveMs;
     if (
       keepalive !== undefined &&
@@ -121,6 +155,14 @@ export class QwpIngressSession {
     return this.connection.closed;
   }
 
+  get handshake(): QwpHandshakeMetadata {
+    return this.connection.handshake;
+  }
+
+  get maxBatchSizeBytes(): number | undefined {
+    return this.effectiveMaxBatchSizeBytes;
+  }
+
   sendTables(
     tables: readonly QwpTableBuffer[],
     encodeOptions: QwpIngressEncodeOptions = {},
@@ -130,6 +172,17 @@ export class QwpIngressSession {
 
   sendFrame(frame: Uint8Array): Promise<QwpIngressResponse> {
     this.throwIfUnavailable();
+    if (
+      this.effectiveMaxBatchSizeBytes !== undefined &&
+      frame.byteLength > this.effectiveMaxBatchSizeBytes
+    ) {
+      return Promise.reject(
+        new QwpBatchTooLargeError(
+          frame.byteLength,
+          this.effectiveMaxBatchSizeBytes,
+        ),
+      );
+    }
     const sequence = this.nextSequence++;
     let pending!: PendingResponse;
     const response = new Promise<QwpIngressResponse>((resolve, reject) => {

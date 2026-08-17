@@ -62,6 +62,9 @@ describe("QWP Node transport", () => {
 
     server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Max-Batch-Size: 64");
+      headers.push("X-QuestDB-Role: primary");
       headers.push("X-QWP-Durable-Ack: enabled");
     });
     server.on("connection", (socket, request) => {
@@ -88,6 +91,13 @@ describe("QWP Node transport", () => {
       { durableAckKeepaliveMs: 10 },
     );
     try {
+      expect(session.handshake).toMatchObject({
+        qwpVersion: 1,
+        maxBatchSizeBytes: 64,
+        durableAckEnabled: true,
+        serverRole: "primary",
+      });
+      expect(session.maxBatchSizeBytes).toBe(64);
       const ack = await session.sendFrame(Uint8Array.of(1));
       await session.waitForDurable(ack, 1_000);
       expect(requestedDurableAck).toBe("true");

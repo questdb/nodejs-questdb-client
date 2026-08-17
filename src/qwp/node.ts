@@ -4,11 +4,16 @@ export * from "./index";
 import type { Agent } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
 import WebSocket from "ws";
+import { QWP_VERSION } from "./core";
 import {
   openQwpWebSocket,
   QwpWebSocketLike,
 } from "./internal/websocket-connection";
-import { QwpBinaryConnection, QwpWebSocketConnectOptions } from "./transport";
+import {
+  QwpBinaryConnection,
+  QwpHandshakeMetadata,
+  QwpWebSocketConnectOptions,
+} from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 
@@ -21,6 +26,46 @@ export class QwpDurableAckUnavailableError extends Error {
     );
     this.name = "QwpDurableAckUnavailableError";
   }
+}
+
+export class QwpVersionMismatchError extends Error {
+  constructor(
+    readonly serverVersion: number,
+    readonly clientMaxVersion: number,
+  ) {
+    super(
+      `QWP server advertised unsupported version ${serverVersion} [client max=${clientMaxVersion}]`,
+    );
+    this.name = "QwpVersionMismatchError";
+  }
+}
+
+function headerValue(
+  headers: IncomingHttpHeaders | undefined,
+  name: string,
+): string | undefined {
+  const value = headers?.[name];
+  const first = Array.isArray(value) ? value[0] : value;
+  const trimmed = first?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function parseQwpVersion(headers: IncomingHttpHeaders | undefined): number {
+  const value = headerValue(headers, "x-qwp-version");
+  if (!value || !/^\d+$/.test(value)) return QWP_VERSION;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : QWP_VERSION;
+}
+
+function parseMaxBatchSize(
+  headers: IncomingHttpHeaders | undefined,
+): number | undefined {
+  const value = headerValue(headers, "x-qwp-max-batch-size");
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 0x7fffffff
+    ? parsed
+    : undefined;
 }
 
 export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
@@ -47,8 +92,20 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
 export function connectQwpNodeWebSocket(
   options: QwpNodeWebSocketOptions,
 ): Promise<QwpBinaryConnection> {
+  const clientMaxVersion = options.maxVersion ?? QWP_VERSION;
+  if (
+    !Number.isSafeInteger(clientMaxVersion) ||
+    clientMaxVersion < 1 ||
+    clientMaxVersion > QWP_VERSION
+  ) {
+    return Promise.reject(
+      new RangeError(
+        `maxVersion must be an integer between 1 and ${QWP_VERSION}`,
+      ),
+    );
+  }
   const headers: Record<string, string> = {
-    "X-QWP-Max-Version": String(options.maxVersion ?? 1),
+    "X-QWP-Max-Version": String(clientMaxVersion),
     "X-QWP-Client-Id": options.clientId ?? "typescript/1.0.0",
     ...options.headers,
   };
@@ -90,14 +147,24 @@ export function connectQwpNodeWebSocket(
     },
   });
   return openQwpWebSocket(socket, options.connectTimeoutMs, () => {
-    if (!options.requestDurableAck) return;
-    const confirmation = upgradeHeaders?.["x-qwp-durable-ack"];
-    if (
-      typeof confirmation !== "string" ||
-      confirmation.toLowerCase() !== "enabled"
-    ) {
+    const qwpVersion = parseQwpVersion(upgradeHeaders);
+    if (qwpVersion < 1 || qwpVersion > clientMaxVersion) {
+      throw new QwpVersionMismatchError(qwpVersion, clientMaxVersion);
+    }
+    const durableAckEnabled =
+      headerValue(upgradeHeaders, "x-qwp-durable-ack")?.toLowerCase() ===
+      "enabled";
+    if (options.requestDurableAck && !durableAckEnabled) {
       throw new QwpDurableAckUnavailableError(options.url);
     }
+    const handshake: QwpHandshakeMetadata = {
+      qwpVersion,
+      maxBatchSizeBytes: parseMaxBatchSize(upgradeHeaders),
+      contentEncoding: headerValue(upgradeHeaders, "x-qwp-content-encoding"),
+      durableAckEnabled,
+      serverRole: headerValue(upgradeHeaders, "x-questdb-role"),
+    };
+    return handshake;
   });
 }
 

@@ -6,9 +6,11 @@ import {
 import {
   connectQwpNodeWebSocket,
   QwpDurableAckUnavailableError,
+  QwpVersionMismatchError,
 } from "../../src/qwp/node";
 import {
   QWP_STATUS,
+  QwpBatchTooLargeError,
   QwpByteWriter,
   QwpIngressNackError,
   QwpIngressSession,
@@ -145,7 +147,13 @@ describe("QWP WebSocket adapters", () => {
       requestDurableAck: true,
       webSocketFactory: (_url, options) => {
         capturedHeaders = options.headers;
-        options.onUpgrade({ "x-qwp-durable-ack": "enabled" });
+        options.onUpgrade({
+          "x-qwp-version": "1",
+          "x-qwp-max-batch-size": "4096",
+          "x-qwp-content-encoding": "raw",
+          "x-qwp-durable-ack": "enabled",
+          "x-questdb-role": "primary",
+        });
         return asQwpSocket(socket);
       },
     });
@@ -157,7 +165,65 @@ describe("QWP WebSocket adapters", () => {
       "X-QWP-Request-Durable-Ack": "true",
       Authorization: "Basic token",
     });
+    expect(connection.handshake).toEqual({
+      qwpVersion: 1,
+      maxBatchSizeBytes: 4096,
+      contentEncoding: "raw",
+      durableAckEnabled: true,
+      serverRole: "primary",
+    });
+    const session = new QwpIngressSession(connection, {
+      maxBatchSizeBytes: 8192,
+    });
+    expect(session.maxBatchSizeBytes).toBe(4096);
+    await expect(
+      session.sendFrame(new Uint8Array(4097)),
+    ).rejects.toBeInstanceOf(QwpBatchTooLargeError);
+    await session.close();
+  });
+
+  it("uses the legacy handshake defaults when optional headers are absent", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpNodeWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: (_url, options) => {
+        options.onUpgrade({
+          "x-qwp-version": "not-a-number",
+          "x-qwp-max-batch-size": "not-a-number",
+        });
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+
+    const connection = await connecting;
+    expect(connection.handshake).toEqual({
+      qwpVersion: 1,
+      maxBatchSizeBytes: undefined,
+      contentEncoding: undefined,
+      durableAckEnabled: false,
+      serverRole: undefined,
+    });
     await connection.close();
+  });
+
+  it("rejects an unsupported server QWP version", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpNodeWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: (_url, options) => {
+        options.onUpgrade({ "x-qwp-version": "2" });
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+
+    await expect(connecting).rejects.toMatchObject({
+      name: "QwpVersionMismatchError",
+      serverVersion: 2,
+      clientMaxVersion: 1,
+    } satisfies Partial<QwpVersionMismatchError>);
+    expect(socket.closeCalls).toHaveLength(1);
   });
 
   it("rejects durable ACK opt-in when the server omits confirmation", async () => {
@@ -216,6 +282,36 @@ describe("QWP WebSocket adapters", () => {
 });
 
 describe("QwpIngressSession", () => {
+  it("rejects an oversized batch locally without consuming its sequence", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting, {
+      maxBatchSizeBytes: 3,
+    });
+    expect(session.maxBatchSizeBytes).toBe(3);
+
+    await expect(session.sendFrame(Uint8Array.of(1, 2, 3, 4))).rejects.toEqual(
+      expect.objectContaining({
+        name: "QwpBatchTooLargeError",
+        batchSizeBytes: 4,
+        maxBatchSizeBytes: 3,
+      } satisfies Partial<QwpBatchTooLargeError>),
+    );
+    expect(socket.sent).toHaveLength(0);
+
+    socket.onSend = () => {
+      socket.message(ingressResponse(QWP_STATUS.OK, 0n));
+    };
+    await expect(
+      session.sendFrame(Uint8Array.of(1, 2, 3)),
+    ).resolves.toMatchObject({ sequence: 0n });
+    await session.close();
+  });
+
   it("registers ACK waiters before sending and preserves call order", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({

@@ -5,6 +5,7 @@ import {
   openQwpWebSocket,
   QwpWebSocketLike,
 } from "./internal/websocket-connection";
+import { QWP_VERSION } from "./core";
 import { QwpBinaryConnection, QwpWebSocketConnectOptions } from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
@@ -48,7 +49,9 @@ export function connectQwpBrowserWebSocket(
       return new WebSocketConstructor(url, protocols);
     });
   const socket = factory(options.url, options.protocols);
-  return openQwpWebSocket(socket, options.connectTimeoutMs);
+  return openQwpWebSocket(socket, options.connectTimeoutMs, () => ({
+    qwpVersion: QWP_VERSION,
+  }));
 }
 
 /** Opens a browser WebSocket and starts an ingress ACK/NACK session. */
@@ -56,8 +59,8 @@ export async function connectQwpBrowserIngress(
   options: QwpBrowserWebSocketOptions,
   sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpIngressSession> {
-  return new QwpIngressSession(
-    await connectQwpBrowserWebSocket(options),
+  return QwpIngressSession.connect(
+    () => connectQwpBrowserWebSocket(options),
     sessionOptions,
   );
 }

@@ -7,6 +7,7 @@ import { GenericContainer, StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   connectQwpNodeIngress,
+  connectQwpNodeWebSocket,
   QWP_COLUMN_TYPE,
   QWP_STATUS,
   QwpDurableAckUnavailableError,
@@ -293,6 +294,19 @@ describe("QWP in a real browser against QuestDB", () => {
         requestDurableAck: true,
       }),
     ).rejects.toBeInstanceOf(QwpDurableAckUnavailableError);
+  });
+
+  it("negotiates the server QWP version and ingress batch cap", async () => {
+    const connection = await connectQwpNodeWebSocket({
+      url: websocketUrl(questdbUrl, "/write/v4"),
+      authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
+    });
+    try {
+      expect(connection.handshake.qwpVersion).toBe(1);
+      expect(connection.handshake.maxBatchSizeBytes).toBeGreaterThan(12);
+    } finally {
+      await connection.close();
+    }
   });
 
   it.runIf(DURABLE_E2E_URL)(

@@ -1,5 +1,9 @@
 import { QwpProtocolError } from "../core";
-import { QwpBinaryConnection, QwpConnectionCloseInfo } from "../transport";
+import {
+  QwpBinaryConnection,
+  QwpConnectionCloseInfo,
+  QwpHandshakeMetadata,
+} from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
 
 interface QwpWebSocketMessageEvent {
@@ -62,7 +66,7 @@ async function normalizeBinaryMessage(data: unknown): Promise<Uint8Array> {
 export function openQwpWebSocket(
   socket: QwpWebSocketLike,
   connectTimeoutMs = 15_000,
-  validateOpen?: () => void,
+  completeHandshake: () => QwpHandshakeMetadata,
 ): Promise<QwpBinaryConnection> {
   if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) {
     return Promise.reject(
@@ -103,8 +107,9 @@ export function openQwpWebSocket(
       "open",
       () => {
         if (openingSettled) return;
+        let handshake: QwpHandshakeMetadata;
         try {
-          validateOpen?.();
+          handshake = Object.freeze({ ...completeHandshake() });
         } catch (error) {
           openingSettled = true;
           clearTimeout(timeout);
@@ -126,6 +131,7 @@ export function openQwpWebSocket(
         const connection: QwpBinaryConnection = {
           messages,
           closed,
+          handshake,
           async send(payload: Uint8Array): Promise<void> {
             if (socket.readyState !== WEBSOCKET_OPEN) {
               throw new Error("QWP WebSocket is not open");

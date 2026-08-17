@@ -18,6 +18,7 @@ import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
+  QwpHandshakeMetadata,
 } from "./transport";
 
 export interface QwpEgressSessionOptions {
@@ -184,6 +185,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   get closed(): Promise<QwpConnectionCloseInfo> {
     return this.connection.closed;
+  }
+
+  get handshake(): QwpHandshakeMetadata {
+    return this.connection.handshake;
   }
 
   async query(

@@ -193,6 +193,7 @@ function queryError(requestId: bigint, message: string): Uint8Array {
 }
 
 class FakeConnection implements QwpBinaryConnection {
+  readonly handshake = { qwpVersion: 1 };
   private readonly incoming = new QwpAsyncQueue<Uint8Array>();
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   readonly messages = this.incoming;
