@@ -16,6 +16,7 @@ import {
   QwpByteWriter,
   QwpConnectionCloseInfo,
   QwpEgressQueryError,
+  QwpEgressQueryTimeoutError,
   QwpEgressSession,
   QwpResultBatchDecoder,
   readQwpVarint,
@@ -201,13 +202,17 @@ function scalarResultBatch(): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), RESULT_FLAGS, 1);
 }
 
-function queryError(requestId: bigint, message: string): Uint8Array {
+function queryError(
+  requestId: bigint,
+  message: string,
+  status = QWP_STATUS.PARSE_ERROR,
+): Uint8Array {
   const bytes = new TextEncoder().encode(message);
   const payload = new QwpByteWriter();
   payload
     .writeUint8(QWP_EGRESS_MESSAGE.QUERY_ERROR)
     .writeBigUint64(requestId)
-    .writeUint8(QWP_STATUS.PARSE_ERROR)
+    .writeUint8(status)
     .writeUint16(bytes.length)
     .writeBytes(bytes);
   return encodeQwpFrame(payload.toUint8Array());
@@ -395,6 +400,17 @@ describe("QwpEgressSession", () => {
       ),
     ).rejects.toThrow("serverInfoTimeoutMs must be a positive finite number");
     expect(factoryCalls).toBe(0);
+
+    await expect(
+      QwpEgressSession.connect(
+        async () => {
+          factoryCalls++;
+          return new FakeConnection();
+        },
+        { queryTimeoutMs: -1 },
+      ),
+    ).rejects.toThrow("queryTimeoutMs must be a non-negative finite number");
+    expect(factoryCalls).toBe(0);
   });
 
   it("closes the transport when SERVER_INFO does not arrive", async () => {
@@ -468,6 +484,159 @@ describe("QwpEgressSession", () => {
       totalRows: 3n,
     });
     await session.close();
+  });
+
+  it("automatically replenishes credit after the consumer advances", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+    });
+    const resultFrame = firstResultBatch(query.requestId);
+    connection.receive(resultFrame);
+
+    const iterator = query[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+    expect(first.value?.rowCount).toBe(3);
+    expect(connection.sent).toHaveLength(1);
+
+    const next = iterator.next();
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    const credit = new QwpByteReader(connection.sent[1]);
+    expect(credit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+    expect(credit.readBigUint64()).toBe(query.requestId);
+    expect(readQwpVarint(credit)).toBe(BigInt(resultFrame.byteLength));
+    expect(credit.remaining).toBe(0);
+
+    connection.receive(resultEnd(query.requestId));
+    await expect(next).resolves.toEqual({ value: undefined, done: true });
+    await query.completion;
+    await session.close();
+  });
+
+  it("uses compressed RESULT_BATCH wire bytes for automatic credit", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select 42", { initialCredit: 1 });
+    const resultFrame = compressedIntResultBatch(query.requestId);
+    connection.receive(resultFrame);
+
+    const iterator = query[Symbol.asyncIterator]();
+    await iterator.next();
+    const next = iterator.next();
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    const credit = new QwpByteReader(connection.sent[1]);
+    expect(credit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+    expect(credit.readBigUint64()).toBe(query.requestId);
+    expect(readQwpVarint(credit)).toBe(BigInt(resultFrame.byteLength));
+
+    connection.receive(resultEnd(query.requestId, 100n));
+    await next;
+    await query.completion;
+    await session.close();
+  });
+
+  it("allows automatic credit replenishment to be disabled", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+      autoCredit: false,
+    });
+    connection.receive(firstResultBatch(query.requestId));
+
+    const iterator = query[Symbol.asyncIterator]();
+    await iterator.next();
+    const next = iterator.next();
+    await Promise.resolve();
+    expect(connection.sent).toHaveLength(1);
+
+    await query.grantCredit(64);
+    expect(connection.sent).toHaveLength(2);
+    connection.receive(resultEnd(query.requestId));
+    await next;
+    await query.completion;
+    await session.close();
+  });
+
+  it("times out a query, sends CANCEL, and drains the terminal response", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = new QwpEgressSession(connection, {
+        queryTimeoutMs: 25,
+      });
+      connection.receive(serverInfo());
+      const query = await session.query(
+        "select * from long_sequence(1000000)",
+        {
+          initialCredit: 64,
+        },
+      );
+      const next = query[Symbol.asyncIterator]()
+        .next()
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(next).resolves.toMatchObject({
+        name: "QwpEgressQueryTimeoutError",
+        requestId: query.requestId,
+        timeoutMs: 25,
+      } satisfies Partial<QwpEgressQueryTimeoutError>);
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      expect(connection.sent).toHaveLength(2);
+      const cancel = new QwpByteReader(connection.sent[1]);
+      expect(cancel.readUint8()).toBe(QWP_EGRESS_MESSAGE.CANCEL);
+      expect(cancel.readBigUint64()).toBe(query.requestId);
+      expect(cancel.remaining).toBe(0);
+
+      await expect(session.query("select 2")).rejects.toThrow(
+        "a QWP query is already active",
+      );
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const nextQuery = await session.query("select 2", { timeoutMs: 0 });
+      connection.receive(resultEnd(nextQuery.requestId, 0n));
+      await nextQuery.completion;
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a query deadline when the query completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = new QwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select 1", { timeoutMs: 25 });
+      connection.receive(resultEnd(query.requestId, 0n));
+      await query.completion;
+      expect(vi.getTimerCount()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(connection.sent).toHaveLength(1);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("streams a Zstd-compressed result through the high-level session", async () => {

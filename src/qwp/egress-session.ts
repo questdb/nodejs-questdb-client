@@ -29,6 +29,8 @@ import {
 
 export interface QwpEgressSessionOptions {
   serverInfoTimeoutMs?: number;
+  /** Default per-query deadline. Zero or undefined disables query deadlines. */
+  queryTimeoutMs?: number;
   /** Enables bounded reconnects. Active operations replay only with onReplayReset. */
   reconnect?: QwpReconnectOptions;
   /**
@@ -42,6 +44,13 @@ export interface QwpEgressSessionOptions {
 export interface QwpEgressQueryOptions {
   /** Zero means the server may stream without credit accounting. */
   initialCredit?: number | bigint;
+  /**
+   * Replenishes positive initial credit by each RESULT_BATCH wire size after
+   * the async iterator advances past that batch. Defaults to true.
+   */
+  autoCredit?: boolean;
+  /** Per-query deadline overriding the session default. Zero disables it. */
+  timeoutMs?: number;
   /** Sets typed positional parameters; index 0 maps to SQL placeholder `$1`. */
   binds?: QwpBindSetter;
   /** Advanced escape hatch for an already encoded bind section. */
@@ -52,16 +61,38 @@ export interface QwpEgressQueryOptions {
   resetDictionary?: boolean;
 }
 
+interface QwpValidatedEgressSessionOptions {
+  readonly serverInfoTimeoutMs: number;
+  readonly queryTimeoutMs: number;
+}
+
+function validateOptionalTimeout(
+  value: number | undefined,
+  name: string,
+): number {
+  const timeout = value ?? 0;
+  if (!Number.isFinite(timeout) || timeout < 0) {
+    throw new RangeError(`${name} must be a non-negative finite number`);
+  }
+  return timeout;
+}
+
 function validateEgressSessionOptions(
   options: QwpEgressSessionOptions,
-): number {
-  const timeout = options.serverInfoTimeoutMs ?? 15_000;
-  if (!Number.isFinite(timeout) || timeout <= 0) {
+): QwpValidatedEgressSessionOptions {
+  const serverInfoTimeoutMs = options.serverInfoTimeoutMs ?? 15_000;
+  if (!Number.isFinite(serverInfoTimeoutMs) || serverInfoTimeoutMs <= 0) {
     throw new RangeError(
       "serverInfoTimeoutMs must be a positive finite number",
     );
   }
-  return timeout;
+  return {
+    serverInfoTimeoutMs,
+    queryTimeoutMs: validateOptionalTimeout(
+      options.queryTimeoutMs,
+      "queryTimeoutMs",
+    ),
+  };
 }
 
 export type QwpQueryCompletion = QwpResultEndMessage | QwpExecDoneMessage;
@@ -74,6 +105,17 @@ export class QwpEgressQueryError extends Error {
   ) {
     super(message);
     this.name = "QwpEgressQueryError";
+  }
+}
+
+/** A client-side query deadline expired and a QWP CANCEL was sent. */
+export class QwpEgressQueryTimeoutError extends Error {
+  constructor(
+    readonly requestId: bigint,
+    readonly timeoutMs: number,
+  ) {
+    super(`QWP query timed out after ${timeoutMs}ms [requestId=${requestId}]`);
+    this.name = "QwpEgressQueryTimeoutError";
   }
 }
 
@@ -94,18 +136,28 @@ interface QwpEgressQueryControl {
     requestId: bigint,
     additionalBytes: number | bigint,
   ): Promise<void>;
+  expire(requestId: bigint, timeoutMs: number): void;
+}
+
+interface QwpQueuedResultBatch {
+  readonly batch: QwpResultBatch;
+  readonly creditBytes: number;
 }
 
 /** One QWP query/statement and its stream of materialized result batches. */
 export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
-  private readonly batches = new QwpAsyncQueue<QwpResultBatch>();
+  private readonly batches = new QwpAsyncQueue<QwpQueuedResultBatch>();
   private readonly resolveCompletion: (value: QwpQueryCompletion) => void;
   private readonly rejectCompletion: (error: unknown) => void;
+  private deliveredCreditBytes = 0;
+  private terminal = false;
+  private timeoutTimer?: ReturnType<typeof setTimeout>;
   readonly completion: Promise<QwpQueryCompletion>;
 
   constructor(
     readonly requestId: bigint,
     private readonly control: QwpEgressQueryControl,
+    private readonly autoCredit: boolean,
   ) {
     let resolve!: (value: QwpQueryCompletion) => void;
     let reject!: (error: unknown) => void;
@@ -121,7 +173,16 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 
   [Symbol.asyncIterator](): AsyncIterator<QwpResultBatch> {
-    return this.batches[Symbol.asyncIterator]();
+    const iterator = this.batches[Symbol.asyncIterator]();
+    return {
+      next: async () => {
+        await this.releaseDeliveredCredit();
+        const result = await iterator.next();
+        if (result.done) return { value: undefined, done: true };
+        this.deliveredCreditBytes = result.value.creditBytes;
+        return { value: result.value.batch, done: false };
+      },
+    };
   }
 
   cancel(): Promise<void> {
@@ -132,26 +193,71 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     return this.control.grantCredit(this.requestId, additionalBytes);
   }
 
+  /** @internal Starts the deadline after QUERY_REQUEST reaches the transport. */
+  armTimeout(timeoutMs: number): void {
+    if (timeoutMs === 0 || this.terminal) return;
+    this.timeoutTimer = setTimeout(() => {
+      this.timeoutTimer = undefined;
+      this.control.expire(this.requestId, timeoutMs);
+    }, timeoutMs);
+  }
+
   /** @internal */
-  push(batch: QwpResultBatch): void {
-    this.batches.push(batch);
+  push(batch: QwpResultBatch, creditBytes: number): void {
+    if (this.terminal) return;
+    this.batches.push({ batch, creditBytes });
   }
 
   /** @internal */
   finish(completion: QwpQueryCompletion): void {
+    if (this.terminal) return;
+    this.terminal = true;
+    this.clearTimeout();
+    this.deliveredCreditBytes = 0;
     this.batches.end();
     this.resolveCompletion(completion);
   }
 
   /** @internal */
   fail(error: unknown): void {
+    if (this.terminal) return;
+    this.terminal = true;
+    this.clearTimeout();
+    this.deliveredCreditBytes = 0;
     this.batches.fail(error);
     this.rejectCompletion(error);
   }
 
+  /** @internal Discards queued results and surfaces a deadline immediately. */
+  expire(error: QwpEgressQueryTimeoutError): void {
+    if (this.terminal) return;
+    this.batches.clear();
+    this.fail(error);
+  }
+
   /** @internal */
   resetForReplay(): void {
+    this.deliveredCreditBytes = 0;
     this.batches.clear();
+  }
+
+  private clearTimeout(): void {
+    if (!this.timeoutTimer) return;
+    clearTimeout(this.timeoutTimer);
+    this.timeoutTimer = undefined;
+  }
+
+  private async releaseDeliveredCredit(): Promise<void> {
+    const creditBytes = this.deliveredCreditBytes;
+    this.deliveredCreditBytes = 0;
+    if (!this.autoCredit || this.terminal || creditBytes === 0) return;
+    try {
+      await this.control.grantCredit(this.requestId, creditBytes);
+    } catch (error) {
+      // Transport failures fail the query through the session send tail. If a
+      // terminal response won the race, no replenishment is needed anymore.
+      if (!this.terminal) throw error;
+    }
   }
 }
 
@@ -168,6 +274,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly resolveServerInfo: (value: QwpServerInfoMessage) => void;
   private readonly rejectServerInfo: (error: unknown) => void;
   private readonly serverInfoTimer: ReturnType<typeof setTimeout>;
+  private readonly defaultQueryTimeoutMs: number;
   private active?: QwpEgressQuery;
   private nextRequestId = 0n;
   private sendTail: Promise<void> = Promise.resolve();
@@ -181,7 +288,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     private readonly connection: QwpBinaryConnection,
     options: QwpEgressSessionOptions = {},
   ) {
-    let timeout: number;
+    let validated: QwpValidatedEgressSessionOptions;
     try {
       if (
         options.reconnect &&
@@ -191,7 +298,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
           "egress reconnect options require QwpEgressSession.connect(factory, options)",
         );
       }
-      timeout = validateEgressSessionOptions(options);
+      validated = validateEgressSessionOptions(options);
     } catch (error) {
       try {
         void connection
@@ -202,6 +309,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       }
       throw error;
     }
+    this.defaultQueryTimeoutMs = validated.queryTimeoutMs;
     let resolve!: (value: QwpServerInfoMessage) => void;
     let reject!: (error: unknown) => void;
     this.ready = new Promise<QwpServerInfoMessage>((res, rej) => {
@@ -217,7 +325,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       void this.connection
         .close(1002, "missing QWP SERVER_INFO")
         .catch(() => undefined);
-    }, timeout);
+    }, validated.serverInfoTimeoutMs);
     this.receiveLoop = this.consumeMessages();
   }
 
@@ -225,13 +333,13 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     factory: QwpConnectionFactory,
     options: QwpEgressSessionOptions = {},
   ): Promise<QwpEgressSession> {
-    const timeout = validateEgressSessionOptions(options);
+    const validated = validateEgressSessionOptions(options);
     const state: { session?: QwpEgressSession } = {};
     const connection = options.reconnect
       ? await QwpReconnectingEgressConnection.connect(
           factory,
           options.reconnect,
-          timeout,
+          validated.serverInfoTimeoutMs,
           () => state.session?.prepareConnectionReset(),
           options.onReplayReset
             ? async (event) => {
@@ -283,6 +391,16 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     sql: string,
     options: QwpEgressQueryOptions = {},
   ): Promise<QwpEgressQuery> {
+    const timeoutMs = validateOptionalTimeout(
+      options.timeoutMs ?? this.defaultQueryTimeoutMs,
+      "timeoutMs",
+    );
+    if (
+      options.autoCredit !== undefined &&
+      typeof options.autoCredit !== "boolean"
+    ) {
+      throw new TypeError("autoCredit must be a boolean");
+    }
     await this.ready;
     this.throwIfUnavailable();
     if (this.active) {
@@ -296,13 +414,22 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     }
 
     const requestId = this.nextRequestId++;
-    const query = new QwpEgressQuery(requestId, this);
+    const initialCredit = options.initialCredit ?? 0;
+    const creditEnabled =
+      typeof initialCredit === "bigint"
+        ? initialCredit > 0n
+        : initialCredit > 0;
+    const query = new QwpEgressQuery(
+      requestId,
+      this,
+      creditEnabled && (options.autoCredit ?? true),
+    );
     this.decoder.resetQuerySchema();
     this.active = query;
     const request: QwpQueryRequest = {
       requestId,
       sql,
-      initialCredit: options.initialCredit,
+      initialCredit,
       binds: options.binds,
       bindCount: options.bindCount,
       bindPayload: options.bindPayload,
@@ -317,6 +444,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       query.fail(error);
       throw error;
     }
+    query.armTimeout(timeoutMs);
     return query;
   }
 
@@ -331,6 +459,16 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   ): Promise<void> {
     this.requireActive(requestId);
     return this.send(encodeQwpCredit(requestId, additionalBytes));
+  }
+
+  expire(requestId: bigint, timeoutMs: number): void {
+    if (!this.active || this.active.requestId !== requestId) return;
+    this.active.expire(new QwpEgressQueryTimeoutError(requestId, timeoutMs));
+    try {
+      void this.send(encodeQwpCancel(requestId)).catch(() => undefined);
+    } catch (error) {
+      this.fail(error);
+    }
   }
 
   close(code = 1000, reason = ""): Promise<void> {
@@ -377,7 +515,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             break;
           case "result-batch": {
             const query = this.requireActive(message.requestId);
-            query.push(this.decoder.decode(message));
+            query.push(this.decoder.decode(message), payload.byteLength);
             break;
           }
           case "result-end": {

@@ -9,11 +9,17 @@ import { WebSocketServer } from "ws";
 import {
   connectQwpNodeIngress,
   connectQwpNodeWebSocket,
+  encodeQwpFrame,
   QWP_COLUMN_TYPE,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+  QWP_EGRESS_MESSAGE,
   QWP_STATUS,
+  QwpByteReader,
+  QwpByteWriter,
   QwpDurableAckUnavailableError,
   QwpTableBuffer,
+  readQwpVarint,
+  writeQwpVarint,
 } from "../../src/qwp/node";
 
 const USER = process.env.QWP_BROWSER_E2E_USER ?? "admin";
@@ -88,6 +94,54 @@ async function executeSql(questdbUrl: string, sql: string): Promise<Response> {
       Authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
     },
   });
+}
+
+function writeU16String(writer: QwpByteWriter, value: string): void {
+  const bytes = new TextEncoder().encode(value);
+  writer.writeUint16(bytes.length).writeBytes(bytes);
+}
+
+function browserServerInfo(): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload
+    .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
+    .writeUint8(0)
+    .writeBigUint64(1n)
+    .writeUint32(0)
+    .writeBigInt64(0n);
+  writeU16String(payload, "browser-test-cluster");
+  writeU16String(payload, "browser-test-node");
+  return encodeQwpFrame(payload.toUint8Array());
+}
+
+function browserEmptyResultBatch(requestId: bigint): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
+  writeQwpVarint(payload, 0); // batch sequence
+  writeQwpVarint(payload, 0); // table name
+  writeQwpVarint(payload, 0); // row count
+  writeQwpVarint(payload, 0); // column count
+  return encodeQwpFrame(payload.toUint8Array(), 0, 1);
+}
+
+function browserResultEnd(requestId: bigint): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
+  writeQwpVarint(payload, 0);
+  writeQwpVarint(payload, 0);
+  return encodeQwpFrame(payload.toUint8Array());
+}
+
+function browserCancelled(requestId: bigint): Uint8Array {
+  const message = new TextEncoder().encode("cancelled by client deadline");
+  const payload = new QwpByteWriter();
+  payload
+    .writeUint8(QWP_EGRESS_MESSAGE.QUERY_ERROR)
+    .writeBigUint64(requestId)
+    .writeUint8(QWP_STATUS.CANCELLED)
+    .writeUint16(message.length)
+    .writeBytes(message);
+  return encodeQwpFrame(payload.toUint8Array());
 }
 
 describe("QWP in a real browser", () => {
@@ -194,6 +248,113 @@ describe("QWP in a real browser", () => {
 
       expect(offeredProtocols).toContain(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL);
       expect(result).toEqual({ qwpVersion: 1, durableAckEnabled: true });
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  it("replenishes egress credit and cancels deadlines in a real browser", async () => {
+    const received: Uint8Array[] = [];
+    const resultBatch = browserEmptyResultBatch(0n);
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("connection", (socket) => {
+      socket.send(browserServerInfo());
+      socket.on("message", (data) => {
+        const payload = new Uint8Array(data as Buffer).slice();
+        received.push(payload);
+        const reader = new QwpByteReader(payload);
+        const kind = reader.readUint8();
+        const requestId = reader.readBigUint64();
+        if (kind === QWP_EGRESS_MESSAGE.QUERY_REQUEST && requestId === 0n) {
+          socket.send(resultBatch);
+        } else if (kind === QWP_EGRESS_MESSAGE.CREDIT && requestId === 0n) {
+          socket.send(browserResultEnd(requestId));
+        } else if (kind === QWP_EGRESS_MESSAGE.CANCEL && requestId === 1n) {
+          socket.send(browserCancelled(requestId));
+        }
+      });
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const session = await qwp.connectQwpBrowserEgress(
+            { url },
+            { queryTimeoutMs: 25 },
+          );
+          try {
+            const flowing = await session.query("select 1", {
+              initialCredit: 1,
+            });
+            const iterator = flowing[Symbol.asyncIterator]();
+            const batch = await iterator.next();
+            const done = await iterator.next();
+            await flowing.completion;
+
+            const expiring = await session.query("select sleep(1000)");
+            let timeout: {
+              name?: string;
+              requestId?: string;
+              timeoutMs?: number;
+            };
+            try {
+              await expiring.completion;
+              timeout = {};
+            } catch (error) {
+              const failure = error as {
+                name?: string;
+                requestId?: bigint;
+                timeoutMs?: number;
+              };
+              timeout = {
+                name: failure.name,
+                requestId: failure.requestId?.toString(),
+                timeoutMs: failure.timeoutMs,
+              };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            return {
+              batchRows: batch.value.rowCount,
+              done: done.done,
+              timeout,
+            };
+          } finally {
+            await session.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/read/v1`,
+        },
+      );
+
+      expect(result).toEqual({
+        batchRows: 0,
+        done: true,
+        timeout: {
+          name: "QwpEgressQueryTimeoutError",
+          requestId: "1",
+          timeoutMs: 25,
+        },
+      });
+      expect(received.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CREDIT,
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      const credit = new QwpByteReader(received[1]);
+      expect(credit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+      expect(credit.readBigUint64()).toBe(0n);
+      expect(readQwpVarint(credit)).toBe(BigInt(resultBatch.byteLength));
     } finally {
       await page.close();
       await closeWebSocketServer(server);

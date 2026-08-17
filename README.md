@@ -123,13 +123,20 @@ WebSocket upgrade. Raw batches remain the default for compatibility.
 ```typescript
 import { connectQwpNodeEgress } from "@questdb/nodejs-client/qwp/node";
 
-const session = await connectQwpNodeEgress({
-  url: "ws://127.0.0.1:9000/read/v1",
-  compression: "zstd",
-  compressionLevel: 3,
-});
+const session = await connectQwpNodeEgress(
+  {
+    url: "ws://127.0.0.1:9000/read/v1",
+    compression: "zstd",
+    compressionLevel: 3,
+  },
+  {
+    queryTimeoutMs: 30_000,
+  },
+);
 try {
-  const query = await session.query("select * from trades");
+  const query = await session.query("select * from trades", {
+    initialCredit: 1024 * 1024,
+  });
   console.log("effective Zstd level", session.negotiatedZstdLevel);
   for await (const batch of query) {
     for (const row of batch.rows()) console.log(row);
@@ -152,6 +159,18 @@ the active server actually selected and refresh after reconnection or failover.
 Both `"zstd"` and `"auto"` advertise Zstd followed by raw fallback, and the
 server still sends an individual batch raw when compression would make it
 larger.
+
+A positive `initialCredit` enables byte-based egress flow control. The client
+automatically replenishes the exact wire size of each result batch after the
+async iterator advances past it, so a slow Node.js or browser consumer naturally
+limits how far the server can stream ahead. Set `autoCredit: false` to manage
+credit explicitly through `query.grantCredit()`.
+
+`queryTimeoutMs` sets the session's default query deadline; a per-query
+`timeoutMs` overrides it, and zero disables the deadline. When a deadline
+expires, the client rejects iteration and `query.completion` with
+`QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and waits for the terminal
+server response before accepting another query on that connection.
 
 ### Authentication and secure connection
 
