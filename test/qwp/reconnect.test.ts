@@ -10,6 +10,7 @@ import {
 } from "../../src/qwp/node";
 import {
   QWP_RECONNECT_EVENT_KIND,
+  QWP_COLUMN_TYPE,
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
   QWP_STATUS,
@@ -21,11 +22,15 @@ import {
   QwpEgressSession,
   QwpIngressSession,
   QwpHandshakeMetadata,
+  QwpSymbolDictionary,
+  QwpTableBuffer,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
   QwpReplayRejectedError,
   QwpUpgradeError,
   encodeQwpFrame,
+  encodeQwpIngressFrame,
+  decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../src/qwp";
 import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
@@ -99,6 +104,15 @@ function resultEnd(requestId = 0n): Uint8Array {
   writeQwpVarint(payload, 1);
   writeQwpVarint(payload, 0);
   return encodeQwpFrame(payload.toUint8Array());
+}
+
+function symbolTable(symbol: string): QwpTableBuffer {
+  const table = new QwpTableBuffer("trades");
+  table
+    .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+    .values.push(symbol);
+  table.nextRow();
+  return table;
 }
 
 class FakeConnection implements QwpBinaryConnection {
@@ -236,6 +250,99 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("restores browser-memory symbol dictionaries before replay", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        ackTimeoutMs: 1_000,
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    const firstTable = symbolTable("ETH-USD");
+    const acknowledged = session.sendTablesDelta([firstTable]);
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    expect(decodeQwpIngressSymbolDictionaryDelta(first.sent[0])).toEqual({
+      startId: 0,
+      entries: ["ETH-USD"],
+    });
+    first.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await acknowledged;
+
+    const pending = session.sendTablesDelta([symbolTable("BTC-USD")]);
+    await vi.waitFor(() => expect(first.sent).toHaveLength(2));
+    expect(decodeQwpIngressSymbolDictionaryDelta(first.sent[1])).toEqual({
+      startId: 1,
+      entries: ["BTC-USD"],
+    });
+    first.drop();
+
+    await vi.waitFor(() => expect(second.sent).toHaveLength(2));
+    expect(decodeQwpIngressSymbolDictionaryDelta(second.sent[0])).toEqual({
+      startId: 0,
+      entries: ["ETH-USD", "BTC-USD"],
+    });
+    expect(second.sent[1]).toEqual(first.sent[1]);
+    second.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    second.receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await expect(pending).resolves.toMatchObject({ sequence: 1n });
+    await session.close();
+  });
+
+  it("chunks reconnect dictionary catch-up under the negotiated batch cap", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary", {
+      qwpVersion: 1,
+      maxBatchSizeBytes: 22,
+    });
+    const connections = [first, second];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        ackTimeoutMs: 1_000,
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    for (const [index, symbol] of ["ETH-USD", "BTC-USD"].entries()) {
+      const pending = session.sendTablesDelta([symbolTable(symbol)]);
+      await vi.waitFor(() => expect(first.sent).toHaveLength(index + 1));
+      first.receive(ingressResponse(QWP_STATUS.OK, BigInt(index)));
+      await pending;
+    }
+
+    first.drop();
+    await vi.waitFor(() => expect(second.sent).toHaveLength(2));
+    expect(second.sent.every((frame) => frame.byteLength <= 22)).toBe(true);
+    expect(decodeQwpIngressSymbolDictionaryDelta(second.sent[0])).toEqual({
+      startId: 0,
+      entries: ["ETH-USD"],
+    });
+    expect(decodeQwpIngressSymbolDictionaryDelta(second.sent[1])).toEqual({
+      startId: 1,
+      entries: ["BTC-USD"],
+    });
+    await session.close();
+  });
+
   it("does not double-send a frame queued while replay is connecting", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
@@ -365,6 +472,67 @@ describe("QWP ingress reconnect and replay", () => {
     await expect(pending).rejects.toBeInstanceOf(QwpReplayRejectedError);
     expect(connections).toHaveLength(0);
     await session.close();
+  });
+
+  it("recovers a persisted Node dictionary before replay and continues its IDs", async () => {
+    const directory = await createTemporaryDirectory();
+    const dictionary = new QwpSymbolDictionary();
+    const seededTable = new QwpTableBuffer("trades");
+    for (const symbol of ["ETH-USD", "BTC-USD"]) {
+      seededTable
+        .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+        .values.push(symbol);
+      seededTable.nextRow();
+    }
+    const replayFrame = encodeQwpIngressFrame([seededTable], {
+      dictionary,
+      confirmedMaxSymbolId: -1,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.appendSymbolDictionary(0, dictionary.entriesFrom(0));
+    await seed.append({ frameSequence: 5n, payload: replayFrame });
+    await seed.close();
+
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+    });
+    expect(connection.sent).toHaveLength(2);
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toEqual({
+      startId: 0,
+      entries: ["ETH-USD", "BTC-USD"],
+    });
+    expect(connection.sent[1]).toEqual(replayFrame);
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await vi.waitFor(async () =>
+      expect(
+        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+      ).toEqual([]),
+    );
+
+    const current = session.sendTablesDelta([symbolTable("SOL-USD")]);
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(3));
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[2])).toEqual({
+      startId: 2,
+      entries: ["SOL-USD"],
+    });
+    connection.receive(ingressResponse(QWP_STATUS.OK, 2n));
+    await expect(current).resolves.toMatchObject({ sequence: 0n });
+    await session.close();
+
+    const verify = new QwpNodeFileReplayStore({ directory });
+    await expect(verify.load()).resolves.toEqual([]);
+    await expect(verify.loadSymbolDictionary()).resolves.toEqual([
+      "ETH-USD",
+      "BTC-USD",
+      "SOL-USD",
+    ]);
+    await verify.close();
+    await rm(directory, { recursive: true, force: true });
   });
 
   it("recovers a Node journal before new frames and removes it after ACK", async () => {
@@ -577,6 +745,37 @@ describe("QWP Node file replay store", () => {
       { frameSequence: 1n, payload: Uint8Array.of(3, 4) },
     ]);
     await third.close();
+  });
+
+  it("recovers a persisted dictionary and truncates a torn append tail", async () => {
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({ directory });
+    await first.load();
+    await first.appendSymbolDictionary(0, ["ETH-USD", "BTC-USD"]);
+    await first.close();
+    await writeFile(
+      join(directory, "symbols.qwpdict"),
+      Uint8Array.of(1, 2, 3),
+      { flag: "a" },
+    );
+
+    const recovered = new QwpNodeFileReplayStore({ directory });
+    await recovered.load();
+    await expect(recovered.loadSymbolDictionary()).resolves.toEqual([
+      "ETH-USD",
+      "BTC-USD",
+    ]);
+    await recovered.appendSymbolDictionary(2, ["SOL-USD"]);
+    await recovered.close();
+
+    const verify = new QwpNodeFileReplayStore({ directory });
+    await verify.load();
+    await expect(verify.loadSymbolDictionary()).resolves.toEqual([
+      "ETH-USD",
+      "BTC-USD",
+      "SOL-USD",
+    ]);
+    await verify.close();
   });
 
   it("enforces its configured disk budget before writing", async () => {

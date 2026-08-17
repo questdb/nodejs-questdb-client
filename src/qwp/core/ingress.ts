@@ -9,10 +9,12 @@ import {
   QWP_HEADER_SIZE,
   QWP_MAX_ERROR_MESSAGE_LENGTH,
   QWP_MAX_ROWS_PER_TABLE,
+  QWP_MAX_SYMBOL_DICTIONARY_SIZE,
   QWP_STATUS,
   QwpColumnType,
 } from "./constants";
-import { writeQwpFrameHeader } from "./frame";
+import { decodeQwpFrame, writeQwpFrameHeader } from "./frame";
+import { QwpProtocolError } from "./errors";
 import { encodeQwpGorilla, qwpGorillaSize } from "./gorilla";
 import { QwpSymbolDictionary } from "./symbol-dictionary";
 import {
@@ -21,13 +23,13 @@ import {
   QwpSymbolValue,
   QwpTableBuffer,
 } from "./table";
-import { qwpVarintSize, writeQwpVarint } from "./varint";
+import { qwpVarintSize, readQwpVarintNumber, writeQwpVarint } from "./varint";
 
 export interface QwpIngressEncodeOptions {
   gorilla?: boolean;
   /** Present means connection-scoped delta dictionary mode. */
   dictionary?: QwpSymbolDictionary;
-  /** Highest global symbol ID already confirmed by the server. */
+  /** Highest global symbol ID already published on this logical connection. */
   confirmedMaxSymbolId?: number;
   deferCommit?: boolean;
 }
@@ -35,6 +37,7 @@ export interface QwpIngressEncodeOptions {
 interface ColumnEncodeOptions {
   gorilla: boolean;
   deltaSymbols: boolean;
+  dictionary?: QwpSymbolDictionary;
 }
 
 export interface QwpIngressTableResult {
@@ -53,8 +56,21 @@ function symbolText(value: unknown): string {
   return typeof value === "string" ? value : (value as QwpSymbolValue).text;
 }
 
-function symbolId(value: unknown): number {
-  return typeof value === "number" ? value : (value as QwpSymbolValue).id;
+function symbolId(value: unknown, dictionary: QwpSymbolDictionary): number {
+  if (typeof value === "string") return dictionary.getOrAdd(value);
+  const id = typeof value === "number" ? value : (value as QwpSymbolValue).id;
+  if (!Number.isSafeInteger(id) || id < 0 || id >= dictionary.size) {
+    throw new Error(`QWP symbol ID is outside the dictionary: ${id}`);
+  }
+  if (typeof value !== "number") {
+    const symbol = value as QwpSymbolValue;
+    if (dictionary.valueAt(id) !== symbol.text) {
+      throw new Error(
+        `QWP symbol value does not match dictionary ID ${id}: '${symbol.text}'`,
+      );
+    }
+  }
+  return id;
 }
 
 function nullCount(column: QwpColumnBuffer): number {
@@ -138,7 +154,9 @@ function columnPayloadSize(
 
   if (column.type === QWP_COLUMN_TYPE.SYMBOL) {
     if (options.deltaSymbols) {
-      for (const value of column.values) size += qwpVarintSize(symbolId(value));
+      for (const value of column.values) {
+        size += qwpVarintSize(symbolId(value, options.dictionary!));
+      }
       return size;
     }
     const dictionary = [
@@ -307,8 +325,9 @@ function writeColumn(
       return;
     case QWP_COLUMN_TYPE.SYMBOL: {
       if (options.deltaSymbols) {
-        for (const value of column.values)
-          writeQwpVarint(writer, symbolId(value));
+        for (const value of column.values) {
+          writeQwpVarint(writer, symbolId(value, options.dictionary!));
+        }
         return;
       }
       const dictionary = [
@@ -425,6 +444,20 @@ export function encodeQwpIngressFrame(
   tables: readonly QwpTableBuffer[],
   options: QwpIngressEncodeOptions = {},
 ): Uint8Array {
+  const dictionarySize = options.dictionary?.size;
+  try {
+    return encodeQwpIngressFrameInternal(tables, options);
+  } catch (error) {
+    if (dictionarySize !== undefined)
+      options.dictionary!.truncate(dictionarySize);
+    throw error;
+  }
+}
+
+function encodeQwpIngressFrameInternal(
+  tables: readonly QwpTableBuffer[],
+  options: QwpIngressEncodeOptions,
+): Uint8Array {
   if (tables.length > 0xffff) {
     throw new Error("QWP frame contains more than 65535 tables");
   }
@@ -439,13 +472,40 @@ export function encodeQwpIngressFrame(
 
   const gorilla = options.gorilla ?? true;
   const deltaSymbols = options.dictionary !== undefined;
+  if (deltaSymbols) {
+    const published = options.confirmedMaxSymbolId ?? -1;
+    if (
+      !Number.isSafeInteger(published) ||
+      published < -1 ||
+      published >= options.dictionary!.size
+    ) {
+      throw new RangeError(
+        `published symbol dictionary ID is out of range [id=${published}, size=${options.dictionary!.size}]`,
+      );
+    }
+  }
+  if (deltaSymbols) {
+    // Resolve string values before calculating the delta prefix and frame size.
+    for (const table of tables) {
+      for (const column of table.columns) {
+        if (column.type !== QWP_COLUMN_TYPE.SYMBOL) continue;
+        for (const value of column.values) {
+          if (typeof value === "string") options.dictionary!.getOrAdd(value);
+        }
+      }
+    }
+  }
   const deltaStart = deltaSymbols
     ? (options.confirmedMaxSymbolId ?? -1) + 1
     : 0;
   const dictionaryEntries = deltaSymbols
     ? options.dictionary!.entriesFrom(deltaStart)
     : [];
-  const columnOptions = { gorilla, deltaSymbols };
+  const columnOptions = {
+    gorilla,
+    deltaSymbols,
+    dictionary: options.dictionary,
+  };
 
   let flags = 0;
   if (gorilla) flags |= QWP_FLAG_GORILLA;
@@ -491,6 +551,63 @@ export function encodeQwpIngressFrame(
     );
   }
   return result;
+}
+
+export interface QwpIngressSymbolDictionaryDelta {
+  readonly startId: number;
+  readonly entries: readonly string[];
+}
+
+/** Reads the connection-scoped dictionary prefix from a delta ingress frame. */
+export function decodeQwpIngressSymbolDictionaryDelta(
+  bytes: Uint8Array,
+): QwpIngressSymbolDictionaryDelta | undefined {
+  const frame = decodeQwpFrame(bytes);
+  if ((frame.flags & QWP_FLAG_DELTA_SYMBOL_DICTIONARY) === 0) return undefined;
+  const reader = new QwpByteReader(frame.payload);
+  const startId = readQwpVarintNumber(reader, "symbol dictionary start ID");
+  const count = readQwpVarintNumber(reader, "symbol dictionary entry count");
+  if (startId + count > QWP_MAX_SYMBOL_DICTIONARY_SIZE) {
+    throw new QwpProtocolError(
+      `QWP symbol dictionary exceeds maximum size ${QWP_MAX_SYMBOL_DICTIONARY_SIZE}`,
+    );
+  }
+  const entries: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const length = readQwpVarintNumber(
+      reader,
+      "symbol dictionary entry length",
+    );
+    entries.push(reader.readUtf8(length, "symbol dictionary entry"));
+  }
+  return { startId, entries };
+}
+
+/** Encodes a table-less committed dictionary catch-up frame. */
+export function encodeQwpIngressSymbolDictionaryFrame(
+  startId: number,
+  entries: readonly string[],
+): Uint8Array {
+  if (!Number.isSafeInteger(startId) || startId < 0) {
+    throw new RangeError("symbol dictionary start ID must be non-negative");
+  }
+  if (startId + entries.length > QWP_MAX_SYMBOL_DICTIONARY_SIZE) {
+    throw new RangeError(
+      `symbol dictionary exceeds maximum size ${QWP_MAX_SYMBOL_DICTIONARY_SIZE}`,
+    );
+  }
+  let payloadLength = qwpVarintSize(startId) + qwpVarintSize(entries.length);
+  for (const entry of entries) payloadLength += qwpStringSize(entry);
+  const writer = new QwpByteWriter(QWP_HEADER_SIZE + payloadLength);
+  writeQwpFrameHeader(writer, {
+    flags: QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+    tableCount: 0,
+    payloadLength,
+  });
+  writeQwpVarint(writer, startId);
+  writeQwpVarint(writer, entries.length);
+  for (const entry of entries) writeQwpString(writer, entry);
+  return writer.toUint8Array();
 }
 
 export function encodeQwpIngressCommitFrame(

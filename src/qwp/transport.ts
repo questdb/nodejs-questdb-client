@@ -95,6 +95,17 @@ export class QwpReplayRejectedError extends Error {
   }
 }
 
+/** A replay store cannot preserve the dictionary required by delta frames. */
+export class QwpReplayDictionaryError extends Error {
+  readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "QwpReplayDictionaryError";
+    this.cause = cause;
+  }
+}
+
 /** An active egress operation cannot be safely replayed without an explicit reset hook. */
 export class QwpEgressReplayRequiredError extends Error {
   constructor(readonly requestId?: bigint) {
@@ -117,6 +128,13 @@ export interface QwpIngressReplayStore {
   load(): Promise<readonly QwpIngressReplayRecord[]>;
   append(record: QwpIngressReplayRecord): Promise<void>;
   acknowledgeThrough(frameSequence: bigint): Promise<void>;
+  /** Loads the durable, dense symbol prefix used by persisted delta frames. */
+  loadSymbolDictionary?(): Promise<readonly string[]>;
+  /** Persists new dense entries before a delta frame is made replayable. */
+  appendSymbolDictionary?(
+    startId: number,
+    entries: readonly string[],
+  ): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -262,6 +280,8 @@ export interface QwpBinaryConnection {
   readonly messages: AsyncIterable<Uint8Array>;
   readonly closed: Promise<QwpConnectionCloseInfo>;
   readonly handshake: QwpHandshakeMetadata;
+  /** @internal Recovered ingress dictionary supplied by replay connections. */
+  readonly ingressSymbolDictionary?: readonly string[];
   /** Endpoint backing this connection, when supplied by its adapter. */
   readonly endpoint?: string | URL;
 

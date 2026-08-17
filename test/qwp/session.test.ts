@@ -9,12 +9,14 @@ import {
   QwpVersionMismatchError,
 } from "../../src/qwp/node";
 import {
+  QWP_COLUMN_TYPE,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpBatchTooLargeError,
   QwpByteWriter,
   QwpIngressNackError,
   QwpIngressSession,
+  QwpTableBuffer,
   QwpSendClosedError,
   QwpSendTimeoutError,
   QwpUpgradeError,
@@ -749,6 +751,37 @@ describe("QwpIngressSession", () => {
     await expect(session.sendFrame(Uint8Array.of(2))).resolves.toMatchObject({
       sequence: 1n,
       status: QWP_STATUS.OK,
+    });
+    await session.close();
+  });
+
+  it("fails a direct delta session after a dictionary gap", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting);
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.DICTIONARY_GAP, 0n, "missing prefix"),
+      );
+    };
+    const table = new QwpTableBuffer("trades");
+    table
+      .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+      .values.push("ETH-USD");
+    table.nextRow();
+
+    await expect(session.sendTablesDelta([table])).rejects.toMatchObject({
+      name: "QwpIngressNackError",
+      response: { status: QWP_STATUS.DICTIONARY_GAP },
+    });
+    expect(() => session.sendFrame(Uint8Array.of(2))).toThrow(/missing prefix/);
+    expect(socket.closeCalls).toContainEqual({
+      code: 1002,
+      reason: "QWP symbol dictionary gap",
     });
     await session.close();
   });

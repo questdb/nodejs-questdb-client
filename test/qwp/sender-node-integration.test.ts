@@ -2,7 +2,13 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { Sender } from "../../src";
-import { QWP_MAGIC, QWP_STATUS, QwpByteWriter } from "../../src/qwp/node";
+import {
+  QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+  QWP_MAGIC,
+  QWP_STATUS,
+  QwpByteWriter,
+  decodeQwpIngressSymbolDictionaryDelta,
+} from "../../src/qwp/node";
 
 function okResponse(sequence: bigint, table: string): Uint8Array {
   const encodedTable = new TextEncoder().encode(table);
@@ -66,6 +72,13 @@ describe("Sender QWP integration", () => {
     expect(authorization).toBe("Bearer secret");
     expect(requestPath).toBe("/write/v4");
     expect(frames).toHaveLength(1);
+    expect(frames[0][5] & QWP_FLAG_DELTA_SYMBOL_DICTIONARY).toBe(
+      QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+    );
+    expect(decodeQwpIngressSymbolDictionaryDelta(frames[0])).toEqual({
+      startId: 0,
+      entries: ["ETH-USD"],
+    });
     expect(
       new DataView(
         frames[0].buffer,

@@ -16,6 +16,7 @@ class RecordingSession implements QwpSenderSession {
     options?: QwpIngressEncodeOptions;
   }[] = [];
   readonly durable: QwpIngressResponse[] = [];
+  deltaSendCount = 0;
   closeCount = 0;
 
   async sendTables(
@@ -31,6 +32,14 @@ class RecordingSession implements QwpSenderSession {
         sequenceTransaction: BigInt(table.rowCount),
       })),
     };
+  }
+
+  sendTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla">,
+  ): Promise<QwpIngressResponse> {
+    this.deltaSendCount++;
+    return this.sendTables(tables, options);
   }
 
   async waitForDurable(response: QwpIngressResponse): Promise<void> {
@@ -63,6 +72,7 @@ describe("QWP high-level sender", () => {
 
     await expect(sender.flush()).resolves.toBe(true);
     expect(session.sends).toHaveLength(1);
+    expect(session.deltaSendCount).toBe(1);
     const first = session.sends[0].tables[0];
     expect(first.name).toBe("trades");
     expect(first.rowCount).toBe(1);
@@ -181,5 +191,18 @@ describe("QWP high-level sender", () => {
     expect(session.sends).toHaveLength(1);
     expect(session.durable).toHaveLength(1);
     await expect(sender.flush()).resolves.toBe(false);
+  });
+
+  it("allows the high-level sender to opt out of symbol deltas", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      encode: { symbolDictionary: "full" },
+    });
+    await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+    await sender.flush();
+    expect(session.deltaSendCount).toBe(0);
+    expect(session.sends).toHaveLength(1);
+    await sender.close();
   });
 });

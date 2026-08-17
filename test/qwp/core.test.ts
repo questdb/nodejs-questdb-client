@@ -3,6 +3,7 @@ import {
   decodeQwpEgressMessage,
   decodeQwpFrame,
   decodeQwpIngressResponse,
+  decodeQwpIngressSymbolDictionaryDelta,
   decodeQwpVarint,
   encodeQwpCancel,
   encodeQwpCredit,
@@ -20,6 +21,7 @@ import {
   QWP_STATUS,
   QwpByteReader,
   QwpByteWriter,
+  QwpSymbolDictionary,
   QwpTableBuffer,
   qwpGorillaSize,
   qwpVarintSize,
@@ -140,6 +142,63 @@ describe("QWP ingress codec", () => {
     expect(dataView(gorilla).getBigInt64(0, true)).toBe(1000n);
     expect(dataView(gorilla).getBigInt64(8, true)).toBe(2000n);
     expect(gorilla[16]).toBe(0);
+  });
+
+  it("assigns string symbols stable global IDs and emits only new deltas", () => {
+    const dictionary = new QwpSymbolDictionary();
+    const first = new QwpTableBuffer("trades");
+    for (const symbol of ["ETH-USD", "BTC-USD"]) {
+      first
+        .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+        .values.push(symbol);
+      first.nextRow();
+    }
+    const firstFrame = encodeQwpIngressFrame([first], {
+      dictionary,
+      confirmedMaxSymbolId: -1,
+    });
+    expect(decodeQwpIngressSymbolDictionaryDelta(firstFrame)).toEqual({
+      startId: 0,
+      entries: ["ETH-USD", "BTC-USD"],
+    });
+
+    const second = new QwpTableBuffer("trades");
+    for (const symbol of ["BTC-USD", "SOL-USD"]) {
+      second
+        .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+        .values.push(symbol);
+      second.nextRow();
+    }
+    const secondFrame = encodeQwpIngressFrame([second], {
+      dictionary,
+      confirmedMaxSymbolId: 1,
+    });
+    expect(decodeQwpIngressSymbolDictionaryDelta(secondFrame)).toEqual({
+      startId: 2,
+      entries: ["SOL-USD"],
+    });
+    expect(dictionary.entriesFrom(0)).toEqual([
+      "ETH-USD",
+      "BTC-USD",
+      "SOL-USD",
+    ]);
+  });
+
+  it("rolls back tentative symbols when frame encoding fails", () => {
+    const dictionary = new QwpSymbolDictionary();
+    const table = new QwpTableBuffer("broken");
+    table
+      .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+      .values.push("ETH-USD");
+    table
+      .getOrCreateColumn("payload", QWP_COLUMN_TYPE.BINARY)!
+      .values.push("not binary");
+    table.nextRow();
+
+    expect(() => encodeQwpIngressFrame([table], { dictionary })).toThrow(
+      /Uint8Array/,
+    );
+    expect(dictionary.size).toBe(0);
   });
 
   it("refuses to encode incomplete column state", () => {

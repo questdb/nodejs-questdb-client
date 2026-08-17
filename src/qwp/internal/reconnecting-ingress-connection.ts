@@ -1,7 +1,13 @@
 import {
   decodeQwpIngressResponse,
+  decodeQwpIngressSymbolDictionaryDelta,
+  encodeQwpIngressSymbolDictionaryFrame,
+  QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+  QWP_HEADER_SIZE,
   QWP_STATUS,
   QwpProtocolError,
+  qwpVarintSize,
+  utf8Length,
 } from "../core";
 import {
   QWP_RECONNECT_EVENT_KIND,
@@ -15,6 +21,7 @@ import {
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
   QwpReconnectOptions,
+  QwpReplayDictionaryError,
   QwpReplayRejectedError,
   QwpSendClosedError,
   QwpUpgradeError,
@@ -26,6 +33,7 @@ interface ReplayFrame extends QwpIngressReplayRecord {
   ackDelivered: boolean;
   transmitted: boolean;
   durableTargets?: Map<string, bigint>;
+  dictionaryCatchup?: boolean;
 }
 
 class RetriableIngressNackError extends Error {
@@ -46,6 +54,7 @@ class RetriableIngressNackError extends Error {
 
 class QwpMemoryReplayStore implements QwpIngressReplayStore {
   private readonly records = new Map<bigint, Uint8Array>();
+  private readonly symbols: string[] = [];
 
   async load(): Promise<readonly QwpIngressReplayRecord[]> {
     return Array.from(this.records, ([frameSequence, payload]) => ({
@@ -65,6 +74,22 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     }
   }
 
+  async loadSymbolDictionary(): Promise<readonly string[]> {
+    return this.symbols.slice();
+  }
+
+  async appendSymbolDictionary(
+    startId: number,
+    entries: readonly string[],
+  ): Promise<void> {
+    if (startId !== this.symbols.length) {
+      throw new QwpReplayDictionaryError(
+        `memory replay dictionary is not dense [expected=${this.symbols.length}, received=${startId}]`,
+      );
+    }
+    this.symbols.push(...entries);
+  }
+
   async close(): Promise<void> {}
 }
 
@@ -77,12 +102,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly messagesQueue = new QwpAsyncQueue<Uint8Array>();
   private readonly frames = new Map<bigint, ReplayFrame>();
   private readonly durableWatermarks = new Map<string, bigint>();
+  private readonly symbolDictionary: string[];
   private readonly store: QwpIngressReplayStore;
   private readonly maxAttempts: number;
   private readonly initialBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly maxDurationMs: number;
   private readonly maxFrameRejections: number;
+  private readonly localMaxBatchSizeBytes?: number;
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   private connection?: QwpBinaryConnection;
   private connectingCandidate?: QwpBinaryConnection;
@@ -109,8 +136,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     private readonly reconnectOptions: QwpReconnectOptions,
     store: QwpIngressReplayStore,
     records: readonly QwpIngressReplayRecord[],
+    symbolDictionary: readonly string[],
+    localMaxBatchSizeBytes?: number,
   ) {
     this.store = store;
+    this.symbolDictionary = [...symbolDictionary];
+    this.localMaxBatchSizeBytes = localMaxBatchSizeBytes;
     this.maxAttempts = reconnectOptions.maxAttempts ?? 3;
     this.initialBackoffMs = reconnectOptions.initialBackoffMs ?? 100;
     this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? 5_000;
@@ -152,11 +183,16 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     factory: QwpConnectionFactory,
     reconnectOptions: QwpReconnectOptions,
     replayStore?: QwpIngressReplayStore,
+    localMaxBatchSizeBytes?: number,
   ): Promise<QwpReconnectingIngressConnection> {
     const store = replayStore ?? new QwpMemoryReplayStore();
     let connection: QwpReconnectingIngressConnection | undefined;
     try {
       const records = await store.load();
+      const symbolDictionary = store.loadSymbolDictionary
+        ? await store.loadSymbolDictionary()
+        : [];
+      validateRecoveredDictionary(records, symbolDictionary, store);
       connection = new QwpReconnectingIngressConnection(
         factory,
         reconnectOptions,
@@ -168,6 +204,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
               ? 1
               : 0,
         ),
+        symbolDictionary,
+        localMaxBatchSizeBytes,
       );
       await connection.connectLoop(undefined, false);
       return connection;
@@ -188,6 +226,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return this.lastEndpoint;
   }
 
+  get ingressSymbolDictionary(): readonly string[] {
+    return this.symbolDictionary.slice();
+  }
+
   send(payload: Uint8Array): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closing) return Promise.reject(new QwpSendClosedError());
@@ -200,6 +242,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     };
     const sending = this.sendTail.then(async () => {
       this.throwIfUnavailable();
+      const delta = readSymbolDictionaryDelta(frame.payload);
+      if (delta) await this.persistSymbolDictionaryDelta(delta);
       await this.store.append(frame);
       this.frames.set(frame.frameSequence, frame);
       try {
@@ -333,8 +377,22 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     connection: QwpBinaryConnection,
   ): Promise<ReplayFrame[]> {
     const replayed: ReplayFrame[] = [];
-    const cap = connection.handshake.maxBatchSizeBytes;
+    const cap = minimumDefined(
+      connection.handshake.maxBatchSizeBytes,
+      this.localMaxBatchSizeBytes,
+    );
     this.durableWatermarks.clear();
+    for (const payload of dictionaryCatchupFrames(this.symbolDictionary, cap)) {
+      const frame: ReplayFrame = {
+        frameSequence: -1n,
+        payload,
+        ackDelivered: true,
+        transmitted: true,
+        dictionaryCatchup: true,
+      };
+      replayed.push(frame);
+      await connection.send(payload);
+    }
     for (const frame of this.frames.values()) {
       if (!frame.transmitted) continue;
       frame.durableTargets = undefined;
@@ -438,6 +496,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (!frame) return undefined;
 
     if (response.status === QWP_STATUS.OK) {
+      if (frame.dictionaryCatchup) return undefined;
       const covered = this.wireFrames.slice(0, wireIndex + 1);
       const clientTarget = findLastClientFrame(covered);
       const shouldDeliver = covered.some(
@@ -537,9 +596,51 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
   }
 
+  private async persistSymbolDictionaryDelta(
+    delta: NonNullable<ReturnType<typeof readSymbolDictionaryDelta>>,
+  ): Promise<void> {
+    if (
+      !this.store.loadSymbolDictionary ||
+      !this.store.appendSymbolDictionary
+    ) {
+      throw new QwpReplayDictionaryError(
+        "QWP delta symbol dictionaries require a replay store with dictionary persistence",
+      );
+    }
+    if (delta.startId > this.symbolDictionary.length) {
+      throw new QwpReplayDictionaryError(
+        `QWP symbol dictionary has a gap [expectedAtMost=${this.symbolDictionary.length}, received=${delta.startId}]`,
+      );
+    }
+    const overlap = Math.min(
+      this.symbolDictionary.length - delta.startId,
+      delta.entries.length,
+    );
+    for (let index = 0; index < overlap; index++) {
+      const id = delta.startId + index;
+      if (this.symbolDictionary[id] !== delta.entries[index]) {
+        throw new QwpReplayDictionaryError(
+          `QWP symbol dictionary conflicts at ID ${id}`,
+        );
+      }
+    }
+    const firstNewEntry = Math.max(
+      this.symbolDictionary.length - delta.startId,
+      0,
+    );
+    const newEntries = delta.entries.slice(firstNewEntry);
+    if (newEntries.length === 0) return;
+    const startId = this.symbolDictionary.length;
+    await this.store.appendSymbolDictionary(startId, newEntries);
+    this.symbolDictionary.push(...newEntries);
+  }
+
   private async transmit(frame: ReplayFrame): Promise<void> {
     const connection = await this.requireConnection();
-    const cap = connection.handshake.maxBatchSizeBytes;
+    const cap = minimumDefined(
+      connection.handshake.maxBatchSizeBytes,
+      this.localMaxBatchSizeBytes,
+    );
     if (cap !== undefined && frame.payload.byteLength > cap) {
       throw new RangeError(
         `QWP frame exceeds reconnect target batch cap [size=${frame.payload.byteLength}, max=${cap}]`,
@@ -655,6 +756,103 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.closedSettled = true;
     this.resolveClosed(info);
   }
+}
+
+function readSymbolDictionaryDelta(payload: Uint8Array) {
+  // Preserve support for opaque/custom payloads used with the low-level API.
+  if (
+    payload.byteLength < QWP_HEADER_SIZE ||
+    (payload[5] & QWP_FLAG_DELTA_SYMBOL_DICTIONARY) === 0
+  ) {
+    return undefined;
+  }
+  return decodeQwpIngressSymbolDictionaryDelta(payload);
+}
+
+function validateRecoveredDictionary(
+  records: readonly QwpIngressReplayRecord[],
+  dictionary: readonly string[],
+  store: QwpIngressReplayStore,
+): void {
+  const hasDictionaryPersistence =
+    store.loadSymbolDictionary !== undefined &&
+    store.appendSymbolDictionary !== undefined;
+  for (const record of records) {
+    const delta = readSymbolDictionaryDelta(record.payload);
+    if (!delta) continue;
+    if (!hasDictionaryPersistence) {
+      throw new QwpReplayDictionaryError(
+        "persisted QWP delta frames require a replay store with dictionary persistence",
+      );
+    }
+    if (delta.startId + delta.entries.length > dictionary.length) {
+      throw new QwpReplayDictionaryError(
+        `persisted QWP frame references an incomplete symbol dictionary [startId=${delta.startId}, count=${delta.entries.length}, dictionarySize=${dictionary.length}]`,
+      );
+    }
+    delta.entries.forEach((entry, index) => {
+      const id = delta.startId + index;
+      if (dictionary[id] !== entry) {
+        throw new QwpReplayDictionaryError(
+          `persisted QWP frame conflicts with symbol dictionary at ID ${id}`,
+        );
+      }
+    });
+  }
+}
+
+function dictionaryCatchupFrames(
+  entries: readonly string[],
+  maxBatchSizeBytes?: number,
+): Uint8Array[] {
+  if (entries.length === 0) return [];
+  if (maxBatchSizeBytes === undefined) {
+    return [encodeQwpIngressSymbolDictionaryFrame(0, entries)];
+  }
+  const result: Uint8Array[] = [];
+  let startId = 0;
+  while (startId < entries.length) {
+    let count = 0;
+    let entriesSize = 0;
+    while (startId + count < entries.length) {
+      const entryLength = utf8Length(entries[startId + count]);
+      const nextEntriesSize =
+        entriesSize + qwpVarintSize(entryLength) + entryLength;
+      const nextCount = count + 1;
+      const size =
+        QWP_HEADER_SIZE +
+        qwpVarintSize(startId) +
+        qwpVarintSize(nextCount) +
+        nextEntriesSize;
+      if (size > maxBatchSizeBytes) break;
+      count = nextCount;
+      entriesSize = nextEntriesSize;
+    }
+    if (count === 0) {
+      throw new RangeError(
+        `symbol dictionary entry exceeds reconnect target batch cap [id=${startId}, max=${maxBatchSizeBytes}]`,
+      );
+    }
+    result.push(
+      encodeQwpIngressSymbolDictionaryFrame(
+        startId,
+        entries.slice(startId, startId + count),
+      ),
+    );
+    startId += count;
+  }
+  return result;
+}
+
+function minimumDefined(
+  first: number | undefined,
+  second: number | undefined,
+): number | undefined {
+  return first === undefined
+    ? second
+    : second === undefined
+      ? first
+      : Math.min(first, second);
 }
 
 function validateReconnectPolicy(

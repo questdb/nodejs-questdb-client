@@ -5,6 +5,7 @@ import {
   QwpIngressEncodeOptions,
   QwpIngressResponse,
   QwpProtocolError,
+  QwpSymbolDictionary,
   QwpTableBuffer,
 } from "./core";
 import {
@@ -110,6 +111,9 @@ export class QwpIngressSession {
   private sendTail: Promise<void> = Promise.resolve();
   private durablePingTimer?: ReturnType<typeof setTimeout>;
   private readonly localMaxBatchSizeBytes?: number;
+  private readonly symbolDictionary = new QwpSymbolDictionary();
+  private publishedMaxSymbolId = -1;
+  private deltaSymbolsPublished = false;
   private failure?: Error;
   private closing = false;
   private readonly receiveLoop: Promise<void>;
@@ -138,6 +142,11 @@ export class QwpIngressSession {
       throw new RangeError("maxBatchSizeBytes must be a positive safe integer");
     }
     this.localMaxBatchSizeBytes = localBatchCap;
+    for (const entry of connection.ingressSymbolDictionary ?? []) {
+      this.symbolDictionary.addRecovered(entry);
+    }
+    this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
+    this.deltaSymbolsPublished = this.symbolDictionary.size > 0;
     const keepalive = options.durableAckKeepaliveMs;
     if (
       keepalive !== undefined &&
@@ -167,6 +176,7 @@ export class QwpIngressSession {
           factory,
           options.reconnect,
           options.replayStore,
+          options.maxBatchSizeBytes,
         )
       : await factory();
     try {
@@ -199,6 +209,50 @@ export class QwpIngressSession {
     encodeOptions: QwpIngressEncodeOptions = {},
   ): Promise<QwpIngressResponse> {
     return this.sendFrame(encodeQwpIngressFrame(tables, encodeOptions));
+  }
+
+  /**
+   * Sends tables using the session's connection-scoped symbol dictionary.
+   * String symbol values are assigned stable IDs automatically.
+   */
+  sendTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    encodeOptions: Pick<
+      QwpIngressEncodeOptions,
+      "gorilla" | "deferCommit"
+    > = {},
+  ): Promise<QwpIngressResponse> {
+    this.throwIfUnavailable();
+    const previousSize = this.symbolDictionary.size;
+    let frame: Uint8Array;
+    try {
+      frame = encodeQwpIngressFrame(tables, {
+        ...encodeOptions,
+        dictionary: this.symbolDictionary,
+        confirmedMaxSymbolId: this.publishedMaxSymbolId,
+      });
+    } catch (error) {
+      this.symbolDictionary.truncate(previousSize);
+      throw error;
+    }
+    if (
+      this.maxBatchSizeBytes !== undefined &&
+      frame.byteLength > this.maxBatchSizeBytes
+    ) {
+      this.symbolDictionary.truncate(previousSize);
+      return Promise.reject(
+        new QwpBatchTooLargeError(frame.byteLength, this.maxBatchSizeBytes),
+      );
+    }
+    this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
+    this.deltaSymbolsPublished = true;
+    try {
+      return this.sendFrame(frame);
+    } catch (error) {
+      this.symbolDictionary.truncate(previousSize);
+      this.publishedMaxSymbolId = previousSize - 1;
+      throw error;
+    }
   }
 
   sendFrame(frame: Uint8Array): Promise<QwpIngressResponse> {
@@ -344,7 +398,16 @@ export class QwpIngressSession {
     }
     this.pending.delete(response.sequence);
     if (pending.timer) clearTimeout(pending.timer);
-    pending.reject(new QwpIngressNackError(response));
+    const error = new QwpIngressNackError(response);
+    pending.reject(error);
+    if (
+      this.deltaSymbolsPublished &&
+      response.status === QWP_STATUS.DICTIONARY_GAP
+    ) {
+      // This wire cannot repair a missing prefix without reconnect catch-up.
+      this.fail(error);
+      void this.connection.close(1002, "QWP symbol dictionary gap");
+    }
   }
 
   private invokeCallback(

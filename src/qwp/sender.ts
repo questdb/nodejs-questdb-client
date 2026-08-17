@@ -14,6 +14,12 @@ export type QwpSenderLogger = (
   message: string | Error,
 ) => void;
 
+export interface QwpSenderEncodeOptions
+  extends Pick<QwpIngressEncodeOptions, "gorilla"> {
+  /** Connection-scoped deltas are the default; use `full` to opt out. */
+  symbolDictionary?: "delta" | "full";
+}
+
 /** Options for the browser-safe, fluent QWP sender. */
 export interface QwpSenderOptions {
   autoFlush?: boolean;
@@ -23,7 +29,7 @@ export interface QwpSenderOptions {
   awaitDurableAck?: boolean;
   durableAckTimeoutMs?: number;
   /** QWP frame encoding options supported by the high-level sender. */
-  encode?: Pick<QwpIngressEncodeOptions, "gorilla">;
+  encode?: QwpSenderEncodeOptions;
   log?: QwpSenderLogger;
 }
 
@@ -32,6 +38,10 @@ export interface QwpSenderSession {
   sendTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
+  ): Promise<QwpIngressResponse>;
+  sendTablesDelta?(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla">,
   ): Promise<QwpIngressResponse>;
   waitForDurable(
     response: QwpIngressResponse,
@@ -820,7 +830,12 @@ export class QwpSender {
     );
     // sendTables encodes synchronously. Do not compact staging if encoding
     // throws, but transfer ownership once the frame has entered the session.
-    const response = session.sendTables(wireTables, this.options.encode);
+    const encode = this.options.encode;
+    const response =
+      (encode?.symbolDictionary ?? "delta") === "delta" &&
+      session.sendTablesDelta
+        ? session.sendTablesDelta(wireTables, { gorilla: encode?.gorilla })
+        : session.sendTables(wireTables, { gorilla: encode?.gorilla });
     for (const { table, rows } of snapshots) table.rows.splice(0, rows.length);
     const sentRows = snapshots.reduce(
       (count, item) => count + item.rows.length,
