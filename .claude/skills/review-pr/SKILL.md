@@ -1,364 +1,702 @@
 ---
 name: review-pr
-description: Review a GitHub pull request against @questdb/nodejs-client (TypeScript ILP client) coding standards. Performs an adversarial, blocking, mission-critical code review covering correctness, buffer/byte-encoding safety, ILP wire format, transport/auth/TLS, async & resource lifecycle, performance, test coverage, and TypeScript API conventions, then verifies every finding against source before reporting.
-argument-hint: [PR number or URL] [--level=0..3]
-allowed-tools: Bash(gh *), Bash(git *), Read, Grep, Glob, Agent
+description: Review a GitHub pull request or local Git range against @questdb/nodejs-client TypeScript ILP client coding standards
+argument-hint: "[PR number or URL | --range=<base>..<head>] [--level=0..3]"
+allowed-tools: Bash, Read, Grep, Glob, Agent
 ---
 
-Review the pull request `$ARGUMENTS`.
+# Review a Node.js client pull request
+
+**Usage:** `/review-pr [PR number or URL | --range=<base>..<head>] [--level=0..3]`
+
+Review the PR or local range identified by the invocation arguments. When this skill
+is run as `/skill:review-pr <args>`, the `<args>` are appended as a `User:` message;
+treat that text as `$ARGUMENTS`. Parse exactly one review target: a PR number/URL,
+or `--range=<base>..<head>`. The range head may be omitted (`--range=<base>..`) to
+review the working tree, including uncommitted changes. If both targets are supplied,
+stop and ask which was intended. If neither is supplied, ask for one.
+
+Use `Bash` only for read-only `gh` and Git queries, plus repository validation
+commands when evidence requires them. Use `Read`, `Grep`, `Glob`, and fresh-context
+agents through the Agent tool. Do not edit the primary working tree, push, post
+comments, or mutate the PR. Step 3b may create an isolated temporary worktree solely
+to verify a regression test against reverted production hunks; remove it afterward.
 
 ## Review mindset
 
-You are a senior QuestDB engineer performing a blocking code review. `@questdb/nodejs-client` is mission-critical software: a TypeScript client that serializes rows into the QuestDB **InfluxDB Line Protocol (ILP)** wire format and ships them over HTTP/HTTPS (Undici or Node stdlib) or TCP/TCPS, and is used to ingest production data from customer Node.js applications. A bug here causes **silent data corruption on the wire** (a mis-encoded byte, a wrong column separator, a truncated buffer), **dropped or duplicated rows** (a flush that discards data on failure, a retry that re-sends), or a client that wedges a worker thread. The runtime is managed — there are no segfaults — but a corrupt ILP line, a lost flush, or a buffer written past its reserved capacity are the mission-critical failures here, and QuestDB cannot un-ingest bad data after it lands. Be critical, thorough, and opinionated. Your job is to catch problems before they ship, not to be nice.
+You are a senior QuestDB engineer performing a blocking code review.
+`@questdb/nodejs-client` is mission-critical software: it serializes rows into the
+QuestDB InfluxDB Line Protocol (ILP) and sends them over HTTP/HTTPS or TCP/TCPS.
+A bug can silently corrupt bytes, drop or duplicate rows, leak credentials, exhaust
+resources, or break supported Node.js consumers.
 
-- **Assume nothing is correct until you've verified it.** Read surrounding code to understand context — don't just look at the diff in isolation.
-- **The diff is a hint, not the boundary of the review.** The highest-value bugs almost always live at callsites outside the diff that depend on contracts the diff quietly changed (a `checkCapacity` reservation that no longer matches the bytes written, a buffer state-machine transition, a `SenderBufferBase` method inherited by v1/v2/v3, an option name consumed by `resolveDeprecated`). Treat the diff as the entry point, not the scope.
-- **Flag every issue you find**, no matter how small. Do not soften language or hedge. Say "this is wrong" not "this might be an issue".
-- **Do not praise the code.** Skip "looks good", "nice work", "clever approach". Focus entirely on problems and risks.
-- **Think adversarially.** For each change, work through:
-  - Inputs: which values break this? `null`/`undefined` where a value is expected, empty strings, empty arrays (`[]` is truthy and has a `null` element type), `NaN`/`Infinity` floats, a `number` LONG beyond `2^53` (silently imprecise), `bigint` vs `number` at the timestamp boundary, max-length table/column names, non-ASCII/multi-byte UTF-8, strings containing the ILP delimiters (space, comma, `=`, `\n`, `\r`, `"`, `\`), irregular or non-homogeneous nested arrays.
-  - Wire format: does the serialized byte sequence match what the server expects for the negotiated protocol version (v1 text, v2 binary doubles + arrays, v3 decimals)? Column separators (leading space vs `,`), escaping, little-endian doubles/ints, array dimension headers, two's-complement decimal payloads.
-  - Buffer capacity: does every `checkCapacity(data, base)` reserve **at least** the exact number of bytes the following `write`/`writeByte`/`writeInt`/`writeDouble` calls emit? An under-reservation is silent corruption (`Buffer.write` short-writes at the allocation boundary) or a `RangeError` (`writeInt8`/`writeInt32LE`/`writeDoubleLE` throw past the end).
-  - Async & failure modes: connection drop mid-flush, HTTP 5xx, a retry after an uncertain send (duplicate rows?), TLS handshake failure, auth rejection — does the `Buffer` end in a usable state, and are rows lost or double-sent? Is every Promise awaited?
-  - Resource: is every socket, Undici pool/agent, `AbortController` timer, and TLS connection released on the error path as well as the happy path? Does the Sender close an `agent` the user passed in (which it must not)?
-- **Check what's missing**, not just what's there. Missing tests, missing error handling, missing edge cases, missing `README.md`/`docs` updates for public API changes, a new option that `resolveDeprecated`/`resolveAuto`/the config parser doesn't handle, a new public symbol not exported from `src/index.ts`.
-- **Verify every claim.** If the PR title says "fix", verify the bug actually existed and the fix is correct. If it says "improve performance", reason about the per-row hot path or look for a benchmark. If it says "simplify", verify the new code is actually simpler and doesn't drop behavior (a dropped escape, a lost capacity check, a removed `await`). Treat the PR description as an unverified hypothesis.
-- **Read the full context of changed files** when the diff alone is ambiguous. Use Read/Grep/Glob to inspect surrounding code, callers, and related tests.
-- **Assess reachability before reporting.** For every potential bug, trace the actual callers and inputs. If a problem requires physically impossible conditions (a buffer larger than `max_buf_size` which is already guarded, a value no caller can produce), it is not a real finding — drop it. Focus on bugs real workloads trigger, not theoretical edge cases the code already rejects upstream.
-- **Never review generated or build artifacts.** `dist/cjs/**` and `dist/es/**` are `bunchee` build outputs, and `docs/**` is generated by `typedoc`. The source of truth is `src/**/*.ts` and `test/**/*.ts`. If the diff contains build output, review the `src` change that produced it, not the artifact.
+**A review that blocks on everything blocks on nothing.** Every finding costs an
+author and CI round-trip. Reserve blocking severity for defects with a real user
+consequence, report other issues at the severity their evidence earns, and approve
+when the gates pass. Zero findings is a successful outcome.
+
+- **Assume nothing is correct until verified.** Read surrounding source and tests;
+  do not review the diff in isolation.
+- **Treat the diff as the entry point, not the boundary.** Contract changes often
+  break unchanged callers, overrides, transports, protocol versions, or generated
+  type consumers.
+- **Discovery is not a finding.** Every concern, including agent output, is an
+  untrusted hypothesis until it passes Step 3b. Omit anything unproved.
+- **Falsify before explaining.** Search for guards, validation, retries, alternate
+  callers, unsupported configurations, and identical base behavior before building
+  a failure narrative. Failure to disprove is not proof.
+- **Keep the PR blast radius small.** The PR owns defects it introduces or exposes.
+  Pre-existing behavior that is unchanged from base does not block it; a fully proved
+  pre-existing bug may leave as an adjacent issue draft.
+- **Do not praise the code.** Focus on defects, risks, and missing evidence.
+- **Think adversarially.** Exercise `null`/`undefined`, empty strings and arrays,
+  `NaN`/`Infinity`, imprecise `number` integers, `bigint`, multi-byte UTF-8, all ILP
+  delimiters, maximum buffer sizes, retries after uncertain sends, connection drops,
+  TLS/auth failures, and every negotiated protocol version.
+- **Demand efficient hot paths.** Per-row and per-cell work scales to millions of
+  rows. Avoid allocations, repeated scans, redundant conversions, extra buffer copies,
+  and suboptimal algorithms there. Bounded setup/configuration work is less severe.
+- **Check what is missing.** Look for absent error handling, cleanup, tests, public
+  exports, TSDoc, README changes, deprecation wiring, and cross-transport parity.
+- **Untested behavior is a coverage risk, not proof of a defect.** A missing test is
+  Critical only when a supported, reachable regression could cause material user harm
+  and existing safeguards do not contain it.
+- **Verify every PR claim.** Reproduce fixes where practical, check performance claims
+  against the actual multiplier, and treat the PR description as a hypothesis.
+- **Assess reachability before reporting.** Drop theoretical paths that callers,
+  validation, configuration, or buffer bounds make impossible.
+- **Never review generated artifacts as source.** `dist/cjs/**`, `dist/es/**`, and
+  `docs/**` are generated. Review their `src/**/*.ts` or documentation source instead.
 
 ## Review level
 
-Parse `$ARGUMENTS` for a level token: `--level=N`, `-lN`, or a bare single digit `0`-`3`. **If no level is given, default to 0.** Strip the level token before feeding the remainder (PR number or URL) to `gh` commands.
-
-The level controls how much of the review below actually runs. Lower levels keep the same review *spirit* — adversarial, blocking, no praise — but cut the breadth of the analysis. Higher levels have significantly higher token cost; reserve level 3 for high-stakes PRs (anything touching the ILP wire format in `src/buffer/**`, buffer capacity/resize math, a transport in `src/transport/**`, auth/TLS, protocol-version negotiation in `src/options.ts`, or the public API surface in `src/index.ts`).
+Parse `$ARGUMENTS` for `--level=N`, `-lN`, or a bare digit `0`-`3`. Default to
+level 0. Strip the level token and any `--range=` token before passing a PR target
+to `gh`.
 
 | Level | What runs |
 |-------|-----------|
-| **0 (default)** | Steps 1, 2, 4. Skip Steps 2.5a-d, but still run Step 2.5e (build & runtime profile — mandatory at every level). Skip Step 3 — no agent spawn; review the diff inline in the main loop, using Read/Grep on demand to resolve ambiguities. Skip Step 3b — verify each finding inline as you write it. Single-pass review covering correctness, buffer/byte-encoding safety, ILP wire format, `null`/`undefined` handling, tests, and coding standards on the diff itself. |
-| **1** | Adds Step 2.5a (semantic delta only — skip 2.5b/2.5c/2.5d; Step 2.5e still runs, as at every level). In Step 3, launch only Agent 1 (correctness), Agent 2 (buffer & byte-encoding safety), and Agent 7 (tests) in parallel. Skip all other agents. Skip Step 3b — verify findings inline as you draft the report. |
-| **2** | Full Step 2.5, but in 2.5b restrict the callsite inventory to symbols exported from `src/index.ts`, plus every `protected`/`abstract` member of `SenderBufferBase`/the transport interfaces, plus every configuration option name. In Step 3, launch Agents 1-8. Skip Agent 9 (cross-context) and Agent 10 (adversarial fresh-context). Step 3b uses a single batched verification agent for all findings instead of one per finding. |
-| **3** | Every step below as written, all 10 agents, per-finding verification. The full mission-critical pass. |
+| **0 (default)** | Steps 1, 2, 2.4, 2.5f, 2.6, and 4. Review inline without agent fanout. Build a compact coverage map and apply the Step 3b admission gate inline from a blank evidence form. |
+| **1** | Add Steps 2.5a and 2.5e when tests change. Run Agent 1 plus at most two applicable roles from Agents 2-7 and 9-13. Independently falsify each surviving atomic candidate. |
+| **2** | Run all of Step 2.5, restricting 2.5b to exported/public/protected symbols, transport interfaces, shared helpers, and configuration options. Run Agent 1 plus at most four change-relevant roles. Independently falsify each surviving candidate. |
+| **3** | Run the full workflow. Select at most six applicable discovery roles: Agent 1 always; Agent 8 when changed symbols have out-of-diff callers; Agents 2-7 when their domains are touched; Agents 9-13 for changed tests or a fix claim; Agent 10 only when a distinct adversarial pass is warranted. Depth comes from evidence, not agent count. |
 
-State the chosen level in one line at the start of the review so the user knows what they're getting (e.g., "Reviewing PR #58 at level 2"). If the level was defaulted, mention that level 3 exists for full review.
+State the selected level at the start of the review. If defaulted, mention that level
+3 exists for a full mission-critical pass. Changes to `src/buffer/**`, transport/auth/
+TLS, protocol negotiation, flush semantics, or `src/index.ts` are high risk; recommend
+level 3, but honor an explicit lower level and state the limitation.
 
-## Step 1: Gather PR context
+## Spawning review agents
 
-Capture the PR identifier in `$PR` (the part of `$ARGUMENTS` left after stripping the level token), then fetch metadata, diff, and review comments in a single bash call so `$PR` is in scope for all three `gh` invocations:
+Steps 3 and 3b use fresh-context, read-only Agent tasks. Discovery tasks receive the
+diff, Step 2.4 gitlink verdicts, the Step 2.5 surface map, the Step 2.6 coverage map,
+the chosen role, and the candidate contract. Agents 10 and Step 3b falsifiers are
+deliberate reduced-context exceptions.
+
+Use a shared temporary artifact for large maps instead of pasting them into every
+prompt. Never pass a discovery narrative, proposed severity/fix, votes, or verification
+claims to a falsifier. The parent owns role selection, the private candidate ledger,
+admission, severity, deduplication, and the final report.
+
+## Step 1: Gather review context
+
+Every mode must end with `$BASE` and `$HEAD` identified. Behavioral findings require
+the same trigger at both revisions unless the surface is genuinely new.
+
+### GitHub PR
 
 ```bash
-PR='<PR number or URL from $ARGUMENTS, with any --level=N / -lN / bare-digit level token removed>'
-gh pr view "$PR" --json number,title,body,labels,state
+PR='<PR number or URL after removing the level token>'
+gh pr view "$PR" --json number,title,body,labels,state,baseRefOid,headRefOid
 gh pr diff "$PR"
 gh pr view "$PR" --comments
+BASE=$(gh pr view "$PR" --json baseRefOid --jq .baseRefOid)
+HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
 ```
 
-If the diff modifies the ILP serialization in `src/buffer/**`, a transport in `src/transport/**`, or the protocol/auth/TLS options in `src/options.ts`, note it now — a wire-format or transport change is the highest-risk class of change in this repo and forces level-3 scrutiny regardless of the requested level.
+Also inspect the commit subjects with a read-only query when available. Do not check
+out the PR into the primary working tree merely to review it.
+
+### Local range (`--range`)
+
+```bash
+BASE='<base from --range>'
+HEAD='<head from --range, or empty for the working tree>'
+git diff "$BASE"${HEAD:+"...$HEAD"} --stat
+git diff "$BASE"${HEAD:+"...$HEAD"}
+git diff "$BASE"${HEAD:+"...$HEAD"} --name-only
+git status --porcelain
+```
+
+With an empty head, include staged and unstaged tracked changes. `git diff` omits
+untracked files, so read any untracked source/test files that belong to the change.
+In range mode skip Step 2 because there is no PR metadata, state that fact, and run
+all other selected steps normally.
 
 ## Step 2: PR title and description
 
-Check against the repo's conventions (`CONTRIBUTING.md` mandates Conventional Commits):
-- Title follows Conventional Commits: `type(scope): description` (e.g., `feat: support for DECIMAL type`, `fix: array null handling`)
-- Description speaks to end-user impact, not just implementation internals
-- If fixing an issue, `Fixes #NNN` (or a link to the issue) is present
-- Tone is level-headed and analytical, no superlatives
-- For public API changes (a new/changed method on `Sender`/`SenderBuffer`, a new/renamed/removed configuration option, a changed default, a new export in `src/index.ts`), the description calls out the API change explicitly, and `README.md` / the TSDoc / any relevant `docs` are updated
-- For a new configuration option, the description states the option name, its default, and whether it deprecates an existing one (which must be wired through `SenderOptions.resolveDeprecated`)
+Skip this step in range mode.
+
+Check the repository conventions in `CONTRIBUTING.md` and recent accepted PRs:
+
+- Title follows Conventional Commits: `type(scope): description`.
+- Description explains end-user impact, not only implementation details.
+- A bug fix links or closes its issue.
+- Tone is analytical and avoids superlatives.
+- Public API, option/default, export, or compatibility changes are explicit.
+- README/TSDoc updates accompany user-visible behavior where needed.
+- New or renamed options document their defaults and deprecation path through
+  `SenderOptions.resolveDeprecated`.
+
+## Step 2.4: Submodule boundaries (mandatory at every level)
+
+Treat submodule gitlink changes as opaque. Detect mode `160000` pointer moves, record
+the path and old/new hashes, and classify each as exactly:
+
+```bash
+git diff --raw "$BASE"${HEAD:+"...$HEAD"} | awk '$1 ~ /^:160000/ || $2 == "160000"'
+```
+
+- **OPAQUE** — the superproject changes only the gitlink. Do not enter the submodule,
+  fetch its branches, expand the commit range, inspect its files, attribute upstream
+  behavior changes to this PR, or report findings from its contents. Assume the
+  referenced changes were already merged and reviewed upstream.
+
+Review submodule contents only when the user explicitly requests that as an independent
+task. A genuine integration defect remains in scope only when code in the superproject
+diff calls or configures the bumped submodule incorrectly; file the finding at that
+superproject callsite and do not use an expanded submodule range as evidence.
+
+Repeat each `OPAQUE` verdict in Step 4 so the scope decision is auditable. If no
+gitlinks changed, state `Submodules: none` in the summary.
 
 ## Step 2.5: Map the change surface
 
-Before launching review agents, produce a structured change surface map. This step is mandatory and must use Grep/Glob — do not reason about callsites from memory. The output of this step is required input for every Step 3 agent except Agent 10 (the fresh-context adversarial agent, which deliberately works from the diff alone).
+Use `rg` and `rg --files` (or Grep/Glob equivalents) rather than reasoning about
+callers from memory. The resulting map is input to every normal Step 3 agent.
 
 ### 2.5a Semantic delta per changed symbol
 
-For every modified or added function, method, class, `abstract`/`protected` member, exported constant, type/interface, or configuration option, write:
+For every modified or added function, method, class, abstract/protected member,
+exported type/constant, interface, and configuration option, record:
 
-- **Symbol:** fully-qualified name (e.g., `SenderBufferBase.writeColumn`, `SenderBufferV2.arrayColumn`, `Sender.flush`, `SenderOptions.resolveAuto`, the `protocol_version` option)
-- **Before:** signature, return type (and **sync vs `async`/`Promise`** — a function that becomes `async` changes every caller's awaiting), what it throws and on which inputs, which buffer state it mutates (`hasTable`/`hasSymbols`/`hasColumns`/`position`/`endOfLastRow`), allocation behavior, which protocol versions it applies to (v1/v2/v3), the exact bytes it writes to the wire
-- **After:** same fields
-- **Delta:** one line stating what semantically changed
-
-"Refactored", "cleaned up", "improved", "simplified" are not acceptable deltas. State the actual behavioral difference. If nothing semantically changed, write "no behavioral change" — but only after checking, not as a default.
+- **Symbol:** fully qualified name.
+- **Before:** signature, sync/async return shape, thrown errors and inputs, state
+  mutation (`hasTable`, `hasSymbols`, `hasColumns`, `position`, `endOfLastRow`),
+  allocation behavior, protocol versions, and exact wire bytes where applicable.
+- **After:** the same fields.
+- **Delta:** the concrete behavioral difference. Use `no behavioral change` only
+  after checking; words such as “refactored” or “simplified” are insufficient.
 
 ### 2.5b Callsite inventory
 
-For every changed symbol that is exported from `src/index.ts`, a `public`/`protected`/`abstract` member of a base class, a shared helper in `src/utils.ts`/`src/validation.ts`, a transport-interface method, or a configuration option name, run Grep across the repository to find every callsite, override, or reference outside the diff.
+For every changed exported/public/protected symbol, base-class member, shared helper,
+transport-interface method, or option name, search all source, tests, README/examples,
+and exports. Group results by file and include overrides and implementations.
 
-Produce a list grouped by file. Search at minimum:
+At minimum check:
 
-- **Source:** `grep -rn 'symbolName' src/`
-- **Public API surface:** `grep -rn 'symbolName' src/index.ts` (is it exported? is the export still consistent?)
-- **Buffer subclasses:** for a changed `SenderBufferBase` member, check `src/buffer/bufferv1.ts`, `bufferv2.ts`, `bufferv3.ts` for overrides and callers — a base-class change silently reaches all three protocol versions
-- **Transport implementations:** for a changed transport-interface method, check `src/transport/http/base.ts`, `http/undici.ts`, `http/stdlib.ts`, `tcp.ts` — all four protocols implement the same contract
-- **Configuration options:** for a changed/added option name, `grep -rn 'option_name' src/options.ts src/ test/` and confirm it is parsed, validated, defaulted, and (if it replaces one) handled by `resolveDeprecated`
-- **Tests:** `grep -rn 'symbolName' test/`
-- **README & examples:** `grep -rn 'symbolName' README.md`
+- `src/index.ts` and emitted public type implications.
+- `SenderBufferBase` plus `SenderBufferV1`/`V2`/`V3` overrides and `createBuffer`.
+- `SenderTransport` plus Undici, stdlib HTTP, and TCP implementations.
+- `SenderOptions.resolveAuto`, `resolveDeprecated`, config parsing, `fromConfig`, and
+  `fromEnv` for option changes.
+- Unit/integration tests and test helpers.
+- `README.md` and examples for public symbols/options.
 
-A changed exported/`protected`/helper symbol with zero recorded Grep calls in the trace is a skill violation. The model is not allowed to assert "this is only used here" without showing the search.
+A changed shared symbol with no recorded `rg` command is a skill violation. Never
+assert “only used here” without the search trace.
 
 ### 2.5c Implicit contract list
 
-For each changed symbol, walk this checklist and write one line per item, stating before vs after:
+For each changed symbol, record before versus after for every applicable contract:
 
-- **Throws-what:** which inputs cause a thrown `Error`, and which callers catch vs propagate. The public builder methods (`table`/`symbol`/`*Column`/`at`/`atNow`) throw synchronously; changing what throws changes caller error handling.
-- **`null`/`undefined` handling:** does the symbol accept, reject, or silently omit `null`/`undefined`? (An omitted column must not write a separator — see the row state machine.) Note that `strictNullChecks` is **off** (see 2.5e), so the type signature does not enforce non-nullability — every parameter is nullable at runtime.
-- **Buffer capacity contract:** does the code reserve via `checkCapacity(data, base)` exactly the bytes the subsequent `write*` calls emit? State the reserved count vs the actual bytes for the changed path.
-- **Buffer state machine:** does it read or transition `hasTable`/`hasSymbols`/`hasColumns`/`endOfLastRow`/`position`? Does a row that ends up empty still get closed by `at`/`atNow` (which throw on an empty row)?
-- **Sync/async:** does it return a value or a `Promise`? Is every caller awaiting it? Did it change between the two?
-- **Wire-format bytes:** any change to the ILP bytes produced — column separators, escaping, entity-type/column-type marker bytes (v2/v3), little-endian encoding, array dimension headers, timestamp units (v1 truncates ns→us; v2+ preserves ns), two's-complement decimal payload.
-- **Protocol-version applicability:** does the change apply to v1, v2, v3, or all? Is a v2/v3-only feature guarded so v1 rejects it cleanly?
-- **Transport contract:** connection lifecycle (`connect`/`send`/`close`), auto-flush row-count default (`getDefaultAutoFlushRows`), retry/idempotency, credential handling, TLS.
-- **Number precision:** does a `number` carry a value that needs `bigint` (LONG beyond `2^53`, nanosecond timestamps)? `Number.isInteger` accepts imprecise large integers.
-- **Configuration/deprecation:** did an option name, default, or validation rule change, and is `resolveDeprecated`/`resolveAuto`/the parser updated in lockstep?
+- Inputs that throw synchronously and which callers catch or propagate.
+- `null`/`undefined`: accept, reject, or omit. `strictNullChecks` is off, so validate
+  runtime behavior rather than trusting the signature.
+- Buffer capacity: bytes reserved by `checkCapacity(data, base)` versus bytes emitted.
+- Row state: reads/transitions of `hasTable`, `hasSymbols`, `hasColumns`, `position`,
+  and `endOfLastRow`, including empty-row closure.
+- Sync/async shape and whether every caller awaits it.
+- ILP bytes: separators, escaping, marker bytes, byte order, arrays, timestamp units,
+  decimal payloads, and protocol-version applicability.
+- Transport lifecycle, retry/idempotency, auto-flush behavior, auth, TLS, and cleanup.
+- Number precision: `number` versus `bigint`, especially LONG and nanosecond values.
+- Configuration name/default/validation/deprecation behavior.
+- Allocation and complexity on setup, per-row, and per-cell paths.
 
 ### 2.5d Cross-context exposure list
 
-End this step with an explicit list of "places this change is visible from but the diff does not touch". This is the highest-priority input for the bug-hunting agents in Step 3.
+List places where the change is visible but the diff does not touch, grouped by:
 
-Group the callsites from 2.5b by execution context. Typical contexts in this codebase:
+- Per-row/per-cell buffer-build hot path.
+- Protocol-version fanout (v1/v2/v3).
+- Transport fanout (Undici, stdlib HTTP, TCP/TCPS).
+- Flush, retry, and lazy auto-flush paths.
+- Protocol negotiation and configuration parsing.
+- Auth/TLS and resource lifecycle.
+- Worker-thread use (one mutable `Sender` per worker).
+- Public ESM/CJS/type surface.
+- Tests, helpers, README, and examples.
 
-- **Per-row buffer-build hot path:** `SenderBufferBase.table`/`symbol`/`stringColumn`/`booleanColumn`/`intColumn`/`timestampColumn`/`writeColumn`/`writeEscaped`/`checkCapacity`, and the v1/v2/v3 `floatColumn`/`arrayColumn`/`decimalColumn` overrides
-- **Protocol-version fan-out:** every `SenderBufferBase` member is inherited by `SenderBufferV1`/`V2`/`V3`; `createBuffer` selects the implementation by `protocol_version`
-- **Transport fan-out:** every transport-interface method is implemented by `UndiciTransport`, `HttpTransport` (stdlib), and `TcpTransport`; `createTransport` selects by protocol
-- **Flush & auto-flush path:** `Sender.flush`/`at`/`atNow`/`tryFlush`/`resetAutoFlush`, and `buffer.toBufferNew` (which compacts/discards on read)
-- **Protocol negotiation:** `SenderOptions.resolveAuto` (HTTP round-trip at setup) and `resolveDeprecated`
-- **Config parsing:** the connection-string parser in `src/options.ts`, `Sender.fromConfig`/`fromEnv`
-- **Auth & TLS:** HTTP Basic (`username`/`password`) / Bearer (`token`) → `Authorization` header; TCP JWK challenge-response; `tls_verify`/`tls_ca`/`tls_roots`
-- **Worker-thread usage:** each worker needs its own `Sender` (shared buffer state is not concurrency-safe — see `README.md` worker-threads example)
-- **Public API / type surface:** `src/index.ts` exports and the emitted `.d.ts`
-- **Tests:** unit (`test/sender.buffer.test.ts`, `sender.config.test.ts`, `sender.transport.test.ts`, `options.test.ts`, `utils.decimal.test.ts`, `logging.test.ts`), integration (`test/sender.integration.test.ts`, TestContainers), and mock helpers (`test/util/mockhttp.ts`, `mockproxy.ts`, `proxy.ts`)
-- **Docs & examples:** `README.md`
+Every listed context must be checked in Step 3.
 
-Every entry on this list must be reviewed in Step 3.
+### 2.5e Test surface and helper inventory
 
-### 2.5e Build & runtime profile facts
+Run when tests are added or changed. Use repository searches to record:
 
-**This sub-step runs at every level, including levels 0 and 1 where the rest of Step 2.5 is skipped.** A single tsconfig flag, a Node/Undici version floor, or the ESM/CJS dual build can flip the safety story for the whole client; agents must reason from the actual profile, not from defaults.
+- Existing setup/teardown, fixtures, mock HTTP/proxy helpers, buffer hex helpers,
+  custom matchers, and parameterized-test patterns the change could reuse.
+- Callers of any changed shared test helper or fixture.
+- The production symbols each changed test actually exercises.
+- Whether the assertion observes public behavior, exact wire bytes, transport calls,
+  resource cleanup, or only implementation details.
 
-Record, with file:line citations:
+### 2.5f Build and runtime profile (mandatory at every level)
 
-- **TypeScript strictness** (`tsconfig.json`): note whether `strict`/`strictNullChecks`/`noImplicitAny`/`noUncheckedIndexedAccess` are set. As of this writing **none are** — `strictNullChecks` is **off**, so the compiler does **not** flag `null`/`undefined` flowing into a non-nullable parameter, and does not flag possibly-`undefined` array/index access. Agents must treat every value as potentially `null`/`undefined` at runtime regardless of its declared type, and must not assume the type checker caught a nullability or index bug. (This is the reason a `null` array reaching `arrayColumn` compiles cleanly.)
-- **`Buffer.write` / `writeInt*` semantics:** `buffer.write(str, pos)` writes only up to the allocation boundary and returns the actual byte count, so a short write **silently truncates** and mis-advances `position` (corrupt wire data, no throw). `buffer.writeInt8`/`writeInt32LE`/`writeDoubleLE` **throw `RangeError`** when `pos` is past the end. Therefore an incorrect `checkCapacity` reservation is a silent-corruption *or* crash surface, not a guarded no-op. `writeInt8` also throws for values outside `-128..127` — a marker byte in `128..255` must be sign-folded (see `bufferv3` `byte -= 256`).
-- **Node version floor:** the client requires **Node v20+** (built-in `fetch`/Undici, `worker_threads`), and `@types/node` is `^22`. Code using a Node API newer than the v20 floor breaks the oldest supported runtime — state the floor.
-- **`undici` dependency** (`^7`): the default HTTP transport is Undici; `stdlib_http=on` switches to Node's `http`/`https`. Behavior must match across both implementations. Note the pinned major.
-- **Dual ESM + CJS build** (`bunchee`, `package.json` `exports`): both `dist/es` (`.mjs`) and `dist/cjs` (`.js`) are shipped. A construct that only works in one module system (`__dirname`/`require` in ESM, top-level `await` in CJS) breaks a supported consumer.
-- **Protocol-version default is `auto`:** for HTTP, `resolveAuto` negotiates the version with the server at setup; for TCP the version must be set explicitly. `createBuffer` builds the serializer for the resolved version — a serializer/version mismatch corrupts the wire.
+Record current facts with file/line citations; do not rely on this list becoming stale:
 
-A review without this section is incomplete. State the relevant facts (strictness, `Buffer` semantics, Node floor, protocol default) in one line at the top of every Step 3 agent prompt (except Agent 10's, which works from the diff alone) so the agent reasons from the right premise.
+- TypeScript flags from `tsconfig.json`, especially `strictNullChecks`,
+  `noImplicitAny`, and `noUncheckedIndexedAccess`.
+- Node.js version floor and `@types/node` version.
+- `undici` major and the `stdlib_http` alternative.
+- Dual ESM/CJS build and `package.json` exports.
+- Protocol default/negotiation and TCP's explicit-version requirement.
+- `Buffer.write` versus `writeInt*` boundary semantics. A short `Buffer.write` can
+  silently truncate, while numeric writes throw out of bounds; `writeInt8` requires
+  `-128..127` and marker bytes above 127 must be sign-folded.
 
-## Step 3: Parallel review
+Put the relevant facts at the top of normal Step 3 prompts. Agent 10 receives only
+the reduced context defined below.
 
-Every agent except Agent 10 receives:
-1. The PR diff
-2. The full change surface map from Step 2.5 (semantic deltas, callsite inventory, implicit contracts, cross-context exposure list, build & runtime profile facts)
+## Step 2.6: Test coverage map (mandatory at every level)
 
-### Anti-anchoring directive (applies to all agents)
+For every production behavioral change, including each new branch/error/NULL/boundary
+path, build an internal row containing:
 
-- **Bugs at callsites outside the diff outrank bugs inside the diff.** A confirmed bug in a file the PR did not touch but that calls a changed symbol is a P0 finding.
-- **"Looks correct in isolation" is not a valid conclusion.** Before clearing a changed symbol, the agent must walk the callsite inventory from 2.5b and explicitly state, per callsite, whether the new behavior is still correct there.
-- **The diff is the entry point, not the scope.** If the change surface map shows the symbol is reachable from N other files, the review covers N+1 files.
-- **Base classes and factories fan out.** A change to a `SenderBufferBase` member retroactively changes v1/v2/v3; a change to a transport-interface method changes all four protocols; a change to a config option changes `resolveDeprecated`/`resolveAuto` and the parser. When a base member, interface method, or option appears in the diff, the review covers the whole fan-out, not just the touched lines.
-- A single finding of the form "in `bufferv2.ts` the new behavior of `writeColumn` writes the wrong separator when the previous column was omitted" is worth more than five findings inside the diff.
+- **Change:** symbol and exact behavior/path.
+- **Test:** exact test file and name found through recorded `rg`/`rg --files` searches.
+- **Failure link:** assertion and why it fails if the behavior regresses.
+- **Reachability/population:** supported API/configuration/event and affected users.
+- **Credible consequence:** concrete recurrence and observed harm.
+- **Change risk:** complexity, caller breadth, state/resource sensitivity, safeguards.
+- **Stable test design:** least invasive meaningful unit/integration/fault-injection
+  assertion and observation seam.
+- **Effort/fragility evidence:** concrete setup, nondeterminism, platform, or production
+  seam costs; “hard to test” alone is not evidence.
+- **Dimensions:** applicable protocol, transport, happy/error, NULL, boundary,
+  concurrency, retry, and resource-cleanup dimensions.
+- **Disposition:** `COVERED`, `CRITICAL GAP`, `MODERATE GAP`, `ACCEPTED GAP`, or `EXEMPT`.
 
-### Agents
+Mark rows with no effective assertion `UNTESTED` before classification. Missing tests
+alone never establish Critical severity:
 
-Launch the following agents in parallel.
+- **Critical gap:** a supported reachable regression can cause data loss/corruption,
+  a security failure, outage/hang, compatibility break, unbounded resource loss, or
+  similarly material harm; safeguards do not contain it; Step 3b admits it.
+- **Moderate gap:** meaningful but bounded exposure, including most bug fixes without
+  an effective regression test.
+- **Accepted gap:** localized low-risk behavior where a stable test is demonstrably
+  disproportionate or more fragile than the code and existing safeguards are strong.
+- **Exempt:** verified non-behavioral source, documentation, generated-output, or CI
+  changes.
 
-**Agent 1 — Correctness & bugs:** `null`/`undefined`/omitted-column handling; `number` vs `bigint` (LONG beyond `2^53` silently loses precision even though `Number.isInteger` returns true; nanosecond timestamps require `bigint`); `Number.isInteger`/type-guard correctness; timestamp unit conversion (`timestampToMicros`/`timestampToNanos`, the v1-always-micros vs v2+-nanos rule); `NaN`/`Infinity` floats; ILP wire-format correctness across v1 (text), v2 (binary doubles + arrays), v3 (decimals); the column separator (leading space for the first column/symbol, `,` thereafter) staying correct when a column is omitted; `writeEscaped` covering every delimiter (space, `,`, `=`, `\n`, `\r`, `"`, `\`) in both quoted and unquoted modes; array validation (`getDimensions`/`validateArray` — irregular shape, non-homogeneous elements, empty arrays with a `null` element type); off-by-one and operator precedence. Cross-reference every changed symbol against its callsite inventory and verify the new behavior is correct at each callsite.
+Publish only admitted gaps. Keep covered, accepted, exempt, and omitted rows private
+unless the user asks for the complete map.
 
-**Agent 2 — Buffer & byte-encoding safety:** This is the memory-safety analog for a byte-buffer serializer — a mis-encoded or truncated buffer is silent data corruption on the wire. State the `Buffer.write`/`writeInt*` facts from 2.5e in the agent's first sentence and evaluate every finding under them. Flag every reachable instance of:
+## Step 3: Change-specific candidate discovery
 
-- **Capacity under-reservation:** every `write`/`writeByte`/`writeInt`/`writeDouble` must be covered by a preceding `checkCapacity(data, base)` whose `base` (raw bytes) plus the UTF-8 byte length of each string in `data` is **≥** the bytes actually emitted. An under-count causes a silent short write (corrupt/misaligned line) or a `RangeError`. Watch for escaping that expands a string (`\` doubling, delimiter escaping) beyond the reserved length, and for a type-suffix byte (`i` for int, `t`/`f` for boolean, marker bytes for v2/v3) not counted in `base`.
-- **`writeByte` range:** `writeInt8` throws outside `-128..127`; a marker/entity/column-type byte in `128..255` must be sign-folded before `writeByte` (`byte -= 256`), not passed raw.
-- **Little-endian encoding:** doubles (`writeDoubleLE`), int32 (`writeInt32LE`), and array dimension headers must be written in the byte order and width the server expects for v2/v3.
-- **Buffer view vs copy:** `toBufferView` returns a `subarray` that **aliases** the live buffer — it becomes stale or corrupt after any further write and is test-only; `toBufferNew` returns a copy and **compacts** the source. A caller that holds a view across a mutation, or that expects `toBufferNew` not to mutate, is a bug.
-- **Compaction & resize:** `compact()` does an overlapping self-copy (`buffer.copy(buffer, 0, endOfLastRow, position)`) — verify the ranges. `resize()` doubles until it fits, enforces `max_buf_size`, and copies old content — verify the growth loop terminates and the `max_buf_size` guard is not bypassed.
-- **Two's-complement / big-endian decimal payloads** (`bigintToTwosComplementBytes`, v3): minimal-width sign-preserving encoding, scale/length bounds (`0..32` bytes, scale `0..76`), invalid-byte rejection.
-- **Position accounting:** `position` must advance by exactly the bytes written; `write` relies on `buffer.write`'s return value, `writeByte`/`writeInt`/`writeDouble` on the `writeInt*` return. A path that advances `position` by an assumed rather than actual count corrupts everything after it.
+Use fresh-context, read-only Agent tasks. Select only roles materially touched by the
+change and obey the review-level cap. Agent count is never evidence.
 
-**Agent 3 — Transport, protocol negotiation & auth:** Check every network-facing path. Verify:
-- **Protocol negotiation:** `resolveAuto` picks a version the server supports; `createBuffer` builds the matching serializer; TCP (which cannot negotiate) requires an explicit `protocol_version`. A serializer/version mismatch corrupts the wire.
-- **HTTP retry & idempotency:** which status codes/errors are retriable; whether `retry_timeout` and backoff are honored; and — critically — whether re-sending the same buffer after an **uncertain** send (server received it but the response was lost) can **duplicate rows**. Confirm retries are confined to cases where the server has not durably accepted the data.
-- **Undici vs stdlib parity:** `UndiciTransport` and `HttpTransport` must apply the same auth, TLS, timeout, and retry behavior — flag any divergence.
-- **Auth:** HTTP Basic (`username`/`password`) and Bearer (`token`) build the `Authorization` header correctly; TCP JWK challenge-response signs correctly. **Credentials must never appear in log output, error messages, or thrown `Error` strings.**
-- **TLS:** `tls_verify`/`tls_ca`/`tls_roots` wired correctly; verification is only disabled when explicitly requested; custom CA/roots actually applied.
-- **Timeouts & lifecycle:** `request_timeout`/`retry_timeout` enforced; `connect`/`close` are only called on TCP transports (HTTP transports must no-op or reject per the interface docs).
+Every normal discovery task receives the diff, change-surface map, coverage map, and
+these candidate rules:
 
-**Agent 4 — Async, concurrency & flush semantics:** Verify:
-- **Every Promise is awaited.** A missing `await` on `flush`/`send`/`connect`/`tryFlush` yields an unhandled rejection, out-of-order sends, or a lost error. The builder `at`/`atNow` are `async` (they may auto-flush) — callers must await them.
-- **Flush data-loss window:** `Sender.flush` calls `buffer.toBufferNew()` which **compacts (discards) the rows before** `await transport.send(...)`. If the send rejects, those rows are already gone and are **not re-queued**. Confirm the change does not widen this window or drop data on a new error path; flag if a fix is expected to preserve data on failure but doesn't.
-- **Auto-flush semantics:** both the row-count (`auto_flush_rows`) and interval (`auto_flush_interval`) triggers are evaluated **lazily inside `tryFlush`** on each `at`/`atNow`. There is **no background timer** — a producer that stops adding rows never auto-flushes on the interval alone. Verify any change respects this (and does not, e.g., assume a timer fires).
-- **Concurrency:** the `Sender`/`SenderBuffer` hold mutable buffer state and are **not** safe for concurrent row building; each worker thread needs its own `Sender` (per `README.md`). Flag any change that invites shared use or interleaves buffer mutation across awaits within one Sender.
+- Generate atomic, falsifiable hypotheses; do not assign severity, propose fixes,
+  write persuasive titles, or claim verification.
+- Cite the exact changed hunk or unchanged callsite contract allegedly broken.
+- Name the supported-state producer: exact public API call, option, protocol, server
+  response, runtime, or event that creates every trigger. Use `producer: unknown`
+  rather than inventing one.
+- Give reachability, head observation, same-trigger base observation, user symptom,
+  evidence commands/artifacts, and strongest counterevidence. Mark unchecked fields
+  `unknown`.
+- Universal claims such as “never”, “only”, “no retry”, or “all transports” require
+  an exhaustive caller/event-source inventory.
+- Do not split supporting mechanisms into findings without independent consequences.
+- Pre-existing unchanged behavior is not a PR finding. Fully proved pre-existing bugs
+  may be proposed as adjacent issues only after Step 3b.
+- Returning no candidate is valid and preferred to speculation.
 
-**Agent 5 — Resource management & lifecycle:** Leaks and dangling handles on all code paths (especially errors). Check:
-- **Transport teardown:** `close()` releases the TCP socket / the Undici pool/agent. A Sender-owned agent must be destroyed on close; a **user-supplied `agent`** (passed via `extraOptions`) must **not** be destroyed by the Sender.
-- **Timers & aborts:** `fetchJson` pairs `setTimeout`/`AbortController` with `clearTimeout` in a `finally` — verify any new async network helper does the same and cannot leak a timer or an un-aborted request.
-- **Error-path cleanup:** a failed `connect`/`send`/TLS handshake must not leave a half-open socket, an un-freed pool, or a listener attached.
-- **Buffer lifecycle:** the internal `Buffer` is reused across rows; verify `reset`/`compact` leave it in a consistent state and nothing retains a stale `subarray` view.
+### Agent roles
 
-Walk every callsite from 2.5b that constructs, owns, or transfers a transport/socket/agent and verify cleanup on success, error, and early-return paths.
+**Agent 1 — Correctness and ILP semantics:** Check nullish omission, separators,
+escaping, input validation, integer precision, timestamp conversion, float edge cases,
+array shape/type/emptiness, decimal encoding, error paths, and exact v1/v2/v3 wire
+behavior. Check every changed symbol against its callers and overrides.
 
-**Agent 6 — Performance & allocations:** The hot path is the per-row buffer build (`table`/`symbol`/`*Column`/`at`/`atNow`) and, for wide rows, the per-cell inner work. Flag: per-row/per-cell allocations that should be amortized; `value.toString()` churn; string concatenation on the write path; repeated `Buffer.byteLength` re-scans of the same string; per-character `buffer.write` in `writeEscaped` where a bulk path exists; buffer `resize` thrashing (the doubling strategy repeatedly copying a large buffer); needless `Buffer` copies. Analyze scaling: millions of rows per flush, wide rows, large arrays. Setup-path costs (Sender construction, `resolveAuto`'s HTTP round-trip, config parsing) are acceptable; per-row/per-cell costs are not.
+**Agent 2 — Buffer and byte-encoding safety:** Reconstruct bytes and capacity math.
+Check every write against `checkCapacity`, UTF-8/escaping expansion, signed marker
+bytes, little-endian numeric/dimension encoding, `position`, overlapping compaction,
+resize/max-size behavior, `toBufferView` aliasing, `toBufferNew` mutation, and decimal
+two's-complement bounds.
 
-**Agent 7 — Test review & coverage (adversarial):** Coverage gaps *and* test efficacy. Check:
-- **Coverage** across the matrix: protocol versions (v1/v2/v3), transports (Undici HTTP, stdlib HTTP, TCP/TCPS), auth methods (Basic/Bearer/JWK), TLS, auto-flush (row-count and interval), buffer resize and `max_buf_size`, escaping, `null`/`undefined`, empty arrays, `bigint`/`number`, `NaN`/`Infinity`, timestamp units, retry/error paths.
-- **Test files:** unit (`test/sender.buffer.test.ts`, `sender.config.test.ts`, `sender.transport.test.ts`, `options.test.ts`, `utils.decimal.test.ts`, `logging.test.ts`), integration against a real QuestDB via TestContainers (`test/sender.integration.test.ts`), and mock helpers (`test/util/mockhttp.ts`, `mockproxy.ts`, `proxy.ts`).
-- **Byte-level assertions:** buffer tests assert exact bytes via the `bufferContentHex`/`toHex` helpers. Verify the expected hex actually encodes the intended wire bytes (separators, escaping, marker bytes, little-endian payloads) — a test that asserts stale or hand-mis-computed bytes locks in a bug.
-- **Efficacy:** flag assertions that cannot fail, tests whose assertion passes whether or not the production change is present (trace the data flow from the changed symbol to the assertion), and happy-path-only tests with no error/`null`/edge coverage the change introduced.
-- **Regression tests:** if the PR fixes a bug, a test must reproduce it and fail without the fix.
+**Agent 3 — Transport, negotiation, auth, and TLS:** Check serializer negotiation,
+TCP explicit versions, retry classification/idempotency, Undici/stdlib parity, Basic/
+Bearer/JWK credentials, secret exposure, TLS verification/custom roots, timeouts, and
+connect/send/close behavior.
 
-Cross-reference 2.5d: every cross-context exposure should have a test that exercises the changed symbol from that context. A new wire-format path without a byte-level assertion, or a new transport/auth path without a transport test, is a high-priority finding.
+**Agent 4 — Async, concurrency, and flush semantics:** Check every Promise/`await`,
+ordering across `at`/`atNow`/`tryFlush`/`flush`, row loss after `toBufferNew` compaction,
+uncertain-send duplication, lazy interval/row-count auto-flush, and unsafe sharing or
+interleaving of mutable Sender state.
 
-**Agent 8 — Code quality & API design:** Public API ergonomics and consistency. The public surface is what `src/index.ts` re-exports — a new public symbol must be exported there, and a removed/renamed one is a breaking change. Verify TSDoc on public classes/methods (the repo uses `@microsoft/tsdoc`); TypeScript types are accurate and not laundered through unsound casts (`as unknown as ...`) that hide real type errors (recall `strictNullChecks` is off, so casts and non-null assumptions are not caught by the compiler); backward compatibility of the `Sender`/`SenderBuffer`/`SenderOptions` API (renamed/removed methods, changed defaults, renamed options must go through `resolveDeprecated` with a warning); `README.md`/`docs` updated for user-visible changes; no dead code or unused `import`s; ESLint (`typescript-eslint` recommended set) and Prettier (`.prettierrc`) clean; naming and member ordering consistent with the surrounding code.
+**Agent 5 — Resource management and lifecycle:** Trace sockets, Undici pools/agents,
+user-supplied versus owned agents, timers, abort controllers, listeners, and buffer
+views on success, failure, and early return. Verify failed connect/send/TLS paths close
+or preserve ownership correctly.
 
-**Agent 9 — Cross-context caller impact:** Walk the callsite inventory from 2.5b. For every callsite, fetch the surrounding code (the calling function plus its callers up two levels) and answer:
+**Agent 6 — Performance and algorithmic optimality:** For each loop, scan, allocation,
+copy, conversion, and data structure, state complexity and the best feasible approach.
+Focus on per-row/per-cell `toString`, string concatenation, repeated `Buffer.byteLength`,
+per-character writes, resize copying, large arrays, and avoidable buffer copies. Every
+candidate must state its multiplier or fixed bound and whether users wait on the path.
 
-- Does this caller pass inputs the new behavior handles incorrectly (`null`/`undefined`, `bigint` vs `number`, an empty array, a delimiter-containing string)?
-- Does this caller depend on a contract from the implicit contract list (2.5c) that the change broke — the old capacity reservation, the old buffer state-machine transition, the old sync/async shape, the old set of thrown errors, the old wire bytes?
-- Is this caller in a context (the per-row hot path, a v1/v2/v3 subclass, one of the four transports, the flush/auto-flush path, an error/retry path, a worker thread) where the new behavior misbehaves even if the inputs are valid?
-- For a changed `SenderBufferBase` member: do the `SenderBufferV1`/`V2`/`V3` overrides and inherited callers still satisfy the new contract?
-- For a changed transport-interface method: do `UndiciTransport`, `HttpTransport`, and `TcpTransport` all still satisfy it?
-- For a changed config option: do `resolveAuto`, `resolveDeprecated`, the parser, and every reader agree on name/default/validation?
+**Agent 7 — Public API, compatibility, and code quality:** Check `src/index.ts`, ESM/
+CJS exports, `.d.ts` implications, TSDoc, option defaults/deprecations, supported Node
+APIs, README/examples, unsound casts, dead code/imports, ESLint, Prettier, naming, and
+member ordering. Separate compatibility defects from cosmetics.
 
-This agent's output is structured per callsite, not per failure mode. Each callsite gets a verdict: SAFE / BROKEN / NEEDS VERIFICATION. Every BROKEN entry is a P0 finding regardless of whether the file is in the diff.
+**Agent 8 — Cross-context caller impact:** Walk every 2.5b callsite with callers up to
+two levels. For each, return `SAFE`, `CANDIDATE`, or `INSUFFICIENT_EVIDENCE` and state
+whether the new contract breaks valid inputs, row state, bytes, sync/async shape,
+protocol subclasses, transports, config readers, error/retry paths, or worker contexts.
 
-This agent is not optional even when the diff is small. Small diffs to widely-used symbols (`writeColumn`, `checkCapacity`, `Sender.flush`, a transport method, a base-class member) have the largest blast radius.
+**Agent 9 — Test coverage:** Recheck every Step 2.6 test and failure link, add missed
+behavior rows, and mutation-spot-check the most dangerous changed conditions. Check
+the matrix of protocols, transports, auth/TLS, auto-flush, resize, escaping, nullish
+values, arrays, precision, timestamps, retry/error, and resource cleanup.
 
-**Agent 10 — Fresh-context adversarial:** Dispatched separately from agents 1-9 to escape checklist anchoring. This agent operates under different rules from the rest:
+**Agent 10 — Fresh-context adversarial:** Receive only the diff and changed filenames.
+Instruction: “Generate a small set of falsifiable ways this code could be wrong and
+try to disprove each before returning it.” It may inspect the repository but receives
+no surface map, checklists, prior candidates, severities, or fixes.
 
-- It receives ONLY the PR diff and the names of the changed files. It does NOT receive the change surface map from Step 2.5, the implicit contract list, the cross-context exposure list, or any of the review checklists below.
-- Its sole instruction: "find ways this code is wrong". No category list, no failure-mode taxonomy, no project-specific style guide.
-- It is free to use Read, Grep, and Glob to explore the repository however it wants.
-- Findings are not pre-classified by category. Each finding states: what's wrong, why it's wrong, and the code path that demonstrates it.
+**Agent 11 — Test efficacy and correctness:** Trace each changed test from production
+symbol to assertion. Find vacuous assertions, tests that do not reach the changed path,
+wrong/stale expected wire bytes, happy-path-only coverage, swallowed asynchronous
+assertion failures, timing-dependent synchronization, and cleanup failures.
 
-The point of this agent is to surface bugs the structured agents cannot see because they are reasoning inside the same frame. A finding here that none of agents 1-9 produced is high signal — it means the structured review missed it. A finding here that overlaps with agents 1-9 is corroboration.
+**Agent 12 — Test-code quality:** Search the 2.5e inventory before flagging duplicated
+setup or helpers. Check parameterization opportunities, misleading names, copy/paste
+residue, debug output, commented code, unjustified skipped tests, brittle implementation
+assertions, and unnecessary casts. Name a real reusable alternative for each complaint.
 
-Run this agent in parallel with agents 1-9. It is mandatory regardless of diff size.
+**Agent 13 — Regression-test efficacy:** For a bug-fix claim, identify which production
+hunk each test depends on. A candidate survives only if the test passes at head and
+fails when the production fix is reverted in an isolated scratch worktree.
 
-Combine all agent findings into a single deduplicated **draft** report. Do NOT present this draft to the user yet — it goes straight into verification.
+Combine outputs into a private candidate ledger. Split compound narratives into atomic
+propositions, deduplicate by proposition plus evidence, and record dependencies. Do not
+draft severity, fixes, or report prose yet.
 
-## Step 3b: Verify every finding against source code
+## Step 3b: Independently falsify, prove, and admit candidates
 
-The parallel review agents work from the diff plus the change surface map and frequently produce false positives — especially around buffer capacity math, the row state machine, protocol-version fan-out, async/await, and retry idempotency. Every finding MUST be verified before it is reported.
+Use this state machine without shortcuts:
 
-For each finding in the draft report:
+`HYPOTHESIS → FALSIFYING → PROVEN → ADMITTED`
 
-1. **Read the actual source code** at the exact lines cited (in `src/**/*.ts`, never the generated `dist/**` output). Do not rely on the agent's description alone.
-2. **Trace the full code path:** follow callers and overrides. Remember the inheritance fan-out — a method called on a `SenderBuffer` reference may dispatch to `SenderBufferV1`/`V2`/`V3`; a transport call dispatches to Undici/stdlib/TCP.
-3. **For capacity/byte-encoding claims:** count the bytes actually written against the `checkCapacity(data, base)` reservation, accounting for UTF-8 multi-byte expansion and escaping. Confirm the direction of the error (under-reservation corrupts/throws; over-reservation is harmless). A claim that the reservation is wrong is a false positive if the arithmetic actually covers the writes.
-4. **For `null`/`undefined` claims:** since `strictNullChecks` is off, verify at the *runtime* level — trace whether a caller can actually pass the nullish value and what the code does with it, not what the type says.
-5. **For wire-format claims:** reconstruct the expected byte sequence for the relevant protocol version and compare against what the code emits and what the byte-level test asserts.
-6. **For flush/data-loss and async claims:** re-read `Sender.flush`/`tryFlush` and confirm the ordering of `toBufferNew` (compaction) vs `await transport.send`, and whether the claimed loss/duplication is reachable on the cited path.
-7. **For retry/idempotency claims:** trace which errors/status codes trigger a resend and whether the server could have durably accepted the data before the resend — only a resend after durable acceptance duplicates rows.
-8. **For resource-leak claims:** trace every socket/agent/timer to its close/clear on all paths (success, error, early return), and confirm a user-supplied `agent` is *not* destroyed by the Sender.
-9. **For performance claims:** confirm the cost is on the per-row/per-cell hot path and material relative to the surrounding work/I-O. Downgrade negligible savings to a nit. Exception: a per-row allocation on the buffer-build path is always worth flagging.
-10. **For cross-context findings (Agent 9):** re-read the callsite in full, including callers up two levels, and confirm the broken behavior is reachable from production or from tests users will exercise.
-11. **For test-efficacy findings (Agent 7):** re-read the cited assertion in full context and confirm it truly cannot fail or truly fails to reach the change — a "vacuous assertion" claim is a false positive if the production code actually recomputes the asserted value; a "wrong hex" claim requires reconstructing the correct bytes.
+Missing proof, unresolved contradiction, failed reproduction, unsupported producer,
+or dependency on an omitted premise ends at `OMITTED`. “Could not disprove” is not
+`PROVEN`, and there is no public downgraded/false-positive section.
 
-**Classify each finding** as:
-- **CONFIRMED in-diff** — the bug is real and inside the diff
-- **CONFIRMED at out-of-diff callsite** — the bug is in an unchanged file because the changed symbol is used there in a way that's now broken (cite the file and the contract from 2.5c that was violated)
-- **FALSE POSITIVE** — the code is actually correct (explain why)
-- **CONFIRMED with nuance** — the issue exists but is less severe than stated (explain)
+At levels 1-3, launch one fresh-context falsifier per atomic candidate. Give it only:
 
-**Move false positives to a separate "Downgraded" section** at the end of the report. For each, give a one-line explanation of why it was dismissed. This lets the PR author verify the reasoning and catch verification mistakes.
+1. The neutral proposition.
+2. Repository plus base/head identities (or captured working-tree diff hash) and
+   relevant filenames.
+3. Raw evidence/artifact paths.
 
-Launch verification agents in parallel where findings are independent. Each verification agent should read surrounding source files, not just the diff.
+Do not send the discovery narrative, severity, fix, author identity, votes, or claims
+that anyone verified it. At level 0, apply the same protocol inline from a blank form.
+
+The falsifier first constructs the strongest disproof: missing producer, unsupported
+configuration, impossible version pairing, omitted caller, retry, guard, validation,
+cleanup, downstream containment, or identical/better base behavior. Only a surviving
+candidate receives affirmative proof.
+
+Admit a behavioral candidate only when every applicable field has cited evidence:
+
+- **Attribution:** changed hunk, or unchanged callsite plus changed contract.
+- **Supported-state producer:** exact supported API/config/protocol/runtime/event.
+- **Reachability:** complete producer-to-symptom path, including guards, retries,
+  dispatch, ownership, and cleanup.
+- **Head observation:** executed trigger and observed result at the reviewed revision.
+- **Base observation:** identical trigger/result at `$BASE`, or `N/A — genuinely new
+  surface` with proof.
+- **User symptom:** independently observable consequence.
+- **Counterevidence search:** strongest disproof and why it does not apply.
+- **Artifact:** command/test, output, environment/configuration, and revision identity.
+
+Runtime-shape, race, ordering, retry, restart, resource-lifetime, compatibility, and
+wire-format claims require executed artifacts; static reading alone cannot admit them.
+For fully static compile errors or standards violations, mark runtime-only fields
+`N/A — static` and cite the complete source proof. Coverage searches prove absence of
+a test, not the reachability or impact needed for a Critical gap.
+
+Apply these special burdens:
+
+- Universal negatives require an exhaustive inventory and executed probe.
+- Concurrency/order candidates must force or observe the interleaving.
+- Regression-test candidates must run green at head and red with the production fix
+  reverted in a scratch worktree, never the primary working tree.
+- If execution is impossible, record the limitation privately and omit the behavioral
+  candidate rather than replacing evidence with confident prose.
+- If a parent premise is omitted, omit every dependent candidate.
+
+Then independently verify Node-client specifics:
+
+1. Read exact source lines in `src/**/*.ts`, not generated output, and trace callers,
+   interfaces, factories, and v1/v2/v3 overrides.
+2. Count every emitted byte against capacity, including escaped multi-byte UTF-8,
+   separators, suffixes, marker bytes, dimension headers, and decimal payloads.
+3. Reconstruct expected wire bytes and compare them with both production output and
+   byte-level test expectations.
+4. Validate nullish behavior at runtime because TypeScript nullability may be disabled.
+5. Trace `toBufferNew`/compaction relative to awaited sends for loss/duplication claims.
+6. Trace retry classes and whether the server could have durably accepted an uncertain
+   send before replay.
+7. Trace every socket, agent, timer, abort controller, listener, and buffer view through
+   success/error/early return; never destroy a user-supplied agent.
+8. For performance, prove complexity, hot/cold placement, call frequency, multiplier
+   or fixed bound, and a materially better feasible implementation.
+9. For public API/config claims, check every export, parser, default, deprecation path,
+   README example, ESM/CJS output implication, and supported Node version.
+10. For test efficacy, prove the assertion reaches the change and would fail under the
+    claimed regression. Recompute expected hex/bytes rather than trusting fixtures.
+11. Derive a fix only after admission, then verify it compiles and closes all admitted
+    paths without creating a compatibility, ownership, or retry defect.
+
+### Net user impact and ledger classification
+
+Before assigning severity, answer in order:
+
+- **Population:** named supported API/config/protocol/runtime population.
+- **Delta vs base:** observed difference for the identical trigger.
+- **Magnitude/frequency:** per cell, row, flush, request, Sender lifetime, or once.
+- **Offsets:** validation, retry, server rejection, type/build gate, operational process,
+  or other containment before the user sees harm.
+- **Net:** `net-negative`, `net-neutral`, or `net-positive`. Only net-negative behavioral
+  candidates may be findings.
+
+Classify ledger entries as:
+
+- **ADMITTED in-diff** — proved defect inside the diff.
+- **ADMITTED out-of-diff-breakage** — proved unchanged caller broken by this PR's
+  changed contract.
+- **OMITTED pre-existing/not-attributed** — same or worse behavior exists at base and
+  this PR does not expose a new path.
+- **OMITTED false** — counterevidence disproves it.
+- **OMITTED unverified** — required producer, path, observation, artifact, or dependency
+  is missing.
+
+Keep omitted candidates and disproofs private. A fully proved pre-existing bug may
+become an adjacent issue draft; false or unverified candidates never do. Verify every
+enumerated instance independently rather than sampling and generalizing.
 
 ## Review checklists
 
-Review the diff for:
+### Correctness and wire format
 
-### Correctness & bugs
-- `null`/`undefined`/omitted-column handling at API boundaries (and remember `strictNullChecks` is off — the compiler didn't check it)
-- Edge cases and error paths
-- `number` vs `bigint`: LONG values beyond `2^53` silently lose precision though `Number.isInteger` returns true; nanosecond timestamps require `bigint`
-- Float edge cases (`NaN`, `Infinity`); timestamp unit conversions (v1 truncates ns→us; v2+ preserves ns)
-- Correct ILP wire format (v1 text / v2 binary / v3 decimals): column separators, escaping, little-endian payloads, array headers, marker bytes
-- Array validation: irregular shape, non-homogeneous elements, empty arrays (element type `null`), `null`/`undefined` arrays omitted (not written as a NULL marker)
-- Logic errors, off-by-one, wrong operator precedence
+- Nullish omission must not emit a separator or leave invalid row state.
+- `number` LONG values beyond `2^53` lose precision; nanosecond timestamps require
+  `bigint`; v1 timestamps use microseconds while v2+ preserve nanoseconds.
+- Reject or intentionally encode `NaN`, `Infinity`, invalid units, invalid types, and
+  unsupported protocol features.
+- Verify table/symbol/column escaping for space, comma, equals, newline, carriage
+  return, quote, backslash, and multi-byte UTF-8.
+- Validate irregular/non-homogeneous/empty arrays and v2 dimension/type bytes.
+- Verify v3 decimal sign, scale, length, two's complement, and big-endian payload.
 
-### Buffer & byte-encoding safety
-- Every `write*` covered by a `checkCapacity` that reserves ≥ the bytes emitted (account for escaping expansion and the type-suffix/marker byte)
-- `writeByte`/`writeInt8` values within `-128..127` (sign-fold `128..255`)
-- Little-endian doubles/int32/dimension headers match the server's expectation
-- `toBufferView` (aliasing, test-only) not held across a mutation; `toBufferNew` (copy + compact) callers aware it mutates the source
-- `compact()` overlapping self-copy ranges correct; `resize()` growth terminates and respects `max_buf_size`
-- Two's-complement/big-endian decimal payloads and their bounds (unscaled `0..32` bytes, scale `0..76`)
-- `position` advanced by the actual bytes written, never an assumed count
+### Buffer and byte safety
 
-### Transport, protocol & auth
-- Serializer matches the negotiated protocol version; TCP has an explicit version
-- Retriable vs non-retriable classification correct; a retry after uncertain acceptance cannot duplicate rows
-- Undici and stdlib HTTP transports behave identically (auth, TLS, timeouts, retry)
-- Auth headers/JWK signing correct; credentials never logged, thrown, or otherwise leaked
-- TLS verification only disabled when explicitly requested; custom CA/roots applied
-- `request_timeout`/`retry_timeout` enforced; `connect`/`close` only meaningful on TCP
+- Every write has capacity for actual escaped UTF-8 bytes and suffix/marker bytes.
+- `writeInt8` values stay in `-128..127`; sign-fold unsigned marker bytes.
+- Doubles, int32 values, and dimensions use correct little-endian width/order.
+- Do not retain `toBufferView` across mutation; account for `toBufferNew` compaction.
+- Verify overlapping compact copies, growth termination, `max_buf_size`, and exact
+  `position` advancement.
 
-### Async, concurrency & resources
-- Every Promise awaited; `at`/`atNow` awaited by callers; no unhandled rejection
-- Flush ordering understood: rows are compacted out of the buffer before the awaited send, so a send failure loses them unless explicitly handled
-- Auto-flush is lazy (no background timer); the interval only fires on the next `at`/`atNow`
-- One `Sender` per worker thread; no shared buffer mutation across awaits
-- Sockets/pools/agents/timers released on all paths; a user-supplied `agent` is not destroyed by the Sender
+### Transport, protocol, auth, and TLS
+
+- Negotiated serializer matches the server; TCP requires an explicit version.
+- Retriable classification, backoff, and time budgets are correct; uncertain replay
+  cannot silently duplicate accepted rows.
+- Undici and stdlib HTTP agree on auth, TLS, timeout, retry, and response handling.
+- Basic/Bearer/JWK credentials are correct and never logged or included in errors.
+- Verification is disabled only explicitly; custom CA/roots are applied.
+
+### Async, concurrency, and resources
+
+- Await every Promise; preserve send order and error propagation.
+- Understand that compaction precedes the awaited send and auto-flush is lazy.
+- Do not invite concurrent mutation or share a Sender across workers.
+- Close owned sockets/pools/agents/timers/listeners on every path; preserve user-owned
+  agents; do not retain stale buffer views.
 
 ### Performance
-- No per-row/per-cell allocations, `toString` churn, string concatenation, or repeated `Buffer.byteLength` scans on the buffer-build path that belong hoisted to setup
-- No buffer `resize` thrashing or needless `Buffer` copies
-- No O(n²) over rows/cells at realistic scale (millions of rows, wide rows, large arrays)
-- Setup-path cost (construction, `resolveAuto`, config parsing) acceptable; per-row cost is not
 
-### Code quality & API design
-- New public symbols exported from `src/index.ts`; removed/renamed ones treated as breaking and called out
-- TSDoc on public classes/methods; types accurate and not laundered through unsound `as` casts
-- Backward compatibility: renamed options wired through `resolveDeprecated` with a warning; changed defaults intentional and documented
-- `README.md`/`docs` updated for user-visible changes
-- No dead code or unused imports; ESLint and Prettier clean; naming/ordering consistent
+- Avoid per-row/per-cell allocations, repeated `toString`/`Buffer.byteLength`, string
+  concatenation, and avoidable conversions/scans.
+- Avoid per-character writes where safe bulk copying exists, resize thrashing, needless
+  buffer copies, and O(n²) work over rows/cells/array elements.
+- State the data multiplier for hot-path findings; bounded setup costs are Moderate at
+  most unless they create an outage or compatibility failure.
 
-### Test review
-- **Coverage gaps:** every new/changed path (per protocol version, transport, auth method) has a test; flag missing ones explicitly as "missing test for X"
-- **Cross-context coverage:** every entry in 2.5d has a test exercising the changed symbol from that context — especially a new wire-format path (byte-level assertion) or a new transport/auth path (transport/integration test)
-- **Byte-level assertions** (`bufferContentHex`/`toHex`) encode the intended wire bytes, not stale/hand-mis-computed ones
-- **Error-path coverage:** connection drops, 5xx, retries, TLS/auth failures, buffer overflow vs `max_buf_size`, invalid inputs — not just the happy path
-- **Edge-case tests:** `null`/`undefined`, empty and irregular arrays, zero-length and delimiter-containing strings, boundary integers, `bigint`, `NaN`/`Infinity`, each timestamp unit
-- **Efficacy:** assertions can actually fail and actually reach the changed code; no happy-path-only gaps
-- **Regression tests:** a bug fix has a test that reproduces the bug and fails without the fix
+### Public API and code quality
 
-### Unresolved TODOs and FIXMEs
-- Scan the diff for `TODO`, `FIXME`, `HACK`, `XXX`, `WORKAROUND`. For each:
-  - Pre-existing (just moved/reformatted) or newly introduced in this PR?
-  - If new: unfinished work that should block merge, or an acceptable known limitation? Flag deferred bugs or incomplete implementations.
-  - If it references a ticket/issue, verify the reference exists.
+- Export new public symbols; treat removals/renames/signature/default changes as
+  compatibility changes.
+- Keep TSDoc/types accurate and avoid casts that hide runtime null/type problems.
+- Wire renamed options through parsing, validation, `resolveDeprecated`, `resolveAuto`,
+  `fromConfig`, and `fromEnv` as applicable.
+- Update README/examples for user-visible behavior.
+- Keep ESLint/Prettier clean; remove dead code/imports; follow local naming/order.
 
-### Commit messages
-- Conventional Commits `type(scope): description` (per `CONTRIBUTING.md`)
-- Clear, descriptive; end-user impact in the body where relevant
+### Tests
+
+- Cover each changed protocol/transport/auth/TLS/configuration path that behaves
+  differently, plus error, nullish, boundary, resize, retry, and cleanup paths.
+- Use byte-level assertions for serializer changes and transport-level assertions for
+  network/auth changes.
+- Recompute expected hex/bytes and ensure assertions can fail and reach production code.
+- A bug fix needs a regression test that fails without the fix unless the Step 2.6
+  proportionality analysis admits a non-Critical gap.
+- Prefer existing helpers and deterministic synchronization; avoid brittle timing,
+  debug residue, misleading names, and implementation-only assertions.
+
+### TODOs and commit messages
+
+- Scan added/changed lines for `TODO`, `FIXME`, `HACK`, `XXX`, and `WORKAROUND`.
+  Distinguish moved comments from newly deferred work and verify referenced issues.
+- Check Conventional Commit subjects against `CONTRIBUTING.md`; descriptions should
+  state user impact where relevant.
 
 ## Step 4: Output
 
-Present ONLY verified findings (false positives are excluded from Critical/Moderate/Minor). Structure as:
+Present only **ADMITTED** findings. Omitted hypotheses, disproofs, retractions, agent
+counts, candidate counts, and the private ledger never appear. Do not publish a concern
+and retract it later. Keep the report actionable; if a normal PR produces more than
+about seven findings, rerun admission and remove dependent, duplicate, not-attributed,
+or low-value items.
+
+Every Critical and Moderate finding begins with three lines written from the completed
+admission form:
+
+- **Problem:** what is wrong, at most 12 words.
+- **Net impact:** supported population and magnitude, at most 12 words.
+- **Evidence:** decisive artifact/static proof and reviewed revision identity.
+
+Then provide only the minimal producer → path → symptom trace, base comparison, exact
+file/line, in-diff versus out-of-diff-breakage classification, and suggested fix.
+
+### Severity classification
+
+Severity is determined by reachable user consequence, not checklist category.
+
+**Critical** requires a supported trigger and one of:
+
+- Wrong/missing/duplicated/corrupted data or ILP wire bytes.
+- Crash, hang, outage, unbounded loop, OOM, or unbounded socket/timer/listener leak.
+- Credential exposure, auth/TLS bypass, or another security failure.
+- Silent/misleading failure that makes ingestion appear successful or undiagnosable.
+- Public API, config, runtime, module-system, protocol, or rolling-version compatibility
+  break affecting existing supported consumers.
+- User-observable throughput/latency/network regression multiplied per row/cell/request.
+- An admitted Critical coverage gap meeting Step 2.6's full reachability/impact burden.
+
+Every behavioral Critical must complete: “user does X → sees Y,” with an executed
+same-trigger base comparison. A performance Critical states the multiplier. A theory
+without a supported trigger is omitted, not preserved as Moderate.
+
+**Moderate** covers admitted attributable issues with bounded/developer-facing impact:
+proved weak tests, missing internal-path coverage, documentation defects, concrete
+standards violations, or bounded setup/configuration costs. Dynamic speculation and
+unchanged hardening opportunities are omitted.
+
+**Minor** covers concrete cosmetics on changed lines: naming, ordering, formatting,
+or comment wording.
+
+Exclude merge mechanics, tautologies true of every similar PR, deliberate project
+decisions without evidence they are wrong, generated artifacts as source, and all
+contents behind `OPAQUE` submodule gitlink bumps.
 
 ### Critical
-Issues that must be fixed before merge. Each must include:
-- Exact file path and line numbers (including out-of-diff files)
-- Whether the finding is **in-diff** or **out-of-diff**
-- Code path trace showing why the bug is real
-- For out-of-diff findings: the contract from 2.5c that was violated and the callsite that triggers it
-- Suggested fix
+
+List blocking admitted issues in descending user impact. Include the three summary
+lines, population/base delta/magnitude/offsets/net-negative determination, exact file
+and lines, supported trigger and symptom, executed artifacts, classification, contract
+and caller for out-of-diff breakage, and a fix scoped to this PR.
 
 ### Moderate
-Issues worth addressing but not blocking.
+
+List non-blocking admitted issues with the three summary lines and decisive evidence.
 
 ### Minor
-Style nits and suggestions.
 
-### Downgraded (false positives)
-Findings from the initial review that were dismissed after source code verification. For each, state:
-- The original claim (one line)
-- Why it was dismissed (one line, citing the specific code that disproves it)
+List optional, concrete cosmetics. Omit the section when empty.
+
+### Adjacent findings (not blocking — file as GitHub issues)
+
+Include only fully proved pre-existing bugs encountered in changed files or mapped
+callers that this PR does not introduce, expose, or worsen. They never affect the
+verdict and are never proposed as changes to this PR. For each provide:
+
+- **Problem:** issue-title-length summary.
+- **Net impact:** population and magnitude.
+- **Location:** exact file and lines.
+- **Symptom/reachability:** observed path, or named guard if latent.
+- **Suggested fix:** one or two lines.
+- **Standalone severity:** Critical, Moderate, or Minor.
+
+Offer to file them; never file without permission.
+
+### Coverage map
+
+State the test-gate result and number of admitted coverage gaps. Render admitted gap
+rows with their recorded search and failure link. Do not expose covered/accepted/exempt
+rows or omitted-candidate counts unless asked.
 
 ### Summary
-- One-line verdict: approve, request changes, or needs discussion
-- Highlight any regressions or tradeoffs
-- State how many draft findings were verified vs dropped as false positives (e.g., "8 findings verified, 4 false positives removed")
-- State the in-diff vs out-of-diff split (e.g., "5 findings in-diff, 3 findings out-of-diff"). If the diff is non-trivial and out-of-diff is zero, the cross-context pass likely underran — re-invoke Agent 9 with a wider grep before finalizing.
+
+Choose exactly one verdict:
+
+- **approve** — no open Critical findings and the test gate passes.
+- **approve with comments** — both gates pass, but named Moderate items remain.
+- **request changes** — at least one Critical finding is open or the test gate fails.
+- **needs discussion** — product, architecture, or compatibility decision is required.
+
+Apply these hard gates:
+
+- **Correctness gate:** any admitted Critical requires `request changes`. Omitted
+  hypotheses never affect the verdict.
+- **Test gate:** fails only for admitted Critical coverage gaps. Zero test changes or
+  missing regression coverage alone does not fail it.
+- Before finalizing, re-audit each rendered behavioral finding for strongest disproof,
+  supported producer, independent falsifier context, dynamic head/base evidence,
+  dependency survival, net-negative user impact, and post-admission severity.
+- If both gates pass, approve plainly; Moderate/Minor items do not justify withholding
+  approval.
+
+Also state:
+
+- Test-gate result and admitted gap count.
+- Regressions or tradeoffs.
+- Submodule verdicts (`path: OPAQUE — contents excluded`) or `Submodules: none`.
+- Admitted split: in-diff / out-of-diff-breakage.
+- Severity distribution.
+- At levels 0-1, the callsite-analysis limitation rather than implying exhaustive
+  out-of-diff coverage.
+
+Do not state agent counts, candidate counts, rejected/false-positive counts, or
+retraction history.
