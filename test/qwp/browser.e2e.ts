@@ -133,7 +133,7 @@ describe("QWP in a real browser against QuestDB", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const canConnect = async (
+          const tryConnect = async (
             connect: (options: {
               url: string;
             }) => Promise<{ close(): Promise<void> }>,
@@ -142,19 +142,46 @@ describe("QWP in a real browser against QuestDB", () => {
             try {
               const session = await connect({ url });
               await session.close();
-              return true;
-            } catch {
-              return false;
+              return { connected: true };
+            } catch (error) {
+              const failure = error as {
+                name?: string;
+                kind?: string;
+                retryable?: boolean;
+                statusCode?: number;
+              };
+              return {
+                connected: false,
+                name: failure.name,
+                kind: failure.kind,
+                retryable: failure.retryable ?? null,
+                statusCode: failure.statusCode ?? null,
+              };
             }
           };
           return {
-            ingress: await canConnect(qwp.connectQwpBrowserIngress, ingress),
-            egress: await canConnect(qwp.connectQwpBrowserEgress, egress),
+            ingress: await tryConnect(qwp.connectQwpBrowserIngress, ingress),
+            egress: await tryConnect(qwp.connectQwpBrowserEgress, egress),
           };
         },
         { moduleUrl: assetUrl, ingress: ingressUrl, egress: egressUrl },
       );
-      expect(anonymousUpgrades).toEqual({ ingress: false, egress: false });
+      expect(anonymousUpgrades).toEqual({
+        ingress: {
+          connected: false,
+          name: "QwpUpgradeError",
+          kind: "opaque",
+          retryable: null,
+          statusCode: null,
+        },
+        egress: {
+          connected: false,
+          name: "QwpUpgradeError",
+          kind: "opaque",
+          retryable: null,
+          statusCode: null,
+        },
+      });
 
       const login = await page.evaluate(
         async ({ username, password, table }) => {

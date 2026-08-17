@@ -10,8 +10,10 @@ import {
   QwpWebSocketLike,
 } from "./internal/websocket-connection";
 import {
+  QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpHandshakeMetadata,
+  QwpUpgradeError,
   QwpWebSocketConnectOptions,
 } from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
@@ -19,25 +21,73 @@ import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
 
-export class QwpDurableAckUnavailableError extends Error {
+export class QwpDurableAckUnavailableError extends QwpUpgradeError {
   constructor(readonly url: string | URL) {
     super(
       `QWP durable ACK was requested, but the server did not advertise support [url=${url}]`,
+      {
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+        retryable: false,
+        tryNextEndpoint: true,
+        url,
+      },
     );
     this.name = "QwpDurableAckUnavailableError";
   }
 }
 
-export class QwpVersionMismatchError extends Error {
+export class QwpVersionMismatchError extends QwpUpgradeError {
   constructor(
     readonly serverVersion: number,
     readonly clientMaxVersion: number,
+    url?: string | URL,
   ) {
     super(
       `QWP server advertised unsupported version ${serverVersion} [client max=${clientMaxVersion}]`,
+      {
+        kind: QWP_UPGRADE_ERROR_KIND.VERSION_MISMATCH,
+        retryable: true,
+        tryNextEndpoint: true,
+        url,
+      },
     );
     this.name = "QwpVersionMismatchError";
   }
+}
+
+export interface QwpNodeUpgradeRejection {
+  statusCode: number;
+  statusMessage?: string;
+  headers: IncomingHttpHeaders;
+}
+
+function classifyUpgradeRejection(
+  url: string | URL,
+  rejection: QwpNodeUpgradeRejection,
+): QwpUpgradeError {
+  const { statusCode, statusMessage, headers } = rejection;
+  const serverRole = headerValue(headers, "x-questdb-role");
+  const serverZone = headerValue(headers, "x-questdb-zone");
+  const kind =
+    statusCode === 401 || statusCode === 403
+      ? QWP_UPGRADE_ERROR_KIND.AUTHENTICATION
+      : statusCode === 421
+        ? QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED
+        : QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED;
+  const suffix = statusMessage ? ` ${statusMessage}` : "";
+  return new QwpUpgradeError(
+    `QWP WebSocket upgrade rejected with HTTP ${statusCode}${suffix}`,
+    {
+      kind,
+      retryable: statusCode === 421,
+      tryNextEndpoint: statusCode !== 401 && statusCode !== 403,
+      url,
+      statusCode,
+      statusMessage,
+      serverRole,
+      serverZone,
+    },
+  );
 }
 
 function headerValue(
@@ -84,6 +134,7 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
       agent?: Agent;
       headers: Record<string, string>;
       onUpgrade: (headers: IncomingHttpHeaders) => void;
+      onUpgradeRejected: (rejection: QwpNodeUpgradeRejection) => void;
     },
   ) => QwpWebSocketLike;
 }
@@ -123,6 +174,7 @@ export function connectQwpNodeWebSocket(
         agent?: Agent;
         headers: Record<string, string>;
         onUpgrade: (headers: IncomingHttpHeaders) => void;
+        onUpgradeRejected: (rejection: QwpNodeUpgradeRejection) => void;
       },
     ) => {
       const wsOptions: WebSocket.ClientOptions = {
@@ -134,10 +186,22 @@ export function connectQwpNodeWebSocket(
         ? new WebSocket(url, init.protocols, wsOptions)
         : new WebSocket(url, wsOptions);
       socket.once("upgrade", (response) => init.onUpgrade(response.headers));
+      socket.once("unexpected-response", (_request, response) => {
+        init.onUpgradeRejected({
+          statusCode: response.statusCode ?? 0,
+          statusMessage: response.statusMessage,
+          headers: response.headers,
+        });
+        response.resume();
+      });
       return socket as unknown as QwpWebSocketLike;
     });
 
   let upgradeHeaders: IncomingHttpHeaders | undefined;
+  let rejectOpening!: (error: QwpUpgradeError) => void;
+  const openingFailure = new Promise<never>((_resolve, reject) => {
+    rejectOpening = reject;
+  });
   const socket = factory(options.url, {
     protocols: options.protocols,
     agent: options.agent,
@@ -145,26 +209,38 @@ export function connectQwpNodeWebSocket(
     onUpgrade: (receivedHeaders) => {
       upgradeHeaders = receivedHeaders;
     },
+    onUpgradeRejected: (rejection) => {
+      rejectOpening(classifyUpgradeRejection(options.url, rejection));
+    },
   });
-  return openQwpWebSocket(socket, options.connectTimeoutMs, () => {
-    const qwpVersion = parseQwpVersion(upgradeHeaders);
-    if (qwpVersion < 1 || qwpVersion > clientMaxVersion) {
-      throw new QwpVersionMismatchError(qwpVersion, clientMaxVersion);
-    }
-    const durableAckEnabled =
-      headerValue(upgradeHeaders, "x-qwp-durable-ack")?.toLowerCase() ===
-      "enabled";
-    if (options.requestDurableAck && !durableAckEnabled) {
-      throw new QwpDurableAckUnavailableError(options.url);
-    }
-    const handshake: QwpHandshakeMetadata = {
-      qwpVersion,
-      maxBatchSizeBytes: parseMaxBatchSize(upgradeHeaders),
-      contentEncoding: headerValue(upgradeHeaders, "x-qwp-content-encoding"),
-      durableAckEnabled,
-      serverRole: headerValue(upgradeHeaders, "x-questdb-role"),
-    };
-    return handshake;
+  return openQwpWebSocket(socket, {
+    url: options.url,
+    connectTimeoutMs: options.connectTimeoutMs,
+    openingFailure,
+    completeHandshake: () => {
+      const qwpVersion = parseQwpVersion(upgradeHeaders);
+      if (qwpVersion < 1 || qwpVersion > clientMaxVersion) {
+        throw new QwpVersionMismatchError(
+          qwpVersion,
+          clientMaxVersion,
+          options.url,
+        );
+      }
+      const durableAckEnabled =
+        headerValue(upgradeHeaders, "x-qwp-durable-ack")?.toLowerCase() ===
+        "enabled";
+      if (options.requestDurableAck && !durableAckEnabled) {
+        throw new QwpDurableAckUnavailableError(options.url);
+      }
+      const handshake: QwpHandshakeMetadata = {
+        qwpVersion,
+        maxBatchSizeBytes: parseMaxBatchSize(upgradeHeaders),
+        contentEncoding: headerValue(upgradeHeaders, "x-qwp-content-encoding"),
+        durableAckEnabled,
+        serverRole: headerValue(upgradeHeaders, "x-questdb-role"),
+      };
+      return handshake;
+    },
   });
 }
 

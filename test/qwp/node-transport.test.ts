@@ -2,9 +2,12 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  connectQwpNodeWebSocket,
   connectQwpNodeIngress,
   QWP_STATUS,
+  QWP_UPGRADE_ERROR_KIND,
   QwpByteWriter,
+  QwpUpgradeError,
 } from "../../src/qwp/node";
 
 function writeTable(
@@ -105,5 +108,39 @@ describe("QWP Node transport", () => {
     } finally {
       await session.close();
     }
+  });
+
+  it("classifies a real role-rejected HTTP upgrade", async () => {
+    server = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+      verifyClient: (_info, done) => {
+        done(false, 421, "Misdirected Request", {
+          "X-QuestDB-Role": "PRIMARY_CATCHUP",
+          "X-QuestDB-Zone": "eu-west-2",
+        });
+      },
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+
+    const address = server.address() as AddressInfo;
+    const connecting = connectQwpNodeWebSocket({
+      url: `ws://127.0.0.1:${address.port}/write/v4`,
+    });
+    const error = await connecting.catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      name: "QwpUpgradeError",
+      kind: QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED,
+      retryable: true,
+      tryNextEndpoint: true,
+      statusCode: 421,
+      serverRole: "PRIMARY_CATCHUP",
+      serverZone: "eu-west-2",
+      isTopologicalRoleReject: false,
+      isTransientRoleReject: true,
+    } satisfies Partial<QwpUpgradeError>);
   });
 });

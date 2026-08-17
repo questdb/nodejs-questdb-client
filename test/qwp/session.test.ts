@@ -10,10 +10,12 @@ import {
 } from "../../src/qwp/node";
 import {
   QWP_STATUS,
+  QWP_UPGRADE_ERROR_KIND,
   QwpBatchTooLargeError,
   QwpByteWriter,
   QwpIngressNackError,
   QwpIngressSession,
+  QwpUpgradeError,
 } from "../../src/qwp";
 
 type Listener = (event: unknown) => void;
@@ -222,6 +224,10 @@ describe("QWP WebSocket adapters", () => {
       name: "QwpVersionMismatchError",
       serverVersion: 2,
       clientMaxVersion: 1,
+      kind: QWP_UPGRADE_ERROR_KIND.VERSION_MISMATCH,
+      retryable: true,
+      tryNextEndpoint: true,
+      url: "ws://localhost:9000/write/v4",
     } satisfies Partial<QwpVersionMismatchError>);
     expect(socket.closeCalls).toHaveLength(1);
   });
@@ -238,10 +244,116 @@ describe("QWP WebSocket adapters", () => {
     });
     socket.open();
 
-    await expect(connecting).rejects.toBeInstanceOf(
-      QwpDurableAckUnavailableError,
-    );
+    await expect(connecting).rejects.toMatchObject({
+      name: "QwpDurableAckUnavailableError",
+      kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+      retryable: false,
+      tryNextEndpoint: true,
+    } satisfies Partial<QwpDurableAckUnavailableError>);
     expect(socket.closeCalls).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      statusCode: 401,
+      statusMessage: "Unauthorized",
+      headers: {},
+      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+      retryable: false,
+      tryNextEndpoint: false,
+    },
+    {
+      statusCode: 421,
+      statusMessage: "Misdirected Request",
+      headers: {
+        "x-questdb-role": "REPLICA",
+        "x-questdb-zone": "eu-west-1",
+      },
+      kind: QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED,
+      retryable: true,
+      tryNextEndpoint: true,
+    },
+    {
+      statusCode: 503,
+      statusMessage: "Service Unavailable",
+      headers: {},
+      kind: QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED,
+      retryable: false,
+      tryNextEndpoint: true,
+    },
+  ])(
+    "classifies an HTTP $statusCode upgrade rejection",
+    async ({
+      statusCode,
+      statusMessage,
+      headers,
+      kind,
+      retryable,
+      tryNextEndpoint,
+    }) => {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: (_url, options) => {
+          options.onUpgradeRejected({ statusCode, statusMessage, headers });
+          return asQwpSocket(socket);
+        },
+      });
+
+      const error = await connecting.catch((caught: unknown) => caught);
+      expect(error).toMatchObject({
+        name: "QwpUpgradeError",
+        kind,
+        retryable,
+        tryNextEndpoint,
+        statusCode,
+        statusMessage,
+        url: "ws://localhost:9000/write/v4",
+      } satisfies Partial<QwpUpgradeError>);
+      if (statusCode === 421) {
+        expect(error).toMatchObject({
+          serverRole: "REPLICA",
+          serverZone: "eu-west-1",
+          isTopologicalRoleReject: true,
+          isTransientRoleReject: false,
+        } satisfies Partial<QwpUpgradeError>);
+      }
+    },
+  );
+
+  it("reports browser upgrade failures as opaque", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.error();
+
+    await expect(connecting).rejects.toMatchObject({
+      name: "QwpUpgradeError",
+      kind: QWP_UPGRADE_ERROR_KIND.OPAQUE,
+      retryable: undefined,
+      tryNextEndpoint: undefined,
+      statusCode: undefined,
+      serverRole: undefined,
+    } satisfies Partial<QwpUpgradeError>);
+  });
+
+  it("classifies Node opening errors as retriable transport failures", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpNodeWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.error();
+
+    await expect(connecting).rejects.toMatchObject({
+      name: "QwpUpgradeError",
+      kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+      retryable: true,
+      tryNextEndpoint: true,
+      statusCode: undefined,
+    } satisfies Partial<QwpUpgradeError>);
   });
 
   it("rejects a connection that does not open before its deadline", async () => {
@@ -253,7 +365,12 @@ describe("QWP WebSocket adapters", () => {
         connectTimeoutMs: 25,
         webSocketFactory: () => asQwpSocket(socket),
       });
-      const rejected = expect(connecting).rejects.toThrow(/timed out/i);
+      const rejected = expect(connecting).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        retryable: true,
+        tryNextEndpoint: true,
+      } satisfies Partial<QwpUpgradeError>);
       await vi.advanceTimersByTimeAsync(25);
       await rejected;
       expect(socket.closeCalls).toHaveLength(1);

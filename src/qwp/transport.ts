@@ -4,6 +4,81 @@ export interface QwpConnectionCloseInfo {
   wasClean: boolean;
 }
 
+export const QWP_UPGRADE_ERROR_KIND = {
+  AUTHENTICATION: "authentication",
+  ROLE_REJECTED: "role-rejected",
+  HTTP_REJECTED: "http-rejected",
+  VERSION_MISMATCH: "version-mismatch",
+  CAPABILITY_MISMATCH: "capability-mismatch",
+  TIMEOUT: "timeout",
+  TRANSPORT: "transport",
+  /** Browser WebSocket APIs do not expose the rejected HTTP upgrade. */
+  OPAQUE: "opaque",
+} as const;
+
+export type QwpUpgradeErrorKind =
+  (typeof QWP_UPGRADE_ERROR_KIND)[keyof typeof QWP_UPGRADE_ERROR_KIND];
+
+export interface QwpUpgradeErrorDetails {
+  kind: QwpUpgradeErrorKind;
+  /** Whether a later retry against the configured endpoint set may recover. */
+  retryable?: boolean;
+  /** Whether failover code should try another endpoint before surfacing this. */
+  tryNextEndpoint?: boolean;
+  url?: string | URL;
+  statusCode?: number;
+  statusMessage?: string;
+  serverRole?: string;
+  serverZone?: string;
+  closeCode?: number;
+  cause?: unknown;
+}
+
+/** A failure while establishing or validating a QWP WebSocket upgrade. */
+export class QwpUpgradeError extends Error {
+  readonly kind: QwpUpgradeErrorKind;
+  readonly retryable?: boolean;
+  readonly tryNextEndpoint?: boolean;
+  readonly url?: string | URL;
+  readonly statusCode?: number;
+  readonly statusMessage?: string;
+  readonly serverRole?: string;
+  readonly serverZone?: string;
+  readonly closeCode?: number;
+  readonly cause?: unknown;
+
+  constructor(message: string, details: QwpUpgradeErrorDetails) {
+    super(message);
+    this.name = "QwpUpgradeError";
+    this.kind = details.kind;
+    this.retryable = details.retryable;
+    this.tryNextEndpoint = details.tryNextEndpoint;
+    this.url = details.url;
+    this.statusCode = details.statusCode;
+    this.statusMessage = details.statusMessage;
+    this.serverRole = details.serverRole;
+    this.serverZone = details.serverZone;
+    this.closeCode = details.closeCode;
+    this.cause = details.cause;
+  }
+
+  /** True for a 421 response from a read-only replica. */
+  get isTopologicalRoleReject(): boolean {
+    return (
+      this.kind === QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED &&
+      this.serverRole?.toUpperCase() === "REPLICA"
+    );
+  }
+
+  /** True for a 421 response from a primary still completing catch-up. */
+  get isTransientRoleReject(): boolean {
+    return (
+      this.kind === QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED &&
+      this.serverRole?.toUpperCase() === "PRIMARY_CATCHUP"
+    );
+  }
+}
+
 /** Metadata negotiated during the QWP WebSocket upgrade. */
 export interface QwpHandshakeMetadata {
   /** QWP protocol version selected by the server. */

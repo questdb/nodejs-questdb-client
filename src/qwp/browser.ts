@@ -49,9 +49,12 @@ export function connectQwpBrowserWebSocket(
       return new WebSocketConstructor(url, protocols);
     });
   const socket = factory(options.url, options.protocols);
-  return openQwpWebSocket(socket, options.connectTimeoutMs, () => ({
-    qwpVersion: QWP_VERSION,
-  }));
+  return openQwpWebSocket(socket, {
+    url: options.url,
+    connectTimeoutMs: options.connectTimeoutMs,
+    completeHandshake: () => ({ qwpVersion: QWP_VERSION }),
+    opaqueErrors: true,
+  });
 }
 
 /** Opens a browser WebSocket and starts an ingress ACK/NACK session. */

@@ -1,8 +1,10 @@
 import { QwpProtocolError } from "../core";
 import {
+  QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpHandshakeMetadata,
+  QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
 
@@ -44,6 +46,16 @@ export interface QwpWebSocketLike {
   ): void;
 }
 
+export interface QwpWebSocketOpenOptions {
+  url: string | URL;
+  connectTimeoutMs?: number;
+  completeHandshake: () => QwpHandshakeMetadata;
+  /** Node adapters use this to surface non-101 HTTP responses from `ws`. */
+  openingFailure?: Promise<never>;
+  /** Browsers hide the HTTP response behind a generic WebSocket error event. */
+  opaqueErrors?: boolean;
+}
+
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CLOSED = 3;
 
@@ -65,9 +77,9 @@ async function normalizeBinaryMessage(data: unknown): Promise<Uint8Array> {
 /** Wraps a WHATWG-style WebSocket and resolves once its opening handshake succeeds. */
 export function openQwpWebSocket(
   socket: QwpWebSocketLike,
-  connectTimeoutMs = 15_000,
-  completeHandshake: () => QwpHandshakeMetadata,
+  options: QwpWebSocketOpenOptions,
 ): Promise<QwpBinaryConnection> {
+  const connectTimeoutMs = options.connectTimeoutMs ?? 15_000;
   if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) {
     return Promise.reject(
       new RangeError("connectTimeoutMs must be a positive finite number"),
@@ -92,7 +104,14 @@ export function openQwpWebSocket(
       } catch {
         // Some implementations throw when close() races an opening handshake.
       }
-      reject(new Error("QWP WebSocket connection timed out"));
+      reject(
+        new QwpUpgradeError("QWP WebSocket connection timed out", {
+          kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+          retryable: true,
+          tryNextEndpoint: true,
+          url: options.url,
+        }),
+      );
     }, connectTimeoutMs);
 
     const failOpening = (error: Error): void => {
@@ -109,7 +128,7 @@ export function openQwpWebSocket(
         if (openingSettled) return;
         let handshake: QwpHandshakeMetadata;
         try {
-          handshake = Object.freeze({ ...completeHandshake() });
+          handshake = Object.freeze({ ...options.completeHandshake() });
         } catch (error) {
           openingSettled = true;
           clearTimeout(timeout);
@@ -172,13 +191,42 @@ export function openQwpWebSocket(
         });
     });
 
-    socket.addEventListener("error", () => {
-      const error = new Error("QWP WebSocket transport error");
-      if (!opened) {
-        failOpening(error);
-      } else {
-        messages.fail(error);
+    options.openingFailure?.catch((error: unknown) => {
+      failOpening(
+        error instanceof Error
+          ? error
+          : new QwpUpgradeError("QWP WebSocket upgrade failed", {
+              kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+              retryable: true,
+              tryNextEndpoint: true,
+              url: options.url,
+              cause: error,
+            }),
+      );
+    });
+
+    socket.addEventListener("error", (event) => {
+      if (opened) {
+        messages.fail(new Error("QWP WebSocket transport error"));
+        return;
       }
+      const opaque = options.opaqueErrors === true;
+      const eventError = (event as { error?: unknown }).error;
+      const error = new QwpUpgradeError(
+        opaque
+          ? "QWP WebSocket upgrade failed; the browser did not expose the HTTP response"
+          : "QWP WebSocket transport error during upgrade",
+        {
+          kind: opaque
+            ? QWP_UPGRADE_ERROR_KIND.OPAQUE
+            : QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+          retryable: opaque ? undefined : true,
+          tryNextEndpoint: opaque ? undefined : true,
+          url: options.url,
+          cause: eventError ?? event,
+        },
+      );
+      failOpening(error);
     });
 
     socket.addEventListener(
@@ -193,8 +241,17 @@ export function openQwpWebSocket(
         resolveClosed(info);
         if (!opened) {
           failOpening(
-            new Error(
+            new QwpUpgradeError(
               `QWP WebSocket closed during handshake [code=${info.code}, reason=${info.reason}]`,
+              {
+                kind: options.opaqueErrors
+                  ? QWP_UPGRADE_ERROR_KIND.OPAQUE
+                  : QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+                retryable: options.opaqueErrors ? undefined : true,
+                tryNextEndpoint: options.opaqueErrors ? undefined : true,
+                url: options.url,
+                closeCode: info.code,
+              },
             ),
           );
           return;
