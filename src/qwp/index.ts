@@ -7,3 +7,5 @@
  * @packageDocumentation
  */
 export * from "./core";
+export * from "./ingress-session";
+export * from "./transport";

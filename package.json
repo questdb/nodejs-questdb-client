@@ -39,6 +39,26 @@
         "types": "./dist/cjs/qwp/index.d.ts",
         "default": "./dist/cjs/qwp/index.js"
       }
+    },
+    "./qwp/browser": {
+      "import": {
+        "types": "./dist/es/qwp/browser.d.mts",
+        "default": "./dist/es/qwp/browser.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/qwp/browser.d.ts",
+        "default": "./dist/cjs/qwp/browser.js"
+      }
+    },
+    "./qwp/node": {
+      "import": {
+        "types": "./dist/es/qwp/node.d.mts",
+        "default": "./dist/es/qwp/node.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/qwp/node.d.ts",
+        "default": "./dist/cjs/qwp/node.js"
+      }
     }
   },
   "repository": {

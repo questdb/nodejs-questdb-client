@@ -1,5 +1,6 @@
 {
   "include": ["src/qwp/**/*.ts"],
+  "exclude": ["src/qwp/node.ts"],
   "compilerOptions": {
     "moduleResolution": "bundler",
     "module": "ESNext",
