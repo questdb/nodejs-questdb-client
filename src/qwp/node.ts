@@ -160,6 +160,51 @@ export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
   storeAndForward?: QwpNodeFileReplayStoreOptions;
 }
 
+export type QwpEgressCompression = "raw" | "zstd" | "auto";
+
+export interface QwpNodeEgressOptions extends QwpNodeWebSocketOptions {
+  /**
+   * Requests Zstd-compressed result batches. The default is `raw`, which
+   * preserves compatibility with servers that predate QWP compression.
+   * `auto` currently advertises the same ordered preference as `zstd`.
+   */
+  compression?: QwpEgressCompression;
+  /** Zstd level hint sent to the server. Must be between 1 and 22. */
+  compressionLevel?: number;
+}
+
+function egressTransportOptions(
+  options: QwpNodeEgressOptions,
+): QwpNodeWebSocketOptions {
+  const { compression, compressionLevel = 1, ...transport } = options;
+  const preference = compression ?? "raw";
+  if (preference !== "raw" && preference !== "zstd" && preference !== "auto") {
+    throw new RangeError("compression must be one of raw, zstd, or auto");
+  }
+  if (
+    !Number.isSafeInteger(compressionLevel) ||
+    compressionLevel < 1 ||
+    compressionLevel > 22
+  ) {
+    throw new RangeError(
+      "compressionLevel must be an integer between 1 and 22",
+    );
+  }
+
+  // Keep the low-level headers escape hatch backwards compatible unless the
+  // typed compression option was explicitly selected.
+  if (compression === undefined) return transport;
+
+  const headers = { ...transport.headers };
+  for (const name of Object.keys(headers)) {
+    if (name.toLowerCase() === "x-qwp-accept-encoding") delete headers[name];
+  }
+  if (preference !== "raw") {
+    headers["X-QWP-Accept-Encoding"] = `zstd;level=${compressionLevel},raw`;
+  }
+  return { ...transport, headers };
+}
+
 /** Opens a Node QWP WebSocket with the upgrade headers required by QuestDB. */
 export function connectQwpNodeWebSocket(
   options: QwpNodeWebSocketOptions,
@@ -365,11 +410,11 @@ export async function connectQwpNodeSender(
 
 /** Opens a Node WebSocket and waits for the egress SERVER_INFO handshake. */
 export async function connectQwpNodeEgress(
-  options: QwpNodeWebSocketOptions,
+  options: QwpNodeEgressOptions,
   sessionOptions: QwpEgressSessionOptions = {},
 ): Promise<QwpEgressSession> {
   return QwpEgressSession.connect(
-    createQwpNodeConnectionFactory(options),
+    createQwpNodeConnectionFactory(egressTransportOptions(options)),
     sessionOptions,
   );
 }

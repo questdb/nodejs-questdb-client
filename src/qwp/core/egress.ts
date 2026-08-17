@@ -39,7 +39,10 @@ export interface QwpResultBatchMessage extends QwpFrameHeader {
   kind: "result-batch";
   requestId: bigint;
   batchSequence: bigint;
-  /** Delta dictionary and columnar table block; decoded by the batch decoder. */
+  /**
+   * Raw or Zstd-compressed delta dictionary and columnar table block; decoded
+   * by the batch decoder according to the frame flags.
+   */
   body: Uint8Array;
 }
 

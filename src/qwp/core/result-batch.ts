@@ -13,6 +13,7 @@ import {
 import { QwpResultBatchMessage } from "./egress";
 import { QwpProtocolError } from "./errors";
 import { readQwpVarint } from "./varint";
+import { decompressQwpZstdFrame } from "./zstd";
 
 const MAX_ARRAY_DIMENSION_LENGTH = (1 << 28) - 1;
 const MAX_ARRAY_ELEMENTS = 268_435_327;
@@ -353,11 +354,6 @@ export class QwpResultBatchDecoder {
   }
 
   decode(message: QwpResultBatchMessage): QwpResultBatch {
-    if ((message.flags & QWP_FLAG_ZSTD) !== 0) {
-      throw new QwpProtocolError(
-        "zstd-compressed QWP result batches are not supported by this runtime-neutral decoder",
-      );
-    }
     if (message.tableCount !== 1) {
       throw new QwpProtocolError(
         `RESULT_BATCH must contain exactly one table, got ${message.tableCount}`,
@@ -369,7 +365,11 @@ export class QwpResultBatchDecoder {
       );
     }
 
-    const reader = new QwpByteReader(message.body);
+    const body =
+      (message.flags & QWP_FLAG_ZSTD) !== 0
+        ? decompressQwpZstdFrame(message.body)
+        : message.body;
+    const reader = new QwpByteReader(body);
     const deltaMode = (message.flags & QWP_FLAG_DELTA_SYMBOL_DICTIONARY) !== 0;
     if (deltaMode) this.readDeltaDictionary(reader);
 

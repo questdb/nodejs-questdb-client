@@ -98,6 +98,34 @@ await sender.flush();
 await sender.close();
 ```
 
+### Zstd-compressed QWP egress
+
+Node.js egress clients can opt into compressed result batches during the
+WebSocket upgrade. Raw batches remain the default for compatibility.
+
+```typescript
+import { connectQwpNodeEgress } from "@questdb/nodejs-client/qwp/node";
+
+const session = await connectQwpNodeEgress({
+  url: "ws://127.0.0.1:9000/read/v1",
+  compression: "zstd",
+  compressionLevel: 3,
+});
+try {
+  const query = await session.query("select * from trades");
+  for await (const batch of query) {
+    for (const row of batch.rows()) console.log(row);
+  }
+  await query.completion;
+} finally {
+  await session.close();
+}
+```
+
+Zstd decoding is also included in the browser entry point. Browsers cannot set
+the `X-QWP-Accept-Encoding` upgrade header themselves, so a same-origin reverse
+proxy must add it when browser clients should opt into compression.
+
 ### Authentication and secure connection
 
 #### Username and password authentication with HTTP transport

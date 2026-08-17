@@ -115,6 +115,44 @@ describe("QWP in a real browser against QuestDB", () => {
     await container?.stop();
   });
 
+  it("decompresses a Zstd result batch in the browser bundle", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(async (moduleUrl) => {
+        const importModule = new Function("url", "return import(url)") as (
+          url: string,
+        ) => Promise<Record<string, any>>;
+        const qwp = await importModule(moduleUrl);
+        const compressedBody = Uint8Array.from([
+          40, 181, 47, 253, 96, 153, 0, 157, 0, 0, 96, 0, 0, 0, 100, 1, 1, 120,
+          4, 0, 42, 0, 0, 1, 0, 138, 171, 46, 9,
+        ]);
+        const payload = new qwp.QwpByteWriter()
+          .writeUint8(qwp.QWP_EGRESS_MESSAGE.RESULT_BATCH)
+          .writeBigUint64(7n);
+        qwp.writeQwpVarint(payload, 0);
+        payload.writeBytes(compressedBody);
+        const frame = qwp.encodeQwpFrame(
+          payload.toUint8Array(),
+          qwp.QWP_FLAG_DELTA_SYMBOL_DICTIONARY | qwp.QWP_FLAG_ZSTD,
+          1,
+        );
+        const message = qwp.decodeQwpEgressMessage(frame);
+        const batch = new qwp.QwpResultBatchDecoder().decode(message);
+        return {
+          requestId: String(batch.requestId),
+          rowCount: batch.rowCount,
+          lastValue: batch.get(99, 0),
+        };
+      }, assetUrl);
+
+      expect(result).toEqual({ requestId: "7", rowCount: 100, lastValue: 42 });
+    } finally {
+      await page.close();
+    }
+  });
+
   it("authenticates ingress and egress with the browser session cookie", async () => {
     const context = await browser.newContext({ bypassCSP: true });
     const page = await context.newPage();

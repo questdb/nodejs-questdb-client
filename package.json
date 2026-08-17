@@ -14,6 +14,7 @@
     "preview:docs": "serve docs"
   },
   "files": [
+    "THIRD_PARTY_NOTICES.md",
     "dist/cjs",
     "dist/es"
   ],
@@ -79,6 +80,7 @@
     "@types/ws": "^8.18.1",
     "bunchee": "^6.5.1",
     "eslint": "^9.26.0",
+    "fzstd": "0.1.1",
     "playwright": "^1.62.1",
     "prettier": "^3.5.3",
     "serve": "^14.2.4",

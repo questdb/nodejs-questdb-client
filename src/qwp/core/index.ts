@@ -10,3 +10,4 @@ export * from "./result-batch";
 export * from "./symbol-dictionary";
 export * from "./table";
 export * from "./varint";
+export * from "./zstd";

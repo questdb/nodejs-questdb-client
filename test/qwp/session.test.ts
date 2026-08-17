@@ -4,16 +4,19 @@ import {
   QwpWebSocketLike,
 } from "../../src/qwp/browser";
 import {
+  connectQwpNodeEgress,
   connectQwpNodeWebSocket,
   QwpDurableAckUnavailableError,
   QwpVersionMismatchError,
 } from "../../src/qwp/node";
 import {
   QWP_COLUMN_TYPE,
+  QWP_EGRESS_MESSAGE,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpBatchTooLargeError,
   QwpByteWriter,
+  encodeQwpFrame,
   QwpIngressNackError,
   QwpIngressSession,
   QwpIngressSessionClosedError,
@@ -183,6 +186,19 @@ function writeIngressTables(
   }
 }
 
+function serverInfoFrame(): Uint8Array {
+  const writer = new QwpByteWriter();
+  writer
+    .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
+    .writeUint8(0)
+    .writeBigUint64(1n)
+    .writeUint32(0)
+    .writeBigInt64(123n)
+    .writeUint16(0)
+    .writeUint16(0);
+  return encodeQwpFrame(writer.toUint8Array());
+}
+
 describe("QWP WebSocket adapters", () => {
   it.each(["browser", "node"] as const)(
     "validates %s timeouts before creating a WebSocket",
@@ -274,6 +290,74 @@ describe("QWP WebSocket adapters", () => {
       session.sendFrame(new Uint8Array(4097)),
     ).rejects.toBeInstanceOf(QwpBatchTooLargeError);
     await session.close();
+  });
+
+  it.each(["zstd", "auto"] as const)(
+    "negotiates %s compression for Node egress",
+    async (compression) => {
+      const socket = new FakeWebSocket();
+      let capturedHeaders: Record<string, string> | undefined;
+      const connecting = connectQwpNodeEgress({
+        url: "ws://localhost:9000/read/v1",
+        compression,
+        compressionLevel: 5,
+        webSocketFactory: (_url, options) => {
+          capturedHeaders = options.headers;
+          options.onUpgrade({
+            "x-qwp-content-encoding": "zstd;level=5",
+          });
+          return asQwpSocket(socket);
+        },
+      });
+      socket.open();
+      socket.message(serverInfoFrame());
+
+      const session = await connecting;
+      expect(capturedHeaders).toMatchObject({
+        "X-QWP-Accept-Encoding": "zstd;level=5,raw",
+      });
+      expect(session.handshake.contentEncoding).toBe("zstd;level=5");
+      await session.close();
+    },
+  );
+
+  it("keeps raw egress compatible with custom low-level headers", async () => {
+    const socket = new FakeWebSocket();
+    let capturedHeaders: Record<string, string> | undefined;
+    const connecting = connectQwpNodeEgress({
+      url: "ws://localhost:9000/read/v1",
+      headers: { "x-qwp-accept-encoding": "custom" },
+      webSocketFactory: (_url, options) => {
+        capturedHeaders = options.headers;
+        options.onUpgrade({});
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+    socket.message(serverInfoFrame());
+
+    const session = await connecting;
+    expect(capturedHeaders?.["x-qwp-accept-encoding"]).toBe("custom");
+    await session.close();
+  });
+
+  it.each([
+    { compression: "zstd" as const, compressionLevel: 0 },
+    { compression: "zstd" as const, compressionLevel: 23 },
+    { compression: "invalid" as "zstd", compressionLevel: 1 },
+  ])("rejects invalid egress compression options", async (options) => {
+    let factoryCalls = 0;
+    await expect(
+      connectQwpNodeEgress({
+        url: "ws://localhost:9000/read/v1",
+        ...options,
+        webSocketFactory: () => {
+          factoryCalls++;
+          return asQwpSocket(new FakeWebSocket());
+        },
+      }),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(factoryCalls).toBe(0);
   });
 
   it("uses the legacy handshake defaults when optional headers are absent", async () => {

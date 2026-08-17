@@ -8,6 +8,8 @@ import {
   QWP_EGRESS_MESSAGE,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_FLAG_GORILLA,
+  QWP_FLAG_ZSTD,
+  QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
   QWP_STATUS,
   QwpBinaryConnection,
   QwpByteReader,
@@ -22,6 +24,13 @@ import {
 import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
 
 const RESULT_FLAGS = QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_GORILLA;
+
+// One standard Zstd frame with a declared 409-byte content size and an actual
+// compressed block. Its body is a 100-row QWP table of INT values equal to 42.
+const COMPRESSED_INT_RESULT_BODY = Uint8Array.from([
+  40, 181, 47, 253, 96, 153, 0, 157, 0, 0, 96, 0, 0, 0, 100, 1, 1, 120, 4, 0,
+  42, 0, 0, 1, 0, 138, 171, 46, 9,
+]);
 
 function writeString(writer: QwpByteWriter, value: string): void {
   const bytes = new TextEncoder().encode(value);
@@ -89,12 +98,24 @@ function firstResultBatch(requestId = 0n): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), RESULT_FLAGS, 1);
 }
 
-function resultEnd(requestId = 0n): Uint8Array {
+function resultEnd(requestId = 0n, totalRows = 3n): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
   writeQwpVarint(payload, 1);
-  writeQwpVarint(payload, 3);
+  writeQwpVarint(payload, totalRows);
   return encodeQwpFrame(payload.toUint8Array());
+}
+
+function compressedIntResultBatch(requestId = 0n): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
+  writeQwpVarint(payload, 0);
+  payload.writeBytes(COMPRESSED_INT_RESULT_BODY);
+  return encodeQwpFrame(
+    payload.toUint8Array(),
+    QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_ZSTD,
+    1,
+  );
 }
 
 function scalarResultBatch(): Uint8Array {
@@ -286,6 +307,79 @@ describe("QWP result batch decoder", () => {
     expect(row[17]).toEqual(Uint8Array.of(1, 2, 3));
     expect(row[18]).toBe(-1);
   });
+
+  it("decompresses a Zstd RESULT_BATCH body", () => {
+    const message = decodeQwpEgressMessage(compressedIntResultBatch(7n));
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    expect(message.body).toEqual(COMPRESSED_INT_RESULT_BODY);
+    const batch = new QwpResultBatchDecoder().decode(message);
+    expect(batch.requestId).toBe(7n);
+    expect(batch.rowCount).toBe(100);
+    expect(batch.columns[0]).toEqual({
+      name: "x",
+      type: QWP_COLUMN_TYPE.INT,
+      values: new Array(100).fill(42),
+    });
+    expect(batch.get(99, 0)).toBe(42);
+  });
+
+  it("requires a bounded, single Zstd frame", () => {
+    const decodeBody = (body: Uint8Array) => {
+      const bytes = compressedIntResultBatch();
+      const message = decodeQwpEgressMessage(bytes);
+      if (message.kind !== "result-batch") {
+        throw new Error("unexpected message");
+      }
+      return new QwpResultBatchDecoder().decode({ ...message, body });
+    };
+
+    expect(() => decodeBody(Uint8Array.of(1, 2, 3, 4, 5))).toThrow(
+      /zstd frame magic/i,
+    );
+    expect(() => decodeBody(Uint8Array.of(40, 181, 47, 253, 0, 0))).toThrow(
+      /declared content size/i,
+    );
+
+    const overCap = BigInt(QWP_MAX_ZSTD_DECOMPRESSED_SIZE + 1);
+    expect(() =>
+      decodeBody(
+        Uint8Array.of(
+          40,
+          181,
+          47,
+          253,
+          0xa0,
+          Number(overCap & 0xffn),
+          Number((overCap >> 8n) & 0xffn),
+          Number((overCap >> 16n) & 0xffn),
+          Number((overCap >> 24n) & 0xffn),
+        ),
+      ),
+    ).toThrow(/exceeds client cap/i);
+
+    const withTrailingData = new Uint8Array(
+      COMPRESSED_INT_RESULT_BODY.byteLength + 1,
+    );
+    withTrailingData.set(COMPRESSED_INT_RESULT_BODY);
+    expect(() => decodeBody(withTrailingData)).toThrow(/exactly one frame/i);
+
+    const wrongDeclaredSize = COMPRESSED_INT_RESULT_BODY.slice();
+    wrongDeclaredSize[5]++;
+    expect(() => decodeBody(wrongDeclaredSize)).toThrow(
+      /does not match frame content size/i,
+    );
+
+    const tooSmallDeclaredSize = COMPRESSED_INT_RESULT_BODY.slice();
+    tooSmallDeclaredSize[5]--;
+    expect(() => decodeBody(tooSmallDeclaredSize)).toThrow(
+      /output exceeds declared content size/i,
+    );
+
+    const reservedBlock = COMPRESSED_INT_RESULT_BODY.slice();
+    reservedBlock[7] = (reservedBlock[7] & ~0x06) | 0x06;
+    expect(() => decodeBody(reservedBlock)).toThrow(/reserved block type/i);
+  });
 });
 
 describe("QwpEgressSession", () => {
@@ -373,6 +467,24 @@ describe("QwpEgressSession", () => {
       kind: "result-end",
       totalRows: 3n,
     });
+    await session.close();
+  });
+
+  it("streams a Zstd-compressed result through the high-level session", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select 42");
+
+    connection.receive(compressedIntResultBatch(query.requestId));
+    connection.receive(resultEnd(query.requestId, 100n));
+    const batches = [];
+    for await (const batch of query) batches.push(batch);
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0].rowCount).toBe(100);
+    expect(batches[0].get(99, 0)).toBe(42);
+    await expect(query.completion).resolves.toMatchObject({ totalRows: 100n });
     await session.close();
   });
 
