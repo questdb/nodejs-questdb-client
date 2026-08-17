@@ -437,28 +437,119 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("supports arrays with NULL value", async function () {
+  it("omits array columns with NULL value", async function () {
     const sender = new Sender({
       protocol: "http",
       protocol_version: "2",
       host: "host",
       init_buf_size: 1024,
     });
+    // A null or undefined array column is omitted from the row entirely: in ILP
+    // a NULL value is represented by not sending the field. Column separators
+    // stay correct whether the omitted column is leading or in the middle.
     await sender
       .table("tableName")
-      .arrayColumn("arrayCol", undefined as unknown as unknown[])
+      .arrayColumn("undefCol", undefined)
+      .intColumn("i", 42)
+      .arrayColumn("nullCol", null)
+      .intColumn("j", 7)
       .atNow();
-    await sender
-      .table("tableName")
-      .arrayColumn("arrayCol", null as unknown as unknown[])
-      .atNow();
-    expect(bufferContentHex(sender)).toBe(
-      toHex("tableName arrayCol==") +
-        " 0e 21 " +
-        toHex("\ntableName arrayCol==") +
-        " 0e 21 " +
-        toHex("\n"),
+    expect(bufferContentHex(sender)).toBe(toHex("tableName i=42i,j=7i\n"));
+    await sender.close();
+
+    // A row whose only columns are NULL arrays has no fields and cannot be closed.
+    const emptySender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await expect(
+      async () =>
+        await emptySender
+          .table("tableName")
+          .arrayColumn("nullCol", null)
+          .atNow(),
+    ).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
     );
+    await emptySender.close();
+  });
+
+  it("omits columns and symbols with null or undefined value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+    // null and undefined values are skipped entirely (recorded as NULL by the
+    // server), matching the Python client. See issue #28. The kept columns keep
+    // their separators correctly regardless of which values were skipped.
+    await sender
+      .table("tableName")
+      .symbol("skippedSym1", null)
+      .symbol("skippedSym2", undefined)
+      .symbol("keptSym", "sv")
+      .stringColumn("skippedStr", null)
+      .stringColumn("keptStr", "hello")
+      .floatColumn("skippedFloat", undefined)
+      .floatColumn("keptFloat", 1.5)
+      .intColumn("skippedInt", null)
+      .intColumn("keptInt", 42)
+      .booleanColumn("skippedBool", undefined)
+      .booleanColumn("keptBool", true)
+      .timestampColumn("skippedTs", null)
+      .timestampColumn("keptTs", 1000)
+      .atNow();
+    expect(bufferContent(sender)).toBe(
+      'tableName,keptSym=sv keptStr="hello",keptFloat=1.5,keptInt=42i,keptBool=t,keptTs=1000t\n',
+    );
+    await sender.close();
+  });
+
+  it("omits decimal columns with null or undefined value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("fx")
+      .decimalColumnText("skippedText", null)
+      .decimalColumnText("keptText", "1.5")
+      .decimalColumn("skippedBin", undefined, 2)
+      .intColumn("keptInt", 7)
+      .atNow();
+    expect(bufferContent(sender)).toBe("fx keptText=1.5d,keptInt=7i\n");
+    await sender.close();
+  });
+
+  it("skips null/undefined array columns regardless of protocol version", async function () {
+    // v1 does not support arrays, but a null or undefined value is a no-op skip
+    // (consistent with every other column type) rather than an error.
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .arrayColumn("skippedArr1", null)
+      .arrayColumn("skippedArr2", undefined)
+      .intColumn("keptInt", 1)
+      .atNow();
+    expect(bufferContent(sender)).toBe("tableName keptInt=1i\n");
+
+    // An actual array value still throws on v1.
+    sender.reset();
+    expect(() =>
+      sender.table("tableName").arrayColumn("arr", [1, 2, 3]),
+    ).toThrow("Arrays are not supported in protocol v1");
     await sender.close();
   });
 

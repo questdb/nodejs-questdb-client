@@ -152,10 +152,14 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Use it to insert into SYMBOL columns.
    *
    * @param {string} name - Symbol name.
-   * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
+   * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter. A null or undefined value omits the symbol entirely (stored as NULL).
    * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   symbol(name: string, value: unknown): SenderBuffer {
+    // A null or undefined value omits the symbol entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     if (typeof name !== "string") {
       throw new Error(`Symbol name must be a string, received ${typeof name}`);
     }
@@ -180,10 +184,14 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Use it to insert into VARCHAR and STRING columns.
    *
    * @param {string} name - Column name.
-   * @param {string} value - Column value, accepts only string values.
+   * @param {string | null | undefined} value - Column value, accepts only string values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {SenderBuffer} Returns with a reference to this buffer.
    */
-  stringColumn(name: string, value: string): SenderBuffer {
+  stringColumn(name: string, value: string | null | undefined): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     this.writeColumn(
       name,
       value,
@@ -203,10 +211,14 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Use it to insert into BOOLEAN columns.
    *
    * @param {string} name - Column name.
-   * @param {boolean} value - Column value, accepts only boolean values.
+   * @param {boolean | null | undefined} value - Column value, accepts only boolean values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {SenderBuffer} Returns with a reference to this buffer.
    */
-  booleanColumn(name: string, value: boolean): SenderBuffer {
+  booleanColumn(name: string, value: boolean | null | undefined): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     this.writeColumn(
       name,
       value,
@@ -224,34 +236,44 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number values.
+   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {SenderBuffer} Returns with a reference to this buffer.
    */
-  abstract floatColumn(name: string, value: number): SenderBuffer;
+  abstract floatColumn(
+    name: string,
+    value: number | null | undefined,
+  ): SenderBuffer;
 
   /**
    * Writes an array column with its values into the buffer.
    *
    * @param {string} name - Column name
-   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @param {unknown[] | null | undefined} value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely, storing NULL.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
    * - value is not an array
    * - or the shape of the array is irregular: the length of sub-arrays are different
    * - or the array is not homogeneous: its elements are not all the same type
    */
-  abstract arrayColumn(name: string, value: unknown[]): SenderBuffer;
+  abstract arrayColumn(
+    name: string,
+    value: unknown[] | null | undefined,
+  ): SenderBuffer;
 
   /**
    * Writes a 64-bit signed integer into the buffer. <br>
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number values.
+   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {SenderBuffer} Returns with a reference to this buffer.
    * @throws Error if the value is not an integer
    */
-  intColumn(name: string, value: number): SenderBuffer {
+  intColumn(name: string, value: number | null | undefined): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     if (!Number.isInteger(value)) {
       throw new Error(`Value must be an integer, received ${value}`);
     }
@@ -283,7 +305,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    *   Always uses microsecond precision, even if the timestamp is specified in nanoseconds.
    *
    * @param {string} name - The column name.
-   * @param {number | bigint} value - The epoch timestamp. Must be an integer or a `BigInt`.
+   * @param {number | bigint | null | undefined} value - The epoch timestamp. Must be an integer or a `BigInt`. A null or undefined value omits the column entirely (stored as NULL).
    * @param {'ns' | 'us' | 'ms'} [unit='us'] - The time unit of the timestamp.
    * Supported values:
    *   - `'ns'` — nanoseconds (requires `BigInt`)
@@ -297,9 +319,13 @@ abstract class SenderBufferBase implements SenderBuffer {
    */
   timestampColumn(
     name: string,
-    value: number | bigint,
+    value: number | bigint | null | undefined,
     unit: TimestampUnit = "us",
   ): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     if (typeof value !== "bigint" && !Number.isInteger(value)) {
       throw new Error(
         `Timestamp value must be an integer or BigInt, received ${value}`,
@@ -414,6 +440,20 @@ abstract class SenderBufferBase implements SenderBuffer {
       this.position = this.position - this.endOfLastRow;
       this.endOfLastRow = 0;
     }
+  }
+
+  /**
+   * @ignore
+   * Determines whether a column value is null or undefined. <br>
+   * Such values cause the column (or symbol) to be omitted from the row
+   * entirely, which QuestDB records as NULL. This mirrors the Python client
+   * and resolves https://github.com/questdb/nodejs-questdb-client/issues/28
+   *
+   * @param value - The column or symbol value to test.
+   * @returns True if the value is null or undefined.
+   */
+  protected isNullOrUndefined(value: unknown): value is null | undefined {
+    return value === null || value === undefined;
   }
 
   /**
@@ -538,7 +578,14 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Possible validation errors:
    * - The provided string is not a valid decimal representation.
    */
-  decimalColumnText(name: string, value: string | number): SenderBuffer {
+  decimalColumnText(
+    name: string,
+    value: string | number | null | undefined,
+  ): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     throw new Error("Decimals are not supported in protocol v1/v2");
   }
 
@@ -563,9 +610,13 @@ abstract class SenderBufferBase implements SenderBuffer {
    */
   decimalColumn(
     name: string,
-    unscaled: bigint | Int8Array,
+    unscaled: bigint | Int8Array | null | undefined,
     scale: number,
   ): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(unscaled)) {
+      return this;
+    }
     throw new Error("Decimals are not supported in protocol v1/v2");
   }
   /* eslint-enable @typescript-eslint/no-unused-vars */

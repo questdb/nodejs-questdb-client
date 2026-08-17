@@ -24,10 +24,14 @@ class SenderBufferV1 extends SenderBufferBase {
    * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number values.
+   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {Sender} Returns with a reference to this sender.
    */
-  floatColumn(name: string, value: number): SenderBuffer {
+  floatColumn(name: string, value: number | null | undefined): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     this.writeColumn(
       name,
       value,
@@ -59,11 +63,21 @@ class SenderBufferV1 extends SenderBufferBase {
   }
 
   /**
-   * Array columns are not supported in protocol v1.
+   * Array columns are not supported in protocol v1. <br>
+   * A null or undefined value omits the column entirely (stored as NULL),
+   * consistent with the other column methods; any actual array throws.
    *
+   * @param {string} name - Column name.
+   * @param {unknown[] | null | undefined} value - Array values. Only null or
+   * undefined is accepted in v1 (which skips the column).
+   * @returns {SenderBuffer} Returns with a reference to this buffer.
    * @throws Error indicating arrays are not supported in v1
    */
-  arrayColumn(): SenderBuffer {
+  arrayColumn(name: string, value: unknown[] | null | undefined): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     throw new Error("Arrays are not supported in protocol v1");
   }
 }

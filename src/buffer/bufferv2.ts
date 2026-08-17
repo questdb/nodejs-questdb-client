@@ -10,9 +10,8 @@ import {
   validateArray,
 } from "../utils";
 
-// Column type constants for protocol v2.
+// Column type constant for protocol v2.
 const COLUMN_TYPE_DOUBLE: number = 10;
-const COLUMN_TYPE_NULL: number = 33;
 
 // Entity type constants for protocol v2.
 const ENTITY_TYPE_ARRAY: number = 14;
@@ -41,10 +40,14 @@ class SenderBufferV2 extends SenderBufferBase {
    * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number values.
+   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @returns {Sender} Returns with a reference to this buffer.
    */
-  floatColumn(name: string, value: number): SenderBuffer {
+  floatColumn(name: string, value: number | null | undefined): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     this.writeColumn(
       name,
       value,
@@ -85,17 +88,22 @@ class SenderBufferV2 extends SenderBufferBase {
    * Write an array column with its values into the buffer using v2 format.
    *
    * @param {string} name - Column name
-   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @param {unknown[] | null | undefined} value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely, storing NULL.
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if array validation fails:
    * - value is not an array
    * - or the shape of the array is irregular: the length of sub-arrays are different
    * - or the array is not homogeneous: its elements are not all the same type
    */
-  arrayColumn(name: string, value: unknown[]): SenderBuffer {
+  arrayColumn(name: string, value: unknown[] | null | undefined): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
+
     const dimensions = getDimensions(value);
     const type = validateArray(value, dimensions);
-    // only number arrays and NULL supported for now
+    // only number arrays supported for now (empty arrays have a null element type)
     if (type !== "number" && type !== null) {
       throw new Error(`Unsupported array type [type=${type}]`);
     }
@@ -104,13 +112,8 @@ class SenderBufferV2 extends SenderBufferBase {
       this.checkCapacity([], 3);
       this.writeByte(EQUALS_SIGN);
       this.writeByte(ENTITY_TYPE_ARRAY);
-
-      if (!value) {
-        this.writeByte(COLUMN_TYPE_NULL);
-      } else {
-        this.writeByte(COLUMN_TYPE_DOUBLE);
-        this.writeArray(value, dimensions, type);
-      }
+      this.writeByte(COLUMN_TYPE_DOUBLE);
+      this.writeArray(value, dimensions, type);
     });
     return this;
   }

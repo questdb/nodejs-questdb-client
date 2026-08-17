@@ -89,7 +89,7 @@ interface SenderBuffer {
    * Writes a symbol name and value into the buffer.
    * Use it to insert into SYMBOL columns.
    * @param name - Symbol name.
-   * @param value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
+   * @param value - Symbol value, toString() is called to extract the actual symbol value from the parameter. A null or undefined value omits the symbol entirely (stored as NULL).
    * @returns Returns with a reference to this buffer.
    */
   symbol(name: string, value: unknown): SenderBuffer;
@@ -98,50 +98,50 @@ interface SenderBuffer {
    * Writes a string column with its value into the buffer.
    * Use it to insert into VARCHAR and STRING columns.
    * @param name - Column name.
-   * @param value - Column value, accepts only string values.
+   * @param value - Column value, accepts only string values. A null or undefined value omits the column entirely (stored as NULL).
    * @returns Returns with a reference to this buffer.
    */
-  stringColumn(name: string, value: string): SenderBuffer;
+  stringColumn(name: string, value: string | null | undefined): SenderBuffer;
 
   /**
    * Writes a boolean column with its value into the buffer.
    * Use it to insert into BOOLEAN columns.
    * @param name - Column name.
-   * @param value - Column value, accepts only boolean values.
+   * @param value - Column value, accepts only boolean values. A null or undefined value omits the column entirely (stored as NULL).
    * @returns Returns with a reference to this buffer.
    */
-  booleanColumn(name: string, value: boolean): SenderBuffer;
+  booleanColumn(name: string, value: boolean | null | undefined): SenderBuffer;
 
   /**
    * Writes a 64-bit floating point value into the buffer.
    * Use it to insert into DOUBLE or FLOAT database columns.
    * @param name - Column name.
-   * @param value - Column value, accepts only number values.
+   * @param value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @returns Returns with a reference to this buffer.
    */
-  floatColumn(name: string, value: number): SenderBuffer;
+  floatColumn(name: string, value: number | null | undefined): SenderBuffer;
 
   /**
    * Writes an array column with its values into the buffer.
    * @param name - Column name
-   * @param value - Array values to write (currently supports double arrays)
+   * @param value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely, storing NULL.
    * @returns Returns with a reference to this buffer.
    * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
    * - value is not an array
    * - or the shape of the array is irregular: the length of sub-arrays are different
    * - or the array is not homogeneous: its elements are not all the same type
    */
-  arrayColumn(name: string, value: unknown[]): SenderBuffer;
+  arrayColumn(name: string, value: unknown[] | null | undefined): SenderBuffer;
 
   /**
    * Writes a 64-bit signed integer into the buffer.
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    * @param name - Column name.
-   * @param value - Column value, accepts only number values.
+   * @param value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @returns Returns with a reference to this buffer.
    * @throws Error if the value is not an integer
    */
-  intColumn(name: string, value: number): SenderBuffer;
+  intColumn(name: string, value: number | null | undefined): SenderBuffer;
 
   /**
    * Writes a timestamp column and its value into the buffer.
@@ -156,7 +156,7 @@ interface SenderBuffer {
    *   Always uses microsecond precision, even if the timestamp is specified in nanoseconds.
    *
    * @param {string} name - The column name.
-   * @param {number | bigint} value - The epoch timestamp. Must be an integer or a `BigInt`.
+   * @param {number | bigint | null | undefined} value - The epoch timestamp. Must be an integer or a `BigInt`. A null or undefined value omits the column entirely (stored as NULL).
    * @param {'ns' | 'us' | 'ms'} [unit='us'] - The time unit of the timestamp.
    * Supported values:
    *   - `'ns'` — nanoseconds (requires `BigInt`)
@@ -170,7 +170,7 @@ interface SenderBuffer {
    */
   timestampColumn(
     name: string,
-    value: number | bigint,
+    value: number | bigint | null | undefined,
     unit: TimestampUnit,
   ): SenderBuffer;
 
@@ -180,15 +180,19 @@ interface SenderBuffer {
    * Use it to insert into DECIMAL database columns.
    *
    * @param {string} name - Column name.
-   * @param {string | number} value - The decimal value to write.
+   * @param {string | number | null | undefined} value - The decimal value to write.
    *   - Accepts either a `number` or a `string` containing a valid decimal representation.
    *   - String values should follow standard decimal notation (e.g., `"123.45"` or `"-0.001"`).
+   *   - A null or undefined value omits the column entirely (stored as NULL).
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error If decimals are not supported by the buffer implementation, or validation fails.
    * Possible validation errors:
    * - The provided string is not a valid decimal representation.
    */
-  decimalColumnText(name: string, value: string | number): SenderBuffer;
+  decimalColumnText(
+    name: string,
+    value: string | number | null | undefined,
+  ): SenderBuffer;
 
   /**
    * Writes a decimal value into the buffer using its binary format.
@@ -196,11 +200,12 @@ interface SenderBuffer {
    * Use it to insert into DECIMAL database columns.
    *
    * @param {string} name - Column name.
-   * @param {bigint | Int8Array} unscaled - The unscaled integer portion of the decimal value.
+   * @param {bigint | Int8Array | null | undefined} unscaled - The unscaled integer portion of the decimal value.
    *   - If a `bigint` is provided, it will be converted automatically.
    *   - If an `Int8Array` is provided, it must contain the two’s complement representation
    *     of the unscaled value in **big-endian** byte order.
    *   - An empty `Int8Array` represents a `NULL` value.
+   *   - A null or undefined value omits the column entirely (stored as NULL).
    * @param {number} scale - The number of fractional digits (the scale) of the decimal value.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    * @throws {Error} If decimals are not supported by the buffer implementation, or validation fails.
@@ -211,7 +216,7 @@ interface SenderBuffer {
    */
   decimalColumn(
     name: string,
-    unscaled: bigint | Int8Array,
+    unscaled: bigint | Int8Array | null | undefined,
     scale: number,
   ): SenderBuffer;
 

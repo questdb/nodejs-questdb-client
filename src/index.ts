@@ -11,6 +11,7 @@ export type { SenderBuffer } from "./buffer";
 export { createBuffer } from "./buffer";
 export { SenderBufferV1 } from "./buffer/bufferv1";
 export { SenderBufferV2 } from "./buffer/bufferv2";
+export { SenderBufferV3 } from "./buffer/bufferv3";
 export type { SenderTransport } from "./transport";
 export { createTransport } from "./transport";
 export { TcpTransport } from "./transport/tcp";

@@ -42,7 +42,14 @@ class SenderBufferV3 extends SenderBufferV2 {
    * Possible validation errors:
    * - The provided string is not a valid decimal representation.
    */
-  decimalColumnText(name: string, value: string | number): SenderBuffer {
+  decimalColumnText(
+    name: string,
+    value: string | number | null | undefined,
+  ): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(value)) {
+      return this;
+    }
     let str = "";
     if (typeof value === "string") {
       validateDecimalText(value);
@@ -81,9 +88,13 @@ class SenderBufferV3 extends SenderBufferV2 {
    */
   decimalColumn(
     name: string,
-    unscaled: bigint | Int8Array,
+    unscaled: bigint | Int8Array | null | undefined,
     scale: number,
   ): SenderBuffer {
+    // A null or undefined value omits the column entirely (see issue #28).
+    if (this.isNullOrUndefined(unscaled)) {
+      return this;
+    }
     if (scale < 0 || scale > 76) {
       throw new RangeError("Scale must be between 0 and 76");
     }

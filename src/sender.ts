@@ -231,7 +231,7 @@ class Sender {
    * Use it to insert into SYMBOL columns.
    *
    * @param {string} name - Symbol name.
-   * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter.
+   * @param {unknown} value - Symbol value, toString() is called to extract the actual symbol value from the parameter. A null or undefined value omits the symbol entirely (stored as NULL).
    * @return {Sender} Returns with a reference to this sender.
    */
   symbol(name: string, value: unknown): Sender {
@@ -244,10 +244,10 @@ class Sender {
    * Use it to insert into VARCHAR and STRING columns.
    *
    * @param {string} name - Column name.
-   * @param {string} value - Column value, accepts only string values.
+   * @param {string | null | undefined} value - Column value, accepts only string values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {Sender} Returns with a reference to this sender.
    */
-  stringColumn(name: string, value: string): Sender {
+  stringColumn(name: string, value: string | null | undefined): Sender {
     this.buffer.stringColumn(name, value);
     return this;
   }
@@ -257,10 +257,10 @@ class Sender {
    * Use it to insert into BOOLEAN columns.
    *
    * @param {string} name - Column name.
-   * @param {boolean} value - Column value, accepts only boolean values.
+   * @param {boolean | null | undefined} value - Column value, accepts only boolean values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {Sender} Returns with a reference to this sender.
    */
-  booleanColumn(name: string, value: boolean): Sender {
+  booleanColumn(name: string, value: boolean | null | undefined): Sender {
     this.buffer.booleanColumn(name, value);
     return this;
   }
@@ -270,10 +270,10 @@ class Sender {
    * Use it to insert into DOUBLE or FLOAT database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number values.
+   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {Sender} Returns with a reference to this sender.
    */
-  floatColumn(name: string, value: number): Sender {
+  floatColumn(name: string, value: number | null | undefined): Sender {
     this.buffer.floatColumn(name, value);
     return this;
   }
@@ -282,14 +282,14 @@ class Sender {
    * Writes an array column with its values into the buffer of the sender.
    *
    * @param {string} name - Column name
-   * @param {unknown[]} value - Array values to write (currently supports double arrays)
+   * @param {unknown[] | null | undefined} value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely, storing NULL.
    * @returns {Sender} Returns with a reference to this sender.
    * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
    * - value is not an array
    * - or the shape of the array is irregular: the length of sub-arrays are different
    * - or the array is not homogeneous: its elements are not all the same type
    */
-  arrayColumn(name: string, value: unknown[]): Sender {
+  arrayColumn(name: string, value: unknown[] | null | undefined): Sender {
     this.buffer.arrayColumn(name, value);
     return this;
   }
@@ -299,11 +299,11 @@ class Sender {
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number values.
+   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
    * @return {Sender} Returns with a reference to this sender.
    * @throws Error if the value is not an integer
    */
-  intColumn(name: string, value: number): Sender {
+  intColumn(name: string, value: number | null | undefined): Sender {
     this.buffer.intColumn(name, value);
     return this;
   }
@@ -321,7 +321,7 @@ class Sender {
    *   Always uses microsecond precision, even if the timestamp is specified in nanoseconds.
    *
    * @param {string} name - The column name.
-   * @param {number | bigint} value - The epoch timestamp. Must be an integer or a `BigInt`.
+   * @param {number | bigint | null | undefined} value - The epoch timestamp. Must be an integer or a `BigInt`. A null or undefined value omits the column entirely (stored as NULL).
    * @param {'ns' | 'us' | 'ms'} [unit='us'] - The time unit of the timestamp.
    * Supported values:
    *   - `'ns'` — nanoseconds (requires `BigInt`)
@@ -335,7 +335,7 @@ class Sender {
    */
   timestampColumn(
     name: string,
-    value: number | bigint,
+    value: number | bigint | null | undefined,
     unit: TimestampUnit = "us",
   ): Sender {
     this.buffer.timestampColumn(name, value, unit);
@@ -348,12 +348,15 @@ class Sender {
    * Use it to insert into DECIMAL database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number/string values.
+   * @param {string | number | null | undefined} value - Column value, accepts only number/string values. A null or undefined value omits the column entirely (stored as NULL).
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
    * - string value is not a valid decimal representation
    */
-  decimalColumnText(name: string, value: string | number): Sender {
+  decimalColumnText(
+    name: string,
+    value: string | number | null | undefined,
+  ): Sender {
     this.buffer.decimalColumnText(name, value);
     return this;
   }
@@ -364,9 +367,10 @@ class Sender {
    * Use it to insert into DECIMAL database columns.
    *
    * @param {string} name - Column name.
-   * @param {number} unscaled - The unscaled value of the decimal in two's
+   * @param {Int8Array | bigint | null | undefined} unscaled - The unscaled value of the decimal in two's
    * complement representation and big-endian byte order.
    * An empty array represents the NULL value.
+   * A null or undefined value omits the column entirely (stored as NULL).
    * @param {number} scale - The scale of the decimal value.
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
@@ -376,7 +380,7 @@ class Sender {
    */
   decimalColumn(
     name: string,
-    unscaled: Int8Array | bigint,
+    unscaled: Int8Array | bigint | null | undefined,
     scale: number,
   ): Sender {
     this.buffer.decimalColumn(name, unscaled, scale);
