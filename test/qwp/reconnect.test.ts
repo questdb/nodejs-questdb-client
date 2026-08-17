@@ -21,6 +21,8 @@ import {
   QwpEgressReplayRequiredError,
   QwpEgressSession,
   QwpIngressSession,
+  QwpIngressReplayRecord,
+  QwpIngressReplayStore,
   QwpHandshakeMetadata,
   QwpSymbolDictionary,
   QwpTableBuffer,
@@ -158,6 +160,32 @@ class FakeConnection implements QwpBinaryConnection {
     this.closedSettled = true;
     this.incoming.end();
     this.resolveClosed(info);
+  }
+}
+
+class TrackingReplayStore implements QwpIngressReplayStore {
+  readonly records = new Map<bigint, Uint8Array>();
+  closeCount = 0;
+
+  async load(): Promise<readonly QwpIngressReplayRecord[]> {
+    return Array.from(this.records, ([frameSequence, payload]) => ({
+      frameSequence,
+      payload,
+    }));
+  }
+
+  async append(record: QwpIngressReplayRecord): Promise<void> {
+    this.records.set(record.frameSequence, record.payload.slice());
+  }
+
+  async acknowledgeThrough(frameSequence: bigint): Promise<void> {
+    for (const sequence of this.records.keys()) {
+      if (sequence <= frameSequence) this.records.delete(sequence);
+    }
+  }
+
+  async close(): Promise<void> {
+    this.closeCount++;
   }
 }
 
@@ -386,6 +414,7 @@ describe("QWP ingress reconnect and replay", () => {
 
   it("fails pending sends with a typed reconnect exhaustion error", async () => {
     const first = new FakeConnection("primary");
+    const replayStore = new TrackingReplayStore();
     let factoryCalls = 0;
     const session = await QwpIngressSession.connect(
       async () => {
@@ -397,6 +426,7 @@ describe("QWP ingress reconnect and replay", () => {
         });
       },
       {
+        replayStore,
         reconnect: {
           maxAttempts: 2,
           initialBackoffMs: 0,
@@ -410,7 +440,9 @@ describe("QWP ingress reconnect and replay", () => {
 
     await expect(pending).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
     expect(factoryCalls).toBe(3);
+    await vi.waitFor(() => expect(replayStore.closeCount).toBe(1));
     await session.close();
+    expect(replayStore.closeCount).toBe(1);
   });
 
   it("reconnects and replays a transient ingress NACK without advancing", async () => {

@@ -123,6 +123,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private generation = 0;
   private sendTail: Promise<void> = Promise.resolve();
   private reconnectTask?: Promise<void>;
+  private storeClosePromise?: Promise<void>;
   private terminalError?: Error;
   private cancelBackoff?: () => void;
   private closing = false;
@@ -285,8 +286,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (connectingCandidate && connectingCandidate !== connection) {
       await connectingCandidate.close(code, reason).catch(() => undefined);
     }
-    await this.store.close();
-    this.settleClosed(closeInfo);
+    try {
+      await this.closeStore();
+    } finally {
+      this.settleClosed(closeInfo);
+    }
   }
 
   private async connectLoop(
@@ -746,6 +750,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       reason: this.terminalError.message,
       wasClean: false,
     });
+    void this.closeStore().catch(() => undefined);
     void this.connection
       ?.close(1011, "QWP reconnect failed")
       .catch(() => undefined);
@@ -755,6 +760,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (this.closedSettled) return;
     this.closedSettled = true;
     this.resolveClosed(info);
+  }
+
+  private closeStore(): Promise<void> {
+    if (!this.storeClosePromise) {
+      this.storeClosePromise = Promise.resolve().then(() => this.store.close());
+    }
+    return this.storeClosePromise;
   }
 }
 

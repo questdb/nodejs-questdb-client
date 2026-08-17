@@ -4,6 +4,7 @@ export * from "./index";
 import {
   openQwpWebSocket,
   QwpWebSocketLike,
+  validateQwpWebSocketTimeouts,
 } from "./internal/websocket-connection";
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import { QWP_VERSION } from "./core";
@@ -56,6 +57,7 @@ function connectQwpBrowserEndpoint(
   options: QwpBrowserWebSocketOptions,
   endpoint: string | URL,
 ): Promise<QwpBinaryConnection> {
+  validateQwpWebSocketTimeouts(options);
   const factory =
     options.webSocketFactory ??
     ((url: string | URL, protocols?: string | string[]) => {
@@ -77,6 +79,7 @@ function connectQwpBrowserEndpoint(
     url: endpoint,
     connectTimeoutMs: options.connectTimeoutMs,
     sendTimeoutMs: options.sendTimeoutMs,
+    closeTimeoutMs: options.closeTimeoutMs,
     completeHandshake: () => ({ qwpVersion: QWP_VERSION }),
     opaqueErrors: true,
   });

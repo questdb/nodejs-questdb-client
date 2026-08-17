@@ -51,6 +51,18 @@ export interface QwpEgressQueryOptions {
   resetDictionary?: boolean;
 }
 
+function validateEgressSessionOptions(
+  options: QwpEgressSessionOptions,
+): number {
+  const timeout = options.serverInfoTimeoutMs ?? 15_000;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new RangeError(
+      "serverInfoTimeoutMs must be a positive finite number",
+    );
+  }
+  return timeout;
+}
+
 export type QwpQueryCompletion = QwpResultEndMessage | QwpExecDoneMessage;
 
 export class QwpEgressQueryError extends Error {
@@ -161,25 +173,33 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private serverInfo?: QwpServerInfoMessage;
   private failure?: Error;
   private closing = false;
+  private closePromise?: Promise<void>;
   readonly ready: Promise<QwpServerInfoMessage>;
 
   constructor(
     private readonly connection: QwpBinaryConnection,
     options: QwpEgressSessionOptions = {},
   ) {
-    if (
-      options.reconnect &&
-      !(connection instanceof QwpReconnectingEgressConnection)
-    ) {
-      throw new Error(
-        "egress reconnect options require QwpEgressSession.connect(factory, options)",
-      );
-    }
-    const timeout = options.serverInfoTimeoutMs ?? 15_000;
-    if (!Number.isFinite(timeout) || timeout <= 0) {
-      throw new RangeError(
-        "serverInfoTimeoutMs must be a positive finite number",
-      );
+    let timeout: number;
+    try {
+      if (
+        options.reconnect &&
+        !(connection instanceof QwpReconnectingEgressConnection)
+      ) {
+        throw new Error(
+          "egress reconnect options require QwpEgressSession.connect(factory, options)",
+        );
+      }
+      timeout = validateEgressSessionOptions(options);
+    } catch (error) {
+      try {
+        void connection
+          .close(1002, "invalid QWP egress session options")
+          .catch(() => undefined);
+      } catch {
+        // Preserve the configuration error when transport cleanup also fails.
+      }
+      throw error;
     }
     let resolve!: (value: QwpServerInfoMessage) => void;
     let reject!: (error: unknown) => void;
@@ -191,7 +211,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     this.resolveServerInfo = resolve;
     this.rejectServerInfo = reject;
     this.serverInfoTimer = setTimeout(() => {
-      this.fail(new Error("timed out waiting for QWP SERVER_INFO"));
+      const error = new Error("timed out waiting for QWP SERVER_INFO");
+      this.fail(error);
+      void this.connection
+        .close(1002, "missing QWP SERVER_INFO")
+        .catch(() => undefined);
     }, timeout);
     this.receiveLoop = this.consumeMessages();
   }
@@ -200,7 +224,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     factory: QwpConnectionFactory,
     options: QwpEgressSessionOptions = {},
   ): Promise<QwpEgressSession> {
-    const timeout = options.serverInfoTimeoutMs ?? 15_000;
+    const timeout = validateEgressSessionOptions(options);
     const state: { session?: QwpEgressSession } = {};
     const connection = options.reconnect
       ? await QwpReconnectingEgressConnection.connect(
@@ -215,15 +239,22 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             : undefined,
         )
       : await factory();
-    const session = new QwpEgressSession(connection, options);
-    state.session = session;
+    let session: QwpEgressSession;
     try {
+      session = new QwpEgressSession(connection, options);
+      state.session = session;
       await session.ready;
       return session;
     } catch (error) {
-      await session
-        .close(1002, "missing QWP SERVER_INFO")
-        .catch(() => undefined);
+      if (state.session) {
+        await state.session
+          .close(1002, "missing QWP SERVER_INFO")
+          .catch(() => undefined);
+      } else {
+        await connection
+          .close(1002, "invalid QWP egress session")
+          .catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -290,20 +321,30 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     return this.send(encodeQwpCredit(requestId, additionalBytes));
   }
 
-  async close(code = 1000, reason = ""): Promise<void> {
-    if (this.closing) {
-      await this.connection.closed;
-      return;
-    }
+  close(code = 1000, reason = ""): Promise<void> {
+    if (!this.closePromise) this.closePromise = this.closeNow(code, reason);
+    return this.closePromise;
+  }
+
+  private async closeNow(code: number, reason: string): Promise<void> {
     this.closing = true;
     clearTimeout(this.serverInfoTimer);
     const error = new QwpEgressSessionClosedError();
     this.rejectServerInfo(error);
     this.active?.fail(error);
     this.active = undefined;
-    await this.sendTail;
-    await this.connection.close(code, reason);
-    await this.receiveLoop;
+    let transportClose: Promise<void>;
+    try {
+      transportClose = this.connection.close(code, reason);
+    } catch (closeError) {
+      transportClose = Promise.reject(closeError);
+    }
+    const [, closeResult] = await Promise.allSettled([
+      this.sendTail,
+      transportClose,
+      this.receiveLoop,
+    ]);
+    if (closeResult.status === "rejected") throw closeResult.reason;
   }
 
   private async consumeMessages(): Promise<void> {

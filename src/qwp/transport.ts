@@ -299,6 +299,8 @@ export interface QwpWebSocketConnectOptions {
   connectTimeoutMs?: number;
   /** Maximum time a send may remain queued by the WebSocket. Defaults to 15s. */
   sendTimeoutMs?: number;
+  /** Maximum time allowed for a graceful WebSocket close. Defaults to 15s. */
+  closeTimeoutMs?: number;
 }
 
 export type QwpConnectionFactory = () => Promise<QwpBinaryConnection>;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   decodeQwpEgressMessage,
   encodeQwpFrame,
@@ -198,7 +198,10 @@ class FakeConnection implements QwpBinaryConnection {
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   readonly messages = this.incoming;
   readonly sent: Uint8Array[] = [];
+  readonly closeCalls: { code: number; reason: string }[] = [];
   readonly closed: Promise<QwpConnectionCloseInfo>;
+  onSend?: (payload: Uint8Array) => Promise<void>;
+  onClose?: () => void;
 
   constructor() {
     let resolve!: (info: QwpConnectionCloseInfo) => void;
@@ -210,10 +213,12 @@ class FakeConnection implements QwpBinaryConnection {
 
   send(payload: Uint8Array): Promise<void> {
     this.sent.push(payload.slice());
-    return Promise.resolve();
+    return this.onSend?.(payload) ?? Promise.resolve();
   }
 
   close(code = 1000, reason = ""): Promise<void> {
+    this.closeCalls.push({ code, reason });
+    this.onClose?.();
     this.incoming.end();
     this.resolveClosed({ code, reason, wasClean: true });
     return Promise.resolve();
@@ -284,6 +289,65 @@ describe("QWP result batch decoder", () => {
 });
 
 describe("QwpEgressSession", () => {
+  it("validates SERVER_INFO timeouts before invoking its factory", async () => {
+    let factoryCalls = 0;
+    await expect(
+      QwpEgressSession.connect(
+        async () => {
+          factoryCalls++;
+          return new FakeConnection();
+        },
+        { serverInfoTimeoutMs: 0 },
+      ),
+    ).rejects.toThrow("serverInfoTimeoutMs must be a positive finite number");
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("closes the transport when SERVER_INFO does not arrive", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = new QwpEgressSession(connection, {
+        serverInfoTimeoutMs: 25,
+      });
+      const ready = session.ready.catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(ready).resolves.toEqual(
+        expect.objectContaining({
+          message: "timed out waiting for QWP SERVER_INFO",
+        }),
+      );
+      expect(connection.closeCalls).toEqual([
+        { code: 1002, reason: "missing QWP SERVER_INFO" },
+      ]);
+      await expect(session.closed).resolves.toMatchObject({ code: 1002 });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("close interrupts an egress request whose send has not settled", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    await session.ready;
+    let rejectSend!: (error: Error) => void;
+    connection.onSend = () =>
+      new Promise<void>((_resolve, reject) => {
+        rejectSend = reject;
+      });
+    connection.onClose = () => rejectSend(new Error("transport closed"));
+    const querying = session.query("select 1").catch((error: unknown) => error);
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+
+    await expect(session.close()).resolves.toBeUndefined();
+    await expect(querying).resolves.toEqual(
+      expect.objectContaining({ message: "transport closed" }),
+    );
+  });
+
   it("waits for SERVER_INFO and streams a typed query result", async () => {
     const connection = new FakeConnection();
     const session = new QwpEgressSession(connection);

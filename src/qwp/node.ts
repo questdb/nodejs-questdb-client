@@ -8,6 +8,7 @@ import { QWP_VERSION } from "./core";
 import {
   openQwpWebSocket,
   QwpWebSocketLike,
+  validateQwpWebSocketTimeouts,
 } from "./internal/websocket-connection";
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import {
@@ -181,6 +182,7 @@ function connectQwpNodeEndpoint(
   options: QwpNodeWebSocketOptions,
   endpoint: string | URL,
 ): Promise<QwpBinaryConnection> {
+  validateQwpWebSocketTimeouts(options);
   const clientMaxVersion = options.maxVersion ?? QWP_VERSION;
   if (
     !Number.isSafeInteger(clientMaxVersion) ||
@@ -259,6 +261,7 @@ function connectQwpNodeEndpoint(
     url: endpoint,
     connectTimeoutMs: options.connectTimeoutMs,
     sendTimeoutMs: options.sendTimeoutMs,
+    closeTimeoutMs: options.closeTimeoutMs,
     openingFailure,
     completeHandshake: () => {
       const qwpVersion = parseQwpVersion(upgradeHeaders);

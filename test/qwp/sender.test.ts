@@ -51,6 +51,25 @@ class RecordingSession implements QwpSenderSession {
   }
 }
 
+class ClosingUnblocksSession extends RecordingSession {
+  private rejectSend?: (error: Error) => void;
+
+  sendTables(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): Promise<QwpIngressResponse> {
+    this.sends.push({ tables, options });
+    return new Promise((_resolve, reject) => {
+      this.rejectSend = reject;
+    });
+  }
+
+  async close(): Promise<void> {
+    this.closeCount++;
+    this.rejectSend?.(new Error("session closed"));
+  }
+}
+
 function column(table: QwpTableBuffer, name: string) {
   const result = table.columns.find((candidate) => candidate.name === name);
   if (!result) throw new Error(`missing column '${name}'`);
@@ -58,6 +77,20 @@ function column(table: QwpTableBuffer, name: string) {
 }
 
 describe("QWP high-level sender", () => {
+  it("closes its session before waiting for an in-flight flush", async () => {
+    const session = new ClosingUnblocksSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 42n).atNow();
+    const flushing = sender.flush().catch((error: unknown) => error);
+    await Promise.resolve();
+
+    await expect(sender.close()).resolves.toBeUndefined();
+    await expect(flushing).resolves.toEqual(
+      expect.objectContaining({ message: "session closed" }),
+    );
+    expect(session.closeCount).toBe(1);
+  });
+
   it("uses the existing Sender fluent API and preserves an unfinished row", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });

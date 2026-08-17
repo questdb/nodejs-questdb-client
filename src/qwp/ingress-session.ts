@@ -94,6 +94,42 @@ export class QwpBatchTooLargeError extends RangeError {
   }
 }
 
+function validateIngressSessionOptions(
+  options: QwpIngressSessionOptions,
+  connection?: QwpBinaryConnection,
+): void {
+  const timeout = options.ackTimeoutMs ?? 15_000;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new RangeError("ackTimeoutMs must be a positive finite number");
+  }
+  const localBatchCap = options.maxBatchSizeBytes;
+  if (
+    localBatchCap !== undefined &&
+    (!Number.isSafeInteger(localBatchCap) || localBatchCap <= 0)
+  ) {
+    throw new RangeError("maxBatchSizeBytes must be a positive safe integer");
+  }
+  const keepalive = options.durableAckKeepaliveMs;
+  if (
+    keepalive !== undefined &&
+    (!Number.isFinite(keepalive) || keepalive < 0)
+  ) {
+    throw new RangeError(
+      "durableAckKeepaliveMs must be a non-negative finite number",
+    );
+  }
+  if (
+    connection &&
+    keepalive !== undefined &&
+    keepalive > 0 &&
+    !connection.ping
+  ) {
+    throw new Error(
+      "durable ACK keepalive requires a WebSocket transport with PING support",
+    );
+  }
+}
+
 /**
  * Connection-scoped ingress sequencer.
  *
@@ -116,51 +152,39 @@ export class QwpIngressSession {
   private deltaSymbolsPublished = false;
   private failure?: Error;
   private closing = false;
+  private closePromise?: Promise<void>;
   private readonly receiveLoop: Promise<void>;
 
   constructor(
     private readonly connection: QwpBinaryConnection,
     private readonly options: QwpIngressSessionOptions = {},
   ) {
-    if (
-      options.reconnect &&
-      !(connection instanceof QwpReconnectingIngressConnection)
-    ) {
-      throw new Error(
-        "ingress reconnect options require QwpIngressSession.connect(factory, options)",
-      );
+    try {
+      if (
+        options.reconnect &&
+        !(connection instanceof QwpReconnectingIngressConnection)
+      ) {
+        throw new Error(
+          "ingress reconnect options require QwpIngressSession.connect(factory, options)",
+        );
+      }
+      validateIngressSessionOptions(options, connection);
+    } catch (error) {
+      try {
+        void connection
+          .close(1002, "invalid QWP ingress session options")
+          .catch(() => undefined);
+      } catch {
+        // Preserve the configuration error when transport cleanup also fails.
+      }
+      throw error;
     }
-    const timeout = options.ackTimeoutMs ?? 15_000;
-    if (!Number.isFinite(timeout) || timeout <= 0) {
-      throw new RangeError("ackTimeoutMs must be a positive finite number");
-    }
-    const localBatchCap = options.maxBatchSizeBytes;
-    if (
-      localBatchCap !== undefined &&
-      (!Number.isSafeInteger(localBatchCap) || localBatchCap <= 0)
-    ) {
-      throw new RangeError("maxBatchSizeBytes must be a positive safe integer");
-    }
-    this.localMaxBatchSizeBytes = localBatchCap;
+    this.localMaxBatchSizeBytes = options.maxBatchSizeBytes;
     for (const entry of connection.ingressSymbolDictionary ?? []) {
       this.symbolDictionary.addRecovered(entry);
     }
     this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
     this.deltaSymbolsPublished = this.symbolDictionary.size > 0;
-    const keepalive = options.durableAckKeepaliveMs;
-    if (
-      keepalive !== undefined &&
-      (!Number.isFinite(keepalive) || keepalive < 0)
-    ) {
-      throw new RangeError(
-        "durableAckKeepaliveMs must be a non-negative finite number",
-      );
-    }
-    if (keepalive !== undefined && keepalive > 0 && !connection.ping) {
-      throw new Error(
-        "durable ACK keepalive requires a WebSocket transport with PING support",
-      );
-    }
     this.receiveLoop = this.consumeMessages();
   }
 
@@ -168,6 +192,7 @@ export class QwpIngressSession {
     factory: QwpConnectionFactory,
     options: QwpIngressSessionOptions = {},
   ): Promise<QwpIngressSession> {
+    validateIngressSessionOptions(options);
     if (options.replayStore && !options.reconnect) {
       throw new RangeError("a QWP replayStore requires reconnect options");
     }
@@ -339,17 +364,27 @@ export class QwpIngressSession {
     });
   }
 
-  async close(code = 1000, reason = ""): Promise<void> {
-    if (this.closing) {
-      await this.connection.closed;
-      return;
-    }
+  close(code = 1000, reason = ""): Promise<void> {
+    if (!this.closePromise) this.closePromise = this.closeNow(code, reason);
+    return this.closePromise;
+  }
+
+  private async closeNow(code: number, reason: string): Promise<void> {
     this.closing = true;
     this.clearDurablePing();
     this.rejectAll(new QwpIngressSessionClosedError());
-    await this.sendTail;
-    await this.connection.close(code, reason);
-    await this.receiveLoop;
+    let transportClose: Promise<void>;
+    try {
+      transportClose = this.connection.close(code, reason);
+    } catch (error) {
+      transportClose = Promise.reject(error);
+    }
+    const [, closeResult] = await Promise.allSettled([
+      this.sendTail,
+      transportClose,
+      this.receiveLoop,
+    ]);
+    if (closeResult.status === "rejected") throw closeResult.reason;
   }
 
   private async consumeMessages(): Promise<void> {

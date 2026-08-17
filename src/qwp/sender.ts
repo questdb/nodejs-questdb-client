@@ -716,7 +716,27 @@ export class QwpSender {
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
-    await this.flushTail;
+    // Let a flush already queued in this turn enter getSession() so it can be
+    // cancelled through the session instead of making close wait for its ACK.
+    await Promise.resolve();
+    let sessionClose: Promise<void> | undefined;
+    let sessionFailure: { reason: unknown } | undefined;
+    if (this.sessionPromise) {
+      try {
+        const session = await this.sessionPromise;
+        try {
+          sessionClose = session.close();
+        } catch (error) {
+          sessionClose = Promise.reject(error);
+        }
+      } catch (error) {
+        sessionFailure = { reason: error };
+      }
+    }
+    const [, closeResult] = await Promise.allSettled([
+      this.flushTail,
+      sessionClose ?? Promise.resolve(),
+    ]);
     if (this.pendingRowCount > 0 || this.currentRow.size > 0) {
       this.log(
         "warn",
@@ -724,10 +744,8 @@ export class QwpSender {
       );
     }
     this.closed = true;
-    if (this.sessionPromise) {
-      const session = await this.sessionPromise;
-      await session.close();
-    }
+    if (sessionFailure) throw sessionFailure.reason;
+    if (closeResult.status === "rejected") throw closeResult.reason;
   }
 
   private fixedDecimalColumn(

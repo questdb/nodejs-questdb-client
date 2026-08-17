@@ -16,6 +16,7 @@ import {
   QwpByteWriter,
   QwpIngressNackError,
   QwpIngressSession,
+  QwpIngressSessionClosedError,
   QwpTableBuffer,
   QwpSendClosedError,
   QwpSendTimeoutError,
@@ -37,6 +38,20 @@ class FakeWebSocket {
     const listeners = this.listeners.get(type) ?? [];
     listeners.push(listener);
     this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: Listener): void {
+    const listeners = this.listeners.get(type);
+    if (!listeners) return;
+    const index = listeners.indexOf(listener);
+    if (index >= 0) listeners.splice(index, 1);
+    if (listeners.length === 0) this.listeners.delete(type);
+  }
+
+  listenerCount(): number {
+    let count = 0;
+    for (const listeners of this.listeners.values()) count += listeners.length;
+    return count;
   }
 
   send(payload: Uint8Array): void {
@@ -70,6 +85,21 @@ class FakeWebSocket {
 
   private emit(type: string, event: unknown): void {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+}
+
+class FakeStuckCloseWebSocket extends FakeWebSocket {
+  close(code?: number, reason?: string): void {
+    this.closeCalls.push({ code, reason });
+  }
+}
+
+class FakeStuckCloseNodeWebSocket extends FakeStuckCloseWebSocket {
+  terminateCalls = 0;
+
+  terminate(): void {
+    this.terminateCalls++;
+    this.readyState = 3;
   }
 }
 
@@ -154,6 +184,34 @@ function writeIngressTables(
 }
 
 describe("QWP WebSocket adapters", () => {
+  it.each(["browser", "node"] as const)(
+    "validates %s timeouts before creating a WebSocket",
+    async (runtime) => {
+      let factoryCalls = 0;
+      const factory = (): QwpWebSocketLike => {
+        factoryCalls++;
+        return asQwpSocket(new FakeWebSocket());
+      };
+      const connecting =
+        runtime === "browser"
+          ? connectQwpBrowserWebSocket({
+              url: "ws://localhost:9000/write/v4",
+              closeTimeoutMs: 0,
+              webSocketFactory: factory,
+            })
+          : connectQwpNodeWebSocket({
+              url: "ws://localhost:9000/write/v4",
+              closeTimeoutMs: 0,
+              webSocketFactory: factory,
+            });
+
+      await expect(connecting).rejects.toThrow(
+        "closeTimeoutMs must be a positive finite number",
+      );
+      expect(factoryCalls).toBe(0);
+    },
+  );
+
   it("buffers browser messages until a consumer is attached", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
@@ -371,6 +429,8 @@ describe("QWP WebSocket adapters", () => {
       statusCode: undefined,
       serverRole: undefined,
     } satisfies Partial<QwpUpgradeError>);
+    await vi.waitFor(() => expect(socket.listenerCount()).toBe(0));
+    expect(socket.closeCalls).toHaveLength(1);
   });
 
   it("classifies Node opening errors as retriable transport failures", async () => {
@@ -408,6 +468,87 @@ describe("QWP WebSocket adapters", () => {
       await vi.advanceTimersByTimeAsync(25);
       await rejected;
       expect(socket.closeCalls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds browser close when the peer never emits a close event", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeStuckCloseWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        closeTimeoutMs: 25,
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const connection = await connecting;
+
+      const closing = connection.close(1000, "client shutdown");
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(closing).resolves.toBeUndefined();
+      await expect(connection.closed).resolves.toEqual({
+        code: 1006,
+        reason: "QWP WebSocket close timed out after 25ms",
+        wasClean: false,
+      });
+      expect(socket.listenerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds cleanup when a browser Blob conversion never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      class NeverSettlingBlob extends Blob {
+        arrayBuffer(): Promise<ArrayBuffer> {
+          return new Promise(() => undefined);
+        }
+      }
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        closeTimeoutMs: 25,
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const connection = await connecting;
+      const next = connection.messages[Symbol.asyncIterator]().next();
+      socket.message(new NeverSettlingBlob());
+      await vi.advanceTimersByTimeAsync(0);
+
+      const closing = connection.close();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(closing).resolves.toBeUndefined();
+      await expect(next).resolves.toEqual({ value: undefined, done: true });
+      expect(socket.listenerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("terminates a stuck Node WebSocket after the close deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeStuckCloseNodeWebSocket();
+      const connecting = connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        closeTimeoutMs: 25,
+        webSocketFactory: (_url, options) => {
+          options.onUpgrade({});
+          return asQwpSocket(socket);
+        },
+      });
+      socket.open();
+      const connection = await connecting;
+
+      const closing = connection.close();
+      await vi.advanceTimersByTimeAsync(25);
+      await closing;
+      expect(socket.terminateCalls).toBe(1);
+      expect(socket.listenerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -506,6 +647,48 @@ describe("QWP WebSocket adapters", () => {
     }
   });
 
+  it("close interrupts a backpressured send and clears its timers", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeBackpressuredWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        sendTimeoutMs: 60_000,
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const connection = await connecting;
+      const sending = connection
+        .send(Uint8Array.of(1))
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(connection.close()).resolves.toBeUndefined();
+      await expect(sending).resolves.toBeInstanceOf(QwpSendClosedError);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(socket.listenerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles and cleans up after a post-upgrade transport error", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const connection = await connecting;
+    const next = connection.messages[Symbol.asyncIterator]().next();
+
+    socket.error();
+    await expect(next).rejects.toThrow("QWP WebSocket transport error");
+    await expect(connection.closed).resolves.toMatchObject({ code: 1011 });
+    await connection.close();
+    expect(socket.listenerCount()).toBe(0);
+  });
+
   it("awaits Node send callbacks and preserves send order", async () => {
     const socket = new FakeCallbackWebSocket();
     const connecting = connectQwpNodeWebSocket({
@@ -551,6 +734,48 @@ describe("QWP WebSocket adapters", () => {
 });
 
 describe("QwpIngressSession", () => {
+  it("validates session timeouts before invoking its connection factory", async () => {
+    let factoryCalls = 0;
+    await expect(
+      QwpIngressSession.connect(
+        async () => {
+          factoryCalls++;
+          throw new Error("must not connect");
+        },
+        { ackTimeoutMs: Number.NaN },
+      ),
+    ).rejects.toThrow("ackTimeoutMs must be a positive finite number");
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("close aborts a send blocked by browser backpressure", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeBackpressuredWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        sendTimeoutMs: 60_000,
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const session = new QwpIngressSession(await connecting, {
+        ackTimeoutMs: 60_000,
+      });
+      const sending = session
+        .sendFrame(Uint8Array.of(1))
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(session.close()).resolves.toBeUndefined();
+      await expect(sending).resolves.toBeInstanceOf(
+        QwpIngressSessionClosedError,
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects an oversized batch locally without consuming its sequence", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
@@ -721,6 +946,7 @@ describe("QwpIngressSession", () => {
           durableAckKeepaliveMs: 25,
         }),
     ).toThrow(/PING support/);
+    expect(socket.closeCalls).toHaveLength(1);
     await connection.close();
   });
 
