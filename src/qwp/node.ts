@@ -7,6 +7,7 @@ import {
   QwpWebSocketLike,
 } from "./internal/websocket-connection";
 import { QwpBinaryConnection, QwpWebSocketConnectOptions } from "./transport";
+import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
@@ -74,6 +75,17 @@ export async function connectQwpNodeIngress(
 ): Promise<QwpIngressSession> {
   return new QwpIngressSession(
     await connectQwpNodeWebSocket(options),
+    sessionOptions,
+  );
+}
+
+/** Opens a Node WebSocket and waits for the egress SERVER_INFO handshake. */
+export async function connectQwpNodeEgress(
+  options: QwpNodeWebSocketOptions,
+  sessionOptions: QwpEgressSessionOptions = {},
+): Promise<QwpEgressSession> {
+  return QwpEgressSession.connect(
+    () => connectQwpNodeWebSocket(options),
     sessionOptions,
   );
 }

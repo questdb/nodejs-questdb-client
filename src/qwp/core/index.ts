@@ -5,6 +5,7 @@ export * from "./errors";
 export * from "./frame";
 export * from "./gorilla";
 export * from "./ingress";
+export * from "./result-batch";
 export * from "./symbol-dictionary";
 export * from "./table";
 export * from "./varint";

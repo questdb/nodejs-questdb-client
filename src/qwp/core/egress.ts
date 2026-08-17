@@ -16,7 +16,7 @@ export interface QwpQueryRequest {
   queryFlags?: number | bigint;
 }
 
-export interface QwpServerInfoMessage {
+export interface QwpServerInfoMessage extends QwpFrameHeader {
   kind: "server-info";
   role: number;
   epoch: bigint;
@@ -27,7 +27,7 @@ export interface QwpServerInfoMessage {
   zoneId: string | null;
 }
 
-export interface QwpResultBatchMessage {
+export interface QwpResultBatchMessage extends QwpFrameHeader {
   kind: "result-batch";
   requestId: bigint;
   batchSequence: bigint;
@@ -35,41 +35,39 @@ export interface QwpResultBatchMessage {
   body: Uint8Array;
 }
 
-export interface QwpResultEndMessage {
+export interface QwpResultEndMessage extends QwpFrameHeader {
   kind: "result-end";
   requestId: bigint;
   finalSequence: bigint;
   totalRows: bigint;
 }
 
-export interface QwpQueryErrorMessage {
+export interface QwpQueryErrorMessage extends QwpFrameHeader {
   kind: "query-error";
   requestId: bigint;
   status: number;
   message: string;
 }
 
-export interface QwpExecDoneMessage {
+export interface QwpExecDoneMessage extends QwpFrameHeader {
   kind: "exec-done";
   requestId: bigint;
   operationType: number;
   rowsAffected: bigint;
 }
 
-export interface QwpCacheResetMessage {
+export interface QwpCacheResetMessage extends QwpFrameHeader {
   kind: "cache-reset";
   resetMask: number;
 }
 
-export type QwpEgressMessage = (
+export type QwpEgressMessage =
   | QwpServerInfoMessage
   | QwpResultBatchMessage
   | QwpResultEndMessage
   | QwpQueryErrorMessage
   | QwpExecDoneMessage
-  | QwpCacheResetMessage
-) &
-  QwpFrameHeader;
+  | QwpCacheResetMessage;
 
 function requestId(value: number | bigint): bigint {
   if (typeof value === "number") {
