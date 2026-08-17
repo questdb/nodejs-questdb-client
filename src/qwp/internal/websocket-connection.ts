@@ -16,6 +16,8 @@ export interface QwpWebSocketLike {
   binaryType: string;
   readonly readyState: number;
   send(data: Uint8Array): void;
+  /** Node WebSocket implementations may expose control-frame PING. */
+  ping?(): void;
   close(code?: number, reason?: string): void;
   addEventListener(
     type: "open",
@@ -60,6 +62,7 @@ async function normalizeBinaryMessage(data: unknown): Promise<Uint8Array> {
 export function openQwpWebSocket(
   socket: QwpWebSocketLike,
   connectTimeoutMs = 15_000,
+  validateOpen?: () => void,
 ): Promise<QwpBinaryConnection> {
   if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) {
     return Promise.reject(
@@ -100,10 +103,27 @@ export function openQwpWebSocket(
       "open",
       () => {
         if (openingSettled) return;
+        try {
+          validateOpen?.();
+        } catch (error) {
+          openingSettled = true;
+          clearTimeout(timeout);
+          try {
+            socket.close(1000, "QWP upgrade validation failed");
+          } catch {
+            // The validation error is more useful than a close race.
+          }
+          reject(
+            error instanceof Error
+              ? error
+              : new Error("QWP WebSocket upgrade validation failed"),
+          );
+          return;
+        }
         openingSettled = true;
         opened = true;
         clearTimeout(timeout);
-        resolve({
+        const connection: QwpBinaryConnection = {
           messages,
           closed,
           async send(payload: Uint8Array): Promise<void> {
@@ -117,7 +137,16 @@ export function openQwpWebSocket(
             socket.close(code, reason);
             await closed;
           },
-        });
+        };
+        if (socket.ping) {
+          connection.ping = async (): Promise<void> => {
+            if (socket.readyState !== WEBSOCKET_OPEN) {
+              throw new Error("QWP WebSocket is not open");
+            }
+            socket.ping!();
+          };
+        }
+        resolve(connection);
       },
       { once: true },
     );

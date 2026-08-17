@@ -3,7 +3,10 @@ import {
   connectQwpBrowserWebSocket,
   QwpWebSocketLike,
 } from "../../src/qwp/browser";
-import { connectQwpNodeWebSocket } from "../../src/qwp/node";
+import {
+  connectQwpNodeWebSocket,
+  QwpDurableAckUnavailableError,
+} from "../../src/qwp/node";
 import {
   QWP_STATUS,
   QwpByteWriter,
@@ -61,6 +64,16 @@ class FakeWebSocket {
   }
 }
 
+class FakePingWebSocket extends FakeWebSocket {
+  pingCalls = 0;
+  onPing?: () => void;
+
+  ping(): void {
+    this.pingCalls++;
+    this.onPing?.();
+  }
+}
+
 function asQwpSocket(socket: FakeWebSocket): QwpWebSocketLike {
   return socket as unknown as QwpWebSocketLike;
 }
@@ -69,16 +82,37 @@ function ingressResponse(
   status: number,
   sequence: bigint,
   message?: string,
+  tables: readonly [string, bigint][] = [],
 ): Uint8Array {
   const writer = new QwpByteWriter();
   writer.writeUint8(status).writeBigUint64(sequence);
   if (status === QWP_STATUS.OK) {
-    writer.writeUint16(0);
+    writeIngressTables(writer, tables);
   } else {
     const encoded = new TextEncoder().encode(message ?? "rejected");
     writer.writeUint16(encoded.length).writeBytes(encoded);
   }
   return writer.toUint8Array();
+}
+
+function durableResponse(tables: readonly [string, bigint][]): Uint8Array {
+  const writer = new QwpByteWriter().writeUint8(QWP_STATUS.DURABLE_ACK);
+  writeIngressTables(writer, tables);
+  return writer.toUint8Array();
+}
+
+function writeIngressTables(
+  writer: QwpByteWriter,
+  tables: readonly [string, bigint][],
+): void {
+  writer.writeUint16(tables.length);
+  for (const [name, sequenceTransaction] of tables) {
+    const encoded = new TextEncoder().encode(name);
+    writer
+      .writeUint16(encoded.length)
+      .writeBytes(encoded)
+      .writeBigInt64(sequenceTransaction);
+  }
 }
 
 describe("QWP WebSocket adapters", () => {
@@ -111,6 +145,7 @@ describe("QWP WebSocket adapters", () => {
       requestDurableAck: true,
       webSocketFactory: (_url, options) => {
         capturedHeaders = options.headers;
+        options.onUpgrade({ "x-qwp-durable-ack": "enabled" });
         return asQwpSocket(socket);
       },
     });
@@ -123,6 +158,24 @@ describe("QWP WebSocket adapters", () => {
       Authorization: "Basic token",
     });
     await connection.close();
+  });
+
+  it("rejects durable ACK opt-in when the server omits confirmation", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpNodeWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      requestDurableAck: true,
+      webSocketFactory: (_url, options) => {
+        options.onUpgrade({});
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+
+    await expect(connecting).rejects.toBeInstanceOf(
+      QwpDurableAckUnavailableError,
+    );
+    expect(socket.closeCalls).toHaveLength(1);
   });
 
   it("rejects a connection that does not open before its deadline", async () => {
@@ -210,6 +263,63 @@ describe("QwpIngressSession", () => {
       ),
     );
     await session.close();
+  });
+
+  it("pings an idle durable session until its table targets are covered", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakePingWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const session = new QwpIngressSession(await connecting, {
+        ackTimeoutMs: 100,
+        durableAckKeepaliveMs: 25,
+      });
+      socket.onSend = () => {
+        socket.message(
+          ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+        );
+      };
+      socket.onPing = () => {
+        socket.message(
+          durableResponse([["trades", socket.pingCalls === 1 ? 41n : 42n]]),
+        );
+      };
+
+      const ack = await session.sendFrame(Uint8Array.of(1));
+      const durable = session.waitForDurable(ack);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(socket.pingCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(durable).resolves.toBeUndefined();
+      expect(socket.pingCalls).toBe(2);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(socket.pingCalls).toBe(2);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects durable keepalive on a transport without PING support", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const connection = await connecting;
+    expect(
+      () =>
+        new QwpIngressSession(connection, {
+          durableAckKeepaliveMs: 25,
+        }),
+    ).toThrow(/PING support/);
+    await connection.close();
   });
 
   it("rejects the matching frame on NACK without breaking later ACKs", async () => {

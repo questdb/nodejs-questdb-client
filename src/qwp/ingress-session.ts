@@ -15,12 +15,25 @@ import {
 
 export interface QwpIngressSessionOptions {
   ackTimeoutMs?: number;
+  /**
+   * Enables durable-ACK tracking and sends Node WebSocket PING frames while
+   * committed table transactions are still awaiting durable upload. Zero
+   * keeps tracking enabled but disables automatic PINGs.
+   */
+  durableAckKeepaliveMs?: number;
   onResponse?: (response: QwpIngressResponse) => void;
   onDurableAck?: (response: QwpIngressResponse) => void;
 }
 
 interface PendingResponse {
   resolve: (response: QwpIngressResponse) => void;
+  reject: (error: unknown) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface PendingDurableResponse {
+  readonly targets: Map<string, bigint>;
+  resolve: () => void;
   reject: (error: unknown) => void;
   timer?: ReturnType<typeof setTimeout>;
 }
@@ -56,8 +69,12 @@ export class QwpIngressSessionClosedError extends Error {
  */
 export class QwpIngressSession {
   private readonly pending = new Map<bigint, PendingResponse>();
+  private readonly durableWatermarks = new Map<string, bigint>();
+  private readonly pendingDurableTargets = new Map<string, bigint>();
+  private readonly durableWaiters = new Set<PendingDurableResponse>();
   private nextSequence = 0n;
   private sendTail: Promise<void> = Promise.resolve();
+  private durablePingTimer?: ReturnType<typeof setTimeout>;
   private failure?: Error;
   private closing = false;
   private readonly receiveLoop: Promise<void>;
@@ -70,6 +87,20 @@ export class QwpIngressSession {
     if (!Number.isFinite(timeout) || timeout <= 0) {
       throw new RangeError("ackTimeoutMs must be a positive finite number");
     }
+    const keepalive = options.durableAckKeepaliveMs;
+    if (
+      keepalive !== undefined &&
+      (!Number.isFinite(keepalive) || keepalive < 0)
+    ) {
+      throw new RangeError(
+        "durableAckKeepaliveMs must be a non-negative finite number",
+      );
+    }
+    if (keepalive !== undefined && keepalive > 0 && !connection.ping) {
+      throw new Error(
+        "durable ACK keepalive requires a WebSocket transport with PING support",
+      );
+    }
     this.receiveLoop = this.consumeMessages();
   }
 
@@ -77,7 +108,13 @@ export class QwpIngressSession {
     factory: QwpConnectionFactory,
     options: QwpIngressSessionOptions = {},
   ): Promise<QwpIngressSession> {
-    return new QwpIngressSession(await factory(), options);
+    const connection = await factory();
+    try {
+      return new QwpIngressSession(connection, options);
+    } catch (error) {
+      await connection.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   get closed(): Promise<QwpConnectionCloseInfo> {
@@ -123,12 +160,51 @@ export class QwpIngressSession {
     return response;
   }
 
+  /**
+   * Waits until a durable ACK covers every table transaction in an OK ACK.
+   * Durable tracking must have been enabled with durableAckKeepaliveMs.
+   */
+  waitForDurable(
+    response: QwpIngressResponse,
+    timeoutMs = this.options.ackTimeoutMs ?? 15_000,
+  ): Promise<void> {
+    if (this.options.durableAckKeepaliveMs === undefined) {
+      return Promise.reject(
+        new Error("durable ACK tracking is not enabled for this session"),
+      );
+    }
+    if (response.status !== QWP_STATUS.OK) {
+      return Promise.reject(
+        new Error("only a successful QWP ACK can be awaited for durability"),
+      );
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(
+        new RangeError("durable ACK timeout must be a positive finite number"),
+      );
+    }
+    const targets = new Map(
+      response.tables.map((table) => [table.name, table.sequenceTransaction]),
+    );
+    if (this.areDurableTargetsCovered(targets)) return Promise.resolve();
+
+    return new Promise<void>((resolve, reject) => {
+      const pending: PendingDurableResponse = { targets, resolve, reject };
+      pending.timer = setTimeout(() => {
+        if (!this.durableWaiters.delete(pending)) return;
+        reject(new Error("timed out waiting for QWP durable ACK"));
+      }, timeoutMs);
+      this.durableWaiters.add(pending);
+    });
+  }
+
   async close(code = 1000, reason = ""): Promise<void> {
     if (this.closing) {
       await this.connection.closed;
       return;
     }
     this.closing = true;
+    this.clearDurablePing();
     this.rejectAll(new QwpIngressSessionClosedError());
     await this.sendTail;
     await this.connection.close(code, reason);
@@ -156,6 +232,7 @@ export class QwpIngressSession {
   private handleResponse(response: QwpIngressResponse): void {
     this.invokeCallback(this.options.onResponse, response);
     if (response.status === QWP_STATUS.DURABLE_ACK) {
+      this.applyDurableAck(response);
       this.invokeCallback(this.options.onDurableAck, response);
       return;
     }
@@ -163,6 +240,7 @@ export class QwpIngressSession {
       throw new QwpProtocolError("QWP response is missing its wire sequence");
     }
     if (response.status === QWP_STATUS.OK) {
+      this.trackDurableTargets(response);
       for (const [sequence, pending] of this.pending) {
         if (sequence > response.sequence) break;
         this.pending.delete(sequence);
@@ -194,6 +272,87 @@ export class QwpIngressSession {
     }
   }
 
+  private trackDurableTargets(response: QwpIngressResponse): void {
+    if (this.options.durableAckKeepaliveMs === undefined) return;
+    for (const table of response.tables) {
+      const durable = this.durableWatermarks.get(table.name);
+      if (durable !== undefined && durable >= table.sequenceTransaction) {
+        continue;
+      }
+      const pending = this.pendingDurableTargets.get(table.name);
+      if (pending === undefined || table.sequenceTransaction > pending) {
+        this.pendingDurableTargets.set(table.name, table.sequenceTransaction);
+      }
+    }
+    this.scheduleDurablePing();
+  }
+
+  private applyDurableAck(response: QwpIngressResponse): void {
+    for (const table of response.tables) {
+      const watermark = this.durableWatermarks.get(table.name);
+      if (watermark === undefined || table.sequenceTransaction > watermark) {
+        this.durableWatermarks.set(table.name, table.sequenceTransaction);
+      }
+      const target = this.pendingDurableTargets.get(table.name);
+      if (target !== undefined && table.sequenceTransaction >= target) {
+        this.pendingDurableTargets.delete(table.name);
+      }
+    }
+
+    for (const waiter of this.durableWaiters) {
+      if (!this.areDurableTargetsCovered(waiter.targets)) continue;
+      this.durableWaiters.delete(waiter);
+      if (waiter.timer) clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+    if (this.pendingDurableTargets.size === 0) {
+      this.clearDurablePing();
+    } else {
+      this.scheduleDurablePing();
+    }
+  }
+
+  private areDurableTargetsCovered(
+    targets: ReadonlyMap<string, bigint>,
+  ): boolean {
+    for (const [table, target] of targets) {
+      const watermark = this.durableWatermarks.get(table);
+      if (watermark === undefined || watermark < target) return false;
+    }
+    return true;
+  }
+
+  private scheduleDurablePing(): void {
+    const interval = this.options.durableAckKeepaliveMs;
+    if (
+      interval === undefined ||
+      interval === 0 ||
+      this.pendingDurableTargets.size === 0 ||
+      this.durablePingTimer
+    ) {
+      return;
+    }
+    this.durablePingTimer = setTimeout(() => {
+      this.durablePingTimer = undefined;
+      if (
+        this.closing ||
+        this.failure ||
+        this.pendingDurableTargets.size === 0
+      ) {
+        return;
+      }
+      void this.connection.ping!()
+        .then(() => this.scheduleDurablePing())
+        .catch((error: unknown) => this.fail(error));
+    }, interval);
+  }
+
+  private clearDurablePing(): void {
+    if (!this.durablePingTimer) return;
+    clearTimeout(this.durablePingTimer);
+    this.durablePingTimer = undefined;
+  }
+
   private throwIfUnavailable(): void {
     if (this.failure) throw this.failure;
     if (this.closing) throw new QwpIngressSessionClosedError();
@@ -201,6 +360,7 @@ export class QwpIngressSession {
 
   private fail(error: unknown): void {
     if (this.failure) return;
+    this.clearDurablePing();
     this.failure =
       error instanceof Error
         ? error
@@ -214,5 +374,10 @@ export class QwpIngressSession {
       pending.reject(error);
     }
     this.pending.clear();
+    for (const pending of this.durableWaiters) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.durableWaiters.clear();
   }
 }

@@ -1,7 +1,9 @@
 /** Node.js WebSocket adapter and shared QWP protocol/session APIs. */
 export * from "./index";
 
-import { Dispatcher, WebSocket } from "undici";
+import type { Agent } from "node:http";
+import type { IncomingHttpHeaders } from "node:http";
+import WebSocket from "ws";
 import {
   openQwpWebSocket,
   QwpWebSocketLike,
@@ -12,20 +14,31 @@ import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
 
+export class QwpDurableAckUnavailableError extends Error {
+  constructor(readonly url: string | URL) {
+    super(
+      `QWP durable ACK was requested, but the server did not advertise support [url=${url}]`,
+    );
+    this.name = "QwpDurableAckUnavailableError";
+  }
+}
+
 export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   headers?: Record<string, string>;
-  dispatcher?: Dispatcher;
+  /** Optional HTTP(S) agent used for the WebSocket upgrade. */
+  agent?: Agent;
   authorization?: string;
   clientId?: string;
   maxVersion?: number;
   requestDurableAck?: boolean;
-  /** Test hook; defaults to Undici's WebSocket implementation. */
+  /** Test hook; defaults to the Node-only `ws` implementation. */
   webSocketFactory?: (
     url: string | URL,
     options: {
       protocols?: string | string[];
-      dispatcher?: Dispatcher;
+      agent?: Agent;
       headers: Record<string, string>;
+      onUpgrade: (headers: IncomingHttpHeaders) => void;
     },
   ) => QwpWebSocketLike;
 }
@@ -50,22 +63,42 @@ export function connectQwpNodeWebSocket(
       url: string | URL,
       init: {
         protocols?: string | string[];
-        dispatcher?: Dispatcher;
+        agent?: Agent;
         headers: Record<string, string>;
+        onUpgrade: (headers: IncomingHttpHeaders) => void;
       },
-    ) =>
-      new WebSocket(url, {
-        protocols: init.protocols,
-        dispatcher: init.dispatcher,
+    ) => {
+      const wsOptions: WebSocket.ClientOptions = {
+        agent: init.agent,
         headers: init.headers,
-      }) as unknown as QwpWebSocketLike);
+        perMessageDeflate: false,
+      };
+      const socket = init.protocols
+        ? new WebSocket(url, init.protocols, wsOptions)
+        : new WebSocket(url, wsOptions);
+      socket.once("upgrade", (response) => init.onUpgrade(response.headers));
+      return socket as unknown as QwpWebSocketLike;
+    });
 
+  let upgradeHeaders: IncomingHttpHeaders | undefined;
   const socket = factory(options.url, {
     protocols: options.protocols,
-    dispatcher: options.dispatcher,
+    agent: options.agent,
     headers,
+    onUpgrade: (receivedHeaders) => {
+      upgradeHeaders = receivedHeaders;
+    },
   });
-  return openQwpWebSocket(socket, options.connectTimeoutMs);
+  return openQwpWebSocket(socket, options.connectTimeoutMs, () => {
+    if (!options.requestDurableAck) return;
+    const confirmation = upgradeHeaders?.["x-qwp-durable-ack"];
+    if (
+      typeof confirmation !== "string" ||
+      confirmation.toLowerCase() !== "enabled"
+    ) {
+      throw new QwpDurableAckUnavailableError(options.url);
+    }
+  });
 }
 
 /** Opens a Node WebSocket and starts an ingress ACK/NACK session. */
@@ -73,9 +106,15 @@ export async function connectQwpNodeIngress(
   options: QwpNodeWebSocketOptions,
   sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpIngressSession> {
-  return new QwpIngressSession(
-    await connectQwpNodeWebSocket(options),
-    sessionOptions,
+  const effectiveSessionOptions = options.requestDurableAck
+    ? {
+        ...sessionOptions,
+        durableAckKeepaliveMs: sessionOptions.durableAckKeepaliveMs ?? 200,
+      }
+    : sessionOptions;
+  return QwpIngressSession.connect(
+    () => connectQwpNodeWebSocket(options),
+    effectiveSessionOptions,
   );
 }
 

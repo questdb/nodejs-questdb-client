@@ -15,6 +15,8 @@ export interface QwpBinaryConnection {
   readonly closed: Promise<QwpConnectionCloseInfo>;
 
   send(payload: Uint8Array): Promise<void>;
+  /** Sends an RFC 6455 PING when the underlying runtime supports it. */
+  ping?(): Promise<void>;
   close(code?: number, reason?: string): Promise<void>;
 }
 

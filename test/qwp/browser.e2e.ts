@@ -5,9 +5,18 @@ import path from "node:path";
 import { Browser, chromium } from "playwright";
 import { GenericContainer, StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  connectQwpNodeIngress,
+  QWP_COLUMN_TYPE,
+  QWP_STATUS,
+  QwpDurableAckUnavailableError,
+  QwpIngressSession,
+  QwpTableBuffer,
+} from "../../src/qwp/node";
 
 const USER = process.env.QWP_BROWSER_E2E_USER ?? "admin";
 const PASSWORD = process.env.QWP_BROWSER_E2E_PASSWORD ?? "quest";
+const DURABLE_E2E_URL = process.env.QWP_DURABLE_E2E_URL;
 const QUESTDB_HTTP_PORT = 9000;
 const WRITE_BATCH_SIZE = 8;
 
@@ -53,6 +62,14 @@ function websocketUrl(httpUrl: string, pathname: string): string {
   const url = new URL(pathname, httpUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
+}
+
+async function executeSql(questdbUrl: string, sql: string): Promise<Response> {
+  return fetch(new URL(`/exec?query=${encodeURIComponent(sql)}`, questdbUrl), {
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
+    },
+  });
 }
 
 describe("QWP in a real browser against QuestDB", () => {
@@ -266,4 +283,57 @@ describe("QWP in a real browser against QuestDB", () => {
       await context.close();
     }
   });
+
+  it("rejects durable ACK opt-in when the server does not advertise it", async () => {
+    if (DURABLE_E2E_URL) return;
+    await expect(
+      connectQwpNodeIngress({
+        url: websocketUrl(questdbUrl, "/write/v4"),
+        authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
+        requestDurableAck: true,
+      }),
+    ).rejects.toBeInstanceOf(QwpDurableAckUnavailableError);
+  });
+
+  it.runIf(DURABLE_E2E_URL)(
+    "waits for Enterprise ingress to reach its durable table watermark",
+    async () => {
+      const durableUrl = DURABLE_E2E_URL!;
+      const tableName = `qwp_durable_e2e_${Date.now()}`;
+      const create = await executeSql(
+        durableUrl,
+        `create table ${tableName} (value long, ts timestamp) ` +
+          "timestamp(ts) partition by day wal",
+      );
+      expect(create.status, await create.text()).toBe(200);
+
+      const table = new QwpTableBuffer(tableName);
+      table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(42n);
+      table
+        .getOrCreateColumn("", QWP_COLUMN_TYPE.TIMESTAMP)!
+        .values.push(BigInt(Date.now()) * 1_000n);
+      table.nextRow();
+
+      let session: QwpIngressSession | undefined;
+      try {
+        session = await connectQwpNodeIngress(
+          {
+            url: websocketUrl(durableUrl, "/write/v4"),
+            authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
+            requestDurableAck: true,
+          },
+          { durableAckKeepaliveMs: 25 },
+        );
+        const ack = await session.sendTables([table]);
+        expect(ack.status).toBe(QWP_STATUS.OK);
+        expect(ack.tables).toContainEqual(
+          expect.objectContaining({ name: tableName }),
+        );
+        await session.waitForDurable(ack, 30_000);
+      } finally {
+        await session?.close();
+        await executeSql(durableUrl, `drop table ${tableName}`);
+      }
+    },
+  );
 });

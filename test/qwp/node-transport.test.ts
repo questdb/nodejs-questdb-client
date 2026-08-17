@@ -1,0 +1,99 @@
+import type { AddressInfo } from "node:net";
+import { WebSocketServer } from "ws";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  connectQwpNodeIngress,
+  QWP_STATUS,
+  QwpByteWriter,
+} from "../../src/qwp/node";
+
+function writeTable(
+  writer: QwpByteWriter,
+  name: string,
+  sequenceTransaction: bigint,
+): void {
+  const encoded = new TextEncoder().encode(name);
+  writer
+    .writeUint16(encoded.length)
+    .writeBytes(encoded)
+    .writeBigInt64(sequenceTransaction);
+}
+
+function okResponse(
+  sequence: bigint,
+  table: string,
+  sequenceTransaction: bigint,
+): Uint8Array {
+  const writer = new QwpByteWriter()
+    .writeUint8(QWP_STATUS.OK)
+    .writeBigUint64(sequence)
+    .writeUint16(1);
+  writeTable(writer, table, sequenceTransaction);
+  return writer.toUint8Array();
+}
+
+function durableResponse(
+  table: string,
+  sequenceTransaction: bigint,
+): Uint8Array {
+  const writer = new QwpByteWriter()
+    .writeUint8(QWP_STATUS.DURABLE_ACK)
+    .writeUint16(1);
+  writeTable(writer, table, sequenceTransaction);
+  return writer.toUint8Array();
+}
+
+describe("QWP Node transport", () => {
+  let server: WebSocketServer | undefined;
+
+  afterEach(async () => {
+    await new Promise<void>((resolve, reject) => {
+      if (!server) return resolve();
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+    server = undefined;
+  });
+
+  it("negotiates durable ACK and polls progress with a WebSocket PING", async () => {
+    const table = "trades";
+    const sequenceTransaction = 7n;
+    let requestedDurableAck: string | undefined;
+    let pingCount = 0;
+
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Durable-Ack: enabled");
+    });
+    server.on("connection", (socket, request) => {
+      requestedDurableAck = request.headers["x-qwp-request-durable-ack"];
+      socket.once("message", () => {
+        socket.send(okResponse(0n, table, sequenceTransaction));
+      });
+      socket.once("ping", () => {
+        pingCount++;
+        socket.send(durableResponse(table, sequenceTransaction));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+
+    const address = server.address() as AddressInfo;
+    const session = await connectQwpNodeIngress(
+      {
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        requestDurableAck: true,
+      },
+      { durableAckKeepaliveMs: 10 },
+    );
+    try {
+      const ack = await session.sendFrame(Uint8Array.of(1));
+      await session.waitForDurable(ack, 1_000);
+      expect(requestedDurableAck).toBe("true");
+      expect(pingCount).toBe(1);
+    } finally {
+      await session.close();
+    }
+  });
+});
