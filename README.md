@@ -65,6 +65,39 @@ async function run() {
 run().then(console.log).catch(console.error);
 ```
 
+### QWP ingress from Node.js or a browser
+
+Node.js applications can select QWP through the regular `Sender` API:
+
+```typescript
+import { Sender } from "@questdb/nodejs-client";
+
+const sender = await Sender.fromConfig("ws::addr=127.0.0.1:9000");
+await sender.connect();
+await sender
+  .table("trades")
+  .symbol("symbol", "ETH-USD")
+  .floatColumn("price", 2615.54)
+  .at(Date.now(), "ms");
+await sender.flush();
+await sender.close();
+```
+
+Browser applications use the browser entry point, which has no Node.js
+dependencies. Cookies are supplied by the browser during a same-origin
+WebSocket upgrade.
+
+```typescript
+import { connectQwpBrowserSender } from "@questdb/nodejs-client/qwp/browser";
+
+const url = new URL("/write/v4", location.href);
+url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+await sender.table("events").longColumn("value", 42n).atNow();
+await sender.flush();
+await sender.close();
+```
+
 ### Authentication and secure connection
 
 #### Username and password authentication with HTTP transport

@@ -5,7 +5,7 @@
 
 export { Sender } from "./sender";
 export { SenderOptions } from "./options";
-export type { ExtraOptions } from "./options";
+export type { ExtraOptions, QwpExtraOptions } from "./options";
 export type { TimestampUnit } from "./utils";
 export type { SenderBuffer } from "./buffer";
 export { createBuffer } from "./buffer";

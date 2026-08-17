@@ -212,28 +212,20 @@ describe("QWP in a real browser against QuestDB", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const buffer = new qwp.QwpTableBuffer(table);
-          buffer
-            .getOrCreateColumn("value", qwp.QWP_COLUMN_TYPE.LONG)
-            .values.push(42n);
-          buffer
-            .getOrCreateColumn("", qwp.QWP_COLUMN_TYPE.TIMESTAMP)
-            .values.push(BigInt(Date.now()) * 1_000n);
-          buffer.nextRow();
-
-          const session = await qwp.connectQwpBrowserIngress({ url });
+          const sender = await qwp.connectQwpBrowserSender(
+            { url },
+            { autoFlush: false },
+          );
           try {
-            const responses = await Promise.all(
-              Array.from({ length: batchSize }, () =>
-                session.sendTables([buffer]),
-              ),
-            );
-            return responses.map((response) => ({
-              status: response.status,
-              sequence: String(response.sequence),
-            }));
+            for (let index = 0; index < batchSize; index++) {
+              await sender
+                .table(table)
+                .longColumn("value", 42n)
+                .at(BigInt(Date.now()) * 1_000n);
+            }
+            return { flushed: await sender.flush() };
           } finally {
-            await session.close();
+            await sender.close();
           }
         },
         {
@@ -243,14 +235,7 @@ describe("QWP in a real browser against QuestDB", () => {
           batchSize: WRITE_BATCH_SIZE,
         },
       );
-      expect(ingressResult).toHaveLength(WRITE_BATCH_SIZE);
-      ingressResult.forEach((response, requestSequence) => {
-        expect(response.status).toBe(0);
-        expect(BigInt(response.sequence)).toBeGreaterThanOrEqual(
-          BigInt(requestSequence),
-        );
-      });
-      expect(ingressResult.at(-1)?.sequence).toBe(String(WRITE_BATCH_SIZE - 1));
+      expect(ingressResult).toEqual({ flushed: true });
 
       await expect
         .poll(

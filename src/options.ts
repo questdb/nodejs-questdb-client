@@ -7,14 +7,22 @@ import * as https from "https";
 import { Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
+import type {
+  QwpNodeIngressOptions,
+  QwpIngressSessionOptions,
+  QwpSenderOptions,
+} from "./qwp/node";
 
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
+const QWP_PORT = 9000;
 
 const HTTP = "http";
 const HTTPS = "https";
 const TCP = "tcp";
 const TCPS = "tcps";
+const WS = "ws";
+const WSS = "wss";
 
 const ON = "on";
 const OFF = "off";
@@ -27,9 +35,19 @@ const PROTOCOL_VERSION_V3 = "3";
 
 const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
 
+type QwpExtraOptions = {
+  /** Node WebSocket and persistent store-and-forward options. */
+  webSocket?: Omit<QwpNodeIngressOptions, "url">;
+  /** Ingress ACK, durable-ACK, and reconnect options. */
+  session?: QwpIngressSessionOptions;
+  /** High-level buffering and auto-flush options. */
+  sender?: QwpSenderOptions;
+};
+
 type ExtraOptions = {
   log?: Logger;
   agent?: Agent | http.Agent | https.Agent;
+  qwp?: QwpExtraOptions;
 };
 
 type DeprecatedOptions = {
@@ -51,8 +69,8 @@ type DeprecatedOptions = {
  * <br>
  * Connection and protocol options
  * <ul>
- * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps</i> - The protocol used to communicate with the server. <br>
- * When <i>https</i> or <i>tcps</i> used, the connection is secured with TLS encryption.
+ * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps, ws, wss</i> - The protocol used to communicate with the server. <br>
+ * WS/WSS select QWP ingress. When <i>https</i>, <i>tcps</i>, or <i>wss</i> is used, the connection is secured with TLS encryption.
  * </li>
  * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used for data serialization. <br>
  * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles and arrays. <br>
@@ -182,6 +200,8 @@ class SenderOptions {
 
   stdlib_http?: boolean;
 
+  qwp?: QwpExtraOptions;
+
   auth?: {
     username?: string;
     keyId?: string;
@@ -219,6 +239,7 @@ class SenderOptions {
         throw new Error("Invalid HTTP agent");
       }
       this.agent = extraOptions.agent;
+      this.qwp = extraOptions.qwp;
     }
   }
 
@@ -467,16 +488,26 @@ function parseProtocol(options: SenderOptions, configString: string) {
     case HTTPS:
     case TCP:
     case TCPS:
+    case WS:
+    case WSS:
       break;
     default:
       throw new Error(
-        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps'`,
+        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
       );
   }
   return index + 2;
 }
 
 function parseProtocolVersion(options: SenderOptions) {
+  if (options.protocol === WS || options.protocol === WSS) {
+    if (options.protocol_version !== undefined) {
+      throw new Error(
+        "'protocol_version' is not used by the QWP ws/wss protocols",
+      );
+    }
+    return;
+  }
   const protocol_version = options.protocol_version ?? PROTOCOL_VERSION_AUTO;
   switch (protocol_version) {
     case PROTOCOL_VERSION_AUTO:
@@ -518,9 +549,13 @@ function parseAddress(options: SenderOptions) {
       case TCPS:
         options.port = TCP_PORT;
         return;
+      case WS:
+      case WSS:
+        options.port = QWP_PORT;
+        return;
       default:
         throw new Error(
-          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps'`,
+          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
         );
     }
   }
@@ -625,10 +660,13 @@ function parseInteger(
 export {
   SenderOptions,
   ExtraOptions,
+  QwpExtraOptions,
   HTTP,
   HTTPS,
   TCP,
   TCPS,
+  WS,
+  WSS,
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,

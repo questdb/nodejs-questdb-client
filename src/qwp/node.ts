@@ -20,6 +20,7 @@ import {
 } from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
+import { QwpSender, QwpSenderOptions } from "./sender";
 import { QwpNodeFileReplayStore } from "../qwp-node/file-replay-store";
 import type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
 
@@ -323,6 +324,40 @@ export async function connectQwpNodeIngress(
     createQwpNodeConnectionFactory(options),
     effectiveSessionOptions,
   );
+}
+
+/**
+ * Creates a fluent Node QWP sender without opening the WebSocket yet.
+ * Call connect(), or let the first flush connect lazily.
+ */
+export function createQwpNodeSender(
+  options: QwpNodeIngressOptions,
+  senderOptions: QwpSenderOptions = {},
+  sessionOptions: QwpIngressSessionOptions = {},
+): QwpSender {
+  return new QwpSender(
+    () =>
+      connectQwpNodeIngress(
+        {
+          ...options,
+          requestDurableAck:
+            options.requestDurableAck ?? senderOptions.awaitDurableAck,
+        },
+        sessionOptions,
+      ),
+    senderOptions,
+  );
+}
+
+/** Opens a Node QWP connection and returns a fluent sender. */
+export async function connectQwpNodeSender(
+  options: QwpNodeIngressOptions,
+  senderOptions: QwpSenderOptions = {},
+  sessionOptions: QwpIngressSessionOptions = {},
+): Promise<QwpSender> {
+  const sender = createQwpNodeSender(options, senderOptions, sessionOptions);
+  await sender.connect();
+  return sender;
 }
 
 /** Opens a Node WebSocket and waits for the egress SERVER_INFO handshake. */

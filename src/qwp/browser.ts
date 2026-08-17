@@ -14,6 +14,7 @@ import {
 } from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
+import { QwpSender, QwpSenderOptions } from "./sender";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
 
@@ -90,6 +91,32 @@ export async function connectQwpBrowserIngress(
     createQwpBrowserConnectionFactory(options),
     sessionOptions,
   );
+}
+
+/**
+ * Creates a browser-safe fluent QWP sender without opening the WebSocket yet.
+ * Call connect(), or let the first flush connect lazily.
+ */
+export function createQwpBrowserSender(
+  options: QwpBrowserWebSocketOptions,
+  senderOptions: QwpSenderOptions = {},
+  sessionOptions: QwpIngressSessionOptions = {},
+): QwpSender {
+  return new QwpSender(
+    () => connectQwpBrowserIngress(options, sessionOptions),
+    senderOptions,
+  );
+}
+
+/** Opens a browser QWP connection and returns a fluent sender. */
+export async function connectQwpBrowserSender(
+  options: QwpBrowserWebSocketOptions,
+  senderOptions: QwpSenderOptions = {},
+  sessionOptions: QwpIngressSessionOptions = {},
+): Promise<QwpSender> {
+  const sender = createQwpBrowserSender(options, senderOptions, sessionOptions);
+  await sender.connect();
+  return sender;
 }
 
 /** Opens a browser WebSocket and waits for the egress SERVER_INFO handshake. */

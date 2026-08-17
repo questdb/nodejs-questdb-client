@@ -1,9 +1,14 @@
 // @ts-check
+import { readFileSync } from "node:fs";
+import * as http from "node:http";
+import * as https from "node:https";
 import { log, Logger } from "./logging";
-import { SenderOptions, ExtraOptions } from "./options";
+import { SenderOptions, ExtraOptions, WS, WSS } from "./options";
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
+import { QWP_INGRESS_PATH } from "./qwp/core";
+import { createQwpNodeSender, QwpSender } from "./qwp/node";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
@@ -19,6 +24,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * Supports certificate validation and custom CA certificates.</li>
  * <li><b>TCP</b>: Direct TCP connection, provides persistent connections. Uses JWK token-based authentication.</li>
  * <li><b>TCPS</b>: Secure TCP transport with TLS encryption.</li>
+ * <li><b>WS/WSS</b>: QWP ingress over WebSocket, including browser-compatible wire encoding and QWP ACKs.</li>
  * </ul>
  * </p>
  * <p>
@@ -61,6 +67,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * <li>HTTPS with authentication: <i>Sender.fromConfig("https::addr=localhost:9000;username=admin;password=secret")</i></li>
  * <li>TCP: <i>Sender.fromConfig("tcp::addr=localhost:9009")</i></li>
  * <li>TCPS with authentication: <i>Sender.fromConfig("tcps::addr=localhost:9009;username=user;token=private_key")</i></li>
+ * <li>QWP: <i>Sender.fromConfig("ws::addr=localhost:9000")</i></li>
  * </ul>
  * </p>
  * <p>
@@ -84,9 +91,11 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * </p>
  */
 class Sender {
-  private readonly transport: SenderTransport;
+  private readonly transport?: SenderTransport;
 
-  private readonly buffer: SenderBuffer;
+  private readonly buffer?: SenderBuffer;
+
+  private readonly qwpSender?: QwpSender;
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
@@ -103,10 +112,17 @@ class Sender {
    * See SenderOptions documentation for detailed description of configuration options.
    */
   constructor(options: SenderOptions) {
+    this.log = options && typeof options.log === "function" ? options.log : log;
+    if (options?.protocol === WS || options?.protocol === WSS) {
+      this.qwpSender = createConfiguredQwpSender(options, this.log);
+      this.autoFlush = false;
+      this.autoFlushRows = 0;
+      this.autoFlushInterval = 0;
+      this.resetAutoFlush();
+      return;
+    }
     this.transport = createTransport(options);
     this.buffer = createBuffer(options);
-
-    this.log = typeof options.log === "function" ? options.log : log;
 
     this.autoFlush = isBoolean(options.auto_flush) ? options.auto_flush : true;
     this.autoFlushRows = isInteger(options.auto_flush_rows, 0)
@@ -164,7 +180,11 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   reset(): Sender {
-    this.buffer.reset();
+    if (this.qwpSender) {
+      this.qwpSender.reset();
+      return this;
+    }
+    this.buffer!.reset();
     this.resetAutoFlush();
     return this;
   }
@@ -175,7 +195,9 @@ class Sender {
    * @return {Promise<boolean>} Resolves to true if the client is connected.
    */
   connect(): Promise<boolean> {
-    return this.transport.connect();
+    return this.qwpSender
+      ? this.qwpSender.connect()
+      : this.transport!.connect();
   }
 
   /**
@@ -185,7 +207,8 @@ class Sender {
    * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send, and it was sent successfully.
    */
   async flush(): Promise<boolean> {
-    const dataToSend: Buffer = this.buffer.toBufferNew();
+    if (this.qwpSender) return this.qwpSender.flush();
+    const dataToSend: Buffer = this.buffer!.toBufferNew();
     if (!dataToSend) {
       return false; // Nothing to send
     }
@@ -196,7 +219,7 @@ class Sender {
     );
     this.resetAutoFlush();
 
-    await this.transport.send(dataToSend);
+    await this.transport!.send(dataToSend);
     return true;
   }
 
@@ -205,14 +228,15 @@ class Sender {
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
    */
   async close(): Promise<void> {
-    const pos = this.buffer.currentPosition();
+    if (this.qwpSender) return this.qwpSender.close();
+    const pos = this.buffer!.currentPosition();
     if (pos > 0) {
       this.log(
         "warn",
         `Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=${pos}]`,
       );
     }
-    return this.transport.close();
+    return this.transport!.close();
   }
 
   /**
@@ -222,7 +246,8 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   table(table: string): Sender {
-    this.buffer.table(table);
+    if (this.qwpSender) this.qwpSender.table(table);
+    else this.buffer!.table(table);
     return this;
   }
 
@@ -235,7 +260,8 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   symbol(name: string, value: unknown): Sender {
-    this.buffer.symbol(name, value);
+    if (this.qwpSender) this.qwpSender.symbol(name, value);
+    else this.buffer!.symbol(name, value);
     return this;
   }
 
@@ -248,7 +274,8 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   stringColumn(name: string, value: string | null | undefined): Sender {
-    this.buffer.stringColumn(name, value);
+    if (this.qwpSender) this.qwpSender.stringColumn(name, value);
+    else this.buffer!.stringColumn(name, value);
     return this;
   }
 
@@ -261,7 +288,8 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   booleanColumn(name: string, value: boolean | null | undefined): Sender {
-    this.buffer.booleanColumn(name, value);
+    if (this.qwpSender) this.qwpSender.booleanColumn(name, value);
+    else this.buffer!.booleanColumn(name, value);
     return this;
   }
 
@@ -274,7 +302,8 @@ class Sender {
    * @return {Sender} Returns with a reference to this sender.
    */
   floatColumn(name: string, value: number | null | undefined): Sender {
-    this.buffer.floatColumn(name, value);
+    if (this.qwpSender) this.qwpSender.floatColumn(name, value);
+    else this.buffer!.floatColumn(name, value);
     return this;
   }
 
@@ -290,7 +319,8 @@ class Sender {
    * - or the array is not homogeneous: its elements are not all the same type
    */
   arrayColumn(name: string, value: unknown[] | null | undefined): Sender {
-    this.buffer.arrayColumn(name, value);
+    if (this.qwpSender) this.qwpSender.arrayColumn(name, value);
+    else this.buffer!.arrayColumn(name, value);
     return this;
   }
 
@@ -304,7 +334,8 @@ class Sender {
    * @throws Error if the value is not an integer
    */
   intColumn(name: string, value: number | null | undefined): Sender {
-    this.buffer.intColumn(name, value);
+    if (this.qwpSender) this.qwpSender.intColumn(name, value);
+    else this.buffer!.intColumn(name, value);
     return this;
   }
 
@@ -338,7 +369,8 @@ class Sender {
     value: number | bigint | null | undefined,
     unit: TimestampUnit = "us",
   ): Sender {
-    this.buffer.timestampColumn(name, value, unit);
+    if (this.qwpSender) this.qwpSender.timestampColumn(name, value, unit);
+    else this.buffer!.timestampColumn(name, value, unit);
     return this;
   }
 
@@ -357,7 +389,8 @@ class Sender {
     name: string,
     value: string | number | null | undefined,
   ): Sender {
-    this.buffer.decimalColumnText(name, value);
+    if (this.qwpSender) this.qwpSender.decimalColumnText(name, value);
+    else this.buffer!.decimalColumnText(name, value);
     return this;
   }
 
@@ -383,7 +416,8 @@ class Sender {
     unscaled: Int8Array | bigint | null | undefined,
     scale: number,
   ): Sender {
-    this.buffer.decimalColumn(name, unscaled, scale);
+    if (this.qwpSender) this.qwpSender.decimalColumn(name, unscaled, scale);
+    else this.buffer!.decimalColumn(name, unscaled, scale);
     return this;
   }
 
@@ -413,7 +447,8 @@ class Sender {
     timestamp: number | bigint,
     unit: TimestampUnit = "us",
   ): Promise<void> {
-    this.buffer.at(timestamp, unit);
+    if (this.qwpSender) return this.qwpSender.at(timestamp, unit);
+    this.buffer!.at(timestamp, unit);
     this.pendingRowCount++;
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
     await this.tryFlush();
@@ -424,7 +459,8 @@ class Sender {
    * Designated timestamp will be populated by the server on this record.
    */
   async atNow(): Promise<void> {
-    this.buffer.atNow();
+    if (this.qwpSender) return this.qwpSender.atNow();
+    this.buffer!.atNow();
     this.pendingRowCount++;
     this.log("debug", `Pending row count: ${this.pendingRowCount}`);
     await this.tryFlush();
@@ -447,6 +483,62 @@ class Sender {
       await this.flush();
     }
   }
+}
+
+function createConfiguredQwpSender(
+  options: SenderOptions,
+  logger: Logger,
+): QwpSender {
+  if (!options.host || !options.port) {
+    throw new Error("The 'host' and 'port' options are mandatory for QWP");
+  }
+  const configuredWebSocket = options.qwp?.webSocket ?? {};
+  const configuredSender = options.qwp?.sender ?? {};
+  let agent = configuredWebSocket.agent;
+  if (!agent && options.agent instanceof http.Agent) agent = options.agent;
+  if (!agent && options.protocol === WSS) {
+    agent = new https.Agent({
+      ca: options.tls_ca ? readFileSync(options.tls_ca) : undefined,
+      rejectUnauthorized: options.tls_verify ?? true,
+    });
+  }
+  const authorization =
+    configuredWebSocket.authorization ?? qwpAuthorization(options);
+  return createQwpNodeSender(
+    {
+      ...configuredWebSocket,
+      url: `${options.protocol}://${options.host}:${options.port}${QWP_INGRESS_PATH}`,
+      agent,
+      authorization,
+    },
+    {
+      ...configuredSender,
+      autoFlush: isBoolean(options.auto_flush)
+        ? options.auto_flush
+        : configuredSender.autoFlush,
+      autoFlushRows: isInteger(options.auto_flush_rows, 0)
+        ? options.auto_flush_rows
+        : configuredSender.autoFlushRows,
+      autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
+        ? options.auto_flush_interval
+        : configuredSender.autoFlushIntervalMs,
+      log: logger,
+    },
+    options.qwp?.session,
+  );
+}
+
+function qwpAuthorization(options: SenderOptions): string | undefined {
+  if (options.token) return `Bearer ${options.token}`;
+  if (options.username !== undefined || options.password !== undefined) {
+    if (!options.username || options.password === undefined) {
+      throw new Error(
+        "QWP Basic authentication requires both 'username' and 'password'",
+      );
+    }
+    return `Basic ${Buffer.from(`${options.username}:${options.password}`, "utf8").toString("base64")}`;
+  }
+  return undefined;
 }
 
 export { Sender };

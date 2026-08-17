@@ -64,36 +64,42 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol).toBe("https");
 
+    options = await SenderOptions.fromConfig("ws::addr=host");
+    expect(options.protocol).toBe("ws");
+
+    options = await SenderOptions.fromConfig("wss::addr=host");
+    expect(options.protocol).toBe("wss");
+
     await expect(
       async () => await SenderOptions.fromConfig("HTTP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'HTTP', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'HTTP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("Http::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'Http', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'Http', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("HtTps::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'HtTps', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'HtTps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
     );
 
     await expect(
       async () => await SenderOptions.fromConfig("TCP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'TCP', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'TCP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("TcP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'TcP', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'TcP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("Tcps::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'Tcps', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'Tcps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
     );
   });
 
@@ -230,9 +236,20 @@ describe("Configuration string parser suite", function () {
     expect(options.port).toBe(9009);
     expect(options.username).toBe("user1");
     expect(options.token).toBe("jwkprivkey123");
+
+    options = await SenderOptions.fromConfig("ws::addr=hostname");
+    expect(options.host).toBe("hostname");
+    expect(options.port).toBe(9000);
+    expect(options.protocol_version).toBeUndefined();
   });
 
   it("can parse protocol version", async function () {
+    await expect(
+      SenderOptions.fromConfig("ws::addr=hostname;protocol_version=1"),
+    ).rejects.toThrow(
+      "'protocol_version' is not used by the QWP ws/wss protocols",
+    );
+
     // invalid protocol version
     await expect(
       async () =>
