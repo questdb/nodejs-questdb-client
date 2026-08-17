@@ -287,6 +287,7 @@ export function openQwpWebSocket(
           messages,
           closed,
           handshake,
+          endpoint: options.url,
           send(payload: Uint8Array): Promise<void> {
             const sending = sendTail.then(() => sendWithBackpressure(payload));
             sendTail = sending.catch(() => undefined);

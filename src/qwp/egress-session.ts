@@ -5,6 +5,7 @@ import {
   encodeQwpQueryRequest,
   QWP_EGRESS_CAPABILITY,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
+  QWP_RESET_MASK_DICTIONARY,
   QwpExecDoneMessage,
   QwpProtocolError,
   QwpQueryRequest,
@@ -14,15 +15,26 @@ import {
   QwpServerInfoMessage,
 } from "./core";
 import { QwpAsyncQueue } from "./internal/async-queue";
+import { QwpReconnectingEgressConnection } from "./internal/reconnecting-egress-connection";
 import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
+  QwpEgressReplayResetEvent,
   QwpHandshakeMetadata,
+  QwpReconnectOptions,
 } from "./transport";
 
 export interface QwpEgressSessionOptions {
   serverInfoTimeoutMs?: number;
+  /** Enables bounded reconnects. Active operations replay only with onReplayReset. */
+  reconnect?: QwpReconnectOptions;
+  /**
+   * Explicitly opts into at-least-once re-execution after a disconnect. The
+   * query's not-yet-consumed batches are discarded before this callback, and
+   * callers must discard any result prefix they already consumed.
+   */
+  onReplayReset?: (event: QwpEgressReplayResetEvent) => void | Promise<void>;
 }
 
 export interface QwpEgressQueryOptions {
@@ -119,6 +131,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.batches.fail(error);
     this.rejectCompletion(error);
   }
+
+  /** @internal */
+  resetForReplay(): void {
+    this.batches.clear();
+  }
 }
 
 /**
@@ -146,6 +163,14 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     private readonly connection: QwpBinaryConnection,
     options: QwpEgressSessionOptions = {},
   ) {
+    if (
+      options.reconnect &&
+      !(connection instanceof QwpReconnectingEgressConnection)
+    ) {
+      throw new Error(
+        "egress reconnect options require QwpEgressSession.connect(factory, options)",
+      );
+    }
     const timeout = options.serverInfoTimeoutMs ?? 15_000;
     if (!Number.isFinite(timeout) || timeout <= 0) {
       throw new RangeError(
@@ -171,7 +196,23 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     factory: QwpConnectionFactory,
     options: QwpEgressSessionOptions = {},
   ): Promise<QwpEgressSession> {
-    const session = new QwpEgressSession(await factory(), options);
+    const timeout = options.serverInfoTimeoutMs ?? 15_000;
+    const state: { session?: QwpEgressSession } = {};
+    const connection = options.reconnect
+      ? await QwpReconnectingEgressConnection.connect(
+          factory,
+          options.reconnect,
+          timeout,
+          () => state.session?.prepareConnectionReset(),
+          options.onReplayReset
+            ? async (event) => {
+                await options.onReplayReset!(event);
+              }
+            : undefined,
+        )
+      : await factory();
+    const session = new QwpEgressSession(connection, options);
+    state.session = session;
     try {
       await session.ready;
       return session;
@@ -328,6 +369,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       );
     }
     return this.active;
+  }
+
+  private prepareConnectionReset(): void {
+    this.decoder.applyCacheReset(QWP_RESET_MASK_DICTIONARY);
+    this.decoder.resetQuerySchema();
+    this.active?.resetForReplay();
   }
 
   private send(payload: Uint8Array): Promise<void> {

@@ -9,15 +9,26 @@ import {
   openQwpWebSocket,
   QwpWebSocketLike,
 } from "./internal/websocket-connection";
+import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import {
   QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
+  QwpConnectionFactory,
   QwpHandshakeMetadata,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
 } from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
+import { QwpNodeFileReplayStore } from "../qwp-node/file-replay-store";
+import type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
+
+export {
+  QwpNodeFileReplayStore,
+  QwpReplayStoreError,
+  QwpReplayStoreFullError,
+} from "../qwp-node/file-replay-store";
+export type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
 
@@ -139,9 +150,35 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   ) => QwpWebSocketLike;
 }
 
+export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
+  /**
+   * Enables persistent Node store-and-forward and ingress reconnection. Use a
+   * directory owned exclusively by this ingress session.
+   */
+  storeAndForward?: QwpNodeFileReplayStoreOptions;
+}
+
 /** Opens a Node QWP WebSocket with the upgrade headers required by QuestDB. */
 export function connectQwpNodeWebSocket(
   options: QwpNodeWebSocketOptions,
+): Promise<QwpBinaryConnection> {
+  return createQwpNodeConnectionFactory(options)();
+}
+
+/** Creates a stateful Node endpoint walker suitable for session reconnects. */
+export function createQwpNodeConnectionFactory(
+  options: QwpNodeWebSocketOptions,
+): QwpConnectionFactory {
+  return createQwpFailoverConnectionFactory(
+    options.url,
+    options.failoverUrls,
+    (endpoint) => connectQwpNodeEndpoint(options, endpoint),
+  );
+}
+
+function connectQwpNodeEndpoint(
+  options: QwpNodeWebSocketOptions,
+  endpoint: string | URL,
 ): Promise<QwpBinaryConnection> {
   const clientMaxVersion = options.maxVersion ?? QWP_VERSION;
   if (
@@ -206,7 +243,7 @@ export function connectQwpNodeWebSocket(
   const openingFailure = new Promise<never>((_resolve, reject) => {
     rejectOpening = reject;
   });
-  const socket = factory(options.url, {
+  const socket = factory(endpoint, {
     protocols: options.protocols,
     agent: options.agent,
     headers,
@@ -214,11 +251,11 @@ export function connectQwpNodeWebSocket(
       upgradeHeaders = receivedHeaders;
     },
     onUpgradeRejected: (rejection) => {
-      rejectOpening(classifyUpgradeRejection(options.url, rejection));
+      rejectOpening(classifyUpgradeRejection(endpoint, rejection));
     },
   });
   return openQwpWebSocket(socket, {
-    url: options.url,
+    url: endpoint,
     connectTimeoutMs: options.connectTimeoutMs,
     sendTimeoutMs: options.sendTimeoutMs,
     openingFailure,
@@ -228,14 +265,14 @@ export function connectQwpNodeWebSocket(
         throw new QwpVersionMismatchError(
           qwpVersion,
           clientMaxVersion,
-          options.url,
+          endpoint,
         );
       }
       const durableAckEnabled =
         headerValue(upgradeHeaders, "x-qwp-durable-ack")?.toLowerCase() ===
         "enabled";
       if (options.requestDurableAck && !durableAckEnabled) {
-        throw new QwpDurableAckUnavailableError(options.url);
+        throw new QwpDurableAckUnavailableError(endpoint);
       }
       const handshake: QwpHandshakeMetadata = {
         qwpVersion,
@@ -251,17 +288,39 @@ export function connectQwpNodeWebSocket(
 
 /** Opens a Node WebSocket and starts an ingress ACK/NACK session. */
 export async function connectQwpNodeIngress(
-  options: QwpNodeWebSocketOptions,
+  options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpIngressSession> {
-  const effectiveSessionOptions = options.requestDurableAck
-    ? {
-        ...sessionOptions,
-        durableAckKeepaliveMs: sessionOptions.durableAckKeepaliveMs ?? 200,
-      }
-    : sessionOptions;
+  if (options.storeAndForward && sessionOptions.replayStore) {
+    throw new RangeError(
+      "storeAndForward and a custom replayStore cannot both be configured",
+    );
+  }
+  if (
+    sessionOptions.reconnect &&
+    !options.storeAndForward &&
+    !sessionOptions.replayStore
+  ) {
+    throw new RangeError(
+      "Node QWP ingress reconnection requires a persistent storeAndForward directory",
+    );
+  }
+  const replayStore = options.storeAndForward
+    ? new QwpNodeFileReplayStore(options.storeAndForward)
+    : sessionOptions.replayStore;
+  const reconnect = options.storeAndForward
+    ? (sessionOptions.reconnect ?? {})
+    : sessionOptions.reconnect;
+  const effectiveSessionOptions: QwpIngressSessionOptions = {
+    ...sessionOptions,
+    reconnect,
+    replayStore,
+    durableAckKeepaliveMs: options.requestDurableAck
+      ? (sessionOptions.durableAckKeepaliveMs ?? 200)
+      : sessionOptions.durableAckKeepaliveMs,
+  };
   return QwpIngressSession.connect(
-    () => connectQwpNodeWebSocket(options),
+    createQwpNodeConnectionFactory(options),
     effectiveSessionOptions,
   );
 }
@@ -272,7 +331,7 @@ export async function connectQwpNodeEgress(
   sessionOptions: QwpEgressSessionOptions = {},
 ): Promise<QwpEgressSession> {
   return QwpEgressSession.connect(
-    () => connectQwpNodeWebSocket(options),
+    createQwpNodeConnectionFactory(options),
     sessionOptions,
   );
 }

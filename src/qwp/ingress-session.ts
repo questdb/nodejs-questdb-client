@@ -12,10 +12,25 @@ import {
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
   QwpHandshakeMetadata,
+  QwpIngressReplayStore,
+  QwpReconnectOptions,
 } from "./transport";
+import { QwpReconnectingIngressConnection } from "./internal/reconnecting-ingress-connection";
 
 export interface QwpIngressSessionOptions {
   ackTimeoutMs?: number;
+  /**
+   * Enables bounded reconnection and at-least-once replay of unacknowledged
+   * frames. Browser replay is memory-only. Node connectors require a
+   * persistent store-and-forward directory when this is enabled.
+   *
+   * An ACK lost during disconnect can cause a frame to be replayed after the
+   * server accepted it; configure server-side deduplication when duplicates
+   * are not acceptable.
+   */
+  reconnect?: QwpReconnectOptions;
+  /** @internal Node adapter hook for persistent store-and-forward. */
+  replayStore?: QwpIngressReplayStore;
   /**
    * Optional local ingress frame cap. Browsers cannot read WebSocket upgrade
    * headers, so browser applications should set this to the server's configured
@@ -94,7 +109,7 @@ export class QwpIngressSession {
   private nextSequence = 0n;
   private sendTail: Promise<void> = Promise.resolve();
   private durablePingTimer?: ReturnType<typeof setTimeout>;
-  private readonly effectiveMaxBatchSizeBytes?: number;
+  private readonly localMaxBatchSizeBytes?: number;
   private failure?: Error;
   private closing = false;
   private readonly receiveLoop: Promise<void>;
@@ -103,6 +118,14 @@ export class QwpIngressSession {
     private readonly connection: QwpBinaryConnection,
     private readonly options: QwpIngressSessionOptions = {},
   ) {
+    if (
+      options.reconnect &&
+      !(connection instanceof QwpReconnectingIngressConnection)
+    ) {
+      throw new Error(
+        "ingress reconnect options require QwpIngressSession.connect(factory, options)",
+      );
+    }
     const timeout = options.ackTimeoutMs ?? 15_000;
     if (!Number.isFinite(timeout) || timeout <= 0) {
       throw new RangeError("ackTimeoutMs must be a positive finite number");
@@ -114,13 +137,7 @@ export class QwpIngressSession {
     ) {
       throw new RangeError("maxBatchSizeBytes must be a positive safe integer");
     }
-    const serverBatchCap = connection.handshake.maxBatchSizeBytes;
-    this.effectiveMaxBatchSizeBytes =
-      localBatchCap === undefined
-        ? serverBatchCap
-        : serverBatchCap === undefined
-          ? localBatchCap
-          : Math.min(localBatchCap, serverBatchCap);
+    this.localMaxBatchSizeBytes = localBatchCap;
     const keepalive = options.durableAckKeepaliveMs;
     if (
       keepalive !== undefined &&
@@ -142,7 +159,16 @@ export class QwpIngressSession {
     factory: QwpConnectionFactory,
     options: QwpIngressSessionOptions = {},
   ): Promise<QwpIngressSession> {
-    const connection = await factory();
+    if (options.replayStore && !options.reconnect) {
+      throw new RangeError("a QWP replayStore requires reconnect options");
+    }
+    const connection = options.reconnect
+      ? await QwpReconnectingIngressConnection.connect(
+          factory,
+          options.reconnect,
+          options.replayStore,
+        )
+      : await factory();
     try {
       return new QwpIngressSession(connection, options);
     } catch (error) {
@@ -160,7 +186,12 @@ export class QwpIngressSession {
   }
 
   get maxBatchSizeBytes(): number | undefined {
-    return this.effectiveMaxBatchSizeBytes;
+    const serverBatchCap = this.connection.handshake.maxBatchSizeBytes;
+    return this.localMaxBatchSizeBytes === undefined
+      ? serverBatchCap
+      : serverBatchCap === undefined
+        ? this.localMaxBatchSizeBytes
+        : Math.min(this.localMaxBatchSizeBytes, serverBatchCap);
   }
 
   sendTables(
@@ -173,14 +204,11 @@ export class QwpIngressSession {
   sendFrame(frame: Uint8Array): Promise<QwpIngressResponse> {
     this.throwIfUnavailable();
     if (
-      this.effectiveMaxBatchSizeBytes !== undefined &&
-      frame.byteLength > this.effectiveMaxBatchSizeBytes
+      this.maxBatchSizeBytes !== undefined &&
+      frame.byteLength > this.maxBatchSizeBytes
     ) {
       return Promise.reject(
-        new QwpBatchTooLargeError(
-          frame.byteLength,
-          this.effectiveMaxBatchSizeBytes,
-        ),
+        new QwpBatchTooLargeError(frame.byteLength, this.maxBatchSizeBytes),
       );
     }
     const sequence = this.nextSequence++;

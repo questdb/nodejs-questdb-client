@@ -1,4 +1,7 @@
 import type { AddressInfo } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -143,4 +146,75 @@ describe("QWP Node transport", () => {
       isTransientRoleReject: true,
     } satisfies Partial<QwpUpgradeError>);
   });
+
+  it("fails over and replays an unacknowledged frame through the public Node API", async () => {
+    const primary = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    const secondary = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    const directory = await mkdtemp(join(tmpdir(), "qwp-node-failover-"));
+    const primaryFrames: Uint8Array[] = [];
+    const secondaryFrames: Uint8Array[] = [];
+    for (const endpoint of [primary, secondary]) {
+      endpoint.on("headers", (headers) => {
+        headers.push("X-QWP-Version: 1");
+      });
+    }
+    primary.on("connection", (socket) => {
+      socket.once("message", (payload) => {
+        primaryFrames.push(new Uint8Array(payload as Buffer));
+        socket.terminate();
+      });
+    });
+    secondary.on("connection", (socket) => {
+      socket.once("message", (payload) => {
+        secondaryFrames.push(new Uint8Array(payload as Buffer));
+        socket.send(okResponse(0n, "trades", 1n));
+      });
+    });
+    await Promise.all([listen(primary), listen(secondary)]);
+
+    const primaryAddress = primary.address() as AddressInfo;
+    const secondaryAddress = secondary.address() as AddressInfo;
+    const session = await connectQwpNodeIngress(
+      {
+        url: `ws://127.0.0.1:${primaryAddress.port}/write/v4`,
+        failoverUrls: [`ws://127.0.0.1:${secondaryAddress.port}/write/v4`],
+        storeAndForward: { directory },
+      },
+      {
+        ackTimeoutMs: 2_000,
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    try {
+      const response = await session.sendFrame(Uint8Array.of(1, 2, 3));
+      expect(response).toMatchObject({ status: QWP_STATUS.OK, sequence: 0n });
+      expect(primaryFrames).toEqual([Uint8Array.of(1, 2, 3)]);
+      expect(secondaryFrames).toEqual([Uint8Array.of(1, 2, 3)]);
+    } finally {
+      await session.close();
+      await Promise.all([closeServer(primary), closeServer(secondary)]);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
+
+function listen(server: WebSocketServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (server.address()) {
+      resolve();
+      return;
+    }
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+}
+
+function closeServer(server: WebSocketServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}

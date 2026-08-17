@@ -5,8 +5,13 @@ import {
   openQwpWebSocket,
   QwpWebSocketLike,
 } from "./internal/websocket-connection";
+import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import { QWP_VERSION } from "./core";
-import { QwpBinaryConnection, QwpWebSocketConnectOptions } from "./transport";
+import {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+  QwpWebSocketConnectOptions,
+} from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 
@@ -32,6 +37,24 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
 export function connectQwpBrowserWebSocket(
   options: QwpBrowserWebSocketOptions,
 ): Promise<QwpBinaryConnection> {
+  return createQwpBrowserConnectionFactory(options)();
+}
+
+/** Creates a stateful browser endpoint walker suitable for session reconnects. */
+export function createQwpBrowserConnectionFactory(
+  options: QwpBrowserWebSocketOptions,
+): QwpConnectionFactory {
+  return createQwpFailoverConnectionFactory(
+    options.url,
+    options.failoverUrls,
+    (endpoint) => connectQwpBrowserEndpoint(options, endpoint),
+  );
+}
+
+function connectQwpBrowserEndpoint(
+  options: QwpBrowserWebSocketOptions,
+  endpoint: string | URL,
+): Promise<QwpBinaryConnection> {
   const factory =
     options.webSocketFactory ??
     ((url: string | URL, protocols?: string | string[]) => {
@@ -48,9 +71,9 @@ export function connectQwpBrowserWebSocket(
       }
       return new WebSocketConstructor(url, protocols);
     });
-  const socket = factory(options.url, options.protocols);
+  const socket = factory(endpoint, options.protocols);
   return openQwpWebSocket(socket, {
-    url: options.url,
+    url: endpoint,
     connectTimeoutMs: options.connectTimeoutMs,
     sendTimeoutMs: options.sendTimeoutMs,
     completeHandshake: () => ({ qwpVersion: QWP_VERSION }),
@@ -64,7 +87,7 @@ export async function connectQwpBrowserIngress(
   sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpIngressSession> {
   return QwpIngressSession.connect(
-    () => connectQwpBrowserWebSocket(options),
+    createQwpBrowserConnectionFactory(options),
     sessionOptions,
   );
 }
@@ -75,7 +98,7 @@ export async function connectQwpBrowserEgress(
   sessionOptions: QwpEgressSessionOptions = {},
 ): Promise<QwpEgressSession> {
   return QwpEgressSession.connect(
-    () => connectQwpBrowserWebSocket(options),
+    createQwpBrowserConnectionFactory(options),
     sessionOptions,
   );
 }

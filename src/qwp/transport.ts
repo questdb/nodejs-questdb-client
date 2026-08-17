@@ -44,6 +44,125 @@ export class QwpSendClosedError extends QwpSendError {
   }
 }
 
+export interface QwpFailoverAttempt {
+  readonly endpoint: string | URL;
+  readonly error: unknown;
+}
+
+/** Every eligible QWP endpoint in one connection sweep failed. */
+export class QwpFailoverError extends Error {
+  readonly cause?: unknown;
+
+  constructor(readonly attempts: readonly QwpFailoverAttempt[]) {
+    const last = attempts[attempts.length - 1];
+    super(
+      `all QWP endpoints failed [count=${attempts.length}]${
+        last ? `; last endpoint=${last.endpoint}` : ""
+      }`,
+    );
+    this.name = "QwpFailoverError";
+    this.cause = last?.error;
+  }
+}
+
+/** A configured QWP reconnect policy exhausted its retry boundary. */
+export class QwpReconnectExhaustedError extends Error {
+  readonly cause: unknown;
+
+  constructor(
+    readonly attempts: number,
+    cause: unknown,
+  ) {
+    super(`QWP reconnect attempts exhausted [attempts=${attempts}]`);
+    this.name = "QwpReconnectExhaustedError";
+    this.cause = cause;
+  }
+}
+
+/** A replayed ingress frame was rejected and remains in persistent storage. */
+export class QwpReplayRejectedError extends Error {
+  constructor(
+    readonly frameSequence: bigint,
+    readonly status: number,
+    message?: string,
+  ) {
+    super(
+      `QWP replay frame was rejected and retained [frameSequence=${frameSequence}, status=0x${status.toString(16)}]${
+        message ? `: ${message}` : ""
+      }`,
+    );
+    this.name = "QwpReplayRejectedError";
+  }
+}
+
+/** An active egress operation cannot be safely replayed without an explicit reset hook. */
+export class QwpEgressReplayRequiredError extends Error {
+  constructor(readonly requestId?: bigint) {
+    super(
+      `QWP egress connection was lost with an operation in flight${
+        requestId === undefined ? "" : ` [requestId=${requestId}]`
+      }; configure onReplayReset to opt into at-least-once re-execution`,
+    );
+    this.name = "QwpEgressReplayRequiredError";
+  }
+}
+
+export interface QwpIngressReplayRecord {
+  readonly frameSequence: bigint;
+  readonly payload: Uint8Array;
+}
+
+/** Browser-safe abstraction; Node supplies a persistent filesystem implementation. */
+export interface QwpIngressReplayStore {
+  load(): Promise<readonly QwpIngressReplayRecord[]>;
+  append(record: QwpIngressReplayRecord): Promise<void>;
+  acknowledgeThrough(frameSequence: bigint): Promise<void>;
+  close(): Promise<void>;
+}
+
+export const QWP_RECONNECT_EVENT_KIND = {
+  RECONNECTING: "reconnecting",
+  ATTEMPT_FAILED: "attempt-failed",
+  RECONNECTED: "reconnected",
+  FAILED_OVER: "failed-over",
+} as const;
+
+export type QwpReconnectEventKind =
+  (typeof QWP_RECONNECT_EVENT_KIND)[keyof typeof QWP_RECONNECT_EVENT_KIND];
+
+export interface QwpReconnectEvent {
+  readonly kind: QwpReconnectEventKind;
+  /** One-based reconnect sweep number within the current outage. */
+  readonly attempt: number;
+  readonly endpoint?: string | URL;
+  readonly previousEndpoint?: string | URL;
+  readonly cause?: unknown;
+}
+
+export interface QwpReconnectOptions {
+  /** Maximum connection sweeps per outage. Defaults to 3; zero is unlimited. */
+  maxAttempts?: number;
+  /** Backoff before the first failed sweep is retried. Defaults to 100ms. */
+  initialBackoffMs?: number;
+  /** Exponential-backoff ceiling. Defaults to 5s. */
+  maxBackoffMs?: number;
+  /** Total reconnect deadline. Defaults to 30s; zero disables the deadline. */
+  maxDurationMs?: number;
+  /**
+   * Consecutive retriable rejections of one ingress frame before it is treated
+   * as poison and retained for inspection. Defaults to 4.
+   */
+  maxFrameRejections?: number;
+  onEvent?: (event: QwpReconnectEvent) => void;
+}
+
+export interface QwpEgressReplayResetEvent {
+  readonly requestId?: bigint;
+  readonly previousEndpoint?: string | URL;
+  readonly endpoint?: string | URL;
+  readonly cause?: unknown;
+}
+
 export const QWP_UPGRADE_ERROR_KIND = {
   AUTHENTICATION: "authentication",
   ROLE_REJECTED: "role-rejected",
@@ -143,6 +262,8 @@ export interface QwpBinaryConnection {
   readonly messages: AsyncIterable<Uint8Array>;
   readonly closed: Promise<QwpConnectionCloseInfo>;
   readonly handshake: QwpHandshakeMetadata;
+  /** Endpoint backing this connection, when supplied by its adapter. */
+  readonly endpoint?: string | URL;
 
   send(payload: Uint8Array): Promise<void>;
   /** Sends an RFC 6455 PING when the underlying runtime supports it. */
@@ -152,6 +273,8 @@ export interface QwpBinaryConnection {
 
 export interface QwpWebSocketConnectOptions {
   url: string | URL;
+  /** Additional endpoints attempted in order when the preferred endpoint fails. */
+  failoverUrls?: readonly (string | URL)[];
   protocols?: string | string[];
   connectTimeoutMs?: number;
   /** Maximum time a send may remain queued by the WebSocket. Defaults to 15s. */
