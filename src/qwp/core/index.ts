@@ -1,4 +1,5 @@
 export * from "./bytes";
+export * from "./binds";
 export * from "./constants";
 export * from "./egress";
 export * from "./errors";

@@ -279,14 +279,73 @@ describe("QWP in a real browser against QuestDB", () => {
           const session = await qwp.connectQwpBrowserEgress({ url });
           try {
             const query = await session.query(
-              `select value from ${table} order by ts`,
+              `select value from ${table} where value = $1 and ts >= $2 order by ts`,
+              {
+                binds: (binds: any) =>
+                  binds.setLong(0, 42n).setTimestampMicros(1, 0n),
+              },
             );
             const values: string[] = [];
             for await (const batch of query) {
               for (const row of batch.rows()) values.push(String(row[0]));
             }
             const completion = await query.completion;
-            return { values, completion: completion.kind };
+
+            const typedQuery = await session.query(
+              "select " +
+                "$1::boolean, $2::byte, $3::short, $4::char, " +
+                "$5::int, $6::long, $7::float, $8::double, " +
+                "$9::date, $10::timestamp, $11::timestamp_ns, " +
+                "$12::varchar, $13::uuid, $14::long256, " +
+                "cast($15 as geohash(60b)), $16::decimal(18, 4), " +
+                "$17::decimal(38, 6), $18::decimal(76, 10) " +
+                "from long_sequence(1)",
+              {
+                binds: (binds: any) =>
+                  binds
+                    .setBoolean(0, true)
+                    .setByte(1, 42)
+                    .setShort(2, 1234)
+                    .setChar(3, "Q")
+                    .setInt(4, 2_000_000)
+                    .setLong(5, 9_000_000_000n)
+                    .setFloat(6, 3.25)
+                    .setDouble(7, 2.5)
+                    .setDate(8, 1_700_000_000_000n)
+                    .setTimestampMicros(9, 1_700_000_000_000_000n)
+                    .setTimestampNanos(10, 1_700_000_000_123_456_789n)
+                    .setVarchar(11, "café")
+                    .setUuid(12, "123e4567-e89b-12d3-a456-426614174000")
+                    .setLong256(13, 1n, 2n, 3n, 4n)
+                    .setGeohash(14, 60, 0x0fffffffffffffffn)
+                    .setDecimal64(15, 4, 123_456_789n)
+                    .setDecimal128(16, 6, 123_456_789_123_456n, 0n)
+                    .setDecimal256(17, 10, 420_000_000_000n, 0n, 0n, 0n),
+              },
+            );
+            let typedRow: any[] | undefined;
+            for await (const batch of typedQuery) {
+              typedRow = [...batch.rows()][0];
+            }
+            await typedQuery.completion;
+            const normalize = (value: any): any => {
+              if (typeof value === "bigint") return value.toString();
+              if (Array.isArray(value)) return value.map(normalize);
+              if (value && typeof value === "object") {
+                return Object.fromEntries(
+                  Object.entries(value).map(([key, nested]) => [
+                    key,
+                    normalize(nested),
+                  ]),
+                );
+              }
+              return value;
+            };
+            return {
+              values,
+              completion: completion.kind,
+              typedRow: typedRow?.map(normalize),
+            };
           } finally {
             await session.close();
           }
@@ -296,6 +355,26 @@ describe("QWP in a real browser against QuestDB", () => {
       expect(egressResult).toEqual({
         values: Array.from({ length: WRITE_BATCH_SIZE }, () => "42"),
         completion: "result-end",
+        typedRow: [
+          true,
+          42,
+          1234,
+          "Q",
+          2_000_000,
+          "9000000000",
+          3.25,
+          2.5,
+          "1700000000000",
+          "1700000000000000",
+          "1700000000123456789",
+          "café",
+          { low: "11841725276408463360", high: "1314564453825188563" },
+          { words: ["1", "2", "3", "4"] },
+          { bits: "1152921504606846975", precisionBits: 60 },
+          { unscaled: "123456789", scale: 4 },
+          { unscaled: "123456789123456", scale: 6 },
+          { unscaled: "420000000000", scale: 10 },
+        ],
       });
     } finally {
       await page

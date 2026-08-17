@@ -6,6 +6,7 @@ import {
   QWP_EGRESS_CAPABILITY,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_RESET_MASK_DICTIONARY,
+  QwpBindSetter,
   QwpExecDoneMessage,
   QwpProtocolError,
   QwpQueryRequest,
@@ -40,8 +41,11 @@ export interface QwpEgressSessionOptions {
 export interface QwpEgressQueryOptions {
   /** Zero means the server may stream without credit accounting. */
   initialCredit?: number | bigint;
+  /** Sets typed positional parameters; index 0 maps to SQL placeholder `$1`. */
+  binds?: QwpBindSetter;
+  /** Advanced escape hatch for an already encoded bind section. */
   bindCount?: number;
-  /** Pre-encoded positional bind payload. */
+  /** Advanced escape hatch for an already encoded bind section. */
   bindPayload?: Uint8Array;
   /** Ask a capable server to reset its connection-scoped symbol dictionary. */
   resetDictionary?: boolean;
@@ -256,6 +260,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       requestId,
       sql,
       initialCredit: options.initialCredit,
+      binds: options.binds,
       bindCount: options.bindCount,
       bindPayload: options.bindPayload,
       queryFlags: options.resetDictionary

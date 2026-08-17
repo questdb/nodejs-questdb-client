@@ -1,5 +1,10 @@
 import { encodeUtf8, QwpByteReader, QwpByteWriter } from "./bytes";
-import { QWP_EGRESS_CAPABILITY, QWP_EGRESS_MESSAGE } from "./constants";
+import { encodeQwpBinds, QwpBindSetter } from "./binds";
+import {
+  QWP_EGRESS_CAPABILITY,
+  QWP_EGRESS_MESSAGE,
+  QWP_MAX_COLUMNS_PER_TABLE,
+} from "./constants";
 import { decodeQwpFrame, QwpFrameHeader } from "./frame";
 import { QwpProtocolError } from "./errors";
 import { readQwpVarint, writeQwpVarint } from "./varint";
@@ -9,8 +14,11 @@ export interface QwpQueryRequest {
   sql: string;
   /** Zero means unbounded. */
   initialCredit?: number | bigint;
+  /** Browser-safe typed positional binds. */
+  binds?: QwpBindSetter;
+  /** Advanced escape hatch for an already encoded bind section. */
   bindCount?: number;
-  /** Pre-encoded positional bind payload. */
+  /** Advanced escape hatch for an already encoded bind section. */
   bindPayload?: Uint8Array;
   /** Append only after SERVER_INFO advertises QUERY_FLAGS. */
   queryFlags?: number | bigint;
@@ -84,11 +92,29 @@ function requestId(value: number | bigint): bigint {
 
 /** Encodes the unframed client-to-server QUERY_REQUEST payload. */
 export function encodeQwpQueryRequest(request: QwpQueryRequest): Uint8Array {
-  const bindCount = request.bindCount ?? 0;
-  if (!Number.isSafeInteger(bindCount) || bindCount < 0) {
-    throw new RangeError("bindCount must be a non-negative safe integer");
+  if (
+    request.binds !== undefined &&
+    (request.bindCount !== undefined || request.bindPayload !== undefined)
+  ) {
+    throw new Error(
+      "typed binds cannot be mixed with raw bindCount/bindPayload",
+    );
   }
-  const bindPayload = request.bindPayload ?? new Uint8Array();
+  const encodedBinds = request.binds
+    ? encodeQwpBinds(request.binds)
+    : undefined;
+  const bindCount = encodedBinds?.count ?? request.bindCount ?? 0;
+  if (
+    !Number.isSafeInteger(bindCount) ||
+    bindCount < 0 ||
+    bindCount > QWP_MAX_COLUMNS_PER_TABLE
+  ) {
+    throw new RangeError(
+      `bindCount must be an integer between 0 and ${QWP_MAX_COLUMNS_PER_TABLE}`,
+    );
+  }
+  const bindPayload =
+    encodedBinds?.payload ?? request.bindPayload ?? new Uint8Array();
   if (bindCount === 0 && bindPayload.length !== 0) {
     throw new Error("bindPayload requires a non-zero bindCount");
   }
