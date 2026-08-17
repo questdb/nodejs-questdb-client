@@ -187,6 +187,31 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
+  it("resolves every covered waiter from a cumulative ACK", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting);
+    socket.onSend = () => {
+      if (socket.sent.length === 8) {
+        socket.message(ingressResponse(QWP_STATUS.OK, 7n));
+      }
+    };
+
+    const sends = Array.from({ length: 8 }, (_, index) =>
+      session.sendFrame(Uint8Array.of(index)),
+    );
+    await expect(Promise.all(sends)).resolves.toEqual(
+      Array.from({ length: 8 }, () =>
+        expect.objectContaining({ status: QWP_STATUS.OK, sequence: 7n }),
+      ),
+    );
+    await session.close();
+  });
+
   it("rejects the matching frame on NACK without breaking later ACKs", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({

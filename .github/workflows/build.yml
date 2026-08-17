@@ -6,7 +6,7 @@ on:
       - main
   pull_request:
   schedule:
-    - cron: '15 2,10,18 * * *'
+    - cron: "15 2,10,18 * * *"
 
 jobs:
   test:
@@ -39,3 +39,29 @@ jobs:
 
       - name: Tests
         run: pnpm test
+
+  qwp-browser-e2e:
+    name: QWP browser E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      QWP_BROWSER_E2E_IMAGE: ${{ vars.QWP_BROWSER_E2E_IMAGE || 'questdb/questdb:nightly' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: true
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Authenticated ingress and egress
+        run: pnpm test:qwp-browser-e2e

@@ -51,7 +51,8 @@ export class QwpIngressSessionClosedError extends Error {
  *
  * One promise is registered before each WebSocket send, preventing a fast ACK
  * from racing its waiter. Calls are serialized to preserve the server's
- * zero-based wire sequence.
+ * zero-based wire sequence. Successful ACKs are cumulative, so an ACK for
+ * sequence N resolves every outstanding send through N.
  */
 export class QwpIngressSession {
   private readonly pending = new Map<bigint, PendingResponse>();
@@ -161,18 +162,24 @@ export class QwpIngressSession {
     if (response.sequence === null) {
       throw new QwpProtocolError("QWP response is missing its wire sequence");
     }
+    if (response.status === QWP_STATUS.OK) {
+      for (const [sequence, pending] of this.pending) {
+        if (sequence > response.sequence) break;
+        this.pending.delete(sequence);
+        if (pending.timer) clearTimeout(pending.timer);
+        pending.resolve(response);
+      }
+      return;
+    }
+
     const pending = this.pending.get(response.sequence);
     if (!pending) {
-      // A late response after timeout, or a duplicate ACK, is harmless.
+      // A late response after timeout, or a duplicate response, is harmless.
       return;
     }
     this.pending.delete(response.sequence);
     if (pending.timer) clearTimeout(pending.timer);
-    if (response.status === QWP_STATUS.OK) {
-      pending.resolve(response);
-    } else {
-      pending.reject(new QwpIngressNackError(response));
-    }
+    pending.reject(new QwpIngressNackError(response));
   }
 
   private invokeCallback(
