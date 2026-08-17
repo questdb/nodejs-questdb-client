@@ -188,12 +188,6 @@ export class QwpIngressSession {
     const response = new Promise<QwpIngressResponse>((resolve, reject) => {
       pending = { resolve, reject };
     });
-    pending.timer = setTimeout(() => {
-      if (!this.pending.delete(sequence)) return;
-      pending.reject(
-        new Error(`timed out waiting for QWP ACK [sequence=${sequence}]`),
-      );
-    }, this.options.ackTimeoutMs ?? 15_000);
     this.pending.set(sequence, pending);
 
     const sending = this.sendTail.then(async () => {
@@ -203,6 +197,18 @@ export class QwpIngressSession {
     this.sendTail = sending.catch((error: unknown) => {
       this.fail(error);
     });
+    void sending.then(
+      () => {
+        if (this.pending.get(sequence) !== pending) return;
+        pending.timer = setTimeout(() => {
+          if (!this.pending.delete(sequence)) return;
+          pending.reject(
+            new Error(`timed out waiting for QWP ACK [sequence=${sequence}]`),
+          );
+        }, this.options.ackTimeoutMs ?? 15_000);
+      },
+      () => undefined,
+    );
     void sending.catch((error: unknown) => {
       const current = this.pending.get(sequence);
       if (current !== pending) return;

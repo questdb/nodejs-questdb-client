@@ -4,6 +4,9 @@ import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpHandshakeMetadata,
+  QwpSendClosedError,
+  QwpSendError,
+  QwpSendTimeoutError,
   QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
@@ -21,9 +24,15 @@ interface QwpWebSocketCloseEvent {
 export interface QwpWebSocketLike {
   binaryType: string;
   readonly readyState: number;
+  /** Number of application bytes queued by WHATWG-compatible WebSockets. */
+  readonly bufferedAmount?: number;
   send(data: Uint8Array): void;
+  /** Node adapter hook for the `ws.send(data, callback)` completion signal. */
+  sendWithCallback?(data: Uint8Array, callback: (error?: Error) => void): void;
   /** Node WebSocket implementations may expose control-frame PING. */
   ping?(): void;
+  /** Node WebSocket implementations may support immediate termination. */
+  terminate?(): void;
   close(code?: number, reason?: string): void;
   addEventListener(
     type: "open",
@@ -49,6 +58,7 @@ export interface QwpWebSocketLike {
 export interface QwpWebSocketOpenOptions {
   url: string | URL;
   connectTimeoutMs?: number;
+  sendTimeoutMs?: number;
   completeHandshake: () => QwpHandshakeMetadata;
   /** Node adapters use this to surface non-101 HTTP responses from `ws`. */
   openingFailure?: Promise<never>;
@@ -58,6 +68,7 @@ export interface QwpWebSocketOpenOptions {
 
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CLOSED = 3;
+const BUFFERED_AMOUNT_POLL_MS = 4;
 
 async function normalizeBinaryMessage(data: unknown): Promise<Uint8Array> {
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
@@ -85,6 +96,12 @@ export function openQwpWebSocket(
       new RangeError("connectTimeoutMs must be a positive finite number"),
     );
   }
+  const sendTimeoutMs = options.sendTimeoutMs ?? 15_000;
+  if (!Number.isFinite(sendTimeoutMs) || sendTimeoutMs <= 0) {
+    return Promise.reject(
+      new RangeError("sendTimeoutMs must be a positive finite number"),
+    );
+  }
 
   const messages = new QwpAsyncQueue<Uint8Array>();
   let resolveClosed!: (info: QwpConnectionCloseInfo) => void;
@@ -94,6 +111,125 @@ export function openQwpWebSocket(
   let opened = false;
   let openingSettled = false;
   let messageTail: Promise<void> = Promise.resolve();
+  let sendTail: Promise<void> = Promise.resolve();
+  let terminalSendError: QwpSendError | undefined;
+  let rejectActiveSend: ((error: QwpSendError) => void) | undefined;
+
+  const failSends = (error: QwpSendError): QwpSendError => {
+    terminalSendError ??= error;
+    rejectActiveSend?.(terminalSendError);
+    return terminalSendError;
+  };
+
+  const abortAfterSendFailure = (): void => {
+    try {
+      if (socket.terminate) {
+        socket.terminate();
+      } else if (socket.readyState !== WEBSOCKET_CLOSED) {
+        socket.close(1011, "QWP send failed");
+      }
+    } catch {
+      // The send error remains authoritative if shutdown races the transport.
+    }
+  };
+
+  const sendWithBackpressure = (payload: Uint8Array): Promise<void> => {
+    if (terminalSendError) return Promise.reject(terminalSendError);
+    if (socket.readyState !== WEBSOCKET_OPEN) {
+      return Promise.reject(failSends(new QwpSendClosedError()));
+    }
+
+    return new Promise<void>((resolveSend, rejectSend) => {
+      let settled = false;
+      let drainPoll: ReturnType<typeof setTimeout> | undefined;
+
+      const settle = (error?: QwpSendError): void => {
+        if (settled) return;
+        settled = true;
+        if (drainPoll) clearTimeout(drainPoll);
+        clearTimeout(sendTimeout);
+        if (rejectActiveSend === rejectPending) rejectActiveSend = undefined;
+        if (error) rejectSend(error);
+        else resolveSend();
+      };
+      const rejectPending = (error: QwpSendError): void => settle(error);
+      const failSend = (error: QwpSendError): void => {
+        settle(failSends(error));
+        abortAfterSendFailure();
+      };
+
+      rejectActiveSend = rejectPending;
+      const sendTimeout = setTimeout(() => {
+        const bufferedAmount = socket.bufferedAmount;
+        failSend(
+          new QwpSendTimeoutError(
+            sendTimeoutMs,
+            typeof bufferedAmount === "number" ? bufferedAmount : undefined,
+          ),
+        );
+      }, sendTimeoutMs);
+
+      if (socket.sendWithCallback) {
+        try {
+          socket.sendWithCallback(payload, (error) => {
+            if (error) {
+              failSend(
+                new QwpSendError(
+                  "QWP WebSocket send failed; delivery outcome is unknown",
+                  error,
+                ),
+              );
+            } else {
+              settle();
+            }
+          });
+        } catch (error) {
+          failSend(
+            new QwpSendError(
+              "QWP WebSocket send failed before it could be queued",
+              error,
+            ),
+          );
+        }
+        return;
+      }
+
+      const initialBufferedAmount = socket.bufferedAmount;
+      try {
+        socket.send(payload);
+      } catch (error) {
+        failSend(
+          new QwpSendError(
+            "QWP WebSocket send failed before it could be queued",
+            error,
+          ),
+        );
+        return;
+      }
+
+      if (typeof initialBufferedAmount !== "number") {
+        // Backwards compatibility for custom adapters without a drain signal.
+        settle();
+        return;
+      }
+
+      const waitForDrain = (): void => {
+        if (socket.readyState !== WEBSOCKET_OPEN) {
+          settle(failSends(new QwpSendClosedError()));
+          return;
+        }
+        if (
+          typeof socket.bufferedAmount !== "number" ||
+          socket.bufferedAmount <= initialBufferedAmount
+        ) {
+          settle();
+          return;
+        }
+        drainPoll = setTimeout(waitForDrain, BUFFERED_AMOUNT_POLL_MS);
+      };
+      waitForDrain();
+    });
+  };
 
   return new Promise<QwpBinaryConnection>((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -151,11 +287,10 @@ export function openQwpWebSocket(
           messages,
           closed,
           handshake,
-          async send(payload: Uint8Array): Promise<void> {
-            if (socket.readyState !== WEBSOCKET_OPEN) {
-              throw new Error("QWP WebSocket is not open");
-            }
-            socket.send(payload);
+          send(payload: Uint8Array): Promise<void> {
+            const sending = sendTail.then(() => sendWithBackpressure(payload));
+            sendTail = sending.catch(() => undefined);
+            return sending;
           },
           async close(code = 1000, reason = ""): Promise<void> {
             if (socket.readyState === WEBSOCKET_CLOSED) return;
@@ -207,6 +342,13 @@ export function openQwpWebSocket(
 
     socket.addEventListener("error", (event) => {
       if (opened) {
+        const eventError = (event as { error?: unknown }).error;
+        failSends(
+          new QwpSendError(
+            "QWP WebSocket transport error while sending",
+            eventError ?? event,
+          ),
+        );
         messages.fail(new Error("QWP WebSocket transport error"));
         return;
       }
@@ -256,6 +398,7 @@ export function openQwpWebSocket(
           );
           return;
         }
+        failSends(new QwpSendClosedError(info));
         void messageTail.finally(() => messages.end());
       },
       { once: true },

@@ -194,7 +194,11 @@ export function connectQwpNodeWebSocket(
         });
         response.resume();
       });
-      return socket as unknown as QwpWebSocketLike;
+      const qwpSocket = socket as unknown as QwpWebSocketLike;
+      qwpSocket.sendWithCallback = (data, callback) => {
+        socket.send(data, callback);
+      };
+      return qwpSocket;
     });
 
   let upgradeHeaders: IncomingHttpHeaders | undefined;
@@ -216,6 +220,7 @@ export function connectQwpNodeWebSocket(
   return openQwpWebSocket(socket, {
     url: options.url,
     connectTimeoutMs: options.connectTimeoutMs,
+    sendTimeoutMs: options.sendTimeoutMs,
     openingFailure,
     completeHandshake: () => {
       const qwpVersion = parseQwpVersion(upgradeHeaders);

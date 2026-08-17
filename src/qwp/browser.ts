@@ -52,6 +52,7 @@ export function connectQwpBrowserWebSocket(
   return openQwpWebSocket(socket, {
     url: options.url,
     connectTimeoutMs: options.connectTimeoutMs,
+    sendTimeoutMs: options.sendTimeoutMs,
     completeHandshake: () => ({ qwpVersion: QWP_VERSION }),
     opaqueErrors: true,
   });

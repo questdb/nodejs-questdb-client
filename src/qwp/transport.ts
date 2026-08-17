@@ -4,6 +4,46 @@ export interface QwpConnectionCloseInfo {
   wasClean: boolean;
 }
 
+/** A failure while handing a QWP frame to the WebSocket transport. */
+export class QwpSendError extends Error {
+  readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "QwpSendError";
+    this.cause = cause;
+  }
+}
+
+/** The WebSocket did not drain a QWP frame before its send deadline. */
+export class QwpSendTimeoutError extends QwpSendError {
+  constructor(
+    readonly timeoutMs: number,
+    readonly bufferedAmountBytes?: number,
+  ) {
+    super(
+      `QWP WebSocket send timed out after ${timeoutMs}ms; delivery outcome is unknown${
+        bufferedAmountBytes === undefined
+          ? ""
+          : ` [bufferedAmount=${bufferedAmountBytes}]`
+      }`,
+    );
+    this.name = "QwpSendTimeoutError";
+  }
+}
+
+/** A QWP send was rejected because its WebSocket closed. */
+export class QwpSendClosedError extends QwpSendError {
+  constructor(readonly closeInfo?: QwpConnectionCloseInfo) {
+    super(
+      closeInfo
+        ? `QWP WebSocket closed while sending [code=${closeInfo.code}, reason=${closeInfo.reason}]`
+        : "QWP WebSocket is not open",
+    );
+    this.name = "QwpSendClosedError";
+  }
+}
+
 export const QWP_UPGRADE_ERROR_KIND = {
   AUTHENTICATION: "authentication",
   ROLE_REJECTED: "role-rejected",
@@ -114,6 +154,8 @@ export interface QwpWebSocketConnectOptions {
   url: string | URL;
   protocols?: string | string[];
   connectTimeoutMs?: number;
+  /** Maximum time a send may remain queued by the WebSocket. Defaults to 15s. */
+  sendTimeoutMs?: number;
 }
 
 export type QwpConnectionFactory = () => Promise<QwpBinaryConnection>;
