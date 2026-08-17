@@ -98,6 +98,23 @@ await sender.flush();
 await sender.close();
 ```
 
+Browsers can request durable ingress acknowledgements without custom HTTP
+headers. The client offers a QWP WebSocket subprotocol and verifies that the
+server selected it before sending data. Browser keepalives use side-effect-free,
+table-less QWP poll frames because the WebSocket API does not expose
+protocol-level PING frames.
+
+```typescript
+const sender = await connectQwpBrowserSender(
+  { url, requestDurableAck: true },
+  { autoFlush: false, awaitDurableAck: true },
+);
+```
+
+Browser durable ACKs are an in-memory delivery confirmation only. Persistent
+store-and-forward remains available exclusively through the Node.js entry
+point.
+
 ### Zstd-compressed QWP egress
 
 Node.js egress clients can opt into compressed result batches during the

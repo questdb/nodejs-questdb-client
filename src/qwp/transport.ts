@@ -258,6 +258,22 @@ export class QwpUpgradeError extends Error {
   }
 }
 
+/** A requested durable-ACK capability was not confirmed by the server. */
+export class QwpDurableAckUnavailableError extends QwpUpgradeError {
+  constructor(readonly url: string | URL) {
+    super(
+      `QWP durable ACK was requested, but the server did not advertise support [url=${url}]`,
+      {
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+        retryable: false,
+        tryNextEndpoint: true,
+        url,
+      },
+    );
+    this.name = "QwpDurableAckUnavailableError";
+  }
+}
+
 /** Metadata negotiated during the QWP WebSocket upgrade. */
 export interface QwpHandshakeMetadata {
   /** QWP protocol version selected by the server. */

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  connectQwpBrowserIngress,
   connectQwpBrowserWebSocket,
+  createQwpBrowserSender,
   QwpWebSocketLike,
 } from "../../src/qwp/browser";
 import {
@@ -16,7 +18,9 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QwpBatchTooLargeError,
   QwpByteWriter,
+  encodeQwpDurableAckPollFrame,
   encodeQwpFrame,
+  QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QwpIngressNackError,
   QwpIngressSession,
   QwpIngressSessionClosedError,
@@ -31,6 +35,7 @@ type Listener = (event: unknown) => void;
 class FakeWebSocket {
   binaryType = "blob";
   readyState = 0;
+  protocol = "";
   bufferedAmount = 0;
   readonly sent: Uint8Array[] = [];
   readonly closeCalls: { code?: number; reason?: string }[] = [];
@@ -245,6 +250,74 @@ describe("QWP WebSocket adapters", () => {
       done: false,
     });
     await connection.close();
+  });
+
+  it("negotiates durable ACKs through a browser WebSocket subprotocol", async () => {
+    const socket = new FakeWebSocket();
+    socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+    let capturedProtocols: string | string[] | undefined;
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      protocols: ["application.v1"],
+      requestDurableAck: true,
+      webSocketFactory: (_url, protocols) => {
+        capturedProtocols = protocols;
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+
+    const connection = await connecting;
+    expect(capturedProtocols).toEqual([
+      "application.v1",
+      QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+    ]);
+    expect(connection.handshake).toEqual({
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    await connection.close();
+  });
+
+  it("rejects browser durable ACK opt-in without subprotocol confirmation", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      requestDurableAck: true,
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+
+    await expect(connecting).rejects.toMatchObject({
+      name: "QwpDurableAckUnavailableError",
+      kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+      retryable: false,
+      tryNextEndpoint: true,
+      url: "ws://localhost:9000/write/v4",
+    } satisfies Partial<QwpDurableAckUnavailableError>);
+    expect(socket.closeCalls).toHaveLength(1);
+  });
+
+  it("requests browser durable ACKs when the high-level sender awaits them", async () => {
+    const socket = new FakeWebSocket();
+    socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+    let capturedProtocols: string | string[] | undefined;
+    const sender = createQwpBrowserSender(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: (_url, protocols) => {
+          capturedProtocols = protocols;
+          return asQwpSocket(socket);
+        },
+      },
+      { awaitDurableAck: true },
+    );
+    const connecting = sender.connect();
+    socket.open();
+
+    await expect(connecting).resolves.toBe(true);
+    expect(capturedProtocols).toBe(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL);
+    await sender.close();
   });
 
   it("adds Node-only QWP upgrade headers", async () => {
@@ -1028,22 +1101,48 @@ describe("QwpIngressSession", () => {
     }
   });
 
-  it("rejects durable keepalive on a transport without PING support", async () => {
-    const socket = new FakeWebSocket();
-    const connecting = connectQwpBrowserWebSocket({
-      url: "ws://localhost:9000/write/v4",
-      webSocketFactory: () => asQwpSocket(socket),
-    });
-    socket.open();
-    const connection = await connecting;
-    expect(
-      () =>
-        new QwpIngressSession(connection, {
+  it("polls durable progress with table-less QWP frames in browsers", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+      const connecting = connectQwpBrowserIngress(
+        {
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: true,
+          webSocketFactory: () => asQwpSocket(socket),
+        },
+        {
+          ackTimeoutMs: 100,
           durableAckKeepaliveMs: 25,
-        }),
-    ).toThrow(/PING support/);
-    expect(socket.closeCalls).toHaveLength(1);
-    await connection.close();
+        },
+      );
+      socket.open();
+      const session = await connecting;
+      socket.onSend = () => {
+        if (socket.sent.length === 1) {
+          socket.message(
+            ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+          );
+          return;
+        }
+        socket.message(durableResponse([["trades", 42n]]));
+        socket.message(ingressResponse(QWP_STATUS.OK, 1n));
+      };
+
+      const ack = await session.sendFrame(Uint8Array.of(1));
+      const durable = session.waitForDurable(ack);
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(durable).resolves.toBeUndefined();
+      expect(socket.sent).toHaveLength(2);
+      expect(socket.sent[1]).toEqual(encodeQwpDurableAckPollFrame());
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(socket.sent).toHaveLength(2);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects the matching frame on NACK without breaking later ACKs", async () => {

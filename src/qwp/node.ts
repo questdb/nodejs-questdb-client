@@ -20,6 +20,7 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpConnectionFactory,
+  QwpDurableAckUnavailableError,
   QwpHandshakeMetadata,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
@@ -38,21 +39,6 @@ export {
 export type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
-
-export class QwpDurableAckUnavailableError extends QwpUpgradeError {
-  constructor(readonly url: string | URL) {
-    super(
-      `QWP durable ACK was requested, but the server did not advertise support [url=${url}]`,
-      {
-        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
-        retryable: false,
-        tryNextEndpoint: true,
-        url,
-      },
-    );
-    this.name = "QwpDurableAckUnavailableError";
-  }
-}
 
 export class QwpVersionMismatchError extends QwpUpgradeError {
   constructor(

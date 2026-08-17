@@ -4,6 +4,8 @@ export const QWP_VERSION = 1;
 export const QWP_HEADER_SIZE = 12;
 
 export const QWP_FLAG_DEFER_COMMIT = 0x01;
+/** Table-less ingress control frame that polls negotiated durable-ACK progress. */
+export const QWP_FLAG_DURABLE_ACK_POLL = 0x02;
 export const QWP_FLAG_GORILLA = 0x04;
 export const QWP_FLAG_DELTA_SYMBOL_DICTIONARY = 0x08;
 export const QWP_FLAG_ZSTD = 0x10;

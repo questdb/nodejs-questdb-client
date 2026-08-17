@@ -5,6 +5,7 @@ import {
   QWP_ENCODING_UNCOMPRESSED,
   QWP_FLAG_DEFER_COMMIT,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+  QWP_FLAG_DURABLE_ACK_POLL,
   QWP_FLAG_GORILLA,
   QWP_HEADER_SIZE,
   QWP_MAX_ERROR_MESSAGE_LENGTH,
@@ -619,6 +620,17 @@ export function encodeQwpIngressCommitFrame(
     dictionary,
     confirmedMaxSymbolId,
   });
+}
+
+/** Encodes a negotiated, side-effect-free durable-ACK progress poll. */
+export function encodeQwpDurableAckPollFrame(): Uint8Array {
+  const writer = new QwpByteWriter(QWP_HEADER_SIZE);
+  writeQwpFrameHeader(writer, {
+    flags: QWP_FLAG_DURABLE_ACK_POLL,
+    tableCount: 0,
+    payloadLength: 0,
+  });
+  return writer.toUint8Array();
 }
 
 function readIngressTables(

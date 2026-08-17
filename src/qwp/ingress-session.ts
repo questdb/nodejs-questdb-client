@@ -1,5 +1,6 @@
 import {
   decodeQwpIngressResponse,
+  encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
   QWP_STATUS,
   QwpIngressEncodeOptions,
@@ -39,9 +40,10 @@ export interface QwpIngressSessionOptions {
    */
   maxBatchSizeBytes?: number;
   /**
-   * Enables durable-ACK tracking and sends Node WebSocket PING frames while
-   * committed table transactions are still awaiting durable upload. Zero
-   * keeps tracking enabled but disables automatic PINGs.
+   * Enables durable-ACK tracking. While committed table transactions await
+   * durable upload, Node transports send WebSocket PING frames and browser
+   * transports send table-less QWP commit frames. Zero keeps tracking enabled
+   * but disables automatic polling.
    */
   durableAckKeepaliveMs?: number;
   onResponse?: (response: QwpIngressResponse) => void;
@@ -96,7 +98,6 @@ export class QwpBatchTooLargeError extends RangeError {
 
 function validateIngressSessionOptions(
   options: QwpIngressSessionOptions,
-  connection?: QwpBinaryConnection,
 ): void {
   const timeout = options.ackTimeoutMs ?? 15_000;
   if (!Number.isFinite(timeout) || timeout <= 0) {
@@ -118,16 +119,6 @@ function validateIngressSessionOptions(
       "durableAckKeepaliveMs must be a non-negative finite number",
     );
   }
-  if (
-    connection &&
-    keepalive !== undefined &&
-    keepalive > 0 &&
-    !connection.ping
-  ) {
-    throw new Error(
-      "durable ACK keepalive requires a WebSocket transport with PING support",
-    );
-  }
 }
 
 /**
@@ -145,7 +136,7 @@ export class QwpIngressSession {
   private readonly durableWaiters = new Set<PendingDurableResponse>();
   private nextSequence = 0n;
   private sendTail: Promise<void> = Promise.resolve();
-  private durablePingTimer?: ReturnType<typeof setTimeout>;
+  private durablePollTimer?: ReturnType<typeof setTimeout>;
   private readonly localMaxBatchSizeBytes?: number;
   private readonly symbolDictionary = new QwpSymbolDictionary();
   private publishedMaxSymbolId = -1;
@@ -168,7 +159,7 @@ export class QwpIngressSession {
           "ingress reconnect options require QwpIngressSession.connect(factory, options)",
         );
       }
-      validateIngressSessionOptions(options, connection);
+      validateIngressSessionOptions(options);
     } catch (error) {
       try {
         void connection
@@ -371,7 +362,7 @@ export class QwpIngressSession {
 
   private async closeNow(code: number, reason: string): Promise<void> {
     this.closing = true;
-    this.clearDurablePing();
+    this.clearDurablePoll();
     this.rejectAll(new QwpIngressSessionClosedError());
     let transportClose: Promise<void>;
     try {
@@ -469,7 +460,7 @@ export class QwpIngressSession {
         this.pendingDurableTargets.set(table.name, table.sequenceTransaction);
       }
     }
-    this.scheduleDurablePing();
+    this.scheduleDurablePoll();
   }
 
   private applyDurableAck(response: QwpIngressResponse): void {
@@ -491,9 +482,9 @@ export class QwpIngressSession {
       waiter.resolve();
     }
     if (this.pendingDurableTargets.size === 0) {
-      this.clearDurablePing();
+      this.clearDurablePoll();
     } else {
-      this.scheduleDurablePing();
+      this.scheduleDurablePoll();
     }
   }
 
@@ -507,18 +498,18 @@ export class QwpIngressSession {
     return true;
   }
 
-  private scheduleDurablePing(): void {
+  private scheduleDurablePoll(): void {
     const interval = this.options.durableAckKeepaliveMs;
     if (
       interval === undefined ||
       interval === 0 ||
       this.pendingDurableTargets.size === 0 ||
-      this.durablePingTimer
+      this.durablePollTimer
     ) {
       return;
     }
-    this.durablePingTimer = setTimeout(() => {
-      this.durablePingTimer = undefined;
+    this.durablePollTimer = setTimeout(() => {
+      this.durablePollTimer = undefined;
       if (
         this.closing ||
         this.failure ||
@@ -526,16 +517,19 @@ export class QwpIngressSession {
       ) {
         return;
       }
-      void this.connection.ping!()
-        .then(() => this.scheduleDurablePing())
+      const poll = this.connection.ping
+        ? this.connection.ping()
+        : this.sendFrame(encodeQwpDurableAckPollFrame()).then(() => undefined);
+      void poll
+        .then(() => this.scheduleDurablePoll())
         .catch((error: unknown) => this.fail(error));
     }, interval);
   }
 
-  private clearDurablePing(): void {
-    if (!this.durablePingTimer) return;
-    clearTimeout(this.durablePingTimer);
-    this.durablePingTimer = undefined;
+  private clearDurablePoll(): void {
+    if (!this.durablePollTimer) return;
+    clearTimeout(this.durablePollTimer);
+    this.durablePollTimer = undefined;
   }
 
   private throwIfUnavailable(): void {
@@ -545,7 +539,7 @@ export class QwpIngressSession {
 
   private fail(error: unknown): void {
     if (this.failure) return;
-    this.clearDurablePing();
+    this.clearDurablePoll();
     this.failure =
       error instanceof Error
         ? error

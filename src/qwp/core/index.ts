@@ -2,6 +2,7 @@ export * from "./bytes";
 export * from "./binds";
 export * from "./compression";
 export * from "./constants";
+export * from "./durable-ack";
 export * from "./egress";
 export * from "./errors";
 export * from "./frame";

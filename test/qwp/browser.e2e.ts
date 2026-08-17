@@ -5,10 +5,12 @@ import path from "node:path";
 import { Browser, chromium } from "playwright";
 import { GenericContainer, StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { WebSocketServer } from "ws";
 import {
   connectQwpNodeIngress,
   connectQwpNodeWebSocket,
   QWP_COLUMN_TYPE,
+  QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QWP_STATUS,
   QwpDurableAckUnavailableError,
   QwpTableBuffer,
@@ -30,6 +32,23 @@ function listen(server: Server): Promise<void> {
 }
 
 function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function waitForWebSocketServer(server: WebSocketServer): Promise<void> {
+  if (server.address()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.once("listening", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+function closeWebSocketServer(server: WebSocketServer): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
@@ -71,7 +90,7 @@ async function executeSql(questdbUrl: string, sql: string): Promise<Response> {
   });
 }
 
-describe("QWP in a real browser against QuestDB", () => {
+describe("QWP in a real browser", () => {
   let assetServer: Server;
   let assetUrl: string;
   let browser: Browser;
@@ -79,24 +98,6 @@ describe("QWP in a real browser against QuestDB", () => {
   let questdbUrl: string;
 
   beforeAll(async () => {
-    const configuredUrl = process.env.QWP_BROWSER_E2E_URL;
-    if (configuredUrl) {
-      questdbUrl = new URL(configuredUrl).toString();
-    } else {
-      container = await new GenericContainer(
-        process.env.QWP_BROWSER_E2E_IMAGE ?? "questdb/questdb:nightly",
-      )
-        .withEnvironment({
-          QDB_HTTP_USER: USER,
-          QDB_HTTP_PASSWORD: PASSWORD,
-        })
-        .withExposedPorts(QUESTDB_HTTP_PORT)
-        .start();
-      questdbUrl = new URL(
-        `http://${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)}`,
-      ).toString();
-    }
-
     assetServer = createModuleServer();
     await listen(assetServer);
     const address = assetServer.address() as AddressInfo;
@@ -112,7 +113,6 @@ describe("QWP in a real browser against QuestDB", () => {
   afterAll(async () => {
     await browser?.close();
     if (assetServer) await close(assetServer);
-    await container?.stop();
   });
 
   it("decompresses a Zstd result batch in the browser bundle", async () => {
@@ -153,285 +153,358 @@ describe("QWP in a real browser against QuestDB", () => {
     }
   });
 
-  it("authenticates ingress and egress with the browser session cookie", async () => {
-    const context = await browser.newContext({ bypassCSP: true });
-    const page = await context.newPage();
-    const tableName = `qwp_browser_e2e_${Date.now()}`;
-    const ingressUrl = websocketUrl(questdbUrl, "/write/v4");
-    const egressUrl = websocketUrl(questdbUrl, "/read/v1");
-
+  it("negotiates durable ACKs through the real browser WebSocket API", async () => {
+    const offeredProtocols: string[] = [];
+    const server = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+      handleProtocols: (protocols) => {
+        offeredProtocols.push(...protocols);
+        return protocols.has(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL)
+          ? QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL
+          : false;
+      },
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
     try {
-      await page.goto(questdbUrl, { waitUntil: "domcontentloaded" });
-
-      const anonymousUpgrades = await page.evaluate(
-        async ({ moduleUrl, ingress, egress }) => {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url }) => {
           const importModule = new Function("url", "return import(url)") as (
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const tryConnect = async (
-            connect: (options: {
-              url: string;
-            }) => Promise<{ close(): Promise<void> }>,
-            url: string,
-          ) => {
-            try {
-              const session = await connect({ url });
-              await session.close();
-              return { connected: true };
-            } catch (error) {
-              const failure = error as {
-                name?: string;
-                kind?: string;
-                retryable?: boolean;
-                statusCode?: number;
-              };
-              return {
-                connected: false,
-                name: failure.name,
-                kind: failure.kind,
-                retryable: failure.retryable ?? null,
-                statusCode: failure.statusCode ?? null,
-              };
-            }
-          };
-          return {
-            ingress: await tryConnect(qwp.connectQwpBrowserIngress, ingress),
-            egress: await tryConnect(qwp.connectQwpBrowserEgress, egress),
-          };
-        },
-        { moduleUrl: assetUrl, ingress: ingressUrl, egress: egressUrl },
-      );
-      expect(anonymousUpgrades).toEqual({
-        ingress: {
-          connected: false,
-          name: "QwpUpgradeError",
-          kind: "opaque",
-          retryable: null,
-          statusCode: null,
-        },
-        egress: {
-          connected: false,
-          name: "QwpUpgradeError",
-          kind: "opaque",
-          retryable: null,
-          statusCode: null,
-        },
-      });
-
-      const login = await page.evaluate(
-        async ({ username, password, table }) => {
-          const query =
-            `create table ${table} (value long, ts timestamp) ` +
-            "timestamp(ts) partition by day wal";
-          const response = await fetch(
-            `/exec?query=${encodeURIComponent(query)}&session=true`,
-            {
-              credentials: "include",
-              headers: {
-                Authorization: `Basic ${btoa(`${username}:${password}`)}`,
-              },
-            },
-          );
-          return { status: response.status, body: await response.text() };
-        },
-        { username: USER, password: PASSWORD, table: tableName },
-      );
-      expect(login.status, login.body).toBe(200);
-
-      const cookies = await context.cookies(questdbUrl);
-      expect(cookies).toContainEqual(
-        expect.objectContaining({ name: "qdb_session", httpOnly: true }),
-      );
-
-      const ingressResult = await page.evaluate(
-        async ({ moduleUrl, url, table, batchSize }) => {
-          const importModule = new Function("url", "return import(url)") as (
-            url: string,
-          ) => Promise<Record<string, any>>;
-          const qwp = await importModule(moduleUrl);
-          const sender = await qwp.connectQwpBrowserSender(
-            { url },
-            { autoFlush: false },
-          );
+          const connection = await qwp.connectQwpBrowserWebSocket({
+            url,
+            requestDurableAck: true,
+          });
           try {
-            for (let index = 0; index < batchSize; index++) {
-              await sender
-                .table(table)
-                .longColumn("value", 42n)
-                .at(BigInt(Date.now()) * 1_000n);
-            }
-            return { flushed: await sender.flush() };
+            return connection.handshake;
           } finally {
-            await sender.close();
+            await connection.close();
           }
         },
         {
           moduleUrl: assetUrl,
-          url: ingressUrl,
-          table: tableName,
-          batchSize: WRITE_BATCH_SIZE,
+          url: `ws://127.0.0.1:${address.port}/write/v4`,
         },
       );
-      expect(ingressResult).toEqual({ flushed: true });
 
-      await expect
-        .poll(
-          () =>
-            page.evaluate(async (table) => {
-              const response = await fetch(
-                `/exec?query=${encodeURIComponent(`select count() from ${table}`)}`,
-                { credentials: "include" },
-              );
-              if (!response.ok) return -1;
-              const result = await response.json();
-              return result.dataset[0][0] as number;
-            }, tableName),
-          { timeout: 30_000, interval: 250 },
+      expect(offeredProtocols).toContain(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL);
+      expect(result).toEqual({ qwpVersion: 1, durableAckEnabled: true });
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  describe("against QuestDB", () => {
+    beforeAll(async () => {
+      const configuredUrl = process.env.QWP_BROWSER_E2E_URL;
+      if (configuredUrl) {
+        questdbUrl = new URL(configuredUrl).toString();
+      } else {
+        container = await new GenericContainer(
+          process.env.QWP_BROWSER_E2E_IMAGE ?? "questdb/questdb:nightly",
         )
-        .toBe(WRITE_BATCH_SIZE);
+          .withEnvironment({
+            QDB_HTTP_USER: USER,
+            QDB_HTTP_PASSWORD: PASSWORD,
+          })
+          .withExposedPorts(QUESTDB_HTTP_PORT)
+          .start();
+        questdbUrl = new URL(
+          `http://${container.getHost()}:${container.getMappedPort(QUESTDB_HTTP_PORT)}`,
+        ).toString();
+      }
+    });
 
-      const egressResult = await page.evaluate(
-        async ({ moduleUrl, url, table }) => {
-          const importModule = new Function("url", "return import(url)") as (
-            url: string,
-          ) => Promise<Record<string, any>>;
-          const qwp = await importModule(moduleUrl);
-          const session = await qwp.connectQwpBrowserEgress({ url });
-          try {
-            const query = await session.query(
-              `select value from ${table} where value = $1 and ts >= $2 order by ts`,
-              {
-                binds: (binds: any) =>
-                  binds.setLong(0, 42n).setTimestampMicros(1, 0n),
-              },
-            );
-            const values: string[] = [];
-            for await (const batch of query) {
-              for (const row of batch.rows()) values.push(String(row[0]));
-            }
-            const completion = await query.completion;
+    afterAll(async () => {
+      await container?.stop();
+    });
 
-            const typedQuery = await session.query(
-              "select " +
-                "$1::boolean, $2::byte, $3::short, $4::char, " +
-                "$5::int, $6::long, $7::float, $8::double, " +
-                "$9::date, $10::timestamp, $11::timestamp_ns, " +
-                "$12::varchar, $13::uuid, $14::long256, " +
-                "cast($15 as geohash(60b)), $16::decimal(18, 4), " +
-                "$17::decimal(38, 6), $18::decimal(76, 10) " +
-                "from long_sequence(1)",
-              {
-                binds: (binds: any) =>
-                  binds
-                    .setBoolean(0, true)
-                    .setByte(1, 42)
-                    .setShort(2, 1234)
-                    .setChar(3, "Q")
-                    .setInt(4, 2_000_000)
-                    .setLong(5, 9_000_000_000n)
-                    .setFloat(6, 3.25)
-                    .setDouble(7, 2.5)
-                    .setDate(8, 1_700_000_000_000n)
-                    .setTimestampMicros(9, 1_700_000_000_000_000n)
-                    .setTimestampNanos(10, 1_700_000_000_123_456_789n)
-                    .setVarchar(11, "café")
-                    .setUuid(12, "123e4567-e89b-12d3-a456-426614174000")
-                    .setLong256(13, 1n, 2n, 3n, 4n)
-                    .setGeohash(14, 60, 0x0fffffffffffffffn)
-                    .setDecimal64(15, 4, 123_456_789n)
-                    .setDecimal128(16, 6, 123_456_789_123_456n, 0n)
-                    .setDecimal256(17, 10, 420_000_000_000n, 0n, 0n, 0n),
-              },
-            );
-            let typedRow: any[] | undefined;
-            for await (const batch of typedQuery) {
-              typedRow = [...batch.rows()][0];
-            }
-            await typedQuery.completion;
-            const normalize = (value: any): any => {
-              if (typeof value === "bigint") return value.toString();
-              if (Array.isArray(value)) return value.map(normalize);
-              if (value && typeof value === "object") {
-                return Object.fromEntries(
-                  Object.entries(value).map(([key, nested]) => [
-                    key,
-                    normalize(nested),
-                  ]),
-                );
+    it("authenticates ingress and egress with the browser session cookie", async () => {
+      const context = await browser.newContext({ bypassCSP: true });
+      const page = await context.newPage();
+      const tableName = `qwp_browser_e2e_${Date.now()}`;
+      const ingressUrl = websocketUrl(questdbUrl, "/write/v4");
+      const egressUrl = websocketUrl(questdbUrl, "/read/v1");
+
+      try {
+        await page.goto(questdbUrl, { waitUntil: "domcontentloaded" });
+
+        const anonymousUpgrades = await page.evaluate(
+          async ({ moduleUrl, ingress, egress }) => {
+            const importModule = new Function("url", "return import(url)") as (
+              url: string,
+            ) => Promise<Record<string, any>>;
+            const qwp = await importModule(moduleUrl);
+            const tryConnect = async (
+              connect: (options: {
+                url: string;
+              }) => Promise<{ close(): Promise<void> }>,
+              url: string,
+            ) => {
+              try {
+                const session = await connect({ url });
+                await session.close();
+                return { connected: true };
+              } catch (error) {
+                const failure = error as {
+                  name?: string;
+                  kind?: string;
+                  retryable?: boolean;
+                  statusCode?: number;
+                };
+                return {
+                  connected: false,
+                  name: failure.name,
+                  kind: failure.kind,
+                  retryable: failure.retryable ?? null,
+                  statusCode: failure.statusCode ?? null,
+                };
               }
-              return value;
             };
             return {
-              values,
-              completion: completion.kind,
-              typedRow: typedRow?.map(normalize),
+              ingress: await tryConnect(qwp.connectQwpBrowserIngress, ingress),
+              egress: await tryConnect(qwp.connectQwpBrowserEgress, egress),
             };
-          } finally {
-            await session.close();
-          }
-        },
-        { moduleUrl: assetUrl, url: egressUrl, table: tableName },
-      );
-      expect(egressResult).toEqual({
-        values: Array.from({ length: WRITE_BATCH_SIZE }, () => "42"),
-        completion: "result-end",
-        typedRow: [
-          true,
-          42,
-          1234,
-          "Q",
-          2_000_000,
-          "9000000000",
-          3.25,
-          2.5,
-          "1700000000000",
-          "1700000000000000",
-          "1700000000123456789",
-          "café",
-          { low: "11841725276408463360", high: "1314564453825188563" },
-          { words: ["1", "2", "3", "4"] },
-          { bits: "1152921504606846975", precisionBits: 60 },
-          { unscaled: "123456789", scale: 4 },
-          { unscaled: "123456789123456", scale: 6 },
-          { unscaled: "420000000000", scale: 10 },
-        ],
-      });
-    } finally {
-      await page
-        .evaluate(async (table) => {
-          await fetch(
-            `/exec?query=${encodeURIComponent(`drop table ${table}`)}`,
-            {
-              credentials: "include",
-            },
-          );
-        }, tableName)
-        .catch(() => undefined);
-      await context.close();
-    }
-  });
+          },
+          { moduleUrl: assetUrl, ingress: ingressUrl, egress: egressUrl },
+        );
+        expect(anonymousUpgrades).toEqual({
+          ingress: {
+            connected: false,
+            name: "QwpUpgradeError",
+            kind: "opaque",
+            retryable: null,
+            statusCode: null,
+          },
+          egress: {
+            connected: false,
+            name: "QwpUpgradeError",
+            kind: "opaque",
+            retryable: null,
+            statusCode: null,
+          },
+        });
 
-  it("rejects durable ACK opt-in when the server does not advertise it", async () => {
-    await expect(
-      connectQwpNodeIngress({
+        const login = await page.evaluate(
+          async ({ username, password, table }) => {
+            const query =
+              `create table ${table} (value long, ts timestamp) ` +
+              "timestamp(ts) partition by day wal";
+            const response = await fetch(
+              `/exec?query=${encodeURIComponent(query)}&session=true`,
+              {
+                credentials: "include",
+                headers: {
+                  Authorization: `Basic ${btoa(`${username}:${password}`)}`,
+                },
+              },
+            );
+            return { status: response.status, body: await response.text() };
+          },
+          { username: USER, password: PASSWORD, table: tableName },
+        );
+        expect(login.status, login.body).toBe(200);
+
+        const cookies = await context.cookies(questdbUrl);
+        expect(cookies).toContainEqual(
+          expect.objectContaining({ name: "qdb_session", httpOnly: true }),
+        );
+
+        const ingressResult = await page.evaluate(
+          async ({ moduleUrl, url, table, batchSize }) => {
+            const importModule = new Function("url", "return import(url)") as (
+              url: string,
+            ) => Promise<Record<string, any>>;
+            const qwp = await importModule(moduleUrl);
+            const sender = await qwp.connectQwpBrowserSender(
+              { url },
+              { autoFlush: false },
+            );
+            try {
+              for (let index = 0; index < batchSize; index++) {
+                await sender
+                  .table(table)
+                  .longColumn("value", 42n)
+                  .at(BigInt(Date.now()) * 1_000n);
+              }
+              return { flushed: await sender.flush() };
+            } finally {
+              await sender.close();
+            }
+          },
+          {
+            moduleUrl: assetUrl,
+            url: ingressUrl,
+            table: tableName,
+            batchSize: WRITE_BATCH_SIZE,
+          },
+        );
+        expect(ingressResult).toEqual({ flushed: true });
+
+        await expect
+          .poll(
+            () =>
+              page.evaluate(async (table) => {
+                const response = await fetch(
+                  `/exec?query=${encodeURIComponent(`select count() from ${table}`)}`,
+                  { credentials: "include" },
+                );
+                if (!response.ok) return -1;
+                const result = await response.json();
+                return result.dataset[0][0] as number;
+              }, tableName),
+            { timeout: 30_000, interval: 250 },
+          )
+          .toBe(WRITE_BATCH_SIZE);
+
+        const egressResult = await page.evaluate(
+          async ({ moduleUrl, url, table }) => {
+            const importModule = new Function("url", "return import(url)") as (
+              url: string,
+            ) => Promise<Record<string, any>>;
+            const qwp = await importModule(moduleUrl);
+            const session = await qwp.connectQwpBrowserEgress({ url });
+            try {
+              const query = await session.query(
+                `select value from ${table} where value = $1 and ts >= $2 order by ts`,
+                {
+                  binds: (binds: any) =>
+                    binds.setLong(0, 42n).setTimestampMicros(1, 0n),
+                },
+              );
+              const values: string[] = [];
+              for await (const batch of query) {
+                for (const row of batch.rows()) values.push(String(row[0]));
+              }
+              const completion = await query.completion;
+
+              const typedQuery = await session.query(
+                "select " +
+                  "$1::boolean, $2::byte, $3::short, $4::char, " +
+                  "$5::int, $6::long, $7::float, $8::double, " +
+                  "$9::date, $10::timestamp, $11::timestamp_ns, " +
+                  "$12::varchar, $13::uuid, $14::long256, " +
+                  "cast($15 as geohash(60b)), $16::decimal(18, 4), " +
+                  "$17::decimal(38, 6), $18::decimal(76, 10) " +
+                  "from long_sequence(1)",
+                {
+                  binds: (binds: any) =>
+                    binds
+                      .setBoolean(0, true)
+                      .setByte(1, 42)
+                      .setShort(2, 1234)
+                      .setChar(3, "Q")
+                      .setInt(4, 2_000_000)
+                      .setLong(5, 9_000_000_000n)
+                      .setFloat(6, 3.25)
+                      .setDouble(7, 2.5)
+                      .setDate(8, 1_700_000_000_000n)
+                      .setTimestampMicros(9, 1_700_000_000_000_000n)
+                      .setTimestampNanos(10, 1_700_000_000_123_456_789n)
+                      .setVarchar(11, "café")
+                      .setUuid(12, "123e4567-e89b-12d3-a456-426614174000")
+                      .setLong256(13, 1n, 2n, 3n, 4n)
+                      .setGeohash(14, 60, 0x0fffffffffffffffn)
+                      .setDecimal64(15, 4, 123_456_789n)
+                      .setDecimal128(16, 6, 123_456_789_123_456n, 0n)
+                      .setDecimal256(17, 10, 420_000_000_000n, 0n, 0n, 0n),
+                },
+              );
+              let typedRow: any[] | undefined;
+              for await (const batch of typedQuery) {
+                typedRow = [...batch.rows()][0];
+              }
+              await typedQuery.completion;
+              const normalize = (value: any): any => {
+                if (typeof value === "bigint") return value.toString();
+                if (Array.isArray(value)) return value.map(normalize);
+                if (value && typeof value === "object") {
+                  return Object.fromEntries(
+                    Object.entries(value).map(([key, nested]) => [
+                      key,
+                      normalize(nested),
+                    ]),
+                  );
+                }
+                return value;
+              };
+              return {
+                values,
+                completion: completion.kind,
+                typedRow: typedRow?.map(normalize),
+              };
+            } finally {
+              await session.close();
+            }
+          },
+          { moduleUrl: assetUrl, url: egressUrl, table: tableName },
+        );
+        expect(egressResult).toEqual({
+          values: Array.from({ length: WRITE_BATCH_SIZE }, () => "42"),
+          completion: "result-end",
+          typedRow: [
+            true,
+            42,
+            1234,
+            "Q",
+            2_000_000,
+            "9000000000",
+            3.25,
+            2.5,
+            "1700000000000",
+            "1700000000000000",
+            "1700000000123456789",
+            "café",
+            { low: "11841725276408463360", high: "1314564453825188563" },
+            { words: ["1", "2", "3", "4"] },
+            { bits: "1152921504606846975", precisionBits: 60 },
+            { unscaled: "123456789", scale: 4 },
+            { unscaled: "123456789123456", scale: 6 },
+            { unscaled: "420000000000", scale: 10 },
+          ],
+        });
+      } finally {
+        await page
+          .evaluate(async (table) => {
+            await fetch(
+              `/exec?query=${encodeURIComponent(`drop table ${table}`)}`,
+              {
+                credentials: "include",
+              },
+            );
+          }, tableName)
+          .catch(() => undefined);
+        await context.close();
+      }
+    });
+
+    it("rejects durable ACK opt-in when the server does not advertise it", async () => {
+      await expect(
+        connectQwpNodeIngress({
+          url: websocketUrl(questdbUrl, "/write/v4"),
+          authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
+          requestDurableAck: true,
+        }),
+      ).rejects.toBeInstanceOf(QwpDurableAckUnavailableError);
+    });
+
+    it("negotiates the server QWP version and ingress batch cap", async () => {
+      const connection = await connectQwpNodeWebSocket({
         url: websocketUrl(questdbUrl, "/write/v4"),
         authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
-        requestDurableAck: true,
-      }),
-    ).rejects.toBeInstanceOf(QwpDurableAckUnavailableError);
-  });
-
-  it("negotiates the server QWP version and ingress batch cap", async () => {
-    const connection = await connectQwpNodeWebSocket({
-      url: websocketUrl(questdbUrl, "/write/v4"),
-      authorization: `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString("base64")}`,
+      });
+      try {
+        expect(connection.handshake.qwpVersion).toBe(1);
+        expect(connection.handshake.maxBatchSizeBytes).toBeGreaterThan(12);
+      } finally {
+        await connection.close();
+      }
     });
-    try {
-      expect(connection.handshake.qwpVersion).toBe(1);
-      expect(connection.handshake.maxBatchSizeBytes).toBeGreaterThan(12);
-    } finally {
-      await connection.close();
-    }
   });
 });

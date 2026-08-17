@@ -24,6 +24,8 @@ interface QwpWebSocketCloseEvent {
 export interface QwpWebSocketLike {
   binaryType: string;
   readonly readyState: number;
+  /** WebSocket subprotocol selected by the server, or an empty string. */
+  readonly protocol?: string;
   /** Number of application bytes queued by WHATWG-compatible WebSockets. */
   readonly bufferedAmount?: number;
   send(data: Uint8Array): void;

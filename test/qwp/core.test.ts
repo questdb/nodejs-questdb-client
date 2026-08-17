@@ -6,18 +6,22 @@ import {
   decodeQwpIngressResponse,
   decodeQwpIngressSymbolDictionaryDelta,
   decodeQwpVarint,
+  addQwpDurableAckWebSocketProtocol,
   encodeQwpCancel,
   encodeQwpAcceptEncoding,
   encodeQwpCredit,
+  encodeQwpDurableAckPollFrame,
   encodeQwpFrame,
   encodeQwpGorilla,
   encodeQwpIngressFrame,
   encodeQwpQueryRequest,
   encodeQwpVarint,
   QWP_COLUMN_TYPE,
+  QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
   QWP_FLAG_GORILLA,
+  QWP_FLAG_DURABLE_ACK_POLL,
   QWP_HEADER_SIZE,
   QWP_MAGIC,
   QWP_STATUS,
@@ -76,6 +80,39 @@ describe("QWP browser-safe byte core", () => {
         ]),
       ),
     ).toThrow(/uint64/i);
+  });
+});
+
+describe("QWP browser durable-ACK negotiation", () => {
+  it("adds the capability token without mutating or duplicating protocols", () => {
+    expect(addQwpDurableAckWebSocketProtocol(undefined)).toBe(
+      QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+    );
+    expect(addQwpDurableAckWebSocketProtocol("application.v1")).toEqual([
+      "application.v1",
+      QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+    ]);
+    const protocols = ["application.v1"];
+    expect(addQwpDurableAckWebSocketProtocol(protocols)).toEqual([
+      "application.v1",
+      QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+    ]);
+    expect(protocols).toEqual(["application.v1"]);
+    expect(
+      addQwpDurableAckWebSocketProtocol([
+        "application.v1",
+        QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+      ]),
+    ).toEqual(["application.v1", QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL]);
+  });
+
+  it("encodes a side-effect-free table-less durable progress poll", () => {
+    expect(decodeQwpFrame(encodeQwpDurableAckPollFrame())).toMatchObject({
+      flags: QWP_FLAG_DURABLE_ACK_POLL,
+      tableCount: 0,
+      payloadLength: 0,
+      payload: new Uint8Array(),
+    });
   });
 });
 
