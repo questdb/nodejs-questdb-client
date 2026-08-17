@@ -279,6 +279,7 @@ describe("QWP WebSocket adapters", () => {
       qwpVersion: 1,
       maxBatchSizeBytes: 4096,
       contentEncoding: "raw",
+      negotiatedCompression: { codec: "raw", level: 0 },
       durableAckEnabled: true,
       serverRole: "primary",
     });
@@ -317,6 +318,11 @@ describe("QWP WebSocket adapters", () => {
         "X-QWP-Accept-Encoding": "zstd;level=5,raw",
       });
       expect(session.handshake.contentEncoding).toBe("zstd;level=5");
+      expect(session.negotiatedCompression).toEqual({
+        codec: "zstd",
+        level: 5,
+      });
+      expect(session.negotiatedZstdLevel).toBe(5);
       await session.close();
     },
   );
@@ -338,6 +344,11 @@ describe("QWP WebSocket adapters", () => {
 
     const session = await connecting;
     expect(capturedHeaders?.["x-qwp-accept-encoding"]).toBe("custom");
+    expect(session.negotiatedCompression).toEqual({
+      codec: "raw",
+      level: 0,
+    });
+    expect(session.negotiatedZstdLevel).toBe(0);
     await session.close();
   });
 
@@ -379,6 +390,7 @@ describe("QWP WebSocket adapters", () => {
       qwpVersion: 1,
       maxBatchSizeBytes: undefined,
       contentEncoding: undefined,
+      negotiatedCompression: { codec: "raw", level: 0 },
       durableAckEnabled: false,
       serverRole: undefined,
     });

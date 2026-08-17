@@ -656,6 +656,43 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  it("refreshes the negotiated Zstd level after failover", async () => {
+    const first = new FakeConnection("primary", {
+      qwpVersion: 1,
+      contentEncoding: "zstd;level=5",
+      negotiatedCompression: { codec: "zstd", level: 5 },
+    });
+    const second = new FakeConnection("secondary", {
+      qwpVersion: 1,
+      contentEncoding: "zstd;level=1",
+      negotiatedCompression: { codec: "zstd", level: 1 },
+    });
+    const connections = [first, second];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    expect(session.negotiatedZstdLevel).toBe(5);
+
+    first.drop();
+    await vi.waitFor(() => expect(session.negotiatedZstdLevel).toBe(1));
+    expect(session.handshake.contentEncoding).toBe("zstd;level=1");
+    await session.close();
+  });
+
   it("discards queued batches, invokes reset, and replays an opted-in query", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");

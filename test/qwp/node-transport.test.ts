@@ -5,13 +5,28 @@ import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  connectQwpNodeWebSocket,
+  connectQwpNodeEgress,
   connectQwpNodeIngress,
+  connectQwpNodeWebSocket,
+  encodeQwpFrame,
+  QWP_EGRESS_MESSAGE,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpByteWriter,
   QwpUpgradeError,
 } from "../../src/qwp/node";
+
+function serverInfo(): Uint8Array {
+  const payload = new QwpByteWriter()
+    .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
+    .writeUint8(0)
+    .writeBigUint64(1n)
+    .writeUint32(0)
+    .writeBigInt64(123n)
+    .writeUint16(0)
+    .writeUint16(0);
+  return encodeQwpFrame(payload.toUint8Array());
+}
 
 function writeTable(
   writer: QwpByteWriter,
@@ -108,6 +123,40 @@ describe("QWP Node transport", () => {
       await session.waitForDurable(ack, 1_000);
       expect(requestedDurableAck).toBe("true");
       expect(pingCount).toBe(1);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("surfaces the server-clamped Zstd level from a real upgrade", async () => {
+    let acceptEncoding: string | undefined;
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Content-Encoding: zstd;level=9");
+    });
+    server.on("connection", (socket, request) => {
+      acceptEncoding = request.headers["x-qwp-accept-encoding"];
+      socket.send(serverInfo());
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+
+    const address = server.address() as AddressInfo;
+    const session = await connectQwpNodeEgress({
+      url: `ws://127.0.0.1:${address.port}/read/v1`,
+      compression: "auto",
+      compressionLevel: 22,
+    });
+    try {
+      expect(acceptEncoding).toBe("zstd;level=22,raw");
+      expect(session.negotiatedCompression).toEqual({
+        codec: "zstd",
+        level: 9,
+      });
+      expect(session.negotiatedZstdLevel).toBe(9);
     } finally {
       await session.close();
     }

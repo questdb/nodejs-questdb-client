@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeQwpEgressMessage,
+  decodeQwpContentEncoding,
   decodeQwpFrame,
   decodeQwpIngressResponse,
   decodeQwpIngressSymbolDictionaryDelta,
   decodeQwpVarint,
   encodeQwpCancel,
+  encodeQwpAcceptEncoding,
   encodeQwpCredit,
   encodeQwpFrame,
   encodeQwpGorilla,
@@ -74,6 +76,48 @@ describe("QWP browser-safe byte core", () => {
         ]),
       ),
     ).toThrow(/uint64/i);
+  });
+});
+
+describe("QWP egress compression negotiation", () => {
+  it("builds raw and Zstd upgrade preferences", () => {
+    expect(encodeQwpAcceptEncoding("raw", 1)).toBeUndefined();
+    expect(encodeQwpAcceptEncoding("zstd", 1)).toBe("zstd;level=1,raw");
+    expect(encodeQwpAcceptEncoding("auto", 22)).toBe("zstd;level=22,raw");
+  });
+
+  it.each([0, 23, 1.5, Number.NaN])(
+    "rejects invalid Zstd tuning level %s",
+    (level) => {
+      expect(() => encodeQwpAcceptEncoding("zstd", level)).toThrow(
+        /between 1 and 22/,
+      );
+    },
+  );
+
+  it("parses the effective server codec and level", () => {
+    expect(decodeQwpContentEncoding(undefined)).toEqual({
+      codec: "raw",
+      level: 0,
+    });
+    expect(decodeQwpContentEncoding(" identity ")).toEqual({
+      codec: "raw",
+      level: 0,
+    });
+    expect(decodeQwpContentEncoding("ZSTD; level = 7")).toEqual({
+      codec: "zstd",
+      level: 7,
+    });
+    expect(decodeQwpContentEncoding("zstd;level=bogus")).toEqual({
+      codec: "unknown",
+      level: 0,
+      contentEncoding: "zstd;level=bogus",
+    });
+    expect(decodeQwpContentEncoding("br")).toEqual({
+      codec: "unknown",
+      level: 0,
+      contentEncoding: "br",
+    });
   });
 });
 

@@ -113,6 +113,7 @@ const session = await connectQwpNodeEgress({
 });
 try {
   const query = await session.query("select * from trades");
+  console.log("effective Zstd level", session.negotiatedZstdLevel);
   for await (const batch of query) {
     for (const row of batch.rows()) console.log(row);
   }
@@ -125,6 +126,15 @@ try {
 Zstd decoding is also included in the browser entry point. Browsers cannot set
 the `X-QWP-Accept-Encoding` upgrade header themselves, so a same-origin reverse
 proxy must add it when browser clients should opt into compression.
+
+Level `1` is the lowest-CPU default and is usually the right starting point.
+Higher values trade server CPU for wire size; the client accepts levels 1–22,
+while the server may clamp the request or apply an operator-configured level.
+`session.negotiatedCompression` and `session.negotiatedZstdLevel` report what
+the active server actually selected and refresh after reconnection or failover.
+Both `"zstd"` and `"auto"` advertise Zstd followed by raw fallback, and the
+server still sends an individual batch raw when compression would make it
+larger.
 
 ### Authentication and secure connection
 

@@ -1,3 +1,5 @@
+import type { QwpNegotiatedEgressCompression } from "./core/compression";
+
 export interface QwpConnectionCloseInfo {
   code: number;
   reason: string;
@@ -264,6 +266,8 @@ export interface QwpHandshakeMetadata {
   readonly maxBatchSizeBytes?: number;
   /** Server-selected egress content encoding, when advertised. */
   readonly contentEncoding?: string;
+  /** Parsed effective egress codec and level selected by the server. */
+  readonly negotiatedCompression?: QwpNegotiatedEgressCompression;
   /** Whether the server confirmed durable-ACK support. */
   readonly durableAckEnabled?: boolean;
   /** Server role advertised on a successful upgrade, when available. */

@@ -8,6 +8,7 @@ import {
   QWP_RESET_MASK_DICTIONARY,
   QwpBindSetter,
   QwpExecDoneMessage,
+  type QwpNegotiatedEgressCompression,
   QwpProtocolError,
   QwpQueryRequest,
   QwpResultBatch,
@@ -265,6 +266,17 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   get handshake(): QwpHandshakeMetadata {
     return this.connection.handshake;
+  }
+
+  /** Effective codec and level echoed by the server on the active endpoint. */
+  get negotiatedCompression(): QwpNegotiatedEgressCompression | undefined {
+    return this.connection.handshake.negotiatedCompression;
+  }
+
+  /** Effective Zstd level, or zero for raw, unknown, or browser-hidden negotiation. */
+  get negotiatedZstdLevel(): number {
+    const compression = this.negotiatedCompression;
+    return compression?.codec === "zstd" ? compression.level : 0;
   }
 
   async query(

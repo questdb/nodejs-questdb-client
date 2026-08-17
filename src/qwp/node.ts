@@ -4,7 +4,12 @@ export * from "./index";
 import type { Agent } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
 import WebSocket from "ws";
-import { QWP_VERSION } from "./core";
+import {
+  decodeQwpContentEncoding,
+  encodeQwpAcceptEncoding,
+  QWP_VERSION,
+  type QwpEgressCompression,
+} from "./core";
 import {
   openQwpWebSocket,
   QwpWebSocketLike,
@@ -160,8 +165,6 @@ export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
   storeAndForward?: QwpNodeFileReplayStoreOptions;
 }
 
-export type QwpEgressCompression = "raw" | "zstd" | "auto";
-
 export interface QwpNodeEgressOptions extends QwpNodeWebSocketOptions {
   /**
    * Requests Zstd-compressed result batches. The default is `raw`, which
@@ -178,18 +181,7 @@ function egressTransportOptions(
 ): QwpNodeWebSocketOptions {
   const { compression, compressionLevel = 1, ...transport } = options;
   const preference = compression ?? "raw";
-  if (preference !== "raw" && preference !== "zstd" && preference !== "auto") {
-    throw new RangeError("compression must be one of raw, zstd, or auto");
-  }
-  if (
-    !Number.isSafeInteger(compressionLevel) ||
-    compressionLevel < 1 ||
-    compressionLevel > 22
-  ) {
-    throw new RangeError(
-      "compressionLevel must be an integer between 1 and 22",
-    );
-  }
+  const acceptEncoding = encodeQwpAcceptEncoding(preference, compressionLevel);
 
   // Keep the low-level headers escape hatch backwards compatible unless the
   // typed compression option was explicitly selected.
@@ -199,9 +191,7 @@ function egressTransportOptions(
   for (const name of Object.keys(headers)) {
     if (name.toLowerCase() === "x-qwp-accept-encoding") delete headers[name];
   }
-  if (preference !== "raw") {
-    headers["X-QWP-Accept-Encoding"] = `zstd;level=${compressionLevel},raw`;
-  }
+  if (acceptEncoding) headers["X-QWP-Accept-Encoding"] = acceptEncoding;
   return { ...transport, headers };
 }
 
@@ -323,10 +313,15 @@ function connectQwpNodeEndpoint(
       if (options.requestDurableAck && !durableAckEnabled) {
         throw new QwpDurableAckUnavailableError(endpoint);
       }
+      const contentEncoding = headerValue(
+        upgradeHeaders,
+        "x-qwp-content-encoding",
+      );
       const handshake: QwpHandshakeMetadata = {
         qwpVersion,
         maxBatchSizeBytes: parseMaxBatchSize(upgradeHeaders),
-        contentEncoding: headerValue(upgradeHeaders, "x-qwp-content-encoding"),
+        contentEncoding,
+        negotiatedCompression: decodeQwpContentEncoding(contentEncoding),
         durableAckEnabled,
         serverRole: headerValue(upgradeHeaders, "x-questdb-role"),
       };
