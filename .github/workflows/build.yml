@@ -65,3 +65,57 @@ jobs:
 
       - name: Authenticated ingress and egress
         run: pnpm test:qwp-browser-e2e
+
+  enterprise-qwp-e2e:
+    name: Dispatch Enterprise QWP E2E
+    runs-on: ubuntu-latest
+    # Azure credentials are not exposed to fork PRs. The repository variable
+    # keeps this dormant until the Enterprise pipeline and PAT are configured.
+    if: >-
+      vars.ENTERPRISE_E2E_ENABLED == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - name: Queue Enterprise TypeScript-client E2E
+        env:
+          ENT_DISPATCH_PAT: ${{ secrets.ENT_DISPATCH_PAT }}
+          CLIENT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CLIENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CLIENT_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ENT_DISPATCH_PAT:-}" ]; then
+            echo "ENT_DISPATCH_PAT is not configured" >&2
+            exit 1
+          fi
+
+          ORG_URL="https://dev.azure.com/questdb/"
+          PROJECT="questdb-enterprise"
+          PIPELINE_NAME="build-and-test-e2e-typescript-client"
+          PIPELINES=$(curl -fsS -u ":${ENT_DISPATCH_PAT}" \
+            "${ORG_URL}${PROJECT}/_apis/pipelines?api-version=7.0")
+          PIPELINE_ID=$(echo "$PIPELINES" | jq -r --arg name "$PIPELINE_NAME" \
+            '.value[] | select(.name == $name) | .id' | head -1)
+          if [ -z "$PIPELINE_ID" ] || [ "$PIPELINE_ID" = "null" ]; then
+            echo "Enterprise pipeline '$PIPELINE_NAME' is not registered" >&2
+            exit 1
+          fi
+
+          BODY=$(jq -n \
+            --arg commit "$CLIENT_COMMIT" \
+            --arg pr "$CLIENT_PR_NUMBER" \
+            --arg branch "$CLIENT_BRANCH" \
+            '{
+              templateParameters: {
+                typescriptClientCommit: $commit,
+                typescriptClientPrNumber: $pr,
+                clientBranch: $branch
+              }
+            }')
+          RESPONSE=$(curl -fsS -u ":${ENT_DISPATCH_PAT}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d "$BODY" \
+            "${ORG_URL}${PROJECT}/_apis/pipelines/${PIPELINE_ID}/runs?api-version=7.0")
+          echo "Enterprise E2E queued: $(echo "$RESPONSE" | jq -r '._links.web.href')"
