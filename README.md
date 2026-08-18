@@ -185,6 +185,14 @@ const sender = createQwpBrowserSender(
       }
     },
     onError: (event) => console.error("QWP ingress", event.error),
+    onSenderError: (error) =>
+      console.error(
+        "QWP rejection",
+        error.category,
+        error.appliedPolicy,
+        error.fromFsn,
+        error.toFsn,
+      ),
   },
 );
 
@@ -198,9 +206,15 @@ console.info(
 
 Snapshots distinguish the client-session acceptance sequence from persistent
 replay watermarks. With durable ACKs, `replayAcknowledgedFrameSequence`
-advances only after the durable watermark covers a frame. Observer exceptions
-are contained so they cannot fail the session, but callbacks should remain
-lightweight because browser and Node JavaScript share the event loop.
+advances only after the durable watermark covers a frame. Observer callbacks are
+dispatched asynchronously through bounded, drop-oldest inboxes, so they do not run
+inside ACK or reconnect protocol stacks. The metrics snapshot exposes delivered and
+dropped progress, connection, and error notification counters.
+`connectionListenerInboxCapacity` and `errorInboxCapacity` tune the Java-compatible
+64/256 defaults. `onSenderError` receives typed category/policy, wire status, message
+sequence, stable frame-sequence range, and quarantine context. Observer exceptions are
+contained, but CPU-bound callbacks should still move work to a Worker because browser
+and Node JavaScript share the event loop.
 
 When QuestDB authentication is enabled, establish the browser's HttpOnly
 `qdb_session` cookie over REST before opening a QWP WebSocket. A QuestDB REST

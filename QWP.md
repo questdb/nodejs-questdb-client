@@ -182,7 +182,10 @@ contain a dictionary gap or conflict that cannot be reconstructed, the foregroun
 slot is renamed to `<slot>.unreplayable-N`, marked with `.qwp.failed`, and preserved
 for inspection. The sender then starts once with a clean slot at the configured path.
 `onRecoveryQuarantine` receives the original and quarantine paths plus the terminal
-cause; its callback cannot interrupt recovery. Quarantined paths are never adopted by
+cause and a typed `senderError`. The shared `onSenderError` callback receives the same
+`data-loss` / `abandoned` verdict and its `quarantinedPath`. This build-time recovery
+notification is synchronous because no connected sender dispatcher exists yet;
+callback failures cannot interrupt recovery. Quarantined paths are never adopted by
 the orphan scanner. Operational filesystem errors are not quarantined and still fail
 startup, so a temporary permissions or disk problem cannot be mistaken for data
 corruption.
@@ -196,8 +199,9 @@ default). The scanner runs immediately and then every 30 seconds; set
 `.qwp.failed` in the slot so a corrupt or permanently rejected head cannot cause a hot
 retry loop. After inspection or repair, call `retryQwpNodeOrphanSlot(slotDirectory)`
 to make it eligible again. `onOrphanDrainEvent` reports discovery, drain, lock
-contention, quarantine, and scanner failures without allowing callback exceptions to
-interrupt recovery.
+contention, quarantine, and scanner failures through a bounded asynchronous inbox. An
+abandoned slot also reports a typed `data-loss` sender error. Callback exceptions
+cannot interrupt recovery.
 
 A foreground sender retries a symbol-dictionary catch-up entry that is too large for
 the current target forever because a larger-cap node may return. An orphan drainer
@@ -476,6 +480,15 @@ const sender = createQwpNodeSender(
       }
     },
     onError: (event) => console.error("QWP ingress", event.error),
+    onSenderError: (error) => {
+      console.error(
+        "QWP rejection",
+        error.category,
+        error.appliedPolicy,
+        error.fromFsn,
+        error.toFsn,
+      );
+    },
   },
 );
 
@@ -483,10 +496,23 @@ await sender.connect();
 console.info(sender.metrics);
 ```
 
-Callback failures are contained and cannot fail the session. Keep callbacks short;
-Node.js and browsers run them on the JavaScript event loop. The ingress snapshot
-separates client-session sequences from persistent replay watermarks and reports
-published, sent, replayed, acknowledged, durable, reconnect, and error counters.
+Callbacks are placed on bounded asynchronous inboxes and never invoked inside ACK,
+reconnect, or orphan-recovery protocol stacks. Connection events default to 64 retained
+entries and errors to 256; `connectionListenerInboxCapacity` and
+`errorInboxCapacity` (or their snake-case unified-string keys) tune those bounds.
+Overflow drops the oldest pending entry and retains the newest state. Inspect
+`droppedProgressNotifications`, `droppedConnectionNotifications`, and
+`droppedErrorNotifications` in the immutable ingress metrics; non-zero values mean an
+observer is not keeping up. Callback failures are contained. Callbacks still execute on
+the JavaScript event loop, so CPU-bound synchronous work should be moved to an
+application worker.
+
+`onSenderError` is the Java-parity rejection stream. Its immutable payload includes
+`category`, applied policy, raw server status/message, wire message sequence, inclusive
+stable `[fromFsn, toFsn]` correlation range, optional single-table attribution, and
+`quarantinedPath` for abandoned persistent data. The legacy `onError` callback remains
+available for timeouts and general session failures; classified NACK events also expose
+the same payload as `event.senderError`.
 
 ## Egress
 
@@ -751,7 +777,8 @@ durability, a 10 GiB total journal cap, 4 MiB frame/segment batches, a 30-second
 capacity wait, a 60-second close drain, and fail-fast initial connection. Set
 `sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
 The parser also supports `max_name_len`, password-protected `tls_roots`, and the
-Java listener/error inbox capacity keys.
+Java listener/error inbox capacity keys. Those capacities actively bound asynchronous
+connection and typed-error delivery and are reflected in ingress drop counters.
 
 The object form remains available for cases where constructing the two sides
 separately is useful:
@@ -935,8 +962,10 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |
 | Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |
 
-Do not translate Java threading assumptions directly: callbacks, WebSocket delivery,
-and iteration all share the JavaScript event loop.
+Unlike Java's dedicated dispatcher threads, TypeScript callback inboxes schedule work on
+later JavaScript event-loop turns. This keeps user callbacks out of protocol call stacks,
+but CPU-bound callback code still blocks the runtime and belongs in a Worker or
+`worker_threads` task.
 
 ## Public API policy
 

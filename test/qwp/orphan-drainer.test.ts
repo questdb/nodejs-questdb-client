@@ -11,6 +11,11 @@ import {
   scanQwpNodeOrphanSlots,
   type QwpNodeOrphanDrainSession,
 } from "../../src/qwp/node";
+import {
+  QWP_SENDER_ERROR_CATEGORY,
+  QWP_SENDER_ERROR_POLICY,
+  type QwpSenderError,
+} from "../../src/qwp";
 
 class FakeDrainSession implements QwpNodeOrphanDrainSession {
   pendingReplayFrames = 1;
@@ -185,16 +190,36 @@ describe("QWP Node orphan drainer", () => {
     const rootDirectory = await root();
     const directory = await recordSlot(rootDirectory, "corrupt");
     const terminal = new Error("corrupt replay record");
+    const senderErrors: QwpSenderError[] = [];
+    const events: string[] = [];
     const drainer = new QwpNodeOrphanDrainer({
       rootDirectory,
       scanIntervalMs: 0,
       createSession: async () => {
         throw terminal;
       },
+      onEvent: (event) => {
+        if (event.senderError) events.push(event.senderError.category);
+      },
+      onSenderError: (error) => senderErrors.push(error),
     });
     drainer.start();
     await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
     expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    await vi.waitFor(() => expect(events).toEqual(["data-loss"]));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+      serverMessage: terminal.message,
+    });
+    expect(drainer.metrics).toMatchObject({
+      deliveredNotifications: expect.any(Number),
+      droppedNotifications: 0,
+      deliveredErrorNotifications: 1,
+      droppedErrorNotifications: 0,
+    });
     await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
 
     await retryQwpNodeOrphanSlot(directory);

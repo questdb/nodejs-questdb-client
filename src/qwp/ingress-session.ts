@@ -22,8 +22,17 @@ import {
   QwpReplayDictionaryPersistenceError,
 } from "./transport";
 import { QwpReconnectingIngressConnection } from "./internal/reconnecting-ingress-connection";
+import { QwpNotificationDispatcher } from "./internal/notification-dispatcher";
+import {
+  createQwpSenderError,
+  QWP_SENDER_ERROR_POLICY,
+  type QwpSenderError,
+} from "./sender-error";
 
 const QWP_FLAGS_OFFSET = 5;
+const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
+const DEFAULT_ERROR_INBOX_CAPACITY = 256;
+const DEFAULT_PROGRESS_INBOX_CAPACITY = 256;
 
 interface PlannedIngressFrames {
   readonly frames: Uint8Array[];
@@ -181,15 +190,17 @@ export interface QwpIngressSessionOptions {
    */
   durableAckKeepaliveMs?: number;
   /**
-   * Validated Java-compatible connection listener inbox capacity. Reserved
-   * until a connection-listener callback is installed on this session.
+   * Bounded reconnect-listener inbox. Oldest pending events are dropped when
+   * full. Defaults to 64, matching the Java client.
    */
   connectionListenerInboxCapacity?: number;
   /**
-   * Validated Java-compatible async error inbox capacity. Reserved until the
-   * callback dispatcher exposes bounded delivery controls.
+   * Bounded typed/legacy error inbox. Oldest pending errors are dropped when
+   * full. Defaults to 256, matching the Java client.
    */
   errorInboxCapacity?: number;
+  /** Java-parity typed server-rejection and data-loss notifications. */
+  onSenderError?: (error: QwpSenderError) => void;
   onResponse?: (response: QwpIngressResponse) => void;
   onDurableAck?: (response: QwpIngressResponse) => void;
   /** Monotonic send/accept/durability notifications. Callback errors are ignored. */
@@ -238,6 +249,12 @@ export interface QwpIngressMetrics {
   readonly totalReconnectsSucceeded: number;
   readonly totalFailovers: number;
   readonly totalReconnectErrors: number;
+  readonly deliveredProgressNotifications: number;
+  readonly droppedProgressNotifications: number;
+  readonly deliveredConnectionNotifications: number;
+  readonly droppedConnectionNotifications: number;
+  readonly deliveredErrorNotifications: number;
+  readonly droppedErrorNotifications: number;
   /** Stable store-and-forward watermark; absent without reconnect/replay. */
   readonly replayPublishedFrameSequence?: bigint;
   /** Trim watermark; in durable-ACK mode it advances only after durability. */
@@ -260,6 +277,8 @@ export interface QwpIngressErrorEvent {
   readonly terminal: boolean;
   readonly timestampMs: number;
   readonly response?: QwpIngressResponse;
+  /** Present for a classified server rejection. */
+  readonly senderError?: QwpSenderError;
   readonly metrics: QwpIngressMetrics;
 }
 
@@ -285,7 +304,10 @@ interface PendingAcknowledgedSequence {
 }
 
 export class QwpIngressNackError extends Error {
-  constructor(readonly response: QwpIngressResponse) {
+  constructor(
+    readonly response: QwpIngressResponse,
+    readonly senderError: QwpSenderError = createQwpSenderError(response),
+  ) {
     super(
       response.errorMessage ??
         `QuestDB rejected QWP frame [status=0x${response.status.toString(16)}]`,
@@ -417,6 +439,8 @@ export class QwpIngressSession {
   private closePromise?: Promise<void>;
   private readonly closeHooks: (() => void | Promise<void>)[] = [];
   private readonly receiveLoop: Promise<void>;
+  private readonly progressDispatcher?: QwpNotificationDispatcher<() => void>;
+  private readonly errorDispatcher?: QwpNotificationDispatcher<() => void>;
 
   constructor(
     private readonly connection: QwpBinaryConnection,
@@ -443,6 +467,21 @@ export class QwpIngressSession {
       throw error;
     }
     this.localMaxBatchSizeBytes = options.maxBatchSizeBytes;
+    if (options.onResponse || options.onDurableAck || options.onProgress) {
+      this.progressDispatcher = new QwpNotificationDispatcher(
+        (callback) => callback(),
+        DEFAULT_PROGRESS_INBOX_CAPACITY,
+      );
+    }
+    if (
+      options.onError ||
+      (options.onSenderError && !connection.managesIngressSenderErrors)
+    ) {
+      this.errorDispatcher = new QwpNotificationDispatcher(
+        (callback) => callback(),
+        options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
+      );
+    }
     for (const entry of connection.ingressSymbolDictionary ?? []) {
       this.symbolDictionary.addRecovered(entry);
     }
@@ -490,6 +529,10 @@ export class QwpIngressSession {
           options.orphanStoreAndForward,
           options.catchUpCapGapMinEscalationWindowMs,
           initialConnection,
+          options.connectionListenerInboxCapacity ??
+            DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY,
+          options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
+          options.onSenderError,
         )
       : await factory();
     try {
@@ -563,6 +606,20 @@ export class QwpIngressSession {
       totalReconnectsSucceeded: transport?.totalReconnectsSucceeded ?? 0,
       totalFailovers: transport?.totalFailovers ?? 0,
       totalReconnectErrors: transport?.totalReconnectErrors ?? 0,
+      deliveredProgressNotifications:
+        this.progressDispatcher?.metrics.delivered ?? 0,
+      droppedProgressNotifications:
+        this.progressDispatcher?.metrics.dropped ?? 0,
+      deliveredConnectionNotifications:
+        transport?.deliveredConnectionNotifications ?? 0,
+      droppedConnectionNotifications:
+        transport?.droppedConnectionNotifications ?? 0,
+      deliveredErrorNotifications:
+        (transport?.deliveredErrorNotifications ?? 0) +
+        (this.errorDispatcher?.metrics.delivered ?? 0),
+      droppedErrorNotifications:
+        (transport?.droppedErrorNotifications ?? 0) +
+        (this.errorDispatcher?.metrics.dropped ?? 0),
       replayPublishedFrameSequence: transport?.publishedFrameSequence,
       replayAcknowledgedFrameSequence: transport?.acknowledgedFrameSequence,
       pendingReplayFrames: transport?.pendingReplayFrames ?? 0,
@@ -1017,6 +1074,10 @@ export class QwpIngressSession {
       this.receiveLoop,
       ...closeHooks,
     ]);
+    await Promise.all([
+      this.progressDispatcher?.close(),
+      this.errorDispatcher?.close(),
+    ]);
     if (closeResult.status === "rejected") throw closeResult.reason;
   }
 
@@ -1039,11 +1100,11 @@ export class QwpIngressSession {
   }
 
   private handleResponse(response: QwpIngressResponse): void {
-    this.invokeCallback(this.options.onResponse, response);
+    this.dispatchProgressCallback(this.options.onResponse, response);
     if (response.status === QWP_STATUS.DURABLE_ACK) {
       this.totalDurableAcks++;
       const advanced = this.applyDurableAck(response);
-      this.invokeCallback(this.options.onDurableAck, response);
+      this.dispatchProgressCallback(this.options.onDurableAck, response);
       if (advanced) {
         this.emitProgress(
           QWP_INGRESS_PROGRESS_KIND.DURABLE_ACKNOWLEDGED,
@@ -1080,7 +1141,15 @@ export class QwpIngressSession {
 
     this.totalNacks++;
     const pending = this.pending.get(response.sequence);
-    const error = new QwpIngressNackError(response);
+    const fsn = this.connection.getIngressFrameSequence?.(response.sequence);
+    const senderError = createQwpSenderError(response, {
+      appliedPolicy: this.connection.managesIngressSenderErrors
+        ? undefined
+        : QWP_SENDER_ERROR_POLICY.TERMINAL,
+      fromFsn: fsn ?? response.sequence,
+      toFsn: fsn ?? response.sequence,
+    });
+    const error = new QwpIngressNackError(response, senderError);
     if (
       !this.acknowledgementRejection ||
       response.sequence < this.acknowledgementRejection.sequence
@@ -1096,7 +1165,7 @@ export class QwpIngressSession {
     const dictionaryGap =
       this.deltaSymbolsPublished &&
       response.status === QWP_STATUS.DICTIONARY_GAP;
-    this.recordError(error, dictionaryGap, response);
+    this.recordError(error, dictionaryGap, response, senderError);
     if (dictionaryGap) {
       // This wire cannot repair a missing prefix without reconnect catch-up.
       this.fail(error, true);
@@ -1104,16 +1173,12 @@ export class QwpIngressSession {
     }
   }
 
-  private invokeCallback<T>(
+  private dispatchProgressCallback<T>(
     callback: ((event: T) => void) | undefined,
     event: T,
   ): void {
-    if (!callback) return;
-    try {
-      callback(event);
-    } catch {
-      // Observability callbacks must not break protocol progress.
-    }
+    if (!callback || !this.progressDispatcher) return;
+    this.progressDispatcher.offer(() => safelyInvoke(callback, event));
   }
 
   private emitProgress(
@@ -1121,7 +1186,7 @@ export class QwpIngressSession {
     sequence?: bigint,
     response?: QwpIngressResponse,
   ): void {
-    this.invokeCallback(this.options.onProgress, {
+    this.dispatchProgressCallback(this.options.onProgress, {
       kind,
       timestampMs: Date.now(),
       sequence,
@@ -1134,6 +1199,7 @@ export class QwpIngressSession {
     error: unknown,
     terminal: boolean,
     response?: QwpIngressResponse,
+    senderError?: QwpSenderError,
   ): Error {
     const observed =
       error instanceof Error
@@ -1141,12 +1207,19 @@ export class QwpIngressSession {
         : new Error(`QWP ingress failed: ${error}`);
     this.lastError = observed;
     this.totalErrors++;
-    this.invokeCallback(this.options.onError, {
+    const event: QwpIngressErrorEvent = {
       error: observed,
       terminal,
       timestampMs: Date.now(),
       response,
+      senderError,
       metrics: this.metrics,
+    };
+    this.errorDispatcher?.offer(() => {
+      safelyInvoke(this.options.onError, event);
+      if (senderError && !this.connection.managesIngressSenderErrors) {
+        safelyInvoke(this.options.onSenderError, senderError);
+      }
     });
     return observed;
   }
@@ -1327,5 +1400,25 @@ export class QwpIngressSession {
       pending.reject(error);
     }
     this.acknowledgedSequenceWaiters.clear();
+  }
+}
+
+function safelyInvoke<T>(
+  callback: ((event: T) => void) | undefined,
+  event: T,
+): void {
+  if (!callback) return;
+  try {
+    const result = (callback as (value: T) => unknown)(event);
+    if (
+      result !== null &&
+      (typeof result === "object" || typeof result === "function") &&
+      "catch" in result &&
+      typeof result.catch === "function"
+    ) {
+      void result.catch(() => undefined);
+    }
+  } catch {
+    // Observability callbacks must not break protocol progress.
   }
 }

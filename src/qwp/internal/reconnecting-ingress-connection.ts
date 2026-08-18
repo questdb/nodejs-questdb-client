@@ -36,6 +36,12 @@ import {
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
+import { QwpNotificationDispatcher } from "./notification-dispatcher";
+import {
+  createQwpProtocolViolationSenderError,
+  createQwpSenderError,
+  type QwpSenderError,
+} from "../sender-error";
 
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
@@ -175,6 +181,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly poisonMinEscalationWindowMs: number;
   private readonly catchUpCapGapMinEscalationWindowMs: number;
   private readonly localMaxBatchSizeBytes?: number;
+  private readonly connectionDispatcher?: QwpNotificationDispatcher<QwpReconnectEvent>;
+  private readonly errorDispatcher?: QwpNotificationDispatcher<QwpSenderError>;
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   private connection?: QwpBinaryConnection;
   private connectingCandidate?: QwpBinaryConnection;
@@ -215,6 +223,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private deltaSymbolDictionaryEnabled: boolean;
   readonly messages: AsyncIterable<Uint8Array> = this.messagesQueue;
   readonly closed: Promise<QwpConnectionCloseInfo>;
+  readonly managesIngressSenderErrors = true;
   ping?: () => Promise<void>;
 
   private constructor(
@@ -228,6 +237,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     private readonly backgroundStoreAndForward = false,
     private readonly orphanStoreAndForward = false,
     catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
+    connectionListenerInboxCapacity = 64,
+    errorInboxCapacity = 256,
+    onSenderError?: (error: QwpSenderError) => void,
   ) {
     this.store = store;
     this.symbolDictionary = [...symbolDictionary];
@@ -245,6 +257,18 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       reconnectOptions.poisonMinEscalationWindowMs ?? 5_000;
     this.catchUpCapGapMinEscalationWindowMs =
       catchUpCapGapMinEscalationWindowMs;
+    if (reconnectOptions.onEvent) {
+      this.connectionDispatcher = new QwpNotificationDispatcher(
+        reconnectOptions.onEvent,
+        connectionListenerInboxCapacity,
+      );
+    }
+    if (onSenderError) {
+      this.errorDispatcher = new QwpNotificationDispatcher(
+        onSenderError,
+        errorInboxCapacity,
+      );
+    }
     validateReconnectPolicy(
       this.maxAttempts,
       this.initialBackoffMs,
@@ -294,6 +318,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     orphanStoreAndForward = false,
     catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
     initialConnection?: Promise<QwpBinaryConnection>,
+    connectionListenerInboxCapacity = 64,
+    errorInboxCapacity = 256,
+    onSenderError?: (error: QwpSenderError) => void,
   ): Promise<QwpReconnectingIngressConnection> {
     const store = replayStore ?? new QwpMemoryReplayStore();
     let connection: QwpReconnectingIngressConnection | undefined;
@@ -327,6 +354,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         backgroundStoreAndForward,
         orphanStoreAndForward,
         catchUpCapGapMinEscalationWindowMs,
+        connectionListenerInboxCapacity,
+        errorInboxCapacity,
+        onSenderError,
       );
       await connection.retireRecoveredDiscardTailIfReady();
       if (
@@ -411,7 +441,20 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       totalFailovers: this.totalFailovers,
       totalReconnectErrors: this.totalReconnectErrors,
       totalServerNacks: this.totalServerNacks,
+      deliveredConnectionNotifications:
+        this.connectionDispatcher?.metrics.delivered ?? 0,
+      droppedConnectionNotifications:
+        this.connectionDispatcher?.metrics.dropped ?? 0,
+      deliveredErrorNotifications: this.errorDispatcher?.metrics.delivered ?? 0,
+      droppedErrorNotifications: this.errorDispatcher?.metrics.dropped ?? 0,
     });
+  }
+
+  getIngressFrameSequence(clientSequence: bigint): bigint | undefined {
+    for (const frame of this.frames.values()) {
+      if (frame.clientSequence === clientSequence) return frame.frameSequence;
+    }
+    return undefined;
   }
 
   send(payload: Uint8Array): Promise<void> {
@@ -505,6 +548,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     try {
       await this.closeStore();
     } finally {
+      await Promise.all([
+        this.connectionDispatcher?.close(),
+        this.errorDispatcher?.close(),
+      ]);
       this.settleClosed(closeInfo);
     }
   }
@@ -857,6 +904,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (this.wireFrames.length === 0) {
       if (response.status === QWP_STATUS.OK) return undefined;
       this.totalServerNacks++;
+      const pending = this.pendingFsnRange();
+      this.emitSenderError(
+        createQwpSenderError(response, {
+          messageSequence: response.sequence ?? undefined,
+          fromFsn: pending?.from,
+          toFsn: pending?.to,
+        }),
+      );
       if (isRetriableIngressStatus(response.status)) {
         throw new RetriableIngressNackError(
           -1n,
@@ -910,6 +965,16 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
 
     this.totalServerNacks++;
+    const pending = frame.dictionaryCatchup
+      ? this.pendingFsnRange()
+      : undefined;
+    this.emitSenderError(
+      createQwpSenderError(response, {
+        messageSequence: response.sequence,
+        fromFsn: pending?.from ?? frame.frameSequence,
+        toFsn: pending?.to ?? frame.frameSequence,
+      }),
+    );
 
     if (isRetriableIngressStatus(response.status)) {
       const exempt =
@@ -923,6 +988,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         );
       }
       if (this.recordPoisonStrike(frame.frameSequence)) {
+        this.emitSenderError(
+          createQwpProtocolViolationSenderError(
+            `frame remained rejected after ${this.poisonStrikes} attempts${
+              response.errorMessage ? `: ${response.errorMessage}` : ""
+            }`,
+            frame.frameSequence,
+          ),
+        );
         throw new QwpReplayRejectedError(
           frame.frameSequence,
           response.status,
@@ -1026,9 +1099,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       const closeDetail = closeInfo
         ? `code=${closeInfo.code}, reason=${closeInfo.reason}`
         : "transport ended without an orderly close";
-      return new QwpProtocolError(
-        `QWP ingress frame repeatedly caused a non-orderly connection loss [frameSequence=${head.frameSequence}, strikes=${this.poisonStrikes}, ${closeDetail}]`,
+      const message = `QWP ingress frame repeatedly caused a non-orderly connection loss [frameSequence=${head.frameSequence}, strikes=${this.poisonStrikes}, ${closeDetail}]`;
+      this.emitSenderError(
+        createQwpProtocolViolationSenderError(
+          message,
+          head.frameSequence,
+          this.nextFrameSequence - 1n,
+        ),
       );
+      return new QwpProtocolError(message);
     }
     return new RetriableIngressConnectionError(
       cappedExponentialBackoff(
@@ -1264,11 +1343,23 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {
-    try {
-      this.reconnectOptions.onEvent?.({ ...event, timestampMs: Date.now() });
-    } catch {
-      // Connection observers must not interfere with replay progress.
-    }
+    this.connectionDispatcher?.offer({
+      ...event,
+      timestampMs: Date.now(),
+    });
+  }
+
+  private emitSenderError(error: QwpSenderError): void {
+    this.errorDispatcher?.offer(error);
+  }
+
+  private pendingFsnRange(): { from: bigint; to: bigint } | undefined {
+    const iterator = this.frames.keys();
+    const first = iterator.next();
+    if (first.done) return undefined;
+    let to = first.value;
+    for (const frameSequence of iterator) to = frameSequence;
+    return { from: first.value, to };
   }
 
   private throwIfUnavailable(): void {

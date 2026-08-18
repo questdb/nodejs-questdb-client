@@ -23,6 +23,8 @@ import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_INGRESS_PROGRESS_KIND,
   QWP_STATUS,
+  QWP_SENDER_ERROR_CATEGORY,
+  QWP_SENDER_ERROR_POLICY,
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,
   QwpBatchTooLargeError,
@@ -38,6 +40,7 @@ import {
   QwpIngressNackError,
   QwpIngressSession,
   QwpIngressSessionClosedError,
+  type QwpSenderError,
   QwpTableBuffer,
   QwpSendClosedError,
   QwpSendTimeoutError,
@@ -1839,6 +1842,7 @@ describe("QwpIngressSession", () => {
     socket.open();
     const progress: string[] = [];
     const errors: { terminal: boolean; message: string }[] = [];
+    const senderErrors: QwpSenderError[] = [];
     const session = new QwpIngressSession(await connecting, {
       durableAckKeepaliveMs: 0,
       onProgress: (event) => progress.push(event.kind),
@@ -1849,6 +1853,7 @@ describe("QwpIngressSession", () => {
         });
         throw new Error("observer failure must be contained");
       },
+      onSenderError: (error) => senderErrors.push(error),
     });
     socket.onSend = () => {
       const sequence = BigInt(socket.sent.length - 1);
@@ -1874,6 +1879,9 @@ describe("QwpIngressSession", () => {
       name: "QwpIngressNackError",
     });
 
+    await vi.waitFor(() => expect(progress).toHaveLength(4));
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
     expect(progress).toEqual([
       QWP_INGRESS_PROGRESS_KIND.PUBLISHED,
       QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED,
@@ -1881,6 +1889,15 @@ describe("QwpIngressSession", () => {
       QWP_INGRESS_PROGRESS_KIND.PUBLISHED,
     ]);
     expect(errors).toEqual([{ terminal: false, message: "write failed" }]);
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.WRITE_ERROR,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.TERMINAL,
+      serverStatusByte: QWP_STATUS.WRITE_ERROR,
+      serverMessage: "write failed",
+      messageSequence: 1n,
+      fromFsn: 1n,
+      toFsn: 1n,
+    });
     expect(session.metrics).toMatchObject({
       publishedSequence: 1n,
       acknowledgedSequence: 0n,

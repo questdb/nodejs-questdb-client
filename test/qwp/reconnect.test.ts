@@ -32,10 +32,13 @@ import {
   QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_SERVER_ROLE,
   QWP_STATUS,
+  QWP_SENDER_ERROR_CATEGORY,
+  QWP_SENDER_ERROR_POLICY,
   QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpByteWriter,
   QwpConnectionCloseInfo,
+  type QwpSenderError,
   QwpEgressSession,
   QwpEgressSessionClosedError,
   QwpIngressSession,
@@ -1202,6 +1205,7 @@ describe("QWP ingress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
+    const senderErrors: QwpSenderError[] = [];
     const session = await QwpIngressSession.connect(
       async () => {
         const connection = connections.shift();
@@ -1209,6 +1213,7 @@ describe("QWP ingress reconnect and replay", () => {
         return connection;
       },
       {
+        onSenderError: (error) => senderErrors.push(error),
         reconnect: {
           maxAttempts: 1,
           initialBackoffMs: 0,
@@ -1226,12 +1231,23 @@ describe("QWP ingress reconnect and replay", () => {
       status: QWP_STATUS.OK,
       sequence: 0n,
     });
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.WRITE_ERROR,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.RETRIABLE,
+      serverStatusByte: QWP_STATUS.WRITE_ERROR,
+      messageSequence: 0n,
+      fromFsn: 0n,
+      toFsn: 0n,
+    });
     expect(session.metrics).toMatchObject({
       totalNacks: 1,
       totalFramesSent: 2,
       totalFramesReplayed: 1,
       totalReconnectAttempts: 1,
       totalReconnectsSucceeded: 1,
+      deliveredErrorNotifications: 1,
+      droppedErrorNotifications: 0,
     });
     await session.close();
   });

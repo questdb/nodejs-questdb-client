@@ -44,6 +44,7 @@ import type {
   QwpEgressViewQuery,
   QwpIngressSession,
   QwpIngressSessionOptions,
+  QwpSenderError,
   QwpQueryLease,
   QwpResultBatchView,
   QwpResultBatchViewHandler,
@@ -172,6 +173,16 @@ const egressSessionOptionsContract: QwpEgressSessionOptions = {
 
 const fixedConnectionIngressContract: QwpIngressSessionOptions = {
   reconnect: false,
+  connectionListenerInboxCapacity: 64,
+  errorInboxCapacity: 256,
+  onSenderError: (error: QwpSenderError) =>
+    void [
+      error.category,
+      error.appliedPolicy,
+      error.fromFsn,
+      error.toFsn,
+      error.quarantinedPath,
+    ],
 };
 
 const fixedConnectionEgressContract: QwpEgressSessionOptions = {

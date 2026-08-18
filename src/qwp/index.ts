@@ -11,4 +11,5 @@ export * from "./client";
 export * from "./egress-session";
 export * from "./ingress-session";
 export * from "./sender";
+export * from "./sender-error";
 export * from "./transport";

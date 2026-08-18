@@ -36,6 +36,10 @@ import {
 } from "./transport";
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
+import {
+  createQwpDataLossSenderError,
+  type QwpSenderError,
+} from "./sender-error";
 import { QwpSender, QwpSenderOptions } from "./sender";
 import { QwpClient, QwpClientPoolOptions } from "./client";
 import {
@@ -214,6 +218,7 @@ export interface QwpNodeReplayRecoveryEvent {
   readonly directory: string;
   readonly quarantineDirectory: string;
   readonly error: QwpReplayStoreQuarantinedError;
+  readonly senderError: QwpSenderError;
 }
 
 /** Node store-and-forward controls layered on the crash-safe replay journal. */
@@ -580,7 +585,11 @@ async function connectQwpNodeIngressInternal(
       storeAndForward.directory,
       error,
     );
-    emitReplayRecoveryQuarantine(storeAndForward, recoveryError);
+    emitReplayRecoveryQuarantine(
+      storeAndForward,
+      recoveryError,
+      effectiveSessionOptions.onSenderError,
+    );
     replayStore = new QwpNodeFileReplayStore(storeAndForward);
     session = await QwpIngressSession.connect(connectionFactory, {
       ...effectiveSessionOptions,
@@ -604,21 +613,36 @@ function isQuarantinableReplayRecoveryError(error: unknown): boolean {
 function emitReplayRecoveryQuarantine(
   options: QwpNodeStoreAndForwardOptions,
   error: QwpReplayStoreQuarantinedError,
+  onSenderError?: (error: QwpSenderError) => void,
 ): void {
+  const senderError = createQwpDataLossSenderError(
+    error.message,
+    error.quarantineDirectory,
+  );
   const event: QwpNodeReplayRecoveryEvent = {
     timestampMs: Date.now(),
     directory: error.directory,
     quarantineDirectory: error.quarantineDirectory,
     error,
+    senderError,
   };
-  if (!options.onRecoveryQuarantine) {
+  if (!options.onRecoveryQuarantine && !onSenderError) {
     log("error", error);
     return;
   }
+  let callbackFailed = false;
   try {
-    options.onRecoveryQuarantine(event);
+    options.onRecoveryQuarantine?.(event);
   } catch {
-    // Recovery already succeeded. A notification callback must not brick the
+    callbackFailed = true;
+  }
+  try {
+    onSenderError?.(senderError);
+  } catch {
+    callbackFailed = true;
+  }
+  if (callbackFailed) {
+    // Recovery already succeeded. Notification callbacks must not brick the
     // fresh producer slot; fall back to the default logger instead.
     log("error", error);
   }
@@ -920,6 +944,9 @@ function createNodeOrphanDrainer(
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : 0,
     onEvent: storeAndForward.onOrphanDrainEvent,
+    onSenderError: sessionOptions.onSenderError,
+    eventInboxCapacity: sessionOptions.connectionListenerInboxCapacity,
+    errorInboxCapacity: sessionOptions.errorInboxCapacity,
     createSession: (directory) =>
       connectQwpNodeIngressInternal(
         {

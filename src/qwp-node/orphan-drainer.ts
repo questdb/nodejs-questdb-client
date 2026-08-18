@@ -8,11 +8,18 @@ import {
   isQwpNodeReplayQuarantineSlotName,
   QwpReplayStoreLockedError,
 } from "./file-replay-store";
+import { QwpNotificationDispatcher } from "../qwp/internal/notification-dispatcher";
+import {
+  createQwpDataLossSenderError,
+  type QwpSenderError,
+} from "../qwp/sender-error";
 
 const RECORD_SUFFIX = ".qwp";
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_SCAN_INTERVAL_MS = 30_000;
 const DEFAULT_PROGRESS_POLL_MS = 50;
+const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
+const DEFAULT_ERROR_INBOX_CAPACITY = 256;
 
 /** A terminal orphan-drain failure marker. Remove it to retry the slot. */
 export const QWP_ORPHAN_FAILED_SENTINEL = ".qwp.failed";
@@ -34,6 +41,8 @@ export interface QwpNodeOrphanDrainEvent {
   readonly timestampMs: number;
   readonly directory?: string;
   readonly error?: Error;
+  /** Present when a failed slot has been abandoned behind its sentinel. */
+  readonly senderError?: QwpSenderError;
   readonly metrics: QwpNodeOrphanDrainerMetrics;
 }
 
@@ -46,6 +55,10 @@ export interface QwpNodeOrphanDrainerMetrics {
   readonly locked: number;
   readonly failed: number;
   readonly scanFailures: number;
+  readonly deliveredNotifications: number;
+  readonly droppedNotifications: number;
+  readonly deliveredErrorNotifications: number;
+  readonly droppedErrorNotifications: number;
   readonly closing: boolean;
   readonly closed: boolean;
 }
@@ -78,6 +91,12 @@ export interface QwpNodeOrphanDrainerOptions {
   /** Durable-ACK prompt cadence for adopted sessions. Zero disables it. */
   durableAckPollIntervalMs?: number;
   onEvent?: (event: QwpNodeOrphanDrainEvent) => void;
+  /** Java-parity data-loss notification for an abandoned orphan slot. */
+  onSenderError?: (error: QwpSenderError) => void;
+  /** Bounded lifecycle-event inbox. Defaults to 64. */
+  eventInboxCapacity?: number;
+  /** Bounded data-loss inbox. Defaults to 256. */
+  errorInboxCapacity?: number;
 }
 
 /**
@@ -149,7 +168,8 @@ export class QwpNodeOrphanDrainer {
   private readonly maxConcurrent: number;
   private readonly scanIntervalMs: number;
   private readonly durableAckPollIntervalMs: number;
-  private readonly onEvent?: (event: QwpNodeOrphanDrainEvent) => void;
+  private readonly eventDispatcher?: QwpNotificationDispatcher<QwpNodeOrphanDrainEvent>;
+  private readonly errorDispatcher?: QwpNotificationDispatcher<QwpSenderError>;
   private readonly known = new Set<string>();
   private readonly queue: string[] = [];
   private readonly active = new Map<string, QwpNodeOrphanDrainSession>();
@@ -194,13 +214,33 @@ export class QwpNodeOrphanDrainer {
         "QWP orphan-drain durableAckPollIntervalMs must be a non-negative finite number",
       );
     }
+    for (const [name, value] of [
+      ["eventInboxCapacity", options.eventInboxCapacity],
+      ["errorInboxCapacity", options.errorInboxCapacity],
+    ] as const) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+        throw new RangeError(`${name} must be a positive safe integer`);
+      }
+    }
     this.rootDirectory = rootDirectory;
     this.excludeSlot = options.excludeSlot;
     this.createSession = options.createSession;
     this.maxConcurrent = maxConcurrent;
     this.scanIntervalMs = scanIntervalMs;
     this.durableAckPollIntervalMs = durableAckPollIntervalMs;
-    this.onEvent = options.onEvent;
+    if (options.onEvent) {
+      this.eventDispatcher = new QwpNotificationDispatcher(
+        options.onEvent,
+        options.eventInboxCapacity ??
+          DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY,
+      );
+    }
+    if (options.onSenderError) {
+      this.errorDispatcher = new QwpNotificationDispatcher(
+        options.onSenderError,
+        options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
+      );
+    }
   }
 
   get metrics(): QwpNodeOrphanDrainerMetrics {
@@ -213,6 +253,10 @@ export class QwpNodeOrphanDrainer {
       locked: this.locked,
       failed: this.failed,
       scanFailures: this.scanFailures,
+      deliveredNotifications: this.eventDispatcher?.metrics.delivered ?? 0,
+      droppedNotifications: this.eventDispatcher?.metrics.dropped ?? 0,
+      deliveredErrorNotifications: this.errorDispatcher?.metrics.delivered ?? 0,
+      droppedErrorNotifications: this.errorDispatcher?.metrics.dropped ?? 0,
       closing: this.closing,
       closed: this.closed,
     });
@@ -364,6 +408,10 @@ export class QwpNodeOrphanDrainer {
     );
     await Promise.allSettled(Array.from(this.workers));
     this.known.clear();
+    await Promise.all([
+      this.eventDispatcher?.close(),
+      this.errorDispatcher?.close(),
+    ]);
     this.closed = true;
   }
 
@@ -372,17 +420,19 @@ export class QwpNodeOrphanDrainer {
     directory?: string,
     error?: Error,
   ): void {
-    try {
-      this.onEvent?.({
-        kind,
-        timestampMs: Date.now(),
-        directory,
-        error,
-        metrics: this.metrics,
-      });
-    } catch {
-      // Observers must not interfere with durable recovery.
-    }
+    const senderError =
+      kind === QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED && directory && error
+        ? createQwpDataLossSenderError(error.message, directory)
+        : undefined;
+    this.eventDispatcher?.offer({
+      kind,
+      timestampMs: Date.now(),
+      directory,
+      error,
+      senderError,
+      metrics: this.metrics,
+    });
+    if (senderError) this.errorDispatcher?.offer(senderError);
   }
 }
 

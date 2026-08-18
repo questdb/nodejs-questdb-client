@@ -15,6 +15,8 @@ import {
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
   QWP_SERVER_ROLE,
+  QWP_SENDER_ERROR_CATEGORY,
+  QWP_SENDER_ERROR_POLICY,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,
@@ -23,6 +25,7 @@ import {
   QwpReplayStoreCorruptionError,
   QwpReplayStoreQuarantinedError,
   QwpUpgradeError,
+  type QwpSenderError,
   writeQwpVarint,
 } from "../../src/qwp/node";
 
@@ -448,16 +451,25 @@ describe("QWP Node transport", () => {
     await writeFile(join(directory, record), Uint8Array.of(0));
 
     const events: QwpReplayStoreQuarantinedError[] = [];
+    const senderErrors: QwpSenderError[] = [];
     const address = server.address() as AddressInfo;
     try {
-      const session = await connectQwpNodeIngress({
-        url: `ws://127.0.0.1:${address.port}/write/v4`,
-        storeAndForward: {
-          directory,
-          initialConnectMode: "sync",
-          onRecoveryQuarantine: (event) => events.push(event.error),
+      const session = await connectQwpNodeIngress(
+        {
+          url: `ws://127.0.0.1:${address.port}/write/v4`,
+          storeAndForward: {
+            directory,
+            initialConnectMode: "sync",
+            onRecoveryQuarantine: (event) => {
+              events.push(event.error);
+              expect(event.senderError.quarantinedPath).toBe(
+                event.quarantineDirectory,
+              );
+            },
+          },
         },
-      });
+        { onSenderError: (error) => senderErrors.push(error) },
+      );
       try {
         await expect(
           session.sendFrame(Uint8Array.of(2)),
@@ -474,6 +486,12 @@ describe("QWP Node transport", () => {
       expect(events[0]).toBeInstanceOf(QwpReplayStoreQuarantinedError);
       expect(events[0].cause).toBeInstanceOf(QwpReplayStoreCorruptionError);
       expect(events[0].quarantineDirectory).toBe(quarantineDirectory);
+      expect(senderErrors).toHaveLength(1);
+      expect(senderErrors[0]).toMatchObject({
+        category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+        appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+        quarantinedPath: quarantineDirectory,
+      });
       expect(await readdir(quarantineDirectory)).toEqual(
         expect.arrayContaining([record, ".qwp.failed"]),
       );

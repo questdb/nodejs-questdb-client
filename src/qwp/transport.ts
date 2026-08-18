@@ -189,6 +189,10 @@ export interface QwpIngressTransportMetrics {
   readonly totalFailovers: number;
   readonly totalReconnectErrors: number;
   readonly totalServerNacks: number;
+  readonly deliveredConnectionNotifications?: number;
+  readonly droppedConnectionNotifications?: number;
+  readonly deliveredErrorNotifications?: number;
+  readonly droppedErrorNotifications?: number;
 }
 
 export const QWP_RECONNECT_EVENT_KIND = {
@@ -438,11 +442,16 @@ export interface QwpBinaryConnection {
   readonly ingressSymbolDictionary?: readonly string[];
   /** @internal False after replay dictionary persistence becomes unavailable. */
   readonly ingressDeltaSymbolDictionaryEnabled?: boolean;
+  /** @internal True when the transport dispatches typed sender errors itself. */
+  readonly managesIngressSenderErrors?: boolean;
   /** Endpoint backing this connection, when supplied by its adapter. */
   readonly endpoint?: string | URL;
 
   /** @internal Physical delivery metrics exposed by replaying transports. */
   getIngressMetrics?(): QwpIngressTransportMetrics;
+
+  /** @internal Resolves a session sequence to its stable replay FSN. */
+  getIngressFrameSequence?(clientSequence: bigint): bigint | undefined;
 
   /**
    * @internal Marks this endpoint as temporarily unsuitable and asks a stateful
