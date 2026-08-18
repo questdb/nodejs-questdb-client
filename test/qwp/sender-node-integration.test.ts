@@ -129,4 +129,72 @@ describe("Sender QWP integration", () => {
       await sender.close();
     }
   });
+
+  it("publishes pending rows and drains their ACK on close", async () => {
+    const frames: Uint8Array[] = [];
+    let ackSent = false;
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Max-Batch-Size: 1048576");
+    });
+    server.on("connection", (socket) => {
+      socket.on("message", (payload) => {
+        frames.push(new Uint8Array(payload as Buffer));
+        setTimeout(() => {
+          ackSent = true;
+          socket.send(okResponse(0n, "events"));
+        }, 25);
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+    const { port } = server.address() as AddressInfo;
+
+    const sender = await Sender.fromConfig(
+      `ws::addr=127.0.0.1:${port};auto_flush=off;close_flush_timeout_millis=1000`,
+    );
+    await sender.connect();
+    await sender.table("events").intColumn("value", 42).atNow();
+
+    await expect(sender.close()).resolves.toBeUndefined();
+    expect(frames).toHaveLength(1);
+    expect(ackSent).toBe(true);
+    expect(sender.acknowledgedSequence).toBe(0n);
+  });
+
+  it("closes the socket and reports a bounded close-drain timeout", async () => {
+    const frames: Uint8Array[] = [];
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Max-Batch-Size: 1048576");
+    });
+    server.on("connection", (socket) => {
+      socket.on("message", (payload) => {
+        frames.push(new Uint8Array(payload as Buffer));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+    const { port } = server.address() as AddressInfo;
+
+    const sender = await Sender.fromConfig(
+      `ws::addr=127.0.0.1:${port};auto_flush=off;close_flush_timeout_millis=25`,
+    );
+    await sender.connect();
+    await sender.table("events").intColumn("value", 42).atNow();
+
+    await expect(sender.close()).rejects.toMatchObject({
+      name: "QwpSenderCloseTimeoutError",
+      timeoutMs: 25,
+      targetSequence: 0n,
+      acknowledgedSequence: -1n,
+    });
+    expect(frames).toHaveLength(1);
+  });
 });

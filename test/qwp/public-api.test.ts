@@ -36,6 +36,7 @@ const sharedRuntimeContract = [
   "QwpQueryLease",
   "QwpSendTimeoutError",
   "QwpSender",
+  "QwpSenderCloseTimeoutError",
   "QwpUpgradeError",
 ] as const;
 

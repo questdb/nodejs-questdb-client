@@ -828,6 +828,31 @@ describe("Configuration string parser suite", function () {
     );
   });
 
+  it("parses close_flush_timeout_millis only for QWP WebSocket", async function () {
+    let options = await SenderOptions.fromConfig(
+      "ws::addr=host:9000;close_flush_timeout_millis=123;",
+    );
+    expect(options.close_flush_timeout_millis).toBe(123);
+
+    options = await SenderOptions.fromConfig(
+      "wss::addr=host:9000;close_flush_timeout_millis=0;",
+    );
+    expect(options.close_flush_timeout_millis).toBe(0);
+
+    await expect(
+      SenderOptions.fromConfig(
+        "ws::addr=host:9000;close_flush_timeout_millis=-1;",
+      ),
+    ).rejects.toThrow("Invalid close flush timeout option: -1");
+    await expect(
+      SenderOptions.fromConfig(
+        "http::addr=host:9000;close_flush_timeout_millis=123;",
+      ),
+    ).rejects.toThrow(
+      "close_flush_timeout_millis is only supported for QWP ws/wss transport",
+    );
+  });
+
   it("can parse auto_flush_interval config", async function () {
     let options = await SenderOptions.fromConfig(
       "http::addr=host:9000;protocol_version=2;auto_flush_interval=30",

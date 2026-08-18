@@ -129,6 +129,9 @@ type DeprecatedOptions = {
  * When set to 0, interval-based flushing is disabled. <br>
  * Note that the setting is checked only when a new row is added to the buffer. There is no timer registered to flush the buffer automatically.
  * </li>
+ * <li> close_flush_timeout_millis: <i>integer</i> - Maximum time QWP close waits for committed rows to be acknowledged.
+ * Defaults to 5000; 0 publishes pending rows but skips the ACK drain. This option is supported by ws/wss only.
+ * </li>
  * </ul>
  * <br>
  * Buffer sizing options
@@ -183,6 +186,7 @@ class SenderOptions {
   auto_flush_rows?: number;
   auto_flush_bytes?: number;
   auto_flush_interval?: number;
+  close_flush_timeout_millis?: number;
 
   request_min_throughput?: number;
   request_timeout?: number;
@@ -385,6 +389,7 @@ function parseConfigurationString(
   parseAddress(options);
   parseBufferSizes(options);
   parseAutoFlushOptions(options);
+  parseCloseFlushOptions(options);
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
@@ -446,6 +451,7 @@ const ValidConfigKeys = [
   "auto_flush_rows",
   "auto_flush_bytes",
   "auto_flush_interval",
+  "close_flush_timeout_millis",
   "request_min_throughput",
   "request_timeout",
   "retry_timeout",
@@ -606,6 +612,19 @@ function parseAutoFlushOptions(options: SenderOptions) {
     );
   }
   parseInteger(options, "auto_flush_interval", "auto flush interval", 0);
+}
+
+function parseCloseFlushOptions(options: SenderOptions) {
+  parseInteger(options, "close_flush_timeout_millis", "close flush timeout", 0);
+  if (
+    options.close_flush_timeout_millis !== undefined &&
+    options.protocol !== WS &&
+    options.protocol !== WSS
+  ) {
+    throw new Error(
+      "close_flush_timeout_millis is only supported for QWP ws/wss transport",
+    );
+  }
 }
 
 function parseTlsOptions(options: SenderOptions) {

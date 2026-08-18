@@ -8,7 +8,10 @@ import {
   utf8Length,
   type QwpArrayValue,
 } from "./core";
-import type { QwpIngressMetrics } from "./ingress-session";
+import {
+  QwpIngressAckTimeoutError,
+  type QwpIngressMetrics,
+} from "./ingress-session";
 
 export type QwpTimestampUnit = "ns" | "us" | "ms";
 
@@ -50,9 +53,35 @@ export interface QwpSenderOptions {
   /** Wait for durable upload after every successful ingress ACK. */
   awaitDurableAck?: boolean;
   durableAckTimeoutMs?: number;
+  /**
+   * Maximum time close() spends publishing queued rows and waiting for the
+   * server ACK watermark. Zero skips the drain. Defaults to 5 seconds.
+   */
+  closeFlushTimeoutMs?: number;
   /** QWP frame encoding options supported by the high-level sender. */
   encode?: QwpSenderEncodeOptions;
   log?: QwpSenderLogger;
+}
+
+/** close() could not publish and acknowledge all committed ingress frames. */
+export class QwpSenderCloseTimeoutError extends Error {
+  readonly timeoutMs: number;
+  readonly targetSequence: bigint;
+  readonly acknowledgedSequence: bigint;
+
+  constructor(
+    timeoutMs: number,
+    targetSequence: bigint,
+    acknowledgedSequence: bigint,
+  ) {
+    super(
+      `QWP sender close timed out after ${timeoutMs}ms [targetSequence=${targetSequence}, acknowledgedSequence=${acknowledgedSequence}]; pending data may be lost`,
+    );
+    this.name = "QwpSenderCloseTimeoutError";
+    this.timeoutMs = timeoutMs;
+    this.targetSequence = targetSequence;
+    this.acknowledgedSequence = acknowledgedSequence;
+  }
 }
 
 /** The subset of QwpIngressSession used by QwpSender. */
@@ -140,6 +169,7 @@ interface QwpSenderFlushResult {
 const DEFAULT_AUTO_FLUSH_ROWS = 1_000;
 const DEFAULT_AUTO_FLUSH_BYTES = 0;
 const DEFAULT_AUTO_FLUSH_INTERVAL_MS = 100;
+const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
 
 function validateNonNegativeInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -383,6 +413,7 @@ export class QwpSender {
   private totalFlushes = 0;
   private totalFlushFailures = 0;
   private totalTransactionsCommitted = 0;
+  private lastCommitBoundarySequence = -1n;
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
@@ -390,6 +421,7 @@ export class QwpSender {
   private readonly autoFlushIntervalMs: number;
   private readonly transactional: boolean;
   private readonly awaitServerAck: boolean;
+  private readonly closeFlushTimeoutMs: number;
   private readonly log: QwpSenderLogger;
 
   constructor(
@@ -403,9 +435,12 @@ export class QwpSender {
       options.autoFlushIntervalMs ?? DEFAULT_AUTO_FLUSH_INTERVAL_MS;
     this.transactional = options.transactional ?? false;
     this.awaitServerAck = options.awaitServerAck ?? true;
+    this.closeFlushTimeoutMs =
+      options.closeFlushTimeoutMs ?? DEFAULT_CLOSE_FLUSH_TIMEOUT_MS;
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
     validateNonNegativeInteger(this.autoFlushBytes, "autoFlushBytes");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
+    validateNonNegativeInteger(this.closeFlushTimeoutMs, "closeFlushTimeoutMs");
     if (
       options.durableAckTimeoutMs !== undefined &&
       (!Number.isFinite(options.durableAckTimeoutMs) ||
@@ -978,27 +1013,79 @@ export class QwpSender {
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
-    // Let a flush already queued in this turn enter getSession() so it can be
-    // cancelled through the session instead of making close wait for its ACK.
-    await Promise.resolve();
-    let sessionClose: Promise<void> | undefined;
-    let sessionFailure: { reason: unknown } | undefined;
-    if (this.sessionPromise) {
-      try {
-        const session = await this.sessionPromise;
-        try {
-          sessionClose = session.close();
-        } catch (error) {
-          sessionClose = Promise.reject(error);
+    const deadline =
+      this.closeFlushTimeoutMs > 0
+        ? Date.now() + this.closeFlushTimeoutMs
+        : undefined;
+    let terminalError: unknown;
+
+    try {
+      // Serialize behind public flushes so symbol dictionaries, transaction
+      // boundaries, and staging ownership cannot race. close() itself uses a
+      // publication-only flush and applies one bounded ACK watermark wait.
+      const closeFlush = this.flushTail.then(async () => {
+        if (
+          this.pendingRowCount === 0 &&
+          (this.transactional || !this.hasDeferredMessages)
+        ) {
+          return;
         }
-      } catch (error) {
-        sessionFailure = { reason: error };
+        try {
+          await this.flushNow(this.transactional, true);
+        } catch (error) {
+          this.totalFlushFailures++;
+          throw error;
+        }
+      });
+      await this.withCloseDeadline(closeFlush, deadline);
+
+      const session = this.activeSession;
+      const target = this.lastCommitBoundarySequence;
+      if (
+        deadline !== undefined &&
+        session &&
+        target >= 0n &&
+        sessionAcknowledgedSequence(session) < target
+      ) {
+        if (!session.waitForAcknowledged) {
+          throw new Error(
+            "this QWP ingress session does not expose an ACK watermark",
+          );
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw this.closeTimeoutError();
+        try {
+          await this.withCloseDeadline(
+            session.waitForAcknowledged(target, remaining),
+            deadline,
+          );
+        } catch (error) {
+          if (error instanceof QwpIngressAckTimeoutError) {
+            throw this.closeTimeoutError();
+          }
+          throw error;
+        }
       }
+    } catch (error) {
+      terminalError = error;
     }
-    const [, closeResult] = await Promise.allSettled([
-      this.flushTail,
-      sessionClose ?? Promise.resolve(),
-    ]);
+
+    let closeError: unknown;
+    const session = this.activeSession;
+    if (session) {
+      try {
+        await session.close();
+      } catch (error) {
+        closeError = error;
+      }
+    } else if (this.sessionPromise) {
+      // A close deadline can expire while the connection factory is still in
+      // flight. Attach cleanup so a late connection cannot leak its socket.
+      void this.sessionPromise
+        .then((connected) => connected.close())
+        .catch(() => undefined);
+    }
+
     if (this.pendingRowCount > 0 || this.currentRow.size > 0) {
       this.log(
         "warn",
@@ -1008,12 +1095,49 @@ export class QwpSender {
     if (this.hasDeferredMessages) {
       this.log(
         "warn",
-        `QWP sender is closing with ${this.deferredRowCount} auto-flushed row(s) awaiting commit; QuestDB will roll the open transaction back`,
+        `QWP sender is closing with ${this.deferredRowCount} deferred row(s) awaiting commit; QuestDB will roll the open transaction back`,
       );
     }
     this.closed = true;
-    if (sessionFailure) throw sessionFailure.reason;
-    if (closeResult.status === "rejected") throw closeResult.reason;
+    if (terminalError !== undefined) {
+      if (closeError !== undefined) {
+        this.log(
+          "error",
+          closeError instanceof Error ? closeError : String(closeError),
+        );
+      }
+      throw terminalError;
+    }
+    if (closeError !== undefined) throw closeError;
+  }
+
+  private closeTimeoutError(): QwpSenderCloseTimeoutError {
+    const session = this.activeSession;
+    return new QwpSenderCloseTimeoutError(
+      this.closeFlushTimeoutMs,
+      this.lastCommitBoundarySequence,
+      session ? sessionAcknowledgedSequence(session) : -1n,
+    );
+  }
+
+  private async withCloseDeadline<T>(
+    operation: Promise<T>,
+    deadline: number | undefined,
+  ): Promise<T> {
+    if (deadline === undefined) return operation;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw this.closeTimeoutError();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(this.closeTimeoutError()), remaining);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private fixedDecimalColumn(
@@ -1178,6 +1302,10 @@ export class QwpSender {
           );
         });
     }
+    publishedSequence = advancedSequence(
+      beforeSequence,
+      sessionPublishedSequence(session),
+    );
     this.totalFlushes++;
     // Publication-only Node store-and-forward transfers row ownership only
     // after every frame is durable locally. A disk-capacity or I/O failure
@@ -1204,6 +1332,9 @@ export class QwpSender {
       "debug",
       `${deferCommit ? "Auto-flushing" : "Flushing"} ${sentRows} QWP row(s)${deferCommit ? " with commit deferred" : ""}`,
     );
+    if (!deferCommit && publishedSequence >= 0n) {
+      this.lastCommitBoundarySequence = publishedSequence;
+    }
 
     if (deferCommit) {
       this.hasDeferredMessages = true;
@@ -1223,10 +1354,19 @@ export class QwpSender {
     this.deferredRowCount = 0;
     const ack = response ? await response : undefined;
     if (response) {
-      publishedSequence = advancedSequence(
+      const observedSequence = advancedSequence(
         beforeSequence,
         sessionPublishedSequence(session),
       );
+      publishedSequence =
+        observedSequence >= 0n
+          ? observedSequence
+          : typeof ack?.sequence === "bigint"
+            ? ack.sequence
+            : -1n;
+    }
+    if (publishedSequence >= 0n) {
+      this.lastCommitBoundarySequence = publishedSequence;
     }
     if (!publicationOnly && deferredAcks.length > 0) {
       await Promise.all(deferredAcks);

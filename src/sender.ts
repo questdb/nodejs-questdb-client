@@ -270,8 +270,9 @@ class Sender {
   }
 
   /**
-   * Closes the connection to the database. <br>
-   * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
+   * Closes the connection to the database. QWP publishes completed rows and
+   * performs a bounded acknowledgement drain first. Other transports retain
+   * their legacy behavior and require an explicit flush().
    */
   async close(): Promise<void> {
     if (this.qwpSender) return this.qwpSender.close();
@@ -571,6 +572,9 @@ function createConfiguredQwpSender(
       autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
         ? options.auto_flush_interval
         : configuredSender.autoFlushIntervalMs,
+      closeFlushTimeoutMs: isInteger(options.close_flush_timeout_millis, 0)
+        ? options.close_flush_timeout_millis
+        : configuredSender.closeFlushTimeoutMs,
       log: logger,
     },
     options.qwp?.session,

@@ -232,7 +232,10 @@ otherwise it follows ordinary protocol OK responses. A deadline failure raises
 Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` or
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to
 assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`, or
-`ms` timestamp. `close()` does not flush pending rows.
+`ms` timestamp. `close()` publishes completed rows and waits for the committed-frame
+ACK watermark for up to `closeFlushTimeoutMs` (5 seconds by default). Set it to `0`
+to publish without the ACK drain. An unfinished row is still discarded with a warning.
+The configuration-string equivalent is `close_flush_timeout_millis`.
 
 `autoFlushBytes` is a soft threshold over estimated raw column-buffer storage and is
 disabled by default (`0`). It combines with `autoFlushRows` and
@@ -344,8 +347,8 @@ await sender.commit();
 ```
 
 Transactions are atomic per table, not across all tables in one flush. Closing a
-sender with uncommitted transactional auto-flushes rolls the open server transaction
-back. The sender logs a warning in this case.
+sender publishes locally staged transactional rows but does not implicitly commit;
+QuestDB rolls the open server transaction back. The sender logs a warning in this case.
 
 In browsers, durable ACK capability is negotiated with a WebSocket subprotocol;
 Node.js uses upgrade headers. Setting `awaitDurableAck` automatically requests the
@@ -622,6 +625,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpClientClosedError`             | The pooled client or an individual returned lease is already closed                                         |
 | `QwpDurableAckUnavailableError`    | Durable acknowledgement was required but not negotiated                                                     |
 | `QwpSendTimeoutError`              | A send did not drain before its deadline; delivery is unknown                                               |
+| `QwpSenderCloseTimeoutError`       | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
 | `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |
 | `QwpIngressAckTimeoutError`        | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
 | `QwpBatchTooLargeError`            | One encoded row cannot fit the effective ingress cap                                                        |
@@ -637,8 +641,9 @@ The public error classes preserve enough context for policy decisions:
 | `QwpEgressQueryCancelTimeoutError` | A cancelled query did not produce a terminal server response before the drain deadline                      |
 | `QwpEgressReplayRequiredError`     | Re-execution needs an explicit reset callback                                                               |
 
-Always close senders and sessions in `finally`. Closing is idempotent and bounded by
-`closeTimeoutMs`. `connectTimeoutMs`, `sendTimeoutMs`, acknowledgement timeouts, and
+Always close senders and sessions in `finally`. Sender publication plus ACK draining is
+bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
+by `closeTimeoutMs`. `connectTimeoutMs`, `sendTimeoutMs`, acknowledgement timeouts, and
 query deadlines cover separate lifecycle phases; configure each according to the
 deployment rather than using one very large catch-all value.
 

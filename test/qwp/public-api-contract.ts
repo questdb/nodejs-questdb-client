@@ -149,6 +149,7 @@ const qwpExtraOptionsContract: QwpExtraOptions = {
   sender: {
     transactional: true,
     autoFlushBytes: 4 * 1024 * 1024,
+    closeFlushTimeoutMs: 5_000,
     awaitDurableAck: true,
   },
   session: {
