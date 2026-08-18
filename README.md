@@ -126,6 +126,7 @@ const sender = await connectQwpBrowserSender(
   { url },
   {
     autoFlushRows: 10_000,
+    autoFlushBytes: 4 * 1024 * 1024,
     transactional: true,
   },
 );

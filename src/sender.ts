@@ -565,6 +565,9 @@ function createConfiguredQwpSender(
       autoFlushRows: isInteger(options.auto_flush_rows, 0)
         ? options.auto_flush_rows
         : configuredSender.autoFlushRows,
+      autoFlushBytes: isInteger(options.auto_flush_bytes, 0)
+        ? options.auto_flush_bytes
+        : configuredSender.autoFlushBytes,
       autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
         ? options.auto_flush_interval
         : configuredSender.autoFlushIntervalMs,

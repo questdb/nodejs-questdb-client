@@ -83,6 +83,7 @@ const sender = await Sender.fromConfig(
       sender: {
         awaitDurableAck: true,
         autoFlushRows: 10_000,
+        autoFlushBytes: 4 * 1024 * 1024,
       },
       session: {
         reconnect: {
@@ -185,6 +186,7 @@ const sender = await connectQwpNodeSender(
   },
   {
     autoFlushRows: 5_000,
+    autoFlushBytes: 4 * 1024 * 1024,
     autoFlushIntervalMs: 1_000,
     encode: { symbolDictionary: "delta", gorilla: true },
   },
@@ -231,6 +233,17 @@ Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` 
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to
 assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`, or
 `ms` timestamp. `close()` does not flush pending rows.
+
+`autoFlushBytes` is a soft threshold over estimated raw column-buffer storage and is
+disabled by default (`0`). It combines with `autoFlushRows` and
+`autoFlushIntervalMs`: reaching any enabled threshold flushes after the completed row,
+so one row of overshoot is possible. Once connected, an enabled byte threshold is
+clamped to 90% of the server-advertised batch cap. Schema and symbol-dictionary
+overhead make this an estimate; exact encoded-size enforcement and automatic frame
+splitting remain the ingress session's responsibility. `sender.metrics.pendingBytes`
+and `sender.metrics.effectiveAutoFlushBytes` expose the live estimate and applied
+threshold. Configuration strings use `auto_flush_bytes=N`; `off` is equivalent to
+zero.
 
 The sender automatically maintains connection-scoped symbol IDs, emits dictionary
 deltas, tracks acknowledgements, and splits multi-row batches at the smaller of the

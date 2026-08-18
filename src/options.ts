@@ -122,6 +122,9 @@ type DeprecatedOptions = {
  * <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
  * The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
  * </li>
+ * <li> auto_flush_bytes: <i>integer or off</i> - QWP WebSocket buffered-byte threshold. Defaults to off. <br>
+ * Reaching the threshold flushes after the completed row. This option is supported by ws/wss only.
+ * </li>
  * <li> auto_flush_interval: <i>integer</i> - The number of milliseconds that will trigger a flush, default value is 1000.
  * When set to 0, interval-based flushing is disabled. <br>
  * Note that the setting is checked only when a new row is added to the buffer. There is no timer registered to flush the buffer automatically.
@@ -178,6 +181,7 @@ class SenderOptions {
 
   auto_flush?: boolean;
   auto_flush_rows?: number;
+  auto_flush_bytes?: number;
   auto_flush_interval?: number;
 
   request_min_throughput?: number;
@@ -440,6 +444,7 @@ const ValidConfigKeys = [
   "token_y",
   "auto_flush",
   "auto_flush_rows",
+  "auto_flush_bytes",
   "auto_flush_interval",
   "request_min_throughput",
   "request_timeout",
@@ -586,6 +591,20 @@ function parseBufferSizes(options: SenderOptions) {
 function parseAutoFlushOptions(options: SenderOptions) {
   parseBoolean(options, "auto_flush", "auto flush");
   parseInteger(options, "auto_flush_rows", "auto flush rows", 0);
+  if ((options.auto_flush_bytes as unknown) === OFF) {
+    options.auto_flush_bytes = 0;
+  } else {
+    parseInteger(options, "auto_flush_bytes", "auto flush bytes", 0);
+  }
+  if (
+    options.auto_flush_bytes !== undefined &&
+    options.protocol !== WS &&
+    options.protocol !== WSS
+  ) {
+    throw new Error(
+      "auto_flush_bytes is only supported for QWP ws/wss transport",
+    );
+  }
   parseInteger(options, "auto_flush_interval", "auto flush interval", 0);
 }
 

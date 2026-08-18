@@ -807,6 +807,27 @@ describe("Configuration string parser suite", function () {
     ).rejects.toThrow("Invalid auto flush rows option, not a number: '1w23'");
   });
 
+  it("parses auto_flush_bytes only for QWP WebSocket", async function () {
+    let options = await SenderOptions.fromConfig(
+      "ws::addr=host:9000;auto_flush_bytes=123;",
+    );
+    expect(options.auto_flush_bytes).toBe(123);
+
+    options = await SenderOptions.fromConfig(
+      "wss::addr=host:9000;auto_flush_bytes=off;",
+    );
+    expect(options.auto_flush_bytes).toBe(0);
+
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host:9000;auto_flush_bytes=-1;"),
+    ).rejects.toThrow("Invalid auto flush bytes option: -1");
+    await expect(
+      SenderOptions.fromConfig("http::addr=host:9000;auto_flush_bytes=123;"),
+    ).rejects.toThrow(
+      "auto_flush_bytes is only supported for QWP ws/wss transport",
+    );
+  });
+
   it("can parse auto_flush_interval config", async function () {
     let options = await SenderOptions.fromConfig(
       "http::addr=host:9000;protocol_version=2;auto_flush_interval=30",

@@ -96,4 +96,37 @@ describe("Sender QWP integration", () => {
       ).getUint32(0, true),
     ).toBe(QWP_MAGIC);
   });
+
+  it("honors auto_flush_bytes from the ws:: configuration string", async () => {
+    const frames: Uint8Array[] = [];
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Max-Batch-Size: 1048576");
+    });
+    server.on("connection", (socket) => {
+      socket.on("message", (payload) => {
+        frames.push(new Uint8Array(payload as Buffer));
+        socket.send(okResponse(BigInt(frames.length - 1), "events"));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+    const { port } = server.address() as AddressInfo;
+
+    const sender = await Sender.fromConfig(
+      `ws::addr=127.0.0.1:${port};auto_flush_rows=0;auto_flush_interval=0;auto_flush_bytes=8`,
+    );
+    try {
+      await sender.connect();
+      await sender.table("events").intColumn("value", 42).atNow();
+
+      expect(frames).toHaveLength(1);
+      await expect(sender.flush()).resolves.toBe(false);
+    } finally {
+      await sender.close();
+    }
+  });
 });

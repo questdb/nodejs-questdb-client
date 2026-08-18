@@ -5,6 +5,8 @@ import {
   QwpIngressResponse,
   QwpTableBuffer,
   flattenQwpArray,
+  utf8Length,
+  type QwpArrayValue,
 } from "./core";
 import type { QwpIngressMetrics } from "./ingress-session";
 
@@ -25,6 +27,12 @@ export interface QwpSenderEncodeOptions
 export interface QwpSenderOptions {
   autoFlush?: boolean;
   autoFlushRows?: number;
+  /**
+   * Soft threshold for estimated buffered column bytes. Zero disables the byte
+   * trigger. Defaults to zero and is clamped below a connected server's batch
+   * cap; exact encoded frames remain subject to the protocol batch limit.
+   */
+  autoFlushBytes?: number;
   autoFlushIntervalMs?: number;
   /**
    * Keep auto-flushed rows in an open server-side transaction. An explicit
@@ -50,6 +58,7 @@ export interface QwpSenderOptions {
 /** The subset of QwpIngressSession used by QwpSender. */
 export interface QwpSenderSession {
   readonly metrics?: QwpIngressMetrics;
+  readonly maxBatchSizeBytes?: number;
   readonly publishedFrameSequence?: bigint;
   readonly acknowledgedFrameSequence?: bigint;
   sendTables(
@@ -90,6 +99,10 @@ export interface QwpSenderMetrics {
   readonly totalFlushFailures: number;
   readonly totalTransactionsCommitted: number;
   readonly pendingRows: number;
+  /** Estimated raw column-buffer bytes currently staged. */
+  readonly pendingBytes: number;
+  readonly autoFlushBytes: number;
+  readonly effectiveAutoFlushBytes: number;
   readonly deferredRows: number;
   readonly connected: boolean;
   readonly closing: boolean;
@@ -107,11 +120,16 @@ interface StagedColumn {
 
 interface StagedTable {
   name: string;
-  rows: Map<string, StagedColumn>[];
+  rows: StagedRow[];
   schema: Map<
     string,
     Pick<StagedColumn, "type" | "geohashPrecision" | "decimalScale">
   >;
+}
+
+interface StagedRow {
+  readonly columns: Map<string, StagedColumn>;
+  readonly estimatedBytes: number;
 }
 
 interface QwpSenderFlushResult {
@@ -120,6 +138,7 @@ interface QwpSenderFlushResult {
 }
 
 const DEFAULT_AUTO_FLUSH_ROWS = 1_000;
+const DEFAULT_AUTO_FLUSH_BYTES = 0;
 const DEFAULT_AUTO_FLUSH_INTERVAL_MS = 100;
 
 function validateNonNegativeInteger(value: number, name: string): void {
@@ -216,6 +235,52 @@ function fitsSigned(value: bigint, bits: number): boolean {
   return BigInt.asIntN(bits, value) === value;
 }
 
+/** Mirrors the Java QWP sender's raw column-buffer byte accounting. */
+function stagedColumnBytes(column: StagedColumn): number {
+  switch (column.type) {
+    case QWP_COLUMN_TYPE.BOOLEAN:
+    case QWP_COLUMN_TYPE.BYTE:
+      return 1;
+    case QWP_COLUMN_TYPE.SHORT:
+    case QWP_COLUMN_TYPE.CHAR:
+      return 2;
+    case QWP_COLUMN_TYPE.INT:
+    case QWP_COLUMN_TYPE.FLOAT:
+    case QWP_COLUMN_TYPE.IPV4:
+    case QWP_COLUMN_TYPE.SYMBOL:
+      return 4;
+    case QWP_COLUMN_TYPE.LONG:
+    case QWP_COLUMN_TYPE.DOUBLE:
+    case QWP_COLUMN_TYPE.TIMESTAMP:
+    case QWP_COLUMN_TYPE.TIMESTAMP_NANOS:
+    case QWP_COLUMN_TYPE.DATE:
+    case QWP_COLUMN_TYPE.DECIMAL64:
+    case QWP_COLUMN_TYPE.GEOHASH:
+      return 8;
+    case QWP_COLUMN_TYPE.UUID:
+    case QWP_COLUMN_TYPE.DECIMAL128:
+      return 16;
+    case QWP_COLUMN_TYPE.LONG256:
+    case QWP_COLUMN_TYPE.DECIMAL256:
+      return 32;
+    case QWP_COLUMN_TYPE.VARCHAR:
+      return 4 + utf8Length(column.value as string);
+    case QWP_COLUMN_TYPE.BINARY:
+      return 4 + (column.value as Uint8Array).byteLength;
+    case QWP_COLUMN_TYPE.DOUBLE_ARRAY:
+    case QWP_COLUMN_TYPE.LONG_ARRAY: {
+      const array = column.value as QwpArrayValue;
+      return array.values.length * 8;
+    }
+  }
+}
+
+function stagedRowBytes(columns: ReadonlyMap<string, StagedColumn>): number {
+  let bytes = 0;
+  for (const column of columns.values()) bytes += stagedColumnBytes(column);
+  return bytes;
+}
+
 function decimalType(value: bigint, scale: number): QwpColumnType {
   if (scale <= 18 && fitsSigned(value, 64)) return QWP_COLUMN_TYPE.DECIMAL64;
   if (scale <= 38 && fitsSigned(value, 128)) return QWP_COLUMN_TYPE.DECIMAL128;
@@ -302,6 +367,7 @@ export class QwpSender {
   private current?: StagedTable;
   private currentRow = new Map<string, StagedColumn>();
   private pendingRowCount = 0;
+  private pendingByteCount = 0;
   private lastFlushTime = Date.now();
   private sessionPromise?: Promise<QwpSenderSession>;
   private activeSession?: QwpSenderSession;
@@ -320,6 +386,7 @@ export class QwpSender {
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
+  private readonly autoFlushBytes: number;
   private readonly autoFlushIntervalMs: number;
   private readonly transactional: boolean;
   private readonly awaitServerAck: boolean;
@@ -331,11 +398,13 @@ export class QwpSender {
   ) {
     this.autoFlush = options.autoFlush ?? true;
     this.autoFlushRows = options.autoFlushRows ?? DEFAULT_AUTO_FLUSH_ROWS;
+    this.autoFlushBytes = options.autoFlushBytes ?? DEFAULT_AUTO_FLUSH_BYTES;
     this.autoFlushIntervalMs =
       options.autoFlushIntervalMs ?? DEFAULT_AUTO_FLUSH_INTERVAL_MS;
     this.transactional = options.transactional ?? false;
     this.awaitServerAck = options.awaitServerAck ?? true;
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
+    validateNonNegativeInteger(this.autoFlushBytes, "autoFlushBytes");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
     if (
       options.durableAckTimeoutMs !== undefined &&
@@ -366,6 +435,9 @@ export class QwpSender {
       totalFlushFailures: this.totalFlushFailures,
       totalTransactionsCommitted: this.totalTransactionsCommitted,
       pendingRows: this.pendingRowCount,
+      pendingBytes: this.pendingByteCount,
+      autoFlushBytes: this.autoFlushBytes,
+      effectiveAutoFlushBytes: this.effectiveAutoFlushByteThreshold(),
       deferredRows: this.deferredRowCount,
       connected:
         this.activeSession !== undefined && !this.closing && !this.closed,
@@ -1000,12 +1072,17 @@ export class QwpSender {
 
   private finishRow(): void {
     const table = this.requireTable();
-    table.rows.push(this.currentRow);
+    const estimatedBytes = stagedRowBytes(this.currentRow);
+    table.rows.push({ columns: this.currentRow, estimatedBytes });
     this.currentRow = new Map();
     this.current = undefined;
     this.pendingRowCount++;
+    this.pendingByteCount += estimatedBytes;
     this.totalRowsStaged++;
-    this.log("debug", `Pending QWP row count: ${this.pendingRowCount}`);
+    this.log(
+      "debug",
+      `Pending QWP rows: ${this.pendingRowCount}, estimated bytes: ${this.pendingByteCount}`,
+    );
   }
 
   private requireTable(): StagedTable {
@@ -1021,10 +1098,12 @@ export class QwpSender {
   }
 
   private async tryFlush(): Promise<void> {
+    const byteThreshold = this.effectiveAutoFlushByteThreshold();
     if (
       this.autoFlush &&
       this.pendingRowCount > 0 &&
       ((this.autoFlushRows > 0 && this.pendingRowCount >= this.autoFlushRows) ||
+        (byteThreshold > 0 && this.pendingByteCount >= byteThreshold) ||
         (this.autoFlushIntervalMs > 0 &&
           Date.now() - this.lastFlushTime >= this.autoFlushIntervalMs))
     ) {
@@ -1109,7 +1188,16 @@ export class QwpSender {
       (count, item) => count + item.rows.length,
       0,
     );
+    const sentBytes = snapshots.reduce(
+      (total, item) =>
+        total +
+        item.rows.reduce((tableTotal, row) => {
+          return tableTotal + row.estimatedBytes;
+        }, 0),
+      0,
+    );
     this.pendingRowCount -= sentRows;
+    this.pendingByteCount -= sentBytes;
     this.totalRowsPublished += sentRows;
     this.lastFlushTime = Date.now();
     this.log(
@@ -1152,13 +1240,10 @@ export class QwpSender {
     return { flushed: true, sequence: publishedSequence };
   }
 
-  private buildTable(
-    name: string,
-    rows: readonly Map<string, StagedColumn>[],
-  ): QwpTableBuffer {
+  private buildTable(name: string, rows: readonly StagedRow[]): QwpTableBuffer {
     const result = new QwpTableBuffer(name);
     for (const row of rows) {
-      for (const column of row.values()) {
+      for (const column of row.columns.values()) {
         const target = result.getOrCreateColumn(column.name, column.type);
         if (!target) continue;
         if (column.geohashPrecision !== undefined) {
@@ -1193,7 +1278,18 @@ export class QwpSender {
 
   private resetAutoFlush(): void {
     this.pendingRowCount = 0;
+    this.pendingByteCount = 0;
     this.lastFlushTime = Date.now();
+  }
+
+  private effectiveAutoFlushByteThreshold(): number {
+    if (this.autoFlushBytes === 0) return 0;
+    const cap = this.activeSession?.maxBatchSizeBytes;
+    if (cap === undefined || !Number.isSafeInteger(cap) || cap <= 0) {
+      return this.autoFlushBytes;
+    }
+    const safeServerBudget = Math.max(1, Math.floor((cap * 9) / 10));
+    return Math.min(this.autoFlushBytes, safeServerBudget);
   }
 
   private throwIfClosed(): void {

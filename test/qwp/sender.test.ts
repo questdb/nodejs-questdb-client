@@ -168,6 +168,22 @@ function column(table: QwpTableBuffer, name: string) {
 }
 
 describe("QWP high-level sender", () => {
+  it("validates the byte auto-flush threshold", () => {
+    const session = new RecordingSession();
+    expect(
+      () =>
+        new QwpSender(async () => session, {
+          autoFlushBytes: -1,
+        }),
+    ).toThrow(/autoFlushBytes must be a non-negative safe integer/);
+    expect(
+      () =>
+        new QwpSender(async () => session, {
+          autoFlushBytes: 1.5,
+        }),
+    ).toThrow(/autoFlushBytes must be a non-negative safe integer/);
+  });
+
   it("returns a publication sequence and waits for its ACK independently", async () => {
     const session = new WatermarkSession();
     const sender = new QwpSender(async () => session, {
@@ -416,6 +432,110 @@ describe("QWP high-level sender", () => {
     expect(session.sends).toHaveLength(1);
     expect(session.durable).toHaveLength(1);
     await expect(sender.flush()).resolves.toBe(false);
+  });
+
+  it("auto-flushes by estimated buffered bytes", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 0,
+      autoFlushBytes: 16,
+      autoFlushIntervalMs: 0,
+    });
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    expect(session.sends).toHaveLength(0);
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 1,
+      pendingBytes: 8,
+      autoFlushBytes: 16,
+      effectiveAutoFlushBytes: 16,
+    });
+
+    await sender.table("events").longColumn("value", 2n).atNow();
+    expect(session.sends).toHaveLength(1);
+    expect(session.sends[0].tables[0].rowCount).toBe(2);
+    expect(sender.metrics).toMatchObject({ pendingRows: 0, pendingBytes: 0 });
+    await sender.close();
+  });
+
+  it("counts variable-width values by UTF-8 and binary payload bytes", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 0,
+      autoFlushBytes: 13,
+      autoFlushIntervalMs: 0,
+    });
+
+    await sender
+      .table("events")
+      .stringColumn("message", "é")
+      .binaryColumn("payload", Uint8Array.of(1, 2, 3))
+      .atNow();
+
+    expect(session.sends).toHaveLength(1);
+    expect(sender.metrics.pendingBytes).toBe(0);
+    await sender.close();
+  });
+
+  it("clamps an enabled byte trigger below the connected server batch cap", async () => {
+    const session = Object.assign(new RecordingSession(), {
+      maxBatchSizeBytes: 20,
+    });
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 0,
+      autoFlushBytes: 100,
+      autoFlushIntervalMs: 0,
+    });
+    await sender.connect();
+    expect(sender.metrics.effectiveAutoFlushBytes).toBe(18);
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await sender.table("events").longColumn("value", 2n).atNow();
+    expect(session.sends).toHaveLength(0);
+    await sender.table("events").longColumn("value", 3n).atNow();
+    expect(session.sends).toHaveLength(1);
+    expect(session.sends[0].tables[0].rowCount).toBe(3);
+    await sender.close();
+  });
+
+  it("does not let a server batch cap enable an opted-out byte trigger", async () => {
+    const session = Object.assign(new RecordingSession(), {
+      maxBatchSizeBytes: 20,
+    });
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 0,
+      autoFlushBytes: 0,
+      autoFlushIntervalMs: 0,
+    });
+    await sender.connect();
+    expect(sender.metrics.effectiveAutoFlushBytes).toBe(0);
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    expect(session.sends).toHaveLength(0);
+    expect(sender.metrics).toMatchObject({ pendingRows: 1, pendingBytes: 8 });
+    await sender.flush();
+    await sender.close();
+  });
+
+  it("preserves pending byte accounting when publication fails", async () => {
+    const session = new PublishingSession();
+    session.failPublication = true;
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 0,
+      autoFlushBytes: 8,
+      autoFlushIntervalMs: 0,
+      awaitServerAck: false,
+    });
+
+    await expect(
+      sender.table("events").longColumn("value", 1n).atNow(),
+    ).rejects.toThrow("journal is full");
+    expect(sender.metrics).toMatchObject({ pendingRows: 1, pendingBytes: 8 });
+
+    session.failPublication = false;
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(sender.metrics).toMatchObject({ pendingRows: 0, pendingBytes: 0 });
+    await sender.close();
   });
 
   it("defers transactional auto-flush and commits without waiting on its withheld ACK", async () => {
