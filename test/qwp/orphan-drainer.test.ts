@@ -92,6 +92,9 @@ describe("QWP Node orphan drainer", () => {
   it("finds record-bearing child slots while excluding live and failed slots", async () => {
     const rootDirectory = await root();
     const orphan = await recordSlot(rootDirectory, "orphan");
+    const segmented = join(rootDirectory, "segmented");
+    await mkdir(segmented);
+    await writeFile(join(segmented, "00000000000000000000.qwps"), "segment");
     await recordSlot(rootDirectory, "live");
     const failed = await recordSlot(rootDirectory, "failed");
     await writeFile(join(failed, QWP_ORPHAN_FAILED_SENTINEL), "inspect me");
@@ -100,7 +103,7 @@ describe("QWP Node orphan drainer", () => {
 
     await expect(
       scanQwpNodeOrphanSlots(rootDirectory, (name) => name === "live"),
-    ).resolves.toEqual([orphan]);
+    ).resolves.toEqual([orphan, segmented]);
     await expect(
       scanQwpNodeOrphanSlots(join(rootDirectory, "missing")),
     ).resolves.toEqual([]);

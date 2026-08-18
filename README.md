@@ -87,6 +87,25 @@ await sender.flush();
 await sender.close();
 ```
 
+Node.js also supports fire-and-forget QWP-over-UDP through the same API:
+
+```typescript
+const sender = await Sender.fromConfig(
+  "udp::addr=239.1.2.3:9007;max_datagram_size=1400;multicast_ttl=1",
+);
+await sender.connect();
+await sender
+  .table("trades")
+  .symbol("symbol", "ETH-USD")
+  .floatColumn("price", 2615.54)
+  .atNow();
+await sender.close();
+```
+
+UDP datagrams are self-contained and split at row boundaries. UDP has no
+authentication, acknowledgements, transactions, retry, or store-and-forward and is
+not available in browsers. See the QWP guide for the lower-level Node UDP API.
+
 When Node QWP is configured with `qwp.webSocket.storeAndForward`, the sender
 can start and accept flushes while QuestDB is offline. `flush()` then resolves
 after local durable journal publication and a background drainer reconnects
@@ -98,6 +117,9 @@ budget settings without an explicit mode promotes initial startup to `"sync"`,
 matching the Java client. The configuration-string
 equivalent is `initial_connect_retry`, used together with the store-and-forward
 options in `extraOptions.qwp`.
+Persistent frames are coalesced into bounded 4 MiB segments by default, with a
+checksummed ACK cursor for partially acknowledged segments. Existing file-per-frame
+replay directories remain readable and are migrated naturally as new frames arrive.
 Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
 the Node client scans and drains slots left by failed producer processes with bounded
 concurrency. Pooled QWP clients recover out-of-range `sender-N` slots automatically,

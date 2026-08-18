@@ -53,6 +53,10 @@ import {
   QwpNodeOrphanDrainer,
   type QwpNodeOrphanDrainEvent,
 } from "../qwp-node/orphan-drainer";
+import {
+  QwpNodeUdpSession,
+  type QwpNodeUdpOptions,
+} from "../qwp-node/udp-sender";
 
 export {
   QWP_SF_BACKPRESSURE_POLICY,
@@ -80,6 +84,15 @@ export {
   retryQwpNodeOrphanSlot,
   scanQwpNodeOrphanSlots,
 } from "../qwp-node/orphan-drainer";
+export {
+  QwpNodeUdpSession,
+  QwpUdpDatagramTooLargeError,
+} from "../qwp-node/udp-sender";
+export type {
+  QwpNodeUdpMetrics,
+  QwpNodeUdpOptions,
+  QwpNodeUdpSocketLike,
+} from "../qwp-node/udp-sender";
 export type {
   QwpNodeOrphanDrainEvent,
   QwpNodeOrphanDrainEventKind,
@@ -690,6 +703,57 @@ export async function connectQwpNodeSender(
   const sender = createQwpNodeSender(options, senderOptions, sessionOptions);
   await sender.connect();
   return sender;
+}
+
+/** Opens a Node IPv4 UDP socket for fire-and-forget QWP ingress. */
+export function connectQwpNodeUdp(
+  options: QwpNodeUdpOptions,
+): Promise<QwpNodeUdpSession> {
+  return QwpNodeUdpSession.connect(options);
+}
+
+/**
+ * Creates a fluent Node QWP-over-UDP sender without opening its socket yet.
+ * UDP has no authentication, server ACK, durable ACK, transaction, retry, or
+ * store-and-forward semantics.
+ */
+export function createQwpNodeUdpSender(
+  options: QwpNodeUdpOptions,
+  senderOptions: QwpSenderOptions = {},
+): QwpSender {
+  validateUdpSenderOptions(senderOptions);
+  return new QwpSender(() => connectQwpNodeUdp(options), {
+    ...senderOptions,
+    autoFlushBytes:
+      senderOptions.autoFlushBytes ?? options.maxDatagramSize ?? 1_400,
+    transactional: false,
+    awaitServerAck: true,
+    awaitDurableAck: false,
+    encode: {
+      ...senderOptions.encode,
+      gorilla: false,
+      symbolDictionary: "full",
+    },
+  });
+}
+
+/** Opens a Node UDP socket and returns a fluent fire-and-forget QWP sender. */
+export async function connectQwpNodeUdpSender(
+  options: QwpNodeUdpOptions,
+  senderOptions: QwpSenderOptions = {},
+): Promise<QwpSender> {
+  const sender = createQwpNodeUdpSender(options, senderOptions);
+  await sender.connect();
+  return sender;
+}
+
+function validateUdpSenderOptions(options: QwpSenderOptions): void {
+  if (options.transactional) {
+    throw new RangeError("QWP UDP does not support transactions");
+  }
+  if (options.awaitDurableAck) {
+    throw new RangeError("QWP UDP does not support durable acknowledgements");
+  }
 }
 
 /** Opens a Node WebSocket and waits for the egress SERVER_INFO handshake. */

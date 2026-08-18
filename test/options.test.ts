@@ -70,36 +70,39 @@ describe("Configuration string parser suite", function () {
     options = await SenderOptions.fromConfig("wss::addr=host");
     expect(options.protocol).toBe("wss");
 
+    options = await SenderOptions.fromConfig("udp::addr=host");
+    expect(options.protocol).toBe("udp");
+
     await expect(
       async () => await SenderOptions.fromConfig("HTTP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'HTTP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
+      "Invalid protocol: 'HTTP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("Http::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'Http', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
+      "Invalid protocol: 'Http', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("HtTps::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'HtTps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
+      "Invalid protocol: 'HtTps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
 
     await expect(
       async () => await SenderOptions.fromConfig("TCP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'TCP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
+      "Invalid protocol: 'TCP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("TcP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'TcP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
+      "Invalid protocol: 'TcP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("Tcps::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'Tcps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'",
+      "Invalid protocol: 'Tcps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
   });
 
@@ -241,14 +244,17 @@ describe("Configuration string parser suite", function () {
     expect(options.host).toBe("hostname");
     expect(options.port).toBe(9000);
     expect(options.protocol_version).toBeUndefined();
+
+    options = await SenderOptions.fromConfig("udp::addr=hostname");
+    expect(options.host).toBe("hostname");
+    expect(options.port).toBe(9007);
+    expect(options.protocol_version).toBeUndefined();
   });
 
   it("can parse protocol version", async function () {
     await expect(
       SenderOptions.fromConfig("ws::addr=hostname;protocol_version=1"),
-    ).rejects.toThrow(
-      "'protocol_version' is not used by the QWP ws/wss protocols",
-    );
+    ).rejects.toThrow("'protocol_version' is not used by QWP transports");
 
     // invalid protocol version
     await expect(
@@ -807,7 +813,7 @@ describe("Configuration string parser suite", function () {
     ).rejects.toThrow("Invalid auto flush rows option, not a number: '1w23'");
   });
 
-  it("parses auto_flush_bytes only for QWP WebSocket", async function () {
+  it("parses auto_flush_bytes only for QWP transports", async function () {
     let options = await SenderOptions.fromConfig(
       "ws::addr=host:9000;auto_flush_bytes=123;",
     );
@@ -818,13 +824,39 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.auto_flush_bytes).toBe(0);
 
+    options = await SenderOptions.fromConfig(
+      "udp::addr=host:9007;auto_flush_bytes=1400;",
+    );
+    expect(options.auto_flush_bytes).toBe(1400);
+
     await expect(
       SenderOptions.fromConfig("ws::addr=host:9000;auto_flush_bytes=-1;"),
     ).rejects.toThrow("Invalid auto flush bytes option: -1");
     await expect(
       SenderOptions.fromConfig("http::addr=host:9000;auto_flush_bytes=123;"),
+    ).rejects.toThrow("auto_flush_bytes is only supported for QWP transports");
+  });
+
+  it("parses and validates QWP UDP options", async function () {
+    const options = await SenderOptions.fromConfig(
+      "udp::addr=host;max_datagram_size=1400;multicast_ttl=2;",
+    );
+    expect(options.max_datagram_size).toBe(1400);
+    expect(options.multicast_ttl).toBe(2);
+
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host;multicast_ttl=256;"),
+    ).rejects.toThrow("Invalid multicast TTL option: 256");
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host;username=admin;"),
+    ).rejects.toThrow("authentication is not supported for QWP UDP transport");
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host;tls_verify=on;"),
+    ).rejects.toThrow("TLS is not supported for QWP UDP transport");
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host;max_datagram_size=1400;"),
     ).rejects.toThrow(
-      "auto_flush_bytes is only supported for QWP ws/wss transport",
+      "max_datagram_size and multicast_ttl are only supported for QWP UDP transport",
     );
   });
 

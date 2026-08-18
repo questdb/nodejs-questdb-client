@@ -413,7 +413,7 @@ describe("QWP Node transport", () => {
         async () => {
           expect(
             (await readdir(orphanDirectory)).filter((name) =>
-              name.endsWith(".qwp"),
+              name.endsWith(".qwps"),
             ),
           ).toEqual([]);
           expect(events).toContain("drained");
@@ -446,7 +446,7 @@ describe("QWP Node transport", () => {
     await seed.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
     await seed.close();
     const [record] = (await readdir(directory)).filter((name) =>
-      name.endsWith(".qwp"),
+      name.endsWith(".qwps"),
     );
     await writeFile(join(directory, record), Uint8Array.of(0));
 
@@ -496,7 +496,7 @@ describe("QWP Node transport", () => {
         expect.arrayContaining([record, ".qwp.failed"]),
       );
       expect(
-        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+        (await readdir(directory)).filter((name) => name.endsWith(".qwps")),
       ).toEqual([]);
     } finally {
       await rm(rootDirectory, { recursive: true, force: true });
@@ -583,7 +583,7 @@ describe("QWP Node transport", () => {
       await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
       await expect(sender.flush()).resolves.toBe(true);
       expect(
-        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+        (await readdir(directory)).filter((name) => name.endsWith(".qwps")),
       ).toHaveLength(1);
 
       server = new WebSocketServer({ host: "127.0.0.1", port });
@@ -601,7 +601,7 @@ describe("QWP Node transport", () => {
       await vi.waitFor(
         async () =>
           expect(
-            (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+            (await readdir(directory)).filter((name) => name.endsWith(".qwps")),
           ).toEqual([]),
         { timeout: 2_000 },
       );

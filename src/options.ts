@@ -9,6 +9,7 @@ import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 import type {
   QwpNodeIngressOptions,
+  QwpNodeUdpOptions,
   QwpInitialConnectMode,
   QwpIngressSessionOptions,
   QwpSenderOptions,
@@ -17,6 +18,7 @@ import type {
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
 const QWP_PORT = 9000;
+const QWP_UDP_PORT = 9007;
 
 const HTTP = "http";
 const HTTPS = "https";
@@ -24,6 +26,7 @@ const TCP = "tcp";
 const TCPS = "tcps";
 const WS = "ws";
 const WSS = "wss";
+const UDP = "udp";
 
 const ON = "on";
 const OFF = "off";
@@ -43,6 +46,8 @@ type QwpExtraOptions = {
   session?: QwpIngressSessionOptions;
   /** High-level buffering and auto-flush options. */
   sender?: QwpSenderOptions;
+  /** Node-only QWP-over-UDP socket overrides. */
+  udp?: Omit<QwpNodeUdpOptions, "host" | "port">;
 };
 
 type ExtraOptions = {
@@ -70,8 +75,8 @@ type DeprecatedOptions = {
  * <br>
  * Connection and protocol options
  * <ul>
- * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps, ws, wss</i> - The protocol used to communicate with the server. <br>
- * WS/WSS select QWP ingress. When <i>https</i>, <i>tcps</i>, or <i>wss</i> is used, the connection is secured with TLS encryption.
+ * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps, ws, wss, udp</i> - The protocol used to communicate with the server. <br>
+ * WS/WSS select acknowledged QWP ingress. UDP selects Node-only fire-and-forget QWP datagrams. When <i>https</i>, <i>tcps</i>, or <i>wss</i> is used, the connection is secured with TLS encryption.
  * </li>
  * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used for data serialization. <br>
  * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles and arrays. <br>
@@ -212,6 +217,8 @@ class SenderOptions {
   tls_roots_password?: never; // not supported
 
   max_name_len?: number;
+  max_datagram_size?: number;
+  multicast_ttl?: number;
 
   log?: Logger;
   agent?: Agent | http.Agent | https.Agent;
@@ -405,6 +412,7 @@ function parseConfigurationString(
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
+  parseUdpOptions(options);
   parseStdlibTransport(options);
 }
 
@@ -477,6 +485,8 @@ const ValidConfigKeys = [
   "tls_ca",
   "tls_roots",
   "tls_roots_password",
+  "max_datagram_size",
+  "multicast_ttl",
 ];
 
 function validateConfigKey(key: string) {
@@ -515,21 +525,24 @@ function parseProtocol(options: SenderOptions, configString: string) {
     case TCPS:
     case WS:
     case WSS:
+    case UDP:
       break;
     default:
       throw new Error(
-        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
+        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'`,
       );
   }
   return index + 2;
 }
 
 function parseProtocolVersion(options: SenderOptions) {
-  if (options.protocol === WS || options.protocol === WSS) {
+  if (
+    options.protocol === WS ||
+    options.protocol === WSS ||
+    options.protocol === UDP
+  ) {
     if (options.protocol_version !== undefined) {
-      throw new Error(
-        "'protocol_version' is not used by the QWP ws/wss protocols",
-      );
+      throw new Error("'protocol_version' is not used by QWP transports");
     }
     return;
   }
@@ -578,9 +591,12 @@ function parseAddress(options: SenderOptions) {
       case WSS:
         options.port = QWP_PORT;
         return;
+      case UDP:
+        options.port = QWP_UDP_PORT;
+        return;
       default:
         throw new Error(
-          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
+          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'`,
         );
     }
   }
@@ -619,11 +635,10 @@ function parseAutoFlushOptions(options: SenderOptions) {
   if (
     options.auto_flush_bytes !== undefined &&
     options.protocol !== WS &&
-    options.protocol !== WSS
+    options.protocol !== WSS &&
+    options.protocol !== UDP
   ) {
-    throw new Error(
-      "auto_flush_bytes is only supported for QWP ws/wss transport",
-    );
+    throw new Error("auto_flush_bytes is only supported for QWP transports");
   }
   parseInteger(options, "auto_flush_interval", "auto flush interval", 0);
 }
@@ -690,6 +705,13 @@ function parseCatchUpCapGapOptions(options: SenderOptions) {
 function parseTlsOptions(options: SenderOptions) {
   parseBoolean(options, "tls_verify", "TLS verify", UNSAFE_OFF);
 
+  if (
+    options.protocol === UDP &&
+    (options.tls_verify !== undefined || options.tls_ca !== undefined)
+  ) {
+    throw new Error("TLS is not supported for QWP UDP transport");
+  }
+
   if (options.tls_roots || options.tls_roots_password) {
     throw new Error(
       `'tls_roots' and 'tls_roots_password' options are not supported, please, use the 'tls_ca' option or the NODE_EXTRA_CA_CERTS environment variable instead`,
@@ -705,6 +727,29 @@ function parseRequestTimeoutOptions(options: SenderOptions) {
 
 function parseMaxNameLength(options: SenderOptions) {
   parseInteger(options, "max_name_len", "max name length", 1);
+}
+
+function parseUdpOptions(options: SenderOptions) {
+  parseInteger(options, "max_datagram_size", "maximum datagram size", 1);
+  parseInteger(options, "multicast_ttl", "multicast TTL", 0);
+  if (options.multicast_ttl !== undefined && options.multicast_ttl > 255) {
+    throw new Error(`Invalid multicast TTL option: ${options.multicast_ttl}`);
+  }
+  if (
+    (options.max_datagram_size !== undefined ||
+      options.multicast_ttl !== undefined) &&
+    options.protocol !== UDP
+  ) {
+    throw new Error(
+      "max_datagram_size and multicast_ttl are only supported for QWP UDP transport",
+    );
+  }
+  if (
+    options.protocol === UDP &&
+    (options.username || options.password || options.token)
+  ) {
+    throw new Error("authentication is not supported for QWP UDP transport");
+  }
 }
 
 function parseStdlibTransport(options: SenderOptions) {
@@ -765,6 +810,7 @@ export {
   TCPS,
   WS,
   WSS,
+  UDP,
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,

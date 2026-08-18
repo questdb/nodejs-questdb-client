@@ -3,12 +3,16 @@ import { readFileSync } from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
 import { log, Logger } from "./logging";
-import { SenderOptions, ExtraOptions, WS, WSS } from "./options";
+import { SenderOptions, ExtraOptions, UDP, WS, WSS } from "./options";
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
 import { QWP_INGRESS_PATH } from "./qwp/core";
-import { createQwpNodeSender, QwpSender } from "./qwp/node";
+import {
+  createQwpNodeSender,
+  createQwpNodeUdpSender,
+  QwpSender,
+} from "./qwp/node";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
@@ -25,6 +29,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * <li><b>TCP</b>: Direct TCP connection, provides persistent connections. Uses JWK token-based authentication.</li>
  * <li><b>TCPS</b>: Secure TCP transport with TLS encryption.</li>
  * <li><b>WS/WSS</b>: QWP ingress over WebSocket, including browser-compatible wire encoding and QWP ACKs.</li>
+ * <li><b>UDP</b>: Node-only fire-and-forget QWP ingress in self-contained datagrams.</li>
  * </ul>
  * </p>
  * <p>
@@ -68,6 +73,7 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * <li>TCP: <i>Sender.fromConfig("tcp::addr=localhost:9009")</i></li>
  * <li>TCPS with authentication: <i>Sender.fromConfig("tcps::addr=localhost:9009;username=user;token=private_key")</i></li>
  * <li>QWP: <i>Sender.fromConfig("ws::addr=localhost:9000")</i></li>
+ * <li>QWP UDP: <i>Sender.fromConfig("udp::addr=localhost:9007;max_datagram_size=1400")</i></li>
  * </ul>
  * </p>
  * <p>
@@ -113,8 +119,15 @@ class Sender {
    */
   constructor(options: SenderOptions) {
     this.log = options && typeof options.log === "function" ? options.log : log;
-    if (options?.protocol === WS || options?.protocol === WSS) {
-      this.qwpSender = createConfiguredQwpSender(options, this.log);
+    if (
+      options?.protocol === WS ||
+      options?.protocol === WSS ||
+      options?.protocol === UDP
+    ) {
+      this.qwpSender =
+        options.protocol === UDP
+          ? createConfiguredQwpUdpSender(options, this.log)
+          : createConfiguredQwpSender(options, this.log);
       this.autoFlush = false;
       this.autoFlushRows = 0;
       this.autoFlushInterval = 0;
@@ -603,6 +616,48 @@ function createConfiguredQwpSender(
       log: logger,
     },
     options.qwp?.session,
+  );
+}
+
+function createConfiguredQwpUdpSender(
+  options: SenderOptions,
+  logger: Logger,
+): QwpSender {
+  if (!options.host || !options.port) {
+    throw new Error("The 'host' and 'port' options are mandatory for QWP UDP");
+  }
+  const configuredUdp = options.qwp?.udp ?? {};
+  const configuredSender = options.qwp?.sender ?? {};
+  const maxDatagramSize =
+    options.max_datagram_size ?? configuredUdp.maxDatagramSize ?? 1_400;
+  return createQwpNodeUdpSender(
+    {
+      ...configuredUdp,
+      host: options.host,
+      port: options.port,
+      maxDatagramSize,
+      multicastTtl: options.multicast_ttl ?? configuredUdp.multicastTtl,
+      onError: configuredUdp.onError ?? ((error) => logger("warn", error)),
+    },
+    {
+      ...configuredSender,
+      autoFlush: isBoolean(options.auto_flush)
+        ? options.auto_flush
+        : configuredSender.autoFlush,
+      autoFlushRows: isInteger(options.auto_flush_rows, 0)
+        ? options.auto_flush_rows
+        : configuredSender.autoFlushRows,
+      autoFlushBytes: isInteger(options.auto_flush_bytes, 0)
+        ? options.auto_flush_bytes
+        : (configuredSender.autoFlushBytes ?? maxDatagramSize),
+      autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
+        ? options.auto_flush_interval
+        : configuredSender.autoFlushIntervalMs,
+      maxNameLength: isInteger(options.max_name_len, 1)
+        ? options.max_name_len
+        : configuredSender.maxNameLength,
+      log: logger,
+    },
   );
 }
 

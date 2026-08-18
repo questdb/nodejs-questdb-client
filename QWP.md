@@ -14,7 +14,7 @@ policy. Imports from internal source paths are never supported.
 
 | Entry point                          | Runtime            | Use it for                                                                                |
 | ------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------- |
-| `@questdb/nodejs-client`             | Node.js            | Existing `Sender`, including QWP ingress selected with `ws::` or `wss::`                  |
+| `@questdb/nodejs-client`             | Node.js            | Existing `Sender`, including QWP ingress selected with `ws::`, `wss::`, or `udp::`        |
 | `@questdb/nodejs-client/qwp/browser` | Browser            | Browser-safe QWP ingress, egress, authentication bootstrap, sessions, and codecs          |
 | `@questdb/nodejs-client/qwp/node`    | Node.js            | QWP ingress and egress with upgrade headers, TLS agents, and persistent store-and-forward |
 | `@questdb/nodejs-client/qwp`         | Browser or Node.js | Shared protocol codecs and low-level session abstractions for advanced integrations       |
@@ -58,6 +58,38 @@ try {
 
 `username` plus `password` selects HTTP Basic authentication for the WebSocket
 upgrade. `token` selects Bearer authentication. Use `wss::` in production.
+
+### Node.js fire-and-forget UDP
+
+`udp::` selects Node-only QWP v1 over IPv4 UDP while retaining the fluent row API:
+
+```typescript
+import { Sender } from "@questdb/nodejs-client";
+
+const sender = await Sender.fromConfig(
+  "udp::addr=239.1.2.3:9007;max_datagram_size=1400;multicast_ttl=1",
+);
+await sender.connect();
+await sender
+  .table("trades")
+  .symbol("symbol", "ETH-USD")
+  .floatColumn("price", 2615.54)
+  .atNow();
+await sender.close();
+```
+
+The default port is 9007, maximum datagram size is 1400 bytes, and multicast TTL
+is zero. Each datagram is self-contained, contains exactly one table, and uses an
+inline schema plus table-local symbol dictionaries. Batches are split at row
+boundaries; `QwpUdpDatagramTooLargeError` is raised before transmission when one
+row cannot fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the
+same transport from `qwp/node`.
+
+UDP provides no authentication, TLS, server or durable ACK, transactions,
+reconnection, compression, or store-and-forward. Local socket errors are delivered
+to `QwpNodeUdpOptions.onError`; like the Java sender, they are observational and do
+not retry rows that may already have been handed to the network. UDP is unavailable
+from the browser entry point.
 
 Advanced QWP options are accepted in the second argument:
 
@@ -141,9 +173,9 @@ The connect-string key
 
 `durability` controls the local persistence barrier:
 
-- `"append"` (the backwards-compatible default) fsyncs every frame and its atomic
-  directory rename before publication resolves.
-- `"periodic"` checkpoints frame files, symbol metadata, and directory changes in the
+- `"append"` (the backwards-compatible default) fsyncs every segment append and its
+  atomic segment creation before publication resolves.
+- `"periodic"` checkpoints segment files, symbol metadata, and directory changes in the
   background. The default interval is 5 seconds, and `close()` performs a final
   checkpoint. A power failure can lose the most recent checkpoint window.
 - `"memory"` relies on operating-system writeback. It survives an orderly close and
@@ -151,11 +183,12 @@ The connect-string key
 
 `backpressurePolicy: "error"` preserves the existing immediate
 `QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
-ACK deletes record files. `appendDeadlineMs` bounds each such pause (30 seconds by
+ACK advances the checksummed cursor and deletes fully drained segments.
+`appendDeadlineMs` bounds each such pause (30 seconds by
 default) and expiry raises `QwpReplayStoreAppendTimeoutError`. Waiting appenders do
 not hold the journal mutation queue, so ACK cleanup can continue. Direct users of
-`QwpNodeFileReplayStore` can inspect `metrics` for pending checkpoint work,
-checkpoints, checkpoint failures, active waiters, stalls, and timeouts.
+`QwpNodeFileReplayStore` can inspect `metrics` for pending records and segments,
+checkpoint work, checkpoint failures, active waiters, stalls, and timeouts.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
 cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target, but the
@@ -163,7 +196,9 @@ journal preserves up to 32 MiB (or the configured target when smaller) for live 
 records if dictionary growth uses all remaining headroom. Dictionary persistence
 itself is never rejected by the target, so actual disk usage can exceed it by the
 current dictionary overshoot. Frame growth beyond the liveness allowance remains
-backpressured until ACK trimming frees record files. Once every frame is acknowledged,
+backpressured until ACK trimming frees complete segments. A partly acknowledged
+segment remains charged to the disk budget until its last live record is acknowledged.
+Once every frame is acknowledged,
 `close()` removes the dictionary under the journal lock; the next clean start uses a
 fresh symbol-ID space. A partially drained close retains the dictionary required by
 the surviving frames.
@@ -174,6 +209,12 @@ or session closes. A second live process using the same directory fails with
 Locks left by a terminated process on the same host are recovered automatically;
 locks owned by a live local process, another host, or an unidentifiable owner fail
 closed.
+
+New journals coalesce records into bounded `.qwps` segments, targeting
+`maxSegmentBytes` (4 MiB by default) plus at most one record header. This bounds inode
+growth during long outages. Existing file-per-frame `.qwp` slots remain readable and
+can be drained alongside new segmented appends, so the storage upgrade does not
+require an offline migration.
 
 On startup, a dictionary sidecar truncated at a complete-block boundary is rebuilt
 from the ordered symbol deltas embedded in surviving committed frames and healed
@@ -957,6 +998,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Explicit drain/commit        | `flush()` / `commit()`                                        |
 | Durable delivery             | `requestDurableAck` plus `awaitDurableAck`                    |
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
+| Fire-and-forget UDP ingress  | Node `udp::` or `connectQwpNodeUdpSender()`                   |
 | Query parameters             | `session.query(sql, { binds })`                               |
 | Materialized result batches  | `for await (const batch of query)`                            |
 | Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |

@@ -15,6 +15,7 @@ import {
 } from "../qwp/sender-error";
 
 const RECORD_SUFFIX = ".qwp";
+const SEGMENT_SUFFIX = ".qwps";
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_SCAN_INTERVAL_MS = 30_000;
 const DEFAULT_PROGRESS_POLL_MS = 50;
@@ -145,7 +146,10 @@ export async function scanQwpNodeOrphanSlots(
     }
     if (
       children.some(
-        (child) => child.isFile() && child.name.endsWith(RECORD_SUFFIX),
+        (child) =>
+          child.isFile() &&
+          (child.name.endsWith(RECORD_SUFFIX) ||
+            child.name.endsWith(SEGMENT_SUFFIX)),
       )
     ) {
       candidates.push(directory);

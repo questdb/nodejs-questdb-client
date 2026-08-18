@@ -19,6 +19,8 @@ import {
   connectQwpNodeClient,
   connectQwpNodeIngress,
   connectQwpNodeSender,
+  connectQwpNodeUdp,
+  connectQwpNodeUdpSender,
   connectQwpNodeWebSocket,
   parseQwpNodeClientConfig,
   retryQwpNodeOrphanSlot,
@@ -29,6 +31,8 @@ import type {
   QwpNodeClientConfigOptions,
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
+  QwpNodeUdpOptions,
+  QwpNodeUdpSession,
   QwpNodeOrphanDrainEvent,
   QwpNodeReplayRecoveryEvent,
   QwpNodeStoreAndForwardOptions,
@@ -87,6 +91,15 @@ const nodeSenderSignature: (
   senderOptions?: QwpSenderOptions,
   sessionOptions?: QwpIngressSessionOptions,
 ) => Promise<QwpSender> = connectQwpNodeSender;
+
+const nodeUdpSignature: (
+  options: QwpNodeUdpOptions,
+) => Promise<QwpNodeUdpSession> = connectQwpNodeUdp;
+
+const nodeUdpSenderSignature: (
+  options: QwpNodeUdpOptions,
+  senderOptions?: QwpSenderOptions,
+) => Promise<QwpSender> = connectQwpNodeUdpSender;
 
 const nodeIngressSignature: (
   options: QwpNodeIngressOptions,
@@ -223,6 +236,10 @@ const qwpExtraOptionsContract: QwpExtraOptions = {
   session: {
     reconnect: { maxAttempts: 3 },
   },
+  udp: {
+    maxDatagramSize: 1_400,
+    multicastTtl: 1,
+  },
 };
 
 function senderSequenceContract(
@@ -299,6 +316,8 @@ void browserEgressSignature;
 void bootstrapSignature;
 void browserClientSignature;
 void nodeSenderSignature;
+void nodeUdpSignature;
+void nodeUdpSenderSignature;
 void nodeIngressSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
