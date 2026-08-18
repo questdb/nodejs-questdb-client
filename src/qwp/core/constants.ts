@@ -44,6 +44,7 @@ export const QWP_ENCODING_GORILLA = 0x01;
 
 export const QWP_STATUS = {
   OK: 0x00,
+  SERVER_INFO: 0x01,
   DURABLE_ACK: 0x02,
   SCHEMA_MISMATCH: 0x03,
   PARSE_ERROR: 0x05,
@@ -71,6 +72,12 @@ export const QWP_EGRESS_MESSAGE = {
 export const QWP_EGRESS_CAPABILITY = {
   ZONE: 0x00000001,
   QUERY_FLAGS: 0x00000002,
+  COMPRESSION: 0x00000004,
+} as const;
+
+export const QWP_COMPRESSION_CODEC = {
+  RAW: 0,
+  ZSTD: 1,
 } as const;
 
 export const QWP_QUERY_FLAG_RESET_DICTIONARY = 0x01;

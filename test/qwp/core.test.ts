@@ -4,6 +4,7 @@ import {
   decodeQwpContentEncoding,
   decodeQwpFrame,
   decodeQwpIngressResponse,
+  decodeQwpIngressServerInfo,
   decodeQwpIngressSymbolDictionaryDelta,
   decodeQwpVarint,
   addQwpDurableAckWebSocketProtocol,
@@ -17,6 +18,7 @@ import {
   encodeQwpQueryRequest,
   encodeQwpVarint,
   QWP_COLUMN_TYPE,
+  QWP_COMPRESSION_CODEC,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
@@ -113,6 +115,17 @@ describe("QWP browser durable-ACK negotiation", () => {
       payloadLength: 0,
       payload: new Uint8Array(),
     });
+  });
+
+  it("decodes the browser ingress SERVER_INFO batch cap", () => {
+    const payload = new QwpByteWriter()
+      .writeUint8(QWP_STATUS.SERVER_INFO)
+      .writeUint32(1_048_576)
+      .toUint8Array();
+    expect(decodeQwpIngressServerInfo(payload)).toBe(1_048_576);
+    expect(
+      decodeQwpIngressServerInfo(Uint8Array.from([QWP_STATUS.OK])),
+    ).toBeUndefined();
   });
 });
 
@@ -380,11 +393,14 @@ describe("QWP egress codec", () => {
       .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
       .writeUint8(1)
       .writeBigUint64(3n)
-      .writeUint32(QWP_EGRESS_CAPABILITY.ZONE)
+      .writeUint32(
+        QWP_EGRESS_CAPABILITY.ZONE | QWP_EGRESS_CAPABILITY.COMPRESSION,
+      )
       .writeBigInt64(123n);
     writeU16String(payload, "cluster-a");
     writeU16String(payload, "node-1");
     writeU16String(payload, "eu-west-1a");
+    payload.writeUint8(QWP_COMPRESSION_CODEC.ZSTD).writeUint8(3);
 
     expect(
       decodeQwpEgressMessage(encodeQwpFrame(payload.toUint8Array())),
@@ -395,6 +411,8 @@ describe("QWP egress codec", () => {
       clusterId: "cluster-a",
       nodeId: "node-1",
       zoneId: "eu-west-1a",
+      compressionCodec: QWP_COMPRESSION_CODEC.ZSTD,
+      compressionLevel: 3,
     });
   });
 

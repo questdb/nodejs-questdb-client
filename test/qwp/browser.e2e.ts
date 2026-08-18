@@ -11,8 +11,10 @@ import {
   connectQwpNodeWebSocket,
   encodeQwpFrame,
   QWP_COLUMN_TYPE,
+  QWP_COMPRESSION_CODEC,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
+  QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
   QWP_STATUS,
   QwpByteReader,
@@ -102,17 +104,30 @@ function writeU16String(writer: QwpByteWriter, value: string): void {
   writer.writeUint16(bytes.length).writeBytes(bytes);
 }
 
-function browserServerInfo(): Uint8Array {
+function browserServerInfo(compression?: {
+  codec: number;
+  level: number;
+}): Uint8Array {
   const payload = new QwpByteWriter();
   payload
     .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
     .writeUint8(0)
     .writeBigUint64(1n)
-    .writeUint32(0)
+    .writeUint32(compression ? QWP_EGRESS_CAPABILITY.COMPRESSION : 0)
     .writeBigInt64(0n);
   writeU16String(payload, "browser-test-cluster");
   writeU16String(payload, "browser-test-node");
+  if (compression) {
+    payload.writeUint8(compression.codec).writeUint8(compression.level);
+  }
   return encodeQwpFrame(payload.toUint8Array());
+}
+
+function browserIngressServerInfo(maxBatchSizeBytes: number): Uint8Array {
+  return new QwpByteWriter()
+    .writeUint8(QWP_STATUS.SERVER_INFO)
+    .writeUint32(maxBatchSizeBytes)
+    .toUint8Array();
 }
 
 function browserEmptyResultBatch(requestId: bigint): Uint8Array {
@@ -210,6 +225,7 @@ describe("QWP in a real browser", () => {
 
   it("negotiates durable ACKs through the real browser WebSocket API", async () => {
     const offeredProtocols: string[] = [];
+    let requestedPath: string | undefined;
     const server = new WebSocketServer({
       host: "127.0.0.1",
       port: 0,
@@ -219,6 +235,10 @@ describe("QWP in a real browser", () => {
           ? QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL
           : false;
       },
+    });
+    server.on("connection", (socket, request) => {
+      requestedPath = request.url;
+      socket.send(browserIngressServerInfo(1_048_576));
     });
     await waitForWebSocketServer(server);
     const address = server.address() as AddressInfo;
@@ -231,7 +251,7 @@ describe("QWP in a real browser", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const connection = await qwp.connectQwpBrowserWebSocket({
+          const connection = await qwp.connectQwpBrowserIngress({
             url,
             requestDurableAck: true,
           });
@@ -248,7 +268,151 @@ describe("QWP in a real browser", () => {
       );
 
       expect(offeredProtocols).toContain(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL);
-      expect(result).toEqual({ qwpVersion: 1, durableAckEnabled: true });
+      expect(
+        new URL(requestedPath!, "http://localhost").searchParams.get(
+          "qwp_browser_handshake",
+        ),
+      ).toBe("v1");
+      expect(result).toEqual({
+        qwpVersion: 1,
+        durableAckEnabled: true,
+        maxBatchSizeBytes: 1_048_576,
+      });
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  it("falls back to raw when an older egress server ignores compression", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("connection", (socket) => socket.send(browserServerInfo()));
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const session = await qwp.connectQwpBrowserEgress({
+            url,
+            compression: "zstd",
+            compressionLevel: 7,
+          });
+          try {
+            return session.negotiatedCompression;
+          } finally {
+            await session.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/read/v1`,
+        },
+      );
+
+      expect(result).toEqual({ codec: "raw", level: 0 });
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  it("falls back cleanly when an older ingress server sends no cap", async () => {
+    const server = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const connection = await qwp.connectQwpBrowserIngress({
+            url,
+            ingressNegotiationTimeoutMs: 10,
+          });
+          try {
+            return connection.handshake;
+          } finally {
+            await connection.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/write/v4`,
+        },
+      );
+
+      expect(result).toEqual({ qwpVersion: 1 });
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  it("negotiates Zstd through the real browser WebSocket API", async () => {
+    let requestedPath: string | undefined;
+    const server = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+    });
+    server.on("connection", (socket, request) => {
+      requestedPath = request.url;
+      socket.send(
+        browserServerInfo({ codec: QWP_COMPRESSION_CODEC.ZSTD, level: 3 }),
+      );
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const session = await qwp.connectQwpBrowserEgress({
+            url,
+            compression: "zstd",
+            compressionLevel: 7,
+          });
+          try {
+            return {
+              compression: session.negotiatedCompression,
+              level: session.negotiatedZstdLevel,
+            };
+          } finally {
+            await session.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/read/v1`,
+        },
+      );
+
+      expect(
+        new URL(requestedPath!, "http://localhost").searchParams.get(
+          "qwp_accept_encoding",
+        ),
+      ).toBe("zstd;level=7,raw");
+      expect(result).toEqual({
+        compression: { codec: "zstd", level: 3 },
+        level: 3,
+      });
     } finally {
       await page.close();
       await closeWebSocketServer(server);

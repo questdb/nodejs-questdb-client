@@ -10,7 +10,10 @@ import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
 import {
   addQwpDurableAckWebSocketProtocol,
+  decodeQwpIngressServerInfo,
+  encodeQwpAcceptEncoding,
   isQwpDurableAckWebSocketProtocol,
+  QwpEgressCompression,
   QWP_VERSION,
 } from "./core";
 import {
@@ -265,6 +268,11 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
    */
   requestDurableAck?: boolean;
   /**
+   * Time allowed for the optional ingress SERVER_INFO message. Defaults to
+   * 250ms; zero disables the initial wait while retaining late negotiation.
+   */
+  ingressNegotiationTimeoutMs?: number;
+  /**
    * Authenticates over REST before every WebSocket connection attempt so the
    * browser can attach QuestDB's HttpOnly session cookies to the upgrade.
    */
@@ -279,7 +287,15 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
 /** Browser WebSocket options plus protocol-level egress topology routing. */
 export interface QwpBrowserEgressOptions
   extends QwpBrowserWebSocketOptions,
-    QwpEgressRoutingOptions {}
+    QwpEgressRoutingOptions {
+  /**
+   * Requests Zstd-compressed result batches through browser-visible URL
+   * negotiation. Defaults to raw for compatibility.
+   */
+  compression?: QwpEgressCompression;
+  /** Zstd level hint. Must be between 1 and 22. */
+  compressionLevel?: number;
+}
 
 /** Browser configuration for a combined pooled QWP ingress/egress client. */
 export interface QwpBrowserClientOptions {
@@ -303,7 +319,11 @@ export interface QwpBrowserClientOptions {
 export function connectQwpBrowserWebSocket(
   options: QwpBrowserWebSocketOptions,
 ): Promise<QwpBinaryConnection> {
-  return createQwpBrowserConnectionFactory(options)();
+  return createQwpFailoverConnectionFactory(
+    options.url,
+    options.failoverUrls,
+    (endpoint) => connectQwpBrowserRawEndpoint(options, endpoint),
+  )();
 }
 
 /** Creates a stateful browser endpoint walker suitable for session reconnects. */
@@ -313,13 +333,18 @@ export function createQwpBrowserConnectionFactory(
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
-    (endpoint) => connectQwpBrowserEndpoint(options, endpoint),
+    (endpoint) => connectQwpBrowserIngressEndpoint(options, endpoint),
   );
 }
 
 async function connectQwpBrowserEndpoint(
   options: QwpBrowserWebSocketOptions,
   endpoint: string | URL,
+  requestEndpoint: string | URL,
+  protocols: string | string[] | undefined,
+  completeHandshake: (
+    selectedProtocol: string | undefined,
+  ) => QwpBinaryConnection["handshake"],
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
   if (options.sessionBootstrap) {
@@ -344,19 +369,45 @@ async function connectQwpBrowserEndpoint(
       }
       return new WebSocketConstructor(url, protocols);
     });
-  const protocols = options.requestDurableAck
-    ? addQwpDurableAckWebSocketProtocol(options.protocols)
-    : options.protocols;
-  const socket = factory(endpoint, protocols);
+  const socket = factory(requestEndpoint, protocols);
   return openQwpWebSocket(socket, {
     url: endpoint,
     connectTimeoutMs: options.connectTimeoutMs,
     sendTimeoutMs: options.sendTimeoutMs,
     closeTimeoutMs: options.closeTimeoutMs,
-    completeHandshake: () => {
-      const durableAckEnabled = isQwpDurableAckWebSocketProtocol(
-        socket.protocol,
-      );
+    completeHandshake: () => completeHandshake(socket.protocol),
+    opaqueErrors: true,
+  });
+}
+
+function browserNegotiationUrl(
+  endpoint: string | URL,
+  name: string,
+  value: string,
+): URL {
+  const url =
+    endpoint instanceof URL
+      ? new URL(endpoint)
+      : new URL(endpoint, globalThis.location?.href);
+  url.searchParams.set(name, value);
+  return url;
+}
+
+function connectQwpBrowserRawEndpoint(
+  options: QwpBrowserWebSocketOptions,
+  endpoint: string | URL,
+): Promise<QwpBinaryConnection> {
+  const protocols = options.requestDurableAck
+    ? addQwpDurableAckWebSocketProtocol(options.protocols)
+    : options.protocols;
+  return connectQwpBrowserEndpoint(
+    options,
+    endpoint,
+    endpoint,
+    protocols,
+    (selectedProtocol) => {
+      const durableAckEnabled =
+        isQwpDurableAckWebSocketProtocol(selectedProtocol);
       if (options.requestDurableAck && !durableAckEnabled) {
         throw new QwpDurableAckUnavailableError(endpoint);
       }
@@ -364,8 +415,141 @@ async function connectQwpBrowserEndpoint(
         ? { qwpVersion: QWP_VERSION, durableAckEnabled: true }
         : { qwpVersion: QWP_VERSION };
     },
-    opaqueErrors: true,
-  });
+  );
+}
+
+async function applyQwpBrowserIngressHandshake(
+  connection: QwpBinaryConnection,
+  timeoutMs: number,
+): Promise<QwpBinaryConnection> {
+  const iterator = connection.messages[Symbol.asyncIterator]();
+  const pendingFirst = iterator.next();
+  const timeout = Symbol("QWP browser ingress negotiation timeout");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome =
+    timeoutMs === 0
+      ? timeout
+      : await Promise.race([
+          pendingFirst,
+          new Promise<typeof timeout>((resolve) => {
+            timer = setTimeout(resolve, timeoutMs, timeout);
+          }),
+        ]);
+  if (timer !== undefined) clearTimeout(timer);
+
+  const handshake: {
+    qwpVersion: number;
+    maxBatchSizeBytes?: number;
+    contentEncoding?: string;
+    negotiatedCompression?: QwpBinaryConnection["handshake"]["negotiatedCompression"];
+    durableAckEnabled?: boolean;
+    serverRole?: string;
+    serverZone?: string;
+  } = { ...connection.handshake };
+  let firstResult: IteratorResult<Uint8Array> | undefined;
+  let pendingResult: Promise<IteratorResult<Uint8Array>> | undefined;
+  if (outcome === timeout) {
+    pendingResult = pendingFirst;
+  } else if (!outcome.done) {
+    const maxBatchSizeBytes = decodeQwpIngressServerInfo(outcome.value);
+    if (maxBatchSizeBytes === undefined) firstResult = outcome;
+    else handshake.maxBatchSizeBytes = maxBatchSizeBytes;
+  }
+
+  const messages: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      let result =
+        firstResult ??
+        (pendingResult === undefined
+          ? await iterator.next()
+          : await pendingResult);
+      while (!result.done) {
+        const maxBatchSizeBytes = decodeQwpIngressServerInfo(result.value);
+        if (maxBatchSizeBytes === undefined) yield result.value;
+        else handshake.maxBatchSizeBytes = maxBatchSizeBytes;
+        result = await iterator.next();
+      }
+    },
+  };
+
+  return {
+    messages,
+    handshake,
+    closed: connection.closed,
+    endpoint: connection.endpoint,
+    ingressSymbolDictionary: connection.ingressSymbolDictionary,
+    ingressDeltaSymbolDictionaryEnabled:
+      connection.ingressDeltaSymbolDictionaryEnabled,
+    getIngressMetrics: connection.getIngressMetrics
+      ? () => connection.getIngressMetrics!()
+      : undefined,
+    send: (payload) => connection.send(payload),
+    ping: connection.ping ? () => connection.ping!() : undefined,
+    close: (code, reason) => connection.close(code, reason),
+  };
+}
+
+async function connectQwpBrowserIngressEndpoint(
+  options: QwpBrowserWebSocketOptions,
+  endpoint: string | URL,
+): Promise<QwpBinaryConnection> {
+  const timeoutMs = options.ingressNegotiationTimeoutMs ?? 250;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError(
+      "ingressNegotiationTimeoutMs must be a non-negative finite number",
+    );
+  }
+  const connection = await connectQwpBrowserEndpoint(
+    options,
+    endpoint,
+    browserNegotiationUrl(endpoint, "qwp_browser_handshake", "v1"),
+    options.requestDurableAck
+      ? addQwpDurableAckWebSocketProtocol(options.protocols)
+      : options.protocols,
+    (selectedProtocol) => {
+      const durableAckEnabled =
+        isQwpDurableAckWebSocketProtocol(selectedProtocol);
+      if (options.requestDurableAck && !durableAckEnabled) {
+        throw new QwpDurableAckUnavailableError(endpoint);
+      }
+      return durableAckEnabled
+        ? { qwpVersion: QWP_VERSION, durableAckEnabled: true }
+        : { qwpVersion: QWP_VERSION };
+    },
+  );
+  try {
+    return await applyQwpBrowserIngressHandshake(connection, timeoutMs);
+  } catch (error) {
+    await connection
+      .close(1002, "invalid QWP ingress SERVER_INFO")
+      .catch(() => undefined);
+    throw error;
+  }
+}
+
+function connectQwpBrowserEgressEndpoint(
+  options: QwpBrowserEgressOptions,
+  endpoint: string | URL,
+): Promise<QwpBinaryConnection> {
+  const compression = options.compression ?? "raw";
+  const acceptEncoding = encodeQwpAcceptEncoding(
+    compression,
+    options.compressionLevel ?? 1,
+  );
+  const requestEndpoint =
+    acceptEncoding === undefined
+      ? endpoint
+      : browserNegotiationUrl(endpoint, "qwp_accept_encoding", acceptEncoding);
+  return connectQwpBrowserEndpoint(
+    options,
+    endpoint,
+    requestEndpoint,
+    options.protocols,
+    () => ({
+      qwpVersion: QWP_VERSION,
+      negotiatedCompression: { codec: "raw", level: 0 },
+    }),
+  );
 }
 
 /** Opens a browser WebSocket and starts an ingress ACK/NACK session. */
@@ -428,7 +612,7 @@ export async function connectQwpBrowserEgress(
     createQwpEgressFailoverConnectionFactory(
       options.url,
       options.failoverUrls,
-      (endpoint) => connectQwpBrowserEndpoint(options, endpoint),
+      (endpoint) => connectQwpBrowserEgressEndpoint(options, endpoint),
       { target: options.target, zone: options.zone },
       sessionOptions.serverInfoTimeoutMs ?? 15_000,
     ),

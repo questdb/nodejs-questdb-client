@@ -356,6 +356,13 @@ capability unless `requestDurableAck` was set explicitly. The connection fails w
 `QwpDurableAckUnavailableError` when the server does not confirm it. Browser durable
 tracking is in memory only. Persistent store-and-forward is intentionally Node-only.
 
+Browser ingress adds `qwp_browser_handshake=v1` to the WebSocket URL. Compatible
+servers send a small `SERVER_INFO` message immediately after the upgrade, and the
+sender uses its exact ingress payload cap for automatic splitting. Older servers
+ignore the query parameter; after a bounded 250 ms negotiation window the client
+continues in unknown-cap mode. Set `ingressNegotiationTimeoutMs` to tune that window,
+or keep using `maxBatchSizeBytes` as a local compatibility limit.
+
 ### Reconnect, failover, and roles
 
 The preferred URL and `failoverUrls` form one endpoint set. Endpoints are ranked by
@@ -541,12 +548,14 @@ server does not terminate the query within the bound, the client fails with
 `QwpEgressQueryCancelTimeoutError` and closes the unusable connection instead of
 leaving the session permanently occupied.
 
-Node.js can request Zstd with `compression: "zstd"` or `"auto"` and a level from 1
-through 22. Raw remains the compatibility default. Check
-`session.negotiatedCompression` after the handshake. The decoder handles raw and
-Zstd batches in both runtimes, but browsers cannot advertise
-`X-QWP-Accept-Encoding`; a same-origin proxy must add that header to opt a browser
-into compressed responses.
+Node.js and browsers can request Zstd with `compression: "zstd"` or `"auto"` and a
+level from 1 through 22. Raw remains the compatibility default. Node uses
+`X-QWP-Accept-Encoding`; browsers send the same preference in the URL's
+`qwp_accept_encoding` parameter. Compatible servers report the effective codec and
+operator-forced level in the existing egress `SERVER_INFO` message. Check
+`session.negotiatedCompression` after the handshake. Older servers ignore the query
+parameter and safely remain raw. The decoder handles raw and Zstd batches in both
+runtimes.
 
 Egress reconnect never silently resumes a partially consumed result. Configure
 `onReplayReset` to opt into at-least-once query re-execution, discard any rows from
@@ -567,6 +576,8 @@ const session = await connectQwpBrowserEgress({
   failoverUrls: ["wss://replica-2.example/read/v1"],
   target: "replica",
   zone: "eu-west-1a",
+  compression: "zstd",
+  compressionLevel: 3,
   sessionBootstrap: {
     authentication: { type: "bearer", token: oidcOrRestAccessToken },
   },

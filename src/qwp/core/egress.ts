@@ -33,6 +33,8 @@ export interface QwpServerInfoMessage extends QwpFrameHeader {
   clusterId: string;
   nodeId: string;
   zoneId: string | null;
+  compressionCodec: number | null;
+  compressionLevel: number | null;
 }
 
 export interface QwpResultBatchMessage extends QwpFrameHeader {
@@ -186,6 +188,14 @@ export function decodeQwpEgressMessage(bytes: Uint8Array): QwpEgressMessage {
         (capabilities & QWP_EGRESS_CAPABILITY.ZONE) !== 0
           ? readUint16Utf8(reader, "zone ID")
           : null;
+      const compressionCodec =
+        (capabilities & QWP_EGRESS_CAPABILITY.COMPRESSION) !== 0
+          ? reader.readUint8("egress compression codec")
+          : null;
+      const compressionLevel =
+        compressionCodec !== null
+          ? reader.readUint8("egress compression level")
+          : null;
       reader.expectEnd("SERVER_INFO");
       return {
         ...header,
@@ -197,6 +207,8 @@ export function decodeQwpEgressMessage(bytes: Uint8Array): QwpEgressMessage {
         clusterId,
         nodeId,
         zoneId,
+        compressionCodec,
+        compressionLevel,
       };
     }
     case QWP_EGRESS_MESSAGE.RESULT_BATCH: {

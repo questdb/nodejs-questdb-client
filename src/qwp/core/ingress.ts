@@ -53,6 +53,25 @@ export interface QwpIngressResponse {
   errorMessage?: string;
 }
 
+/** Decodes the browser-requested ingress SERVER_INFO payload when present. */
+export function decodeQwpIngressServerInfo(
+  payload: Uint8Array,
+): number | undefined {
+  if (payload[0] !== QWP_STATUS.SERVER_INFO) return undefined;
+  if (payload.byteLength !== 5) {
+    throw new QwpProtocolError("invalid QWP ingress SERVER_INFO length");
+  }
+  const maxBatchSizeBytes = new DataView(
+    payload.buffer,
+    payload.byteOffset,
+    payload.byteLength,
+  ).getUint32(1, true);
+  if (maxBatchSizeBytes === 0) {
+    throw new QwpProtocolError("invalid QWP ingress SERVER_INFO batch cap");
+  }
+  return maxBatchSizeBytes;
+}
+
 function symbolText(value: unknown): string {
   return typeof value === "string" ? value : (value as QwpSymbolValue).text;
 }

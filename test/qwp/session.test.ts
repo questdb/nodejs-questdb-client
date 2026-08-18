@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   bootstrapQwpBrowserSession,
+  connectQwpBrowserEgress,
   connectQwpBrowserIngress,
   connectQwpBrowserWebSocket,
   createQwpBrowserSender,
@@ -15,6 +16,8 @@ import {
 } from "../../src/qwp/node";
 import {
   QWP_COLUMN_TYPE,
+  QWP_COMPRESSION_CODEC,
+  QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
   QWP_FLAG_DEFER_COMMIT,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
@@ -239,17 +242,30 @@ function symbolTable(name: string, values: readonly string[]): QwpTableBuffer {
   return table;
 }
 
-function serverInfoFrame(): Uint8Array {
+function serverInfoFrame(compression?: {
+  codec: number;
+  level: number;
+}): Uint8Array {
   const writer = new QwpByteWriter();
   writer
     .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
     .writeUint8(0)
     .writeBigUint64(1n)
-    .writeUint32(0)
+    .writeUint32(compression ? QWP_EGRESS_CAPABILITY.COMPRESSION : 0)
     .writeBigInt64(123n)
     .writeUint16(0)
     .writeUint16(0);
+  if (compression) {
+    writer.writeUint8(compression.codec).writeUint8(compression.level);
+  }
   return encodeQwpFrame(writer.toUint8Array());
+}
+
+function ingressServerInfo(maxBatchSizeBytes: number): Uint8Array {
+  return new QwpByteWriter()
+    .writeUint8(QWP_STATUS.SERVER_INFO)
+    .writeUint32(maxBatchSizeBytes)
+    .toUint8Array();
 }
 
 describe("QWP WebSocket adapters", () => {
@@ -488,6 +504,87 @@ describe("QWP WebSocket adapters", () => {
     await expect(connecting).resolves.toBe(true);
     expect(capturedProtocols).toBe(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL);
     await sender.close();
+  });
+
+  it("uses the browser-selected ingress batch cap automatically", async () => {
+    const socket = new FakeWebSocket();
+    let capturedUrl: string | URL | undefined;
+    const connecting = connectQwpBrowserIngress({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: (url) => {
+        capturedUrl = url;
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+    socket.message(ingressServerInfo(128));
+
+    const session = await connecting;
+    expect(
+      new URL(capturedUrl!).searchParams.get("qwp_browser_handshake"),
+    ).toBe("v1");
+    expect(session.handshake.maxBatchSizeBytes).toBe(128);
+    expect(session.maxBatchSizeBytes).toBe(128);
+    await session.close();
+  });
+
+  it("splits fluent browser rows under the negotiated server cap", async () => {
+    const socket = new FakeWebSocket();
+    const sender = createQwpBrowserSender(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      { autoFlush: false, encode: { gorilla: false } },
+    );
+    const connecting = sender.connect();
+    socket.open();
+    socket.message(ingressServerInfo(128));
+    await connecting;
+    for (let value = 0; value < 50; value++) {
+      await sender.table("events").longColumn("value", value).atNow();
+    }
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(ingressResponse(QWP_STATUS.OK, sequence));
+    };
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.sent.length).toBeGreaterThan(1);
+    expect(socket.sent.every((frame) => frame.byteLength <= 128)).toBe(true);
+    await sender.close();
+  });
+
+  it("negotiates browser Zstd and exposes the effective selected level", async () => {
+    const socket = new FakeWebSocket();
+    let capturedUrl: string | URL | undefined;
+    let capturedProtocols: string | string[] | undefined;
+    const connecting = connectQwpBrowserEgress({
+      url: "ws://localhost:9000/read/v1",
+      compression: "zstd",
+      compressionLevel: 7,
+      webSocketFactory: (url, protocols) => {
+        capturedUrl = url;
+        capturedProtocols = protocols;
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+    socket.message(
+      serverInfoFrame({ codec: QWP_COMPRESSION_CODEC.ZSTD, level: 3 }),
+    );
+
+    const session = await connecting;
+    expect(capturedProtocols).toBeUndefined();
+    expect(new URL(capturedUrl!).searchParams.get("qwp_accept_encoding")).toBe(
+      "zstd;level=7,raw",
+    );
+    expect(session.negotiatedCompression).toEqual({
+      codec: "zstd",
+      level: 3,
+    });
+    expect(session.negotiatedZstdLevel).toBe(3);
+    await session.close();
   });
 
   it("automatically splits fluent browser sender rows under its configured cap", async () => {
@@ -1764,6 +1861,7 @@ describe("QwpIngressSession", () => {
         {
           url: "ws://localhost:9000/write/v4",
           requestDurableAck: true,
+          ingressNegotiationTimeoutMs: 0,
           webSocketFactory: () => asQwpSocket(socket),
         },
         {

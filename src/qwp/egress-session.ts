@@ -3,6 +3,7 @@ import {
   encodeQwpCancel,
   encodeQwpCredit,
   encodeQwpQueryRequest,
+  QWP_COMPRESSION_CODEC,
   QWP_EGRESS_CAPABILITY,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_RESET_MASK_DICTIONARY,
@@ -532,10 +533,27 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   /** Effective codec and level echoed by the server on the active endpoint. */
   get negotiatedCompression(): QwpNegotiatedEgressCompression | undefined {
+    const serverInfo = this.serverInfo;
+    if (
+      serverInfo?.compressionCodec === QWP_COMPRESSION_CODEC.ZSTD &&
+      serverInfo.compressionLevel !== null
+    ) {
+      return { codec: "zstd", level: serverInfo.compressionLevel };
+    }
+    if (serverInfo?.compressionCodec === QWP_COMPRESSION_CODEC.RAW) {
+      return { codec: "raw", level: 0 };
+    }
+    if (serverInfo?.compressionCodec !== null && serverInfo !== undefined) {
+      return {
+        codec: "unknown",
+        level: 0,
+        contentEncoding: `codec=${serverInfo.compressionCodec};level=${serverInfo.compressionLevel ?? 0}`,
+      };
+    }
     return this.connection.handshake.negotiatedCompression;
   }
 
-  /** Effective Zstd level, or zero for raw, unknown, or browser-hidden negotiation. */
+  /** Effective Zstd level, or zero for raw or unknown negotiation. */
   get negotiatedZstdLevel(): number {
     const compression = this.negotiatedCompression;
     return compression?.codec === "zstd" ? compression.level : 0;
