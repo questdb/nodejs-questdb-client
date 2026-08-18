@@ -17,6 +17,7 @@ import {
   QwpHandshakeMetadata,
   QwpIngressReplayStore,
   QwpReconnectOptions,
+  QwpReplayDictionaryPersistenceError,
 } from "./transport";
 import { QwpReconnectingIngressConnection } from "./internal/reconnecting-ingress-connection";
 
@@ -558,6 +559,8 @@ export class QwpIngressSession {
   /**
    * Sends tables using the session's connection-scoped symbol dictionary.
    * String symbol values are assigned stable IDs automatically.
+   * If a replay dictionary append fails, that call rejects with
+   * QwpReplayDictionaryPersistenceError; retrying uses full inline symbols.
    */
   sendTablesDelta(
     tables: readonly QwpTableBuffer[],
@@ -567,6 +570,9 @@ export class QwpIngressSession {
     > = {},
   ): Promise<QwpIngressResponse> {
     this.throwIfUnavailable();
+    if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
+      return this.sendTables(tables, encodeOptions);
+    }
     const previousSize = this.symbolDictionary.size;
     const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
     const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
@@ -623,7 +629,11 @@ export class QwpIngressSession {
     }
   }
 
-  /** Publishes tables with the automatic connection-scoped symbol dictionary. */
+  /**
+   * Publishes tables with the automatic connection-scoped symbol dictionary.
+   * After a replay dictionary persistence error, retries use full inline
+   * symbols and no longer depend on the failed sidecar.
+   */
   async publishTablesDelta(
     tables: readonly QwpTableBuffer[],
     encodeOptions: Pick<
@@ -632,6 +642,9 @@ export class QwpIngressSession {
     > = {},
   ): Promise<void> {
     this.throwIfUnavailable();
+    if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
+      return this.publishTables(tables, encodeOptions);
+    }
     const previousSize = this.symbolDictionary.size;
     const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
     const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
@@ -754,7 +767,11 @@ export class QwpIngressSession {
       await this.connection.send(frame);
     });
     this.sendTail = sending.catch((error: unknown) => {
-      this.fail(error);
+      if (error instanceof QwpReplayDictionaryPersistenceError) {
+        this.recordError(error, false);
+      } else {
+        this.fail(error);
+      }
     });
     // Publish the callback only after sendTail owns this frame so a callback
     // that queues another frame cannot reorder it ahead of this sequence.

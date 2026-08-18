@@ -43,6 +43,7 @@ import {
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
   QwpReplayRejectedError,
+  QwpReplayDictionaryPersistenceError,
   QwpUpgradeError,
   encodeQwpFrame,
   encodeQwpDurableAckPollFrame,
@@ -233,6 +234,19 @@ class FailOnceDictionaryReplayStore extends TrackingReplayStore {
   ): Promise<void> {
     if (startId !== this.symbols.length) throw new Error("dictionary gap");
     this.symbols.push(...entries);
+  }
+}
+
+class FailingDictionaryPersistenceReplayStore extends TrackingReplayStore {
+  appendSymbolDictionaryCalls = 0;
+
+  async loadSymbolDictionary(): Promise<readonly string[]> {
+    return [];
+  }
+
+  async appendSymbolDictionary(): Promise<void> {
+    this.appendSymbolDictionaryCalls++;
+    throw new Error("symbol dictionary disk is full");
   }
 }
 
@@ -508,6 +522,75 @@ describe("QWP ingress reconnect and replay", () => {
     expect(
       decodeQwpIngressSymbolDictionaryDelta(replayStore.records.get(1n)!),
     ).toEqual({ startId: 0, entries: ["ETH-USD", "BTC-USD"] });
+    await session.close();
+  });
+
+  it("falls back to full symbols after dictionary persistence fails", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new FailingDictionaryPersistenceReplayStore();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+    });
+
+    await expect(
+      session.publishTablesDelta([symbolTable("ETH-USD")]),
+    ).rejects.toBeInstanceOf(QwpReplayDictionaryPersistenceError);
+    expect(replayStore.appendSymbolDictionaryCalls).toBe(1);
+    expect(replayStore.records.size).toBe(0);
+    expect(connection.sent).toEqual([]);
+
+    await expect(
+      session.publishTablesDelta([symbolTable("BTC-USD")]),
+    ).resolves.toBeUndefined();
+    expect(connection.sent).toHaveLength(1);
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toBe(
+      undefined,
+    );
+    expect(replayStore.appendSymbolDictionaryCalls).toBe(1);
+    expect(replayStore.records.size).toBe(1);
+    await session.close();
+  });
+
+  it("keeps an ACK-waiting session usable after dictionary persistence fails", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new FailingDictionaryPersistenceReplayStore();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+    });
+
+    await expect(
+      session.sendTablesDelta([symbolTable("ETH-USD")]),
+    ).rejects.toBeInstanceOf(QwpReplayDictionaryPersistenceError);
+    const retried = session.sendTablesDelta([symbolTable("BTC-USD")]);
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toBe(
+      undefined,
+    );
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(retried).resolves.toMatchObject({ sequence: 1n });
+    await session.close();
+  });
+
+  it("uses full symbols when a replay store has no dictionary sidecar", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new TrackingReplayStore();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+    });
+
+    await expect(
+      session.publishTablesDelta([symbolTable("ETH-USD")]),
+    ).resolves.toBeUndefined();
+    expect(connection.sent).toHaveLength(1);
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toBe(
+      undefined,
+    );
+    expect(replayStore.records.size).toBe(1);
     await session.close();
   });
 

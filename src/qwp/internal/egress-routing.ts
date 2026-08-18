@@ -120,7 +120,12 @@ function prependMessage(
     closed: connection.closed,
     handshake: { ...connection.handshake, ...topology },
     endpoint: connection.endpoint,
-    ingressSymbolDictionary: connection.ingressSymbolDictionary,
+    get ingressSymbolDictionary() {
+      return connection.ingressSymbolDictionary;
+    },
+    get ingressDeltaSymbolDictionaryEnabled() {
+      return connection.ingressDeltaSymbolDictionaryEnabled;
+    },
     send: (payload) => connection.send(payload),
     close: (code, reason) => connection.close(code, reason),
   };

@@ -26,6 +26,7 @@ import {
   QwpReconnectExhaustedError,
   QwpReconnectOptions,
   QwpReplayDictionaryError,
+  QwpReplayDictionaryPersistenceError,
   QwpReplayRejectedError,
   QwpSendClosedError,
   QwpUpgradeError,
@@ -172,6 +173,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private totalFailovers = 0;
   private totalReconnectErrors = 0;
   private totalServerNacks = 0;
+  private deltaSymbolDictionaryEnabled: boolean;
   readonly messages: AsyncIterable<Uint8Array> = this.messagesQueue;
   readonly closed: Promise<QwpConnectionCloseInfo>;
   ping?: () => Promise<void>;
@@ -188,6 +190,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   ) {
     this.store = store;
     this.symbolDictionary = [...symbolDictionary];
+    this.deltaSymbolDictionaryEnabled =
+      store.loadSymbolDictionary !== undefined &&
+      store.appendSymbolDictionary !== undefined;
     this.recoveredDiscardTail = recoveredDiscardTail;
     this.localMaxBatchSizeBytes = localMaxBatchSizeBytes;
     this.maxAttempts = reconnectOptions.maxAttempts ?? 3;
@@ -292,6 +297,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return this.symbolDictionary.slice();
   }
 
+  get ingressDeltaSymbolDictionaryEnabled(): boolean {
+    return this.deltaSymbolDictionaryEnabled;
+  }
+
   getIngressMetrics(): QwpIngressTransportMetrics {
     let pendingReplayBytes = 0;
     for (const frame of this.frames.values()) {
@@ -327,7 +336,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
       const delta = readSymbolDictionaryDelta(frame.payload);
-      if (delta) await this.persistSymbolDictionaryDelta(delta);
+      if (delta) {
+        if (!this.deltaSymbolDictionaryEnabled) {
+          throw new QwpReplayDictionaryError(
+            "QWP delta symbol dictionaries are disabled because replay dictionary persistence is unavailable; encode symbols with full inline dictionaries",
+          );
+        }
+        await this.persistSymbolDictionaryDelta(delta);
+      }
       await this.store.append(frame);
       this.frames.set(frame.frameSequence, frame);
       if (this.backgroundStoreAndForward) {
@@ -955,7 +971,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     const newEntries = delta.entries.slice(firstNewEntry);
     if (newEntries.length === 0) return;
     const startId = this.symbolDictionary.length;
-    await this.store.appendSymbolDictionary(startId, newEntries);
+    try {
+      await this.store.appendSymbolDictionary(startId, newEntries);
+    } catch (error) {
+      this.deltaSymbolDictionaryEnabled = false;
+      throw new QwpReplayDictionaryPersistenceError(error);
+    }
     this.symbolDictionary.push(...newEntries);
   }
 

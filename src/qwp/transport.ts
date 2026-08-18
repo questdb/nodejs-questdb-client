@@ -108,6 +108,21 @@ export class QwpReplayDictionaryError extends Error {
   }
 }
 
+/**
+ * A replay dictionary sidecar rejected an append before its delta frame was
+ * published. The reconnecting transport has permanently switched to full,
+ * self-contained symbol encoding; retrying the logical batch is safe.
+ */
+export class QwpReplayDictionaryPersistenceError extends QwpReplayDictionaryError {
+  constructor(cause: unknown) {
+    super(
+      "failed to persist the QWP symbol dictionary before publication; delta dictionaries are disabled for this connection -- retry the batch",
+      cause,
+    );
+    this.name = "QwpReplayDictionaryPersistenceError";
+  }
+}
+
 /** An active egress operation cannot be safely replayed without an explicit reset hook. */
 export class QwpEgressReplayRequiredError extends Error {
   constructor(readonly requestId?: bigint) {
@@ -372,6 +387,8 @@ export interface QwpBinaryConnection {
   readonly handshake: QwpHandshakeMetadata;
   /** @internal Recovered ingress dictionary supplied by replay connections. */
   readonly ingressSymbolDictionary?: readonly string[];
+  /** @internal False after replay dictionary persistence becomes unavailable. */
+  readonly ingressDeltaSymbolDictionaryEnabled?: boolean;
   /** Endpoint backing this connection, when supplied by its adapter. */
   readonly endpoint?: string | URL;
 

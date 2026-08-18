@@ -231,7 +231,12 @@ function observeConnectionHealth(
     closed: connection.closed,
     handshake: connection.handshake,
     endpoint: connection.endpoint,
-    ingressSymbolDictionary: connection.ingressSymbolDictionary,
+    get ingressSymbolDictionary() {
+      return connection.ingressSymbolDictionary;
+    },
+    get ingressDeltaSymbolDictionaryEnabled() {
+      return connection.ingressDeltaSymbolDictionaryEnabled;
+    },
     send: async (payload) => {
       try {
         await connection.send(payload);
