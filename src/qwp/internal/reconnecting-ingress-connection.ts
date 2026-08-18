@@ -42,6 +42,7 @@ import { QwpNotificationDispatcher } from "./notification-dispatcher";
 import {
   createQwpProtocolViolationSenderError,
   createQwpSenderError,
+  defaultQwpSenderErrorHandler,
   type QwpSenderError,
 } from "../sender-error";
 
@@ -287,12 +288,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         connectionListenerInboxCapacity,
       );
     }
-    if (onSenderError) {
-      this.errorDispatcher = new QwpNotificationDispatcher(
-        onSenderError,
-        errorInboxCapacity,
-      );
-    }
+    this.errorDispatcher = new QwpNotificationDispatcher(
+      onSenderError ?? defaultQwpSenderErrorHandler,
+      errorInboxCapacity,
+    );
     validateReconnectPolicy(
       this.maxAttempts,
       this.initialBackoffMs,

@@ -234,9 +234,11 @@ inside ACK or reconnect protocol stacks. The metrics snapshot exposes delivered 
 dropped progress, connection, and error notification counters.
 `connectionListenerInboxCapacity` and `errorInboxCapacity` tune the Java-compatible
 64/256 defaults. `onSenderError` receives typed category/policy, wire status, message
-sequence, stable frame-sequence range, and quarantine context. Observer exceptions are
-contained, but CPU-bound callbacks should still move work to a Worker because browser
-and Node JavaScript share the event loop.
+sequence, stable frame-sequence range, and quarantine context. If it is omitted,
+retriable rejections are logged at `warn` and terminal rejections or abandoned data at
+`error`; general asynchronous ingress failures are also logged when `onError` is
+omitted. Observer exceptions are contained, but CPU-bound callbacks should still move
+work to a Worker because browser and Node JavaScript share the event loop.
 
 When QuestDB authentication is enabled, establish the browser's HttpOnly
 `qdb_session` cookie over REST before opening a QWP WebSocket. A QuestDB REST

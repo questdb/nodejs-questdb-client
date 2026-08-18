@@ -46,6 +46,7 @@ const sharedRuntimeContract = [
   "QwpSenderCloseTimeoutError",
   "QwpUnrecoverableReplayDictionaryError",
   "QwpUpgradeError",
+  "defaultQwpSenderErrorHandler",
 ] as const;
 
 const browserRuntimeContract = [

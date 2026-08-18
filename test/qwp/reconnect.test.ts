@@ -1764,6 +1764,9 @@ describe("QWP ingress reconnect and replay", () => {
       status: QWP_STATUS.OK,
       sequence: 0n,
     });
+    await vi.waitFor(() =>
+      expect(session.metrics.deliveredErrorNotifications).toBe(2),
+    );
     await session.close();
   });
 

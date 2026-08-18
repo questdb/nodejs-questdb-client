@@ -1,4 +1,5 @@
 import { QWP_STATUS, type QwpIngressResponse } from "./core";
+import { log } from "../logging";
 
 export const QWP_SENDER_ERROR_CATEGORY = {
   SCHEMA_MISMATCH: "schema-mismatch",
@@ -49,6 +50,40 @@ export interface QwpSenderErrorResponseContext {
   readonly toFsn?: bigint;
   readonly tableName?: string;
   readonly detectedAtMs?: number;
+}
+
+/**
+ * Browser-safe fallback for asynchronous ingress rejections and abandoned
+ * persistent data. Applications can replace it with `onSenderError`.
+ */
+export function defaultQwpSenderErrorHandler(error: QwpSenderError): void {
+  const level =
+    error.category === QWP_SENDER_ERROR_CATEGORY.DATA_LOSS ||
+    error.appliedPolicy === QWP_SENDER_ERROR_POLICY.TERMINAL ||
+    error.appliedPolicy === QWP_SENDER_ERROR_POLICY.ABANDONED
+      ? "error"
+      : "warn";
+  if (error.category === QWP_SENDER_ERROR_CATEGORY.DATA_LOSS) {
+    log(
+      level,
+      `QWP buffered data abandoned [category=${error.category}, policy=${error.appliedPolicy}, quarantined=${error.quarantinedPath ?? "none"}, message=${error.serverMessage ?? "none"}]`,
+    );
+    return;
+  }
+  const status =
+    error.serverStatusByte === undefined
+      ? "none"
+      : `0x${error.serverStatusByte.toString(16).padStart(2, "0")}`;
+  const fsn =
+    error.fromFsn === undefined
+      ? "none"
+      : error.toFsn === undefined || error.toFsn === error.fromFsn
+        ? error.fromFsn.toString()
+        : `${error.fromFsn}..${error.toFsn}`;
+  log(
+    level,
+    `QuestDB rejected QWP ingress batch [category=${error.category}, policy=${error.appliedPolicy}, status=${status}, fsn=${fsn}, table=${error.tableName ?? "(multi)"}, sequence=${error.messageSequence?.toString() ?? "none"}, message=${error.serverMessage ?? "none"}]`,
+  );
 }
 
 export function createQwpSenderError(

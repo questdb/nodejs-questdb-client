@@ -574,7 +574,13 @@ application worker.
 stable `[fromFsn, toFsn]` correlation range, optional single-table attribution, and
 `quarantinedPath` for abandoned persistent data. The legacy `onError` callback remains
 available for timeouts and general session failures; classified NACK events also expose
-the same payload as `event.senderError`.
+the same payload as `event.senderError`. When `onSenderError` is omitted, QWP logs
+retriable rejections at `warn` and terminal rejections or abandoned data at `error`.
+General asynchronous session failures are likewise logged when `onError` is omitted,
+so a background store-and-forward failure is never silent by default. Reconnect and
+orphan-drain fallbacks use the same bounded asynchronous error inbox; direct session
+fallback logging adds no callback or close-time dependency. Both paths work in browsers
+and Node.js.
 
 ## Egress
 

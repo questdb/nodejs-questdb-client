@@ -26,9 +26,11 @@ import { QwpReconnectingIngressConnection } from "./internal/reconnecting-ingres
 import { QwpNotificationDispatcher } from "./internal/notification-dispatcher";
 import {
   createQwpSenderError,
+  defaultQwpSenderErrorHandler,
   QWP_SENDER_ERROR_POLICY,
   type QwpSenderError,
 } from "./sender-error";
+import { log } from "../logging";
 
 const QWP_FLAGS_OFFSET = 5;
 const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
@@ -202,7 +204,11 @@ export interface QwpIngressSessionOptions {
    * full. Defaults to 256, matching the Java client.
    */
   errorInboxCapacity?: number;
-  /** Java-parity typed server-rejection and data-loss notifications. */
+  /**
+   * Java-parity typed server-rejection and data-loss notifications. When
+   * omitted, the default handler logs retriable errors at warn and terminal
+   * errors or abandoned data at error.
+   */
   onSenderError?: (error: QwpSenderError) => void;
   onResponse?: (response: QwpIngressResponse) => void;
   onDurableAck?: (response: QwpIngressResponse) => void;
@@ -1372,12 +1378,22 @@ export class QwpIngressSession {
       senderError,
       metrics: this.metrics,
     };
-    this.errorDispatcher?.offer(() => {
+    const notify = (): void => {
       safelyInvoke(this.options.onError, event);
       if (senderError && !this.connection.managesIngressSenderErrors) {
-        safelyInvoke(this.options.onSenderError, senderError);
+        safelyInvoke(
+          this.options.onSenderError ?? defaultQwpSenderErrorHandler,
+          senderError,
+        );
+      } else if (!senderError && !this.options.onError) {
+        safelyInvoke(
+          defaultQwpIngressErrorHandler,
+          Object.freeze({ terminal, error: observed }),
+        );
       }
-    });
+    };
+    if (this.errorDispatcher) this.errorDispatcher.offer(notify);
+    else notify();
     return observed;
   }
 
@@ -1578,4 +1594,14 @@ function safelyInvoke<T>(
   } catch {
     // Observability callbacks must not break protocol progress.
   }
+}
+
+function defaultQwpIngressErrorHandler(event: {
+  readonly terminal: boolean;
+  readonly error: Error;
+}): void {
+  log(
+    event.terminal ? "error" : "warn",
+    `QWP ingress ${event.terminal ? "terminated" : "reported an asynchronous failure"} [message=${event.error.message}]`,
+  );
 }

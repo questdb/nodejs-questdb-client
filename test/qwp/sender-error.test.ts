@@ -1,13 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createQwpDataLossSenderError,
   createQwpSenderError,
+  defaultQwpSenderErrorHandler,
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
   QWP_STATUS,
 } from "../../src/qwp";
 
+const logging = vi.hoisted(() => ({ log: vi.fn() }));
+
+vi.mock("../../src/logging", () => logging);
+
 describe("QWP typed sender errors", () => {
+  beforeEach(() => logging.log.mockClear());
+
   it.each([
     [
       QWP_STATUS.SCHEMA_MISMATCH,
@@ -82,5 +89,35 @@ describe("QWP typed sender errors", () => {
       serverMessage: "corrupt journal",
       quarantinedPath: "/qwp/slot.bad",
     });
+  });
+
+  it("warns by default for a retriable server rejection", () => {
+    defaultQwpSenderErrorHandler(
+      createQwpSenderError(
+        {
+          status: QWP_STATUS.WRITE_ERROR,
+          sequence: 7n,
+          tables: [{ name: "trades", sequenceTransaction: 11n }],
+          errorMessage: "disk busy",
+        },
+        { fromFsn: 41n, toFsn: 43n },
+      ),
+    );
+
+    expect(logging.log).toHaveBeenCalledWith(
+      "warn",
+      "QuestDB rejected QWP ingress batch [category=write-error, policy=retriable, status=0x09, fsn=41..43, table=trades, sequence=7, message=disk busy]",
+    );
+  });
+
+  it("reports abandoned persistent data as an error by default", () => {
+    defaultQwpSenderErrorHandler(
+      createQwpDataLossSenderError("corrupt journal", "/qwp/slot.bad"),
+    );
+
+    expect(logging.log).toHaveBeenCalledWith(
+      "error",
+      "QWP buffered data abandoned [category=data-loss, policy=abandoned, quarantined=/qwp/slot.bad, message=corrupt journal]",
+    );
   });
 });

@@ -1,5 +1,6 @@
 import { Sender } from "../../src";
 import type { ExtraOptions, QwpExtraOptions } from "../../src";
+import { defaultQwpSenderErrorHandler } from "../../src/qwp";
 import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
@@ -68,6 +69,9 @@ const browserSenderSignature: (
   senderOptions?: QwpSenderOptions,
   sessionOptions?: QwpIngressSessionOptions,
 ) => Promise<QwpSender> = connectQwpBrowserSender;
+
+const defaultSenderErrorHandlerSignature: (error: QwpSenderError) => void =
+  defaultQwpSenderErrorHandler;
 
 const browserIngressSignature: (
   options: QwpBrowserWebSocketOptions,
@@ -321,6 +325,7 @@ const rootExtraOptionsContract: ExtraOptions = {
 };
 
 void browserSenderSignature;
+void defaultSenderErrorHandlerSignature;
 void browserIngressSignature;
 void browserEgressSignature;
 void bootstrapSignature;

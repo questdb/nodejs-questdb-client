@@ -13,6 +13,7 @@ import {
 import { QwpNotificationDispatcher } from "../qwp/internal/notification-dispatcher";
 import {
   createQwpDataLossSenderError,
+  defaultQwpSenderErrorHandler,
   type QwpSenderError,
 } from "../qwp/sender-error";
 
@@ -252,12 +253,10 @@ export class QwpNodeOrphanDrainer {
           DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY,
       );
     }
-    if (options.onSenderError) {
-      this.errorDispatcher = new QwpNotificationDispatcher(
-        options.onSenderError,
-        options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
-      );
-    }
+    this.errorDispatcher = new QwpNotificationDispatcher(
+      options.onSenderError ?? defaultQwpSenderErrorHandler,
+      options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
+    );
   }
 
   get metrics(): QwpNodeOrphanDrainerMetrics {
