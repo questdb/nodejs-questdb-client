@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  bootstrapQwpBrowserSession,
   connectQwpBrowserIngress,
   connectQwpBrowserWebSocket,
   createQwpBrowserSender,
+  QwpBrowserSessionBootstrapError,
   QwpWebSocketLike,
 } from "../../src/qwp/browser";
 import {
@@ -276,6 +278,128 @@ describe("QWP WebSocket adapters", () => {
       expect(factoryCalls).toBe(0);
     },
   );
+
+  it("bootstraps a browser qdb_session with Basic authentication", async () => {
+    let requestedUrl: URL | undefined;
+    let requestedInit: RequestInit | undefined;
+    const result = await bootstrapQwpBrowserSession({
+      url: "https://questdb.example/exec?tenant=blue",
+      authentication: {
+        type: "basic",
+        username: "admin",
+        password: "quest",
+      },
+      fetch: async (input, init) => {
+        requestedUrl = new URL(input);
+        requestedInit = init;
+        return new Response('{"dataset":[[1]]}', {
+          status: 200,
+          statusText: "OK",
+        });
+      },
+    });
+
+    expect(result).toMatchObject({ status: 200 });
+    expect(requestedUrl?.pathname).toBe("/exec");
+    expect(requestedUrl?.searchParams.get("tenant")).toBe("blue");
+    expect(requestedUrl?.searchParams.get("query")).toBe("select 1");
+    expect(requestedUrl?.searchParams.get("session")).toBe("true");
+    expect(requestedInit).toMatchObject({
+      method: "GET",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        Authorization: "Basic YWRtaW46cXVlc3Q=",
+        "Cache-Control": "no-store",
+      },
+    });
+  });
+
+  it("bootstraps REST/OIDC bearer auth and safely quotes a service account", async () => {
+    let requestedUrl: URL | undefined;
+    let requestedInit: RequestInit | undefined;
+    const result = await bootstrapQwpBrowserSession({
+      url: "https://questdb.example/exec",
+      authentication: { type: "bearer", token: "access-token" },
+      serviceAccount: "market'maker",
+      fetch: async (input, init) => {
+        requestedUrl = new URL(input);
+        requestedInit = init;
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: 200,
+      serviceAccount: "market'maker",
+    });
+    expect(requestedUrl?.searchParams.get("query")).toBe(
+      "assume service account 'market''maker'",
+    );
+    expect(requestedInit).toMatchObject({
+      credentials: "include",
+      headers: { Authorization: "Bearer access-token" },
+    });
+  });
+
+  it("classifies rejected browser session credentials without failing over", async () => {
+    const requestedHosts: string[] = [];
+    await expect(
+      connectQwpBrowserWebSocket({
+        url: "wss://primary.example/write/v4",
+        failoverUrls: ["wss://secondary.example/write/v4"],
+        sessionBootstrap: {
+          authentication: { type: "bearer", token: "invalid" },
+          fetch: async (input) => {
+            requestedHosts.push(new URL(input).host);
+            return new Response("invalid token", {
+              status: 401,
+              statusText: "Unauthorized",
+            });
+          },
+        },
+        webSocketFactory: () => {
+          throw new Error("WebSocket must not open after failed login");
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "QwpBrowserSessionBootstrapError",
+      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+      retryable: false,
+      tryNextEndpoint: false,
+      statusCode: 401,
+      responseBody: "invalid token",
+    } satisfies Partial<QwpBrowserSessionBootstrapError>);
+    expect(requestedHosts).toEqual(["primary.example"]);
+  });
+
+  it("completes the browser session bootstrap before opening WebSocket", async () => {
+    const socket = new FakeWebSocket();
+    const events: string[] = [];
+    const connecting = connectQwpBrowserWebSocket({
+      url: "wss://questdb.example/proxy/write/v4",
+      sessionBootstrap: {
+        authentication: { type: "bearer", token: "rest-token" },
+        fetch: async (input) => {
+          events.push(`fetch:${new URL(input).toString()}`);
+          return new Response("{}", { status: 200 });
+        },
+      },
+      webSocketFactory: () => {
+        events.push("websocket");
+        queueMicrotask(() => socket.open());
+        return asQwpSocket(socket);
+      },
+    });
+
+    const connection = await connecting;
+    expect(events).toHaveLength(2);
+    expect(events[0]).toContain(
+      "https://questdb.example/proxy/exec?query=select+1&session=true",
+    );
+    expect(events[1]).toBe("websocket");
+    await connection.close();
+  });
 
   it("buffers browser messages until a consumer is attached", async () => {
     const socket = new FakeWebSocket();

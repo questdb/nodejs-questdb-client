@@ -98,6 +98,55 @@ await sender.flush();
 await sender.close();
 ```
 
+When QuestDB authentication is enabled, establish the browser's HttpOnly
+`qdb_session` cookie over REST before opening a QWP WebSocket. A QuestDB REST
+token and an OIDC access token both use the `bearer` form. The application is
+responsible for obtaining an OIDC token from its identity provider; the client
+does not run an interactive OIDC authorization flow.
+
+```typescript
+import {
+  bootstrapQwpBrowserSession,
+  connectQwpBrowserSender,
+} from "@questdb/nodejs-client/qwp/browser";
+
+await bootstrapQwpBrowserSession({
+  url: new URL("/exec", location.href),
+  authentication: { type: "bearer", token: oidcOrRestAccessToken },
+  // QuestDB Enterprise only; omit to use the authenticated principal.
+  serviceAccount: "market_data_writer",
+});
+
+const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+```
+
+The bootstrap can also be attached to the connection options. It then runs
+before each initial, reconnect, or failover WebSocket attempt:
+
+```typescript
+const sender = await connectQwpBrowserSender(
+  {
+    url,
+    sessionBootstrap: {
+      authentication: {
+        type: "basic",
+        username: "admin",
+        password: "quest",
+      },
+    },
+  },
+  { autoFlush: false },
+);
+```
+
+The REST request uses `credentials: "include"`. The default bootstrap URL is
+`/exec` beside `/write/v4` or `/read/v1`; set `sessionBootstrap.url` explicitly
+when a reverse proxy exposes a different REST path. The REST and WebSocket
+routes should be served from the same browser origin (or configured with
+credentialed CORS), otherwise the browser may decline to store or send the
+HttpOnly cookies. JavaScript deliberately never reads `qdb_session` or the
+Enterprise `qdbServiceAccount` cookie.
+
 Browsers can request durable ingress acknowledgements without custom HTTP
 headers. The client offers a QWP WebSocket subprotocol and verifies that the
 server selected it before sending data. Browser keepalives use side-effect-free,

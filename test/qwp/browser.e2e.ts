@@ -453,23 +453,36 @@ describe("QWP in a real browser", () => {
         });
 
         const login = await page.evaluate(
-          async ({ username, password, table }) => {
+          async ({ moduleUrl, username, password, table }) => {
+            const importModule = new Function("url", "return import(url)") as (
+              url: string,
+            ) => Promise<Record<string, any>>;
+            const qwp = await importModule(moduleUrl);
+            const bootstrap = await qwp.bootstrapQwpBrowserSession({
+              url: new URL("/exec", location.href),
+              authentication: { type: "basic", username, password },
+            });
             const query =
               `create table ${table} (value long, ts timestamp) ` +
               "timestamp(ts) partition by day wal";
             const response = await fetch(
-              `/exec?query=${encodeURIComponent(query)}&session=true`,
-              {
-                credentials: "include",
-                headers: {
-                  Authorization: `Basic ${btoa(`${username}:${password}`)}`,
-                },
-              },
+              `/exec?query=${encodeURIComponent(query)}`,
+              { credentials: "include" },
             );
-            return { status: response.status, body: await response.text() };
+            return {
+              bootstrapStatus: bootstrap.status,
+              status: response.status,
+              body: await response.text(),
+            };
           },
-          { username: USER, password: PASSWORD, table: tableName },
+          {
+            moduleUrl: assetUrl,
+            username: USER,
+            password: PASSWORD,
+            table: tableName,
+          },
         );
+        expect(login.bootstrapStatus).toBe(200);
         expect(login.status, login.body).toBe(200);
 
         const cookies = await context.cookies(questdbUrl);
