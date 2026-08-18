@@ -185,7 +185,7 @@ describe("QWP in a real browser", () => {
     if (assetServer) await close(assetServer);
   });
 
-  it("decompresses a Zstd result batch in the browser bundle", async () => {
+  it("decompresses Zstd and reuses row views in the browser bundle", async () => {
     const page = await browser.newPage();
     try {
       await page.goto(assetUrl);
@@ -209,15 +209,36 @@ describe("QWP in a real browser", () => {
           1,
         );
         const message = qwp.decodeQwpEgressMessage(frame);
-        const batch = new qwp.QwpResultBatchDecoder().decode(message);
+        const batch = new qwp.QwpResultBatchDecoder().decodeView(message);
+        let sharedRow: any;
+        let reusesRow = true;
+        let visits = 0;
+        batch.forEachRow((row: any) => {
+          sharedRow ??= row;
+          reusesRow &&= sharedRow === row;
+          visits++;
+        });
+        const lastRow = batch.row(99);
         return {
           requestId: String(batch.requestId),
           rowCount: batch.rowCount,
-          lastValue: batch.get(99, 0),
+          lastValue: lastRow.getInt(0),
+          lastRowIndex: lastRow.rowIndex,
+          reusesRow,
+          rowViewExported: lastRow instanceof qwp.QwpResultRowView,
+          visits,
         };
       }, assetUrl);
 
-      expect(result).toEqual({ requestId: "7", rowCount: 100, lastValue: 42 });
+      expect(result).toEqual({
+        requestId: "7",
+        rowCount: 100,
+        lastValue: 42,
+        lastRowIndex: 99,
+        reusesRow: true,
+        rowViewExported: true,
+        visits: 100,
+      });
     } finally {
       await page.close();
     }

@@ -531,10 +531,31 @@ const query = await session.queryViews(
 await query.completion;
 ```
 
+For conventional row-major processing, the same batch also owns one reusable
+`QwpResultRowView`:
+
+```typescript
+batch.forEachRow((row) => {
+  if (!row.isNull(2)) {
+    consume(row.getLong(0), row.getSymbol(1), row.getDouble(2));
+  }
+});
+
+// Direct indexed access uses the same flyweight.
+const first = batch.row(0);
+consume(first.rowIndex, first.getString(1));
+```
+
+`forEachRow()` is synchronous, visits rows in index order, propagates callback
+exceptions, and re-points the same row object on every iteration. Do not retain
+the row object or any zero-copy value returned from it; copy the value inside the
+current invocation when it must survive. Calling `batch.row(index)` also returns
+that shared object, re-pointed to the requested row.
+
 The batch, its column objects, and every `Uint8Array`/`Int32Array` returned by a
-column are valid only until the callback settles. The decoder reuses those objects
-and its NULL-index, symbol-ID, array-offset, and Gorilla-timestamp scratch storage
-for later batches. Copy an individual byte view with `.slice()`, or call
+column or row are valid only until the callback settles. The decoder reuses those
+objects and its NULL-index, symbol-ID, array-offset, and Gorilla-timestamp scratch
+storage for later batches. Copy an individual byte view with `.slice()`, or call
 `batch.materialize()` inside the callback, when data must be retained.
 
 Raw fixed-width, NULL, VARCHAR/BINARY, and array data views point into the current
@@ -801,7 +822,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Query parameters             | `session.query(sql, { binds })`                               |
 | Materialized result batches  | `for await (const batch of query)`                            |
-| Reusable result views        | `session.queryViews(sql, onBatch)`                            |
+| Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |
 | Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |
 
 Do not translate Java threading assumptions directly: callbacks, WebSocket delivery,

@@ -23,6 +23,7 @@ import {
   QwpEgressSession,
   QwpResultBatchDecoder,
   QwpResultBatchView,
+  QwpResultRowView,
   readQwpVarint,
   writeQwpVarint,
 } from "../../src/qwp";
@@ -356,6 +357,71 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
+  it("reuses one row-major view for row() and forEachRow()", () => {
+    const message = decodeQwpEgressMessage(firstResultBatch());
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const batch = new QwpResultBatchDecoder().decodeView(message);
+    const first = batch.row(0);
+    expect(first).toBeInstanceOf(QwpResultRowView);
+    expect(first.batch).toBe(batch);
+    expect(first.rowIndex).toBe(0);
+    expect(first.getInt(0)).toBe(7);
+    expect(new TextDecoder().decode(first.getUtf8View(1)!)).toBe("a");
+    expect(first.getSymbolId(2)).toBe(0);
+    expect(first.getSymbol(2)).toBe("alpha");
+    expect(first.getLong(3)).toBe(100n);
+
+    const second = batch.row(1);
+    expect(second).toBe(first);
+    expect(first.rowIndex).toBe(1);
+    expect(first.isNull(0)).toBe(true);
+    expect(first.getInt(0)).toBe(0);
+    expect(first.getString(1)).toBe("bb");
+
+    const identities = new Set<QwpResultRowView>();
+    const rows: unknown[][] = [];
+    batch.forEachRow((row) => {
+      identities.add(row);
+      rows.push([
+        row.rowIndex,
+        row.get(0),
+        row.getString(1),
+        row.getSymbol(2),
+        row.getLong(3),
+      ]);
+    });
+    expect(identities.size).toBe(1);
+    expect(rows).toEqual([
+      [0, 7, "a", "alpha", 100n],
+      [1, null, "bb", "beta", 200n],
+      [2, 9, "", "alpha", 300n],
+    ]);
+
+    let visited = 0;
+    expect(() =>
+      batch.forEachRow((row) => {
+        visited++;
+        if (row.rowIndex === 1) throw new Error("stop rows");
+      }),
+    ).toThrow("stop rows");
+    expect(visited).toBe(2);
+
+    batch.release();
+    expect(() => first.rowIndex).toThrow(/no longer valid/i);
+    expect(() => first.getInt(0)).toThrow(/no longer valid/i);
+  });
+
+  it("does not invoke forEachRow for an empty batch", () => {
+    const message = decodeQwpEgressMessage(emptyResultBatch(0n, 0));
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decodeView(message);
+    const callback = vi.fn();
+    batch.forEachRow(callback);
+    expect(callback).not.toHaveBeenCalled();
+    expect(() => batch.row(0)).toThrow("row index out of range: 0");
+  });
+
   it("lazily reads every result type and detaches materialized binary", () => {
     const frame = scalarResultBatch();
     const message = decodeQwpEgressMessage(frame);
@@ -385,6 +451,24 @@ describe("QWP result batch decoder", () => {
     expect(batch.column(17).getBinaryView(0)).toEqual(Uint8Array.of(1, 2, 3));
     expect(batch.column(18).getInt(0)).toBe(-1);
 
+    const rowView = batch.row(0);
+    expect(rowView.getBoolean(0)).toBe(true);
+    expect(rowView.getByte(1)).toBe(-2);
+    expect(rowView.getShort(2)).toBe(-3);
+    expect(rowView.getChar(3)).toBe("Q");
+    expect(rowView.getLong(4)).toBe(-4n);
+    expect(rowView.getFloat(5)).toBe(1.5);
+    expect(rowView.getDouble(6)).toBe(-2.5);
+    expect(rowView.getUuidLow(8)).toBe(1n);
+    expect(rowView.getUuidHigh(8)).toBe(2n);
+    expect(rowView.getLong256Word(9, 3)).toBe(4n);
+    expect(rowView.getGeohashBits(10)).toBe(21n);
+    expect(rowView.getArrayDimensionCount(12)).toBe(2);
+    expect(rowView.getArrayView(12)).toBeInstanceOf(Uint8Array);
+    expect(rowView.getDecimalUnscaled(14)).toBe(1234n);
+    expect(rowView.getBinaryView(17)).toEqual(Uint8Array.of(1, 2, 3));
+    expect(rowView.getInt(18)).toBe(-1);
+
     const retained = batch.materialize();
     batch.column(17).getBinaryView(0)![0] = 99;
     expect(retained.get(0, 17)).toEqual(Uint8Array.of(1, 2, 3));
@@ -398,6 +482,7 @@ describe("QWP result batch decoder", () => {
     }
     const first = decoder.decodeView(firstMessage);
     const firstColumn = first.column(0);
+    const firstRow = first.row(0);
     first.release();
     decoder.resetQuerySchema();
 
@@ -408,7 +493,9 @@ describe("QWP result batch decoder", () => {
     const second = decoder.decodeView(secondMessage);
     expect(second).toBe(first);
     expect(second.column(0)).toBe(firstColumn);
+    expect(second.row(0)).toBe(firstRow);
     expect(second.column(0).getBoolean(0)).toBe(true);
+    expect(second.row(0).getBoolean(0)).toBe(true);
   });
 
   it("rejects a continuation batch before a schema-bearing batch", () => {

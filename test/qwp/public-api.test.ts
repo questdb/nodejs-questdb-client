@@ -37,6 +37,7 @@ const sharedRuntimeContract = [
   "QwpResultBatch",
   "QwpResultBatchView",
   "QwpResultColumnView",
+  "QwpResultRowView",
   "QwpQueryLease",
   "QwpSendTimeoutError",
   "QwpSender",

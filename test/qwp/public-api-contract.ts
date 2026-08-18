@@ -43,6 +43,8 @@ import type {
   QwpQueryLease,
   QwpResultBatchView,
   QwpResultBatchViewHandler,
+  QwpResultRowView,
+  QwpResultRowViewCallback,
   QwpSender,
   QwpSenderOptions,
 } from "../../src/qwp";
@@ -207,9 +209,18 @@ function queryViewContract(
     const typedBatch: QwpResultBatchView = batch;
     const requestId: bigint = query.requestId;
     const rawValues: Uint8Array | undefined = batch.column(0).valuesBytes();
+    const directRow: QwpResultRowView = batch.row(0);
+    const rowCallback: QwpResultRowViewCallback = (row) => {
+      const rowIndex: number = row.rowIndex;
+      const value: bigint = row.getLong(0);
+      void rowIndex;
+      void value;
+    };
+    batch.forEachRow(rowCallback);
     void typedBatch;
     void requestId;
     void rawValues;
+    void directRow;
   };
   const direct: Promise<QwpEgressViewQuery> = session.queryViews(
     "select * from trades",

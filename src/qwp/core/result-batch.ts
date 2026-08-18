@@ -667,6 +667,142 @@ export class QwpResultColumnView {
   }
 }
 
+/** Callback invoked by QwpResultBatchView.forEachRow(). */
+export type QwpResultRowViewCallback = (row: QwpResultRowView) => void;
+
+/**
+ * Reusable row-pinned facade over a QwpResultBatchView.
+ *
+ * The batch owns one instance and re-points it in place. It is valid only
+ * while the surrounding queryViews() callback is running, and must not be
+ * retained across forEachRow() iterations. Byte and array views returned by
+ * its accessors remain zero-copy and have the same lifetime.
+ */
+export class QwpResultRowView {
+  private _rowIndex = -1;
+
+  /** @internal */
+  constructor(private readonly parent: QwpResultBatchView) {}
+
+  /** Parent batch, primarily for column metadata. */
+  get batch(): QwpResultBatchView {
+    // Validate the shared batch before exposing it through a retained row.
+    void this.parent.rowCount;
+    return this.parent;
+  }
+
+  /** Zero-based row currently pinned by this reusable view. */
+  get rowIndex(): number {
+    void this.parent.rowCount;
+    return this._rowIndex;
+  }
+
+  /** Re-points this flyweight at a row and returns the same instance. */
+  of(rowIndex: number): this {
+    const rowCount = this.parent.rowCount;
+    if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= rowCount) {
+      throw new RangeError(`row index out of range: ${rowIndex}`);
+    }
+    this._rowIndex = rowIndex;
+    return this;
+  }
+
+  isNull(columnIndex: number): boolean {
+    return this.column(columnIndex).isNull(this._rowIndex);
+  }
+
+  get(columnIndex: number): QwpResultValue {
+    return this.column(columnIndex).get(this._rowIndex);
+  }
+
+  getBoolean(columnIndex: number): boolean {
+    return this.column(columnIndex).getBoolean(this._rowIndex);
+  }
+
+  getByte(columnIndex: number): number {
+    return this.column(columnIndex).getByte(this._rowIndex);
+  }
+
+  getShort(columnIndex: number): number {
+    return this.column(columnIndex).getShort(this._rowIndex);
+  }
+
+  getChar(columnIndex: number): string {
+    return this.column(columnIndex).getChar(this._rowIndex);
+  }
+
+  getInt(columnIndex: number): number {
+    return this.column(columnIndex).getInt(this._rowIndex);
+  }
+
+  getFloat(columnIndex: number): number {
+    return this.column(columnIndex).getFloat(this._rowIndex);
+  }
+
+  getDouble(columnIndex: number): number {
+    return this.column(columnIndex).getDouble(this._rowIndex);
+  }
+
+  getLong(columnIndex: number): bigint {
+    return this.column(columnIndex).getLong(this._rowIndex);
+  }
+
+  /** Zero-copy UTF-8 bytes for a VARCHAR value. */
+  getUtf8View(columnIndex: number): Uint8Array | null {
+    return this.column(columnIndex).getUtf8View(this._rowIndex);
+  }
+
+  getString(columnIndex: number): string | null {
+    return this.column(columnIndex).getString(this._rowIndex);
+  }
+
+  /** Zero-copy BINARY bytes. */
+  getBinaryView(columnIndex: number): Uint8Array | null {
+    return this.column(columnIndex).getBinaryView(this._rowIndex);
+  }
+
+  getSymbolId(columnIndex: number): number {
+    return this.column(columnIndex).getSymbolId(this._rowIndex);
+  }
+
+  getSymbol(columnIndex: number): string | null {
+    return this.column(columnIndex).getSymbol(this._rowIndex);
+  }
+
+  getUuidLow(columnIndex: number): bigint {
+    return this.column(columnIndex).getUuidLow(this._rowIndex);
+  }
+
+  getUuidHigh(columnIndex: number): bigint {
+    return this.column(columnIndex).getUuidHigh(this._rowIndex);
+  }
+
+  getLong256Word(columnIndex: number, wordIndex: number): bigint {
+    return this.column(columnIndex).getLong256Word(this._rowIndex, wordIndex);
+  }
+
+  getDecimalUnscaled(columnIndex: number): bigint {
+    return this.column(columnIndex).getDecimalUnscaled(this._rowIndex);
+  }
+
+  getGeohashBits(columnIndex: number): bigint {
+    return this.column(columnIndex).getGeohashBits(this._rowIndex);
+  }
+
+  /** Zero-copy encoded ARRAY row, including its dimension header. */
+  getArrayView(columnIndex: number): Uint8Array | null {
+    return this.column(columnIndex).getArrayView(this._rowIndex);
+  }
+
+  getArrayDimensionCount(columnIndex: number): number {
+    return this.column(columnIndex).getArrayDimensionCount(this._rowIndex);
+  }
+
+  private column(columnIndex: number): QwpResultColumnView {
+    return this.parent.column(columnIndex);
+  }
+}
+
 /**
  * Batch-owned reusable view delivered by QwpEgressSession.queryViews().
  * Access is invalid after the callback returns. materialize() creates an
@@ -681,6 +817,7 @@ export class QwpResultBatchView {
   private layouts: QwpResultColumnViewLayout[] = [];
   private readonly columnViews: QwpResultColumnView[] = [];
   private readonly columnViewPool: QwpResultColumnView[] = [];
+  private rowView?: QwpResultRowView;
 
   get valid(): boolean {
     return this.active;
@@ -727,6 +864,28 @@ export class QwpResultBatchView {
 
   get(rowIndex: number, columnIndex: number): QwpResultValue {
     return this.column(columnIndex).get(rowIndex);
+  }
+
+  /**
+   * Returns the batch-owned reusable row view pinned to rowIndex. Every call
+   * returns the same object re-pointed at the requested row.
+   */
+  row(rowIndex: number): QwpResultRowView {
+    this.assertValid();
+    return this.reusableRowView().of(rowIndex);
+  }
+
+  /**
+   * Visits rows in index order with one re-pointed row view. The callback is
+   * synchronous; copy values that must survive the current invocation.
+   */
+  forEachRow(callback: QwpResultRowViewCallback): void {
+    this.assertValid();
+    if (this._rowCount === 0) return;
+    const rowView = this.reusableRowView();
+    for (let rowIndex = 0; rowIndex < this._rowCount; rowIndex++) {
+      callback(rowView.of(rowIndex));
+    }
   }
 
   materialize(): QwpResultBatch {
@@ -802,6 +961,10 @@ export class QwpResultBatchView {
         "QWP result batch view is no longer valid; copy or materialize values inside the queryViews callback",
       );
     }
+  }
+
+  private reusableRowView(): QwpResultRowView {
+    return (this.rowView ??= new QwpResultRowView(this));
   }
 }
 
