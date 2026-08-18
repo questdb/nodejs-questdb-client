@@ -454,6 +454,12 @@ export interface QwpBinaryConnection {
   getIngressFrameSequence?(clientSequence: bigint): bigint | undefined;
 
   /**
+   * @internal Reserves a client sequence for a split-batch suffix suppressed
+   * before send(), keeping replay ACK translation aligned with the session.
+   */
+  skipIngressClientSequence?(): void;
+
+  /**
    * @internal Marks this endpoint as temporarily unsuitable and asks a stateful
    * connection factory to start its next sweep at another configured endpoint.
    */

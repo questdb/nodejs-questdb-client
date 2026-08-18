@@ -48,6 +48,7 @@ import type {
   QwpEgressViewQuery,
   QwpIngressSession,
   QwpIngressSessionOptions,
+  QwpIngressSendResult,
   QwpSenderError,
   QwpQueryLease,
   QwpResultBatchView,
@@ -253,6 +254,12 @@ function senderSequenceContract(
   const sessionWait: Promise<void> = session.waitForAcknowledged(0n, 5_000);
   const sessionPublished: bigint = session.publishedFrameSequence;
   const sessionAcknowledged: bigint = session.acknowledgedFrameSequence;
+  const tracked: QwpIngressSendResult = session.sendFrameWithPublication(
+    new Uint8Array(),
+  );
+  const localPublication: Promise<void> = tracked.publication;
+  const serverAcknowledgement = tracked.acknowledgement;
+  const trackedSequence: bigint = tracked.sequence;
   void published;
   void senderWait;
   void senderPublished;
@@ -260,6 +267,9 @@ function senderSequenceContract(
   void sessionWait;
   void sessionPublished;
   void sessionAcknowledged;
+  void localPublication;
+  void serverAcknowledgement;
+  void trackedSequence;
 }
 
 function rootSenderSequenceContract(sender: Sender): void {

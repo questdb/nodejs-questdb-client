@@ -1,4 +1,5 @@
 import {
+  decodeQwpIngressSymbolDictionaryDelta,
   decodeQwpIngressResponse,
   encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
@@ -280,6 +281,21 @@ export interface QwpIngressErrorEvent {
   /** Present for a classified server rejection. */
   readonly senderError?: QwpSenderError;
   readonly metrics: QwpIngressMetrics;
+}
+
+/**
+ * One ingress operation with independent local-publication and server-ACK
+ * completion. Publication resolves after every physical frame belonging to
+ * the logical batch has been accepted by the connection. For persistent Node
+ * transports that means the frames are durable in the replay journal.
+ */
+export interface QwpIngressSendResult {
+  /** Last client-session sequence allocated to this logical batch. */
+  readonly sequence: bigint;
+  /** Local transport/journal ownership boundary. */
+  readonly publication: Promise<void>;
+  /** Cumulative server response for every frame in the logical batch. */
+  readonly acknowledgement: Promise<QwpIngressResponse>;
 }
 
 interface PendingResponse {
@@ -632,19 +648,33 @@ export class QwpIngressSession {
     tables: readonly QwpTableBuffer[],
     encodeOptions: QwpIngressEncodeOptions = {},
   ): Promise<QwpIngressResponse> {
-    this.throwIfUnavailable();
-    const cap = this.maxBatchSizeBytes;
-    if (cap === undefined) {
-      return this.sendFrame(encodeQwpIngressFrame(tables, encodeOptions));
-    }
-    let planned: PlannedIngressFrames;
     try {
-      planned = planIngressFrames(tables, encodeOptions, cap);
+      return this.sendTablesWithPublication(tables, encodeOptions)
+        .acknowledgement;
     } catch (error) {
       if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
       throw error;
     }
-    return this.sendPlannedFrames(planned.frames);
+  }
+
+  /**
+   * Starts an ingress batch and exposes local publication separately from its
+   * server ACK. High-level senders use this boundary to retain retryable rows
+   * until a persistent replay journal owns the complete logical batch.
+   */
+  sendTablesWithPublication(
+    tables: readonly QwpTableBuffer[],
+    encodeOptions: QwpIngressEncodeOptions = {},
+  ): QwpIngressSendResult {
+    this.throwIfUnavailable();
+    const cap = this.maxBatchSizeBytes;
+    if (cap === undefined) {
+      return this.sendFrameWithPublication(
+        encodeQwpIngressFrame(tables, encodeOptions),
+      );
+    }
+    const planned = planIngressFrames(tables, encodeOptions, cap);
+    return this.sendPlannedFramesWithPublication(planned.frames);
   }
 
   /**
@@ -685,18 +715,46 @@ export class QwpIngressSession {
       "gorilla" | "deferCommit"
     > = {},
   ): Promise<QwpIngressResponse> {
+    try {
+      return this.sendTablesDeltaWithPublication(tables, encodeOptions)
+        .acknowledgement;
+    } catch (error) {
+      if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
+      throw error;
+    }
+  }
+
+  /** Delta-dictionary variant of sendTablesWithPublication(). */
+  sendTablesDeltaWithPublication(
+    tables: readonly QwpTableBuffer[],
+    encodeOptions: Pick<
+      QwpIngressEncodeOptions,
+      "gorilla" | "deferCommit"
+    > = {},
+  ): QwpIngressSendResult {
     this.throwIfUnavailable();
     if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
-      return this.sendTables(tables, encodeOptions);
+      return this.sendTablesWithPublication(tables, encodeOptions);
     }
     const previousSize = this.symbolDictionary.size;
     const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
     const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
-    const cap = this.maxBatchSizeBytes;
-    if (cap !== undefined) {
-      let planned: PlannedIngressFrames;
-      try {
-        planned = planIngressFrames(
+    let successfullyPublishedMaxSymbolId = previousPublishedMaxSymbolId;
+    let successfullyPublishedDelta = previousDeltaSymbolsPublished;
+    const recordPublishedDelta = (frame: Uint8Array): void => {
+      const delta = decodeQwpIngressSymbolDictionaryDelta(frame);
+      if (!delta) return;
+      successfullyPublishedDelta = true;
+      successfullyPublishedMaxSymbolId = Math.max(
+        successfullyPublishedMaxSymbolId,
+        delta.startId + delta.entries.length - 1,
+      );
+    };
+    let sending: QwpIngressSendResult;
+    try {
+      const cap = this.maxBatchSizeBytes;
+      if (cap !== undefined) {
+        const planned = planIngressFrames(
           tables,
           {
             ...encodeOptions,
@@ -705,44 +763,50 @@ export class QwpIngressSession {
           },
           cap,
         );
-      } catch (error) {
-        if (error instanceof QwpBatchTooLargeError)
-          return Promise.reject(error);
-        throw error;
+        this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
+        this.deltaSymbolsPublished = true;
+        sending = this.sendPlannedFramesWithPublication(
+          planned.frames,
+          recordPublishedDelta,
+        );
+      } else {
+        const frame = encodeQwpIngressFrame(tables, {
+          ...encodeOptions,
+          dictionary: this.symbolDictionary,
+          confirmedMaxSymbolId: this.publishedMaxSymbolId,
+        });
+        this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
+        this.deltaSymbolsPublished = true;
+        const rawSending = this.sendFrameWithPublication(frame);
+        sending = {
+          ...rawSending,
+          publication: rawSending.publication.then(() =>
+            recordPublishedDelta(frame),
+          ),
+        };
       }
-      this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
-      this.deltaSymbolsPublished = true;
-      try {
-        return this.sendPlannedFrames(planned.frames);
-      } catch (error) {
-        this.symbolDictionary.truncate(previousSize);
-        this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
-        this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
-        throw error;
-      }
-    }
-
-    let frame: Uint8Array;
-    try {
-      frame = encodeQwpIngressFrame(tables, {
-        ...encodeOptions,
-        dictionary: this.symbolDictionary,
-        confirmedMaxSymbolId: this.publishedMaxSymbolId,
-      });
-    } catch (error) {
-      this.symbolDictionary.truncate(previousSize);
-      throw error;
-    }
-    this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
-    this.deltaSymbolsPublished = true;
-    try {
-      return this.sendFrame(frame);
     } catch (error) {
       this.symbolDictionary.truncate(previousSize);
       this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
       this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
       throw error;
     }
+
+    // The publication promise, rather than a synchronous try/catch around
+    // sendFrame(), is the authoritative ownership boundary. Restore the
+    // allocator/watermark before the acknowledgement observes a local journal
+    // rejection, while retaining dictionary entries that did persist.
+    const publication = sending.publication.catch((error: unknown) => {
+      this.restoreDeltaStateAfterPublishFailure(previousSize);
+      this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
+      this.deltaSymbolsPublished = successfullyPublishedDelta;
+      throw error;
+    });
+    const acknowledgement = Promise.all([
+      publication,
+      sending.acknowledgement,
+    ]).then(([, response]) => response);
+    return { sequence: sending.sequence, publication, acknowledgement };
   }
 
   /**
@@ -764,6 +828,17 @@ export class QwpIngressSession {
     const previousSize = this.symbolDictionary.size;
     const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
     const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
+    let successfullyPublishedMaxSymbolId = previousPublishedMaxSymbolId;
+    let successfullyPublishedDelta = previousDeltaSymbolsPublished;
+    const recordPublishedDelta = (frame: Uint8Array): void => {
+      const delta = decodeQwpIngressSymbolDictionaryDelta(frame);
+      if (!delta) return;
+      successfullyPublishedDelta = true;
+      successfullyPublishedMaxSymbolId = Math.max(
+        successfullyPublishedMaxSymbolId,
+        delta.startId + delta.entries.length - 1,
+      );
+    };
     try {
       const cap = this.maxBatchSizeBytes;
       if (cap !== undefined) {
@@ -778,7 +853,7 @@ export class QwpIngressSession {
         );
         this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
         this.deltaSymbolsPublished = true;
-        await this.publishPlannedFrames(planned.frames);
+        await this.publishPlannedFrames(planned.frames, recordPublishedDelta);
         return;
       }
 
@@ -790,10 +865,11 @@ export class QwpIngressSession {
       this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
       this.deltaSymbolsPublished = true;
       await this.publishFrame(frame);
+      recordPublishedDelta(frame);
     } catch (error) {
       this.restoreDeltaStateAfterPublishFailure(previousSize);
-      this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
-      this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
+      this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
+      this.deltaSymbolsPublished = successfullyPublishedDelta;
       throw error;
     }
   }
@@ -857,6 +933,23 @@ export class QwpIngressSession {
   }
 
   sendFrame(frame: Uint8Array): Promise<QwpIngressResponse> {
+    try {
+      return this.sendFrameWithPublication(frame).acknowledgement;
+    } catch (error) {
+      if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
+      throw error;
+    }
+  }
+
+  /** Starts one pre-encoded frame with independent publication and ACKs. */
+  sendFrameWithPublication(frame: Uint8Array): QwpIngressSendResult {
+    return this.startFrameWithPublication(frame);
+  }
+
+  private startFrameWithPublication(
+    frame: Uint8Array,
+    publicationBarrier: Promise<void> = this.sendTail,
+  ): QwpIngressSendResult {
     this.throwIfUnavailable();
     const ackDeferredUntilCommit =
       frame.byteLength > QWP_FLAGS_OFFSET &&
@@ -865,9 +958,7 @@ export class QwpIngressSession {
       this.maxBatchSizeBytes !== undefined &&
       frame.byteLength > this.maxBatchSizeBytes
     ) {
-      return Promise.reject(
-        new QwpBatchTooLargeError(frame.byteLength, this.maxBatchSizeBytes),
-      );
+      throw new QwpBatchTooLargeError(frame.byteLength, this.maxBatchSizeBytes);
     }
     const sequence = this.nextSequence++;
     let pending!: PendingResponse;
@@ -878,12 +969,30 @@ export class QwpIngressSession {
     this.totalFramesPublished++;
     this.totalBytesPublished += frame.byteLength;
 
-    const sending = this.sendTail.then(async () => {
-      this.throwIfUnavailable();
-      await this.connection.send(frame);
-    });
+    let sendStarted = false;
+    const sending = publicationBarrier.then(
+      async () => {
+        this.throwIfUnavailable();
+        sendStarted = true;
+        await this.connection.send(frame);
+      },
+      (error: unknown) => {
+        // This session sequence was already allocated, but the frame must not
+        // reach a replay transport after an earlier frame in the same logical
+        // transaction failed publication. Reserve its translation slot so all
+        // later wire ACKs still map to the correct session sequence.
+        this.connection.skipIngressClientSequence?.();
+        throw error;
+      },
+    );
     this.sendTail = sending.catch((error: unknown) => {
+      if (!sendStarted) return;
       if (error instanceof QwpReplayDictionaryPersistenceError) {
+        this.recordError(error, false);
+      } else if (this.connection instanceof QwpReconnectingIngressConnection) {
+        // Replay transports own their terminal state. A local journal append
+        // failure is retryable by the caller and must not brick the session;
+        // terminal transport failures independently close the message stream.
         this.recordError(error, false);
       } else {
         this.fail(error);
@@ -920,21 +1029,57 @@ export class QwpIngressSession {
       if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
     });
-    return response;
+    return {
+      sequence,
+      publication: sending,
+      acknowledgement: response,
+    };
   }
 
-  private sendPlannedFrames(
+  private sendPlannedFramesWithPublication(
     frames: readonly Uint8Array[],
-  ): Promise<QwpIngressResponse> {
-    const responses = frames.map((frame) => this.sendFrame(frame));
-    if (responses.length === 1) return responses[0];
-    return Promise.all(responses).then(mergeIngressResponses);
+    onFramePublished?: (frame: Uint8Array) => void,
+  ): QwpIngressSendResult {
+    const sends: QwpIngressSendResult[] = [];
+    let publicationBarrier = this.sendTail;
+    for (const frame of frames) {
+      const sending = this.startFrameWithPublication(frame, publicationBarrier);
+      const tracked = onFramePublished
+        ? {
+            ...sending,
+            publication: sending.publication.then(() =>
+              onFramePublished(frame),
+            ),
+          }
+        : sending;
+      sends.push(tracked);
+      // Within one logical split batch a failed prefix must suppress every
+      // later frame. In particular, never send the final commit frame after a
+      // deferred prefix failed to enter the replay journal.
+      publicationBarrier = tracked.publication;
+    }
+    if (sends.length === 1) return sends[0];
+    // The final barrier settles only after every suffix has either published
+    // or been deliberately suppressed and had its sequence slot reserved.
+    const publication = publicationBarrier;
+    const acknowledgement = Promise.all(
+      sends.map((send) => send.acknowledgement),
+    ).then(mergeIngressResponses);
+    return {
+      sequence: sends[sends.length - 1].sequence,
+      publication,
+      acknowledgement,
+    };
   }
 
   private async publishPlannedFrames(
     frames: readonly Uint8Array[],
+    onFramePublished?: (frame: Uint8Array) => void,
   ): Promise<void> {
-    for (const frame of frames) await this.publishFrame(frame);
+    for (const frame of frames) {
+      await this.publishFrame(frame);
+      onFramePublished?.(frame);
+    }
   }
 
   /**

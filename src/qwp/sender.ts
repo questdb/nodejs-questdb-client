@@ -10,6 +10,7 @@ import {
 } from "./core";
 import {
   QwpIngressAckTimeoutError,
+  type QwpIngressSendResult,
   type QwpIngressMetrics,
 } from "./ingress-session";
 
@@ -100,6 +101,14 @@ export interface QwpSenderSession {
     tables: readonly QwpTableBuffer[],
     options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
   ): Promise<QwpIngressResponse>;
+  sendTablesWithPublication?(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): QwpIngressSendResult;
+  sendTablesDeltaWithPublication?(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): QwpIngressSendResult;
   publishTables?(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
@@ -1287,15 +1296,32 @@ export class QwpSender {
     let publishedSequence = -1n;
     const waitForServerAck = this.awaitServerAck && !publicationOnly;
     if (waitForServerAck) {
-      response = useDelta
-        ? session.sendTablesDelta!(wireTables, {
-            gorilla: encode?.gorilla,
-            deferCommit,
-          })
-        : session.sendTables(wireTables, {
-            gorilla: encode?.gorilla,
-            deferCommit,
-          });
+      const trackedSender = useDelta
+        ? session.sendTablesDeltaWithPublication
+        : session.sendTablesWithPublication;
+      if (trackedSender) {
+        const sending = trackedSender.call(session, wireTables, {
+          gorilla: encode?.gorilla,
+          deferCommit,
+        });
+        response = sending.acknowledgement;
+        // Observe ACK rejection while the local-publication boundary is being
+        // awaited; it is consumed normally below after ownership transfers.
+        void response.catch(() => undefined);
+        publication = sending.publication.then(() => {
+          publishedSequence = sending.sequence;
+        });
+      } else {
+        response = useDelta
+          ? session.sendTablesDelta!(wireTables, {
+              gorilla: encode?.gorilla,
+              deferCommit,
+            })
+          : session.sendTables(wireTables, {
+              gorilla: encode?.gorilla,
+              deferCommit,
+            });
+      }
     } else {
       const publisher = useDelta
         ? session.publishTablesDelta
@@ -1322,9 +1348,9 @@ export class QwpSender {
       sessionPublishedSequence(session),
     );
     this.totalFlushes++;
-    // Publication-only Node store-and-forward transfers row ownership only
-    // after every frame is durable locally. A disk-capacity or I/O failure
-    // therefore leaves the staged rows available for retry.
+    // Transfer row ownership only after every logical frame is accepted by
+    // the transport. For Node store-and-forward this is the durable journal
+    // boundary, independently of whether this flush also waits for an ACK.
     if (publication) await publication;
     for (const { table, rows } of snapshots) table.rows.splice(0, rows.length);
     const sentRows = snapshots.reduce(

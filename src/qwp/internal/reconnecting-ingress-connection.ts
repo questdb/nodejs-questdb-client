@@ -191,6 +191,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private wireFrames: ReplayFrame[] = [];
   private nextFrameSequence = 0n;
   private nextClientSequence = 0n;
+  private publishedFrameSequence = -1n;
   private acknowledgedFrameSequence = -1n;
   private highestOkFrameSequence = -1n;
   private poisonFrameSequence?: bigint;
@@ -304,6 +305,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       this.acknowledgedFrameSequence = records[0].frameSequence - 1n;
     }
     this.nextFrameSequence = previous + 1n;
+    this.publishedFrameSequence = previous;
   }
 
   static async connect(
@@ -428,7 +430,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       pendingReplayBytes += frame.payload.byteLength;
     }
     return Object.freeze({
-      publishedFrameSequence: this.nextFrameSequence - 1n,
+      publishedFrameSequence: this.publishedFrameSequence,
       acknowledgedFrameSequence: this.acknowledgedFrameSequence,
       pendingReplayFrames: this.frames.size,
       pendingReplayBytes,
@@ -457,6 +459,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return undefined;
   }
 
+  skipIngressClientSequence(): void {
+    this.nextClientSequence++;
+    this.nextFrameSequence++;
+  }
+
   send(payload: Uint8Array): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closing) return Promise.reject(new QwpSendClosedError());
@@ -480,6 +487,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       }
       await this.store.append(frame);
       this.frames.set(frame.frameSequence, frame);
+      this.publishedFrameSequence = frame.frameSequence;
       if (this.backgroundStoreAndForward) {
         this.enqueueDrain(frame);
         return;

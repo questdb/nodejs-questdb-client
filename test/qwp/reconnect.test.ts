@@ -54,6 +54,7 @@ import {
   QwpReconnectExhaustedError,
   QwpReplayRejectedError,
   QwpReplayDictionaryPersistenceError,
+  QwpSender,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   encodeQwpFrame,
@@ -154,6 +155,17 @@ function symbolTable(symbol: string): QwpTableBuffer {
   return table;
 }
 
+function symbolRows(symbols: readonly string[]): QwpTableBuffer {
+  const table = new QwpTableBuffer("trades");
+  for (const symbol of symbols) {
+    table
+      .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+      .values.push(symbol);
+    table.nextRow();
+  }
+  return table;
+}
+
 class FakeConnection implements QwpBinaryConnection {
   readonly messages: AsyncIterable<Uint8Array>;
   readonly sent: Uint8Array[] = [];
@@ -230,9 +242,15 @@ class FailOnceDictionaryReplayStore extends TrackingReplayStore {
   readonly symbols: string[] = [];
   appendAttempts = 0;
 
+  constructor(private readonly failOnAppendAttempt = 1) {
+    super();
+  }
+
   override async append(record: QwpIngressReplayRecord): Promise<void> {
     this.appendAttempts++;
-    if (this.appendAttempts === 1) throw new Error("journal is full");
+    if (this.appendAttempts === this.failOnAppendAttempt) {
+      throw new Error("journal is full");
+    }
     await super.append(record);
   }
 
@@ -903,6 +921,98 @@ describe("QWP ingress reconnect and replay", () => {
     expect(
       decodeQwpIngressSymbolDictionaryDelta(replayStore.records.get(1n)!),
     ).toEqual({ startId: 0, entries: ["ETH-USD", "BTC-USD"] });
+    await session.close();
+  });
+
+  it("retains ACK-waiting high-level rows until journal publication succeeds", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new FailOnceDictionaryReplayStore();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+    });
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      awaitServerAck: true,
+    });
+    await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+
+    await expect(sender.flush()).rejects.toThrow("journal is full");
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 1,
+      totalRowsPublished: 0,
+      totalFlushFailures: 1,
+    });
+    expect(sender.publishedSequence).toBe(-1n);
+    expect(replayStore.symbols).toEqual(["ETH-USD"]);
+    expect(replayStore.records.size).toBe(0);
+
+    const retried = sender.flush();
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toEqual({
+      startId: 0,
+      entries: ["ETH-USD"],
+    });
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(retried).resolves.toBe(true);
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 0,
+      totalRowsPublished: 1,
+      totalFlushes: 2,
+    });
+    await sender.close();
+  });
+
+  it("stops a split ACK-waiting batch after a failed journal prefix", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new FailOnceDictionaryReplayStore(2);
+    const symbols = ["symbol-0000", "symbol-1111", "symbol-2222"];
+    const sizingDictionary = new QwpSymbolDictionary();
+    const cap = encodeQwpIngressFrame([symbolTable(symbols[0])], {
+      dictionary: sizingDictionary,
+      confirmedMaxSymbolId: -1,
+    }).byteLength;
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+      maxBatchSizeBytes: cap,
+    });
+
+    const failed = session.sendTablesDeltaWithPublication([
+      symbolRows(symbols),
+    ]);
+    await expect(failed.publication).rejects.toThrow("journal is full");
+    await expect(failed.acknowledgement).rejects.toThrow("journal is full");
+    expect([...replayStore.records.keys()]).toEqual([0n]);
+    expect(connection.sent).toHaveLength(1);
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toEqual({
+      startId: 0,
+      entries: [symbols[0]],
+    });
+    // The failed second frame persisted its sidecar entry before its frame
+    // append failed; the suppressed third frame persisted neither.
+    expect(replayStore.symbols).toEqual(symbols.slice(0, 2));
+
+    const retried = session.sendTablesDeltaWithPublication([
+      symbolRows(symbols),
+    ]);
+    await expect(retried.publication).resolves.toBeUndefined();
+    expect(connection.sent).toHaveLength(4);
+    expect(connection.sent.slice(1).every((frame) => frame.length <= cap)).toBe(
+      true,
+    );
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[1])).toEqual({
+      startId: 1,
+      entries: [symbols[1]],
+    });
+    connection.receive(
+      ingressResponse(QWP_STATUS.OK, BigInt(connection.sent.length - 1)),
+    );
+    await expect(retried.acknowledgement).resolves.toMatchObject({
+      sequence: retried.sequence,
+    });
     await session.close();
   });
 

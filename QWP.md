@@ -356,6 +356,12 @@ Low-level Node sessions expose `publishFrame()`, `publishTables()`, and
 `publishTablesDelta()` for local-publication semantics. Their `send*()` counterparts
 continue to return the server ACK. Use the publication methods only with persistent
 store-and-forward when local durability is the intended completion boundary.
+`sendFrameWithPublication()`, `sendTablesWithPublication()`, and
+`sendTablesDeltaWithPublication()` expose both boundaries from one operation: await
+`publication` before releasing retryable source rows, then await `acknowledgement`
+when server acceptance is also required. If a split logical batch cannot be fully
+journaled, its unattempted suffix is suppressed and the operation's publication
+promise rejects.
 
 ### Browser ingress
 
