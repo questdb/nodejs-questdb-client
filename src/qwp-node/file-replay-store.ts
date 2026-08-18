@@ -32,6 +32,10 @@ const LOCK_DIRECTORY = ".qwp.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const LOCK_RECOVERY_FILE = "recovery.json";
 const ABANDONED_LOCK_PREFIX = ".qwp.lock.abandoned-";
+// The file-per-frame journal has no fixed segment working set. Preserve two
+// default-sized QWP batches instead, mirroring Java's active+spare liveness
+// floor when the lifetime-monotonic dictionary consumes the configured cap.
+const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 interface StoredRecord {
@@ -50,7 +54,11 @@ interface ReplayStoreLockOwner {
 export interface QwpNodeFileReplayStoreOptions {
   /** Exclusive directory used by one ingress session. */
   directory: string;
-  /** Maximum journal size including record headers. Defaults to 1 GiB. */
+  /**
+   * Target maximum journal size including record headers and symbol metadata.
+   * Defaults to 1 GiB. The non-reclaimable symbol dictionary may exceed this
+   * target so it cannot permanently consume the journal's live frame budget.
+   */
   maxBytes?: number;
 }
 
@@ -105,6 +113,7 @@ export class QwpReplayStoreLockedError extends QwpReplayStoreError {
 export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly directory: string;
   private readonly maxBytes: number;
+  private readonly liveFrameBytes: number;
   private readonly records = new Map<bigint, StoredRecord>();
   private readonly symbols: string[] = [];
   private readonly symbolValues = new Set<string>();
@@ -130,6 +139,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.directory = directory;
     this.maxBytes = maxBytes;
+    this.liveFrameBytes = Math.min(maxBytes, DEFAULT_LIVE_FRAME_BYTES);
   }
 
   load(): Promise<readonly QwpIngressReplayRecord[]> {
@@ -218,7 +228,15 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       }
       const bytes = encodeRecord(record);
       const requiredBytes = this.totalBytes + bytes.byteLength;
-      if (requiredBytes > this.maxBytes) {
+      const frameBytes = this.totalBytes - this.dictionaryFileSize;
+      const requiredFrameBytes = frameBytes + bytes.byteLength;
+      const preservesLiveness =
+        this.dictionaryFileSize > 0 &&
+        (requiredFrameBytes <= this.liveFrameBytes || frameBytes === 0);
+      if (
+        bytes.byteLength > this.maxBytes ||
+        (requiredBytes > this.maxBytes && !preservesLiveness)
+      ) {
         throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
       }
 
@@ -316,9 +334,6 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       const addedBytes =
         block.byteLength + (initial ? DICTIONARY_HEADER_SIZE : 0);
       const requiredBytes = this.totalBytes + addedBytes;
-      if (requiredBytes > this.maxBytes) {
-        throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
-      }
       const finalPath = join(this.directory, DICTIONARY_FILE);
       if (initial) {
         const temporaryPath = join(
@@ -625,9 +640,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.dictionaryFileSize = offset;
     this.totalBytes += offset;
-    if (this.totalBytes > this.maxBytes) {
-      throw new QwpReplayStoreFullError(this.maxBytes, this.totalBytes);
-    }
+    // Dictionary bytes are lifetime-monotonic and ACK trimming cannot reclaim
+    // them. Loading a valid journal above the target is therefore safe; frame
+    // appends remain backpressured except for the bounded liveness floor.
   }
 
   private assertReady(): void {

@@ -1441,6 +1441,46 @@ describe("QWP Node file replay store", () => {
     await store.close();
   });
 
+  it("preserves a live frame budget after dictionary growth exhausts the target", async () => {
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 60,
+    });
+    await first.load();
+    // Header + block metadata + this entry occupy 66 bytes, already above
+    // the configured target. Unlike frame bytes, this prefix never shrinks.
+    await first.appendSymbolDictionary(0, ["abcdefghij"]);
+    await expect(
+      first.append({ frameSequence: 0n, payload: Uint8Array.of(1) }),
+    ).resolves.toBeUndefined();
+    await expect(
+      first.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+    ).rejects.toBeInstanceOf(QwpReplayStoreFullError);
+
+    await first.acknowledgeThrough(0n);
+    await expect(
+      first.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+    ).resolves.toBeUndefined();
+    await first.close();
+
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 60,
+    });
+    await expect(recovered.load()).resolves.toEqual([
+      { frameSequence: 1n, payload: Uint8Array.of(2) },
+    ]);
+    await expect(recovered.loadSymbolDictionary()).resolves.toEqual([
+      "abcdefghij",
+    ]);
+    await recovered.acknowledgeThrough(1n);
+    await expect(
+      recovered.append({ frameSequence: 2n, payload: Uint8Array.of(3) }),
+    ).resolves.toBeUndefined();
+    await recovered.close();
+  });
+
   it("fails closed when a persisted record is corrupt", async () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({ directory });

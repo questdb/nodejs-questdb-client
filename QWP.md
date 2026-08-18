@@ -98,6 +98,14 @@ sends it in order. Applications can therefore keep publishing during an outage u
 the configured `maxBytes` applies backpressure. A failed journal publication leaves
 the high-level rows staged so the caller can retry.
 
+The persisted symbol dictionary is lifetime-monotonic and cannot be reclaimed by an
+ACK. It counts toward the `maxBytes` target, but the journal preserves up to 32 MiB
+(or the configured target when smaller) for live frame records if dictionary growth
+uses all remaining headroom. Dictionary persistence itself is never rejected by the
+target, so actual disk usage can exceed it by the non-reclaimable dictionary
+overshoot. Frame growth beyond the liveness allowance remains backpressured until
+ACK trimming frees record files.
+
 The journal takes an exclusive lock when it is loaded and holds it until the sender
 or session closes. A second live process using the same directory fails with
 `QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents.
