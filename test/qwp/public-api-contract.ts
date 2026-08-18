@@ -169,6 +169,10 @@ const egressSessionOptionsContract: QwpEgressSessionOptions = {
   cancelDrainTimeoutMs: 5_000,
 };
 
+const fixedConnectionEgressContract: QwpEgressSessionOptions = {
+  reconnect: false,
+};
+
 const browserEgressOptionsContract: QwpBrowserEgressOptions = {
   url: "wss://node-1.example/read/v1",
   failoverUrls: ["wss://node-2.example/read/v1"],
@@ -289,6 +293,7 @@ void nodeOrphanRetrySignature;
 void nodeStoreAndForwardContract;
 void queryOptionsContract;
 void egressSessionOptionsContract;
+void fixedConnectionEgressContract;
 void browserEgressOptionsContract;
 void nodeEgressOptionsContract;
 void rootExtraOptionsContract;

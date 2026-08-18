@@ -35,8 +35,8 @@ import {
   QwpBinaryConnection,
   QwpByteWriter,
   QwpConnectionCloseInfo,
-  QwpEgressReplayRequiredError,
   QwpEgressSession,
+  QwpEgressSessionClosedError,
   QwpIngressSession,
   QwpIngressReplayRecord,
   QwpIngressReplayStore,
@@ -1777,6 +1777,19 @@ describe("QWP ingress reconnect and replay", () => {
 });
 
 describe("QWP egress reconnect and replay", () => {
+  it("keeps default initial connection establishment fail-fast", async () => {
+    const failure = new Error("offline");
+    let factoryCalls = 0;
+
+    await expect(
+      QwpEgressSession.connect(async () => {
+        factoryCalls++;
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(factoryCalls).toBe(1);
+  });
+
   it("applies full jitter to egress reconnect backoff", async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0.25);
@@ -2119,7 +2132,49 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
-  it("fails rather than silently replaying an active operation without reset", async () => {
+  it("defaults failover on and replays an active operation without a reset callback", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpEgressSession.connect(async () => {
+      const connection = connections.shift();
+      if (!connection) throw new Error("no connection available");
+      queueMicrotask(() => connection.receive(serverInfo(connection.endpoint)));
+      return connection;
+    });
+    const query = await session.query("update x set n = n + 1");
+    first.drop();
+
+    await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
+    second.receive(resultEnd());
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await session.close();
+  });
+
+  it("allows automatic egress failover to be disabled", async () => {
+    const first = new FakeConnection("primary");
+    let factoryCalls = 0;
+    const session = await QwpEgressSession.connect(
+      async () => {
+        factoryCalls++;
+        queueMicrotask(() => first.receive(serverInfo("primary")));
+        return first;
+      },
+      { reconnect: false },
+    );
+    const query = await session.query("select 1");
+    first.drop();
+
+    await expect(query.completion).rejects.toBeInstanceOf(
+      QwpEgressSessionClosedError,
+    );
+    expect(factoryCalls).toBe(1);
+    await session.close();
+  });
+
+  it("fails over and replays after a result decoder protocol error", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
@@ -2140,12 +2195,94 @@ describe("QWP egress reconnect and replay", () => {
         },
       },
     );
-    const query = await session.query("update x set n = n + 1");
-    first.drop();
+    const query = await session.query("select * from x");
+    first.receive(emptyResultBatch(0n, 1));
 
-    await expect(query.completion).rejects.toBeInstanceOf(
-      QwpEgressReplayRequiredError,
+    await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
+    second.receive(emptyResultBatch());
+    second.receive(resultEnd());
+    const iterator = query[Symbol.asyncIterator]();
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await session.close();
+  });
+
+  it("rotates endpoints after a malformed egress frame", async () => {
+    const attempts: string[] = [];
+    const connections = new Map<string, FakeConnection>();
+    const factory = createQwpEgressFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      async (endpoint) => {
+        const name = String(endpoint);
+        attempts.push(name);
+        const connection = new FakeConnection(name);
+        connections.set(name, connection);
+        connection.receive(serverInfo(name));
+        return connection;
+      },
+      {},
+      100,
     );
+    const session = await QwpEgressSession.connect(factory, {
+      reconnect: {
+        maxAttempts: 1,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+      },
+    });
+    const primary = connections.get("primary")!;
+    const query = await session.query("select 1");
+    primary.receive(Uint8Array.of(0xff));
+
+    await vi.waitFor(() =>
+      expect(connections.get("secondary")?.sent).toEqual(primary.sent),
+    );
+    const secondary = connections.get("secondary")!;
+    secondary.receive(resultEnd());
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    expect(attempts).toEqual(["primary", "secondary"]);
+    await session.close();
+  });
+
+  it("recovers an idle session after an invalid terminal response", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    first.receive(resultEnd());
+    await vi.waitFor(() => expect(connections).toHaveLength(0));
+    const query = await session.query("select 1");
+    expect(second.sent).toHaveLength(1);
+    second.receive(resultEnd());
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
     await session.close();
   });
 });

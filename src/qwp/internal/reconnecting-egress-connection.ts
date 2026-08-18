@@ -10,7 +10,6 @@ import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
-  QwpEgressReplayRequiredError,
   QwpEgressReplayResetEvent,
   QwpFailoverError,
   QwpHandshakeMetadata,
@@ -44,10 +43,20 @@ class ReplayResetCallbackError extends Error {
   }
 }
 
+class ReplayStateError extends QwpProtocolError {
+  readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "ReplayStateError";
+    this.cause = cause;
+  }
+}
+
 /**
- * Reconnects an egress wire and, only with an explicit reset handler, replays
- * the in-flight request and its control messages. Statements may therefore be
- * executed more than once when their outcome was lost with the connection.
+ * Reconnects an egress wire and replays the in-flight request and its control
+ * messages. Statements may therefore be executed more than once when their
+ * outcome was lost with the connection.
  */
 export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   private readonly messagesQueue = new QwpAsyncQueue<Uint8Array>();
@@ -80,10 +89,11 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     private readonly onConnectionReset: ConnectionResetHandler,
     private readonly encodeQueryRequest: QueryRequestEncoder,
     private readonly onReplayReset?: ReplayResetHandler,
+    private readonly retryInitialConnection = true,
   ) {
-    this.maxAttempts = reconnectOptions.maxAttempts ?? 3;
-    this.initialBackoffMs = reconnectOptions.initialBackoffMs ?? 100;
-    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? 5_000;
+    this.maxAttempts = reconnectOptions.maxAttempts ?? 8;
+    this.initialBackoffMs = reconnectOptions.initialBackoffMs ?? 50;
+    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? 1_000;
     this.maxDurationMs = reconnectOptions.maxDurationMs ?? 30_000;
     validateReconnectPolicy(
       this.maxAttempts,
@@ -105,6 +115,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     onConnectionReset: ConnectionResetHandler,
     encodeQueryRequest: QueryRequestEncoder,
     onReplayReset?: ReplayResetHandler,
+    retryInitialConnection = true,
   ): Promise<QwpReconnectingEgressConnection> {
     const reconnecting = new QwpReconnectingEgressConnection(
       factory,
@@ -113,6 +124,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       onConnectionReset,
       encodeQueryRequest,
       onReplayReset,
+      retryInitialConnection,
     );
     try {
       await reconnecting.connectLoop(undefined, false);
@@ -186,6 +198,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   private async connectLoop(
     initialCause: unknown,
     reconnecting: boolean,
+    skipQueueBarrier = false,
   ): Promise<void> {
     const outageStarted = Date.now();
     const previousEndpoint = this.lastEndpoint;
@@ -238,6 +251,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
             serverInfo,
             previousEndpoint,
             initialCause,
+            skipQueueBarrier,
           );
         } else {
           this.initialServerInfo = serverInfo;
@@ -281,6 +295,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           cause: error,
         });
         if (!isRetryableReconnectError(error)) throw error;
+        if (!reconnecting && !this.retryInitialConnection) throw error;
         const attemptsExhausted =
           this.maxAttempts > 0 && attempt >= this.maxAttempts;
         const durationExhausted =
@@ -323,7 +338,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           message.kind === "exec-done" ||
           message.kind === "query-error"
         ) {
-          this.outboundReplay = [];
+          const activeRequestId = replayRequestId(this.outboundReplay);
+          if (activeRequestId === message.requestId) this.outboundReplay = [];
         }
         this.messagesQueue.push(next.value);
       }
@@ -341,16 +357,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       ) {
         return;
       }
-      if (error instanceof QwpProtocolError) {
-        this.failTerminal(error);
-        await connection
-          .close(1002, "invalid QWP egress message")
-          .catch(() => undefined);
-        return;
-      }
-      await this.requestReconnect(error, connection).catch((reconnectError) => {
-        this.failTerminal(reconnectError);
-      });
+      await this.requestReconnect(
+        error,
+        connection,
+        error instanceof QwpProtocolError ? 1002 : 1000,
+        error instanceof QwpProtocolError ? "invalid QWP egress message" : "",
+      ).catch((reconnectError) => this.failTerminal(reconnectError));
     }
   }
 
@@ -383,7 +395,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   ): void {
     const initial = this.initialServerInfo;
     if (!initial) {
-      throw new QwpProtocolError(
+      throw new ReplayStateError(
         "QWP reconnect started before the initial SERVER_INFO was received",
       );
     }
@@ -409,11 +421,13 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     serverInfo: QwpServerInfoMessage,
     previousEndpoint: string | URL | undefined,
     cause: unknown,
+    skipQueueBarrier: boolean,
   ): Promise<void> {
     if (this.outboundReplay.length === 0) {
       // A terminal response may already be queued. Let the bounded session
       // consume it before resetting connection-scoped decoder state.
-      await this.messagesQueue.barrier();
+      if (skipQueueBarrier) this.messagesQueue.clear();
+      else await this.messagesQueue.barrier();
       await this.onConnectionReset(serverInfo);
       return;
     }
@@ -424,25 +438,24 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     await this.onConnectionReset(serverInfo);
     const requestId = replayRequestId(this.outboundReplay);
     if (requestId === undefined) {
-      throw new QwpProtocolError(
+      throw new ReplayStateError(
         "QWP egress replay is missing its QUERY_REQUEST",
       );
     }
-    if (!this.onReplayReset) {
-      throw new QwpEgressReplayRequiredError(requestId);
+    if (this.onReplayReset) {
+      try {
+        await this.onReplayReset({
+          requestId,
+          serverInfo,
+          previousEndpoint,
+          endpoint: connection.endpoint,
+          cause,
+        });
+      } catch (error) {
+        throw new ReplayResetCallbackError(error);
+      }
     }
-    try {
-      await this.onReplayReset({
-        requestId,
-        serverInfo,
-        previousEndpoint,
-        endpoint: connection.endpoint,
-        cause,
-      });
-    } catch (error) {
-      throw new ReplayResetCallbackError(error);
-    }
-    const request = await this.encodeQueryRequest(serverInfo, requestId);
+    const request = await this.encodeReplayRequest(serverInfo, requestId);
     validateEncodedRequest(request, requestId);
     const preparedRequest = request.slice();
     this.outboundReplay[0] = preparedRequest;
@@ -458,9 +471,42 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         "QWP QUERY_REQUEST cannot be prepared before SERVER_INFO",
       );
     }
-    const encoded = await this.encodeQueryRequest(serverInfo, requestId);
+    const encoded = await this.encodeReplayRequest(serverInfo, requestId);
     validateEncodedRequest(encoded, requestId);
     return encoded.slice();
+  }
+
+  private async encodeReplayRequest(
+    serverInfo: QwpServerInfoMessage,
+    requestId: bigint,
+  ): Promise<Uint8Array> {
+    try {
+      return await this.encodeQueryRequest(serverInfo, requestId);
+    } catch (error) {
+      throw new ReplayStateError(
+        `QWP egress could not reconstruct active request ID ${requestId}`,
+        error,
+      );
+    }
+  }
+
+  /** @internal Replaces a connection whose server response was invalid. */
+  async recoverProtocolFailure(error: QwpProtocolError): Promise<void> {
+    this.throwIfUnavailable();
+    const connection = this.connection;
+    if (!connection) throw new QwpSendClosedError();
+    try {
+      await this.requestReconnect(
+        error,
+        connection,
+        1002,
+        "invalid QWP egress message",
+        true,
+      );
+    } catch (reconnectError) {
+      this.failTerminal(reconnectError);
+      throw reconnectError;
+    }
   }
 
   private trackOutbound(payload: Uint8Array): void {
@@ -485,6 +531,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   private async requestReconnect(
     cause: unknown,
     failedConnection: QwpBinaryConnection,
+    closeCode = 1000,
+    closeReason = "",
+    skipQueueBarrier = false,
   ): Promise<void> {
     if (this.closing) throw new QwpSendClosedError();
     if (this.connection && this.connection !== failedConnection) return;
@@ -492,14 +541,21 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       const activeReconnect = this.reconnectTask;
       await activeReconnect;
       if (this.connection === failedConnection && !this.closing) {
-        await this.requestReconnect(cause, failedConnection);
+        await this.requestReconnect(
+          cause,
+          failedConnection,
+          closeCode,
+          closeReason,
+          skipQueueBarrier,
+        );
       }
       return;
     }
 
     this.connection = undefined;
-    void failedConnection.close().catch(() => undefined);
-    const reconnecting = this.connectLoop(cause, true);
+    if (closeCode !== 1000) failedConnection.deprioritizeEndpoint?.();
+    void failedConnection.close(closeCode, closeReason).catch(() => undefined);
+    const reconnecting = this.connectLoop(cause, true, skipQueueBarrier);
     this.reconnectTask = reconnecting;
     try {
       await reconnecting;
@@ -579,7 +635,7 @@ function validateEncodedRequest(
 ): void {
   const requestId = replayRequestId([payload]);
   if (requestId !== expectedRequestId) {
-    throw new QwpProtocolError(
+    throw new ReplayStateError(
       `QWP query encoder returned the wrong request [expected=${expectedRequestId}, actual=${requestId ?? "missing"}]`,
     );
   }
@@ -622,8 +678,7 @@ function isRetryableReconnectError(error: unknown): boolean {
     );
   }
   return !(
-    error instanceof QwpEgressReplayRequiredError ||
-    error instanceof ReplayResetCallbackError ||
-    error instanceof QwpProtocolError
+    error instanceof ReplayStateError ||
+    error instanceof ReplayResetCallbackError
   );
 }

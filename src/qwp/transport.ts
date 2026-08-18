@@ -135,7 +135,11 @@ export class QwpReplayDictionaryPersistenceError extends QwpReplayDictionaryErro
   }
 }
 
-/** An active egress operation cannot be safely replayed without an explicit reset hook. */
+/**
+ * @deprecated Standard egress sessions now reset and replay automatically.
+ * Retained for source compatibility with clients that classified the former
+ * explicit-replay opt-in failure.
+ */
 export class QwpEgressReplayRequiredError extends Error {
   constructor(readonly requestId?: bigint) {
     super(

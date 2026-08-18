@@ -536,7 +536,7 @@ function parseIngressReconnect(
 
 function parseEgressReconnect(
   values: ReadonlyMap<string, readonly string[]>,
-): QwpReconnectOptions | undefined {
+): QwpReconnectOptions | false | undefined {
   const failover = optionalBoolean(values.get("failover")?.[0], "failover");
   const reconnect: QwpReconnectOptions = {
     maxAttempts: optionalInteger(
@@ -561,9 +561,11 @@ function parseEgressReconnect(
     ),
   };
   validateReconnectBounds(reconnect, "QWP egress failover");
-  if (failover === false) return undefined;
+  if (failover === false) return false;
   // The Java facade defaults egress failover to on for cluster strings.
-  return reconnect;
+  return failover === true || hasDefinedValue(reconnect)
+    ? reconnect
+    : undefined;
 }
 
 function parseStoreAndForward(
@@ -657,7 +659,7 @@ function validateStoreAndForwardDependencies(
 }
 
 function validateReconnectBounds(
-  reconnect: QwpReconnectOptions | undefined,
+  reconnect: QwpReconnectOptions | false | undefined,
   name: string,
 ): void {
   if (!reconnect) return;

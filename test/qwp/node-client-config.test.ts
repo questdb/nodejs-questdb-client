@@ -84,8 +84,8 @@ describe("QWP unified Node client configuration", () => {
       initialCredit: 8192,
       bufferPoolSize: 2,
       cancelDrainTimeoutMs: 7000,
-      reconnect: {},
     });
+    expect(options.egressSession?.reconnect).toBeUndefined();
     expect(options.pool).toMatchObject({
       senderPoolMin: 0,
       senderPoolMax: 2,
@@ -106,6 +106,14 @@ describe("QWP unified Node client configuration", () => {
       initialConnectMode: "async",
     });
     expect(options.pool?.queryPoolMin).toBe(0);
+  });
+
+  it("preserves failover=off as an explicit programmatic opt-out", () => {
+    const options = parseQwpNodeClientConfig(
+      "ws::addr=localhost;failover=off;",
+    );
+
+    expect(options.egressSession?.reconnect).toBe(false);
   });
 
   it("starts lazy persistent ingress without prewarming egress", async () => {

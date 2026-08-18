@@ -655,11 +655,21 @@ sends `X-QWP-Max-Batch-Rows`; browsers use the `qwp_max_batch_rows` URL paramete
 which requires a server that supports browser QWP negotiation. Older servers ignore
 the browser parameter and keep their configured batch size.
 
-Egress reconnect never silently resumes a partially consumed result. Configure
-`onReplayReset` to opt into at-least-once query re-execution, discard any rows from
-the previous attempt in that callback, and rebuild downstream state. Without that
-hook, losing a connection with an operation in flight raises
-`QwpEgressReplayRequiredError`.
+Egress failover is enabled by default in Node.js and browsers. A transport failure or
+invalid protocol response closes and deprioritizes that endpoint, reconnects, resets
+connection-scoped decoding state, and re-executes the active query. The default policy
+uses eight connection sweeps, full-jitter backoff starting at 50 ms and capped at one
+second, and a 30-second outage deadline. `QUERY_ERROR` remains a query result and does
+not trigger failover.
+
+Re-execution is at least once: a statement may have completed before its response was
+lost, and a consumer may already have observed a prefix of SELECT rows. Queued but
+unconsumed batches are discarded automatically. Configure `onReplayReset` when the
+application must clear an accumulated prefix before batches restart at sequence zero;
+the callback is an optional notification, not an opt-in. Set `reconnect: false` to use
+one fixed connection and surface failures without replay. Supplying a `reconnect`
+object tunes the failover bounds and also retains the earlier opt-in behavior of
+retrying initial connection establishment.
 
 Browser egress uses the same session API:
 
@@ -846,7 +856,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpEgressQueryAbandonedError`     | Result iteration ended before the server completed the query                                                |
 | `QwpEgressQueryTimeoutError`       | The client deadline expired and cancellation began                                                          |
 | `QwpEgressQueryCancelTimeoutError` | A cancelled query did not produce a terminal server response before the drain deadline                      |
-| `QwpEgressReplayRequiredError`     | Re-execution needs an explicit reset callback                                                               |
+| `QwpEgressReplayRequiredError`     | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
 Always close senders and sessions in `finally`. Sender publication plus ACK draining is
 bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded

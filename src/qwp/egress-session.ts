@@ -39,13 +39,16 @@ export interface QwpEgressSessionOptions {
   queryTimeoutMs?: number;
   /** Maximum wait for a terminal response after CANCEL. Defaults to 5 seconds. */
   cancelDrainTimeoutMs?: number;
-  /** Enables bounded reconnects. Active operations replay only with onReplayReset. */
-  reconnect?: QwpReconnectOptions;
   /**
-   * Explicitly opts into at-least-once re-execution after a disconnect. The
-   * query's not-yet-consumed batches are discarded before this callback, and
-   * callers must discard any result prefix they already consumed. The event
-   * includes the authoritative SERVER_INFO for the replacement endpoint.
+   * Bounded failover policy. Failover and at-least-once active-query replay
+   * are enabled by default; set false to keep one fixed connection.
+   */
+  reconnect?: QwpReconnectOptions | false;
+  /**
+   * Optional notification immediately before an active query is re-executed.
+   * Not-yet-consumed batches are discarded automatically; callers that retain
+   * an already-consumed prefix should discard it here. Omitting this callback
+   * leaves replay enabled and is appropriate for idempotent consumers.
    */
   onReplayReset?: (event: QwpEgressReplayResetEvent) => void | Promise<void>;
 }
@@ -96,6 +99,12 @@ export const QWP_DEFAULT_EGRESS_INITIAL_CREDIT = 256 * 1024;
 export const QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE = 4;
 
 const MAX_UINT64 = 0xffffffffffffffffn;
+const DEFAULT_EGRESS_RECONNECT_OPTIONS: Readonly<QwpReconnectOptions> = {
+  maxAttempts: 8,
+  initialBackoffMs: 50,
+  maxBackoffMs: 1_000,
+  maxDurationMs: 30_000,
+};
 
 function validateOptionalTimeout(
   value: number | undefined,
@@ -583,10 +592,14 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   ): Promise<QwpEgressSession> {
     const validated = validateEgressSessionOptions(options);
     const state: { session?: QwpEgressSession } = {};
-    const connection = options.reconnect
+    const reconnectOptions =
+      options.reconnect === false
+        ? undefined
+        : (options.reconnect ?? DEFAULT_EGRESS_RECONNECT_OPTIONS);
+    const connection = reconnectOptions
       ? await QwpReconnectingEgressConnection.connect(
           factory,
-          options.reconnect,
+          reconnectOptions,
           validated.serverInfoTimeoutMs,
           (serverInfo) => state.session?.prepareConnectionReset(serverInfo),
           (serverInfo, requestId) => {
@@ -603,6 +616,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
                 await options.onReplayReset!(event);
               }
             : undefined,
+          options.reconnect !== undefined,
         )
       : await factory();
     let session: QwpEgressSession;
@@ -871,37 +885,25 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private async consumeMessages(): Promise<void> {
     try {
       for await (const payload of this.connection.messages) {
-        const message = decodeQwpEgressMessage(payload);
-        switch (message.kind) {
-          case "server-info":
-            if (this.serverInfo) {
-              throw new QwpProtocolError("received duplicate QWP SERVER_INFO");
-            }
-            this.serverInfo = message;
-            clearTimeout(this.serverInfoTimer);
-            this.resolveServerInfo(message);
-            break;
-          case "cache-reset":
-            this.decoder.applyCacheReset(message.resetMask);
-            break;
-          case "result-batch": {
-            const query = this.requireActive(message.requestId);
-            if (query.retired) {
-              const creditBytes = query.lateBatchCredit(payload.byteLength);
-              if (creditBytes > 0) {
-                void this.sendWhileActive(
-                  message.requestId,
-                  encodeQwpCredit(message.requestId, creditBytes),
-                ).catch(() => undefined);
+        try {
+          const message = decodeQwpEgressMessage(payload);
+          switch (message.kind) {
+            case "server-info":
+              if (this.serverInfo) {
+                throw new QwpProtocolError(
+                  "received duplicate QWP SERVER_INFO",
+                );
               }
-            } else if (query.usesViews) {
-              await query.pushView(
-                this.decoder.decodeView(message),
-                payload.byteLength,
-              );
-            } else {
-              const reservation = await query.reserveMaterializedBatch();
-              if (reservation === "retired") {
+              this.serverInfo = message;
+              clearTimeout(this.serverInfoTimer);
+              this.resolveServerInfo(message);
+              break;
+            case "cache-reset":
+              this.decoder.applyCacheReset(message.resetMask);
+              break;
+            case "result-batch": {
+              const query = this.requireActive(message.requestId);
+              if (query.retired) {
                 const creditBytes = query.lateBatchCredit(payload.byteLength);
                 if (creditBytes > 0) {
                   void this.sendWhileActive(
@@ -909,47 +911,72 @@ export class QwpEgressSession implements QwpEgressQueryControl {
                     encodeQwpCredit(message.requestId, creditBytes),
                   ).catch(() => undefined);
                 }
-              } else if (reservation === "reserved") {
-                try {
-                  query.pushReserved(
-                    this.decoder.decode(message),
-                    payload.byteLength,
-                  );
-                } catch (error) {
-                  query.releaseMaterializedBatch();
-                  throw error;
+              } else if (query.usesViews) {
+                await query.pushView(
+                  this.decoder.decodeView(message),
+                  payload.byteLength,
+                );
+              } else {
+                const reservation = await query.reserveMaterializedBatch();
+                if (reservation === "retired") {
+                  const creditBytes = query.lateBatchCredit(payload.byteLength);
+                  if (creditBytes > 0) {
+                    void this.sendWhileActive(
+                      message.requestId,
+                      encodeQwpCredit(message.requestId, creditBytes),
+                    ).catch(() => undefined);
+                  }
+                } else if (reservation === "reserved") {
+                  try {
+                    query.pushReserved(
+                      this.decoder.decode(message),
+                      payload.byteLength,
+                    );
+                  } catch (error) {
+                    query.releaseMaterializedBatch();
+                    throw error;
+                  }
                 }
               }
+              break;
             }
-            break;
+            case "result-end": {
+              const query = this.requireActive(message.requestId);
+              this.clearActive(query);
+              this.clearCancelDrain(message.requestId);
+              query.finish(message);
+              break;
+            }
+            case "exec-done": {
+              const query = this.requireActive(message.requestId);
+              this.clearActive(query);
+              this.clearCancelDrain(message.requestId);
+              query.finish(message);
+              break;
+            }
+            case "query-error": {
+              const query = this.requireActive(message.requestId);
+              this.clearActive(query);
+              this.clearCancelDrain(message.requestId);
+              query.fail(
+                new QwpEgressQueryError(
+                  message.requestId,
+                  message.status,
+                  message.message,
+                ),
+              );
+              break;
+            }
           }
-          case "result-end": {
-            const query = this.requireActive(message.requestId);
-            this.clearActive(query);
-            this.clearCancelDrain(message.requestId);
-            query.finish(message);
-            break;
+        } catch (error) {
+          if (
+            error instanceof QwpProtocolError &&
+            this.connection instanceof QwpReconnectingEgressConnection
+          ) {
+            await this.connection.recoverProtocolFailure(error);
+            continue;
           }
-          case "exec-done": {
-            const query = this.requireActive(message.requestId);
-            this.clearActive(query);
-            this.clearCancelDrain(message.requestId);
-            query.finish(message);
-            break;
-          }
-          case "query-error": {
-            const query = this.requireActive(message.requestId);
-            this.clearActive(query);
-            this.clearCancelDrain(message.requestId);
-            query.fail(
-              new QwpEgressQueryError(
-                message.requestId,
-                message.status,
-                message.message,
-              ),
-            );
-            break;
-          }
+          throw error;
         }
       }
       if (!this.closing) {
