@@ -92,6 +92,10 @@ can start and accept flushes while QuestDB is offline. `flush()` then resolves
 after local durable journal publication and a background drainer reconnects
 and sends in order. Set `qwp.sender.awaitServerAck: true` to wait for the
 QuestDB ACK instead, or `awaitDurableAck: true` to wait through durable upload.
+Set `initialConnectMode` to `"off"`, `"sync"`, or `"async"` (the default) to
+choose fail-fast, bounded blocking, or background startup. The configuration-string
+equivalent is `initial_connect_retry`, used together with the store-and-forward
+options in `extraOptions.qwp`.
 Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
 the Node client scans and drains slots left by failed producer processes with bounded
 concurrency. Pooled QWP clients recover out-of-range `sender-N` slots automatically,

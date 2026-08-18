@@ -19,12 +19,14 @@ import {
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
 import {
+  QWP_INITIAL_CONNECT_MODE,
   QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpConnectionFactory,
   QwpDurableAckUnavailableError,
   QwpEgressRoutingOptions,
   QwpHandshakeMetadata,
+  QwpInitialConnectMode,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
 } from "./transport";
@@ -185,6 +187,17 @@ export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
 /** Node store-and-forward controls layered on the crash-safe replay journal. */
 export interface QwpNodeStoreAndForwardOptions
   extends QwpNodeFileReplayStoreOptions {
+  /**
+   * Initial server connection policy. Defaults to `async` for compatibility:
+   * persisted rows may be published before an endpoint is online.
+   */
+  initialConnectMode?: QwpInitialConnectMode;
+  /**
+   * Minimum time an orphan slot's symbol catch-up cap gap must persist before
+   * it is quarantined. The gap must also be observed 16 times. Defaults to
+   * five minutes; zero uses the observation threshold alone.
+   */
+  catchUpCapGapMinEscalationWindowMs?: number;
   /**
    * Adopts sibling replay slots left by terminated producers. Standalone
    * senders default this to false; pooled clients always recover their own
@@ -414,17 +427,22 @@ async function connectQwpNodeIngressInternal(
     ? new QwpNodeFileReplayStore(options.storeAndForward)
     : sessionOptions.replayStore;
   const reconnect = options.storeAndForward
-    ? {
-        maxAttempts: 0,
-        maxDurationMs: 0,
-        ...sessionOptions.reconnect,
-      }
+    ? (sessionOptions.reconnect ?? {})
     : sessionOptions.reconnect;
+  const initialConnectMode = options.storeAndForward
+    ? validateInitialConnectMode(
+        options.storeAndForward.initialConnectMode ??
+          QWP_INITIAL_CONNECT_MODE.ASYNC,
+      )
+    : undefined;
   const effectiveSessionOptions: QwpIngressSessionOptions = {
     ...sessionOptions,
     reconnect,
     replayStore,
     backgroundStoreAndForward: options.storeAndForward !== undefined,
+    initialConnectMode,
+    catchUpCapGapMinEscalationWindowMs:
+      options.storeAndForward?.catchUpCapGapMinEscalationWindowMs,
     durableAckKeepaliveMs: options.requestDurableAck
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : sessionOptions.durableAckKeepaliveMs,
@@ -639,6 +657,9 @@ function createNodeOrphanDrainer(
             ...storeAndForward,
             directory,
             drainOrphans: false,
+            // Orphan adoption is always non-blocking. Terminal endpoint-policy
+            // failures and cap-gap quarantine are selected below.
+            initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
           },
         },
         orphanIngressSessionOptions(sessionOptions),
@@ -662,6 +683,8 @@ function orphanIngressSessionOptions(
     },
     replayStore: undefined,
     backgroundStoreAndForward: undefined,
+    initialConnectMode: undefined,
+    orphanStoreAndForward: true,
     onResponse: undefined,
     onDurableAck: undefined,
     onProgress: undefined,
@@ -674,4 +697,19 @@ function parseCanonicalSenderSlot(name: string): number | undefined {
   if (!match) return undefined;
   const index = Number(match[1]);
   return Number.isSafeInteger(index) ? index : undefined;
+}
+
+function validateInitialConnectMode(
+  value: QwpInitialConnectMode,
+): QwpInitialConnectMode {
+  if (
+    value !== QWP_INITIAL_CONNECT_MODE.OFF &&
+    value !== QWP_INITIAL_CONNECT_MODE.SYNC &&
+    value !== QWP_INITIAL_CONNECT_MODE.ASYNC
+  ) {
+    throw new RangeError(
+      "store-and-forward initialConnectMode must be 'off', 'sync', or 'async'",
+    );
+  }
+  return value;
 }

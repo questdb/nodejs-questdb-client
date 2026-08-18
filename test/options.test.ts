@@ -853,6 +853,59 @@ describe("Configuration string parser suite", function () {
     );
   });
 
+  it("parses initial_connect_retry only for QWP WebSocket", async function () {
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host:9000;initial_connect_retry=off;"),
+    ).resolves.toMatchObject({ initial_connect_retry: "off" });
+    await expect(
+      SenderOptions.fromConfig(
+        "wss::addr=host:9000;initial_connect_retry=sync;",
+      ),
+    ).resolves.toMatchObject({ initial_connect_retry: "sync" });
+    await expect(
+      SenderOptions.fromConfig(
+        "ws::addr=host:9000;initial_connect_retry=async;",
+      ),
+    ).resolves.toMatchObject({ initial_connect_retry: "async" });
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host:9000;initial_connect_retry=on;"),
+    ).resolves.toMatchObject({ initial_connect_retry: "sync" });
+    await expect(
+      SenderOptions.fromConfig(
+        "http::addr=host:9000;initial_connect_retry=sync;",
+      ),
+    ).rejects.toThrow(
+      "initial_connect_retry is only supported for QWP ws/wss transport",
+    );
+    await expect(
+      SenderOptions.fromConfig(
+        "ws::addr=host:9000;initial_connect_retry=eventually;",
+      ),
+    ).rejects.toThrow("Invalid initial_connect_retry");
+  });
+
+  it("parses orphan catch-up cap-gap dwell only for QWP WebSocket", async function () {
+    await expect(
+      SenderOptions.fromConfig(
+        "ws::addr=host:9000;catch_up_cap_gap_min_escalation_window_millis=300000;",
+      ),
+    ).resolves.toMatchObject({
+      catch_up_cap_gap_min_escalation_window_millis: 300_000,
+    });
+    await expect(
+      SenderOptions.fromConfig(
+        "ws::addr=host:9000;catch_up_cap_gap_min_escalation_window_millis=-1;",
+      ),
+    ).rejects.toThrow("Invalid catch-up cap-gap minimum escalation window");
+    await expect(
+      SenderOptions.fromConfig(
+        "http::addr=host:9000;catch_up_cap_gap_min_escalation_window_millis=1;",
+      ),
+    ).rejects.toThrow(
+      "catch_up_cap_gap_min_escalation_window_millis is only supported for QWP ws/wss transport",
+    );
+  });
+
   it("can parse auto_flush_interval config", async function () {
     let options = await SenderOptions.fromConfig(
       "http::addr=host:9000;protocol_version=2;auto_flush_interval=30",

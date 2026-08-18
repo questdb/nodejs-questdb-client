@@ -148,7 +148,11 @@ const nodeEgressOptionsContract: QwpNodeEgressOptions = {
 const qwpExtraOptionsContract: QwpExtraOptions = {
   webSocket: {
     requestDurableAck: true,
-    storeAndForward: { directory: "/tmp/qwp-public-api-contract" },
+    storeAndForward: {
+      directory: "/tmp/qwp-public-api-contract",
+      initialConnectMode: "sync",
+      catchUpCapGapMinEscalationWindowMs: 300_000,
+    },
   },
   sender: {
     transactional: true,

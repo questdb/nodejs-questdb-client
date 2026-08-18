@@ -63,7 +63,7 @@ Advanced QWP options are accepted in the second argument:
 
 ```typescript
 const sender = await Sender.fromConfig(
-  "wss::addr=questdb.example:9000;token=REST_OR_OIDC_TOKEN",
+  "wss::addr=questdb.example:9000;token=REST_OR_OIDC_TOKEN;initial_connect_retry=async",
   {
     qwp: {
       webSocket: {
@@ -76,6 +76,7 @@ const sender = await Sender.fromConfig(
           checkpointIntervalMs: 5_000,
           backpressurePolicy: "wait",
           appendDeadlineMs: 30_000,
+          catchUpCapGapMinEscalationWindowMs: 300_000,
           drainOrphans: true,
           maxBackgroundDrainers: 4,
         },
@@ -106,6 +107,22 @@ while `"periodic"` and `"memory"` trade that immediate guarantee for throughput.
 Applications can therefore keep publishing during an outage until the configured
 `maxBytes` applies backpressure. A failed journal publication leaves the high-level
 rows staged so the caller can retry.
+
+`initialConnectMode` selects persistent startup behavior: `"off"` makes one
+fail-fast attempt, `"sync"` retries on the caller within the configured reconnect
+budget, and `"async"` (the backwards-compatible default) returns immediately while
+the background replay loop connects. `Sender.fromConfig()` also accepts
+`initial_connect_retry=off|sync|async` when `qwp.webSocket.storeAndForward` is
+supplied. Initial authentication, upgrade, and capability failures remain terminal.
+After a foreground persistent sender has connected successfully at least once, the
+same failures are retried indefinitely so credential rotation and rolling capability
+changes cannot strand its journal. The configured reconnect attempt/duration budget
+therefore bounds `"sync"` startup and non-persistent reconnects, not steady-state
+foreground store-and-forward recovery.
+
+The connect-string key
+`catch_up_cap_gap_min_escalation_window_millis` is the equivalent of
+`catchUpCapGapMinEscalationWindowMs`.
 
 `durability` controls the local persistence barrier:
 
@@ -151,6 +168,13 @@ retry loop. After inspection or repair, call `retryQwpNodeOrphanSlot(slotDirecto
 to make it eligible again. `onOrphanDrainEvent` reports discovery, drain, lock
 contention, quarantine, and scanner failures without allowing callback exceptions to
 interrupt recovery.
+
+A foreground sender retries a symbol-dictionary catch-up entry that is too large for
+the current target forever because a larger-cap node may return. An orphan drainer
+quarantines that slot only after 16 consecutive incompatible-cap observations and a
+minimum five-minute dwell. Tune the dwell with
+`catchUpCapGapMinEscalationWindowMs`; an unrelated transport or upgrade failure resets
+the episode so outage time cannot accidentally satisfy it.
 
 Keep sibling adoption off unless the parent is a dedicated store-and-forward group:
 every record-bearing child directory that is not the foreground slot is considered
@@ -371,9 +395,11 @@ rejection) and then by zone affinity; configuration order breaks ties. Health ou
 zone, so a known healthy cross-zone node is preferred to an untried local node. Every
 connection sweep can still try every endpoint, allowing role and health changes to
 recover. A non-orderly close demotes the selected endpoint before the next sweep.
-`reconnect` controls bounded exponential backoff and emits lifecycle events. Node
-ingress requires a persistent replay store when reconnect is enabled; browser ingress
-can only replay from memory for the lifetime of the page.
+`reconnect` controls exponential backoff and emits lifecycle events. Its attempt and
+duration bounds apply to browser/memory reconnect and Node `"sync"` startup. A Node
+foreground store-and-forward replay loop remains unbounded after startup. Node ingress
+requires a persistent replay store when reconnect is enabled; browser ingress can only
+replay from memory for the lifetime of the page.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` controls the strike threshold and

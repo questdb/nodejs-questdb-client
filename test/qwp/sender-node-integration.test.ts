@@ -1,4 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sender } from "../../src";
@@ -31,6 +34,44 @@ describe("Sender QWP integration", () => {
       server!.close((error) => (error ? reject(error) : resolve()));
     });
     server = undefined;
+  });
+
+  it("applies fail-fast persistent startup from the configuration string", async () => {
+    const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve, reject) => {
+      reservation.once("listening", resolve);
+      reservation.once("error", reject);
+    });
+    const port = (reservation.address() as AddressInfo).port;
+    await new Promise<void>((resolve, reject) =>
+      reservation.close((error) => (error ? reject(error) : resolve())),
+    );
+    const directory = await mkdtemp(join(tmpdir(), "qwp-sender-startup-"));
+    const sender = await Sender.fromConfig(
+      `ws::addr=127.0.0.1:${port};initial_connect_retry=off`,
+      {
+        qwp: {
+          webSocket: {
+            connectTimeoutMs: 100,
+            storeAndForward: { directory },
+          },
+          session: {
+            reconnect: {
+              maxAttempts: 0,
+              maxDurationMs: 0,
+              initialBackoffMs: 0,
+              maxBackoffMs: 0,
+            },
+          },
+        },
+      },
+    );
+    try {
+      await expect(sender.connect()).rejects.toThrow();
+    } finally {
+      await sender.close().catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("uses ws:: configuration, bearer authentication, and fluent rows", async () => {

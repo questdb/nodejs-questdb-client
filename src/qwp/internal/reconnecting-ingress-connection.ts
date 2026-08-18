@@ -13,6 +13,7 @@ import {
   utf8Length,
 } from "../core";
 import {
+  QWP_INITIAL_CONNECT_MODE,
   QWP_RECONNECT_EVENT_KIND,
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
@@ -22,6 +23,7 @@ import {
   QwpIngressReplayRecord,
   QwpIngressReplayStore,
   QwpIngressTransportMetrics,
+  QwpInitialConnectMode,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
   QwpReconnectOptions,
@@ -32,6 +34,37 @@ import {
   QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
+
+const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
+const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
+
+type ConnectAttemptPolicy = "single" | "configured" | "unbounded";
+
+class QwpCatchUpCapGapError extends RangeError {
+  constructor(
+    readonly symbolId: number,
+    readonly frameLength: number,
+    readonly maxBatchSizeBytes: number,
+    details?: {
+      attempt: number;
+      episodeMs: number;
+      minEscalationWindowMs: number;
+      exhausted: boolean;
+    },
+  ) {
+    super(
+      `symbol dictionary entry exceeds reconnect target batch cap [id=${symbolId}, frameLength=${frameLength}, max=${maxBatchSizeBytes}` +
+        (details
+          ? `, attempt=${details.attempt}/${MAX_CATCH_UP_CAP_GAP_ATTEMPTS}, episodeMs=${details.episodeMs}/${details.minEscalationWindowMs}]${
+              details.exhausted
+                ? "; the data must be resent after the cap is raised"
+                : "; retrying because a larger-cap node may return"
+            }`
+          : "]"),
+    );
+    this.name = "QwpCatchUpCapGapError";
+  }
+}
 
 interface ReplayFrame extends QwpIngressReplayRecord {
   readonly clientSequence?: bigint;
@@ -138,6 +171,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly maxDurationMs: number;
   private readonly maxFrameRejections: number;
   private readonly poisonMinEscalationWindowMs: number;
+  private readonly catchUpCapGapMinEscalationWindowMs: number;
   private readonly localMaxBatchSizeBytes?: number;
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   private connection?: QwpBinaryConnection;
@@ -152,6 +186,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private poisonFrameSequence?: bigint;
   private poisonFirstStrikeMs = 0;
   private poisonStrikes = 0;
+  private catchUpCapGapAttempts = 0;
+  private catchUpCapGapFirstMs = 0;
   private progressAtLastExemptRecycle = -1n;
   private zeroProgressRecycles = 0;
   private recoveredDiscardTail?: RecoveredDiscardTail;
@@ -173,6 +209,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private totalFailovers = 0;
   private totalReconnectErrors = 0;
   private totalServerNacks = 0;
+  private hasEverConnected = false;
   private deltaSymbolDictionaryEnabled: boolean;
   readonly messages: AsyncIterable<Uint8Array> = this.messagesQueue;
   readonly closed: Promise<QwpConnectionCloseInfo>;
@@ -187,6 +224,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     recoveredDiscardTail: RecoveredDiscardTail | undefined,
     localMaxBatchSizeBytes?: number,
     private readonly backgroundStoreAndForward = false,
+    private readonly orphanStoreAndForward = false,
+    catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
   ) {
     this.store = store;
     this.symbolDictionary = [...symbolDictionary];
@@ -202,6 +241,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.maxFrameRejections = reconnectOptions.maxFrameRejections ?? 4;
     this.poisonMinEscalationWindowMs =
       reconnectOptions.poisonMinEscalationWindowMs ?? 5_000;
+    this.catchUpCapGapMinEscalationWindowMs =
+      catchUpCapGapMinEscalationWindowMs;
     validateReconnectPolicy(
       this.maxAttempts,
       this.initialBackoffMs,
@@ -209,6 +250,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       this.maxDurationMs,
       this.maxFrameRejections,
       this.poisonMinEscalationWindowMs,
+      this.catchUpCapGapMinEscalationWindowMs,
     );
     let resolveClosed!: (info: QwpConnectionCloseInfo) => void;
     this.closed = new Promise((resolve) => {
@@ -244,6 +286,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     replayStore?: QwpIngressReplayStore,
     localMaxBatchSizeBytes?: number,
     backgroundStoreAndForward = false,
+    initialConnectMode: QwpInitialConnectMode = backgroundStoreAndForward
+      ? QWP_INITIAL_CONNECT_MODE.ASYNC
+      : QWP_INITIAL_CONNECT_MODE.SYNC,
+    orphanStoreAndForward = false,
+    catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
   ): Promise<QwpReconnectingIngressConnection> {
     const store = replayStore ?? new QwpMemoryReplayStore();
     let connection: QwpReconnectingIngressConnection | undefined;
@@ -269,10 +316,41 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         analyzeRecoveredDiscardTail(sortedRecords),
         localMaxBatchSizeBytes,
         backgroundStoreAndForward,
+        orphanStoreAndForward,
+        catchUpCapGapMinEscalationWindowMs,
       );
       await connection.retireRecoveredDiscardTailIfReady();
-      if (backgroundStoreAndForward) connection.startBackgroundConnect();
-      else await connection.connectLoop(undefined, false);
+      if (
+        backgroundStoreAndForward &&
+        initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC
+      ) {
+        connection.startBackgroundConnect();
+      } else {
+        try {
+          await connection.connectLoop(
+            undefined,
+            false,
+            backgroundStoreAndForward &&
+              initialConnectMode === QWP_INITIAL_CONNECT_MODE.OFF
+              ? "single"
+              : "configured",
+          );
+        } catch (error) {
+          if (
+            backgroundStoreAndForward &&
+            !orphanStoreAndForward &&
+            error instanceof QwpCatchUpCapGapError
+          ) {
+            // Java returns the foreground sender once the wire has connected,
+            // then moves recovered-dictionary catch-up to its unbounded I/O
+            // loop. Do the same instead of making OFF/SYNC construction wait
+            // forever for a larger-cap node.
+            connection.startBackgroundConnect();
+          } else {
+            throw error;
+          }
+        }
+      }
       return connection;
     } catch (error) {
       await connection?.close().catch(() => undefined);
@@ -372,7 +450,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private startBackgroundConnect(): void {
-    const connecting = this.connectLoop(undefined, false);
+    const connecting = this.connectLoop(undefined, false, "unbounded");
     this.reconnectTask = connecting;
     void connecting
       .catch((error: unknown) => {
@@ -421,6 +499,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private async connectLoop(
     initialCause: unknown,
     reconnecting: boolean,
+    attemptPolicy: ConnectAttemptPolicy = this.backgroundStoreAndForward
+      ? "unbounded"
+      : "configured",
   ): Promise<void> {
     const outageStarted = Date.now();
     const previousEndpoint = this.lastEndpoint;
@@ -452,6 +533,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       let candidate: QwpBinaryConnection | undefined;
       try {
         candidate = await this.factory();
+        this.hasEverConnected = true;
         this.connectingCandidate = candidate;
         if (this.closing) {
           await candidate.close().catch(() => undefined);
@@ -460,6 +542,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         const replayed = await this.replayInto(candidate);
         if (this.closing) throw new QwpSendClosedError();
         this.install(candidate, replayed);
+        this.resetCatchUpCapGapEpisode();
         this.connectingCandidate = undefined;
         if (reconnecting) {
           this.totalReconnectsSucceeded++;
@@ -497,18 +580,86 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           previousEndpoint,
           cause: error,
         });
-        if (!isRetryableReconnectError(error)) throw error;
+        const capGapError =
+          error instanceof QwpCatchUpCapGapError
+            ? this.applyCatchUpCapGapPolicy(error)
+            : undefined;
+        if (!capGapError) this.resetCatchUpCapGapEpisode();
+        if (capGapError?.exhausted) throw capGapError.error;
+        if (
+          capGapError &&
+          !this.orphanStoreAndForward &&
+          attemptPolicy !== "unbounded"
+        ) {
+          throw capGapError.error;
+        }
+        if (!this.isRetryableReconnectError(error)) throw error;
         const attemptsExhausted =
-          this.maxAttempts > 0 && attempt >= this.maxAttempts;
+          attemptPolicy === "single" ||
+          (attemptPolicy === "configured" &&
+            this.maxAttempts > 0 &&
+            attempt >= this.maxAttempts);
         const durationExhausted =
+          attemptPolicy === "configured" &&
           this.maxDurationMs > 0 &&
           Date.now() - outageStarted >= this.maxDurationMs;
         if (attemptsExhausted || durationExhausted) {
+          if (attemptPolicy === "single") throw error;
           throw new QwpReconnectExhaustedError(attempt, lastError);
         }
       }
     }
     throw new QwpSendClosedError();
+  }
+
+  private applyCatchUpCapGapPolicy(error: QwpCatchUpCapGapError): {
+    exhausted: boolean;
+    error: QwpCatchUpCapGapError;
+  } {
+    // Foreground SF owns producer data and must wait for a larger-cap node.
+    if (!this.orphanStoreAndForward) {
+      return { exhausted: false, error };
+    }
+    const now = monotonicNowMs();
+    if (this.catchUpCapGapAttempts === 0) {
+      this.catchUpCapGapFirstMs = now;
+    }
+    this.catchUpCapGapAttempts++;
+    const episodeMs = Math.max(0, now - this.catchUpCapGapFirstMs);
+    const exhausted =
+      this.catchUpCapGapAttempts >= MAX_CATCH_UP_CAP_GAP_ATTEMPTS &&
+      episodeMs >= this.catchUpCapGapMinEscalationWindowMs;
+    return {
+      exhausted,
+      error: new QwpCatchUpCapGapError(
+        error.symbolId,
+        error.frameLength,
+        error.maxBatchSizeBytes,
+        {
+          attempt: this.catchUpCapGapAttempts,
+          episodeMs,
+          minEscalationWindowMs: this.catchUpCapGapMinEscalationWindowMs,
+          exhausted,
+        },
+      ),
+    };
+  }
+
+  private resetCatchUpCapGapEpisode(): void {
+    this.catchUpCapGapAttempts = 0;
+    this.catchUpCapGapFirstMs = 0;
+  }
+
+  private isRetryableReconnectError(error: unknown): boolean {
+    if (
+      this.backgroundStoreAndForward &&
+      !this.orphanStoreAndForward &&
+      this.hasEverConnected &&
+      isEndpointPolicyFailure(error)
+    ) {
+      return true;
+    }
+    return isRetryableReconnectError(error);
   }
 
   private async replayInto(
@@ -550,6 +701,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     connection: QwpBinaryConnection,
     wireFrames: ReplayFrame[],
   ): void {
+    this.hasEverConnected = true;
     this.connection = connection;
     this.lastHandshake = connection.handshake;
     this.lastEndpoint = connection.endpoint;
@@ -1038,7 +1190,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     this.connection = undefined;
     void failedConnection.close().catch(() => undefined);
-    const reconnecting = this.connectLoop(cause, true);
+    const reconnecting = this.connectLoop(
+      cause,
+      true,
+      this.backgroundStoreAndForward ? "unbounded" : "configured",
+    );
     this.reconnectTask = reconnecting;
     try {
       await reconnecting;
@@ -1235,9 +1391,14 @@ function dictionaryCatchupFrames(
       entriesSize = nextEntriesSize;
     }
     if (count === 0) {
-      throw new RangeError(
-        `symbol dictionary entry exceeds reconnect target batch cap [id=${startId}, max=${maxBatchSizeBytes}]`,
-      );
+      const entryLength = utf8Length(entries[startId]);
+      const frameLength =
+        QWP_HEADER_SIZE +
+        qwpVarintSize(startId) +
+        qwpVarintSize(1) +
+        qwpVarintSize(entryLength) +
+        entryLength;
+      throw new QwpCatchUpCapGapError(startId, frameLength, maxBatchSizeBytes);
     }
     result.push(
       encodeQwpIngressSymbolDictionaryFrame(
@@ -1261,6 +1422,10 @@ function minimumDefined(
       : Math.min(first, second);
 }
 
+function monotonicNowMs(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
 function validateReconnectPolicy(
   maxAttempts: number,
   initialBackoffMs: number,
@@ -1268,6 +1433,7 @@ function validateReconnectPolicy(
   maxDurationMs: number,
   maxFrameRejections: number,
   poisonMinEscalationWindowMs: number,
+  catchUpCapGapMinEscalationWindowMs: number,
 ): void {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 0) {
     throw new RangeError(
@@ -1279,6 +1445,7 @@ function validateReconnectPolicy(
     ["maxBackoffMs", maxBackoffMs],
     ["maxDurationMs", maxDurationMs],
     ["poisonMinEscalationWindowMs", poisonMinEscalationWindowMs],
+    ["catchUpCapGapMinEscalationWindowMs", catchUpCapGapMinEscalationWindowMs],
   ] as const) {
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError(
@@ -1307,6 +1474,14 @@ function isRetryableReconnectError(error: unknown): boolean {
   }
   return !(
     error instanceof QwpReplayRejectedError || error instanceof QwpProtocolError
+  );
+}
+
+function isEndpointPolicyFailure(error: unknown): boolean {
+  if (error instanceof QwpUpgradeError) return true;
+  return (
+    error instanceof QwpFailoverError &&
+    error.attempts.some((attempt) => isEndpointPolicyFailure(attempt.error))
   );
 }
 

@@ -421,6 +421,63 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("supports fail-fast and bounded blocking persistent startup", async () => {
+    const failFastStore = new TrackingReplayStore();
+    let failFastCalls = 0;
+    await expect(
+      QwpIngressSession.connect(
+        async () => {
+          failFastCalls++;
+          throw new QwpUpgradeError("offline", {
+            kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+            retryable: true,
+            tryNextEndpoint: true,
+          });
+        },
+        {
+          backgroundStoreAndForward: true,
+          initialConnectMode: "off",
+          reconnect: {
+            maxAttempts: 5,
+            initialBackoffMs: 0,
+            maxBackoffMs: 0,
+          },
+          replayStore: failFastStore,
+        },
+      ),
+    ).rejects.toThrow("offline");
+    expect(failFastCalls).toBe(1);
+
+    const connected = new FakeConnection("primary");
+    const synchronousStore = new TrackingReplayStore();
+    let synchronousCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        if (synchronousCalls++ === 0) {
+          throw new QwpUpgradeError("starting", {
+            kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+            retryable: true,
+            tryNextEndpoint: true,
+          });
+        }
+        return connected;
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "sync",
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore: synchronousStore,
+      },
+    );
+    expect(synchronousCalls).toBe(2);
+    expect(session.handshake).toEqual({ qwpVersion: 1 });
+    await session.close();
+  });
+
   it("publishes while initially offline and drains after a background connection", async () => {
     const connection = new FakeConnection("primary");
     const replayStore = new TrackingReplayStore();
@@ -484,6 +541,154 @@ describe("QWP ingress reconnect and replay", () => {
       totalFramesSent: 2,
     });
     await session.close();
+  });
+
+  it("keeps an asynchronous initial authentication rejection terminal", async () => {
+    const replayStore = new TrackingReplayStore();
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        throw new QwpUpgradeError("unauthorized", {
+          kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+          retryable: false,
+          tryNextEndpoint: false,
+        });
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+    await session.closed;
+    await vi.waitFor(() =>
+      expect(session.metrics.lastError?.message).toBe("unauthorized"),
+    );
+    expect(factoryCalls).toBe(1);
+    await session.close();
+  });
+
+  it("retries endpoint-policy failures forever after foreground SF connected once", async () => {
+    const first = new FakeConnection("primary");
+    const replacement = new FakeConnection("primary");
+    const replayStore = new TrackingReplayStore();
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return first;
+        if (factoryCalls === 2) {
+          throw new QwpUpgradeError("credentials are rotating", {
+            kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+            retryable: false,
+            tryNextEndpoint: false,
+          });
+        }
+        return replacement;
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "off",
+        reconnect: {
+          // This bounds initial SYNC/non-SF reconnects, but steady foreground
+          // SF recovery must keep owning the durable replay record.
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(7));
+    await vi.waitFor(() => expect(first.sent).toEqual([Uint8Array.of(7)]));
+    first.drop();
+    await vi.waitFor(() => {
+      expect(factoryCalls).toBe(3);
+      expect(replacement.sent).toEqual([Uint8Array.of(7)]);
+    });
+    replacement.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+    await session.close();
+  });
+
+  it("quarantines only orphan symbol catch-up cap gaps after count and dwell", async () => {
+    const foregroundStore = new FailOnceDictionaryReplayStore();
+    foregroundStore.symbols.push("x".repeat(64));
+    foregroundStore.records.set(0n, Uint8Array.of(1));
+    let foregroundCalls = 0;
+    let recovered!: FakeConnection;
+    const foreground = await QwpIngressSession.connect(
+      async () => {
+        foregroundCalls++;
+        const cap = foregroundCalls <= 16 ? 16 : 1024;
+        const candidate = new FakeConnection("primary", {
+          qwpVersion: 1,
+          maxBatchSizeBytes: cap,
+        });
+        if (cap === 1024) recovered = candidate;
+        return candidate;
+      },
+      {
+        backgroundStoreAndForward: true,
+        // A blocking startup returns after its first successful WebSocket
+        // connection, even when recovered dictionary catch-up must move to
+        // the unbounded foreground replay loop.
+        initialConnectMode: "sync",
+        catchUpCapGapMinEscalationWindowMs: 0,
+        reconnect: {
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore: foregroundStore,
+      },
+    );
+    await vi.waitFor(() => {
+      expect(foregroundCalls).toBe(17);
+      expect(recovered.sent).toHaveLength(2);
+    });
+    expect(foreground.metrics.lastError).toBeUndefined();
+    await foreground.close();
+
+    const orphanStore = new FailOnceDictionaryReplayStore();
+    orphanStore.symbols.push("x".repeat(64));
+    orphanStore.records.set(0n, Uint8Array.of(1));
+    let orphanCalls = 0;
+    const orphan = await QwpIngressSession.connect(
+      async () => {
+        orphanCalls++;
+        return new FakeConnection("primary", {
+          qwpVersion: 1,
+          maxBatchSizeBytes: 16,
+        });
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        orphanStoreAndForward: true,
+        catchUpCapGapMinEscalationWindowMs: 0,
+        reconnect: {
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore: orphanStore,
+      },
+    );
+    await orphan.closed;
+    await vi.waitFor(() =>
+      expect(orphan.metrics.lastError?.message).toMatch(
+        /attempt=16\/16.*data must be resent/,
+      ),
+    );
+    expect(orphanCalls).toBe(16);
+    await orphan.close();
   });
 
   it("preserves durable dictionary IDs after frame journal backpressure", async () => {

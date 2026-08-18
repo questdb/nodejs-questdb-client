@@ -551,9 +551,31 @@ function createConfiguredQwpSender(
   }
   const authorization =
     configuredWebSocket.authorization ?? qwpAuthorization(options);
+  if (
+    (options.initial_connect_retry !== undefined ||
+      options.catch_up_cap_gap_min_escalation_window_millis !== undefined) &&
+    !configuredWebSocket.storeAndForward
+  ) {
+    throw new Error(
+      "initial_connect_retry and catch_up_cap_gap_min_escalation_window_millis require qwp.webSocket.storeAndForward",
+    );
+  }
+  const storeAndForward = configuredWebSocket.storeAndForward
+    ? {
+        ...configuredWebSocket.storeAndForward,
+        initialConnectMode:
+          options.initial_connect_retry ??
+          configuredWebSocket.storeAndForward.initialConnectMode,
+        catchUpCapGapMinEscalationWindowMs:
+          options.catch_up_cap_gap_min_escalation_window_millis ??
+          configuredWebSocket.storeAndForward
+            .catchUpCapGapMinEscalationWindowMs,
+      }
+    : undefined;
   return createQwpNodeSender(
     {
       ...configuredWebSocket,
+      storeAndForward,
       url: `${options.protocol}://${options.host}:${options.port}${QWP_INGRESS_PATH}`,
       agent,
       authorization,

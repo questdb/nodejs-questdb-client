@@ -15,6 +15,7 @@ import {
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
   QwpHandshakeMetadata,
+  QwpInitialConnectMode,
   QwpIngressReplayStore,
   QwpReconnectOptions,
   QwpReplayDictionaryPersistenceError,
@@ -157,6 +158,12 @@ export interface QwpIngressSessionOptions {
   replayStore?: QwpIngressReplayStore;
   /** @internal Starts the Node persistent drainer without waiting for a server. */
   backgroundStoreAndForward?: boolean;
+  /** @internal Initial connection policy supplied by the Node SF adapter. */
+  initialConnectMode?: QwpInitialConnectMode;
+  /** @internal Orphan sessions may quarantine persistent catch-up cap gaps. */
+  orphanStoreAndForward?: boolean;
+  /** @internal Minimum cap-gap dwell before an orphan can be quarantined. */
+  catchUpCapGapMinEscalationWindowMs?: number;
   /**
    * Optional local ingress frame cap. Browsers cannot read WebSocket upgrade
    * headers, so browser applications should set this to the server's configured
@@ -431,6 +438,9 @@ export class QwpIngressSession {
           options.replayStore,
           options.maxBatchSizeBytes,
           options.backgroundStoreAndForward,
+          options.initialConnectMode,
+          options.orphanStoreAndForward,
+          options.catchUpCapGapMinEscalationWindowMs,
         )
       : await factory();
     try {

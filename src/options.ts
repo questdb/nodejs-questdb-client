@@ -9,6 +9,7 @@ import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 import type {
   QwpNodeIngressOptions,
+  QwpInitialConnectMode,
   QwpIngressSessionOptions,
   QwpSenderOptions,
 } from "./qwp/node";
@@ -132,6 +133,13 @@ type DeprecatedOptions = {
  * <li> close_flush_timeout_millis: <i>integer</i> - Maximum time QWP close waits for committed rows to be acknowledged.
  * Defaults to 5000; 0 publishes pending rows but skips the ACK drain. This option is supported by ws/wss only.
  * </li>
+ * <li> initial_connect_retry: <i>enum, accepted values: off, sync, async</i> - QWP persistent
+ * store-and-forward startup policy. Requires <i>qwp.webSocket.storeAndForward</i>.
+ * </li>
+ * <li> catch_up_cap_gap_min_escalation_window_millis: <i>integer</i> - Minimum dwell
+ * before an orphan symbol-dictionary cap gap can be quarantined. Defaults to 300000.
+ * Requires <i>qwp.webSocket.storeAndForward</i>.
+ * </li>
  * </ul>
  * <br>
  * Buffer sizing options
@@ -187,6 +195,8 @@ class SenderOptions {
   auto_flush_bytes?: number;
   auto_flush_interval?: number;
   close_flush_timeout_millis?: number;
+  initial_connect_retry?: QwpInitialConnectMode;
+  catch_up_cap_gap_min_escalation_window_millis?: number;
 
   request_min_throughput?: number;
   request_timeout?: number;
@@ -390,6 +400,8 @@ function parseConfigurationString(
   parseBufferSizes(options);
   parseAutoFlushOptions(options);
   parseCloseFlushOptions(options);
+  parseInitialConnectOptions(options);
+  parseCatchUpCapGapOptions(options);
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
@@ -452,6 +464,8 @@ const ValidConfigKeys = [
   "auto_flush_bytes",
   "auto_flush_interval",
   "close_flush_timeout_millis",
+  "initial_connect_retry",
+  "catch_up_cap_gap_min_escalation_window_millis",
   "request_min_throughput",
   "request_timeout",
   "retry_timeout",
@@ -623,6 +637,52 @@ function parseCloseFlushOptions(options: SenderOptions) {
   ) {
     throw new Error(
       "close_flush_timeout_millis is only supported for QWP ws/wss transport",
+    );
+  }
+}
+
+function parseInitialConnectOptions(options: SenderOptions) {
+  const value = options.initial_connect_retry as unknown;
+  if (value === undefined) return;
+  if (options.protocol !== WS && options.protocol !== WSS) {
+    throw new Error(
+      "initial_connect_retry is only supported for QWP ws/wss transport",
+    );
+  }
+  switch (value) {
+    case "on":
+    case "true":
+    case "sync":
+      options.initial_connect_retry = "sync";
+      return;
+    case "off":
+    case "false":
+      options.initial_connect_retry = "off";
+      return;
+    case "async":
+      options.initial_connect_retry = "async";
+      return;
+    default:
+      throw new Error(
+        `Invalid initial_connect_retry: '${String(value)}', accepted values: 'off', 'sync', 'async'`,
+      );
+  }
+}
+
+function parseCatchUpCapGapOptions(options: SenderOptions) {
+  parseInteger(
+    options,
+    "catch_up_cap_gap_min_escalation_window_millis",
+    "catch-up cap-gap minimum escalation window",
+    0,
+  );
+  if (
+    options.catch_up_cap_gap_min_escalation_window_millis !== undefined &&
+    options.protocol !== WS &&
+    options.protocol !== WSS
+  ) {
+    throw new Error(
+      "catch_up_cap_gap_min_escalation_window_millis is only supported for QWP ws/wss transport",
     );
   }
 }

@@ -196,6 +196,22 @@ export interface QwpReconnectEvent {
   readonly cause?: unknown;
 }
 
+/**
+ * Initial connection policy for a persistent store-and-forward ingress
+ * session. Browser and memory-only reconnect transports do not use it.
+ */
+export const QWP_INITIAL_CONNECT_MODE = {
+  /** Try once on the caller and fail immediately. */
+  OFF: "off",
+  /** Retry on the caller within the configured reconnect budget. */
+  SYNC: "sync",
+  /** Return immediately and connect on the background replay loop. */
+  ASYNC: "async",
+} as const;
+
+export type QwpInitialConnectMode =
+  (typeof QWP_INITIAL_CONNECT_MODE)[keyof typeof QWP_INITIAL_CONNECT_MODE];
+
 export interface QwpReconnectOptions {
   /** Maximum connection sweeps per outage. Defaults to 3; zero is unlimited. */
   maxAttempts?: number;
