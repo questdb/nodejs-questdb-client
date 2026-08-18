@@ -293,6 +293,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       : QWP_INITIAL_CONNECT_MODE.SYNC,
     orphanStoreAndForward = false,
     catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
+    initialConnection?: Promise<QwpBinaryConnection>,
   ): Promise<QwpReconnectingIngressConnection> {
     const store = replayStore ?? new QwpMemoryReplayStore();
     let connection: QwpReconnectingIngressConnection | undefined;
@@ -338,10 +339,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           await connection.connectLoop(
             undefined,
             false,
-            backgroundStoreAndForward &&
-              initialConnectMode === QWP_INITIAL_CONNECT_MODE.OFF
+            initialConnectMode === QWP_INITIAL_CONNECT_MODE.OFF
               ? "single"
               : "configured",
+            initialConnection,
           );
         } catch (error) {
           if (
@@ -362,7 +363,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       return connection;
     } catch (error) {
       await connection?.close().catch(() => undefined);
-      if (!connection) await store.close().catch(() => undefined);
+      if (!connection) {
+        const opened = await initialConnection?.catch(() => undefined);
+        await opened?.close().catch(() => undefined);
+        await store.close().catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -510,6 +515,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     attemptPolicy: ConnectAttemptPolicy = this.backgroundStoreAndForward
       ? "unbounded"
       : "configured",
+    initialConnection?: Promise<QwpBinaryConnection>,
   ): Promise<void> {
     const outageStarted = Date.now();
     const previousEndpoint = this.lastEndpoint;
@@ -543,7 +549,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (reconnecting) this.totalReconnectAttempts++;
       let candidate: QwpBinaryConnection | undefined;
       try {
-        candidate = await this.factory();
+        candidate =
+          attempt === 1 && initialConnection
+            ? await initialConnection
+            : await this.factory();
         this.hasEverConnected = true;
         this.connectingCandidate = candidate;
         if (this.closing) {

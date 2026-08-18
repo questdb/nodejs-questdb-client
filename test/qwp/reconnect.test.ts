@@ -38,6 +38,7 @@ import {
   QwpEgressSession,
   QwpEgressSessionClosedError,
   QwpIngressSession,
+  QwpIngressSessionClosedError,
   QwpIngressReplayRecord,
   QwpIngressReplayStore,
   QwpHandshakeMetadata,
@@ -493,6 +494,62 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("keeps default ingress initial connection establishment fail-fast", async () => {
+    const failure = new Error("offline");
+    let factoryCalls = 0;
+
+    await expect(
+      QwpIngressSession.connect(async () => {
+        factoryCalls++;
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(factoryCalls).toBe(1);
+  });
+
+  it("defaults memory-mode ingress reconnect on and replays an unacknowledged frame", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpIngressSession.connect(async () => {
+      const connection = connections.shift();
+      if (!connection) throw new Error("no connection available");
+      return connection;
+    });
+
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.drop();
+
+    await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
+    second.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    expect(session.metrics.totalFramesReplayed).toBe(1);
+    await session.close();
+  });
+
+  it("allows automatic ingress reconnect to be disabled", async () => {
+    const connection = new FakeConnection("primary");
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        return connection;
+      },
+      { reconnect: false },
+    );
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+    connection.drop();
+
+    await expect(pending).rejects.toBeInstanceOf(QwpIngressSessionClosedError);
+    expect(factoryCalls).toBe(1);
+    await session.close();
+  });
+
   it("applies full jitter to ingress reconnect backoff", async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0.25);
@@ -2737,13 +2794,13 @@ describe("QWP Node file replay store", () => {
     await recovered.close();
   });
 
-  it("requires persistence when Node ingress reconnection is enabled", async () => {
+  it("accepts tuned in-memory reconnect for Node ingress", async () => {
     await expect(
       connectQwpNodeIngress(
         { url: "ws://127.0.0.1:1/write/v4" },
         { reconnect: { maxAttempts: 1 } },
       ),
-    ).rejects.toThrow(/persistent storeAndForward directory/);
+    ).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
   });
 });
 

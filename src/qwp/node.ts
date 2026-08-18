@@ -196,8 +196,8 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
 
 export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
   /**
-   * Enables persistent Node store-and-forward and ingress reconnection. Use a
-   * directory owned exclusively by this ingress session.
+   * Upgrades the default in-memory ingress replay to persistent Node
+   * store-and-forward. Use a directory owned exclusively by this session.
    */
   storeAndForward?: QwpNodeStoreAndForwardOptions;
 }
@@ -508,15 +508,6 @@ async function connectQwpNodeIngressInternal(
   if (options.storeAndForward && sessionOptions.replayStore) {
     throw new RangeError(
       "storeAndForward and a custom replayStore cannot both be configured",
-    );
-  }
-  if (
-    sessionOptions.reconnect &&
-    !options.storeAndForward &&
-    !sessionOptions.replayStore
-  ) {
-    throw new RangeError(
-      "Node QWP ingress reconnection requires a persistent storeAndForward directory",
     );
   }
   let replayStore = options.storeAndForward

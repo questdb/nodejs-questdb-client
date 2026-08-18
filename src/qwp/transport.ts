@@ -213,8 +213,9 @@ export interface QwpReconnectEvent {
 }
 
 /**
- * Initial connection policy for a persistent store-and-forward ingress
- * session. Browser and memory-only reconnect transports do not use it.
+ * Initial connection policy for an ingress reconnect session. Public browser
+ * and memory-only helpers resolve their default internally; Node persistent
+ * store-and-forward exposes all three modes.
  */
 export const QWP_INITIAL_CONNECT_MODE = {
   /** Try once on the caller and fail immediately. */

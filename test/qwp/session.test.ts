@@ -529,6 +529,36 @@ describe("QWP WebSocket adapters", () => {
     await session.close();
   });
 
+  it("reconnects browser ingress by default and replays from memory", async () => {
+    const sockets: FakeWebSocket[] = [];
+    const session = await connectQwpBrowserIngress({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        queueMicrotask(() => {
+          socket.open();
+          socket.message(ingressServerInfo(128));
+        });
+        return asQwpSocket(socket);
+      },
+    });
+
+    const pending = session.sendFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(sockets[0].sent).toHaveLength(1));
+    sockets[0].close(1006, "connection lost");
+
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    await vi.waitFor(() => expect(sockets[1].sent).toEqual(sockets[0].sent));
+    sockets[1].message(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    expect(session.metrics.totalFramesReplayed).toBe(1);
+    await session.close();
+  });
+
   it("splits fluent browser rows under the negotiated server cap", async () => {
     const socket = new FakeWebSocket();
     const sender = createQwpBrowserSender(

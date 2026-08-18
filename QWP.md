@@ -421,13 +421,20 @@ rejection) and then by zone affinity; configuration order breaks ties. Health ou
 zone, so a known healthy cross-zone node is preferred to an untried local node. Every
 connection sweep can still try every endpoint, allowing role and health changes to
 recover. A non-orderly close demotes the selected endpoint before the next sweep.
-`reconnect` controls full-jitter exponential backoff and emits lifecycle events. Each
-retry delay is selected between zero and the current exponential ceiling, preventing
-clients disconnected together from retrying in lockstep. Its attempt and duration
-bounds apply to browser/memory reconnect and Node `"sync"` startup. A Node
-foreground store-and-forward replay loop remains unbounded after startup. Node ingress
-requires a persistent replay store when reconnect is enabled; browser ingress can only
-replay from memory for the lifetime of the page.
+Ingress reconnect is enabled by default for factory-created browser and Node sessions.
+Unacknowledged frames are retained in memory and replayed at least once after a
+transport failure. The default memory policy uses full-jitter backoff from 100 ms to
+5 seconds and a five-minute per-outage deadline; the initial connection remains
+fail-fast. Set `reconnect: false` for one fixed connection. Supplying a `reconnect`
+object tunes the bounds, emits lifecycle events through `onEvent`, and retains the
+earlier opt-in behavior of retrying initial connection establishment.
+
+Each retry delay is selected between zero and the current exponential ceiling,
+preventing clients disconnected together from retrying in lockstep. Configured attempt
+and duration bounds apply to browser/memory reconnect and Node `"sync"` startup. A
+Node foreground store-and-forward replay loop remains unbounded after startup. Without
+`storeAndForward`, both Node and browser ingress replay only for the lifetime of the
+process or page; configuring a Node directory makes the same replay crash-safe.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` controls the strike threshold and
@@ -884,7 +891,8 @@ Review these behavioral differences before rollout:
 - QWP symbol dictionaries are connection-scoped and automatic.
 - Large batches are split to the negotiated WebSocket payload cap.
 - QWP transactional auto-flush is per table and must be explicitly committed.
-- Node reconnection requires store-and-forward and has at-least-once replay semantics.
+- Browser and Node QWP ingress reconnect by default with in-memory, at-least-once
+  replay. Configure Node store-and-forward when replay must survive process failure.
 - Existing HTTP, TCP, and TLS options do not automatically apply to QWP; put QWP-only
   connection and session controls under `extraOptions.qwp`.
 

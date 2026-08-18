@@ -169,6 +169,10 @@ const egressSessionOptionsContract: QwpEgressSessionOptions = {
   cancelDrainTimeoutMs: 5_000,
 };
 
+const fixedConnectionIngressContract: QwpIngressSessionOptions = {
+  reconnect: false,
+};
+
 const fixedConnectionEgressContract: QwpEgressSessionOptions = {
   reconnect: false,
 };
@@ -293,6 +297,7 @@ void nodeOrphanRetrySignature;
 void nodeStoreAndForwardContract;
 void queryOptionsContract;
 void egressSessionOptionsContract;
+void fixedConnectionIngressContract;
 void fixedConnectionEgressContract;
 void browserEgressOptionsContract;
 void nodeEgressOptionsContract;

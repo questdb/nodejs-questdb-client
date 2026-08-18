@@ -106,7 +106,9 @@ continue to default to ACK waiting.
 
 Browser applications use the browser entry point, which has no Node.js
 dependencies. Cookies are supplied by the browser during a same-origin
-WebSocket upgrade.
+WebSocket upgrade. Browser and non-persistent Node ingress reconnect by default and
+retain unacknowledged frames in memory; set `reconnect: false` in the session options
+for a fixed connection. Only Node store-and-forward survives process failure.
 
 ```typescript
 import { connectQwpBrowserSender } from "@questdb/nodejs-client/qwp/browser";

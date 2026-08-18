@@ -11,6 +11,7 @@ import {
   QwpTableBuffer,
 } from "./core";
 import {
+  QWP_INITIAL_CONNECT_MODE,
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
@@ -145,15 +146,15 @@ function mergeIngressResponses(
 export interface QwpIngressSessionOptions {
   ackTimeoutMs?: number;
   /**
-   * Enables bounded reconnection and at-least-once replay of unacknowledged
-   * frames. Browser replay is memory-only. Node connectors require a
-   * persistent store-and-forward directory when this is enabled.
+   * Bounded reconnection and at-least-once replay policy. Reconnection is
+   * enabled by default for factory-created sessions; set false to keep one
+   * fixed connection. Browser and non-persistent Node replay is memory-only.
    *
    * An ACK lost during disconnect can cause a frame to be replayed after the
    * server accepted it; configure server-side deduplication when duplicates
    * are not acceptable.
    */
-  reconnect?: QwpReconnectOptions;
+  reconnect?: QwpReconnectOptions | false;
   /** @internal Node adapter hook for persistent store-and-forward. */
   replayStore?: QwpIngressReplayStore;
   /** @internal Starts the Node persistent drainer without waiting for a server. */
@@ -192,6 +193,13 @@ export const QWP_INGRESS_PROGRESS_KIND = {
   ACKNOWLEDGED: "acknowledged",
   DURABLE_ACKNOWLEDGED: "durable-acknowledged",
 } as const;
+
+const DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<QwpReconnectOptions> = {
+  maxAttempts: 0,
+  initialBackoffMs: 100,
+  maxBackoffMs: 5_000,
+  maxDurationMs: 300_000,
+};
 
 export type QwpIngressProgressKind =
   (typeof QWP_INGRESS_PROGRESS_KIND)[keyof typeof QWP_INGRESS_PROGRESS_KIND];
@@ -423,24 +431,45 @@ export class QwpIngressSession {
     options: QwpIngressSessionOptions = {},
   ): Promise<QwpIngressSession> {
     validateIngressSessionOptions(options);
-    if (options.replayStore && !options.reconnect) {
-      throw new RangeError("a QWP replayStore requires reconnect options");
+    if (options.replayStore && options.reconnect === false) {
+      throw new RangeError("a QWP replayStore requires ingress reconnect");
     }
     if (options.backgroundStoreAndForward && !options.replayStore) {
       throw new RangeError(
         "background QWP store-and-forward requires a replayStore",
       );
     }
-    const connection = options.reconnect
+    const reconnectOptions =
+      options.reconnect === false
+        ? undefined
+        : (options.reconnect ?? DEFAULT_INGRESS_RECONNECT_OPTIONS);
+    const initialConnectMode =
+      options.initialConnectMode ??
+      (options.reconnect === undefined && !options.backgroundStoreAndForward
+        ? QWP_INITIAL_CONNECT_MODE.OFF
+        : undefined);
+    // Preserve the connector contract that the first browser/Node transport
+    // is constructed synchronously. The in-memory replay store initializes
+    // asynchronously, but real and test WebSockets may open immediately after
+    // their factory returns.
+    const initialConnection =
+      reconnectOptions &&
+      options.reconnect === undefined &&
+      !options.replayStore &&
+      !options.backgroundStoreAndForward
+        ? factory()
+        : undefined;
+    const connection = reconnectOptions
       ? await QwpReconnectingIngressConnection.connect(
           factory,
-          options.reconnect,
+          reconnectOptions,
           options.replayStore,
           options.maxBatchSizeBytes,
           options.backgroundStoreAndForward,
-          options.initialConnectMode,
+          initialConnectMode,
           options.orphanStoreAndForward,
           options.catchUpCapGapMinEscalationWindowMs,
+          initialConnection,
         )
       : await factory();
     try {
