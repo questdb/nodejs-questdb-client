@@ -16,6 +16,7 @@ const DEFAULT_POOL_MIN = 1;
 const DEFAULT_POOL_MAX = 4;
 const DEFAULT_ACQUIRE_TIMEOUT_MS = 5_000;
 const MAX_CLOSE_CREATION_WAIT_MS = 5_000;
+const MAX_CLOSE_LEASE_WAIT_MS = 5_000;
 
 export interface QwpClientPoolOptions {
   /** Warm ingress connections created by connect(). Defaults to 1. */
@@ -26,7 +27,10 @@ export interface QwpClientPoolOptions {
   queryPoolMin?: number;
   /** Maximum concurrently borrowed query connections. Defaults to 4. */
   queryPoolMax?: number;
-  /** Maximum wait for a returned pool slot. Defaults to 5 seconds. */
+  /**
+   * Maximum wait for a returned pool slot and for leases during shutdown.
+   * The shutdown wait is capped at 5 seconds. Defaults to 5 seconds.
+   */
   acquireTimeoutMs?: number;
 }
 
@@ -116,13 +120,20 @@ interface PoolWaiter {
   readonly timer?: ReturnType<typeof setTimeout>;
 }
 
+interface PoolCloseWaiter {
+  readonly resolve: () => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
 class QwpResourcePool<T> {
   private readonly all = new Map<number, PoolEntry<T>>();
   private readonly available: PoolEntry<T>[] = [];
   private readonly creatingSlots = new Set<number>();
   private readonly creationOperations = new Set<Promise<void>>();
   private readonly waiters = new Set<PoolWaiter>();
+  private readonly closeWaiters = new Set<PoolCloseWaiter>();
   private closePromise?: Promise<void>;
+  private pendingLeaseTeardowns = 0;
   private closed = false;
 
   constructor(
@@ -195,12 +206,19 @@ class QwpResourcePool<T> {
     entry.leased = false;
     if (this.closed || !reusable || this.all.get(entry.slot) !== entry) {
       if (this.all.get(entry.slot) === entry) this.all.delete(entry.slot);
-      await this.destroy(entry);
-      this.wakeWaiters();
+      this.pendingLeaseTeardowns++;
+      try {
+        await this.destroy(entry);
+      } finally {
+        this.pendingLeaseTeardowns--;
+        this.wakeWaiters();
+        this.wakeCloseWaiters();
+      }
       return;
     }
     this.available.push(entry);
     this.wakeWaiters();
+    this.wakeCloseWaiters();
   }
 
   close(): Promise<void> {
@@ -216,24 +234,33 @@ class QwpResourcePool<T> {
       waiter.reject(new QwpClientClosedError());
     }
     this.waiters.clear();
-    const entries = Array.from(this.all.values());
-    this.all.clear();
-    this.available.length = 0;
+    // Only idle entries belong to the closing thread. Borrowed entries stay in
+    // `all` so their exclusive owners can keep using them and retire them from
+    // release(), even after this bounded close has returned.
+    const entries = this.available.splice(0);
+    for (const entry of entries) this.all.delete(entry.slot);
     await Promise.all(entries.map((entry) => this.destroy(entry)));
     const creations = Array.from(this.creationOperations);
-    if (creations.length === 0) return;
-    const waitMs = Math.min(this.acquireTimeoutMs, MAX_CLOSE_CREATION_WAIT_MS);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        Promise.allSettled(creations),
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, waitMs);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
+    if (creations.length > 0) {
+      const waitMs = Math.min(
+        this.acquireTimeoutMs,
+        MAX_CLOSE_CREATION_WAIT_MS,
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(creations),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, waitMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
+    await this.waitForLeases(
+      Math.min(this.acquireTimeoutMs, MAX_CLOSE_LEASE_WAIT_MS),
+    );
   }
 
   private reserveSlot(): number | undefined {
@@ -295,6 +322,40 @@ class QwpResourcePool<T> {
       this.waiters.delete(waiter);
       if (waiter.timer) clearTimeout(waiter.timer);
       waiter.resolve();
+    }
+  }
+
+  private wakeCloseWaiters(): void {
+    for (const waiter of this.closeWaiters) {
+      this.closeWaiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+  }
+
+  private outstandingLeases(): number {
+    let count = this.pendingLeaseTeardowns;
+    for (const entry of this.all.values()) {
+      if (entry.leased) count++;
+    }
+    return count;
+  }
+
+  private async waitForLeases(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.outstandingLeases() > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await new Promise<void>((resolve) => {
+        const waiter: PoolCloseWaiter = {
+          resolve,
+          timer: setTimeout(() => {
+            this.closeWaiters.delete(waiter);
+            resolve();
+          }, remaining),
+        };
+        this.closeWaiters.add(waiter);
+      });
     }
   }
 
@@ -460,6 +521,10 @@ export class QwpClient {
     });
   }
 
+  /**
+   * Rejects new borrows, closes idle resources, and waits boundedly for active
+   * leases. A lease that outlives the wait remains usable and owns its teardown.
+   */
   close(): Promise<void> {
     if (!this.closePromise) this.closePromise = this.closeNow();
     return this.closePromise;

@@ -642,9 +642,12 @@ exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active
 query sends `CANCEL` and waits for the session's bounded cancellation drain; a
 connection that cannot drain is closed instead of being handed to another borrower.
-Call `QwpClient.close()` only after returning application-owned leases; shutdown
-rejects queued borrowers and closes every pooled connection, including one still
-leased by a caller.
+Prefer returning application-owned leases before calling `QwpClient.close()`.
+If shutdown races a borrower, it rejects queued borrowers, closes idle connections,
+and waits up to `acquireTimeoutMs` (capped at five seconds) for active leases to
+return. It never closes a connection underneath its borrower. A lease returned
+during or after shutdown is closed instead of re-entering the pool; a lease that is
+never returned retains its connection.
 
 Pooled sender `close()` flushes completed rows, discards an unfinished row with a
 warning, and resets staging before reuse. With Node store-and-forward enabled, the

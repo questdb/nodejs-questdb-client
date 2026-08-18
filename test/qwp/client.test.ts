@@ -60,6 +60,7 @@ class FakeConnection implements QwpBinaryConnection {
   readonly handshake: QwpHandshakeMetadata = { qwpVersion: 1 };
   readonly messages: AsyncIterable<Uint8Array>;
   readonly sent: Uint8Array[] = [];
+  closeCount = 0;
   readonly closed: Promise<QwpConnectionCloseInfo>;
   private readonly incoming = new QwpAsyncQueue<Uint8Array>();
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
@@ -80,6 +81,7 @@ class FakeConnection implements QwpBinaryConnection {
   }
 
   close(code = 1000, reason = ""): Promise<void> {
+    this.closeCount++;
     if (!this.closedSettled) {
       this.closedSettled = true;
       this.incoming.end();
@@ -210,6 +212,47 @@ describe("QWP pooled client", () => {
     expect(senderSessions[0].closes).toBe(1);
   });
 
+  it("waits for a borrowed sender without closing it underneath its owner", async () => {
+    const senderSessions: FakeSenderSession[] = [];
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          const session = new FakeSenderSession();
+          senderSessions.push(session);
+          const sender = new QwpSender(async () => session, {
+            autoFlush: false,
+          });
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 500,
+      },
+    );
+    const sender = await client.borrowSender();
+    let closeSettled = false;
+    const closing = client.close().then(() => {
+      closeSettled = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(closeSettled).toBe(false);
+    expect(senderSessions[0].closes).toBe(0);
+    await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+    await sender.close();
+    await closing;
+    expect(senderSessions[0].flushes).toBe(1);
+    expect(senderSessions[0].closes).toBe(1);
+  });
+
   it("runs independently borrowed query connections concurrently", async () => {
     const connections: FakeConnection[] = [];
     let queryCreations = 0;
@@ -260,6 +303,42 @@ describe("QWP pooled client", () => {
     await Promise.all([second.close(), third.close()]);
     await client.close();
     expect(connections).toHaveLength(2);
+  });
+
+  it("leaves a timed-out query lease alive and closes it on late return", async () => {
+    const connections: FakeConnection[] = [];
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: (slot) => createQuerySession(slot, connections),
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 10,
+      },
+    );
+    const lease = await client.borrowQuery();
+
+    await client.close();
+    expect(connections[0].closeCount).toBe(0);
+    expect(lease.handshake).toMatchObject({ qwpVersion: 1 });
+    const query = await lease.query("select 1");
+    connections[0].receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({ totalRows: 0n });
+    expect(client.metrics).toMatchObject({
+      closing: true,
+      closed: true,
+      queries: { total: 1, leased: 1 },
+    });
+
+    await lease.close();
+    expect(connections[0].closeCount).toBe(1);
+    expect(client.metrics.queries).toMatchObject({ total: 0, leased: 0 });
   });
 
   it("runs reusable view queries through a pooled query lease", async () => {
