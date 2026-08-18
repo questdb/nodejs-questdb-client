@@ -184,6 +184,26 @@ describe("QWP frame envelope", () => {
 });
 
 describe("QWP ingress codec", () => {
+  it("slices compacted table rows without losing null positions", () => {
+    const table = new QwpTableBuffer("events");
+    table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(10n);
+    table.nextRow();
+    table.nextRow();
+    table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(30n);
+    table.nextRow();
+
+    const sliced = table.sliceRows(1, 3);
+    expect(sliced.rowCount).toBe(2);
+    expect(sliced.columns[0]).toMatchObject({
+      name: "value",
+      values: [30n],
+      nulls: [true, false],
+      size: 2,
+    });
+    expect(() => encodeQwpIngressFrame([sliced])).not.toThrow();
+    expect(() => table.sliceRows(-1, 2)).toThrow(/invalid.*row range/i);
+  });
+
   it("encodes a compacted LONG column with an LSB-first null bitmap", () => {
     const table = new QwpTableBuffer("t");
     table.getOrCreateColumn("a", QWP_COLUMN_TYPE.LONG)!.values.push(1n);

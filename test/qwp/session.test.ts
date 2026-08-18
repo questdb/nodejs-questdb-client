@@ -14,12 +14,18 @@ import {
 import {
   QWP_COLUMN_TYPE,
   QWP_EGRESS_MESSAGE,
+  QWP_FLAG_DEFER_COMMIT,
+  QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpBatchTooLargeError,
+  QwpByteReader,
   QwpByteWriter,
+  decodeQwpFrame,
+  decodeQwpIngressSymbolDictionaryDelta,
   encodeQwpDurableAckPollFrame,
   encodeQwpFrame,
+  encodeQwpIngressFrame,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QwpIngressNackError,
   QwpIngressSession,
@@ -28,6 +34,8 @@ import {
   QwpSendClosedError,
   QwpSendTimeoutError,
   QwpUpgradeError,
+  QwpSymbolDictionary,
+  readQwpVarintNumber,
 } from "../../src/qwp";
 
 type Listener = (event: unknown) => void;
@@ -191,6 +199,42 @@ function writeIngressTables(
   }
 }
 
+function firstIngressTableRowCount(payload: Uint8Array): number {
+  const frame = decodeQwpFrame(payload);
+  const reader = new QwpByteReader(frame.payload);
+  if ((frame.flags & QWP_FLAG_DELTA_SYMBOL_DICTIONARY) !== 0) {
+    readQwpVarintNumber(reader, "dictionary start ID");
+    const entries = readQwpVarintNumber(reader, "dictionary entry count");
+    for (let index = 0; index < entries; index++) {
+      const length = readQwpVarintNumber(reader, "dictionary entry length");
+      reader.readBytes(length, "dictionary entry");
+    }
+  }
+  const nameLength = readQwpVarintNumber(reader, "table name length");
+  reader.readBytes(nameLength, "table name");
+  return readQwpVarintNumber(reader, "row count");
+}
+
+function longTable(name: string, values: readonly bigint[]): QwpTableBuffer {
+  const table = new QwpTableBuffer(name);
+  for (const value of values) {
+    table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(value);
+    table.nextRow();
+  }
+  return table;
+}
+
+function symbolTable(name: string, values: readonly string[]): QwpTableBuffer {
+  const table = new QwpTableBuffer(name);
+  for (const value of values) {
+    table
+      .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+      .values.push(value);
+    table.nextRow();
+  }
+  return table;
+}
+
 function serverInfoFrame(): Uint8Array {
   const writer = new QwpByteWriter();
   writer
@@ -320,6 +364,40 @@ describe("QWP WebSocket adapters", () => {
     await sender.close();
   });
 
+  it("automatically splits fluent browser sender rows under its configured cap", async () => {
+    const socket = new FakeWebSocket();
+    const sizingDictionary = new QwpSymbolDictionary();
+    const cap = encodeQwpIngressFrame([longTable("events", [1n])], {
+      gorilla: false,
+      dictionary: sizingDictionary,
+      confirmedMaxSymbolId: -1,
+    }).byteLength;
+    const sender = createQwpBrowserSender(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      { autoFlush: false, encode: { gorilla: false } },
+      { maxBatchSizeBytes: cap },
+    );
+    const connecting = sender.connect();
+    socket.open();
+    await connecting;
+    for (const value of [1n, 2n, 3n]) {
+      await sender.table("events").longColumn("value", value).atNow();
+    }
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(ingressResponse(QWP_STATUS.OK, sequence));
+    };
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.sent).toHaveLength(3);
+    expect(socket.sent.every((frame) => frame.byteLength <= cap)).toBe(true);
+    expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1]);
+    await sender.close();
+  });
+
   it("adds Node-only QWP upgrade headers", async () => {
     const socket = new FakeWebSocket();
     let capturedHeaders: Record<string, string> | undefined;
@@ -363,6 +441,20 @@ describe("QWP WebSocket adapters", () => {
     await expect(
       session.sendFrame(new Uint8Array(4097)),
     ).rejects.toBeInstanceOf(QwpBatchTooLargeError);
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(ingressResponse(QWP_STATUS.OK, sequence));
+    };
+    const table = new QwpTableBuffer("events");
+    for (const suffix of ["a", "b"]) {
+      table
+        .getOrCreateColumn("payload", QWP_COLUMN_TYPE.VARCHAR)!
+        .values.push(suffix.repeat(3_000));
+      table.nextRow();
+    }
+    await session.sendTables([table]);
+    expect(socket.sent).toHaveLength(2);
+    expect(socket.sent.every((frame) => frame.byteLength <= 4096)).toBe(true);
     await session.close();
   });
 
@@ -972,6 +1064,159 @@ describe("QwpIngressSession", () => {
     await expect(
       session.sendFrame(Uint8Array.of(1, 2, 3)),
     ).resolves.toMatchObject({ sequence: 0n });
+    await session.close();
+  });
+
+  it("splits an oversized ingress flush at row boundaries under the negotiated cap", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const rows = longTable("events", [10n, 20n, 30n, 40n]);
+    const cap = encodeQwpIngressFrame([rows.sliceRows(0, 1)], {
+      gorilla: false,
+    }).byteLength;
+    const session = new QwpIngressSession(await connecting, {
+      maxBatchSizeBytes: cap,
+    });
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, sequence, undefined, [
+          ["events", sequence + 1n],
+        ]),
+      );
+    };
+
+    await expect(
+      session.sendTables([rows], { gorilla: false }),
+    ).resolves.toMatchObject({
+      sequence: 3n,
+      tables: [{ name: "events", sequenceTransaction: 4n }],
+    });
+    expect(socket.sent).toHaveLength(4);
+    expect(socket.sent.every((frame) => frame.byteLength <= cap)).toBe(true);
+    expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1, 1]);
+    expect(
+      socket.sent.map(
+        (frame) => decodeQwpFrame(frame).flags & QWP_FLAG_DEFER_COMMIT,
+      ),
+    ).toEqual([
+      QWP_FLAG_DEFER_COMMIT,
+      QWP_FLAG_DEFER_COMMIT,
+      QWP_FLAG_DEFER_COMMIT,
+      0,
+    ]);
+
+    await session.sendTables([longTable("events", [50n, 60n])], {
+      gorilla: false,
+      deferCommit: true,
+    });
+    expect(
+      socket.sent
+        .slice(4)
+        .map((frame) => decodeQwpFrame(frame).flags & QWP_FLAG_DEFER_COMMIT),
+    ).toEqual([QWP_FLAG_DEFER_COMMIT, QWP_FLAG_DEFER_COMMIT]);
+    await session.close();
+  });
+
+  it("advances automatic symbol deltas across split ingress frames", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const symbols = ["symbol-0000", "symbol-1111", "symbol-2222"];
+    const rows = symbolTable("trades", symbols);
+    const sizingDictionary = new QwpSymbolDictionary();
+    const cap = encodeQwpIngressFrame([rows.sliceRows(0, 1)], {
+      dictionary: sizingDictionary,
+      confirmedMaxSymbolId: -1,
+    }).byteLength;
+    const session = new QwpIngressSession(await connecting, {
+      maxBatchSizeBytes: cap,
+    });
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, sequence, undefined, [
+          ["trades", sequence + 1n],
+        ]),
+      );
+    };
+
+    await session.sendTablesDelta([rows]);
+    expect(socket.sent).toHaveLength(3);
+    expect(socket.sent.every((frame) => frame.byteLength <= cap)).toBe(true);
+    expect(
+      socket.sent.map(
+        (frame) =>
+          decodeQwpFrame(frame).flags & QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+      ),
+    ).toEqual([
+      QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+      QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+      QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+    ]);
+    expect(
+      socket.sent.map((frame) => decodeQwpIngressSymbolDictionaryDelta(frame)),
+    ).toEqual([
+      { startId: 0, entries: [symbols[0]] },
+      { startId: 1, entries: [symbols[1]] },
+      { startId: 2, entries: [symbols[2]] },
+    ]);
+
+    await expect(
+      session.sendTablesDelta([symbolTable("trades", ["x".repeat(cap)])]),
+    ).rejects.toBeInstanceOf(QwpBatchTooLargeError);
+    expect(socket.sent).toHaveLength(3);
+
+    await session.sendTablesDelta([symbolTable("trades", [symbols[0]])]);
+    expect(decodeQwpIngressSymbolDictionaryDelta(socket.sent[3])).toEqual({
+      startId: 3,
+      entries: [],
+    });
+    await session.sendTablesDelta([symbolTable("trades", ["symbol-3333"])]);
+    expect(decodeQwpIngressSymbolDictionaryDelta(socket.sent[4])).toEqual({
+      startId: 3,
+      entries: ["symbol-3333"],
+    });
+    await session.close();
+  });
+
+  it("rejects an unsplittable ingress row before consuming a sequence", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const small = longTable("events", [1n]);
+    const cap = encodeQwpIngressFrame([small]).byteLength;
+    const session = new QwpIngressSession(await connecting, {
+      maxBatchSizeBytes: cap,
+    });
+    const oversized = new QwpTableBuffer("events");
+    oversized
+      .getOrCreateColumn("payload", QWP_COLUMN_TYPE.VARCHAR)!
+      .values.push("x".repeat(cap));
+    oversized.nextRow();
+
+    await expect(session.sendTables([oversized])).rejects.toMatchObject({
+      name: "QwpBatchTooLargeError",
+      maxBatchSizeBytes: cap,
+    } satisfies Partial<QwpBatchTooLargeError>);
+    expect(socket.sent).toHaveLength(0);
+
+    socket.onSend = () => {
+      socket.message(ingressResponse(QWP_STATUS.OK, 0n));
+    };
+    await expect(session.sendTables([small])).resolves.toMatchObject({
+      sequence: 0n,
+    });
     await session.close();
   });
 

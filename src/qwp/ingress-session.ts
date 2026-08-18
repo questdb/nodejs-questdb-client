@@ -2,6 +2,7 @@ import {
   decodeQwpIngressResponse,
   encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
+  QWP_FLAG_DEFER_COMMIT,
   QWP_STATUS,
   QwpIngressEncodeOptions,
   QwpIngressResponse,
@@ -18,6 +19,126 @@ import {
   QwpReconnectOptions,
 } from "./transport";
 import { QwpReconnectingIngressConnection } from "./internal/reconnecting-ingress-connection";
+
+const QWP_FLAGS_OFFSET = 5;
+
+interface PlannedIngressFrames {
+  readonly frames: Uint8Array[];
+}
+
+function splitUnitCount(tables: readonly QwpTableBuffer[]): number {
+  return tables.reduce(
+    (total, table) => total + Math.max(1, table.rowCount),
+    0,
+  );
+}
+
+function splitTablesAtUnit(
+  tables: readonly QwpTableBuffer[],
+  leftUnitCount: number,
+): [QwpTableBuffer[], QwpTableBuffer[]] {
+  const left: QwpTableBuffer[] = [];
+  const right: QwpTableBuffer[] = [];
+  let remaining = leftUnitCount;
+
+  for (const table of tables) {
+    if (remaining <= 0) {
+      right.push(table);
+    } else if (table.rowCount === 0) {
+      left.push(table);
+      remaining--;
+    } else if (remaining >= table.rowCount) {
+      left.push(table);
+      remaining -= table.rowCount;
+    } else {
+      left.push(table.sliceRows(0, remaining));
+      right.push(table.sliceRows(remaining, table.rowCount));
+      remaining = 0;
+    }
+  }
+  return [left, right];
+}
+
+/**
+ * Preflights a logical ingress flush without publishing any frame. Oversized
+ * candidates are bisected in table/row order. Accepted candidates advance a
+ * delta dictionary transactionally; any terminal failure restores its initial
+ * size. Non-final frames defer commit so the final frame closes the group.
+ */
+function planIngressFrames(
+  tables: readonly QwpTableBuffer[],
+  encodeOptions: QwpIngressEncodeOptions,
+  maxBatchSizeBytes: number,
+): PlannedIngressFrames {
+  const dictionary = encodeOptions.dictionary;
+  const initialDictionarySize = dictionary?.size;
+  let confirmedMaxSymbolId = encodeOptions.confirmedMaxSymbolId ?? -1;
+  const frames: Uint8Array[] = [];
+
+  const plan = (candidate: readonly QwpTableBuffer[]): void => {
+    const dictionarySize = dictionary?.size;
+    const frame = encodeQwpIngressFrame(candidate, {
+      ...encodeOptions,
+      deferCommit: false,
+      dictionary,
+      confirmedMaxSymbolId: dictionary
+        ? confirmedMaxSymbolId
+        : encodeOptions.confirmedMaxSymbolId,
+    });
+    if (frame.byteLength <= maxBatchSizeBytes) {
+      frames.push(frame);
+      if (dictionary) confirmedMaxSymbolId = dictionary.size - 1;
+      return;
+    }
+
+    if (dictionarySize !== undefined) dictionary!.truncate(dictionarySize);
+    const units = splitUnitCount(candidate);
+    if (units <= 1) {
+      throw new QwpBatchTooLargeError(frame.byteLength, maxBatchSizeBytes);
+    }
+    const [left, right] = splitTablesAtUnit(candidate, Math.ceil(units / 2));
+    plan(left);
+    plan(right);
+  };
+
+  try {
+    plan(tables);
+    const deferAll = encodeOptions.deferCommit ?? false;
+    frames.forEach((frame, index) => {
+      if (deferAll || index < frames.length - 1) {
+        frame[QWP_FLAGS_OFFSET] |= QWP_FLAG_DEFER_COMMIT;
+      }
+    });
+    return { frames };
+  } catch (error) {
+    if (initialDictionarySize !== undefined) {
+      dictionary!.truncate(initialDictionarySize);
+    }
+    throw error;
+  }
+}
+
+function mergeIngressResponses(
+  responses: readonly QwpIngressResponse[],
+): QwpIngressResponse {
+  const last = responses[responses.length - 1];
+  const tables = new Map<string, bigint>();
+  for (const response of responses) {
+    for (const table of response.tables) {
+      const previous = tables.get(table.name);
+      if (previous === undefined || table.sequenceTransaction > previous) {
+        tables.set(table.name, table.sequenceTransaction);
+      }
+    }
+  }
+  return {
+    ...last,
+    tables: [...tables].map(([name, sequenceTransaction]) => ({
+      name,
+      sequenceTransaction,
+    })),
+  };
+}
 
 export interface QwpIngressSessionOptions {
   ackTimeoutMs?: number;
@@ -37,6 +158,8 @@ export interface QwpIngressSessionOptions {
    * Optional local ingress frame cap. Browsers cannot read WebSocket upgrade
    * headers, so browser applications should set this to the server's configured
    * QWP cap. When the server also advertises a cap, the smaller value wins.
+   * Table batches are split at row boundaries automatically; an individual row
+   * that cannot fit is rejected with QwpBatchTooLargeError before it is sent.
    */
   maxBatchSizeBytes?: number;
   /**
@@ -224,7 +347,19 @@ export class QwpIngressSession {
     tables: readonly QwpTableBuffer[],
     encodeOptions: QwpIngressEncodeOptions = {},
   ): Promise<QwpIngressResponse> {
-    return this.sendFrame(encodeQwpIngressFrame(tables, encodeOptions));
+    this.throwIfUnavailable();
+    const cap = this.maxBatchSizeBytes;
+    if (cap === undefined) {
+      return this.sendFrame(encodeQwpIngressFrame(tables, encodeOptions));
+    }
+    let planned: PlannedIngressFrames;
+    try {
+      planned = planIngressFrames(tables, encodeOptions, cap);
+    } catch (error) {
+      if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
+      throw error;
+    }
+    return this.sendPlannedFrames(planned.frames);
   }
 
   /**
@@ -240,6 +375,38 @@ export class QwpIngressSession {
   ): Promise<QwpIngressResponse> {
     this.throwIfUnavailable();
     const previousSize = this.symbolDictionary.size;
+    const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
+    const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
+    const cap = this.maxBatchSizeBytes;
+    if (cap !== undefined) {
+      let planned: PlannedIngressFrames;
+      try {
+        planned = planIngressFrames(
+          tables,
+          {
+            ...encodeOptions,
+            dictionary: this.symbolDictionary,
+            confirmedMaxSymbolId: this.publishedMaxSymbolId,
+          },
+          cap,
+        );
+      } catch (error) {
+        if (error instanceof QwpBatchTooLargeError)
+          return Promise.reject(error);
+        throw error;
+      }
+      this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
+      this.deltaSymbolsPublished = true;
+      try {
+        return this.sendPlannedFrames(planned.frames);
+      } catch (error) {
+        this.symbolDictionary.truncate(previousSize);
+        this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
+        this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
+        throw error;
+      }
+    }
+
     let frame: Uint8Array;
     try {
       frame = encodeQwpIngressFrame(tables, {
@@ -251,22 +418,14 @@ export class QwpIngressSession {
       this.symbolDictionary.truncate(previousSize);
       throw error;
     }
-    if (
-      this.maxBatchSizeBytes !== undefined &&
-      frame.byteLength > this.maxBatchSizeBytes
-    ) {
-      this.symbolDictionary.truncate(previousSize);
-      return Promise.reject(
-        new QwpBatchTooLargeError(frame.byteLength, this.maxBatchSizeBytes),
-      );
-    }
     this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
     this.deltaSymbolsPublished = true;
     try {
       return this.sendFrame(frame);
     } catch (error) {
       this.symbolDictionary.truncate(previousSize);
-      this.publishedMaxSymbolId = previousSize - 1;
+      this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
+      this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
       throw error;
     }
   }
@@ -315,6 +474,14 @@ export class QwpIngressSession {
       pending.reject(error);
     });
     return response;
+  }
+
+  private sendPlannedFrames(
+    frames: readonly Uint8Array[],
+  ): Promise<QwpIngressResponse> {
+    const responses = frames.map((frame) => this.sendFrame(frame));
+    if (responses.length === 1) return responses[0];
+    return Promise.all(responses).then(mergeIngressResponses);
   }
 
   /**

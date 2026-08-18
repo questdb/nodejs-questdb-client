@@ -174,6 +174,50 @@ export class QwpTableBuffer {
     }
   }
 
+  /**
+   * Copies a completed half-open row range into an independent table buffer.
+   * Compact column values and their null bitmaps are sliced together, so the
+   * result can be encoded without materialising rows first.
+   */
+  sliceRows(start: number, end: number): QwpTableBuffer {
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      start < 0 ||
+      end < start ||
+      end > this.rows
+    ) {
+      throw new RangeError(
+        `invalid QWP table row range [start=${start}, end=${end}, rows=${this.rows}]`,
+      );
+    }
+
+    const result = new QwpTableBuffer(this.name);
+    result.rows = end - start;
+    for (const column of this.columnList) {
+      let valueStart = 0;
+      for (let row = 0; row < start; row++) {
+        if (!column.nulls[row]) valueStart++;
+      }
+      let valueEnd = valueStart;
+      for (let row = start; row < end; row++) {
+        if (!column.nulls[row]) valueEnd++;
+      }
+      const sliced: QwpColumnBuffer = {
+        name: column.name,
+        type: column.type,
+        values: column.values.slice(valueStart, valueEnd),
+        nulls: column.nulls.slice(start, end),
+        size: end - start,
+        geohashPrecision: column.geohashPrecision,
+        decimalScale: column.decimalScale,
+      };
+      result.columnList.push(sliced);
+      result.columnsByName.set(sliced.name, sliced);
+    }
+    return result;
+  }
+
   reset(): void {
     this.columnList.length = 0;
     this.columnsByName.clear();
