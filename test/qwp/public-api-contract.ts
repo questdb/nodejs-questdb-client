@@ -20,11 +20,13 @@ import {
   connectQwpNodeIngress,
   connectQwpNodeSender,
   connectQwpNodeWebSocket,
+  parseQwpNodeClientConfig,
   retryQwpNodeOrphanSlot,
   scanQwpNodeOrphanSlots,
 } from "../../src/qwp/node";
 import type {
   QwpNodeClientOptions,
+  QwpNodeClientConfigOptions,
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
   QwpNodeOrphanDrainEvent,
@@ -107,6 +109,16 @@ const nodeWebSocketOptionsContract: QwpNodeWebSocketOptions = {
 const nodeClientSignature: (
   options: QwpNodeClientOptions,
 ) => Promise<QwpClient> = connectQwpNodeClient;
+
+const nodeClusterClientSignature: (
+  configurationString: string,
+  extraOptions?: QwpNodeClientConfigOptions,
+) => Promise<QwpClient> = connectQwpNodeClient;
+
+const nodeClusterParserSignature: (
+  configurationString: string,
+  extraOptions?: QwpNodeClientConfigOptions,
+) => QwpNodeClientOptions = parseQwpNodeClientConfig;
 
 const poolOptionsContract: QwpClientPoolOptions = {
   senderPoolMin: 1,

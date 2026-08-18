@@ -677,6 +677,46 @@ and concurrent queries. The Node and browser entry points provide configured
 factories; each borrowed handle exclusively owns one pooled WebSocket until its
 `close()` returns it:
 
+For Node, the recommended common-case API accepts one Java-style
+`ws::`/`wss::` cluster string. Every `addr` entry is shared by ingress and
+egress; the facade derives `/write/v4` and `/read/v1`, applies the same
+authentication and TLS configuration to both sides, and validates ingress,
+egress, and pool settings before opening a socket:
+
+```typescript
+import { connectQwpNodeClient } from "@questdb/nodejs-client/qwp/node";
+
+const db = await connectQwpNodeClient(
+  "wss::" +
+    "addr=node-a.example:9000,node-b.example:9000;" +
+    `token=${token};` +
+    "target=replica;zone=eu-west-1a;" +
+    "sender_pool_max=2;query_pool_max=8;",
+);
+```
+
+Repeated `addr=` keys also accumulate endpoints. Programmatic overrides for
+callbacks, custom agents, store-and-forward, sender/session settings, and pool
+sizes may be passed as the second argument. The whole string is still validated
+before overrides are applied, matching the Java builder's fail-fast behavior.
+
+Set `lazy_connect=on` to tolerate an unavailable cluster during startup. In the
+TypeScript client this requires `sf_dir`: ingress uses persistent
+store-and-forward with `initial_connect_retry=async`, while egress uses
+`query_pool_min=0` and connects on the first query. Explicit
+`initial_connect_retry=off|sync` or a positive `query_pool_min` conflicts with
+`lazy_connect` and is rejected before the client is created:
+
+```typescript
+const db = await connectQwpNodeClient(
+  "wss::addr=node-a.example,node-b.example;" +
+    "sf_dir=/var/lib/my-app/qwp;lazy_connect=on;",
+);
+```
+
+The object form remains available for cases where constructing the two sides
+separately is useful:
+
 ```typescript
 import { connectQwpNodeClient } from "@questdb/nodejs-client/qwp/node";
 

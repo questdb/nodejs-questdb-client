@@ -19,6 +19,7 @@ import {
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
 import { validateQwpMaxBatchRows } from "./internal/egress-limits";
+import { resolveQwpNodeClientConfig } from "../qwp-node/client-config";
 import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_UPGRADE_ERROR_KIND,
@@ -239,6 +240,35 @@ export interface QwpNodeEgressOptions
 export interface QwpNodeClientOptions {
   ingress: QwpNodeIngressOptions;
   egress: QwpNodeEgressOptions;
+  sender?: QwpSenderOptions;
+  ingressSession?: QwpIngressSessionOptions;
+  egressSession?: QwpEgressSessionOptions;
+  pool?: QwpClientPoolOptions;
+  /**
+   * Coordinates a non-blocking startup: persistent ingress connects in the
+   * background and the egress pool remains cold until the first query. Requires
+   * ingress store-and-forward and conflicts with a positive queryPoolMin or a
+   * non-async initialConnectMode.
+   */
+  lazyConnect?: boolean;
+}
+
+/**
+ * Programmatic hooks layered over a unified ws/wss cluster string. Values in
+ * this object take precedence after the complete string has been validated.
+ */
+export interface QwpNodeClientConfigOptions {
+  /** Shared transport overrides applied to both ingress and egress. */
+  webSocket?: Partial<Omit<QwpNodeWebSocketOptions, "url" | "failoverUrls">>;
+  /** Optional persistent ingress configuration; may supply/override sf_dir. */
+  storeAndForward?: QwpNodeStoreAndForwardOptions;
+  /** Egress-only routing and compression overrides. */
+  egress?: Partial<
+    Pick<
+      QwpNodeEgressOptions,
+      "target" | "zone" | "compression" | "compressionLevel" | "maxBatchRows"
+    >
+  >;
   sender?: QwpSenderOptions;
   ingressSession?: QwpIngressSessionOptions;
   egressSession?: QwpEgressSessionOptions;
@@ -564,8 +594,30 @@ export async function connectQwpNodeEgress(
   );
 }
 
+/** Resolves and validates one ws/wss configuration string for both QWP sides. */
+export function parseQwpNodeClientConfig(
+  configurationString: string,
+  extraOptions: QwpNodeClientConfigOptions = {},
+): QwpNodeClientOptions {
+  return normalizeQwpNodeClientOptions(
+    resolveQwpNodeClientConfig(configurationString, extraOptions),
+  );
+}
+
 /** Creates a lazy Node QWP client with bounded sender and query pools. */
-export function createQwpNodeClient(options: QwpNodeClientOptions): QwpClient {
+export function createQwpNodeClient(options: QwpNodeClientOptions): QwpClient;
+export function createQwpNodeClient(
+  configurationString: string,
+  extraOptions?: QwpNodeClientConfigOptions,
+): QwpClient;
+export function createQwpNodeClient(
+  optionsOrConfiguration: QwpNodeClientOptions | string,
+  extraOptions: QwpNodeClientConfigOptions = {},
+): QwpClient {
+  const options = resolveNodeClientOptions(
+    optionsOrConfiguration,
+    extraOptions,
+  );
   const orphanDrainer = createPooledOrphanDrainer(options);
   return new QwpClient(
     {
@@ -594,12 +646,67 @@ export function createQwpNodeClient(options: QwpNodeClientOptions): QwpClient {
 }
 
 /** Creates and prewarms a combined Node QWP ingress/egress client. */
-export async function connectQwpNodeClient(
+export function connectQwpNodeClient(
   options: QwpNodeClientOptions,
+): Promise<QwpClient>;
+export async function connectQwpNodeClient(
+  configurationString: string,
+  extraOptions?: QwpNodeClientConfigOptions,
+): Promise<QwpClient>;
+export async function connectQwpNodeClient(
+  optionsOrConfiguration: QwpNodeClientOptions | string,
+  extraOptions: QwpNodeClientConfigOptions = {},
 ): Promise<QwpClient> {
-  const client = createQwpNodeClient(options);
+  const client = createQwpNodeClient(
+    resolveNodeClientOptions(optionsOrConfiguration, extraOptions),
+  );
   await client.connect();
   return client;
+}
+
+function resolveNodeClientOptions(
+  optionsOrConfiguration: QwpNodeClientOptions | string,
+  extraOptions: QwpNodeClientConfigOptions,
+): QwpNodeClientOptions {
+  return typeof optionsOrConfiguration === "string"
+    ? parseQwpNodeClientConfig(optionsOrConfiguration, extraOptions)
+    : normalizeQwpNodeClientOptions(optionsOrConfiguration);
+}
+
+function normalizeQwpNodeClientOptions(
+  options: QwpNodeClientOptions,
+): QwpNodeClientOptions {
+  if (!options.lazyConnect) return options;
+  const storeAndForward = options.ingress.storeAndForward;
+  if (!storeAndForward) {
+    throw new RangeError(
+      "conflicting configuration: lazyConnect requires ingress storeAndForward so writes remain available while the server is down",
+    );
+  }
+  if (
+    storeAndForward.initialConnectMode !== undefined &&
+    storeAndForward.initialConnectMode !== QWP_INITIAL_CONNECT_MODE.ASYNC
+  ) {
+    throw new RangeError(
+      `conflicting configuration: lazyConnect requires storeAndForward.initialConnectMode='async', got '${storeAndForward.initialConnectMode}'`,
+    );
+  }
+  if ((options.pool?.queryPoolMin ?? 0) > 0) {
+    throw new RangeError(
+      `conflicting configuration: lazyConnect requires queryPoolMin=0, got ${options.pool?.queryPoolMin}`,
+    );
+  }
+  return {
+    ...options,
+    ingress: {
+      ...options.ingress,
+      storeAndForward: {
+        ...storeAndForward,
+        initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
+      },
+    },
+    pool: { ...options.pool, queryPoolMin: 0 },
+  };
 }
 
 function pooledNodeClientOptions(
