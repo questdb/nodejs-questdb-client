@@ -36,11 +36,37 @@ const ABANDONED_LOCK_PREFIX = ".qwp.lock.abandoned-";
 // default-sized QWP batches instead, mirroring Java's active+spare liveness
 // floor when the lifetime-monotonic dictionary consumes the configured cap.
 const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
+const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
+const DEFAULT_APPEND_DEADLINE_MS = 30_000;
+const MAX_TIMER_DELAY_MS = 0x7fffffff;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+export const QWP_SF_DURABILITY = {
+  MEMORY: "memory",
+  PERIODIC: "periodic",
+  APPEND: "append",
+} as const;
+
+export type QwpSfDurability =
+  (typeof QWP_SF_DURABILITY)[keyof typeof QWP_SF_DURABILITY];
+
+export const QWP_SF_BACKPRESSURE_POLICY = {
+  ERROR: "error",
+  WAIT: "wait",
+} as const;
+
+export type QwpSfBackpressurePolicy =
+  (typeof QWP_SF_BACKPRESSURE_POLICY)[keyof typeof QWP_SF_BACKPRESSURE_POLICY];
 
 interface StoredRecord {
   readonly path: string;
   readonly size: number;
+}
+
+interface PendingCapacity {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 interface ReplayStoreLockOwner {
@@ -60,6 +86,37 @@ export interface QwpNodeFileReplayStoreOptions {
    * target so it cannot permanently consume the journal's live frame budget.
    */
   maxBytes?: number;
+  /**
+   * Local persistence barrier. `append` preserves the existing fsync-per-frame
+   * behavior, `periodic` checkpoints dirty files in the background, and
+   * `memory` relies on OS page-cache writeback. Defaults to `append`.
+   */
+  durability?: QwpSfDurability;
+  /** Periodic durability checkpoint cadence. Defaults to 5 seconds. */
+  checkpointIntervalMs?: number;
+  /**
+   * Behavior when maxBytes is exhausted. `error` fails immediately; `wait`
+   * pauses the append until ACK trimming frees space or its deadline expires.
+   * Defaults to `error` for backwards compatibility.
+   */
+  backpressurePolicy?: QwpSfBackpressurePolicy;
+  /** Per-append disk-capacity wait deadline. Defaults to 30 seconds. */
+  appendDeadlineMs?: number;
+}
+
+export interface QwpNodeFileReplayStoreMetrics {
+  readonly durability: QwpSfDurability;
+  readonly backpressurePolicy: QwpSfBackpressurePolicy;
+  readonly pendingRecords: number;
+  readonly totalBytes: number;
+  readonly dirtyRecords: number;
+  readonly checkpointPending: boolean;
+  readonly waitingAppends: number;
+  readonly totalCheckpoints: number;
+  readonly totalCheckpointFailures: number;
+  readonly totalBackpressureStalls: number;
+  readonly totalAppendTimeouts: number;
+  readonly lastCheckpointError?: QwpReplayStoreCheckpointError;
 }
 
 export class QwpReplayStoreError extends Error {
@@ -84,6 +141,32 @@ export class QwpReplayStoreFullError extends QwpReplayStoreError {
   }
 }
 
+export class QwpReplayStoreAppendTimeoutError extends QwpReplayStoreError {
+  constructor(
+    readonly maxBytes: number,
+    readonly requiredBytes: number,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `QWP store-and-forward append remained backpressured for ${timeoutMs} ms [maxBytes=${maxBytes}, requiredBytes=${requiredBytes}]`,
+    );
+    this.name = "QwpReplayStoreAppendTimeoutError";
+  }
+}
+
+export class QwpReplayStoreCheckpointError extends QwpReplayStoreError {
+  constructor(
+    readonly directory: string,
+    cause?: unknown,
+  ) {
+    super(
+      `could not checkpoint QWP store-and-forward journal [directory=${directory}]`,
+      cause,
+    );
+    this.name = "QwpReplayStoreCheckpointError";
+  }
+}
+
 export class QwpReplayStoreLockedError extends QwpReplayStoreError {
   constructor(
     readonly directory: string,
@@ -102,24 +185,39 @@ export class QwpReplayStoreLockedError extends QwpReplayStoreError {
 }
 
 /**
- * Crash-safe Node store-and-forward journal.
+ * Node store-and-forward journal with configurable local durability.
  *
- * Each frame is fsynced under a temporary name before an atomic rename. An ACK
- * removes its covered files and fsyncs the directory. A crash between the
- * server ACK and local deletion can therefore cause at-least-once replay, but
- * cannot silently lose an unacknowledged frame. An exclusive, lifetime lock
- * prevents another process from recovering or mutating the same directory.
+ * `append` fsyncs each frame before its atomic rename, while `periodic` batches
+ * those barriers and `memory` relies on OS writeback. An ACK removes its
+ * covered files. A crash between the server ACK and local deletion can cause
+ * at-least-once replay. An exclusive, lifetime lock prevents another process
+ * from recovering or mutating the same directory.
  */
 export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly directory: string;
   private readonly maxBytes: number;
   private readonly liveFrameBytes: number;
+  private readonly durability: QwpSfDurability;
+  private readonly checkpointIntervalMs: number;
+  private readonly backpressurePolicy: QwpSfBackpressurePolicy;
+  private readonly appendDeadlineMs: number;
   private readonly records = new Map<bigint, StoredRecord>();
   private readonly symbols: string[] = [];
   private readonly symbolValues = new Set<string>();
+  private readonly dirtyRecordPaths = new Set<string>();
+  private readonly capacityWaiters = new Set<PendingCapacity>();
   private operationTail: Promise<void> = Promise.resolve();
   private totalBytes = 0;
   private dictionaryFileSize = 0;
+  private dictionaryDirty = false;
+  private directoryDirty = false;
+  private capacityGeneration = 0;
+  private checkpointTimer?: ReturnType<typeof setTimeout>;
+  private checkpointFailure?: QwpReplayStoreCheckpointError;
+  private totalCheckpoints = 0;
+  private totalCheckpointFailures = 0;
+  private totalBackpressureStalls = 0;
+  private totalAppendTimeouts = 0;
   private lockOwner?: ReplayStoreLockOwner;
   private closePromise?: Promise<void>;
   private loaded = false;
@@ -140,6 +238,48 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.directory = directory;
     this.maxBytes = maxBytes;
     this.liveFrameBytes = Math.min(maxBytes, DEFAULT_LIVE_FRAME_BYTES);
+    this.durability = validateDurability(
+      options.durability ?? QWP_SF_DURABILITY.APPEND,
+    );
+    this.backpressurePolicy = validateBackpressurePolicy(
+      options.backpressurePolicy ?? QWP_SF_BACKPRESSURE_POLICY.ERROR,
+    );
+    this.checkpointIntervalMs = validateTimerDelay(
+      options.checkpointIntervalMs ?? DEFAULT_CHECKPOINT_INTERVAL_MS,
+      "store-and-forward checkpointIntervalMs",
+    );
+    if (
+      options.checkpointIntervalMs !== undefined &&
+      this.durability !== QWP_SF_DURABILITY.PERIODIC
+    ) {
+      throw new RangeError(
+        "store-and-forward checkpointIntervalMs requires durability='periodic'",
+      );
+    }
+    this.appendDeadlineMs = validateTimerDelay(
+      options.appendDeadlineMs ?? DEFAULT_APPEND_DEADLINE_MS,
+      "store-and-forward appendDeadlineMs",
+    );
+  }
+
+  get metrics(): QwpNodeFileReplayStoreMetrics {
+    return Object.freeze({
+      durability: this.durability,
+      backpressurePolicy: this.backpressurePolicy,
+      pendingRecords: this.records.size,
+      totalBytes: this.totalBytes,
+      dirtyRecords: this.dirtyRecordPaths.size,
+      checkpointPending:
+        this.dirtyRecordPaths.size > 0 ||
+        this.dictionaryDirty ||
+        this.directoryDirty,
+      waitingAppends: this.capacityWaiters.size,
+      totalCheckpoints: this.totalCheckpoints,
+      totalCheckpointFailures: this.totalCheckpointFailures,
+      totalBackpressureStalls: this.totalBackpressureStalls,
+      totalAppendTimeouts: this.totalAppendTimeouts,
+      lastCheckpointError: this.checkpointFailure,
+    });
   }
 
   load(): Promise<readonly QwpIngressReplayRecord[]> {
@@ -209,6 +349,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         await this.loadDictionaryFile();
         this.loaded = true;
         loadSucceeded = true;
+        this.scheduleCheckpoint();
         return recovered;
       } finally {
         if (!loadSucceeded) await this.releaseDirectoryLock();
@@ -218,57 +359,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   append(record: QwpIngressReplayRecord): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
-    return this.enqueue(async () => {
-      this.assertReady();
-      validateFrameSequence(record.frameSequence);
-      if (this.records.has(record.frameSequence)) {
-        throw new QwpReplayStoreError(
-          `QWP store-and-forward sequence already exists [frameSequence=${record.frameSequence}]`,
-        );
-      }
-      const bytes = encodeRecord(record);
-      const requiredBytes = this.totalBytes + bytes.byteLength;
-      const frameBytes = this.totalBytes - this.dictionaryFileSize;
-      const requiredFrameBytes = frameBytes + bytes.byteLength;
-      const preservesLiveness =
-        this.dictionaryFileSize > 0 &&
-        (requiredFrameBytes <= this.liveFrameBytes || frameBytes === 0);
-      if (
-        bytes.byteLength > this.maxBytes ||
-        (requiredBytes > this.maxBytes && !preservesLiveness)
-      ) {
-        throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
-      }
-
-      const name = recordFileName(record.frameSequence);
-      const finalPath = join(this.directory, name);
-      const temporaryPath = join(
-        this.directory,
-        `${name}${TEMP_MARKER}${process.pid}-${randomUUID()}`,
+    const bytes = encodeRecord(record);
+    if (bytes.byteLength > this.maxBytes) {
+      return Promise.reject(
+        new QwpReplayStoreFullError(this.maxBytes, bytes.byteLength),
       );
-      try {
-        const file = await open(temporaryPath, "wx", 0o600);
-        try {
-          await file.writeFile(bytes);
-          await file.sync();
-        } finally {
-          await file.close();
-        }
-        await rename(temporaryPath, finalPath);
-        await syncDirectory(this.directory);
-      } catch (error) {
-        await ignoreMissing(unlink(temporaryPath));
-        throw new QwpReplayStoreError(
-          `could not persist QWP store-and-forward record [frameSequence=${record.frameSequence}]`,
-          error,
-        );
-      }
-      this.records.set(record.frameSequence, {
-        path: finalPath,
-        size: bytes.byteLength,
-      });
-      this.totalBytes = requiredBytes;
-    });
+    }
+    return this.appendWithBackpressure(record, bytes);
   }
 
   acknowledgeThrough(frameSequence: bigint): Promise<void> {
@@ -287,10 +384,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           );
         }
         this.records.delete(sequence);
+        this.dirtyRecordPaths.delete(record.path);
         this.totalBytes -= record.size;
         changed = true;
       }
-      if (changed) await syncDirectory(this.directory);
+      if (!changed) return;
+      if (this.durability === QWP_SF_DURABILITY.APPEND) {
+        await syncDirectory(this.directory);
+      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+        this.directoryDirty = true;
+      }
+      this.signalCapacity();
     });
   }
 
@@ -346,12 +450,19 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             await file.writeFile(
               Buffer.concat([encodeDictionaryHeader(), block]),
             );
-            await file.sync();
+            if (this.durability === QWP_SF_DURABILITY.APPEND) {
+              await file.sync();
+            }
           } finally {
             await file.close();
           }
           await rename(temporaryPath, finalPath);
-          await syncDirectory(this.directory);
+          if (this.durability === QWP_SF_DURABILITY.APPEND) {
+            await syncDirectory(this.directory);
+          } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+            this.dictionaryDirty = true;
+            this.directoryDirty = true;
+          }
         } catch (error) {
           await ignoreMissing(unlink(temporaryPath));
           throw new QwpReplayStoreError(
@@ -364,7 +475,11 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           const file = await open(finalPath, "a", 0o600);
           try {
             await file.writeFile(block);
-            await file.sync();
+            if (this.durability === QWP_SF_DURABILITY.APPEND) {
+              await file.sync();
+            } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+              this.dictionaryDirty = true;
+            }
           } finally {
             await file.close();
           }
@@ -385,14 +500,223 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    if (this.checkpointTimer) clearTimeout(this.checkpointTimer);
+    this.checkpointTimer = undefined;
+    this.rejectCapacityWaiters(this.closedError());
     this.closePromise = this.operationTail.then(async () => {
+      let failure: unknown;
+      try {
+        if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+          await this.checkpointDirty();
+        }
+        if (this.checkpointFailure) throw this.checkpointFailure;
+      } catch (error) {
+        failure = error;
+      }
       try {
         await this.releaseDirectoryLock();
+      } catch (error) {
+        failure ??= error;
       } finally {
         this.closed = true;
       }
+      if (failure) throw failure;
     });
     return this.closePromise;
+  }
+
+  private async appendWithBackpressure(
+    record: QwpIngressReplayRecord,
+    bytes: Buffer,
+  ): Promise<void> {
+    let deadline = 0;
+    let stalled = false;
+    for (;;) {
+      if (this.closing || this.closed) throw this.closedError();
+      const capacityGeneration = this.capacityGeneration;
+      try {
+        await this.enqueue(() => this.appendOnce(record, bytes));
+        return;
+      } catch (error) {
+        if (!(error instanceof QwpReplayStoreFullError)) throw error;
+        if (this.backpressurePolicy === QWP_SF_BACKPRESSURE_POLICY.ERROR) {
+          throw error;
+        }
+        if (!stalled) {
+          stalled = true;
+          deadline = Date.now() + this.appendDeadlineMs;
+          this.totalBackpressureStalls++;
+        }
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          this.totalAppendTimeouts++;
+          throw new QwpReplayStoreAppendTimeoutError(
+            this.maxBytes,
+            error.requiredBytes,
+            this.appendDeadlineMs,
+          );
+        }
+        await this.waitForCapacity(capacityGeneration, remainingMs, error);
+      }
+    }
+  }
+
+  private async appendOnce(
+    record: QwpIngressReplayRecord,
+    bytes: Buffer,
+  ): Promise<void> {
+    this.assertReady();
+    validateFrameSequence(record.frameSequence);
+    if (this.records.has(record.frameSequence)) {
+      throw new QwpReplayStoreError(
+        `QWP store-and-forward sequence already exists [frameSequence=${record.frameSequence}]`,
+      );
+    }
+    const requiredBytes = this.totalBytes + bytes.byteLength;
+    const frameBytes = this.totalBytes - this.dictionaryFileSize;
+    const requiredFrameBytes = frameBytes + bytes.byteLength;
+    const preservesLiveness =
+      this.dictionaryFileSize > 0 &&
+      (requiredFrameBytes <= this.liveFrameBytes || frameBytes === 0);
+    if (requiredBytes > this.maxBytes && !preservesLiveness) {
+      throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
+    }
+
+    const name = recordFileName(record.frameSequence);
+    const finalPath = join(this.directory, name);
+    const temporaryPath = join(
+      this.directory,
+      `${name}${TEMP_MARKER}${process.pid}-${randomUUID()}`,
+    );
+    try {
+      const file = await open(temporaryPath, "wx", 0o600);
+      try {
+        await file.writeFile(bytes);
+        if (this.durability === QWP_SF_DURABILITY.APPEND) {
+          await file.sync();
+        }
+      } finally {
+        await file.close();
+      }
+      await rename(temporaryPath, finalPath);
+      if (this.durability === QWP_SF_DURABILITY.APPEND) {
+        await syncDirectory(this.directory);
+      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+        this.dirtyRecordPaths.add(finalPath);
+        this.directoryDirty = true;
+      }
+    } catch (error) {
+      await ignoreMissing(unlink(temporaryPath));
+      throw new QwpReplayStoreError(
+        `could not persist QWP store-and-forward record [frameSequence=${record.frameSequence}]`,
+        error,
+      );
+    }
+    this.records.set(record.frameSequence, {
+      path: finalPath,
+      size: bytes.byteLength,
+    });
+    this.totalBytes = requiredBytes;
+  }
+
+  private waitForCapacity(
+    capacityGeneration: number,
+    timeoutMs: number,
+    full: QwpReplayStoreFullError,
+  ): Promise<void> {
+    if (this.checkpointFailure) {
+      return Promise.reject(this.checkpointFailure);
+    }
+    if (capacityGeneration !== this.capacityGeneration) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const pending: PendingCapacity = { resolve, reject };
+      pending.timer = setTimeout(() => {
+        if (!this.capacityWaiters.delete(pending)) return;
+        this.totalAppendTimeouts++;
+        reject(
+          new QwpReplayStoreAppendTimeoutError(
+            this.maxBytes,
+            full.requiredBytes,
+            this.appendDeadlineMs,
+          ),
+        );
+      }, timeoutMs);
+      this.capacityWaiters.add(pending);
+      if (capacityGeneration !== this.capacityGeneration) {
+        this.capacityWaiters.delete(pending);
+        clearTimeout(pending.timer);
+        resolve();
+      }
+    });
+  }
+
+  private signalCapacity(): void {
+    this.capacityGeneration++;
+    for (const pending of this.capacityWaiters) {
+      this.capacityWaiters.delete(pending);
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.resolve();
+    }
+  }
+
+  private rejectCapacityWaiters(error: Error): void {
+    for (const pending of this.capacityWaiters) {
+      this.capacityWaiters.delete(pending);
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  private scheduleCheckpoint(): void {
+    if (
+      this.durability !== QWP_SF_DURABILITY.PERIODIC ||
+      !this.loaded ||
+      this.closing ||
+      this.closed ||
+      this.checkpointTimer
+    ) {
+      return;
+    }
+    this.checkpointTimer = setTimeout(() => {
+      this.checkpointTimer = undefined;
+      if (this.closing || this.closed) return;
+      const checkpoint = this.enqueue(() => this.checkpointDirty());
+      void checkpoint.then(
+        () => this.scheduleCheckpoint(),
+        () => this.scheduleCheckpoint(),
+      );
+    }, this.checkpointIntervalMs);
+    this.checkpointTimer.unref?.();
+  }
+
+  private async checkpointDirty(): Promise<void> {
+    if (
+      this.dirtyRecordPaths.size === 0 &&
+      !this.dictionaryDirty &&
+      !this.directoryDirty
+    ) {
+      return;
+    }
+    try {
+      for (const path of this.dirtyRecordPaths) await syncFile(path);
+      if (this.dictionaryDirty) {
+        await syncFile(join(this.directory, DICTIONARY_FILE));
+      }
+      if (this.directoryDirty) await syncDirectory(this.directory);
+      this.dirtyRecordPaths.clear();
+      this.dictionaryDirty = false;
+      this.directoryDirty = false;
+      this.checkpointFailure = undefined;
+      this.totalCheckpoints++;
+    } catch (cause) {
+      const error = new QwpReplayStoreCheckpointError(this.directory, cause);
+      this.checkpointFailure = error;
+      this.totalCheckpointFailures++;
+      this.rejectCapacityWaiters(error);
+      throw error;
+    }
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -652,6 +976,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         "QWP store-and-forward journal must be loaded before use",
       );
     }
+    if (this.checkpointFailure) throw this.checkpointFailure;
   }
 
   private closedError(): QwpReplayStoreError {
@@ -820,6 +1145,51 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
+async function syncFile(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function validateDurability(value: string): QwpSfDurability {
+  if (
+    value === QWP_SF_DURABILITY.MEMORY ||
+    value === QWP_SF_DURABILITY.PERIODIC ||
+    value === QWP_SF_DURABILITY.APPEND
+  ) {
+    return value;
+  }
+  throw new RangeError(`unsupported store-and-forward durability '${value}'`);
+}
+
+function validateBackpressurePolicy(value: string): QwpSfBackpressurePolicy {
+  if (
+    value === QWP_SF_BACKPRESSURE_POLICY.ERROR ||
+    value === QWP_SF_BACKPRESSURE_POLICY.WAIT
+  ) {
+    return value;
+  }
+  throw new RangeError(
+    `unsupported store-and-forward backpressurePolicy '${value}'`,
+  );
+}
+
+function validateTimerDelay(value: number, name: string): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
+    value > MAX_TIMER_DELAY_MS
+  ) {
+    throw new RangeError(
+      `${name} must be a positive safe integer no greater than ${MAX_TIMER_DELAY_MS}`,
+    );
+  }
+  return value;
+}
+
 async function ignoreMissing(operation: Promise<void>): Promise<void> {
   try {
     await operation;
@@ -879,9 +1249,7 @@ async function writeLockOwner(
   }
 }
 
-function isDefinitelyDeadLockOwner(
-  owner: ReplayStoreLockOwner,
-): boolean {
+function isDefinitelyDeadLockOwner(owner: ReplayStoreLockOwner): boolean {
   if (owner.hostname !== hostname() || owner.pid === process.pid) {
     return false;
   }

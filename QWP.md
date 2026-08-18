@@ -72,6 +72,10 @@ const sender = await Sender.fromConfig(
         storeAndForward: {
           directory: "/var/lib/my-service/qwp-replay/producer-a",
           maxBytes: 512 * 1024 * 1024,
+          durability: "periodic",
+          checkpointIntervalMs: 5_000,
+          backpressurePolicy: "wait",
+          appendDeadlineMs: 30_000,
           drainOrphans: true,
           maxBackgroundDrainers: 4,
         },
@@ -95,10 +99,30 @@ Give each active sender its own store-and-forward directory. The Node.js journal
 persists frames and their symbol dictionary before sending. Persistent senders can
 start while every endpoint is offline and reconnect indefinitely by default. Unless
 `awaitServerAck: true` or `awaitDurableAck: true` is selected, `flush()` resolves once
-the complete logical flush is durable in the local journal; a background drainer then
-sends it in order. Applications can therefore keep publishing during an outage until
-the configured `maxBytes` applies backpressure. A failed journal publication leaves
-the high-level rows staged so the caller can retry.
+the complete logical flush reaches the configured local journal boundary; a background
+drainer then sends it in order. The default `"append"` boundary is locally durable,
+while `"periodic"` and `"memory"` trade that immediate guarantee for throughput.
+Applications can therefore keep publishing during an outage until the configured
+`maxBytes` applies backpressure. A failed journal publication leaves the high-level
+rows staged so the caller can retry.
+
+`durability` controls the local persistence barrier:
+
+- `"append"` (the backwards-compatible default) fsyncs every frame and its atomic
+  directory rename before publication resolves.
+- `"periodic"` checkpoints frame files, symbol metadata, and directory changes in the
+  background. The default interval is 5 seconds, and `close()` performs a final
+  checkpoint. A power failure can lose the most recent checkpoint window.
+- `"memory"` relies on operating-system writeback. It survives an orderly close and
+  normally a process failure, but it makes no power-loss durability promise.
+
+`backpressurePolicy: "error"` preserves the existing immediate
+`QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
+ACK deletes record files. `appendDeadlineMs` bounds each such pause (30 seconds by
+default) and expiry raises `QwpReplayStoreAppendTimeoutError`. Waiting appenders do
+not hold the journal mutation queue, so ACK cleanup can continue. Direct users of
+`QwpNodeFileReplayStore` can inspect `metrics` for pending checkpoint work,
+checkpoints, checkpoint failures, active waiters, stalls, and timeouts.
 
 The persisted symbol dictionary is lifetime-monotonic and cannot be reclaimed by an
 ACK. It counts toward the `maxBytes` target, but the journal preserves up to 32 MiB
@@ -591,6 +615,8 @@ The public error classes preserve enough context for policy decisions:
 | `QwpReconnectExhaustedError`       | The configured reconnect boundary was reached                                                               |
 | `QwpReplayRejectedError`           | A replayed frame was rejected and retained for inspection                                                   |
 | `QwpReplayStoreFullError`          | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreAppendTimeoutError` | The Node.js replay journal did not regain capacity before the configured append deadline                    |
+| `QwpReplayStoreCheckpointError`    | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
 | `QwpReplayStoreLockedError`        | Another process owns the configured Node.js replay directory                                                |
 | `QwpEgressQueryError`              | QuestDB returned a terminal query error                                                                     |
 | `QwpEgressQueryAbandonedError`     | Result iteration ended before the server completed the query                                                |

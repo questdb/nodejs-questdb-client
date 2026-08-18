@@ -40,12 +40,21 @@ import {
 } from "../qwp-node/orphan-drainer";
 
 export {
+  QWP_SF_BACKPRESSURE_POLICY,
+  QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
+  QwpReplayStoreAppendTimeoutError,
+  QwpReplayStoreCheckpointError,
   QwpReplayStoreError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
 } from "../qwp-node/file-replay-store";
-export type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
+export type {
+  QwpNodeFileReplayStoreMetrics,
+  QwpNodeFileReplayStoreOptions,
+  QwpSfBackpressurePolicy,
+  QwpSfDurability,
+} from "../qwp-node/file-replay-store";
 export {
   QWP_ORPHAN_DRAIN_EVENT_KIND,
   QWP_ORPHAN_FAILED_SENTINEL,
@@ -627,8 +636,8 @@ function createNodeOrphanDrainer(
         {
           ...options,
           storeAndForward: {
+            ...storeAndForward,
             directory,
-            maxBytes: storeAndForward.maxBytes,
             drainOrphans: false,
           },
         },

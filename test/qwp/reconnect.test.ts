@@ -1,10 +1,21 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeIngress,
+  QWP_SF_BACKPRESSURE_POLICY,
+  QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
+  QwpReplayStoreAppendTimeoutError,
+  QwpReplayStoreCheckpointError,
   QwpReplayStoreError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
@@ -1203,7 +1214,7 @@ describe("QWP ingress reconnect and replay", () => {
       totalFramesReplayed: 1,
     });
     expect(session.publishedFrameSequence).toBe(7n);
-    expect(session.acknowledgedFrameSequence).toBe(7n);
+    await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(7n));
 
     const currentFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
     const current = session.sendFrame(currentFrame);
@@ -1219,7 +1230,7 @@ describe("QWP ingress reconnect and replay", () => {
         (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
       ).toEqual([]),
     );
-    expect(session.acknowledgedFrameSequence).toBe(8n);
+    await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(8n));
     await session.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -1461,6 +1472,48 @@ describe("QWP Node file replay store", () => {
     return directory;
   }
 
+  it("validates durability, checkpoint, and disk-backpressure controls", async () => {
+    const directory = await trackedDirectory();
+
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({
+          directory,
+          durability: "unsupported" as "append",
+        }),
+    ).toThrow(/unsupported store-and-forward durability/);
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({
+          directory,
+          backpressurePolicy: "unsupported" as "error",
+        }),
+    ).toThrow(/unsupported store-and-forward backpressurePolicy/);
+    expect(
+      () => new QwpNodeFileReplayStore({ directory, checkpointIntervalMs: 1 }),
+    ).toThrow(/requires durability='periodic'/);
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({
+          directory,
+          durability: QWP_SF_DURABILITY.PERIODIC,
+          checkpointIntervalMs: 0,
+        }),
+    ).toThrow(/checkpointIntervalMs must be a positive safe integer/);
+    expect(
+      () => new QwpNodeFileReplayStore({ directory, appendDeadlineMs: 0 }),
+    ).toThrow(/appendDeadlineMs must be a positive safe integer/);
+
+    const defaults = new QwpNodeFileReplayStore({ directory });
+    expect(defaults.metrics).toMatchObject({
+      durability: QWP_SF_DURABILITY.APPEND,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.ERROR,
+      totalCheckpoints: 0,
+      totalBackpressureStalls: 0,
+    });
+    await defaults.close();
+  });
+
   it("survives restart and deletes only the acknowledged prefix", async () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({ directory });
@@ -1589,6 +1642,150 @@ describe("QWP Node file replay store", () => {
       store.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) }),
     ).rejects.toBeInstanceOf(QwpReplayStoreFullError);
     expect(await readdir(directory)).toEqual([".qwp.lock"]);
+    await store.close();
+  });
+
+  it("checkpoints periodic frame and dictionary writes", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      durability: QWP_SF_DURABILITY.PERIODIC,
+      checkpointIntervalMs: 25,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.appendSymbolDictionary(0, ["BTC-USD"]);
+    expect(store.metrics.checkpointPending).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(store.metrics.dirtyRecords).toBe(0);
+      expect(store.metrics.checkpointPending).toBe(false);
+      expect(store.metrics.totalCheckpoints).toBeGreaterThan(0);
+      expect(store.metrics.totalCheckpointFailures).toBe(0);
+    });
+    await store.close();
+
+    const recovered = new QwpNodeFileReplayStore({ directory });
+    await expect(recovered.load()).resolves.toEqual([
+      { frameSequence: 0n, payload: Uint8Array.of(1) },
+    ]);
+    await expect(recovered.loadSymbolDictionary()).resolves.toEqual([
+      "BTC-USD",
+    ]);
+    await recovered.close();
+  });
+
+  it("supports memory durability without running checkpoints", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      durability: QWP_SF_DURABILITY.MEMORY,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(7) });
+    await store.appendSymbolDictionary(0, ["ETH-USD"]);
+    expect(store.metrics).toMatchObject({
+      durability: QWP_SF_DURABILITY.MEMORY,
+      dirtyRecords: 0,
+      checkpointPending: false,
+      totalCheckpoints: 0,
+    });
+    await store.close();
+  });
+
+  it("fails waiting appends closed when a periodic checkpoint fails", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 106,
+      durability: QWP_SF_DURABILITY.PERIODIC,
+      checkpointIntervalMs: 250,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 2_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+    const record = (await readdir(directory)).find((name) =>
+      name.endsWith(".qwp"),
+    );
+    expect(record).toBeDefined();
+    await unlink(join(directory, record!));
+
+    const blocked = store.append({
+      frameSequence: 2n,
+      payload: Uint8Array.of(3),
+    });
+    await vi.waitFor(() => expect(store.metrics.waitingAppends).toBe(1));
+    await expect(blocked).rejects.toBeInstanceOf(QwpReplayStoreCheckpointError);
+    expect(store.metrics).toMatchObject({
+      waitingAppends: 0,
+      totalCheckpointFailures: 1,
+      totalAppendTimeouts: 0,
+    });
+    await expect(store.close()).rejects.toBeInstanceOf(
+      QwpReplayStoreCheckpointError,
+    );
+    expect(await readdir(directory)).not.toContain(".qwp.lock");
+  });
+
+  it("waits for ACK trimming without blocking the acknowledgement queue", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 106,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 1_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+
+    const blocked = store.append({
+      frameSequence: 2n,
+      payload: Uint8Array.of(3),
+    });
+    await vi.waitFor(() => expect(store.metrics.waitingAppends).toBe(1));
+    await store.acknowledgeThrough(0n);
+    await expect(blocked).resolves.toBeUndefined();
+    expect(store.metrics).toMatchObject({
+      pendingRecords: 2,
+      waitingAppends: 0,
+      totalBackpressureStalls: 1,
+      totalAppendTimeouts: 0,
+    });
+    await store.close();
+  });
+
+  it("bounds disk-backpressure waits with a typed append timeout", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 106,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 100,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+
+    const blocked = store.append({
+      frameSequence: 2n,
+      payload: Uint8Array.of(3),
+    });
+    const rejection = expect(blocked).rejects.toMatchObject({
+      name: "QwpReplayStoreAppendTimeoutError",
+      maxBytes: 106,
+      requiredBytes: 159,
+      timeoutMs: 100,
+    } satisfies Partial<QwpReplayStoreAppendTimeoutError>);
+    await vi.waitFor(() => expect(store.metrics.waitingAppends).toBe(1));
+    await rejection;
+    expect(store.metrics).toMatchObject({
+      waitingAppends: 0,
+      totalBackpressureStalls: 1,
+      totalAppendTimeouts: 1,
+    });
     await store.close();
   });
 

@@ -55,8 +55,12 @@ const browserRuntimeContract = [
 const nodeRuntimeContract = [
   "QWP_ORPHAN_DRAIN_EVENT_KIND",
   "QWP_ORPHAN_FAILED_SENTINEL",
+  "QWP_SF_BACKPRESSURE_POLICY",
+  "QWP_SF_DURABILITY",
   "QwpNodeFileReplayStore",
   "QwpNodeOrphanDrainer",
+  "QwpReplayStoreAppendTimeoutError",
+  "QwpReplayStoreCheckpointError",
   "QwpReplayStoreError",
   "QwpReplayStoreFullError",
   "QwpReplayStoreLockedError",
