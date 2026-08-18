@@ -34,7 +34,7 @@ const LOCK_RECOVERY_FILE = "recovery.json";
 const ABANDONED_LOCK_PREFIX = ".qwp.lock.abandoned-";
 // The file-per-frame journal has no fixed segment working set. Preserve two
 // default-sized QWP batches instead, mirroring Java's active+spare liveness
-// floor when the lifetime-monotonic dictionary consumes the configured cap.
+// floor when the current dictionary generation consumes the configured cap.
 const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
 const DEFAULT_APPEND_DEADLINE_MS = 30_000;
@@ -82,8 +82,9 @@ export interface QwpNodeFileReplayStoreOptions {
   directory: string;
   /**
    * Target maximum journal size including record headers and symbol metadata.
-   * Defaults to 1 GiB. The non-reclaimable symbol dictionary may exceed this
-   * target so it cannot permanently consume the journal's live frame budget.
+   * Defaults to 1 GiB. The current symbol dictionary may exceed this target so
+   * it cannot consume the journal's live frame budget before a drained close
+   * retires that dictionary generation.
    */
   maxBytes?: number;
   /**
@@ -510,6 +511,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           await this.checkpointDirty();
         }
         if (this.checkpointFailure) throw this.checkpointFailure;
+        await this.retireDrainedDictionary();
       } catch (error) {
         failure = error;
       }
@@ -717,6 +719,39 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       this.rejectCapacityWaiters(error);
       throw error;
     }
+  }
+
+  /**
+   * Retires the dictionary generation only after every operation has settled
+   * and no replay frame remains. Doing this in acknowledgeThrough() would be
+   * unsafe: an ACK may arrive after a new dictionary suffix is persisted but
+   * before the frame that references it is appended.
+   */
+  private async retireDrainedDictionary(): Promise<void> {
+    if (
+      !this.loaded ||
+      this.records.size !== 0 ||
+      this.dictionaryFileSize === 0
+    ) {
+      return;
+    }
+    const path = join(this.directory, DICTIONARY_FILE);
+    try {
+      await ignoreMissing(unlink(path));
+      if (this.durability !== QWP_SF_DURABILITY.MEMORY) {
+        await syncDirectory(this.directory);
+      }
+    } catch (error) {
+      throw new QwpReplayStoreError(
+        `could not retire fully drained QWP symbol dictionary [file=${path}]`,
+        error,
+      );
+    }
+    this.totalBytes -= this.dictionaryFileSize;
+    this.dictionaryFileSize = 0;
+    this.dictionaryDirty = false;
+    this.symbols.length = 0;
+    this.symbolValues.clear();
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -964,9 +999,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.dictionaryFileSize = offset;
     this.totalBytes += offset;
-    // Dictionary bytes are lifetime-monotonic and ACK trimming cannot reclaim
-    // them. Loading a valid journal above the target is therefore safe; frame
-    // appends remain backpressured except for the bounded liveness floor.
+    // Dictionary bytes are generation-monotonic and ACK trimming cannot
+    // reclaim them while the store remains open. A fully drained close retires
+    // the generation. Loading a valid journal above the target is therefore
+    // safe; frame appends retain the bounded liveness floor until then.
   }
 
   private assertReady(): void {

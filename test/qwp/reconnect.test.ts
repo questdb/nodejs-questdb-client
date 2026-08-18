@@ -1327,7 +1327,7 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
-  it("recovers a persisted Node dictionary before replay and continues its IDs", async () => {
+  it("continues recovered dictionary IDs until a drained close retires them", async () => {
     const directory = await createTemporaryDirectory();
     const dictionary = new QwpSymbolDictionary();
     const seededTable = new QwpTableBuffer("trades");
@@ -1379,12 +1379,12 @@ describe("QWP ingress reconnect and replay", () => {
 
     const verify = new QwpNodeFileReplayStore({ directory });
     await expect(verify.load()).resolves.toEqual([]);
-    await expect(verify.loadSymbolDictionary()).resolves.toEqual([
-      "ETH-USD",
-      "BTC-USD",
-      "SOL-USD",
-    ]);
+    await expect(verify.loadSymbolDictionary()).resolves.toEqual([]);
+    await expect(
+      verify.appendSymbolDictionary(0, ["BTC-USD"]),
+    ).resolves.toBeUndefined();
     await verify.close();
+    expect(await readdir(directory)).toEqual([]);
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1826,6 +1826,62 @@ describe("QWP Node file replay store", () => {
     await third.close();
   });
 
+  it.each([
+    QWP_SF_DURABILITY.APPEND,
+    QWP_SF_DURABILITY.PERIODIC,
+    QWP_SF_DURABILITY.MEMORY,
+  ])(
+    "retires a fully drained %s dictionary generation on close",
+    async (durability) => {
+      const directory = await trackedDirectory();
+      const first = new QwpNodeFileReplayStore({ directory, durability });
+      await first.load();
+      await first.appendSymbolDictionary(0, ["ETH-USD"]);
+      await first.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+      await first.acknowledgeThrough(0n);
+
+      // Keep the generation intact while the store is open. An ACK may race
+      // between this suffix and the frame that will reference it.
+      await first.appendSymbolDictionary(1, ["BTC-USD"]);
+      await expect(first.loadSymbolDictionary()).resolves.toEqual([
+        "ETH-USD",
+        "BTC-USD",
+      ]);
+      expect(await readdir(directory)).toContain("symbols.qwpdict");
+      await first.close();
+      expect(await readdir(directory)).toEqual([]);
+
+      const second = new QwpNodeFileReplayStore({ directory, durability });
+      await expect(second.load()).resolves.toEqual([]);
+      await expect(second.loadSymbolDictionary()).resolves.toEqual([]);
+      await expect(
+        second.appendSymbolDictionary(0, ["BTC-USD"]),
+      ).resolves.toBeUndefined();
+      await second.close();
+      expect(await readdir(directory)).toEqual([]);
+    },
+  );
+
+  it("retains the dictionary when a close leaves replay frames behind", async () => {
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({ directory });
+    await first.load();
+    await first.appendSymbolDictionary(0, ["ETH-USD"]);
+    await first.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await first.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+    await first.acknowledgeThrough(0n);
+    await first.close();
+
+    const second = new QwpNodeFileReplayStore({ directory });
+    await expect(second.load()).resolves.toEqual([
+      { frameSequence: 1n, payload: Uint8Array.of(2) },
+    ]);
+    await expect(second.loadSymbolDictionary()).resolves.toEqual(["ETH-USD"]);
+    await second.acknowledgeThrough(1n);
+    await second.close();
+    expect(await readdir(directory)).toEqual([]);
+  });
+
   it("holds an exclusive directory lock for the store lifetime", async () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({ directory });
@@ -1894,6 +1950,7 @@ describe("QWP Node file replay store", () => {
     const first = new QwpNodeFileReplayStore({ directory });
     await first.load();
     await first.appendSymbolDictionary(0, ["ETH-USD", "BTC-USD"]);
+    await first.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
     await first.close();
     await writeFile(
       join(directory, "symbols.qwpdict"),
@@ -1917,6 +1974,7 @@ describe("QWP Node file replay store", () => {
       "BTC-USD",
       "SOL-USD",
     ]);
+    await verify.acknowledgeThrough(0n);
     await verify.close();
   });
 

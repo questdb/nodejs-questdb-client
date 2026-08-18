@@ -142,13 +142,16 @@ not hold the journal mutation queue, so ACK cleanup can continue. Direct users o
 `QwpNodeFileReplayStore` can inspect `metrics` for pending checkpoint work,
 checkpoints, checkpoint failures, active waiters, stalls, and timeouts.
 
-The persisted symbol dictionary is lifetime-monotonic and cannot be reclaimed by an
-ACK. It counts toward the `maxBytes` target, but the journal preserves up to 32 MiB
-(or the configured target when smaller) for live frame records if dictionary growth
-uses all remaining headroom. Dictionary persistence itself is never rejected by the
-target, so actual disk usage can exceed it by the non-reclaimable dictionary
-overshoot. Frame growth beyond the liveness allowance remains backpressured until
-ACK trimming frees record files.
+The persisted symbol dictionary is monotonic for one open journal generation and
+cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target, but the
+journal preserves up to 32 MiB (or the configured target when smaller) for live frame
+records if dictionary growth uses all remaining headroom. Dictionary persistence
+itself is never rejected by the target, so actual disk usage can exceed it by the
+current dictionary overshoot. Frame growth beyond the liveness allowance remains
+backpressured until ACK trimming frees record files. Once every frame is acknowledged,
+`close()` removes the dictionary under the journal lock; the next clean start uses a
+fresh symbol-ID space. A partially drained close retains the dictionary required by
+the surviving frames.
 
 The journal takes an exclusive lock when it is loaded and holds it until the sender
 or session closes. A second live process using the same directory fails with
