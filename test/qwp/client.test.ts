@@ -10,6 +10,7 @@ import {
   QwpClientClosedError,
   QwpConnectionCloseInfo,
   QwpEgressSession,
+  QwpEgressSessionClosedError,
   QwpEgressSessionOptions,
   QwpHandshakeMetadata,
   QwpIngressResponse,
@@ -503,7 +504,7 @@ describe("QWP pooled client", () => {
     }
   });
 
-  it("leaves a timed-out query lease alive and closes it on late return", async () => {
+  it("cancels and closes every borrowed query session during client shutdown", async () => {
     const connections: FakeConnection[] = [];
     const client = new QwpClient(
       {
@@ -516,27 +517,40 @@ describe("QWP pooled client", () => {
         senderPoolMin: 0,
         senderPoolMax: 1,
         queryPoolMin: 0,
-        queryPoolMax: 1,
+        queryPoolMax: 2,
         acquireTimeoutMs: 10,
       },
     );
     const lease = await client.borrowQuery();
+    const idleLease = await client.borrowQuery();
+    const query = await lease.query("select 1");
+    const completion = expect(query.completion).rejects.toBeInstanceOf(
+      QwpEgressSessionClosedError,
+    );
 
     await client.close();
-    expect(connections[0].closeCount).toBe(0);
-    expect(lease.handshake).toMatchObject({ qwpVersion: 1 });
-    const query = await lease.query("select 1");
-    connections[0].receive(resultEnd(query.requestId));
-    await expect(query.completion).resolves.toMatchObject({ totalRows: 0n });
+    await completion;
+    expect(connections[0].sent).toHaveLength(2);
+    expect(connections[0].sent[1][0]).toBe(QWP_EGRESS_MESSAGE.CANCEL);
+    expect(connections[0].closeCount).toBe(1);
+    expect(connections[1].sent).toHaveLength(0);
+    expect(connections[1].closeCount).toBe(1);
+    await expect(lease.query("select 2")).rejects.toBeInstanceOf(
+      QwpEgressSessionClosedError,
+    );
+    await expect(idleLease.query("select 3")).rejects.toBeInstanceOf(
+      QwpEgressSessionClosedError,
+    );
     expect(client.metrics).toMatchObject({
       closing: true,
       closed: true,
-      queries: { total: 1, leased: 1 },
+      queries: { total: 0, leased: 0 },
     });
 
     await lease.close();
+    await idleLease.close();
     expect(connections[0].closeCount).toBe(1);
-    expect(client.metrics.queries).toMatchObject({ total: 0, leased: 0 });
+    expect(connections[1].closeCount).toBe(1);
   });
 
   it("runs reusable view queries through a pooled query lease", async () => {

@@ -735,10 +735,13 @@ each configured pool minimum. Set either timeout to zero to disable that policy;
 `housekeepingIntervalMs` controls how quickly an expired idle connection is noticed.
 Prefer returning application-owned leases before calling `QwpClient.close()`.
 If shutdown races a borrower, it rejects queued borrowers, closes idle connections,
-and waits up to `acquireTimeoutMs` (capped at five seconds) for active leases to
-return. It never closes a connection underneath its borrower. A lease returned
-during or after shutdown is closed instead of re-entering the pool; a lease that is
-never returned retains its connection.
+and cancels active queries before closing every borrowed query connection. A query
+lease that is never returned therefore cannot retain a WebSocket after client
+shutdown; subsequent operations on it fail as closed. Borrowed senders remain under
+their producer's ownership: shutdown waits up to `acquireTimeoutMs` (capped at five
+seconds) for them to return and never closes a sender underneath its borrower. A
+sender returned during or after shutdown is closed instead of re-entering the pool,
+while a sender that outlives the bounded wait owns its eventual teardown.
 
 Pooled sender `close()` flushes completed rows, discards an unfinished row with a
 warning, and resets staging before reuse. With Node store-and-forward enabled, the

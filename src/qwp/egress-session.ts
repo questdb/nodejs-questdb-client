@@ -804,6 +804,27 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   }
 
   /**
+   * Best-effort cancellation followed by physical connection teardown for
+   * facade shutdown. Unlike pooled lease return, this does not wait for the
+   * server to finish draining the cancelled query.
+   *
+   * @internal
+   */
+  shutdownForClientClose(): Promise<void> {
+    const active = this.active;
+    if (active && !active.retired && !this.closing && !this.failure) {
+      try {
+        void this.connection
+          .send(encodeQwpCancel(active.requestId))
+          .catch(() => undefined);
+      } catch {
+        // Cancellation is advisory; physical teardown is authoritative.
+      }
+    }
+    return this.close(1001, "QWP client shutting down");
+  }
+
+  /**
    * Cancels and drains an active operation before a pooled lease is returned.
    * False means the physical session is no longer safe to reuse.
    *

@@ -161,6 +161,7 @@ class QwpResourcePool<T> {
     private readonly maxLifetimeMs: number,
     private readonly createResource: (slot: number) => Promise<T>,
     private readonly destroyResource: (resource: T) => Promise<void>,
+    private readonly closeLeasedOnShutdown = false,
   ) {}
 
   get metrics(): QwpResourcePoolMetrics {
@@ -277,12 +278,25 @@ class QwpResourcePool<T> {
       waiter.reject(new QwpClientClosedError());
     }
     this.waiters.clear();
-    // Only idle entries belong to the closing thread. Borrowed entries stay in
-    // `all` so their exclusive owners can keep using them and retire them from
-    // release(), even after this bounded close has returned.
+    // Idle entries always belong to the closing thread. Borrowed senders remain
+    // owner-managed, while borrowed query sessions are retired with them below.
     const entries = this.available.splice(0);
     for (const entry of entries) this.all.delete(entry.slot);
-    await Promise.all(entries.map((entry) => this.destroy(entry)));
+    const idleTeardown = Promise.all(
+      entries.map((entry) => this.destroy(entry)),
+    );
+    let leasedTeardown: Promise<void[]> | undefined;
+    if (this.closeLeasedOnShutdown) {
+      const leased = Array.from(this.all.values()).filter(
+        (entry) => entry.leased,
+      );
+      for (const entry of leased) this.all.delete(entry.slot);
+      // Invoke every query teardown before awaiting any one WebSocket's bounded
+      // close handshake, so one slow idle socket cannot delay active-query
+      // cancellation on the other pool entries.
+      leasedTeardown = Promise.all(leased.map((entry) => this.destroy(entry)));
+    }
+    await idleTeardown;
     const creations = Array.from(this.creationOperations);
     if (creations.length > 0) {
       const waitMs = Math.min(
@@ -300,6 +314,11 @@ class QwpResourcePool<T> {
       } finally {
         if (timer) clearTimeout(timer);
       }
+    }
+    if (leasedTeardown) {
+      await leasedTeardown;
+      this.wakeCloseWaiters();
+      return;
     }
     await this.waitForLeases(
       Math.min(this.acquireTimeoutMs, MAX_CLOSE_LEASE_WAIT_MS),
@@ -553,7 +572,8 @@ export class QwpClient {
       validated.idleTimeoutMs,
       validated.maxLifetimeMs,
       factories.createQuerySession,
-      (session) => session.close(),
+      (session) => session.shutdownForClientClose(),
+      true,
     );
     this.startFactories = factories.start;
     this.closeFactories = factories.close;
@@ -598,8 +618,9 @@ export class QwpClient {
   }
 
   /**
-   * Rejects new borrows, closes idle resources, and waits boundedly for active
-   * leases. A lease that outlives the wait remains usable and owns its teardown.
+   * Rejects new borrows and closes idle resources. Borrowed query sessions are
+   * cancelled and closed; borrowed senders retain ownership during a bounded
+   * drain and own their teardown if they outlive it.
    */
   close(): Promise<void> {
     if (!this.closePromise) this.closePromise = this.closeNow();
