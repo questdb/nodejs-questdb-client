@@ -216,9 +216,9 @@ export type QwpInitialConnectMode =
 export interface QwpReconnectOptions {
   /** Maximum connection sweeps per outage. Defaults to 3; zero is unlimited. */
   maxAttempts?: number;
-  /** Backoff before the first failed sweep is retried. Defaults to 100ms. */
+  /** Full-jitter ceiling before the first failed sweep is retried. Defaults to 100ms. */
   initialBackoffMs?: number;
-  /** Exponential-backoff ceiling. Defaults to 5s. */
+  /** Full-jitter exponential-backoff ceiling. Defaults to 5s. */
   maxBackoffMs?: number;
   /** Total reconnect deadline. Defaults to 30s; zero disables the deadline. */
   maxDurationMs?: number;

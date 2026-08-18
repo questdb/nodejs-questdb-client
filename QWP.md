@@ -409,8 +409,10 @@ rejection) and then by zone affinity; configuration order breaks ties. Health ou
 zone, so a known healthy cross-zone node is preferred to an untried local node. Every
 connection sweep can still try every endpoint, allowing role and health changes to
 recover. A non-orderly close demotes the selected endpoint before the next sweep.
-`reconnect` controls exponential backoff and emits lifecycle events. Its attempt and
-duration bounds apply to browser/memory reconnect and Node `"sync"` startup. A Node
+`reconnect` controls full-jitter exponential backoff and emits lifecycle events. Each
+retry delay is selected between zero and the current exponential ceiling, preventing
+clients disconnected together from retrying in lockstep. Its attempt and duration
+bounds apply to browser/memory reconnect and Node `"sync"` startup. A Node
 foreground store-and-forward replay loop remains unbounded after startup. Node ingress
 requires a persistent replay store when reconnect is enabled; browser ingress can only
 replay from memory for the lifetime of the page.

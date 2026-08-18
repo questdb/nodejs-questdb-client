@@ -423,6 +423,48 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("applies full jitter to ingress reconnect backoff", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.25);
+    try {
+      const connection = new FakeConnection("primary");
+      let factoryCalls = 0;
+      const connecting = QwpIngressSession.connect(
+        async () => {
+          factoryCalls++;
+          if (factoryCalls === 1) {
+            throw new QwpUpgradeError("offline", {
+              kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+              retryable: true,
+              tryNextEndpoint: true,
+            });
+          }
+          return connection;
+        },
+        {
+          reconnect: {
+            maxAttempts: 2,
+            initialBackoffMs: 100,
+            maxBackoffMs: 100,
+          },
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(factoryCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(24);
+      expect(factoryCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const session = await connecting;
+      expect(factoryCalls).toBe(2);
+      expect(random).toHaveBeenCalledTimes(1);
+      await session.close();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("supports fail-fast and bounded blocking persistent startup", async () => {
     const failFastStore = new TrackingReplayStore();
     let failFastCalls = 0;
@@ -1595,6 +1637,50 @@ describe("QWP ingress reconnect and replay", () => {
 });
 
 describe("QWP egress reconnect and replay", () => {
+  it("applies full jitter to egress reconnect backoff", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.25);
+    try {
+      const connection = new FakeConnection("primary");
+      let factoryCalls = 0;
+      const connecting = QwpEgressSession.connect(
+        async () => {
+          factoryCalls++;
+          if (factoryCalls === 1) {
+            throw new QwpUpgradeError("offline", {
+              kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+              retryable: true,
+              tryNextEndpoint: true,
+            });
+          }
+          queueMicrotask(() => connection.receive(serverInfo("primary")));
+          return connection;
+        },
+        {
+          serverInfoTimeoutMs: 1_000,
+          reconnect: {
+            maxAttempts: 2,
+            initialBackoffMs: 100,
+            maxBackoffMs: 100,
+          },
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(factoryCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(24);
+      expect(factoryCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const session = await connecting;
+      expect(factoryCalls).toBe(2);
+      expect(random).toHaveBeenCalledTimes(1);
+      await session.close();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("retries the initial connection until one provides SERVER_INFO", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");

@@ -21,6 +21,7 @@ import {
   QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
+import { jitterReconnectDelayMs } from "./reconnect-backoff";
 
 type ReplayResetHandler = (
   event: QwpEgressReplayResetEvent,
@@ -198,11 +199,15 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         previousEndpoint,
         cause: initialCause,
       });
+      if (backoffMs > 0) {
+        await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
+        backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
+      }
     }
 
     while (!this.closing) {
       if (attempt > 0 && backoffMs > 0) {
-        await this.waitForBackoff(backoffMs);
+        await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
         backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
       }
       this.throwIfUnavailable();

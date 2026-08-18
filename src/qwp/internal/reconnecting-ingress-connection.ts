@@ -34,6 +34,7 @@ import {
   QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
+import { jitterReconnectDelayMs } from "./reconnect-backoff";
 
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
@@ -519,12 +520,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     const initialRetryDelayMs = reconnectDelayMs(initialCause);
     if (initialRetryDelayMs > 0) {
-      await this.waitForBackoff(initialRetryDelayMs);
+      await this.waitForBackoff(jitterReconnectDelayMs(initialRetryDelayMs));
+    } else if (reconnecting && backoffMs > 0) {
+      await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
+      backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
     }
 
     while (!this.closing) {
       if (attempt > 0 && backoffMs > 0) {
-        await this.waitForBackoff(backoffMs);
+        await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
         backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
       }
       this.throwIfUnavailable();
