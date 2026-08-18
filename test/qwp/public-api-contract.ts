@@ -85,6 +85,7 @@ const queryOptionsContract: QwpEgressQueryOptions = {
 };
 
 const egressSessionOptionsContract: QwpEgressSessionOptions = {
+  initialCredit: 256 * 1024,
   queryTimeoutMs: 30_000,
   cancelDrainTimeoutMs: 5_000,
 };

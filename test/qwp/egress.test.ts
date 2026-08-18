@@ -9,6 +9,7 @@ import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_FLAG_GORILLA,
   QWP_FLAG_ZSTD,
+  QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
   QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
   QWP_STATUS,
   QwpBinaryConnection,
@@ -409,6 +410,17 @@ describe("QwpEgressSession", () => {
           factoryCalls++;
           return new FakeConnection();
         },
+        { initialCredit: -1 },
+      ),
+    ).rejects.toThrow("initialCredit must be a non-negative safe integer");
+    expect(factoryCalls).toBe(0);
+
+    await expect(
+      QwpEgressSession.connect(
+        async () => {
+          factoryCalls++;
+          return new FakeConnection();
+        },
         { queryTimeoutMs: -1 },
       ),
     ).rejects.toThrow("queryTimeoutMs must be a non-negative finite number");
@@ -527,6 +539,52 @@ describe("QwpEgressSession", () => {
     await expect(next).resolves.toEqual({ value: undefined, done: true });
     await query.completion;
     await session.close();
+  });
+
+  it("uses bounded credit by default and allows a session-level override", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x");
+    const request = new QwpByteReader(connection.sent[0]);
+    expect(request.readUint8()).toBe(QWP_EGRESS_MESSAGE.QUERY_REQUEST);
+    expect(request.readBigUint64()).toBe(query.requestId);
+    const sqlLength = Number(readQwpVarint(request));
+    request.readBytes(sqlLength);
+    expect(readQwpVarint(request)).toBe(
+      BigInt(QWP_DEFAULT_EGRESS_INITIAL_CREDIT),
+    );
+
+    const resultFrame = firstResultBatch(query.requestId);
+    connection.receive(resultFrame);
+    const iterator = query[Symbol.asyncIterator]();
+    await iterator.next();
+    const next = iterator.next();
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    const credit = new QwpByteReader(connection.sent[1]);
+    expect(credit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+    expect(credit.readBigUint64()).toBe(query.requestId);
+    expect(readQwpVarint(credit)).toBe(BigInt(resultFrame.byteLength));
+    connection.receive(resultEnd(query.requestId));
+    await next;
+    await query.completion;
+    await session.close();
+
+    const unboundedConnection = new FakeConnection();
+    const unbounded = new QwpEgressSession(unboundedConnection, {
+      initialCredit: 0,
+    });
+    unboundedConnection.receive(serverInfo());
+    const unboundedQuery = await unbounded.query("select 1");
+    const unboundedRequest = new QwpByteReader(unboundedConnection.sent[0]);
+    unboundedRequest.readUint8();
+    unboundedRequest.readBigUint64();
+    const unboundedSqlLength = Number(readQwpVarint(unboundedRequest));
+    unboundedRequest.readBytes(unboundedSqlLength);
+    expect(readQwpVarint(unboundedRequest)).toBe(0n);
+    unboundedConnection.receive(resultEnd(unboundedQuery.requestId));
+    await unboundedQuery.completion;
+    await unbounded.close();
   });
 
   it("uses compressed RESULT_BATCH wire bytes for automatic credit", async () => {

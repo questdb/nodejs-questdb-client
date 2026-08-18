@@ -29,6 +29,8 @@ import {
 
 export interface QwpEgressSessionOptions {
   serverInfoTimeoutMs?: number;
+  /** Default per-query send-ahead credit. Defaults to 256 KiB; zero is unbounded. */
+  initialCredit?: number | bigint;
   /** Default per-query deadline. Zero or undefined disables query deadlines. */
   queryTimeoutMs?: number;
   /** Maximum wait for a terminal response after CANCEL. Defaults to 5 seconds. */
@@ -44,7 +46,7 @@ export interface QwpEgressSessionOptions {
 }
 
 export interface QwpEgressQueryOptions {
-  /** Zero means the server may stream without credit accounting. */
+  /** Overrides session send-ahead credit. Zero explicitly disables flow control. */
   initialCredit?: number | bigint;
   /**
    * Replenishes positive initial credit by each RESULT_BATCH wire size after
@@ -65,9 +67,15 @@ export interface QwpEgressQueryOptions {
 
 interface QwpValidatedEgressSessionOptions {
   readonly serverInfoTimeoutMs: number;
+  readonly initialCredit: number | bigint;
   readonly queryTimeoutMs: number;
   readonly cancelDrainTimeoutMs: number;
 }
+
+/** Default bounded send-ahead window used by high-level egress queries. */
+export const QWP_DEFAULT_EGRESS_INITIAL_CREDIT = 256 * 1024;
+
+const MAX_UINT64 = 0xffffffffffffffffn;
 
 function validateOptionalTimeout(
   value: number | undefined,
@@ -91,6 +99,10 @@ function validateEgressSessionOptions(
   }
   return {
     serverInfoTimeoutMs,
+    initialCredit: validateInitialCredit(
+      options.initialCredit ?? QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
+      "initialCredit",
+    ),
     queryTimeoutMs: validateOptionalTimeout(
       options.queryTimeoutMs,
       "queryTimeoutMs",
@@ -100,6 +112,22 @@ function validateEgressSessionOptions(
       "cancelDrainTimeoutMs",
     ),
   };
+}
+
+function validateInitialCredit(
+  value: number | bigint,
+  name: string,
+): number | bigint {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new RangeError(`${name} must be a non-negative safe integer`);
+    }
+    return value;
+  }
+  if (typeof value !== "bigint" || value < 0n || value > MAX_UINT64) {
+    throw new RangeError(`${name} must fit in uint64`);
+  }
+  return value;
 }
 
 function validatePositiveTimeout(value: number, name: string): number {
@@ -337,6 +365,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly rejectServerInfo: (error: unknown) => void;
   private readonly serverInfoTimer: ReturnType<typeof setTimeout>;
   private readonly defaultQueryTimeoutMs: number;
+  private readonly defaultInitialCredit: number | bigint;
   private readonly cancelDrainTimeoutMs: number;
   private active?: QwpEgressQuery;
   private nextRequestId = 0n;
@@ -375,6 +404,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       throw error;
     }
     this.defaultQueryTimeoutMs = validated.queryTimeoutMs;
+    this.defaultInitialCredit = validated.initialCredit;
     this.cancelDrainTimeoutMs = validated.cancelDrainTimeoutMs;
     let resolve!: (value: QwpServerInfoMessage) => void;
     let reject!: (error: unknown) => void;
@@ -461,6 +491,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       options.timeoutMs ?? this.defaultQueryTimeoutMs,
       "timeoutMs",
     );
+    const initialCredit = validateInitialCredit(
+      options.initialCredit ?? this.defaultInitialCredit,
+      "initialCredit",
+    );
     if (
       options.autoCredit !== undefined &&
       typeof options.autoCredit !== "boolean"
@@ -480,7 +514,6 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     }
 
     const requestId = this.nextRequestId++;
-    const initialCredit = options.initialCredit ?? 0;
     const creditEnabled =
       typeof initialCredit === "bigint"
         ? initialCredit > 0n

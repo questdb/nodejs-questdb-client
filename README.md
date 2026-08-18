@@ -292,11 +292,12 @@ Both `"zstd"` and `"auto"` advertise Zstd followed by raw fallback, and the
 server still sends an individual batch raw when compression would make it
 larger.
 
-A positive `initialCredit` enables byte-based egress flow control. The client
-automatically replenishes the exact wire size of each result batch after the
-async iterator advances past it, so a slow Node.js or browser consumer naturally
-limits how far the server can stream ahead. Set `autoCredit: false` to manage
-credit explicitly through `query.grantCredit()`.
+Egress queries use a bounded 256 KiB `initialCredit` window by default. The client
+automatically replenishes the exact wire size of each result batch after the async
+iterator advances past it, so a slow Node.js or browser consumer limits how far the
+server can stream ahead. Tune `initialCredit` on the session or individual query;
+set it to zero only to opt into legacy unbounded streaming. Set `autoCredit: false`
+to manage credit explicitly through `query.grantCredit()`.
 
 `queryTimeoutMs` sets the session's default query deadline; a per-query
 `timeoutMs` overrides it, and zero disables the deadline. When a deadline

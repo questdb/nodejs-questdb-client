@@ -6,6 +6,7 @@ import * as shared from "../../src/qwp";
 
 const sharedRuntimeContract = [
   "QWP_INGRESS_PROGRESS_KIND",
+  "QWP_DEFAULT_EGRESS_INITIAL_CREDIT",
   "QWP_RECONNECT_EVENT_KIND",
   "QWP_UPGRADE_ERROR_KIND",
   "QWP_VERSION",

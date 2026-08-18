@@ -359,10 +359,12 @@ microsecond and nanosecond timestamps, strings, UUIDs, LONG256, geohashes,
 decimals, and typed nulls. Set values in ascending index order. `bindPayload` and
 `bindCount` remain advanced escape hatches for pre-encoded data.
 
-Positive `initialCredit` enables byte-based flow control. By default, the client
-replenishes the exact wire size of each batch when iteration advances beyond it, so
-a slow consumer limits server read-ahead. Set `autoCredit: false` and call
-`query.grantCredit()` for manual control.
+The high-level client defaults `initialCredit` to 256 KiB, bounding unread wire data
+to roughly that window plus at most one server batch. The exact wire size of each
+batch is replenished when iteration advances beyond it, so a slow consumer limits
+server read-ahead in Node.js and browsers. Set a session-level `initialCredit` to tune
+the default, override it per query, or explicitly set zero for legacy unbounded
+streaming. Set `autoCredit: false` and call `query.grantCredit()` for manual control.
 
 A session `queryTimeoutMs` supplies the default deadline; per-query `timeoutMs`
 overrides it, and zero disables it. Expiry rejects iteration and `completion` with

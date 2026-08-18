@@ -12,6 +12,7 @@ import {
   encodeQwpFrame,
   QWP_COLUMN_TYPE,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+  QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
   QWP_EGRESS_MESSAGE,
   QWP_STATUS,
   QwpByteReader,
@@ -355,6 +356,16 @@ describe("QWP in a real browser", () => {
       expect(credit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
       expect(credit.readBigUint64()).toBe(0n);
       expect(readQwpVarint(credit)).toBe(BigInt(resultBatch.byteLength));
+      const defaultCreditRequest = new QwpByteReader(received[2]);
+      expect(defaultCreditRequest.readUint8()).toBe(
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+      );
+      expect(defaultCreditRequest.readBigUint64()).toBe(1n);
+      const sqlLength = Number(readQwpVarint(defaultCreditRequest));
+      defaultCreditRequest.readBytes(sqlLength);
+      expect(readQwpVarint(defaultCreditRequest)).toBe(
+        BigInt(QWP_DEFAULT_EGRESS_INITIAL_CREDIT),
+      );
     } finally {
       await page.close();
       await closeWebSocketServer(server);
