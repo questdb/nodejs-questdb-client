@@ -648,7 +648,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private async trimDurablePrefix(): Promise<void> {
     let lastCovered: bigint | undefined;
     for (const frame of this.frames.values()) {
-      if (!frame.durableTargets) break;
+      // Successful ingress ACKs are cumulative. Deferred frames therefore
+      // have no checkpoint of their own; a later commit-bearing ACK covers
+      // them and its durable targets retire the whole preceding range.
+      if (!frame.durableTargets) continue;
       if (!areTargetsCovered(frame.durableTargets, this.durableWatermarks)) {
         break;
       }

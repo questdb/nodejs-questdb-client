@@ -533,6 +533,51 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("durably trims cumulative transaction ranges at ordered ACK checkpoints", async () => {
+    const connection = new FakeConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    const replayStore = new TrackingReplayStore();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      durableAckKeepaliveMs: 0,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+    });
+    const deferred = encodeQwpIngressFrame([symbolTable("ETH-USD")], {
+      deferCommit: true,
+    });
+    const transactionCommit = encodeQwpIngressFrame([symbolTable("BTC-USD")]);
+    const laterCommit = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
+
+    const responses = [
+      session.sendFrame(deferred),
+      session.sendFrame(transactionCommit),
+      session.sendFrame(laterCommit),
+    ];
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(3));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["trades", 42n]]));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 2n, [["trades", 50n]]));
+    await expect(Promise.all(responses)).resolves.toHaveLength(3);
+    expect(Array.from(replayStore.records.keys())).toEqual([0n, 1n, 2n]);
+
+    connection.receive(durableResponse([["trades", 41n]]));
+    await vi.waitFor(() => expect(session.metrics.totalDurableAcks).toBe(1));
+    expect(Array.from(replayStore.records.keys())).toEqual([0n, 1n, 2n]);
+
+    connection.receive(durableResponse([["trades", 42n]]));
+    await vi.waitFor(() =>
+      expect(Array.from(replayStore.records.keys())).toEqual([2n]),
+    );
+    expect(session.metrics.replayAcknowledgedFrameSequence).toBe(1n);
+
+    connection.receive(durableResponse([["trades", 50n]]));
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+    expect(session.metrics.replayAcknowledgedFrameSequence).toBe(2n);
+    await session.close();
+  });
+
   it("recovers a persisted Node dictionary before replay and continues its IDs", async () => {
     const directory = await createTemporaryDirectory();
     const dictionary = new QwpSymbolDictionary();
@@ -738,13 +783,23 @@ describe("QWP ingress reconnect and replay", () => {
     await seed.append({ frameSequence: 6n, payload: commit });
     await seed.close();
 
-    const connection = new FakeConnection("primary");
+    const connection = new FakeConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
     const session = await QwpIngressSession.connect(async () => connection, {
       reconnect: { maxAttempts: 1 },
       replayStore: new QwpNodeFileReplayStore({ directory }),
+      durableAckKeepaliveMs: 0,
     });
     expect(connection.sent).toEqual([deferred, commit]);
-    connection.receive(ingressResponse(QWP_STATUS.OK, 1n));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["trades", 42n]]));
+    await vi.waitFor(async () =>
+      expect(
+        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+      ).toHaveLength(2),
+    );
+    connection.receive(durableResponse([["trades", 42n]]));
     await vi.waitFor(async () =>
       expect(
         (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
