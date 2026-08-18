@@ -103,6 +103,25 @@ function firstResultBatch(requestId = 0n): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), RESULT_FLAGS, 1);
 }
 
+function emptyResultBatch(
+  requestId: bigint,
+  batchSequence: number,
+): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
+  writeQwpVarint(payload, batchSequence);
+  writeQwpVarint(payload, 0); // empty dictionary delta start
+  writeQwpVarint(payload, 0); // empty dictionary delta count
+  writeQwpVarint(payload, 0); // table name
+  writeQwpVarint(payload, 0); // rows
+  if (batchSequence === 0) writeQwpVarint(payload, 0); // initial schema
+  return encodeQwpFrame(
+    payload.toUint8Array(),
+    QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+    1,
+  );
+}
+
 function resultEnd(requestId = 0n, totalRows = 3n): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
@@ -541,6 +560,17 @@ describe("QwpEgressSession", () => {
           factoryCalls++;
           return new FakeConnection();
         },
+        { bufferPoolSize: 0 },
+      ),
+    ).rejects.toThrow("bufferPoolSize must be a positive safe integer");
+    expect(factoryCalls).toBe(0);
+
+    await expect(
+      QwpEgressSession.connect(
+        async () => {
+          factoryCalls++;
+          return new FakeConnection();
+        },
         { queryTimeoutMs: -1 },
       ),
     ).rejects.toThrow("queryTimeoutMs must be a non-negative finite number");
@@ -784,6 +814,57 @@ describe("QwpEgressSession", () => {
     unboundedConnection.receive(resultEnd(unboundedQuery.requestId));
     await unboundedQuery.completion;
     await unbounded.close();
+  });
+
+  it("bounds decoded materialized batches when wire credit is unbounded", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection, {
+      initialCredit: 0,
+      bufferPoolSize: 2,
+    });
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x");
+    connection.receive(emptyResultBatch(query.requestId, 0));
+    connection.receive(emptyResultBatch(query.requestId, 1));
+    connection.receive(emptyResultBatch(query.requestId, 2));
+    connection.receive(resultEnd(query.requestId, 0n));
+
+    let completed = false;
+    void query.completion.then(() => {
+      completed = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    const iterator = query[Symbol.asyncIterator]();
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    await expect(query.completion).resolves.toMatchObject({ totalRows: 0n });
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+    expect(connection.sent).toHaveLength(1);
+    await session.close();
+  });
+
+  it("interrupts a materialized-buffer wait during close", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection, {
+      initialCredit: 0,
+      bufferPoolSize: 1,
+    });
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x");
+    connection.receive(emptyResultBatch(query.requestId, 0));
+    connection.receive(emptyResultBatch(query.requestId, 1));
+
+    await expect(session.close()).resolves.toBeUndefined();
+    await expect(query.completion).rejects.toMatchObject({
+      name: "QwpEgressSessionClosedError",
+    });
   });
 
   it("uses compressed RESULT_BATCH wire bytes for automatic credit", async () => {

@@ -128,6 +128,7 @@ const queryOptionsContract: QwpEgressQueryOptions = {
 
 const egressSessionOptionsContract: QwpEgressSessionOptions = {
   initialCredit: 256 * 1024,
+  bufferPoolSize: 4,
   queryTimeoutMs: 30_000,
   cancelDrainTimeoutMs: 5_000,
 };
@@ -137,12 +138,14 @@ const browserEgressOptionsContract: QwpBrowserEgressOptions = {
   failoverUrls: ["wss://node-2.example/read/v1"],
   target: "replica",
   zone: "eu-west-1a",
+  maxBatchRows: 512,
 };
 
 const nodeEgressOptionsContract: QwpNodeEgressOptions = {
   url: "wss://node-1.example/read/v1",
   failoverUrls: ["wss://node-2.example/read/v1"],
   target: "primary",
+  maxBatchRows: 512,
 };
 
 const qwpExtraOptionsContract: QwpExtraOptions = {

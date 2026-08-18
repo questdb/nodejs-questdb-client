@@ -472,8 +472,9 @@ const session = await connectQwpNodeEgress(
     authorization: `Bearer ${token}`,
     compression: "zstd",
     compressionLevel: 3,
+    maxBatchRows: 4096,
   },
-  { queryTimeoutMs: 30_000 },
+  { queryTimeoutMs: 30_000, bufferPoolSize: 4 },
 );
 
 try {
@@ -563,6 +564,16 @@ server read-ahead in Node.js and browsers. Set a session-level `initialCredit` t
 the default, override it per query, or explicitly set zero for legacy unbounded
 streaming. Set `autoCredit: false` and call `query.grantCredit()` for manual control.
 
+Materialized `query()` results also use a client-side decoded-batch pool with four
+slots by default. Set the session-level `bufferPoolSize` to tune this bound. Once the
+pool fills, decoding pauses until iteration requests another batch; callers must
+consume a multi-batch SELECT before awaiting its terminal `completion`. This bound is
+independent of QWP credit, so `initialCredit: 0` no longer permits an unbounded queue
+of materialized JavaScript value arrays. Protocol credit remains the stronger
+end-to-end bound, particularly in browsers where the WebSocket implementation may
+buffer raw frames before JavaScript reads them. `queryViews()` already has a single
+reusable decoded batch and does not consume materialized-pool slots.
+
 A session `queryTimeoutMs` supplies the default deadline; per-query `timeoutMs`
 overrides it, and zero disables it. Expiry rejects iteration and `completion` with
 `QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and drains the terminal response
@@ -585,6 +596,12 @@ operator-forced level in the existing egress `SERVER_INFO` message. Check
 `session.negotiatedCompression` after the handshake. Older servers ignore the query
 parameter and safely remain raw. The decoder handles raw and Zstd batches in both
 runtimes.
+
+Set transport-level `maxBatchRows` from 1 through 1,048,576 to ask QuestDB for
+smaller `RESULT_BATCH` messages. The server clamps the request to its hard cap. Node
+sends `X-QWP-Max-Batch-Rows`; browsers use the `qwp_max_batch_rows` URL parameter,
+which requires a server that supports browser QWP negotiation. Older servers ignore
+the browser parameter and keep their configured batch size.
 
 Egress reconnect never silently resumes a partially consumed result. Configure
 `onReplayReset` to opt into at-least-once query re-execution, discard any rows from
@@ -785,6 +802,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Query parameters             | `session.query(sql, { binds })`                               |
 | Materialized result batches  | `for await (const batch of query)`                            |
 | Reusable result views        | `session.queryViews(sql, onBatch)`                            |
+| Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |
 
 Do not translate Java threading assumptions directly: callbacks, WebSocket delivery,
 and iteration all share the JavaScript event loop.

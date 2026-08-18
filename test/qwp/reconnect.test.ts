@@ -1683,6 +1683,7 @@ describe("QWP egress reconnect and replay", () => {
           initialBackoffMs: 0,
           maxBackoffMs: 0,
         },
+        bufferPoolSize: 1,
         onReplayReset: (event) => resets.push(event.requestId!),
       },
     );
@@ -1695,6 +1696,11 @@ describe("QWP egress reconnect and replay", () => {
     await expect(iterator.next()).resolves.toMatchObject({ done: false });
     // Queue another stale prefix batch to exercise queue clearing.
     first.receive(emptyResultBatch(0n, 1));
+    // Fill the decoded pool, then block the receive loop on one more stale
+    // batch. Reset must wake the waiter without publishing either batch.
+    first.receive(emptyResultBatch(0n, 2));
+    await Promise.resolve();
+    await Promise.resolve();
     first.drop();
 
     await vi.waitFor(() => expect(resets).toEqual([0n]));
@@ -1710,6 +1716,61 @@ describe("QWP egress reconnect and replay", () => {
     await expect(query.completion).resolves.toMatchObject({
       kind: "result-end",
     });
+    await session.close();
+  });
+
+  it("waits for an active reusable view before resetting it for replay", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const resets: bigint[] = [];
+    let releaseFirstView!: () => void;
+    const firstViewReleased = new Promise<void>((resolve) => {
+      releaseFirstView = resolve;
+    });
+    let viewCalls = 0;
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(
+            serverInfo(connection.endpoint === "primary" ? "one" : "two"),
+          ),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        onReplayReset: (event) => resets.push(event.requestId!),
+      },
+    );
+    const query = await session.queryViews("select * from x", async () => {
+      viewCalls++;
+      if (viewCalls === 1) await firstViewReleased;
+    });
+    first.receive(emptyResultBatch());
+    await vi.waitFor(() => expect(viewCalls).toBe(1));
+
+    first.drop();
+    await Promise.resolve();
+    expect(resets).toEqual([]);
+    expect(second.sent).toEqual([]);
+    releaseFirstView();
+
+    await vi.waitFor(() => expect(resets).toEqual([0n]));
+    await vi.waitFor(() => expect(second.sent.length).toBeGreaterThan(0));
+    expect(second.sent[0]).toEqual(first.sent[0]);
+    second.receive(emptyResultBatch());
+    second.receive(resultEnd());
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    expect(viewCalls).toBe(2);
     await session.close();
   });
 

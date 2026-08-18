@@ -398,9 +398,18 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     previousEndpoint: string | URL | undefined,
     cause: unknown,
   ): Promise<void> {
-    await this.messagesQueue.barrier();
+    if (this.outboundReplay.length === 0) {
+      // A terminal response may already be queued. Let the bounded session
+      // consume it before resetting connection-scoped decoder state.
+      await this.messagesQueue.barrier();
+      await this.onConnectionReset();
+      return;
+    }
+    // An active operation will be replayed from its request. Drop raw stale
+    // messages before resetting the decoded queue; waiting for a barrier here
+    // can deadlock when that queue is deliberately at its client-side bound.
+    this.messagesQueue.clear();
     await this.onConnectionReset();
-    if (this.outboundReplay.length === 0) return;
     const requestId = replayRequestId(this.outboundReplay);
     if (!this.onReplayReset) {
       throw new QwpEgressReplayRequiredError(requestId);

@@ -18,6 +18,7 @@ import {
 } from "./internal/websocket-connection";
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
+import { validateQwpMaxBatchRows } from "./internal/egress-limits";
 import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_UPGRADE_ERROR_KIND,
@@ -223,6 +224,8 @@ export interface QwpNodeEgressOptions
   compression?: QwpEgressCompression;
   /** Zstd level hint sent to the server. Must be between 1 and 22. */
   compressionLevel?: number;
+  /** Requests a server-side RESULT_BATCH row cap. */
+  maxBatchRows?: number;
 }
 
 /** Node configuration for a combined pooled QWP ingress/egress client. */
@@ -240,9 +243,11 @@ function egressTransportOptions(
 ): QwpNodeWebSocketOptions {
   const compression = options.compression;
   const compressionLevel = options.compressionLevel ?? 1;
+  const maxBatchRows = validateQwpMaxBatchRows(options.maxBatchRows);
   const transport = { ...options };
   delete transport.compression;
   delete transport.compressionLevel;
+  delete transport.maxBatchRows;
   delete transport.target;
   delete transport.zone;
   const preference = compression ?? "raw";
@@ -250,13 +255,21 @@ function egressTransportOptions(
 
   // Keep the low-level headers escape hatch backwards compatible unless the
   // typed compression option was explicitly selected.
-  if (compression === undefined) return transport;
+  if (compression === undefined && maxBatchRows === undefined) return transport;
 
   const headers = { ...transport.headers };
-  for (const name of Object.keys(headers)) {
-    if (name.toLowerCase() === "x-qwp-accept-encoding") delete headers[name];
+  if (compression !== undefined) {
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "x-qwp-accept-encoding") delete headers[name];
+    }
+    if (acceptEncoding) headers["X-QWP-Accept-Encoding"] = acceptEncoding;
   }
-  if (acceptEncoding) headers["X-QWP-Accept-Encoding"] = acceptEncoding;
+  if (maxBatchRows !== undefined) {
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "x-qwp-max-batch-rows") delete headers[name];
+    }
+    headers["X-QWP-Max-Batch-Rows"] = String(maxBatchRows);
+  }
   return { ...transport, headers };
 }
 

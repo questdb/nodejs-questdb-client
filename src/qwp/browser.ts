@@ -8,6 +8,7 @@ import {
 } from "./internal/websocket-connection";
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
+import { validateQwpMaxBatchRows } from "./internal/egress-limits";
 import {
   addQwpDurableAckWebSocketProtocol,
   decodeQwpIngressServerInfo,
@@ -295,6 +296,8 @@ export interface QwpBrowserEgressOptions
   compression?: QwpEgressCompression;
   /** Zstd level hint. Must be between 1 and 22. */
   compressionLevel?: number;
+  /** Requests a server-side RESULT_BATCH row cap. */
+  maxBatchRows?: number;
 }
 
 /** Browser configuration for a combined pooled QWP ingress/egress client. */
@@ -536,10 +539,22 @@ function connectQwpBrowserEgressEndpoint(
     compression,
     options.compressionLevel ?? 1,
   );
-  const requestEndpoint =
-    acceptEncoding === undefined
-      ? endpoint
-      : browserNegotiationUrl(endpoint, "qwp_accept_encoding", acceptEncoding);
+  const maxBatchRows = validateQwpMaxBatchRows(options.maxBatchRows);
+  let requestEndpoint: string | URL = endpoint;
+  if (acceptEncoding !== undefined) {
+    requestEndpoint = browserNegotiationUrl(
+      requestEndpoint,
+      "qwp_accept_encoding",
+      acceptEncoding,
+    );
+  }
+  if (maxBatchRows !== undefined) {
+    requestEndpoint = browserNegotiationUrl(
+      requestEndpoint,
+      "qwp_max_batch_rows",
+      String(maxBatchRows),
+    );
+  }
   return connectQwpBrowserEndpoint(
     options,
     endpoint,

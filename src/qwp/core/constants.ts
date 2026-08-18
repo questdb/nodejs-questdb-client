@@ -96,6 +96,8 @@ export const QWP_MAX_TABLE_NAME_LENGTH = 127;
 export const QWP_MAX_ROWS_PER_TABLE = 1_000_000;
 export const QWP_MAX_SYMBOL_DICTIONARY_SIZE = 1_000_000;
 export const QWP_MAX_ERROR_MESSAGE_LENGTH = 1024;
+/** Largest client-requested egress RESULT_BATCH row cap. */
+export const QWP_MAX_BATCH_ROWS_UPPER_BOUND = 1_048_576;
 
 export const QWP_INGRESS_PATH = "/write/v4";
 export const QWP_EGRESS_PATH = "/read/v1";

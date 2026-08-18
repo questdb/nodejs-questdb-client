@@ -302,6 +302,7 @@ describe("QWP in a real browser", () => {
             url,
             compression: "zstd",
             compressionLevel: 7,
+            maxBatchRows: 512,
           });
           try {
             return session.negotiatedCompression;
@@ -388,6 +389,7 @@ describe("QWP in a real browser", () => {
             url,
             compression: "zstd",
             compressionLevel: 7,
+            maxBatchRows: 512,
           });
           try {
             return {
@@ -409,6 +411,11 @@ describe("QWP in a real browser", () => {
           "qwp_accept_encoding",
         ),
       ).toBe("zstd;level=7,raw");
+      expect(
+        new URL(requestedPath!, "http://localhost").searchParams.get(
+          "qwp_max_batch_rows",
+        ),
+      ).toBe("512");
       expect(result).toEqual({
         compression: { codec: "zstd", level: 3 },
         level: 3,

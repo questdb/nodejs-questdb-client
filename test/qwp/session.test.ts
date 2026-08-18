@@ -563,6 +563,7 @@ describe("QWP WebSocket adapters", () => {
       url: "ws://localhost:9000/read/v1",
       compression: "zstd",
       compressionLevel: 7,
+      maxBatchRows: 512,
       webSocketFactory: (url, protocols) => {
         capturedUrl = url;
         capturedProtocols = protocols;
@@ -578,6 +579,9 @@ describe("QWP WebSocket adapters", () => {
     expect(capturedProtocols).toBeUndefined();
     expect(new URL(capturedUrl!).searchParams.get("qwp_accept_encoding")).toBe(
       "zstd;level=7,raw",
+    );
+    expect(new URL(capturedUrl!).searchParams.get("qwp_max_batch_rows")).toBe(
+      "512",
     );
     expect(session.negotiatedCompression).toEqual({
       codec: "zstd",
@@ -744,6 +748,7 @@ describe("QWP WebSocket adapters", () => {
         url: "ws://localhost:9000/read/v1",
         compression,
         compressionLevel: 5,
+        maxBatchRows: 512,
         webSocketFactory: (_url, options) => {
           capturedHeaders = options.headers;
           options.onUpgrade({
@@ -758,6 +763,7 @@ describe("QWP WebSocket adapters", () => {
       const session = await connecting;
       expect(capturedHeaders).toMatchObject({
         "X-QWP-Accept-Encoding": "zstd;level=5,raw",
+        "X-QWP-Max-Batch-Rows": "512",
       });
       expect(session.handshake.contentEncoding).toBe("zstd;level=5");
       expect(session.negotiatedCompression).toEqual({
@@ -812,6 +818,40 @@ describe("QWP WebSocket adapters", () => {
     ).rejects.toBeInstanceOf(RangeError);
     expect(factoryCalls).toBe(0);
   });
+
+  it.each([0, 1_048_577, 1.5])(
+    "rejects invalid egress maxBatchRows %s before opening a socket",
+    async (maxBatchRows) => {
+      let factoryCalls = 0;
+      await expect(
+        connectQwpNodeEgress({
+          url: "ws://localhost:9000/read/v1",
+          maxBatchRows,
+          webSocketFactory: () => {
+            factoryCalls++;
+            return asQwpSocket(new FakeWebSocket());
+          },
+        }),
+      ).rejects.toThrow(
+        "maxBatchRows must be an integer between 1 and 1048576",
+      );
+      expect(factoryCalls).toBe(0);
+
+      await expect(
+        connectQwpBrowserEgress({
+          url: "ws://localhost:9000/read/v1",
+          maxBatchRows,
+          webSocketFactory: () => {
+            factoryCalls++;
+            return asQwpSocket(new FakeWebSocket());
+          },
+        }),
+      ).rejects.toThrow(
+        "maxBatchRows must be an integer between 1 and 1048576",
+      );
+      expect(factoryCalls).toBe(0);
+    },
+  );
 
   it("uses the legacy handshake defaults when optional headers are absent", async () => {
     const socket = new FakeWebSocket();
