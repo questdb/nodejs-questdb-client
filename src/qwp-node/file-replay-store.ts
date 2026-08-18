@@ -5,8 +5,11 @@ import {
   readdir,
   readFile,
   rename,
+  rm,
+  rmdir,
   unlink,
 } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { QWP_MAX_SYMBOL_DICTIONARY_SIZE } from "../qwp/core";
 import {
@@ -25,11 +28,23 @@ const DICTIONARY_MAGIC = Buffer.from("QWPD");
 const DICTIONARY_FILE = "symbols.qwpdict";
 const DICTIONARY_HEADER_SIZE = 8;
 const DICTIONARY_BLOCK_HEADER_SIZE = 44;
+const LOCK_DIRECTORY = ".qwp.lock";
+const LOCK_OWNER_FILE = "owner.json";
+const LOCK_RECOVERY_FILE = "recovery.json";
+const ABANDONED_LOCK_PREFIX = ".qwp.lock.abandoned-";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 interface StoredRecord {
   readonly path: string;
   readonly size: number;
+}
+
+interface ReplayStoreLockOwner {
+  readonly version: 1;
+  readonly token: string;
+  readonly pid: number;
+  readonly hostname: string;
+  readonly createdAtMs: number;
 }
 
 export interface QwpNodeFileReplayStoreOptions {
@@ -61,13 +76,31 @@ export class QwpReplayStoreFullError extends QwpReplayStoreError {
   }
 }
 
+export class QwpReplayStoreLockedError extends QwpReplayStoreError {
+  constructor(
+    readonly directory: string,
+    readonly holderPid?: number,
+    readonly holderHostname?: string,
+  ) {
+    const holder =
+      holderPid === undefined
+        ? "unknown"
+        : `${holderPid}${holderHostname ? `@${holderHostname}` : ""}`;
+    super(
+      `QWP store-and-forward directory is already in use [directory=${directory}, holder=${holder}]`,
+    );
+    this.name = "QwpReplayStoreLockedError";
+  }
+}
+
 /**
  * Crash-safe Node store-and-forward journal.
  *
  * Each frame is fsynced under a temporary name before an atomic rename. An ACK
  * removes its covered files and fsyncs the directory. A crash between the
  * server ACK and local deletion can therefore cause at-least-once replay, but
- * cannot silently lose an unacknowledged frame.
+ * cannot silently lose an unacknowledged frame. An exclusive, lifetime lock
+ * prevents another process from recovering or mutating the same directory.
  */
 export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly directory: string;
@@ -78,6 +111,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private operationTail: Promise<void> = Promise.resolve();
   private totalBytes = 0;
   private dictionaryFileSize = 0;
+  private lockOwner?: ReplayStoreLockOwner;
+  private closePromise?: Promise<void>;
   private loaded = false;
   private closing = false;
   private closed = false;
@@ -107,60 +142,67 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         );
       }
       await mkdir(this.directory, { recursive: true });
-      const entries = await readdir(this.directory, { withFileTypes: true });
-      const recordNames: string[] = [];
-      let removedTemporaryFile = false;
-      for (const entry of entries) {
-        if (!entry.isFile()) continue;
-        if (entry.name.includes(TEMP_MARKER)) {
-          await ignoreMissing(unlink(join(this.directory, entry.name)));
-          removedTemporaryFile = true;
-        } else if (entry.name.endsWith(RECORD_SUFFIX)) {
-          recordNames.push(entry.name);
+      let loadSucceeded = false;
+      try {
+        await this.acquireDirectoryLock();
+        const entries = await readdir(this.directory, { withFileTypes: true });
+        const recordNames: string[] = [];
+        let removedTemporaryFile = false;
+        for (const entry of entries) {
+          if (!entry.isFile()) continue;
+          if (entry.name.includes(TEMP_MARKER)) {
+            await ignoreMissing(unlink(join(this.directory, entry.name)));
+            removedTemporaryFile = true;
+          } else if (entry.name.endsWith(RECORD_SUFFIX)) {
+            recordNames.push(entry.name);
+          }
         }
-      }
-      if (removedTemporaryFile) await syncDirectory(this.directory);
-      recordNames.sort();
+        if (removedTemporaryFile) await syncDirectory(this.directory);
+        recordNames.sort();
 
-      const recovered: QwpIngressReplayRecord[] = [];
-      let previous = -1n;
-      for (const name of recordNames) {
-        const path = join(this.directory, name);
-        let bytes: Buffer;
-        try {
-          bytes = await readFile(path);
-        } catch (error) {
-          throw new QwpReplayStoreError(
-            `could not read QWP store-and-forward record [file=${name}]`,
-            error,
-          );
+        const recovered: QwpIngressReplayRecord[] = [];
+        let previous = -1n;
+        for (const name of recordNames) {
+          const path = join(this.directory, name);
+          let bytes: Buffer;
+          try {
+            bytes = await readFile(path);
+          } catch (error) {
+            throw new QwpReplayStoreError(
+              `could not read QWP store-and-forward record [file=${name}]`,
+              error,
+            );
+          }
+          const record = decodeRecord(bytes, name);
+          if (record.frameSequence <= previous) {
+            throw new QwpReplayStoreError(
+              `QWP store-and-forward sequence is not strictly increasing [file=${name}]`,
+            );
+          }
+          const expectedName = recordFileName(record.frameSequence);
+          if (name !== expectedName) {
+            throw new QwpReplayStoreError(
+              `QWP store-and-forward filename does not match its sequence [file=${name}, expected=${expectedName}]`,
+            );
+          }
+          this.totalBytes += bytes.byteLength;
+          if (this.totalBytes > this.maxBytes) {
+            throw new QwpReplayStoreFullError(this.maxBytes, this.totalBytes);
+          }
+          this.records.set(record.frameSequence, {
+            path,
+            size: bytes.byteLength,
+          });
+          recovered.push(record);
+          previous = record.frameSequence;
         }
-        const record = decodeRecord(bytes, name);
-        if (record.frameSequence <= previous) {
-          throw new QwpReplayStoreError(
-            `QWP store-and-forward sequence is not strictly increasing [file=${name}]`,
-          );
-        }
-        const expectedName = recordFileName(record.frameSequence);
-        if (name !== expectedName) {
-          throw new QwpReplayStoreError(
-            `QWP store-and-forward filename does not match its sequence [file=${name}, expected=${expectedName}]`,
-          );
-        }
-        this.totalBytes += bytes.byteLength;
-        if (this.totalBytes > this.maxBytes) {
-          throw new QwpReplayStoreFullError(this.maxBytes, this.totalBytes);
-        }
-        this.records.set(record.frameSequence, {
-          path,
-          size: bytes.byteLength,
-        });
-        recovered.push(record);
-        previous = record.frameSequence;
+        await this.loadDictionaryFile();
+        this.loaded = true;
+        loadSucceeded = true;
+        return recovered;
+      } finally {
+        if (!loadSucceeded) await this.releaseDirectoryLock();
       }
-      await this.loadDictionaryFile();
-      this.loaded = true;
-      return recovered;
     });
   }
 
@@ -325,11 +367,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     });
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.closing = true;
-    await this.operationTail;
-    this.closed = true;
+    this.closePromise = this.operationTail.then(async () => {
+      try {
+        await this.releaseDirectoryLock();
+      } finally {
+        this.closed = true;
+      }
+    });
+    return this.closePromise;
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -343,6 +391,143 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   private assertOpen(): void {
     if (this.closed) throw this.closedError();
+  }
+
+  private async acquireDirectoryLock(): Promise<void> {
+    const lockPath = join(this.directory, LOCK_DIRECTORY);
+    const ownerPath = join(lockPath, LOCK_OWNER_FILE);
+    const owner: ReplayStoreLockOwner = {
+      version: 1,
+      token: randomUUID(),
+      pid: process.pid,
+      hostname: hostname(),
+      createdAtMs: Date.now(),
+    };
+
+    for (;;) {
+      try {
+        await mkdir(lockPath, { mode: 0o700 });
+      } catch (error) {
+        if (nodeErrorCode(error) !== "EEXIST") {
+          throw new QwpReplayStoreError(
+            `could not acquire QWP store-and-forward directory lock [directory=${this.directory}]`,
+            error,
+          );
+        }
+        const holder = await readLockOwner(ownerPath);
+        if (!holder) {
+          throw new QwpReplayStoreLockedError(this.directory);
+        }
+        if (!isDefinitelyDeadLockOwner(holder)) {
+          throw new QwpReplayStoreLockedError(
+            this.directory,
+            holder.pid,
+            holder.hostname,
+          );
+        }
+
+        // Claim recovery inside the directory before renaming it. This keeps
+        // simultaneous starters that observed the same dead PID from both
+        // adopting the stale pathname. Re-read the owner after the claim so a
+        // process that arrived after another recovery cannot move the new lock.
+        const recoveryPath = join(lockPath, LOCK_RECOVERY_FILE);
+        try {
+          await writeLockOwner(recoveryPath, owner);
+        } catch (claimError) {
+          const code = nodeErrorCode(claimError);
+          if (code === "ENOENT") continue;
+          if (code === "EEXIST") {
+            throw new QwpReplayStoreLockedError(
+              this.directory,
+              holder.pid,
+              holder.hostname,
+            );
+          }
+          throw new QwpReplayStoreError(
+            `could not claim abandoned QWP store-and-forward directory lock [directory=${this.directory}]`,
+            claimError,
+          );
+        }
+        const claimedHolder = await readLockOwner(ownerPath);
+        if (!claimedHolder || claimedHolder.token !== holder.token) {
+          await ignoreMissing(unlink(recoveryPath));
+          if (!claimedHolder) continue;
+          throw new QwpReplayStoreLockedError(
+            this.directory,
+            claimedHolder.pid,
+            claimedHolder.hostname,
+          );
+        }
+
+        const abandonedPath = join(
+          this.directory,
+          `${ABANDONED_LOCK_PREFIX}${randomUUID()}`,
+        );
+        try {
+          await rename(lockPath, abandonedPath);
+        } catch (renameError) {
+          if (nodeErrorCode(renameError) === "ENOENT") {
+            await ignoreMissing(unlink(recoveryPath));
+            continue;
+          }
+          await ignoreMissing(unlink(recoveryPath));
+          throw new QwpReplayStoreError(
+            `could not recover abandoned QWP store-and-forward directory lock [directory=${this.directory}]`,
+            renameError,
+          );
+        }
+        try {
+          await rm(abandonedPath, { recursive: true, force: true });
+          await syncDirectory(this.directory);
+        } catch (cleanupError) {
+          throw new QwpReplayStoreError(
+            `could not remove abandoned QWP store-and-forward directory lock [directory=${this.directory}]`,
+            cleanupError,
+          );
+        }
+        continue;
+      }
+
+      try {
+        await writeLockOwner(ownerPath, owner);
+        await syncDirectory(lockPath);
+        await syncDirectory(this.directory);
+        this.lockOwner = owner;
+        return;
+      } catch (error) {
+        await rm(lockPath, { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+        throw new QwpReplayStoreError(
+          `could not initialize QWP store-and-forward directory lock [directory=${this.directory}]`,
+          error,
+        );
+      }
+    }
+  }
+
+  private async releaseDirectoryLock(): Promise<void> {
+    const owner = this.lockOwner;
+    if (!owner) return;
+    const lockPath = join(this.directory, LOCK_DIRECTORY);
+    const ownerPath = join(lockPath, LOCK_OWNER_FILE);
+    const persistedOwner = await readLockOwner(ownerPath);
+    if (!persistedOwner || persistedOwner.token !== owner.token) {
+      throw new QwpReplayStoreError(
+        `refusing to release a QWP store-and-forward directory lock owned by another process [directory=${this.directory}]`,
+      );
+    }
+    try {
+      await unlink(ownerPath);
+      await rmdir(lockPath);
+      await syncDirectory(this.directory);
+      this.lockOwner = undefined;
+    } catch (error) {
+      throw new QwpReplayStoreError(
+        `could not release QWP store-and-forward directory lock [directory=${this.directory}]`,
+        error,
+      );
+    }
   }
 
   private async loadDictionaryFile(): Promise<void> {
@@ -632,4 +817,63 @@ function nodeErrorCode(error: unknown): string | undefined {
   return error && typeof error === "object" && "code" in error
     ? String(error.code)
     : undefined;
+}
+
+async function readLockOwner(
+  ownerPath: string,
+): Promise<ReplayStoreLockOwner | undefined> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(ownerPath, "utf8"));
+  } catch (error) {
+    const code = nodeErrorCode(error);
+    if (code === "ENOENT" || error instanceof SyntaxError) return undefined;
+    throw new QwpReplayStoreError(
+      `could not read QWP store-and-forward directory lock [file=${ownerPath}]`,
+      error,
+    );
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const owner = parsed as Partial<ReplayStoreLockOwner>;
+  if (
+    owner.version !== 1 ||
+    typeof owner.token !== "string" ||
+    owner.token.length === 0 ||
+    !Number.isSafeInteger(owner.pid) ||
+    (owner.pid ?? 0) <= 0 ||
+    typeof owner.hostname !== "string" ||
+    owner.hostname.length === 0 ||
+    !Number.isSafeInteger(owner.createdAtMs) ||
+    (owner.createdAtMs ?? 0) < 0
+  ) {
+    return undefined;
+  }
+  return owner as ReplayStoreLockOwner;
+}
+
+async function writeLockOwner(
+  path: string,
+  owner: ReplayStoreLockOwner,
+): Promise<void> {
+  const file = await open(path, "wx", 0o600);
+  try {
+    await file.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+}
+
+function isDefinitelyDeadLockOwner(
+  owner: ReplayStoreLockOwner,
+): boolean {
+  if (owner.hostname !== hostname() || owner.pid === process.pid) {
+    return false;
+  }
+  try {
+    process.kill(owner.pid, 0);
+    return false;
+  } catch (error) {
+    return nodeErrorCode(error) === "ESRCH";
+  }
 }

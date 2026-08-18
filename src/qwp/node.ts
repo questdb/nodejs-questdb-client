@@ -35,6 +35,7 @@ export {
   QwpNodeFileReplayStore,
   QwpReplayStoreError,
   QwpReplayStoreFullError,
+  QwpReplayStoreLockedError,
 } from "../qwp-node/file-replay-store";
 export type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
 

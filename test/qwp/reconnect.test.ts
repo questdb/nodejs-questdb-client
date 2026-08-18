@@ -1,5 +1,5 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -7,6 +7,7 @@ import {
   QwpNodeFileReplayStore,
   QwpReplayStoreError,
   QwpReplayStoreFullError,
+  QwpReplayStoreLockedError,
 } from "../../src/qwp/node";
 import {
   QWP_RECONNECT_EVENT_KIND,
@@ -1152,6 +1153,69 @@ describe("QWP Node file replay store", () => {
     await third.close();
   });
 
+  it("holds an exclusive directory lock for the store lifetime", async () => {
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({ directory });
+    await first.load();
+
+    const second = new QwpNodeFileReplayStore({ directory });
+    await expect(second.load()).rejects.toMatchObject({
+      name: "QwpReplayStoreLockedError",
+      directory,
+      holderPid: process.pid,
+      holderHostname: hostname(),
+    } satisfies Partial<QwpReplayStoreLockedError>);
+
+    await first.append({ frameSequence: 0n, payload: Uint8Array.of(7) });
+    await first.close();
+    await expect(second.load()).resolves.toEqual([
+      { frameSequence: 0n, payload: Uint8Array.of(7) },
+    ]);
+    await second.close();
+  });
+
+  it("recovers a lock left by a terminated local process", async () => {
+    const directory = await trackedDirectory();
+    const lockDirectory = join(directory, ".qwp.lock");
+    await mkdir(lockDirectory);
+    await writeFile(
+      join(lockDirectory, "owner.json"),
+      JSON.stringify({
+        version: 1,
+        token: "abandoned",
+        pid: 2_147_483_647,
+        hostname: hostname(),
+        createdAtMs: 0,
+      }),
+    );
+
+    const stores = [
+      new QwpNodeFileReplayStore({ directory }),
+      new QwpNodeFileReplayStore({ directory }),
+    ];
+    const outcomes = await Promise.allSettled(
+      stores.map((store) => store.load()),
+    );
+    const winner = outcomes.findIndex(
+      (outcome) => outcome.status === "fulfilled",
+    );
+    const loser = winner === 0 ? 1 : 0;
+    expect(winner).not.toBe(-1);
+    expect(outcomes[loser]).toMatchObject({
+      status: "rejected",
+      reason: { name: "QwpReplayStoreLockedError" },
+    });
+    expect(
+      (await readdir(directory)).filter((name) =>
+        name.startsWith(".qwp.lock.abandoned-"),
+      ),
+    ).toEqual([]);
+    await stores[winner].close();
+    await expect(stores[loser].load()).resolves.toEqual([]);
+    await stores[loser].close();
+    expect(await readdir(directory)).toEqual([]);
+  });
+
   it("recovers a persisted dictionary and truncates a torn append tail", async () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({ directory });
@@ -1193,7 +1257,7 @@ describe("QWP Node file replay store", () => {
     await expect(
       store.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) }),
     ).rejects.toBeInstanceOf(QwpReplayStoreFullError);
-    expect(await readdir(directory)).toEqual([]);
+    expect(await readdir(directory)).toEqual([".qwp.lock"]);
     await store.close();
   });
 

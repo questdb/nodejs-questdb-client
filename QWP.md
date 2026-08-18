@@ -98,6 +98,13 @@ sends it in order. Applications can therefore keep publishing during an outage u
 the configured `maxBytes` applies backpressure. A failed journal publication leaves
 the high-level rows staged so the caller can retry.
 
+The journal takes an exclusive lock when it is loaded and holds it until the sender
+or session closes. A second live process using the same directory fails with
+`QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents.
+Locks left by a terminated process on the same host are recovered automatically;
+locks owned by a live local process, another host, or an unidentifiable owner fail
+closed.
+
 An offline sender cannot inspect the server-advertised batch cap before its first
 publication. Set `qwp.session.maxBatchSizeBytes` to a value no greater than the
 smallest target node's cap when offline startup is required.
@@ -406,6 +413,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpReconnectExhaustedError`    | The configured reconnect boundary was reached                                                               |
 | `QwpReplayRejectedError`        | A replayed frame was rejected and retained for inspection                                                   |
 | `QwpReplayStoreFullError`       | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreLockedError`     | Another process owns the configured Node.js replay directory                                                |
 | `QwpEgressQueryError`           | QuestDB returned a terminal query error                                                                     |
 | `QwpEgressQueryTimeoutError`    | The client deadline expired and cancellation began                                                          |
 | `QwpEgressReplayRequiredError`  | Re-execution needs an explicit reset callback                                                               |

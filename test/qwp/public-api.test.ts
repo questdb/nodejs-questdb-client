@@ -43,6 +43,7 @@ const nodeRuntimeContract = [
   "QwpNodeFileReplayStore",
   "QwpReplayStoreError",
   "QwpReplayStoreFullError",
+  "QwpReplayStoreLockedError",
   "QwpVersionMismatchError",
   "connectQwpNodeEgress",
   "connectQwpNodeIngress",
