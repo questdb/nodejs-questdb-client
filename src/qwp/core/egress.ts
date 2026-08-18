@@ -24,6 +24,7 @@ export interface QwpQueryRequest {
   queryFlags?: number | bigint;
 }
 
+/** Immutable endpoint metadata from the most recent successful egress bind. */
 export interface QwpServerInfoMessage extends QwpFrameHeader {
   kind: "server-info";
   role: number;
@@ -197,7 +198,7 @@ export function decodeQwpEgressMessage(bytes: Uint8Array): QwpEgressMessage {
           ? reader.readUint8("egress compression level")
           : null;
       reader.expectEnd("SERVER_INFO");
-      return {
+      return Object.freeze({
         ...header,
         kind: "server-info",
         role,
@@ -209,7 +210,7 @@ export function decodeQwpEgressMessage(bytes: Uint8Array): QwpEgressMessage {
         zoneId,
         compressionCodec,
         compressionLevel,
-      };
+      });
     }
     case QWP_EGRESS_MESSAGE.RESULT_BATCH: {
       const requestId = reader.readBigUint64("result request ID");

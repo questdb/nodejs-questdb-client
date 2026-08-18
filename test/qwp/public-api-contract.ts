@@ -56,6 +56,7 @@ import type {
   QwpResultBatchViewHandler,
   QwpResultRowView,
   QwpResultRowViewCallback,
+  QwpServerInfoMessage,
   QwpSender,
   QwpSenderOptions,
 } from "../../src/qwp";
@@ -291,6 +292,9 @@ function queryViewContract(
   session: QwpEgressSession,
   lease: QwpQueryLease,
 ): void {
+  const sessionServerInfo: QwpServerInfoMessage | undefined =
+    session.serverInfo;
+  const leaseServerInfo: QwpServerInfoMessage | undefined = lease.serverInfo;
   const handler: QwpResultBatchViewHandler = (batch, query) => {
     const typedBatch: QwpResultBatchView = batch;
     const requestId: bigint = query.requestId;
@@ -318,6 +322,8 @@ function queryViewContract(
   );
   void direct;
   void pooled;
+  void sessionServerInfo;
+  void leaseServerInfo;
 }
 
 const rootExtraOptionsContract: ExtraOptions = {

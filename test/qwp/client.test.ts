@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   encodeQwpFrame,
+  QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
   QWP_SERVER_ROLE,
   QWP_STATUS,
@@ -25,15 +26,27 @@ function writeString(writer: QwpByteWriter, value: string): void {
   writer.writeUint16(encoded.length).writeBytes(encoded);
 }
 
-function serverInfo(nodeId: string): Uint8Array {
+function serverInfo(
+  nodeId: string,
+  options: {
+    readonly role?: number;
+    readonly clusterId?: string;
+    readonly zoneId?: string;
+    readonly capabilities?: number;
+  } = {},
+): Uint8Array {
+  const capabilities =
+    (options.capabilities ?? 0) |
+    (options.zoneId === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE);
   const payload = new QwpByteWriter()
     .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
-    .writeUint8(QWP_SERVER_ROLE.STANDALONE)
+    .writeUint8(options.role ?? QWP_SERVER_ROLE.STANDALONE)
     .writeBigUint64(1n)
-    .writeUint32(0)
+    .writeUint32(capabilities)
     .writeBigInt64(123n);
-  writeString(payload, "cluster");
+  writeString(payload, options.clusterId ?? "cluster");
   writeString(payload, nodeId);
+  if (options.zoneId !== undefined) writeString(payload, options.zoneId);
   return encodeQwpFrame(payload.toUint8Array());
 }
 
@@ -83,16 +96,23 @@ class FakeConnection implements QwpBinaryConnection {
 
   close(code = 1000, reason = ""): Promise<void> {
     this.closeCount++;
-    if (!this.closedSettled) {
-      this.closedSettled = true;
-      this.incoming.end();
-      this.resolveClosed({ code, reason, wasClean: code === 1000 });
-    }
+    this.finish({ code, reason, wasClean: code === 1000 });
     return Promise.resolve();
   }
 
   receive(payload: Uint8Array): void {
     this.incoming.push(payload);
+  }
+
+  drop(): void {
+    this.finish({ code: 1006, reason: "connection lost", wasClean: false });
+  }
+
+  private finish(info: QwpConnectionCloseInfo): void {
+    if (this.closedSettled) return;
+    this.closedSettled = true;
+    this.incoming.end();
+    this.resolveClosed(info);
   }
 }
 
@@ -324,6 +344,87 @@ describe("QWP pooled client", () => {
     await Promise.all([second.close(), third.close()]);
     await client.close();
     expect(connections).toHaveLength(2);
+  });
+
+  it("exposes immutable server information and refreshes it after failover", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("replica");
+    const connections = [first, second];
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: async () =>
+          QwpEgressSession.connect(
+            async () => {
+              const connection = connections.shift();
+              if (!connection) throw new Error("no connection available");
+              queueMicrotask(() =>
+                connection.receive(
+                  serverInfo(`node-${connection.endpoint}`, {
+                    role:
+                      connection === first
+                        ? QWP_SERVER_ROLE.PRIMARY
+                        : QWP_SERVER_ROLE.REPLICA,
+                    zoneId: connection === first ? "zone-a" : "zone-b",
+                    capabilities:
+                      connection === first
+                        ? QWP_EGRESS_CAPABILITY.QUERY_FLAGS
+                        : 0,
+                  }),
+                ),
+              );
+              return connection;
+            },
+            {
+              reconnect: {
+                maxAttempts: 1,
+                initialBackoffMs: 0,
+                maxBackoffMs: 0,
+              },
+            },
+          ),
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    );
+
+    const lease = await client.borrowQuery();
+    const initial = lease.serverInfo;
+    expect(initial).toMatchObject({
+      role: QWP_SERVER_ROLE.PRIMARY,
+      clusterId: "cluster",
+      nodeId: "node-primary",
+      zoneId: "zone-a",
+      capabilities:
+        QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QWP_EGRESS_CAPABILITY.ZONE,
+    });
+    expect(await lease.ready).toBe(initial);
+    expect(Object.isFrozen(initial)).toBe(true);
+
+    const query = await lease.query("select 1");
+    first.drop();
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    expect(lease.serverInfo).toMatchObject({
+      role: QWP_SERVER_ROLE.REPLICA,
+      clusterId: "cluster",
+      nodeId: "node-replica",
+      zoneId: "zone-b",
+      capabilities: QWP_EGRESS_CAPABILITY.ZONE,
+    });
+    expect(lease.serverInfo).not.toBe(initial);
+    expect(Object.isFrozen(lease.serverInfo)).toBe(true);
+
+    second.receive(resultEnd(query.requestId));
+    await query.completion;
+    await lease.close();
+    expect(() => lease.serverInfo).toThrow(QwpClientClosedError);
+    await client.close();
   });
 
   it("reaps idle excess connections without shrinking below pool minimums", async () => {

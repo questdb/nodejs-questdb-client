@@ -530,12 +530,13 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private activeRequest?: QwpReplayableQueryRequest;
   private nextRequestId = 0n;
   private sendTail: Promise<void> = Promise.resolve();
-  private serverInfo?: QwpServerInfoMessage;
+  private currentServerInfo?: QwpServerInfoMessage;
   private failure?: Error;
   private closing = false;
   private closePromise?: Promise<void>;
   private cancelDrainRequestId?: bigint;
   private cancelDrainTimer?: ReturnType<typeof setTimeout>;
+  /** Initial SERVER_INFO; use serverInfo for the current post-failover snapshot. */
   readonly ready: Promise<QwpServerInfoMessage>;
 
   constructor(
@@ -647,9 +648,18 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     return this.connection.handshake;
   }
 
+  /**
+   * Cached immutable SERVER_INFO for the currently bound endpoint. Reading it
+   * never initiates a connection or failover walk. It is undefined before the
+   * initial bind and refreshes after every successful reconnect.
+   */
+  get serverInfo(): QwpServerInfoMessage | undefined {
+    return this.currentServerInfo;
+  }
+
   /** Effective codec and level echoed by the server on the active endpoint. */
   get negotiatedCompression(): QwpNegotiatedEgressCompression | undefined {
-    const serverInfo = this.serverInfo;
+    const serverInfo = this.currentServerInfo;
     if (
       serverInfo?.compressionCodec === QWP_COMPRESSION_CODEC.ZSTD &&
       serverInfo.compressionLevel !== null
@@ -758,7 +768,9 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     this.active = query;
     this.activeRequest = request;
     try {
-      await this.send(this.encodeQueryRequest(request, this.serverInfo!));
+      await this.send(
+        this.encodeQueryRequest(request, this.currentServerInfo!),
+      );
     } catch (error) {
       this.clearActive(query);
       query.fail(error);
@@ -889,12 +901,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
           const message = decodeQwpEgressMessage(payload);
           switch (message.kind) {
             case "server-info":
-              if (this.serverInfo) {
+              if (this.currentServerInfo) {
                 throw new QwpProtocolError(
                   "received duplicate QWP SERVER_INFO",
                 );
               }
-              this.serverInfo = message;
+              this.currentServerInfo = message;
               clearTimeout(this.serverInfoTimer);
               this.resolveServerInfo(message);
               break;
@@ -1005,7 +1017,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private async prepareConnectionReset(
     serverInfo: QwpServerInfoMessage,
   ): Promise<void> {
-    this.serverInfo = serverInfo;
+    this.currentServerInfo = serverInfo;
     await this.active?.resetForReplay();
     this.decoder.applyCacheReset(QWP_RESET_MASK_DICTIONARY);
     this.decoder.resetQuerySchema();

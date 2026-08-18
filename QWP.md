@@ -767,6 +767,13 @@ uses eight connection sweeps, full-jitter backoff starting at 50 ms and capped a
 second, and a 30-second outage deadline. `QUERY_ERROR` remains a query result and does
 not trigger failover.
 
+`session.ready` resolves once with the initial `SERVER_INFO`. Read
+`session.serverInfo` for the immutable snapshot from the currently bound endpoint:
+role, zone, cluster and node IDs, epoch, capabilities, server clock, and negotiated
+compression. Reading the property is non-perturbing and never initiates a failover
+walk. If an endpoint dies, it continues to report the previous snapshot until the
+transport successfully rebinds, then refreshes to the new endpoint.
+
 Re-execution is at least once: a statement may have completed before its response was
 lost, and a consumer may already have observed a prefix of SELECT rows. Queued but
 unconsumed batches are discarded automatically. Configure `onReplayReset` when the
@@ -916,6 +923,9 @@ exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active
 query sends `CANCEL` and waits for the session's bounded cancellation drain; a
 connection that cannot drain is closed instead of being handed to another borrower.
+Each query lease exposes the same refreshed snapshot as `lease.serverInfo`; accessing
+it after returning the lease raises `QwpClientClosedError` rather than exposing a
+pooled connection now owned by another borrower.
 The shared housekeeper closes excess connections after `idleTimeoutMs` and recycles
 connections older than `maxLifetimeMs` once they are idle, while always retaining
 each configured pool minimum. Set either timeout to zero to disable that policy;

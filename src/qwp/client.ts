@@ -465,7 +465,7 @@ export class QwpQueryLease {
   private closePromise?: Promise<void>;
   private released = false;
 
-  /** SERVER_INFO for the endpoint selected by this pooled session. */
+  /** Initial SERVER_INFO; use serverInfo for the current post-failover snapshot. */
   readonly ready: Promise<QwpServerInfoMessage>;
 
   /** @internal */
@@ -479,6 +479,15 @@ export class QwpQueryLease {
   get handshake(): QwpHandshakeMetadata {
     this.throwIfReleased();
     return this.session.handshake;
+  }
+
+  /**
+   * Cached immutable SERVER_INFO for this lease's currently bound endpoint.
+   * Reading it does not drive failover; a successful query replay refreshes it.
+   */
+  get serverInfo(): QwpServerInfoMessage | undefined {
+    this.throwIfReleased();
+    return this.session.serverInfo;
   }
 
   get negotiatedCompression(): QwpNegotiatedEgressCompression | undefined {

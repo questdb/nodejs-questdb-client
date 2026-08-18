@@ -402,9 +402,10 @@ describe("QWP egress codec", () => {
     writeU16String(payload, "eu-west-1a");
     payload.writeUint8(QWP_COMPRESSION_CODEC.ZSTD).writeUint8(3);
 
-    expect(
-      decodeQwpEgressMessage(encodeQwpFrame(payload.toUint8Array())),
-    ).toMatchObject({
+    const message = decodeQwpEgressMessage(
+      encodeQwpFrame(payload.toUint8Array()),
+    );
+    expect(message).toMatchObject({
       kind: "server-info",
       role: 1,
       epoch: 3n,
@@ -414,6 +415,7 @@ describe("QWP egress codec", () => {
       compressionCodec: QWP_COMPRESSION_CODEC.ZSTD,
       compressionLevel: 3,
     });
+    expect(Object.isFrozen(message)).toBe(true);
   });
 
   it("decodes RESULT_END and rejects truncated control frames", () => {
