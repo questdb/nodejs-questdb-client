@@ -31,6 +31,7 @@ import {
   QwpReplayRejectedError,
   QwpUpgradeError,
   encodeQwpFrame,
+  encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
@@ -617,6 +618,139 @@ describe("QWP ingress reconnect and replay", () => {
     const verify = new QwpNodeFileReplayStore({ directory });
     await expect(verify.load()).resolves.toEqual([]);
     await verify.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("retires a wholly deferred recovered transaction without replaying it", async () => {
+    const directory = await createTemporaryDirectory();
+    const firstDeferred = encodeQwpIngressFrame([symbolTable("ETH-USD")], {
+      deferCommit: true,
+    });
+    const secondDeferred = encodeQwpIngressFrame([symbolTable("BTC-USD")], {
+      deferCommit: true,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({ frameSequence: 5n, payload: firstDeferred });
+    await seed.append({ frameSequence: 6n, payload: secondDeferred });
+    await seed.append({
+      frameSequence: 7n,
+      payload: encodeQwpDurableAckPollFrame(),
+    });
+    await seed.close();
+
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+    });
+    expect(connection.sent).toEqual([]);
+    expect(
+      (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+    ).toEqual([]);
+    expect(session.metrics).toMatchObject({
+      replayPublishedFrameSequence: 7n,
+      replayAcknowledgedFrameSequence: 7n,
+      pendingReplayFrames: 0,
+      totalFramesReplayed: 0,
+    });
+
+    const currentFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
+    const current = session.sendFrame(currentFrame);
+    await vi.waitFor(() => expect(connection.sent).toEqual([currentFrame]));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(current).resolves.toMatchObject({ sequence: 0n });
+    await session.close();
+
+    const verify = new QwpNodeFileReplayStore({ directory });
+    await expect(verify.load()).resolves.toEqual([]);
+    await verify.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("replays a committed prefix before retiring its deferred recovery tail", async () => {
+    const directory = await createTemporaryDirectory();
+    const committed = encodeQwpIngressFrame([symbolTable("ETH-USD")]);
+    const deferred = encodeQwpIngressFrame([symbolTable("BTC-USD")], {
+      deferCommit: true,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({ frameSequence: 5n, payload: committed });
+    await seed.append({ frameSequence: 6n, payload: deferred });
+    await seed.append({
+      frameSequence: 7n,
+      payload: encodeQwpDurableAckPollFrame(),
+    });
+    await seed.close();
+
+    const connection = new FakeConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+      durableAckKeepaliveMs: 0,
+    });
+    expect(connection.sent).toEqual([committed]);
+
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["trades", 42n]]));
+    await vi.waitFor(() => expect(session.metrics.pendingReplayFrames).toBe(3));
+    connection.receive(durableResponse([["trades", 42n]]));
+    await vi.waitFor(async () =>
+      expect(
+        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+      ).toEqual([]),
+    );
+    expect(session.metrics).toMatchObject({
+      replayAcknowledgedFrameSequence: 7n,
+      pendingReplayFrames: 0,
+      totalFramesReplayed: 1,
+    });
+
+    const currentFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
+    const current = session.sendFrame(currentFrame);
+    await vi.waitFor(() =>
+      expect(connection.sent).toEqual([committed, currentFrame]),
+    );
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["trades", 43n]]));
+    await expect(current).resolves.toMatchObject({ sequence: 0n });
+    connection.receive(durableResponse([["trades", 43n]]));
+    await vi.waitFor(async () =>
+      expect(
+        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+      ).toEqual([]),
+    );
+    await session.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("replays deferred recovery frames when a commit frame covers them", async () => {
+    const directory = await createTemporaryDirectory();
+    const deferred = encodeQwpIngressFrame([symbolTable("ETH-USD")], {
+      deferCommit: true,
+    });
+    const commit = encodeQwpIngressFrame([symbolTable("BTC-USD")]);
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({ frameSequence: 5n, payload: deferred });
+    await seed.append({ frameSequence: 6n, payload: commit });
+    await seed.close();
+
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+    });
+    expect(connection.sent).toEqual([deferred, commit]);
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await vi.waitFor(async () =>
+      expect(
+        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+      ).toEqual([]),
+    );
+    await session.close();
     await rm(directory, { recursive: true, force: true });
   });
 

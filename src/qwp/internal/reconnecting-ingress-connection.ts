@@ -1,8 +1,11 @@
 import {
+  decodeQwpFrame,
   decodeQwpIngressResponse,
   decodeQwpIngressSymbolDictionaryDelta,
   encodeQwpIngressSymbolDictionaryFrame,
+  QWP_FLAG_DEFER_COMMIT,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+  QWP_FLAG_DURABLE_ACK_POLL,
   QWP_HEADER_SIZE,
   QWP_STATUS,
   QwpProtocolError,
@@ -35,6 +38,12 @@ interface ReplayFrame extends QwpIngressReplayRecord {
   transmitted: boolean;
   durableTargets?: Map<string, bigint>;
   dictionaryCatchup?: boolean;
+}
+
+interface RecoveredDiscardTail {
+  readonly startSequence: bigint;
+  readonly tipSequence: bigint;
+  readonly predecessorSequence?: bigint;
 }
 
 class RetriableIngressNackError extends Error {
@@ -121,6 +130,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private nextClientSequence = 0n;
   private acknowledgedFrameSequence = -1n;
   private rejectedFrameSequence?: bigint;
+  private recoveredDiscardTail?: RecoveredDiscardTail;
   private rejectionCount = 0;
   private generation = 0;
   private sendTail: Promise<void> = Promise.resolve();
@@ -149,10 +159,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     store: QwpIngressReplayStore,
     records: readonly QwpIngressReplayRecord[],
     symbolDictionary: readonly string[],
+    recoveredDiscardTail: RecoveredDiscardTail | undefined,
     localMaxBatchSizeBytes?: number,
   ) {
     this.store = store;
     this.symbolDictionary = [...symbolDictionary];
+    this.recoveredDiscardTail = recoveredDiscardTail;
     this.localMaxBatchSizeBytes = localMaxBatchSizeBytes;
     this.maxAttempts = reconnectOptions.maxAttempts ?? 3;
     this.initialBackoffMs = reconnectOptions.initialBackoffMs ?? 100;
@@ -204,24 +216,27 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     let connection: QwpReconnectingIngressConnection | undefined;
     try {
       const records = await store.load();
+      const sortedRecords = [...records].sort((a, b) =>
+        a.frameSequence < b.frameSequence
+          ? -1
+          : a.frameSequence > b.frameSequence
+            ? 1
+            : 0,
+      );
       const symbolDictionary = store.loadSymbolDictionary
         ? await store.loadSymbolDictionary()
         : [];
-      validateRecoveredDictionary(records, symbolDictionary, store);
+      validateRecoveredDictionary(sortedRecords, symbolDictionary, store);
       connection = new QwpReconnectingIngressConnection(
         factory,
         reconnectOptions,
         store,
-        [...records].sort((a, b) =>
-          a.frameSequence < b.frameSequence
-            ? -1
-            : a.frameSequence > b.frameSequence
-              ? 1
-              : 0,
-        ),
+        sortedRecords,
         symbolDictionary,
+        analyzeRecoveredDiscardTail(sortedRecords),
         localMaxBatchSizeBytes,
       );
+      await connection.retireRecoveredDiscardTailIfReady();
       await connection.connectLoop(undefined, false);
       return connection;
     } catch (error) {
@@ -446,6 +461,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
     for (const frame of this.frames.values()) {
       if (!frame.transmitted) continue;
+      if (this.isRecoveredDiscardFrame(frame.frameSequence)) continue;
       frame.durableTargets = undefined;
       if (cap !== undefined && frame.payload.byteLength > cap) {
         throw new RangeError(
@@ -642,6 +658,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private async acknowledgeThrough(frameSequence: bigint): Promise<void> {
+    await this.acknowledgeStoredFramesThrough(frameSequence);
+    await this.retireRecoveredDiscardTailIfReady();
+  }
+
+  private async acknowledgeStoredFramesThrough(
+    frameSequence: bigint,
+  ): Promise<void> {
     await this.store.acknowledgeThrough(frameSequence);
     for (const sequence of this.frames.keys()) {
       if (sequence > frameSequence) break;
@@ -650,6 +673,28 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (frameSequence > this.acknowledgedFrameSequence) {
       this.acknowledgedFrameSequence = frameSequence;
     }
+  }
+
+  private isRecoveredDiscardFrame(frameSequence: bigint): boolean {
+    const tail = this.recoveredDiscardTail;
+    return (
+      tail !== undefined &&
+      frameSequence >= tail.startSequence &&
+      frameSequence <= tail.tipSequence
+    );
+  }
+
+  private async retireRecoveredDiscardTailIfReady(): Promise<void> {
+    const tail = this.recoveredDiscardTail;
+    if (!tail) return;
+    if (
+      tail.predecessorSequence !== undefined &&
+      this.frames.has(tail.predecessorSequence)
+    ) {
+      return;
+    }
+    await this.acknowledgeStoredFramesThrough(tail.tipSequence);
+    this.recoveredDiscardTail = undefined;
   }
 
   private async persistSymbolDictionaryDelta(
@@ -845,6 +890,45 @@ function readSymbolDictionaryDelta(payload: Uint8Array) {
     return undefined;
   }
   return decodeQwpIngressSymbolDictionaryDelta(payload);
+}
+
+function analyzeRecoveredDiscardTail(
+  records: readonly QwpIngressReplayRecord[],
+): RecoveredDiscardTail | undefined {
+  let boundaryIndex = -1;
+  for (let index = 0; index < records.length; index++) {
+    if (isRecoveredCommitBarrier(records[index].payload)) {
+      boundaryIndex = index;
+    }
+  }
+  if (boundaryIndex === records.length - 1) return undefined;
+  return {
+    startSequence: records[boundaryIndex + 1].frameSequence,
+    tipSequence: records[records.length - 1].frameSequence,
+    predecessorSequence:
+      boundaryIndex < 0 ? undefined : records[boundaryIndex].frameSequence,
+  };
+}
+
+function isRecoveredCommitBarrier(payload: Uint8Array): boolean {
+  try {
+    const frame = decodeQwpFrame(payload);
+    if ((frame.flags & QWP_FLAG_DEFER_COMMIT) !== 0) return false;
+    // A durable-ACK poll is side-effect-free and cannot cover deferred data
+    // before it. Treat an exact poll as transparent during the recovery scan.
+    if (
+      frame.flags === QWP_FLAG_DURABLE_ACK_POLL &&
+      frame.tableCount === 0 &&
+      frame.payloadLength === 0
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    // Opaque low-level payloads and malformed QWP records are never silently
+    // retired. They remain replay barriers and preserve the existing behavior.
+    return true;
+  }
 }
 
 function validateRecoveredDictionary(
