@@ -1,6 +1,7 @@
 import { QwpProtocolError } from "../core";
 import {
   QWP_UPGRADE_ERROR_KIND,
+  QWP_UPGRADE_TIMEOUT_PHASE,
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpHandshakeMetadata,
@@ -71,6 +72,10 @@ export interface QwpWebSocketLike {
 export interface QwpWebSocketOpenOptions {
   url: string | URL;
   connectTimeoutMs?: number;
+  /** Node-only HTTP authentication and WebSocket upgrade deadline. */
+  authTimeoutMs?: number;
+  /** Resolves after the Node TCP/TLS transport has connected. */
+  transportConnected?: Promise<void>;
   sendTimeoutMs?: number;
   closeTimeoutMs?: number;
   completeHandshake: () => QwpHandshakeMetadata;
@@ -87,11 +92,13 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 
 export function validateQwpWebSocketTimeouts(options: {
   connectTimeoutMs?: number;
+  authTimeoutMs?: number;
   sendTimeoutMs?: number;
   closeTimeoutMs?: number;
 }): void {
   for (const [name, value] of [
     ["connectTimeoutMs", options.connectTimeoutMs],
+    ["authTimeoutMs", options.authTimeoutMs],
     ["sendTimeoutMs", options.sendTimeoutMs],
     ["closeTimeoutMs", options.closeTimeoutMs],
   ] as const) {
@@ -133,6 +140,7 @@ export function openQwpWebSocket(
     return Promise.reject(error);
   }
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const authTimeoutMs = options.authTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const sendTimeoutMs = options.sendTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -338,18 +346,33 @@ export function openQwpWebSocket(
   };
 
   return new Promise<QwpBinaryConnection>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      failOpening(
-        new QwpUpgradeError("QWP WebSocket connection timed out", {
-          kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
-          retryable: true,
-          tryNextEndpoint: true,
-          url: options.url,
-        }),
-        1000,
-        "QWP connection timeout",
-      );
-    }, connectTimeoutMs);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    const armOpeningTimeout = (
+      timeoutMs: number,
+      phase?: "connect" | "authentication",
+    ): void => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        const message =
+          phase === QWP_UPGRADE_TIMEOUT_PHASE.CONNECT
+            ? `QWP TCP/TLS connection timed out after ${timeoutMs}ms`
+            : phase === QWP_UPGRADE_TIMEOUT_PHASE.AUTHENTICATION
+              ? `QWP authentication/WebSocket upgrade timed out after ${timeoutMs}ms`
+              : `QWP WebSocket connection timed out after ${timeoutMs}ms`;
+        failOpening(
+          new QwpUpgradeError(message, {
+            kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+            retryable: true,
+            tryNextEndpoint: true,
+            url: options.url,
+            timeoutPhase: phase,
+          }),
+          1000,
+          "QWP connection timeout",
+        );
+      }, timeoutMs);
+    };
 
     const failOpening = (
       error: Error,
@@ -358,10 +381,40 @@ export function openQwpWebSocket(
     ): void => {
       if (openingSettled) return;
       openingSettled = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       void closeSocket(closeCode, closeReason);
       reject(error);
     };
+
+    armOpeningTimeout(
+      connectTimeoutMs,
+      options.transportConnected
+        ? QWP_UPGRADE_TIMEOUT_PHASE.CONNECT
+        : undefined,
+    );
+    void options.transportConnected?.then(
+      () => {
+        if (openingSettled) return;
+        armOpeningTimeout(
+          authTimeoutMs,
+          QWP_UPGRADE_TIMEOUT_PHASE.AUTHENTICATION,
+        );
+      },
+      (error: unknown) => {
+        failOpening(
+          new QwpUpgradeError(
+            "QWP TCP/TLS transport failed while establishing a connection",
+            {
+              kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+              retryable: true,
+              tryNextEndpoint: true,
+              url: options.url,
+              cause: error,
+            },
+          ),
+        );
+      },
+    );
 
     const onOpen = (): void => {
       if (openingSettled) return;
@@ -380,7 +433,7 @@ export function openQwpWebSocket(
       }
       openingSettled = true;
       opened = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       const connection: QwpBinaryConnection = {
         messages,
         closed,

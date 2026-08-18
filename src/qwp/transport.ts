@@ -261,6 +261,15 @@ export const QWP_UPGRADE_ERROR_KIND = {
 export type QwpUpgradeErrorKind =
   (typeof QWP_UPGRADE_ERROR_KIND)[keyof typeof QWP_UPGRADE_ERROR_KIND];
 
+export const QWP_UPGRADE_TIMEOUT_PHASE = {
+  CONNECT: "connect",
+  AUTHENTICATION: "authentication",
+} as const;
+
+/** Opening phase whose Node QWP deadline expired. */
+export type QwpUpgradeTimeoutPhase =
+  (typeof QWP_UPGRADE_TIMEOUT_PHASE)[keyof typeof QWP_UPGRADE_TIMEOUT_PHASE];
+
 export interface QwpUpgradeErrorDetails {
   kind: QwpUpgradeErrorKind;
   /** Whether a later retry against the configured endpoint set may recover. */
@@ -273,6 +282,7 @@ export interface QwpUpgradeErrorDetails {
   serverRole?: string;
   serverZone?: string;
   closeCode?: number;
+  timeoutPhase?: QwpUpgradeTimeoutPhase;
   cause?: unknown;
 }
 
@@ -304,6 +314,8 @@ export class QwpUpgradeError extends Error {
   readonly serverRole?: string;
   readonly serverZone?: string;
   readonly closeCode?: number;
+  /** Node opening phase that exceeded its deadline. */
+  readonly timeoutPhase?: QwpUpgradeTimeoutPhase;
   readonly cause?: unknown;
 
   constructor(message: string, details: QwpUpgradeErrorDetails) {
@@ -318,6 +330,7 @@ export class QwpUpgradeError extends Error {
     this.serverRole = details.serverRole;
     this.serverZone = details.serverZone;
     this.closeCode = details.closeCode;
+    this.timeoutPhase = details.timeoutPhase;
     this.cause = details.cause;
   }
 
@@ -426,6 +439,10 @@ export interface QwpWebSocketConnectOptions {
   /** Additional endpoints attempted in order when the preferred endpoint fails. */
   failoverUrls?: readonly (string | URL)[];
   protocols?: string | string[];
+  /**
+   * Node TCP/TLS connection deadline, or the complete opening deadline in a
+   * browser. Defaults to 15s.
+   */
   connectTimeoutMs?: number;
   /** Maximum time a send may remain queued by the WebSocket. Defaults to 15s. */
   sendTimeoutMs?: number;

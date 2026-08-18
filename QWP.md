@@ -68,6 +68,8 @@ const sender = await Sender.fromConfig(
     qwp: {
       webSocket: {
         requestDurableAck: true,
+        connectTimeoutMs: 5_000,
+        authTimeoutMs: 15_000,
         failoverUrls: ["wss://questdb-dr.example:9000/write/v4"],
         storeAndForward: {
           directory: "/var/lib/my-service/qwp-replay/producer-a",
@@ -96,6 +98,15 @@ const sender = await Sender.fromConfig(
   },
 );
 ```
+
+Node bounds connection establishment in two phases. `connectTimeoutMs` covers
+DNS plus the TCP/TLS connection; after that succeeds, `authTimeoutMs` independently
+covers the authenticated HTTP request and WebSocket upgrade. Both default to 15
+seconds, so one endpoint attempt can take up to their sum. A timeout is reported as
+`QwpUpgradeError` with `timeoutPhase` set to `"connect"` or `"authentication"`.
+Browsers cannot observe the transport boundary, so their `connectTimeoutMs` continues
+to cover the complete WebSocket opening lifecycle and they do not expose
+`authTimeoutMs`.
 
 Give each active sender its own store-and-forward directory. The Node.js journal
 persists frames and their symbol dictionary before sending. Persistent senders can
@@ -785,9 +796,10 @@ The public error classes preserve enough context for policy decisions:
 
 Always close senders and sessions in `finally`. Sender publication plus ACK draining is
 bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
-by `closeTimeoutMs`. `connectTimeoutMs`, `sendTimeoutMs`, acknowledgement timeouts, and
-query deadlines cover separate lifecycle phases; configure each according to the
-deployment rather than using one very large catch-all value.
+by `closeTimeoutMs`. In Node, `connectTimeoutMs` and `authTimeoutMs` independently
+bound transport connection and authenticated upgrade. `sendTimeoutMs`, acknowledgement
+timeouts, and query deadlines cover later lifecycle phases; configure each according
+to the deployment rather than using one very large catch-all value.
 
 ## Migration guide
 

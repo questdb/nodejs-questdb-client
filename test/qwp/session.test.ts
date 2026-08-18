@@ -24,6 +24,7 @@ import {
   QWP_INGRESS_PROGRESS_KIND,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
+  QWP_UPGRADE_TIMEOUT_PHASE,
   QwpBatchTooLargeError,
   QwpByteReader,
   QwpByteWriter,
@@ -1049,6 +1050,87 @@ describe("QWP WebSocket adapters", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("separately bounds Node transport connection and authenticated upgrade", async () => {
+    vi.useFakeTimers();
+    try {
+      const connectSocket = new FakeWebSocket();
+      const connecting = connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        connectTimeoutMs: 25,
+        authTimeoutMs: 100,
+        webSocketFactory: () => asQwpSocket(connectSocket),
+      });
+      const connectRejected = expect(connecting).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        timeoutPhase: QWP_UPGRADE_TIMEOUT_PHASE.CONNECT,
+        message: "QWP TCP/TLS connection timed out after 25ms",
+      } satisfies Partial<QwpUpgradeError>);
+      await vi.advanceTimersByTimeAsync(25);
+      await connectRejected;
+
+      const upgradeSocket = new FakeWebSocket();
+      let markUpgradeTransportConnected!: () => void;
+      const upgrading = connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        connectTimeoutMs: 100,
+        authTimeoutMs: 25,
+        webSocketFactory: (_url, options) => {
+          markUpgradeTransportConnected = options.onConnected;
+          return asQwpSocket(upgradeSocket);
+        },
+      });
+      const upgradeRejected = expect(upgrading).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        timeoutPhase: QWP_UPGRADE_TIMEOUT_PHASE.AUTHENTICATION,
+        message: "QWP authentication/WebSocket upgrade timed out after 25ms",
+      } satisfies Partial<QwpUpgradeError>);
+      markUpgradeTransportConnected();
+      await vi.advanceTimersByTimeAsync(25);
+      await upgradeRejected;
+
+      const phasedSocket = new FakeWebSocket();
+      let markPhasedTransportConnected!: () => void;
+      const phased = connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        connectTimeoutMs: 25,
+        authTimeoutMs: 25,
+        webSocketFactory: (_url, options) => {
+          markPhasedTransportConnected = options.onConnected;
+          options.onUpgrade({});
+          return asQwpSocket(phasedSocket);
+        },
+      });
+      await vi.advanceTimersByTimeAsync(20);
+      markPhasedTransportConnected();
+      await vi.advanceTimersByTimeAsync(20);
+      phasedSocket.open();
+      const phasedConnection = await phased;
+      expect(phasedConnection).toMatchObject({
+        handshake: { qwpVersion: 1 },
+      });
+      await phasedConnection.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("validates the Node authentication/upgrade timeout before opening", async () => {
+    let factoryCalls = 0;
+    await expect(
+      connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        authTimeoutMs: 0,
+        webSocketFactory: () => {
+          factoryCalls++;
+          return asQwpSocket(new FakeWebSocket());
+        },
+      }),
+    ).rejects.toThrow("authTimeoutMs must be a positive finite number");
+    expect(factoryCalls).toBe(0);
   });
 
   it("bounds browser close when the peer never emits a close event", async () => {

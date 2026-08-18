@@ -1,4 +1,5 @@
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
+import { createServer as createTcpServer } from "node:net";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import {
   QWP_SERVER_ROLE,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
+  QWP_UPGRADE_TIMEOUT_PHASE,
   QwpByteWriter,
   QwpNodeFileReplayStore,
   QwpUpgradeError,
@@ -96,6 +98,42 @@ describe("QWP Node transport", () => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
     server = undefined;
+  });
+
+  it("times out authentication separately after a real TCP connection", async () => {
+    const sockets = new Set<Socket>();
+    const tcpServer = createTcpServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      // Accept the HTTP upgrade request but deliberately never answer it.
+      socket.resume();
+    });
+    await new Promise<void>((resolve, reject) => {
+      tcpServer.once("error", reject);
+      tcpServer.listen(0, "127.0.0.1", resolve);
+    });
+
+    try {
+      const address = tcpServer.address() as AddressInfo;
+      await expect(
+        connectQwpNodeWebSocket({
+          url: `ws://127.0.0.1:${address.port}/write/v4`,
+          connectTimeoutMs: 1_000,
+          authTimeoutMs: 25,
+          closeTimeoutMs: 25,
+        }),
+      ).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        timeoutPhase: QWP_UPGRADE_TIMEOUT_PHASE.AUTHENTICATION,
+        message: "QWP authentication/WebSocket upgrade timed out after 25ms",
+      } satisfies Partial<QwpUpgradeError>);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) => {
+        tcpServer.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it("negotiates durable ACK and polls progress with a WebSocket PING", async () => {

@@ -160,6 +160,11 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   headers?: Record<string, string>;
   /** Optional HTTP(S) agent used for the WebSocket upgrade. */
   agent?: Agent;
+  /**
+   * Time allowed after TCP/TLS connection for HTTP authentication and the
+   * WebSocket upgrade. Defaults to 15s.
+   */
+  authTimeoutMs?: number;
   authorization?: string;
   clientId?: string;
   maxVersion?: number;
@@ -171,6 +176,8 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
       protocols?: string | string[];
       agent?: Agent;
       headers: Record<string, string>;
+      /** Must be called when the underlying TCP/TLS transport is connected. */
+      onConnected: () => void;
       onUpgrade: (headers: IncomingHttpHeaders) => void;
       onUpgradeRejected: (rejection: QwpNodeUpgradeRejection) => void;
     },
@@ -326,6 +333,7 @@ function connectQwpNodeEndpoint(
         protocols?: string | string[];
         agent?: Agent;
         headers: Record<string, string>;
+        onConnected: () => void;
         onUpgrade: (headers: IncomingHttpHeaders) => void;
         onUpgradeRejected: (rejection: QwpNodeUpgradeRejection) => void;
       },
@@ -334,6 +342,22 @@ function connectQwpNodeEndpoint(
         agent: init.agent,
         headers: init.headers,
         perMessageDeflate: false,
+        finishRequest: (request) => {
+          request.once("socket", (socket) => {
+            if (!socket.connecting) {
+              init.onConnected();
+              return;
+            }
+            const protocol = new URL(url).protocol;
+            socket.once(
+              protocol === "wss:" || protocol === "https:"
+                ? "secureConnect"
+                : "connect",
+              init.onConnected,
+            );
+          });
+          request.end();
+        },
       };
       const socket = init.protocols
         ? new WebSocket(url, init.protocols, wsOptions)
@@ -355,6 +379,10 @@ function connectQwpNodeEndpoint(
     });
 
   let upgradeHeaders: IncomingHttpHeaders | undefined;
+  let resolveConnected!: () => void;
+  const transportConnected = new Promise<void>((resolve) => {
+    resolveConnected = resolve;
+  });
   let rejectOpening!: (error: QwpUpgradeError) => void;
   const openingFailure = new Promise<never>((_resolve, reject) => {
     rejectOpening = reject;
@@ -363,6 +391,7 @@ function connectQwpNodeEndpoint(
     protocols: options.protocols,
     agent: options.agent,
     headers,
+    onConnected: resolveConnected,
     onUpgrade: (receivedHeaders) => {
       upgradeHeaders = receivedHeaders;
     },
@@ -373,6 +402,8 @@ function connectQwpNodeEndpoint(
   return openQwpWebSocket(socket, {
     url: endpoint,
     connectTimeoutMs: options.connectTimeoutMs,
+    authTimeoutMs: options.authTimeoutMs,
+    transportConnected,
     sendTimeoutMs: options.sendTimeoutMs,
     closeTimeoutMs: options.closeTimeoutMs,
     openingFailure,

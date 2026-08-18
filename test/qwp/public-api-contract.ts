@@ -98,6 +98,12 @@ const nodeWebSocketSignature: (
   options: QwpNodeWebSocketOptions,
 ) => Promise<QwpBinaryConnection> = connectQwpNodeWebSocket;
 
+const nodeWebSocketOptionsContract: QwpNodeWebSocketOptions = {
+  url: "wss://node-1.example/write/v4",
+  connectTimeoutMs: 5_000,
+  authTimeoutMs: 15_000,
+};
+
 const nodeClientSignature: (
   options: QwpNodeClientOptions,
 ) => Promise<QwpClient> = connectQwpNodeClient;
@@ -260,6 +266,7 @@ void nodeSenderSignature;
 void nodeIngressSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
+void nodeWebSocketOptionsContract;
 void nodeClientSignature;
 void poolOptionsContract;
 void nodeOrphanScanSignature;
