@@ -428,6 +428,12 @@ export interface QwpBinaryConnection {
   /** @internal Physical delivery metrics exposed by replaying transports. */
   getIngressMetrics?(): QwpIngressTransportMetrics;
 
+  /**
+   * @internal Marks this endpoint as temporarily unsuitable and asks a stateful
+   * connection factory to start its next sweep at another configured endpoint.
+   */
+  deprioritizeEndpoint?(): void;
+
   send(payload: Uint8Array): Promise<void>;
   /** Sends an RFC 6455 PING when the underlying runtime supports it. */
   ping?(): Promise<void>;

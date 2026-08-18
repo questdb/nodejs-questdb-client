@@ -377,6 +377,72 @@ describe("QWP endpoint failover", () => {
     expect(attempts).toEqual(["primary", "secondary"]);
   });
 
+  it("rotates away from an endpoint that responds NOT_WRITABLE", async () => {
+    const attempts: string[] = [];
+    const connections: FakeConnection[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      async (endpoint) => {
+        attempts.push(String(endpoint));
+        const connection = new FakeConnection(String(endpoint));
+        connections.push(connection);
+        return connection;
+      },
+    );
+    const session = await QwpIngressSession.connect(factory, {
+      reconnect: {
+        maxAttempts: 1,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+      },
+    });
+
+    const pending = session.sendFrame(Uint8Array.of(9));
+    const primary = connections[0];
+    await vi.waitFor(() => expect(primary.sent).toHaveLength(1));
+    primary.receive(ingressResponse(QWP_STATUS.NOT_WRITABLE, 0n));
+    await vi.waitFor(() =>
+      expect(
+        connections.find((connection) => connection.endpoint === "secondary")
+          ?.sent,
+      ).toHaveLength(1),
+    );
+    const secondary = connections.find(
+      (connection) => connection.endpoint === "secondary",
+    )!;
+    secondary.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    expect(attempts).toEqual(["primary", "secondary"]);
+    await session.close();
+  });
+
+  it("uses a NOT_WRITABLE endpoint only after other endpoints fail", async () => {
+    const attempts: string[] = [];
+    let secondaryAvailable = true;
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      async (endpoint) => {
+        attempts.push(String(endpoint));
+        if (endpoint === "secondary" && !secondaryAvailable) {
+          throw new Error("secondary unavailable");
+        }
+        return new FakeConnection(String(endpoint));
+      },
+    );
+
+    const primary = await factory();
+    primary.deprioritizeEndpoint!();
+    secondaryAvailable = false;
+    await expect(factory()).resolves.toMatchObject({ endpoint: "primary" });
+    expect(attempts).toEqual(["primary", "secondary", "primary"]);
+  });
+
   it("uses SERVER_INFO for browser-compatible role validation", async () => {
     const primary = new FakeConnection("primary");
     primary.receive(serverInfo("primary", QWP_SERVER_ROLE.PRIMARY, "zone-b"));

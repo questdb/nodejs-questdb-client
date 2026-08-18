@@ -67,13 +67,16 @@ export function createQwpFailoverConnectionFactory(
     state: HOST_STATE.UNKNOWN,
     zoneTier: zoneBlind ? ZONE_TIER.SAME : ZONE_TIER.UNKNOWN,
   }));
+  let deferredEndpoint: number | undefined;
 
   return async (): Promise<QwpBinaryConnection> => {
     const attempts: QwpFailoverAttempt[] = [];
     const attempted = new Set<number>();
+    const deferredForSweep = deferredEndpoint;
+    deferredEndpoint = undefined;
 
     while (attempted.size < endpoints.length) {
-      const index = pickNextEndpoint(health, attempted);
+      const index = pickNextEndpoint(health, attempted, deferredForSweep);
       attempted.add(index);
       const endpoint = endpoints[index];
       let candidate: QwpBinaryConnection | undefined;
@@ -110,7 +113,10 @@ export function createQwpFailoverConnectionFactory(
           );
         }
         health[index].state = HOST_STATE.HEALTHY;
-        return observeConnectionHealth(candidate, health[index]);
+        return observeConnectionHealth(candidate, health[index], () => {
+          health[index].state = HOST_STATE.TRANSIENT_REJECT;
+          deferredEndpoint = index;
+        });
       } catch (error) {
         recordFailure(health[index], configuredZone, zoneBlind, error);
         attempts.push({ endpoint, error });
@@ -161,15 +167,23 @@ function matchesTarget(role: string | undefined, target: QwpTarget): boolean {
 function pickNextEndpoint(
   health: readonly QwpEndpointHealth[],
   attempted: ReadonlySet<number>,
+  deferredEndpoint?: number,
 ): number {
   let selected = -1;
   for (let index = 0; index < health.length; index++) {
-    if (attempted.has(index)) continue;
+    if (attempted.has(index) || index === deferredEndpoint) continue;
     if (selected < 0 || compareHealth(health[index], health[selected]) < 0) {
       selected = index;
     }
   }
-  return selected;
+  if (selected >= 0) return selected;
+  if (
+    deferredEndpoint !== undefined &&
+    !attempted.has(deferredEndpoint)
+  ) {
+    return deferredEndpoint;
+  }
+  throw new Error("QWP endpoint sweep has no unattempted endpoint");
 }
 
 function compareHealth(
@@ -217,6 +231,7 @@ function recordFailure(
 function observeConnectionHealth(
   connection: QwpBinaryConnection,
   health: QwpEndpointHealth,
+  deprioritizeEndpoint: () => void,
 ): QwpBinaryConnection {
   const demote = (): void => {
     if (health.state === HOST_STATE.HEALTHY) {
@@ -237,6 +252,7 @@ function observeConnectionHealth(
     get ingressDeltaSymbolDictionaryEnabled() {
       return connection.ingressDeltaSymbolDictionaryEnabled;
     },
+    deprioritizeEndpoint,
     send: async (payload) => {
       try {
         await connection.send(payload);

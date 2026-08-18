@@ -1192,6 +1192,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       return;
     }
 
+    if (
+      cause instanceof RetriableIngressNackError &&
+      cause.status === QWP_STATUS.NOT_WRITABLE
+    ) {
+      // NOT_WRITABLE describes this node, not the replayed frame. Preserve the
+      // frame and make the next factory sweep start at another endpoint.
+      failedConnection.deprioritizeEndpoint?.();
+    }
     this.connection = undefined;
     void failedConnection.close().catch(() => undefined);
     const reconnecting = this.connectLoop(
