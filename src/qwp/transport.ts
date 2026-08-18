@@ -201,6 +201,12 @@ export const QWP_RECONNECT_EVENT_KIND = {
   ATTEMPT_FAILED: "attempt-failed",
   RECONNECTED: "reconnected",
   FAILED_OVER: "failed-over",
+  /** An unbounded SF loop is waiting for durable-ACK-capable endpoints. */
+  DURABLE_ACK_UNAVAILABLE: "durable-ack-unavailable",
+  /** An orphan exhausted its consecutive durable-ACK mismatch budget. */
+  DURABLE_ACK_PERSISTENT_FAILURE: "durable-ack-persistent-failure",
+  /** Every reachable ingress endpoint is temporarily unable to be primary. */
+  PRIMARY_UNAVAILABLE: "primary-unavailable",
 } as const;
 
 export type QwpReconnectEventKind =
@@ -214,6 +220,8 @@ export interface QwpReconnectEvent {
   readonly endpoint?: string | URL;
   readonly previousEndpoint?: string | URL;
   readonly cause?: unknown;
+  /** Elapsed time in the current consecutive capability-gap episode. */
+  readonly episodeMs?: number;
 }
 
 /**

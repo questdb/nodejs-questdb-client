@@ -240,9 +240,22 @@ default). The scanner runs immediately and then every 30 seconds; set
 `.qwp.failed` in the slot so a corrupt or permanently rejected head cannot cause a hot
 retry loop. After inspection or repair, call `retryQwpNodeOrphanSlot(slotDirectory)`
 to make it eligible again. `onOrphanDrainEvent` reports discovery, drain, lock
-contention, quarantine, and scanner failures through a bounded asynchronous inbox. An
-abandoned slot also reports a typed `data-loss` sender error. Callback exceptions
-cannot interrupt recovery.
+contention, quarantine, scanner failures, durable-ACK capability gaps, and transient
+all-replica windows through a bounded asynchronous inbox. An abandoned slot also
+reports a typed `data-loss` sender error. Callback exceptions cannot interrupt
+recovery.
+
+Blocking (`off` or `sync`) foreground startup fails immediately if every usable
+endpoint lacks durable-ACK support. Asynchronous foreground startup and steady-state
+store-and-forward reconnects retain their records and retry through rolling upgrades.
+An orphan slot retries a consecutive durable-ACK capability-gap episode until either
+16 connection sweeps or the configured reconnect `maxDurationMs` is reached, then it
+is quarantined behind `.qwp.failed` (`maxDurationMs: 0` disables only the time half of
+the budget). A transport outage or an all-replica window resets both halves of this
+orphan budget; neither transient condition can itself quarantine persisted data. The
+`durable-ack-unavailable`,
+`durable-ack-persistent-failure`, and `primary-unavailable` orphan events expose the
+distinction to operators.
 
 A foreground sender retries a symbol-dictionary catch-up entry that is too large for
 the current target forever because a larger-cap node may return. An orphan drainer

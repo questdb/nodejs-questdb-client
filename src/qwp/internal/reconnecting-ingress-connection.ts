@@ -15,9 +15,11 @@ import {
 import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_RECONNECT_EVENT_KIND,
+  QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
+  QwpDurableAckUnavailableError,
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpIngressReplayRecord,
@@ -45,6 +47,8 @@ import {
 
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
+const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
+const MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS = 16;
 
 type ConnectAttemptPolicy = "single" | "configured" | "unbounded";
 
@@ -71,6 +75,19 @@ class QwpCatchUpCapGapError extends RangeError {
           : "]"),
     );
     this.name = "QwpCatchUpCapGapError";
+  }
+}
+
+class QwpDurableAckPersistentFailureError extends Error {
+  constructor(
+    readonly attempts: number,
+    readonly episodeMs: number,
+    readonly cause: QwpDurableAckUnavailableError,
+  ) {
+    super(
+      `QWP durable ACK remained unavailable for an orphan replay slot [attempts=${attempts}/${MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS}, episodeMs=${episodeMs}]: ${cause.message}`,
+    );
+    this.name = "QwpDurableAckPersistentFailureError";
   }
 }
 
@@ -180,6 +197,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly maxFrameRejections: number;
   private readonly poisonMinEscalationWindowMs: number;
   private readonly catchUpCapGapMinEscalationWindowMs: number;
+  private readonly orphanDurableAckMismatchMaxDurationMs: number;
   private readonly localMaxBatchSizeBytes?: number;
   private readonly connectionDispatcher?: QwpNotificationDispatcher<QwpReconnectEvent>;
   private readonly errorDispatcher?: QwpNotificationDispatcher<QwpSenderError>;
@@ -199,6 +217,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private poisonStrikes = 0;
   private catchUpCapGapAttempts = 0;
   private catchUpCapGapFirstMs = 0;
+  private durableAckMismatchAttempts = 0;
+  private durableAckMismatchFirstMs = 0;
   private progressAtLastExemptRecycle = -1n;
   private zeroProgressRecycles = 0;
   private recoveredDiscardTail?: RecoveredDiscardTail;
@@ -237,6 +257,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     localMaxBatchSizeBytes?: number,
     private readonly backgroundStoreAndForward = false,
     private readonly orphanStoreAndForward = false,
+    orphanDurableAckMismatchMaxDurationMs = DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS,
     catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
     connectionListenerInboxCapacity = 64,
     errorInboxCapacity = 256,
@@ -258,6 +279,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       reconnectOptions.poisonMinEscalationWindowMs ?? 5_000;
     this.catchUpCapGapMinEscalationWindowMs =
       catchUpCapGapMinEscalationWindowMs;
+    this.orphanDurableAckMismatchMaxDurationMs =
+      orphanDurableAckMismatchMaxDurationMs;
     if (reconnectOptions.onEvent) {
       this.connectionDispatcher = new QwpNotificationDispatcher(
         reconnectOptions.onEvent,
@@ -318,6 +341,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       ? QWP_INITIAL_CONNECT_MODE.ASYNC
       : QWP_INITIAL_CONNECT_MODE.SYNC,
     orphanStoreAndForward = false,
+    orphanDurableAckMismatchMaxDurationMs = DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS,
     catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
     initialConnection?: Promise<QwpBinaryConnection>,
     connectionListenerInboxCapacity = 64,
@@ -355,6 +379,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         localMaxBatchSizeBytes,
         backgroundStoreAndForward,
         orphanStoreAndForward,
+        orphanDurableAckMismatchMaxDurationMs,
         catchUpCapGapMinEscalationWindowMs,
         connectionListenerInboxCapacity,
         errorInboxCapacity,
@@ -577,6 +602,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     let attempt = 0;
     let backoffMs = this.initialBackoffMs;
     let lastError = initialCause;
+    let primaryUnavailableAttempts = 0;
     if (reconnecting) {
       this.emitEvent({
         kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
@@ -618,6 +644,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         if (this.closing) throw new QwpSendClosedError();
         this.install(candidate, replayed);
         this.resetCatchUpCapGapEpisode();
+        this.resetDurableAckMismatchEpisode();
         this.connectingCandidate = undefined;
         if (reconnecting) {
           this.totalReconnectsSucceeded++;
@@ -668,7 +695,38 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         ) {
           throw capGapError.error;
         }
-        if (!this.isRetryableReconnectError(error)) throw error;
+        const durableAckMismatch = durableAckUnavailableCause(error);
+        if (
+          durableAckMismatch &&
+          (!this.backgroundStoreAndForward || attemptPolicy !== "unbounded")
+        ) {
+          this.resetDurableAckMismatchEpisode();
+          throw durableAckMismatch;
+        }
+        const durableAckPolicy =
+          durableAckMismatch &&
+          this.backgroundStoreAndForward &&
+          attemptPolicy === "unbounded"
+            ? this.applyDurableAckMismatchPolicy(durableAckMismatch)
+            : undefined;
+        if (!durableAckPolicy) this.resetDurableAckMismatchEpisode();
+        if (durableAckPolicy?.exhausted) throw durableAckPolicy.error;
+        if (
+          this.orphanStoreAndForward &&
+          attemptPolicy === "unbounded" &&
+          isPrimaryUnavailableError(error)
+        ) {
+          primaryUnavailableAttempts++;
+          this.emitEvent({
+            kind: QWP_RECONNECT_EVENT_KIND.PRIMARY_UNAVAILABLE,
+            attempt: primaryUnavailableAttempts,
+            previousEndpoint,
+            cause: error,
+          });
+        }
+        if (!durableAckPolicy && !this.isRetryableReconnectError(error)) {
+          throw error;
+        }
         const attemptsExhausted =
           attemptPolicy === "single" ||
           (attemptPolicy === "configured" &&
@@ -723,6 +781,54 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private resetCatchUpCapGapEpisode(): void {
     this.catchUpCapGapAttempts = 0;
     this.catchUpCapGapFirstMs = 0;
+  }
+
+  private applyDurableAckMismatchPolicy(error: QwpDurableAckUnavailableError): {
+    exhausted: boolean;
+    error: QwpDurableAckUnavailableError | QwpDurableAckPersistentFailureError;
+  } {
+    const now = monotonicNowMs();
+    if (this.durableAckMismatchAttempts === 0) {
+      this.durableAckMismatchFirstMs = now;
+    }
+    this.durableAckMismatchAttempts++;
+    const episodeMs = Math.max(0, now - this.durableAckMismatchFirstMs);
+    const durationExhausted =
+      this.orphanDurableAckMismatchMaxDurationMs > 0 &&
+      episodeMs >= this.orphanDurableAckMismatchMaxDurationMs;
+    const exhausted =
+      this.orphanStoreAndForward &&
+      (this.durableAckMismatchAttempts >=
+        MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS ||
+        durationExhausted);
+    if (exhausted) {
+      const persistent = new QwpDurableAckPersistentFailureError(
+        this.durableAckMismatchAttempts,
+        episodeMs,
+        error,
+      );
+      this.emitEvent({
+        kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+        attempt: this.durableAckMismatchAttempts,
+        previousEndpoint: this.lastEndpoint,
+        cause: persistent,
+        episodeMs,
+      });
+      return { exhausted: true, error: persistent };
+    }
+    this.emitEvent({
+      kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE,
+      attempt: this.durableAckMismatchAttempts,
+      previousEndpoint: this.lastEndpoint,
+      cause: error,
+      episodeMs,
+    });
+    return { exhausted: false, error };
+  }
+
+  private resetDurableAckMismatchEpisode(): void {
+    this.durableAckMismatchAttempts = 0;
+    this.durableAckMismatchFirstMs = 0;
   }
 
   private isRetryableReconnectError(error: unknown): boolean {
@@ -1654,6 +1760,32 @@ function isEndpointPolicyFailure(error: unknown): boolean {
   return (
     error instanceof QwpFailoverError &&
     error.attempts.some((attempt) => isEndpointPolicyFailure(attempt.error))
+  );
+}
+
+/** Returns the typed capability gap retained anywhere in a failed endpoint sweep. */
+function durableAckUnavailableCause(
+  error: unknown,
+): QwpDurableAckUnavailableError | undefined {
+  if (error instanceof QwpDurableAckUnavailableError) return error;
+  if (!(error instanceof QwpFailoverError) || error.attempts.length === 0) {
+    return undefined;
+  }
+  for (const attempt of error.attempts) {
+    const cause = durableAckUnavailableCause(attempt.error);
+    if (cause) return cause;
+  }
+  return undefined;
+}
+
+function isPrimaryUnavailableError(error: unknown): boolean {
+  if (error instanceof QwpUpgradeError) {
+    return error.kind === QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED;
+  }
+  return (
+    error instanceof QwpFailoverError &&
+    error.attempts.length > 0 &&
+    error.attempts.every((attempt) => isPrimaryUnavailableError(attempt.error))
   );
 }
 

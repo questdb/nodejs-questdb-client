@@ -12,6 +12,7 @@ import {
   type QwpNodeOrphanDrainSession,
 } from "../../src/qwp/node";
 import {
+  QWP_RECONNECT_EVENT_KIND,
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
   type QwpSenderError,
@@ -170,6 +171,74 @@ describe("QWP Node orphan drainer", () => {
     await recordSlot(rootDirectory, "late-producer");
     await vi.waitFor(() => expect(drainer.metrics.drained).toBe(1));
     expect(drainer.metrics.scans).toBeGreaterThan(1);
+    await drainer.close();
+  });
+
+  it("forwards durable-ACK and primary-unavailable reconnect events", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "rolling-upgrade");
+    const events: Array<{
+      kind: string;
+      directory?: string;
+      attempt?: number;
+      episodeMs?: number;
+    }> = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 1,
+      createSession: async (_directory, onReconnectEvent) => {
+        onReconnectEvent?.({
+          kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE,
+          attempt: 3,
+          timestampMs: Date.now(),
+          episodeMs: 25,
+        });
+        onReconnectEvent?.({
+          kind: QWP_RECONNECT_EVENT_KIND.PRIMARY_UNAVAILABLE,
+          attempt: 2,
+          timestampMs: Date.now(),
+        });
+        onReconnectEvent?.({
+          kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+          attempt: 16,
+          timestampMs: Date.now(),
+          episodeMs: 300_000,
+          cause: new Error("durable ACK remained unavailable"),
+        });
+        return new FakeDrainSession();
+      },
+      onEvent: (event) => events.push(event),
+    });
+
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.drained).toBe(1));
+    await vi.waitFor(() =>
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_UNAVAILABLE,
+            directory,
+            attempt: 3,
+            episodeMs: 25,
+          }),
+          expect.objectContaining({
+            kind: QWP_ORPHAN_DRAIN_EVENT_KIND.PRIMARY_UNAVAILABLE,
+            directory,
+            attempt: 2,
+          }),
+          expect.objectContaining({
+            kind: QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+            directory,
+            attempt: 16,
+            episodeMs: 300_000,
+            error: expect.objectContaining({
+              message: "durable ACK remained unavailable",
+            }),
+          }),
+        ]),
+      ),
+    );
     await drainer.close();
   });
 

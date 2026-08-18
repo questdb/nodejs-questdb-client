@@ -173,6 +173,8 @@ export interface QwpIngressSessionOptions {
   initialConnectMode?: QwpInitialConnectMode;
   /** @internal Orphan sessions may quarantine persistent catch-up cap gaps. */
   orphanStoreAndForward?: boolean;
+  /** @internal Consecutive durable-ACK gap budget retained for orphan SF. */
+  orphanDurableAckMismatchMaxDurationMs?: number;
   /** @internal Minimum cap-gap dwell before an orphan can be quarantined. */
   catchUpCapGapMinEscalationWindowMs?: number;
   /**
@@ -392,6 +394,15 @@ function validateIngressSessionOptions(
       "durableAckKeepaliveMs must be a non-negative finite number",
     );
   }
+  const orphanDurableAckBudget = options.orphanDurableAckMismatchMaxDurationMs;
+  if (
+    orphanDurableAckBudget !== undefined &&
+    (!Number.isFinite(orphanDurableAckBudget) || orphanDurableAckBudget < 0)
+  ) {
+    throw new RangeError(
+      "orphanDurableAckMismatchMaxDurationMs must be a non-negative finite number",
+    );
+  }
   for (const [name, value, minimum] of [
     [
       "connectionListenerInboxCapacity",
@@ -543,6 +554,7 @@ export class QwpIngressSession {
           options.backgroundStoreAndForward,
           initialConnectMode,
           options.orphanStoreAndForward,
+          options.orphanDurableAckMismatchMaxDurationMs,
           options.catchUpCapGapMinEscalationWindowMs,
           initialConnection,
           options.connectionListenerInboxCapacity ??

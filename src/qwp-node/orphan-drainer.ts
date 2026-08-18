@@ -1,6 +1,8 @@
 import { readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
+import {
+  QWP_RECONNECT_EVENT_KIND,
+  type QwpReconnectEvent,
   QwpConnectionCloseInfo,
   QwpIngressTransportMetrics,
 } from "../qwp/transport";
@@ -30,6 +32,9 @@ export const QWP_ORPHAN_DRAIN_EVENT_KIND = {
   STARTED: "started",
   DRAINED: "drained",
   LOCKED: "locked",
+  DURABLE_ACK_UNAVAILABLE: "durable-ack-unavailable",
+  DURABLE_ACK_PERSISTENT_FAILURE: "durable-ack-persistent-failure",
+  PRIMARY_UNAVAILABLE: "primary-unavailable",
   FAILED: "failed",
   SCAN_FAILED: "scan-failed",
 } as const;
@@ -42,6 +47,10 @@ export interface QwpNodeOrphanDrainEvent {
   readonly timestampMs: number;
   readonly directory?: string;
   readonly error?: Error;
+  /** One-based attempt in the current capability/topology episode. */
+  readonly attempt?: number;
+  /** Elapsed time in the current consecutive capability-gap episode. */
+  readonly episodeMs?: number;
   /** Present when a failed slot has been abandoned behind its sentinel. */
   readonly senderError?: QwpSenderError;
   readonly metrics: QwpNodeOrphanDrainerMetrics;
@@ -84,7 +93,10 @@ export interface QwpNodeOrphanDrainerOptions {
   /** Slot names owned by the foreground producer/pool and never adoptable. */
   excludeSlot?: (slotName: string) => boolean;
   /** Creates one independent replay session for an adopted slot. */
-  createSession(directory: string): Promise<QwpNodeOrphanDrainSession>;
+  createSession(
+    directory: string,
+    onReconnectEvent?: (event: QwpReconnectEvent) => void,
+  ): Promise<QwpNodeOrphanDrainSession>;
   /** Maximum slots drained concurrently. Defaults to 4. */
   maxConcurrent?: number;
   /** Rescan cadence; zero performs only the startup scan. Defaults to 30s. */
@@ -168,6 +180,7 @@ export class QwpNodeOrphanDrainer {
   private readonly excludeSlot?: (slotName: string) => boolean;
   private readonly createSession: (
     directory: string,
+    onReconnectEvent?: (event: QwpReconnectEvent) => void,
   ) => Promise<QwpNodeOrphanDrainSession>;
   private readonly maxConcurrent: number;
   private readonly scanIntervalMs: number;
@@ -331,7 +344,9 @@ export class QwpNodeOrphanDrainer {
   private async drainOne(directory: string): Promise<void> {
     let session: QwpNodeOrphanDrainSession | undefined;
     try {
-      session = await this.createSession(directory);
+      session = await this.createSession(directory, (event) =>
+        this.emitReconnectEvent(directory, event),
+      );
       if (this.closing) {
         await session.close(1001, "QWP orphan drainer is closing");
         return;
@@ -423,6 +438,8 @@ export class QwpNodeOrphanDrainer {
     kind: QwpNodeOrphanDrainEventKind,
     directory?: string,
     error?: Error,
+    attempt?: number,
+    episodeMs?: number,
   ): void {
     const senderError =
       kind === QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED && directory && error
@@ -433,10 +450,39 @@ export class QwpNodeOrphanDrainer {
       timestampMs: Date.now(),
       directory,
       error,
+      attempt,
+      episodeMs,
       senderError,
       metrics: this.metrics,
     });
     if (senderError) this.errorDispatcher?.offer(senderError);
+  }
+
+  private emitReconnectEvent(
+    directory: string,
+    event: QwpReconnectEvent,
+  ): void {
+    let kind: QwpNodeOrphanDrainEventKind | undefined;
+    switch (event.kind) {
+      case QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE:
+        kind = QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_UNAVAILABLE;
+        break;
+      case QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE:
+        kind = QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE;
+        break;
+      case QWP_RECONNECT_EVENT_KIND.PRIMARY_UNAVAILABLE:
+        kind = QWP_ORPHAN_DRAIN_EVENT_KIND.PRIMARY_UNAVAILABLE;
+        break;
+      default:
+        return;
+    }
+    this.emit(
+      kind,
+      directory,
+      event.cause instanceof Error ? event.cause : undefined,
+      event.attempt,
+      event.episodeMs,
+    );
   }
 }
 

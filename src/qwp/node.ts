@@ -30,6 +30,7 @@ import {
   QwpEgressRoutingOptions,
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
+  type QwpReconnectEvent,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
@@ -258,7 +259,10 @@ export interface QwpNodeStoreAndForwardOptions
   maxBackgroundDrainers?: number;
   /** Rescan cadence; zero scans only at startup. Defaults to 30 seconds. */
   orphanScanIntervalMs?: number;
-  /** Receives isolated scanner and drainer lifecycle notifications. */
+  /**
+   * Receives isolated scanner, drainer, durable-ACK capability-gap, and
+   * primary-unavailable lifecycle notifications.
+   */
   onOrphanDrainEvent?: (event: QwpNodeOrphanDrainEvent) => void;
   /**
    * Receives a data-loss notification when corrupt foreground replay bytes are
@@ -1011,7 +1015,7 @@ function createNodeOrphanDrainer(
     onSenderError: sessionOptions.onSenderError,
     eventInboxCapacity: sessionOptions.connectionListenerInboxCapacity,
     errorInboxCapacity: sessionOptions.errorInboxCapacity,
-    createSession: (directory) =>
+    createSession: (directory, onReconnectEvent) =>
       connectQwpNodeIngressInternal(
         {
           ...options,
@@ -1025,7 +1029,7 @@ function createNodeOrphanDrainer(
             initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
           },
         },
-        orphanIngressSessionOptions(sessionOptions),
+        orphanIngressSessionOptions(sessionOptions, onReconnectEvent),
         false,
       ),
   });
@@ -1033,21 +1037,41 @@ function createNodeOrphanDrainer(
 
 function orphanIngressSessionOptions(
   options: QwpIngressSessionOptions,
+  onReconnectEvent?: (event: QwpReconnectEvent) => void,
 ): QwpIngressSessionOptions {
+  const configuredReconnect =
+    options.reconnect === false ? undefined : options.reconnect;
+  const configuredOnEvent = configuredReconnect?.onEvent;
   return {
     ...options,
     // No foreground caller remains to retry orphan bytes, so transport
     // outages stay retryable for the drainer's lifetime. Authentication,
     // protocol, and poison-frame failures remain terminal and quarantined.
     reconnect: {
-      ...options.reconnect,
+      ...configuredReconnect,
       maxAttempts: 0,
       maxDurationMs: 0,
+      onEvent: (event) => {
+        try {
+          configuredOnEvent?.(event);
+        } catch {
+          // Reconnect observers cannot interrupt orphan recovery.
+        }
+        try {
+          onReconnectEvent?.(event);
+        } catch {
+          // Orphan lifecycle observers use their own bounded dispatcher.
+        }
+      },
     },
     replayStore: undefined,
     backgroundStoreAndForward: undefined,
     initialConnectMode: undefined,
     orphanStoreAndForward: true,
+    orphanDurableAckMismatchMaxDurationMs:
+      options.orphanDurableAckMismatchMaxDurationMs ??
+      configuredReconnect?.maxDurationMs ??
+      300_000,
     onResponse: undefined,
     onDurableAck: undefined,
     onProgress: undefined,
