@@ -296,9 +296,12 @@ try {
 }
 ```
 
-Zstd decoding is also included in the browser entry point. Browsers cannot set
-the `X-QWP-Accept-Encoding` upgrade header themselves, so a same-origin reverse
-proxy must add it when browser clients should opt into compression.
+Zstd decoding and negotiation are also included in the browser entry point.
+Because browsers cannot set the `X-QWP-Accept-Encoding` upgrade header, the
+client sends the same preference through the WebSocket URL's
+`qwp_accept_encoding` parameter. No proxy-injected compression header is
+required. Older servers ignore the parameter and safely continue with raw
+batches.
 
 Level `1` is the lowest-CPU default and is usually the right starting point.
 Higher values trade server CPU for wire size; the client accepts levels 1–22,
