@@ -241,6 +241,23 @@ export interface QwpUpgradeErrorDetails {
   cause?: unknown;
 }
 
+export const QWP_TARGET = {
+  ANY: "any",
+  PRIMARY: "primary",
+  REPLICA: "replica",
+} as const;
+
+/** Server role accepted by an egress connection. Defaults to `any`. */
+export type QwpTarget = (typeof QWP_TARGET)[keyof typeof QWP_TARGET];
+
+/** Browser-safe endpoint-routing controls used by QWP egress clients. */
+export interface QwpEgressRoutingOptions {
+  /** Selects any readable node, a primary/standalone node, or a replica. */
+  target?: QwpTarget;
+  /** Opaque, case-insensitive preferred zone; cross-zone fallback stays enabled. */
+  zone?: string;
+}
+
 /** A failure while establishing or validating a QWP WebSocket upgrade. */
 export class QwpUpgradeError extends Error {
   readonly kind: QwpUpgradeErrorKind;
@@ -286,6 +303,29 @@ export class QwpUpgradeError extends Error {
   }
 }
 
+/** A connected endpoint advertised a role that does not satisfy `target`. */
+export class QwpRoleMismatchError extends QwpUpgradeError {
+  constructor(
+    readonly target: QwpTarget,
+    serverRole: string | undefined,
+    url?: string | URL,
+    serverZone?: string,
+  ) {
+    super(
+      `QWP endpoint role does not match target [target=${target}, role=${serverRole ?? "unknown"}]`,
+      {
+        kind: QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED,
+        retryable: true,
+        tryNextEndpoint: true,
+        url,
+        serverRole,
+        serverZone,
+      },
+    );
+    this.name = "QwpRoleMismatchError";
+  }
+}
+
 /** A requested durable-ACK capability was not confirmed by the server. */
 export class QwpDurableAckUnavailableError extends QwpUpgradeError {
   constructor(readonly url: string | URL) {
@@ -316,6 +356,8 @@ export interface QwpHandshakeMetadata {
   readonly durableAckEnabled?: boolean;
   /** Server role advertised on a successful upgrade, when available. */
   readonly serverRole?: string;
+  /** Server zone advertised on a successful upgrade, when available. */
+  readonly serverZone?: string;
 }
 
 /**

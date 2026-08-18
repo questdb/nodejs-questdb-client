@@ -16,11 +16,13 @@ import {
   validateQwpWebSocketTimeouts,
 } from "./internal/websocket-connection";
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
+import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
 import {
   QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpConnectionFactory,
   QwpDurableAckUnavailableError,
+  QwpEgressRoutingOptions,
   QwpHandshakeMetadata,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
@@ -152,7 +154,9 @@ export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
   storeAndForward?: QwpNodeFileReplayStoreOptions;
 }
 
-export interface QwpNodeEgressOptions extends QwpNodeWebSocketOptions {
+export interface QwpNodeEgressOptions
+  extends QwpNodeWebSocketOptions,
+    QwpEgressRoutingOptions {
   /**
    * Requests Zstd-compressed result batches. The default is `raw`, which
    * preserves compatibility with servers that predate QWP compression.
@@ -166,7 +170,13 @@ export interface QwpNodeEgressOptions extends QwpNodeWebSocketOptions {
 function egressTransportOptions(
   options: QwpNodeEgressOptions,
 ): QwpNodeWebSocketOptions {
-  const { compression, compressionLevel = 1, ...transport } = options;
+  const compression = options.compression;
+  const compressionLevel = options.compressionLevel ?? 1;
+  const transport = { ...options };
+  delete transport.compression;
+  delete transport.compressionLevel;
+  delete transport.target;
+  delete transport.zone;
   const preference = compression ?? "raw";
   const acceptEncoding = encodeQwpAcceptEncoding(preference, compressionLevel);
 
@@ -311,6 +321,7 @@ function connectQwpNodeEndpoint(
         negotiatedCompression: decodeQwpContentEncoding(contentEncoding),
         durableAckEnabled,
         serverRole: headerValue(upgradeHeaders, "x-questdb-role"),
+        serverZone: headerValue(upgradeHeaders, "x-questdb-zone"),
       };
       return handshake;
     },
@@ -406,8 +417,15 @@ export async function connectQwpNodeEgress(
   options: QwpNodeEgressOptions,
   sessionOptions: QwpEgressSessionOptions = {},
 ): Promise<QwpEgressSession> {
+  const transport = egressTransportOptions(options);
   return QwpEgressSession.connect(
-    createQwpNodeConnectionFactory(egressTransportOptions(options)),
+    createQwpEgressFailoverConnectionFactory(
+      transport.url,
+      transport.failoverUrls,
+      (endpoint) => connectQwpNodeEndpoint(transport, endpoint),
+      { target: options.target, zone: options.zone },
+      sessionOptions.serverInfoTimeoutMs ?? 15_000,
+    ),
     sessionOptions,
   );
 }

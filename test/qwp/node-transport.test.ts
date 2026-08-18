@@ -10,22 +10,32 @@ import {
   connectQwpNodeWebSocket,
   createQwpNodeSender,
   encodeQwpFrame,
+  QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
+  QWP_SERVER_ROLE,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpByteWriter,
   QwpUpgradeError,
 } from "../../src/qwp/node";
 
-function serverInfo(): Uint8Array {
+function serverInfo(
+  role = QWP_SERVER_ROLE.STANDALONE,
+  zone?: string,
+): Uint8Array {
+  const capabilities = zone === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE;
   const payload = new QwpByteWriter()
     .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
-    .writeUint8(0)
+    .writeUint8(role)
     .writeBigUint64(1n)
-    .writeUint32(0)
+    .writeUint32(capabilities)
     .writeBigInt64(123n)
     .writeUint16(0)
     .writeUint16(0);
+  if (zone !== undefined) {
+    const encodedZone = new TextEncoder().encode(zone);
+    payload.writeUint16(encodedZone.length).writeBytes(encodedZone);
+  }
   return encodeQwpFrame(payload.toUint8Array());
 }
 
@@ -87,6 +97,7 @@ describe("QWP Node transport", () => {
       headers.push("X-QWP-Version: 1");
       headers.push("X-QWP-Max-Batch-Size: 64");
       headers.push("X-QuestDB-Role: primary");
+      headers.push("X-QuestDB-Zone: eu-west-1a");
       headers.push("X-QWP-Durable-Ack: enabled");
     });
     server.on("connection", (socket, request) => {
@@ -118,6 +129,7 @@ describe("QWP Node transport", () => {
         maxBatchSizeBytes: 64,
         durableAckEnabled: true,
         serverRole: "primary",
+        serverZone: "eu-west-1a",
       });
       expect(session.maxBatchSizeBytes).toBe(64);
       const ack = await session.sendFrame(Uint8Array.of(1));
@@ -195,6 +207,40 @@ describe("QWP Node transport", () => {
       isTopologicalRoleReject: false,
       isTransientRoleReject: true,
     } satisfies Partial<QwpUpgradeError>);
+  });
+
+  it("routes egress to the requested role using SERVER_INFO", async () => {
+    const primary = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    const replica = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    primary.on("connection", (socket) => {
+      socket.send(serverInfo(QWP_SERVER_ROLE.PRIMARY, "zone-b"));
+    });
+    replica.on("connection", (socket) => {
+      socket.send(serverInfo(QWP_SERVER_ROLE.REPLICA, "zone-a"));
+    });
+    await Promise.all([listen(primary), listen(replica)]);
+
+    const primaryAddress = primary.address() as AddressInfo;
+    const replicaAddress = replica.address() as AddressInfo;
+    const session = await connectQwpNodeEgress({
+      url: `ws://127.0.0.1:${primaryAddress.port}/read/v1`,
+      failoverUrls: [`ws://127.0.0.1:${replicaAddress.port}/read/v1`],
+      target: "replica",
+      zone: "ZONE-A",
+    });
+    try {
+      await expect(session.ready).resolves.toMatchObject({
+        role: QWP_SERVER_ROLE.REPLICA,
+        zoneId: "zone-a",
+      });
+      expect(session.handshake).toMatchObject({
+        serverRole: "REPLICA",
+        serverZone: "zone-a",
+      });
+    } finally {
+      await session.close();
+      await Promise.all([closeServer(primary), closeServer(replica)]);
+    }
   });
 
   it("fails over and replays an unacknowledged frame through the public Node API", async () => {

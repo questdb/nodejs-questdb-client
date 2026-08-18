@@ -7,6 +7,7 @@ import {
   validateQwpWebSocketTimeouts,
 } from "./internal/websocket-connection";
 import { createQwpFailoverConnectionFactory } from "./internal/failover";
+import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
 import {
   addQwpDurableAckWebSocketProtocol,
   isQwpDurableAckWebSocketProtocol,
@@ -16,6 +17,7 @@ import {
   QwpBinaryConnection,
   QwpConnectionFactory,
   QwpDurableAckUnavailableError,
+  QwpEgressRoutingOptions,
   QWP_UPGRADE_ERROR_KIND,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
@@ -273,6 +275,11 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
   ) => QwpWebSocketLike;
 }
 
+/** Browser WebSocket options plus protocol-level egress topology routing. */
+export interface QwpBrowserEgressOptions
+  extends QwpBrowserWebSocketOptions,
+    QwpEgressRoutingOptions {}
+
 /**
  * Opens a QWP-capable browser WebSocket.
  *
@@ -403,11 +410,17 @@ export async function connectQwpBrowserSender(
 
 /** Opens a browser WebSocket and waits for the egress SERVER_INFO handshake. */
 export async function connectQwpBrowserEgress(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserEgressOptions,
   sessionOptions: QwpEgressSessionOptions = {},
 ): Promise<QwpEgressSession> {
   return QwpEgressSession.connect(
-    createQwpBrowserConnectionFactory(options),
+    createQwpEgressFailoverConnectionFactory(
+      options.url,
+      options.failoverUrls,
+      (endpoint) => connectQwpBrowserEndpoint(options, endpoint),
+      { target: options.target, zone: options.zone },
+      sessionOptions.serverInfoTimeoutMs ?? 15_000,
+    ),
     sessionOptions,
   );
 }

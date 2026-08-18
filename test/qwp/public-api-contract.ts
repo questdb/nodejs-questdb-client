@@ -9,6 +9,7 @@ import {
 import type {
   QwpBrowserSessionBootstrapOptions,
   QwpBrowserSessionBootstrapResult,
+  QwpBrowserEgressOptions,
   QwpBrowserWebSocketOptions,
 } from "../../src/qwp/browser";
 import {
@@ -49,7 +50,7 @@ const browserIngressSignature: (
 ) => Promise<QwpIngressSession> = connectQwpBrowserIngress;
 
 const browserEgressSignature: (
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserEgressOptions,
   sessionOptions?: QwpEgressSessionOptions,
 ) => Promise<QwpEgressSession> = connectQwpBrowserEgress;
 
@@ -90,6 +91,19 @@ const egressSessionOptionsContract: QwpEgressSessionOptions = {
   cancelDrainTimeoutMs: 5_000,
 };
 
+const browserEgressOptionsContract: QwpBrowserEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  failoverUrls: ["wss://node-2.example/read/v1"],
+  target: "replica",
+  zone: "eu-west-1a",
+};
+
+const nodeEgressOptionsContract: QwpNodeEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  failoverUrls: ["wss://node-2.example/read/v1"],
+  target: "primary",
+};
+
 const qwpExtraOptionsContract: QwpExtraOptions = {
   webSocket: {
     requestDurableAck: true,
@@ -118,5 +132,7 @@ void nodeEgressSignature;
 void nodeWebSocketSignature;
 void queryOptionsContract;
 void egressSessionOptionsContract;
+void browserEgressOptionsContract;
+void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
 void Sender;

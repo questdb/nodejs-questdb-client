@@ -276,10 +276,15 @@ tracking is in memory only. Persistent store-and-forward is intentionally Node-o
 
 ### Reconnect, failover, and roles
 
-`failoverUrls` are attempted in order after the preferred URL. `reconnect` controls
-bounded exponential backoff and emits lifecycle events. Node ingress requires a
-persistent replay store when reconnect is enabled; browser ingress can only replay
-from memory for the lifetime of the page.
+The preferred URL and `failoverUrls` form one endpoint set. Endpoints are ranked by
+observed health (`healthy`, unknown, transient rejection, transport error, topology
+rejection) and then by zone affinity; configuration order breaks ties. Health outranks
+zone, so a known healthy cross-zone node is preferred to an untried local node. Every
+connection sweep can still try every endpoint, allowing role and health changes to
+recover. A non-orderly close demotes the selected endpoint before the next sweep.
+`reconnect` controls bounded exponential backoff and emits lifecycle events. Node
+ingress requires a persistent replay store when reconnect is enabled; browser ingress
+can only replay from memory for the lifetime of the page.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` controls the strike threshold and
@@ -340,6 +345,12 @@ import { connectQwpNodeEgress } from "@questdb/nodejs-client/qwp/node";
 const session = await connectQwpNodeEgress(
   {
     url: "wss://questdb.example:9000/read/v1",
+    failoverUrls: [
+      "wss://questdb-replica-2.example:9000/read/v1",
+      "wss://questdb-primary.example:9000/read/v1",
+    ],
+    target: "replica",
+    zone: "eu-west-1a",
     authorization: `Bearer ${token}`,
     compression: "zstd",
     compressionLevel: 3,
@@ -367,6 +378,14 @@ try {
   await session.close();
 }
 ```
+
+`target` accepts `any` (the default), `primary`, or `replica`. Primary routing also
+accepts standalone servers and a primary completing catch-up, matching the Java
+client. `zone` is an opaque, case-insensitive preference for `any` and `replica`;
+cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
+followed across zones. The client validates the authoritative role and zone from the
+first QWP `SERVER_INFO` frame before accepting an endpoint, so the same guarantees
+work in browsers even though browser WebSocket APIs hide upgrade response headers.
 
 Bind indexes are zero-based in the client: index `0` is SQL placeholder `$1`.
 `QwpBindValues` supports booleans, integer and floating-point values, dates,
@@ -418,6 +437,9 @@ readUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
 
 const session = await connectQwpBrowserEgress({
   url: readUrl,
+  failoverUrls: ["wss://replica-2.example/read/v1"],
+  target: "replica",
+  zone: "eu-west-1a",
   sessionBootstrap: {
     authentication: { type: "bearer", token: oidcOrRestAccessToken },
   },
@@ -431,6 +453,7 @@ The public error classes preserve enough context for policy decisions:
 | Error                              | Meaning                                                                                                     |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `QwpUpgradeError`                  | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
+| `QwpRoleMismatchError`             | A connected endpoint's advertised role does not satisfy the requested egress target                         |
 | `QwpDurableAckUnavailableError`    | Durable acknowledgement was required but not negotiated                                                     |
 | `QwpSendTimeoutError`              | A send did not drain before its deadline; delivery is unknown                                               |
 | `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |

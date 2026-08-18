@@ -14,6 +14,7 @@ import {
   QWP_COLUMN_TYPE,
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
+  QWP_SERVER_ROLE,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
@@ -39,6 +40,7 @@ import {
   writeQwpVarint,
 } from "../../src/qwp";
 import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
+import { createQwpEgressFailoverConnectionFactory } from "../../src/qwp/internal/egress-routing";
 import { createQwpFailoverConnectionFactory } from "../../src/qwp/internal/failover";
 
 function ingressResponse(
@@ -79,15 +81,23 @@ function writeUint16String(writer: QwpByteWriter, value: string): void {
   writer.writeUint16(bytes.length).writeBytes(bytes);
 }
 
-function serverInfo(node: string): Uint8Array {
+function serverInfo(
+  node: string,
+  role = QWP_SERVER_ROLE.STANDALONE,
+  zone?: string,
+): Uint8Array {
+  const capabilities =
+    QWP_EGRESS_CAPABILITY.QUERY_FLAGS |
+    (zone === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE);
   const payload = new QwpByteWriter()
     .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
-    .writeUint8(0)
+    .writeUint8(role)
     .writeBigUint64(1n)
-    .writeUint32(QWP_EGRESS_CAPABILITY.QUERY_FLAGS)
+    .writeUint32(capabilities)
     .writeBigInt64(123n);
   writeUint16String(payload, "cluster");
   writeUint16String(payload, node);
+  if (zone !== undefined) writeUint16String(payload, zone);
   return encodeQwpFrame(payload.toUint8Array());
 }
 
@@ -216,9 +226,10 @@ class FailOnceDictionaryReplayStore extends TrackingReplayStore {
 }
 
 describe("QWP endpoint failover", () => {
-  it("walks all endpoints and rotates away from the last successful one", async () => {
+  it("keeps a healthy endpoint sticky until a mid-stream failure", async () => {
     const attempts: string[] = [];
     let primaryAvailable = false;
+    let lastSecondary: FakeConnection | undefined;
     const factory = createQwpFailoverConnectionFactory(
       "primary",
       ["secondary"],
@@ -231,14 +242,136 @@ describe("QWP endpoint failover", () => {
             tryNextEndpoint: true,
           });
         }
-        return new FakeConnection(String(endpoint));
+        const connection = new FakeConnection(String(endpoint));
+        if (endpoint === "secondary") lastSecondary = connection;
+        return connection;
       },
     );
 
     await expect(factory()).resolves.toMatchObject({ endpoint: "secondary" });
     primaryAvailable = true;
+    const healthy = await factory();
+    expect(healthy).toMatchObject({ endpoint: "secondary" });
+    lastSecondary!.drop();
+    await Promise.resolve();
     await expect(factory()).resolves.toMatchObject({ endpoint: "primary" });
-    expect(attempts).toEqual(["primary", "secondary", "primary"]);
+    expect(attempts).toEqual(["primary", "secondary", "secondary", "primary"]);
+  });
+
+  it("validates target roles and continues the same endpoint sweep", async () => {
+    const attempts: string[] = [];
+    const primary = new FakeConnection("primary", {
+      qwpVersion: 1,
+      serverRole: "PRIMARY",
+      serverZone: "eu-west-1b",
+    });
+    const replica = new FakeConnection("replica", {
+      qwpVersion: 1,
+      serverRole: "REPLICA",
+      serverZone: "eu-west-1a",
+    });
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["replica"],
+      async (endpoint) => {
+        attempts.push(String(endpoint));
+        return endpoint === "primary" ? primary : replica;
+      },
+      { target: "replica", zone: "EU-WEST-1A" },
+    );
+
+    await expect(factory()).resolves.toMatchObject({ endpoint: "replica" });
+    await expect(primary.closed).resolves.toMatchObject({ code: 1000 });
+    expect(attempts).toEqual(["primary", "replica"]);
+  });
+
+  it("ranks health before zone and zone before endpoint order", async () => {
+    const attempts: string[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "remote",
+      ["local"],
+      async (endpoint) => {
+        attempts.push(String(endpoint));
+        return new FakeConnection(String(endpoint), {
+          qwpVersion: 1,
+          serverRole: "REPLICA",
+          serverZone: endpoint === "remote" ? "eu-west-1b" : "eu-west-1a",
+        });
+      },
+      { target: "replica", zone: "eu-west-1a" },
+    );
+
+    await expect(factory()).resolves.toMatchObject({ endpoint: "remote" });
+    await expect(factory()).resolves.toMatchObject({ endpoint: "remote" });
+    expect(attempts).toEqual(["remote", "remote"]);
+
+    const rejectedAttempts: string[] = [];
+    const rejected = createQwpFailoverConnectionFactory(
+      "remote",
+      ["local"],
+      async (endpoint) => {
+        rejectedAttempts.push(String(endpoint));
+        throw new QwpUpgradeError("role rejected", {
+          kind: QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED,
+          retryable: true,
+          tryNextEndpoint: true,
+          serverRole: "PRIMARY",
+          serverZone: endpoint === "remote" ? "eu-west-1b" : "eu-west-1a",
+        });
+      },
+      { target: "replica", zone: "eu-west-1a" },
+    );
+    await expect(rejected()).rejects.toBeDefined();
+    rejectedAttempts.length = 0;
+    await expect(rejected()).rejects.toBeDefined();
+    expect(rejectedAttempts).toEqual(["local", "remote"]);
+  });
+
+  it("demotes an endpoint when a send fails before the socket closes", async () => {
+    const attempts: string[] = [];
+    const primary = new FakeConnection("primary");
+    vi.spyOn(primary, "send").mockRejectedValueOnce(new Error("send failed"));
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      async (endpoint) => {
+        attempts.push(String(endpoint));
+        return endpoint === "primary"
+          ? primary
+          : new FakeConnection("secondary");
+      },
+    );
+
+    const connection = await factory();
+    await expect(connection.send(Uint8Array.of(1))).rejects.toThrow(
+      "send failed",
+    );
+    await expect(factory()).resolves.toMatchObject({ endpoint: "secondary" });
+    expect(attempts).toEqual(["primary", "secondary"]);
+  });
+
+  it("uses SERVER_INFO for browser-compatible role validation", async () => {
+    const primary = new FakeConnection("primary");
+    primary.receive(serverInfo("primary", QWP_SERVER_ROLE.PRIMARY, "zone-b"));
+    const replica = new FakeConnection("replica");
+    replica.receive(serverInfo("replica", QWP_SERVER_ROLE.REPLICA, "zone-a"));
+    const factory = createQwpEgressFailoverConnectionFactory(
+      "primary",
+      ["replica"],
+      async (endpoint) => (endpoint === "primary" ? primary : replica),
+      { target: "replica", zone: "zone-a" },
+      100,
+    );
+
+    const connection = await factory();
+    expect(connection.endpoint).toBe("replica");
+    expect(connection.handshake).toMatchObject({
+      serverRole: "REPLICA",
+      serverZone: "zone-a",
+    });
+    const first = await connection.messages[Symbol.asyncIterator]().next();
+    expect(first.done).toBe(false);
+    await expect(primary.closed).resolves.toMatchObject({ code: 1000 });
   });
 
   it("does not leak invalid credentials to another endpoint", async () => {
