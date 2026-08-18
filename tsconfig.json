@@ -1,5 +1,5 @@
 {
-  "include": ["src"],
+  "include": ["src", "test/qwp/public-api-contract.ts"],
   "compilerOptions": {
     "moduleResolution": "bundler",
     "module": "ESNext",

@@ -67,6 +67,9 @@ run().then(console.log).catch(console.error);
 
 ### QWP ingress from Node.js or a browser
 
+See the [complete QWP guide](./QWP.md) for ingress and egress APIs, browser
+authentication, delivery semantics, migration guidance, and the public API policy.
+
 Node.js applications can select QWP through the regular `Sender` API:
 
 ```typescript
