@@ -367,6 +367,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly defaultQueryTimeoutMs: number;
   private readonly defaultInitialCredit: number | bigint;
   private readonly cancelDrainTimeoutMs: number;
+  private readonly idleWaiters = new Set<() => void>();
   private active?: QwpEgressQuery;
   private nextRequestId = 0n;
   private sendTail: Promise<void> = Promise.resolve();
@@ -540,7 +541,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     try {
       await this.send(encodeQwpQueryRequest(request));
     } catch (error) {
-      if (this.active === query) this.active = undefined;
+      this.clearActive(query);
       query.fail(error);
       throw error;
     }
@@ -591,6 +592,28 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     return this.closePromise;
   }
 
+  /**
+   * Cancels and drains an active operation before a pooled lease is returned.
+   * False means the physical session is no longer safe to reuse.
+   *
+   * @internal
+   */
+  async prepareForPoolRelease(): Promise<boolean> {
+    if (this.failure || this.closing) return false;
+    const active = this.active;
+    if (!active) return true;
+    const idle = this.waitUntilIdle();
+    if (!active.retired) {
+      try {
+        await this.abandon(active.requestId);
+      } catch (error) {
+        this.fail(error);
+      }
+    }
+    await idle;
+    return !this.failure && !this.closing;
+  }
+
   private async closeNow(code: number, reason: string): Promise<void> {
     this.closing = true;
     clearTimeout(this.serverInfoTimer);
@@ -598,7 +621,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     const error = new QwpEgressSessionClosedError();
     this.rejectServerInfo(error);
     this.active?.fail(error);
-    this.active = undefined;
+    this.clearActive();
     let transportClose: Promise<void>;
     try {
       transportClose = this.connection.close(code, reason);
@@ -647,21 +670,21 @@ export class QwpEgressSession implements QwpEgressQueryControl {
           }
           case "result-end": {
             const query = this.requireActive(message.requestId);
-            this.active = undefined;
+            this.clearActive(query);
             this.clearCancelDrain(message.requestId);
             query.finish(message);
             break;
           }
           case "exec-done": {
             const query = this.requireActive(message.requestId);
-            this.active = undefined;
+            this.clearActive(query);
             this.clearCancelDrain(message.requestId);
             query.finish(message);
             break;
           }
           case "query-error": {
             const query = this.requireActive(message.requestId);
-            this.active = undefined;
+            this.clearActive(query);
             this.clearCancelDrain(message.requestId);
             query.fail(
               new QwpEgressQueryError(
@@ -787,6 +810,19 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     if (this.closing) throw new QwpEgressSessionClosedError();
   }
 
+  private clearActive(expected?: QwpEgressQuery): void {
+    if (expected && this.active !== expected) return;
+    if (!this.active) return;
+    this.active = undefined;
+    for (const resolve of this.idleWaiters) resolve();
+    this.idleWaiters.clear();
+  }
+
+  private waitUntilIdle(): Promise<void> {
+    if (!this.active) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.add(resolve));
+  }
+
   private fail(error: unknown): void {
     if (this.failure) return;
     clearTimeout(this.serverInfoTimer);
@@ -795,6 +831,6 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       error instanceof Error ? error : new Error(`QWP egress failed: ${error}`);
     this.rejectServerInfo(this.failure);
     this.active?.fail(this.failure);
-    this.active = undefined;
+    this.clearActive();
   }
 }

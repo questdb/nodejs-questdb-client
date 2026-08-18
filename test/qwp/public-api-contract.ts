@@ -2,11 +2,13 @@ import { Sender } from "../../src";
 import type { ExtraOptions, QwpExtraOptions } from "../../src";
 import {
   bootstrapQwpBrowserSession,
+  connectQwpBrowserClient,
   connectQwpBrowserEgress,
   connectQwpBrowserIngress,
   connectQwpBrowserSender,
 } from "../../src/qwp/browser";
 import type {
+  QwpBrowserClientOptions,
   QwpBrowserSessionBootstrapOptions,
   QwpBrowserSessionBootstrapResult,
   QwpBrowserEgressOptions,
@@ -14,17 +16,20 @@ import type {
 } from "../../src/qwp/browser";
 import {
   connectQwpNodeEgress,
+  connectQwpNodeClient,
   connectQwpNodeIngress,
   connectQwpNodeSender,
   connectQwpNodeWebSocket,
 } from "../../src/qwp/node";
 import type {
+  QwpNodeClientOptions,
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
   QwpNodeWebSocketOptions,
 } from "../../src/qwp/node";
 import type {
   QwpBinaryConnection,
+  QwpClient,
   QwpEgressQueryOptions,
   QwpEgressSession,
   QwpEgressSessionOptions,
@@ -58,6 +63,10 @@ const bootstrapSignature: (
   options: QwpBrowserSessionBootstrapOptions,
 ) => Promise<QwpBrowserSessionBootstrapResult> = bootstrapQwpBrowserSession;
 
+const browserClientSignature: (
+  options: QwpBrowserClientOptions,
+) => Promise<QwpClient> = connectQwpBrowserClient;
+
 const nodeSenderSignature: (
   options: QwpNodeIngressOptions,
   senderOptions?: QwpSenderOptions,
@@ -77,6 +86,10 @@ const nodeEgressSignature: (
 const nodeWebSocketSignature: (
   options: QwpNodeWebSocketOptions,
 ) => Promise<QwpBinaryConnection> = connectQwpNodeWebSocket;
+
+const nodeClientSignature: (
+  options: QwpNodeClientOptions,
+) => Promise<QwpClient> = connectQwpNodeClient;
 
 const queryOptionsContract: QwpEgressQueryOptions = {
   initialCredit: 1024,
@@ -126,10 +139,12 @@ void browserSenderSignature;
 void browserIngressSignature;
 void browserEgressSignature;
 void bootstrapSignature;
+void browserClientSignature;
 void nodeSenderSignature;
 void nodeIngressSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
+void nodeClientSignature;
 void queryOptionsContract;
 void egressSessionOptionsContract;
 void browserEgressOptionsContract;

@@ -25,6 +25,7 @@ import {
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 import { QwpSender, QwpSenderOptions } from "./sender";
+import { QwpClient, QwpClientPoolOptions } from "./client";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
 
@@ -280,6 +281,16 @@ export interface QwpBrowserEgressOptions
   extends QwpBrowserWebSocketOptions,
     QwpEgressRoutingOptions {}
 
+/** Browser configuration for a combined pooled QWP ingress/egress client. */
+export interface QwpBrowserClientOptions {
+  ingress: QwpBrowserWebSocketOptions;
+  egress: QwpBrowserEgressOptions;
+  sender?: QwpSenderOptions;
+  ingressSession?: QwpIngressSessionOptions;
+  egressSession?: QwpEgressSessionOptions;
+  pool?: QwpClientPoolOptions;
+}
+
 /**
  * Opens a QWP-capable browser WebSocket.
  *
@@ -423,4 +434,40 @@ export async function connectQwpBrowserEgress(
     ),
     sessionOptions,
   );
+}
+
+/** Creates a lazy browser QWP client with bounded sender and query pools. */
+export function createQwpBrowserClient(
+  options: QwpBrowserClientOptions,
+): QwpClient {
+  return new QwpClient(
+    {
+      createSender: async () => {
+        const sender = createQwpBrowserSender(
+          options.ingress,
+          options.sender,
+          options.ingressSession,
+        );
+        try {
+          await sender.connect();
+          return sender;
+        } catch (error) {
+          await sender.close().catch(() => undefined);
+          throw error;
+        }
+      },
+      createQuerySession: () =>
+        connectQwpBrowserEgress(options.egress, options.egressSession),
+    },
+    options.pool,
+  );
+}
+
+/** Creates and prewarms a combined browser QWP ingress/egress client. */
+export async function connectQwpBrowserClient(
+  options: QwpBrowserClientOptions,
+): Promise<QwpClient> {
+  const client = createQwpBrowserClient(options);
+  await client.connect();
+  return client;
 }

@@ -446,6 +446,86 @@ const session = await connectQwpBrowserEgress({
 });
 ```
 
+## Combined pooled client
+
+Use `QwpClient` when one long-lived application component needs both ingestion
+and concurrent queries. The Node and browser entry points provide configured
+factories; each borrowed handle exclusively owns one pooled WebSocket until its
+`close()` returns it:
+
+```typescript
+import { connectQwpNodeClient } from "@questdb/nodejs-client/qwp/node";
+
+const db = await connectQwpNodeClient({
+  ingress: {
+    url: "wss://questdb.example:9000/write/v4",
+    authorization: `Bearer ${token}`,
+  },
+  egress: {
+    url: "wss://questdb.example:9000/read/v1",
+    authorization: `Bearer ${token}`,
+    target: "replica",
+    zone: "eu-west-1a",
+  },
+  pool: {
+    senderPoolMin: 1,
+    senderPoolMax: 2,
+    queryPoolMin: 1,
+    queryPoolMax: 8,
+    acquireTimeoutMs: 5_000,
+  },
+});
+
+try {
+  const sender = await db.borrowSender();
+  try {
+    await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+  } finally {
+    // Flushes completed rows and returns the sender; the socket stays pooled.
+    await sender.close();
+  }
+
+  const [prices, volumes] = await Promise.all([
+    db.borrowQuery(),
+    db.borrowQuery(),
+  ]);
+  try {
+    // These use independent egress WebSockets and may execute concurrently.
+    const drain = async (lease, sql) => {
+      const query = await lease.query(sql);
+      for await (const batch of query) consume(batch);
+      await query.completion;
+    };
+    await Promise.all([
+      drain(prices, "select * from latest_prices"),
+      drain(volumes, "select * from hourly_volumes"),
+    ]);
+  } finally {
+    await Promise.all([prices.close(), volumes.close()]);
+  }
+} finally {
+  await db.close();
+}
+```
+
+`connectQwpNodeClient()` and `connectQwpBrowserClient()` prewarm each configured
+pool minimum. Their `createQwp*Client()` counterparts are lazy. Pools grow to
+their maximum under concurrent borrows and apply one FIFO acquisition deadline;
+exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
+but separate borrowed handles run concurrently. Returning a handle with an active
+query sends `CANCEL` and waits for the session's bounded cancellation drain; a
+connection that cannot drain is closed instead of being handed to another borrower.
+Call `QwpClient.close()` only after returning application-owned leases; shutdown
+rejects queued borrowers and closes every pooled connection, including one still
+leased by a caller.
+
+Pooled sender `close()` flushes completed rows, discards an unfinished row with a
+warning, and resets staging before reuse. With Node store-and-forward enabled, the
+configured directory is treated as a pool root and each stable sender slot owns a
+`sender-N` child directory, avoiding journal lock conflicts. A connected pooled
+client prewarms every persistent sender slot (overriding `senderPoolMin`) so journals
+left by previously busy slots are recovered even when current traffic is lower.
+
 ## Error handling and cleanup
 
 The public error classes preserve enough context for policy decisions:
@@ -454,6 +534,9 @@ The public error classes preserve enough context for policy decisions:
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `QwpUpgradeError`                  | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
 | `QwpRoleMismatchError`             | A connected endpoint's advertised role does not satisfy the requested egress target                         |
+| `QwpPoolAcquireTimeoutError`       | Every pooled connection is leased beyond the configured acquisition deadline                                |
+| `QwpPoolResourceError`             | Creating a new pooled sender or query connection failed                                                     |
+| `QwpClientClosedError`             | The pooled client or an individual returned lease is already closed                                         |
 | `QwpDurableAckUnavailableError`    | Durable acknowledgement was required but not negotiated                                                     |
 | `QwpSendTimeoutError`              | A send did not drain before its deadline; delivery is unknown                                               |
 | `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |

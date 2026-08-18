@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  connectQwpNodeClient,
   connectQwpNodeEgress,
   connectQwpNodeIngress,
   connectQwpNodeWebSocket,
@@ -17,6 +18,7 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QwpByteWriter,
   QwpUpgradeError,
+  writeQwpVarint,
 } from "../../src/qwp/node";
 
 function serverInfo(
@@ -73,6 +75,15 @@ function durableResponse(
     .writeUint16(1);
   writeTable(writer, table, sequenceTransaction);
   return writer.toUint8Array();
+}
+
+function resultEnd(requestId = 0n): Uint8Array {
+  const payload = new QwpByteWriter()
+    .writeUint8(QWP_EGRESS_MESSAGE.RESULT_END)
+    .writeBigUint64(requestId);
+  writeQwpVarint(payload, 0);
+  writeQwpVarint(payload, 0);
+  return encodeQwpFrame(payload.toUint8Array());
 }
 
 describe("QWP Node transport", () => {
@@ -240,6 +251,61 @@ describe("QWP Node transport", () => {
     } finally {
       await session.close();
       await Promise.all([closeServer(primary), closeServer(replica)]);
+    }
+  });
+
+  it("combines pooled ingress with concurrent borrowed query connections", async () => {
+    const endpoint = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    endpoint.on("connection", (socket, request) => {
+      if (request.url === "/read/v1") {
+        socket.send(serverInfo());
+        socket.on("message", () => socket.send(resultEnd()));
+      } else {
+        socket.on("message", () => socket.send(okResponse(0n, "trades", 1n)));
+      }
+    });
+    await listen(endpoint);
+    const address = endpoint.address() as AddressInfo;
+    const client = await connectQwpNodeClient({
+      ingress: {
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+      },
+      egress: {
+        url: `ws://127.0.0.1:${address.port}/read/v1`,
+      },
+      sender: { autoFlush: false },
+      pool: {
+        senderPoolMin: 1,
+        senderPoolMax: 1,
+        queryPoolMin: 1,
+        queryPoolMax: 2,
+      },
+    });
+    try {
+      const sender = await client.borrowSender();
+      await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+      await sender.close();
+
+      const [first, second] = await Promise.all([
+        client.borrowQuery(),
+        client.borrowQuery(),
+      ]);
+      try {
+        const [firstQuery, secondQuery] = await Promise.all([
+          first.query("select 1"),
+          second.query("select 2"),
+        ]);
+        await Promise.all([firstQuery.completion, secondQuery.completion]);
+        expect(client.metrics.queries).toMatchObject({
+          total: 2,
+          leased: 2,
+        });
+      } finally {
+        await Promise.all([first.close(), second.close()]);
+      }
+    } finally {
+      await client.close();
+      await closeServer(endpoint);
     }
   });
 

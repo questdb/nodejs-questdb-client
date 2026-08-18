@@ -7,6 +7,7 @@
  * @packageDocumentation
  */
 export * from "./core";
+export * from "./client";
 export * from "./egress-session";
 export * from "./ingress-session";
 export * from "./sender";

@@ -3,6 +3,7 @@ export * from "./index";
 
 import type { Agent } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
+import { join } from "node:path";
 import WebSocket from "ws";
 import {
   decodeQwpContentEncoding,
@@ -30,6 +31,7 @@ import {
 import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 import { QwpSender, QwpSenderOptions } from "./sender";
+import { QwpClient, QwpClientPoolOptions } from "./client";
 import { QwpNodeFileReplayStore } from "../qwp-node/file-replay-store";
 import type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
 
@@ -165,6 +167,16 @@ export interface QwpNodeEgressOptions
   compression?: QwpEgressCompression;
   /** Zstd level hint sent to the server. Must be between 1 and 22. */
   compressionLevel?: number;
+}
+
+/** Node configuration for a combined pooled QWP ingress/egress client. */
+export interface QwpNodeClientOptions {
+  ingress: QwpNodeIngressOptions;
+  egress: QwpNodeEgressOptions;
+  sender?: QwpSenderOptions;
+  ingressSession?: QwpIngressSessionOptions;
+  egressSession?: QwpEgressSessionOptions;
+  pool?: QwpClientPoolOptions;
 }
 
 function egressTransportOptions(
@@ -428,4 +440,69 @@ export async function connectQwpNodeEgress(
     ),
     sessionOptions,
   );
+}
+
+/** Creates a lazy Node QWP client with bounded sender and query pools. */
+export function createQwpNodeClient(options: QwpNodeClientOptions): QwpClient {
+  return new QwpClient(
+    {
+      createSender: async (slot) => {
+        const ingress = pooledNodeIngressOptions(options.ingress, slot);
+        const sender = createQwpNodeSender(
+          ingress,
+          options.sender,
+          options.ingressSession,
+        );
+        try {
+          await sender.connect();
+          return sender;
+        } catch (error) {
+          await sender.close().catch(() => undefined);
+          throw error;
+        }
+      },
+      createQuerySession: () =>
+        connectQwpNodeEgress(options.egress, options.egressSession),
+    },
+    pooledNodeClientOptions(options),
+  );
+}
+
+/** Creates and prewarms a combined Node QWP ingress/egress client. */
+export async function connectQwpNodeClient(
+  options: QwpNodeClientOptions,
+): Promise<QwpClient> {
+  const client = createQwpNodeClient(options);
+  await client.connect();
+  return client;
+}
+
+function pooledNodeClientOptions(
+  options: QwpNodeClientOptions,
+): QwpClientPoolOptions | undefined {
+  if (!options.ingress.storeAndForward) return options.pool;
+  const senderPoolMax = options.pool?.senderPoolMax ?? 4;
+  return {
+    ...options.pool,
+    senderPoolMin: senderPoolMax,
+    senderPoolMax,
+  };
+}
+
+function pooledNodeIngressOptions(
+  options: QwpNodeIngressOptions,
+  slot: number,
+): QwpNodeIngressOptions {
+  if (!options.storeAndForward) return options;
+  const rootDirectory = options.storeAndForward.directory.trim();
+  if (!rootDirectory) {
+    throw new RangeError("storeAndForward directory must not be empty");
+  }
+  return {
+    ...options,
+    storeAndForward: {
+      ...options.storeAndForward,
+      directory: join(rootDirectory, `sender-${slot}`),
+    },
+  };
 }

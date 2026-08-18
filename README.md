@@ -14,7 +14,7 @@ pnpm add @questdb/nodejs-client
 ## Compatibility table
 
 | QuestDB client version | Supported Node.js versions | Default HTTP Agent  |
-|------------------------|----------------------------|---------------------|
+| ---------------------- | -------------------------- | ------------------- |
 | ^4.0.0                 | v20 and above              | Undici Http Agent   |
 | ^3.0.0                 | v16 and above              | Standard Http Agent |
 
@@ -67,8 +67,9 @@ run().then(console.log).catch(console.error);
 
 ### QWP ingress from Node.js or a browser
 
-See the [complete QWP guide](./QWP.md) for ingress and egress APIs, browser
-authentication, delivery semantics, migration guidance, and the public API policy.
+See the [complete QWP guide](./QWP.md) for ingress and egress APIs, the combined
+pooled client, browser authentication, delivery semantics, migration guidance, and
+the public API policy.
 
 Node.js applications can select QWP through the regular `Sender` API:
 
@@ -323,7 +324,7 @@ async function run() {
   // pass the authentication details to the sender
   // for secure connection use 'https' protocol instead of 'http'
   const sender = await Sender.fromConfig(
-    `http::addr=127.0.0.1:9000;username=${USER};password=${PWD}`
+    `http::addr=127.0.0.1:9000;username=${USER};password=${PWD}`,
   );
 
   // add rows to the buffer of the sender
@@ -357,7 +358,7 @@ async function run() {
   // pass the authentication details to the sender
   // for secure connection use 'https' protocol instead of 'http'
   const sender = await Sender.fromConfig(
-    `http::addr=127.0.0.1:9000;token=${TOKEN}`
+    `http::addr=127.0.0.1:9000;token=${TOKEN}`,
   );
 
   // add rows to the buffer of the sender
@@ -391,7 +392,7 @@ async function run() {
 
   // pass the authentication details to the sender
   const sender = await Sender.fromConfig(
-    `tcp::addr=127.0.0.1:9009;username=${CLIENT_ID};token=${PRIVATE_KEY}`
+    `tcp::addr=127.0.0.1:9009;username=${CLIENT_ID};token=${PRIVATE_KEY}`,
   );
   await sender.connect();
 
@@ -421,42 +422,42 @@ import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
   // create a sender
-  const sender = await Sender.fromConfig('http::addr=localhost:9000');
+  const sender = await Sender.fromConfig("http::addr=localhost:9000");
 
   // order book snapshots to ingest
   const orderBooks = [
     {
-      symbol: 'BTC-USD',
-      exchange: 'Coinbase',
+      symbol: "BTC-USD",
+      exchange: "Coinbase",
       timestamp: Date.now(),
-      bidPrices: [50100.25, 50100.20, 50100.15, 50100.10, 50100.05],
+      bidPrices: [50100.25, 50100.2, 50100.15, 50100.1, 50100.05],
       bidSizes: [0.5, 1.2, 2.1, 0.8, 3.5],
-      askPrices: [50100.30, 50100.35, 50100.40, 50100.45, 50100.50],
-      askSizes: [0.6, 1.5, 1.8, 2.2, 4.0]
+      askPrices: [50100.3, 50100.35, 50100.4, 50100.45, 50100.5],
+      askSizes: [0.6, 1.5, 1.8, 2.2, 4.0],
     },
     {
-      symbol: 'ETH-USD',
-      exchange: 'Coinbase',
+      symbol: "ETH-USD",
+      exchange: "Coinbase",
       timestamp: Date.now(),
-      bidPrices: [2850.50, 2850.45, 2850.40, 2850.35, 2850.30],
+      bidPrices: [2850.5, 2850.45, 2850.4, 2850.35, 2850.3],
       bidSizes: [5.0, 8.2, 12.5, 6.8, 15.0],
-      askPrices: [2850.55, 2850.60, 2850.65, 2850.70, 2850.75],
-      askSizes: [4.5, 7.8, 10.2, 8.5, 20.0]
-    }
+      askPrices: [2850.55, 2850.6, 2850.65, 2850.7, 2850.75],
+      askSizes: [4.5, 7.8, 10.2, 8.5, 20.0],
+    },
   ];
 
   try {
     // add rows to the buffer of the sender
     for (const orderBook of orderBooks) {
       await sender
-        .table('order_book_l2')
-        .symbol('symbol', orderBook.symbol)
-        .symbol('exchange', orderBook.exchange)
-        .arrayColumn('bid_prices', orderBook.bidPrices)
-        .arrayColumn('bid_sizes', orderBook.bidSizes)
-        .arrayColumn('ask_prices', orderBook.askPrices)
-        .arrayColumn('ask_sizes', orderBook.askSizes)
-        .at(orderBook.timestamp, 'ms');
+        .table("order_book_l2")
+        .symbol("symbol", orderBook.symbol)
+        .symbol("exchange", orderBook.exchange)
+        .arrayColumn("bid_prices", orderBook.bidPrices)
+        .arrayColumn("bid_sizes", orderBook.bidSizes)
+        .arrayColumn("ask_prices", orderBook.askPrices)
+        .arrayColumn("ask_sizes", orderBook.askSizes)
+        .at(orderBook.timestamp, "ms");
     }
 
     // flush the buffer of the sender, sending the data to QuestDB

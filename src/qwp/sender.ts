@@ -803,6 +803,24 @@ export class QwpSender {
     return this.closePromise;
   }
 
+  /**
+   * Flushes completed rows and resets borrower-local staging without closing
+   * the physical session. Used by the pooled QWP client when a lease returns.
+   *
+   * @internal
+   */
+  async prepareForPoolRelease(): Promise<void> {
+    this.throwIfUnavailable();
+    await this.flush();
+    if (this.currentRow.size > 0) {
+      this.log(
+        "warn",
+        `QWP pooled sender is releasing an unfinished row with ${this.currentRow.size} column(s); the row will be discarded`,
+      );
+    }
+    this.reset();
+  }
+
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
