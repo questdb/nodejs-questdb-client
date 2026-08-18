@@ -342,6 +342,7 @@ export class QwpIngressSession {
   private failure?: Error;
   private closing = false;
   private closePromise?: Promise<void>;
+  private readonly closeHooks: (() => void | Promise<void>)[] = [];
   private readonly receiveLoop: Promise<void>;
 
   constructor(
@@ -769,6 +770,26 @@ export class QwpIngressSession {
     });
   }
 
+  /**
+   * Prompts the server to publish its latest durable-ingress watermarks.
+   * Node transports use a WebSocket PING; browsers send the protocol-level
+   * table-less durable-ACK poll frame.
+   */
+  pollDurableAck(): Promise<void> {
+    this.throwIfUnavailable();
+    return this.connection.ping
+      ? this.connection.ping()
+      : this.sendFrame(encodeQwpDurableAckPollFrame()).then(() => undefined);
+  }
+
+  /** @internal Registers runtime-specific cleanup owned by this session. */
+  registerCloseHook(hook: () => void | Promise<void>): void {
+    if (this.closing) {
+      throw new QwpIngressSessionClosedError();
+    }
+    this.closeHooks.push(hook);
+  }
+
   close(code = 1000, reason = ""): Promise<void> {
     if (!this.closePromise) this.closePromise = this.closeNow(code, reason);
     return this.closePromise;
@@ -778,6 +799,11 @@ export class QwpIngressSession {
     this.closing = true;
     this.clearDurablePoll();
     this.rejectAll(new QwpIngressSessionClosedError());
+    const closeHooks = this.closeHooks.splice(0).map((hook) =>
+      Promise.resolve()
+        .then(hook)
+        .catch(() => undefined),
+    );
     let transportClose: Promise<void>;
     try {
       transportClose = this.connection.close(code, reason);
@@ -788,6 +814,7 @@ export class QwpIngressSession {
       this.sendTail,
       transportClose,
       this.receiveLoop,
+      ...closeHooks,
     ]);
     if (closeResult.status === "rejected") throw closeResult.reason;
   }

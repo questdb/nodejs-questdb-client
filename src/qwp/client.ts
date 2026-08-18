@@ -31,6 +31,10 @@ export interface QwpClientPoolOptions {
 export interface QwpClientFactories {
   createSender(slot: number): Promise<QwpSender>;
   createQuerySession(slot: number): Promise<QwpEgressSession>;
+  /** @internal Starts runtime-specific background services on first use. */
+  start?(): void | Promise<void>;
+  /** @internal Stops runtime-specific background services during close. */
+  close?(): void | Promise<void>;
 }
 
 export interface QwpResourcePoolMetrics {
@@ -376,7 +380,10 @@ export class QwpClient {
   private readonly senderPool: QwpResourcePool<QwpSender>;
   private readonly queryPool: QwpResourcePool<QwpEgressSession>;
   private connectPromise?: Promise<this>;
+  private startPromise?: Promise<void>;
   private closePromise?: Promise<void>;
+  private readonly startFactories?: () => void | Promise<void>;
+  private readonly closeFactories?: () => void | Promise<void>;
   private closing = false;
   private closed = false;
 
@@ -401,6 +408,8 @@ export class QwpClient {
       factories.createQuerySession,
       (session) => session.close(),
     );
+    this.startFactories = factories.start;
+    this.closeFactories = factories.close;
   }
 
   /** Pre-connects the configured minimum sender and query pool sizes. */
@@ -421,6 +430,8 @@ export class QwpClient {
   /** Borrows an exclusive fluent sender; close() flushes and returns its slot. */
   async borrowSender(): Promise<QwpSender> {
     this.throwIfUnavailable();
+    await this.ensureStarted();
+    this.throwIfUnavailable();
     const entry = await this.senderPool.acquire();
     return createSenderLease(entry.value, async (reusable) => {
       await this.senderPool.release(entry, reusable);
@@ -429,6 +440,8 @@ export class QwpClient {
 
   /** Borrows one exclusive egress connection for one or more serial queries. */
   async borrowQuery(): Promise<QwpQueryLease> {
+    this.throwIfUnavailable();
+    await this.ensureStarted();
     this.throwIfUnavailable();
     const entry = await this.queryPool.acquire();
     return new QwpQueryLease(entry.value, async (reusable) => {
@@ -444,6 +457,8 @@ export class QwpClient {
   private async connectNow(): Promise<this> {
     this.throwIfUnavailable();
     try {
+      await this.ensureStarted();
+      this.throwIfUnavailable();
       await Promise.all([this.senderPool.prewarm(), this.queryPool.prewarm()]);
       return this;
     } catch (error) {
@@ -455,8 +470,22 @@ export class QwpClient {
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
-    await Promise.all([this.queryPool.close(), this.senderPool.close()]);
-    this.closed = true;
+    await this.startPromise?.catch(() => undefined);
+    try {
+      await Promise.resolve()
+        .then(() => this.closeFactories?.())
+        .catch(() => undefined);
+      await Promise.all([this.queryPool.close(), this.senderPool.close()]);
+    } finally {
+      this.closed = true;
+    }
+  }
+
+  private ensureStarted(): Promise<void> {
+    if (!this.startPromise) {
+      this.startPromise = Promise.resolve().then(() => this.startFactories?.());
+    }
+    return this.startPromise;
   }
 
   private throwIfUnavailable(): void {

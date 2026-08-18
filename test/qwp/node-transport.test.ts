@@ -17,6 +17,7 @@ import {
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpByteWriter,
+  QwpNodeFileReplayStore,
   QwpUpgradeError,
   writeQwpVarint,
 } from "../../src/qwp/node";
@@ -306,6 +307,82 @@ describe("QWP Node transport", () => {
     } finally {
       await client.close();
       await closeServer(endpoint);
+    }
+  });
+
+  it("background-drains an out-of-range pooled slot left by a failed producer", async () => {
+    const endpoint = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    endpoint.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Durable-Ack: enabled");
+    });
+    const received: Uint8Array[] = [];
+    let pingCount = 0;
+    endpoint.on("connection", (socket) => {
+      let sequence = 0n;
+      socket.on("message", (payload) => {
+        received.push(new Uint8Array(payload as Buffer));
+        socket.send(okResponse(sequence++, "trades", 1n));
+      });
+      socket.on("ping", () => {
+        pingCount++;
+        socket.send(durableResponse("trades", 1n));
+      });
+    });
+    await listen(endpoint);
+    const address = endpoint.address() as AddressInfo;
+    const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-pool-"));
+    const orphanDirectory = join(rootDirectory, "sender-3");
+    const orphan = new QwpNodeFileReplayStore({
+      directory: orphanDirectory,
+    });
+    await orphan.load();
+    await orphan.append({
+      frameSequence: 0n,
+      payload: Uint8Array.of(4, 5, 6),
+    });
+    await orphan.close();
+
+    const events: string[] = [];
+    const client = await connectQwpNodeClient({
+      ingress: {
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        requestDurableAck: true,
+        storeAndForward: {
+          directory: rootDirectory,
+          orphanScanIntervalMs: 0,
+          onOrphanDrainEvent: (event) => events.push(event.kind),
+        },
+      },
+      ingressSession: { durableAckKeepaliveMs: 10 },
+      egress: {
+        url: `ws://127.0.0.1:${address.port}/read/v1`,
+      },
+      pool: {
+        senderPoolMin: 1,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    });
+    try {
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await readdir(orphanDirectory)).filter((name) =>
+              name.endsWith(".qwp"),
+            ),
+          ).toEqual([]);
+          expect(events).toContain("drained");
+        },
+        { timeout: 2_000 },
+      );
+      expect(received).toContainEqual(Uint8Array.of(4, 5, 6));
+      expect(pingCount).toBeGreaterThan(0);
+    } finally {
+      await client.close();
+      await closeServer(endpoint);
+      await rm(rootDirectory, { recursive: true, force: true });
     }
   });
 

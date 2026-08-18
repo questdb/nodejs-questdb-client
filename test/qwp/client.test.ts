@@ -119,6 +119,38 @@ async function createQuerySession(
 }
 
 describe("QWP pooled client", () => {
+  it("starts and stops runtime background services exactly once", async () => {
+    let starts = 0;
+    let closes = 0;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+        start: async () => {
+          starts++;
+        },
+        close: async () => {
+          closes++;
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    );
+
+    await Promise.all([client.connect(), client.connect()]);
+    expect(starts).toBe(1);
+    await Promise.all([client.close(), client.close()]);
+    expect(closes).toBe(1);
+  });
+
   it("flushes and reuses an exclusively borrowed sender", async () => {
     const senderSessions: FakeSenderSession[] = [];
     let senderCreations = 0;

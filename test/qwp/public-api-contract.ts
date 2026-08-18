@@ -20,11 +20,15 @@ import {
   connectQwpNodeIngress,
   connectQwpNodeSender,
   connectQwpNodeWebSocket,
+  retryQwpNodeOrphanSlot,
+  scanQwpNodeOrphanSlots,
 } from "../../src/qwp/node";
 import type {
   QwpNodeClientOptions,
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
+  QwpNodeOrphanDrainEvent,
+  QwpNodeStoreAndForwardOptions,
   QwpNodeWebSocketOptions,
 } from "../../src/qwp/node";
 import type {
@@ -91,6 +95,22 @@ const nodeClientSignature: (
   options: QwpNodeClientOptions,
 ) => Promise<QwpClient> = connectQwpNodeClient;
 
+const nodeOrphanScanSignature: (
+  rootDirectory: string,
+  excludeSlot?: (slotName: string) => boolean,
+) => Promise<readonly string[]> = scanQwpNodeOrphanSlots;
+
+const nodeOrphanRetrySignature: (directory: string) => Promise<void> =
+  retryQwpNodeOrphanSlot;
+
+const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
+  directory: "/tmp/qwp-public-api-contract",
+  drainOrphans: true,
+  maxBackgroundDrainers: 2,
+  orphanScanIntervalMs: 30_000,
+  onOrphanDrainEvent: (event: QwpNodeOrphanDrainEvent) => void event.metrics,
+};
+
 const queryOptionsContract: QwpEgressQueryOptions = {
   initialCredit: 1024,
   autoCredit: true,
@@ -145,6 +165,9 @@ void nodeIngressSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
 void nodeClientSignature;
+void nodeOrphanScanSignature;
+void nodeOrphanRetrySignature;
+void nodeStoreAndForwardContract;
 void queryOptionsContract;
 void egressSessionOptionsContract;
 void browserEgressOptionsContract;

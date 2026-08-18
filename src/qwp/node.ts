@@ -3,7 +3,7 @@ export * from "./index";
 
 import type { Agent } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import WebSocket from "ws";
 import {
   decodeQwpContentEncoding,
@@ -34,6 +34,10 @@ import { QwpSender, QwpSenderOptions } from "./sender";
 import { QwpClient, QwpClientPoolOptions } from "./client";
 import { QwpNodeFileReplayStore } from "../qwp-node/file-replay-store";
 import type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
+import {
+  QwpNodeOrphanDrainer,
+  type QwpNodeOrphanDrainEvent,
+} from "../qwp-node/orphan-drainer";
 
 export {
   QwpNodeFileReplayStore,
@@ -42,6 +46,19 @@ export {
   QwpReplayStoreLockedError,
 } from "../qwp-node/file-replay-store";
 export type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
+export {
+  QWP_ORPHAN_DRAIN_EVENT_KIND,
+  QWP_ORPHAN_FAILED_SENTINEL,
+  QwpNodeOrphanDrainer,
+  retryQwpNodeOrphanSlot,
+  scanQwpNodeOrphanSlots,
+} from "../qwp-node/orphan-drainer";
+export type {
+  QwpNodeOrphanDrainEvent,
+  QwpNodeOrphanDrainEventKind,
+  QwpNodeOrphanDrainerMetrics,
+  QwpNodeOrphanDrainerOptions,
+} from "../qwp-node/orphan-drainer";
 
 export type { QwpWebSocketLike } from "./internal/websocket-connection";
 
@@ -153,7 +170,24 @@ export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
    * Enables persistent Node store-and-forward and ingress reconnection. Use a
    * directory owned exclusively by this ingress session.
    */
-  storeAndForward?: QwpNodeFileReplayStoreOptions;
+  storeAndForward?: QwpNodeStoreAndForwardOptions;
+}
+
+/** Node store-and-forward controls layered on the crash-safe replay journal. */
+export interface QwpNodeStoreAndForwardOptions
+  extends QwpNodeFileReplayStoreOptions {
+  /**
+   * Adopts sibling replay slots left by terminated producers. Standalone
+   * senders default this to false; pooled clients always recover their own
+   * out-of-range `sender-N` slots after a pool-size reduction.
+   */
+  drainOrphans?: boolean;
+  /** Maximum sibling slots drained concurrently. Defaults to 4. */
+  maxBackgroundDrainers?: number;
+  /** Rescan cadence; zero scans only at startup. Defaults to 30 seconds. */
+  orphanScanIntervalMs?: number;
+  /** Receives isolated scanner and drainer lifecycle notifications. */
+  onOrphanDrainEvent?: (event: QwpNodeOrphanDrainEvent) => void;
 }
 
 export interface QwpNodeEgressOptions
@@ -345,6 +379,14 @@ export async function connectQwpNodeIngress(
   options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpIngressSession> {
+  return connectQwpNodeIngressInternal(options, sessionOptions, true);
+}
+
+async function connectQwpNodeIngressInternal(
+  options: QwpNodeIngressOptions,
+  sessionOptions: QwpIngressSessionOptions,
+  startOrphanDrainer: boolean,
+): Promise<QwpIngressSession> {
   if (options.storeAndForward && sessionOptions.replayStore) {
     throw new RangeError(
       "storeAndForward and a custom replayStore cannot both be configured",
@@ -378,10 +420,19 @@ export async function connectQwpNodeIngress(
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : sessionOptions.durableAckKeepaliveMs,
   };
-  return QwpIngressSession.connect(
+  const orphanDrainer =
+    startOrphanDrainer && options.storeAndForward?.drainOrphans === true
+      ? createStandaloneOrphanDrainer(options, sessionOptions)
+      : undefined;
+  const session = await QwpIngressSession.connect(
     createQwpNodeConnectionFactory(options),
     effectiveSessionOptions,
   );
+  if (orphanDrainer) {
+    session.registerCloseHook(() => orphanDrainer.close());
+    orphanDrainer.start();
+  }
+  return session;
 }
 
 /**
@@ -444,6 +495,7 @@ export async function connectQwpNodeEgress(
 
 /** Creates a lazy Node QWP client with bounded sender and query pools. */
 export function createQwpNodeClient(options: QwpNodeClientOptions): QwpClient {
+  const orphanDrainer = createPooledOrphanDrainer(options);
   return new QwpClient(
     {
       createSender: async (slot) => {
@@ -463,6 +515,8 @@ export function createQwpNodeClient(options: QwpNodeClientOptions): QwpClient {
       },
       createQuerySession: () =>
         connectQwpNodeEgress(options.egress, options.egressSession),
+      start: () => orphanDrainer?.start(),
+      close: () => orphanDrainer?.close(),
     },
     pooledNodeClientOptions(options),
   );
@@ -503,6 +557,112 @@ function pooledNodeIngressOptions(
     storeAndForward: {
       ...options.storeAndForward,
       directory: join(rootDirectory, `sender-${slot}`),
+      // The client-level drainer owns sibling adoption. Per-sender scanners
+      // would contend with other managed pool slots during prewarm/borrows.
+      drainOrphans: false,
     },
   };
+}
+
+function createStandaloneOrphanDrainer(
+  options: QwpNodeIngressOptions,
+  sessionOptions: QwpIngressSessionOptions,
+): QwpNodeOrphanDrainer {
+  const storeAndForward = options.storeAndForward!;
+  const ownDirectory = storeAndForward.directory.trim();
+  return createNodeOrphanDrainer(
+    options,
+    sessionOptions,
+    dirname(ownDirectory),
+    (slotName) => slotName === basename(ownDirectory),
+  );
+}
+
+function createPooledOrphanDrainer(
+  options: QwpNodeClientOptions,
+): QwpNodeOrphanDrainer | undefined {
+  const storeAndForward = options.ingress.storeAndForward;
+  if (!storeAndForward) return undefined;
+  const rootDirectory = storeAndForward.directory.trim();
+  if (!rootDirectory) {
+    throw new RangeError("storeAndForward directory must not be empty");
+  }
+  const managedSlotCount = options.pool?.senderPoolMax ?? 4;
+  return createNodeOrphanDrainer(
+    options.ingress,
+    options.ingressSession ?? {},
+    rootDirectory,
+    (slotName) => {
+      const managedIndex = parseCanonicalSenderSlot(slotName);
+      if (managedIndex !== undefined && managedIndex < managedSlotCount) {
+        return true;
+      }
+      // Same-base slots outside the new pool range are always recovered. A
+      // caller must opt in before unrelated/legacy sibling names are adopted.
+      return (
+        managedIndex === undefined && storeAndForward.drainOrphans !== true
+      );
+    },
+  );
+}
+
+function createNodeOrphanDrainer(
+  options: QwpNodeIngressOptions,
+  sessionOptions: QwpIngressSessionOptions,
+  rootDirectory: string,
+  excludeSlot: (slotName: string) => boolean,
+): QwpNodeOrphanDrainer {
+  const storeAndForward = options.storeAndForward!;
+  return new QwpNodeOrphanDrainer({
+    rootDirectory,
+    excludeSlot,
+    maxConcurrent: storeAndForward.maxBackgroundDrainers,
+    scanIntervalMs: storeAndForward.orphanScanIntervalMs,
+    durableAckPollIntervalMs: options.requestDurableAck
+      ? (sessionOptions.durableAckKeepaliveMs ?? 200)
+      : 0,
+    onEvent: storeAndForward.onOrphanDrainEvent,
+    createSession: (directory) =>
+      connectQwpNodeIngressInternal(
+        {
+          ...options,
+          storeAndForward: {
+            directory,
+            maxBytes: storeAndForward.maxBytes,
+            drainOrphans: false,
+          },
+        },
+        orphanIngressSessionOptions(sessionOptions),
+        false,
+      ),
+  });
+}
+
+function orphanIngressSessionOptions(
+  options: QwpIngressSessionOptions,
+): QwpIngressSessionOptions {
+  return {
+    ...options,
+    // No foreground caller remains to retry orphan bytes, so transport
+    // outages stay retryable for the drainer's lifetime. Authentication,
+    // protocol, and poison-frame failures remain terminal and quarantined.
+    reconnect: {
+      ...options.reconnect,
+      maxAttempts: 0,
+      maxDurationMs: 0,
+    },
+    replayStore: undefined,
+    backgroundStoreAndForward: undefined,
+    onResponse: undefined,
+    onDurableAck: undefined,
+    onProgress: undefined,
+    onError: undefined,
+  };
+}
+
+function parseCanonicalSenderSlot(name: string): number | undefined {
+  const match = /^sender-(0|[1-9]\d*)$/.exec(name);
+  if (!match) return undefined;
+  const index = Number(match[1]);
+  return Number.isSafeInteger(index) ? index : undefined;
 }

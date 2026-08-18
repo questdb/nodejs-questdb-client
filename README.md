@@ -92,7 +92,13 @@ can start and accept flushes while QuestDB is offline. `flush()` then resolves
 after local durable journal publication and a background drainer reconnects
 and sends in order. Set `qwp.sender.awaitServerAck: true` to wait for the
 QuestDB ACK instead, or `awaitDurableAck: true` to wait through durable upload.
-This persistent mode is Node-only; browser senders continue to default to ACK waiting.
+Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
+the Node client scans and drains slots left by failed producer processes with bounded
+concurrency. Pooled QWP clients recover out-of-range `sender-N` slots automatically,
+including leftovers after `senderPoolMax` is reduced. Terminally bad slots are marked
+`.qwp.failed` for inspection and can be re-enabled with
+`retryQwpNodeOrphanSlot()`. This persistent mode is Node-only; browser senders
+continue to default to ACK waiting.
 
 Browser applications use the browser entry point, which has no Node.js
 dependencies. Cookies are supplied by the browser during a same-origin

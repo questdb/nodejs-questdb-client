@@ -70,8 +70,10 @@ const sender = await Sender.fromConfig(
         requestDurableAck: true,
         failoverUrls: ["wss://questdb-dr.example:9000/write/v4"],
         storeAndForward: {
-          directory: "/var/lib/my-service/qwp-replay",
+          directory: "/var/lib/my-service/qwp-replay/producer-a",
           maxBytes: 512 * 1024 * 1024,
+          drainOrphans: true,
+          maxBackgroundDrainers: 4,
         },
       },
       sender: {
@@ -112,6 +114,22 @@ or session closes. A second live process using the same directory fails with
 Locks left by a terminated process on the same host are recovered automatically;
 locks owned by a live local process, another host, or an unidentifiable owner fail
 closed.
+
+For a standalone sender, `drainOrphans: true` scans sibling directories beneath the
+configured journal directory's parent, excludes the sender's own directory, and
+adopts record-bearing slots left by failed producers. Adoption is lock-protected and
+uses an independent QWP connection per slot, bounded by `maxBackgroundDrainers` (4 by
+default). The scanner runs immediately and then every 30 seconds; set
+`orphanScanIntervalMs: 0` for a startup-only scan. Terminal recovery failures create
+`.qwp.failed` in the slot so a corrupt or permanently rejected head cannot cause a hot
+retry loop. After inspection or repair, call `retryQwpNodeOrphanSlot(slotDirectory)`
+to make it eligible again. `onOrphanDrainEvent` reports discovery, drain, lock
+contention, quarantine, and scanner failures without allowing callback exceptions to
+interrupt recovery.
+
+Keep sibling adoption off unless the parent is a dedicated store-and-forward group:
+every record-bearing child directory that is not the foreground slot is considered
+eligible. Browser senders never scan or persist local slots.
 
 An offline sender cannot inspect the server-advertised batch cap before its first
 publication. Set `qwp.session.maxBatchSizeBytes` to a value no greater than the
@@ -524,7 +542,11 @@ warning, and resets staging before reuse. With Node store-and-forward enabled, t
 configured directory is treated as a pool root and each stable sender slot owns a
 `sender-N` child directory, avoiding journal lock conflicts. A connected pooled
 client prewarms every persistent sender slot (overriding `senderPoolMin`) so journals
-left by previously busy slots are recovered even when current traffic is lower.
+left by previously busy slots are recovered even when current traffic is lower. A
+client-level orphan scanner also drains canonical `sender-N` slots outside the current
+pool range, covering restarts where `senderPoolMax` was reduced. This managed-slot
+recovery is automatic; `drainOrphans: true` additionally adopts noncanonical/legacy
+sibling slots beneath the pool root.
 
 ## Error handling and cleanup
 

@@ -52,7 +52,10 @@ const browserRuntimeContract = [
 ] as const;
 
 const nodeRuntimeContract = [
+  "QWP_ORPHAN_DRAIN_EVENT_KIND",
+  "QWP_ORPHAN_FAILED_SENTINEL",
   "QwpNodeFileReplayStore",
+  "QwpNodeOrphanDrainer",
   "QwpReplayStoreError",
   "QwpReplayStoreFullError",
   "QwpReplayStoreLockedError",
@@ -65,6 +68,8 @@ const nodeRuntimeContract = [
   "createQwpNodeConnectionFactory",
   "createQwpNodeClient",
   "createQwpNodeSender",
+  "retryQwpNodeOrphanSlot",
+  "scanQwpNodeOrphanSlots",
 ] as const;
 
 function assertRuntimeContract(
