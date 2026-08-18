@@ -62,6 +62,23 @@ class RetriableIngressNackError extends Error {
   }
 }
 
+class RetriableIngressConnectionError extends Error {
+  readonly cause: unknown;
+
+  constructor(
+    readonly retryDelayMs: number,
+    cause: unknown,
+  ) {
+    super(
+      cause instanceof Error
+        ? cause.message
+        : `QWP ingress connection was lost: ${cause}`,
+    );
+    this.name = "RetriableIngressConnectionError";
+    this.cause = cause;
+  }
+}
+
 class QwpMemoryReplayStore implements QwpIngressReplayStore {
   private readonly records = new Map<bigint, Uint8Array>();
   private readonly symbols: string[] = [];
@@ -119,6 +136,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly maxBackoffMs: number;
   private readonly maxDurationMs: number;
   private readonly maxFrameRejections: number;
+  private readonly poisonMinEscalationWindowMs: number;
   private readonly localMaxBatchSizeBytes?: number;
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   private connection?: QwpBinaryConnection;
@@ -129,9 +147,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private nextFrameSequence = 0n;
   private nextClientSequence = 0n;
   private acknowledgedFrameSequence = -1n;
-  private rejectedFrameSequence?: bigint;
+  private highestOkFrameSequence = -1n;
+  private poisonFrameSequence?: bigint;
+  private poisonFirstStrikeMs = 0;
+  private poisonStrikes = 0;
+  private progressAtLastExemptRecycle = -1n;
+  private zeroProgressRecycles = 0;
   private recoveredDiscardTail?: RecoveredDiscardTail;
-  private rejectionCount = 0;
   private generation = 0;
   private sendTail: Promise<void> = Promise.resolve();
   private drainTail: Promise<void> = Promise.resolve();
@@ -173,12 +195,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? 5_000;
     this.maxDurationMs = reconnectOptions.maxDurationMs ?? 30_000;
     this.maxFrameRejections = reconnectOptions.maxFrameRejections ?? 4;
+    this.poisonMinEscalationWindowMs =
+      reconnectOptions.poisonMinEscalationWindowMs ?? 5_000;
     validateReconnectPolicy(
       this.maxAttempts,
       this.initialBackoffMs,
       this.maxBackoffMs,
       this.maxDurationMs,
       this.maxFrameRejections,
+      this.poisonMinEscalationWindowMs,
     );
     let resolveClosed!: (info: QwpConnectionCloseInfo) => void;
     this.closed = new Promise((resolve) => {
@@ -395,11 +420,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       });
     }
 
-    if (
-      initialCause instanceof RetriableIngressNackError &&
-      initialCause.retryDelayMs > 0
-    ) {
-      await this.waitForBackoff(initialCause.retryDelayMs);
+    const initialRetryDelayMs = reconnectDelayMs(initialCause);
+    if (initialRetryDelayMs > 0) {
+      await this.waitForBackoff(initialRetryDelayMs);
     }
 
     while (!this.closing) {
@@ -530,17 +553,58 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   ): Promise<void> {
     try {
       for await (const payload of connection.messages) {
-        if (this.closing || this.connection !== connection) return;
-        const translated = await this.translateResponse(payload);
+        if (
+          this.closing ||
+          this.connection !== connection ||
+          generation !== this.generation
+        ) {
+          return;
+        }
+        let translated: Uint8Array | undefined;
+        try {
+          translated = await this.translateResponse(payload);
+        } catch (error) {
+          if (
+            error instanceof RetriableIngressNackError ||
+            error instanceof QwpProtocolError ||
+            error instanceof QwpReplayRejectedError
+          ) {
+            throw error;
+          }
+          // The wire payload decoded successfully. Failures from this point
+          // are local replay-store/bookkeeping failures, not evidence that
+          // the server rejected the head frame.
+          this.failTerminal(error);
+          await connection
+            .close(1011, "QWP ingress response processing failed")
+            .catch(() => undefined);
+          return;
+        }
         if (translated) this.messagesQueue.push(translated);
         if (this.terminalError) return;
       }
-      if (this.closing || this.connection !== connection) return;
+      if (
+        this.closing ||
+        this.connection !== connection ||
+        generation !== this.generation
+      ) {
+        return;
+      }
       const info = await connection.closed;
-      await this.requestReconnect(
+      const cause = this.classifyConnectionLoss(
         new QwpSendClosedError(info),
-        connection,
-      ).catch((reconnectError) => this.failTerminal(reconnectError));
+        info,
+      );
+      if (cause instanceof QwpProtocolError) {
+        this.failTerminal(cause);
+        await connection
+          .close(1002, "poisoned QWP ingress frame")
+          .catch(() => undefined);
+        return;
+      }
+      await this.requestReconnect(cause, connection).catch((reconnectError) =>
+        this.failTerminal(reconnectError),
+      );
       return;
     } catch (error) {
       if (
@@ -560,7 +624,21 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           .catch(() => undefined);
         return;
       }
-      await this.requestReconnect(error, connection).catch((reconnectError) => {
+      const cause =
+        error instanceof RetriableIngressNackError
+          ? error
+          : this.classifyConnectionLoss(
+              error,
+              error instanceof QwpSendClosedError ? error.closeInfo : undefined,
+            );
+      if (cause instanceof QwpProtocolError) {
+        this.failTerminal(cause);
+        await connection
+          .close(1002, "poisoned QWP ingress frame")
+          .catch(() => undefined);
+        return;
+      }
+      await this.requestReconnect(cause, connection).catch((reconnectError) => {
         this.failTerminal(reconnectError);
       });
     }
@@ -583,17 +661,35 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (response.sequence === null) {
       throw new QwpProtocolError("QWP response is missing its wire sequence");
     }
-    if (
-      response.sequence < 0n ||
-      response.sequence > BigInt(Number.MAX_SAFE_INTEGER)
-    ) {
+    if (response.sequence < 0n) {
       throw new QwpProtocolError(
-        `QWP response sequence is outside the safe range: ${response.sequence}`,
+        `QWP response sequence is negative: ${response.sequence}`,
       );
     }
-    const wireIndex = Number(response.sequence);
+    if (this.wireFrames.length === 0) {
+      if (response.status === QWP_STATUS.OK) return undefined;
+      this.totalServerNacks++;
+      if (isRetriableIngressStatus(response.status)) {
+        throw new RetriableIngressNackError(
+          -1n,
+          response.status,
+          this.nextExemptRecycleDelay(),
+          response.errorMessage,
+        );
+      }
+      throw new QwpProtocolError(
+        `QuestDB rejected ingress before any frame was sent [status=0x${response.status.toString(16)}]${
+          response.errorMessage ? `: ${response.errorMessage}` : ""
+        }`,
+      );
+    }
+    const highestWireIndex = this.wireFrames.length - 1;
+    const wireIndex = Number(
+      response.sequence > BigInt(highestWireIndex)
+        ? BigInt(highestWireIndex)
+        : response.sequence,
+    );
     const frame = this.wireFrames[wireIndex];
-    if (!frame) return undefined;
 
     if (response.status === QWP_STATUS.OK) {
       if (frame.dictionaryCatchup) return undefined;
@@ -604,13 +700,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           candidate.clientSequence !== undefined && !candidate.ackDelivered,
       );
       for (const candidate of covered) candidate.ackDelivered = true;
-      if (
-        this.rejectedFrameSequence !== undefined &&
-        frame.frameSequence >= this.rejectedFrameSequence
-      ) {
-        this.rejectedFrameSequence = undefined;
-        this.rejectionCount = 0;
+      if (frame.frameSequence > this.highestOkFrameSequence) {
+        this.highestOkFrameSequence = frame.frameSequence;
       }
+      this.clearPoisonThrough(frame.frameSequence);
       if (this.handshake.durableAckEnabled) {
         frame.durableTargets = new Map(
           response.tables.map((table) => [
@@ -631,36 +724,45 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.totalServerNacks++;
 
     if (isRetriableIngressStatus(response.status)) {
-      const sameFrame = this.rejectedFrameSequence === frame.frameSequence;
-      this.rejectedFrameSequence = frame.frameSequence;
-      this.rejectionCount = sameFrame ? this.rejectionCount + 1 : 1;
-      const notWritable = response.status === QWP_STATUS.NOT_WRITABLE;
-      if (!notWritable && this.rejectionCount >= this.maxFrameRejections) {
+      const exempt =
+        frame.dictionaryCatchup || response.status === QWP_STATUS.NOT_WRITABLE;
+      if (exempt) {
+        throw new RetriableIngressNackError(
+          frame.frameSequence,
+          response.status,
+          this.nextExemptRecycleDelay(),
+          response.errorMessage,
+        );
+      }
+      if (this.recordPoisonStrike(frame.frameSequence)) {
         throw new QwpReplayRejectedError(
           frame.frameSequence,
           response.status,
-          `frame remained rejected after ${this.rejectionCount} attempts${
+          `frame remained rejected after ${this.poisonStrikes} attempts${
             response.errorMessage ? `: ${response.errorMessage}` : ""
           }`,
         );
       }
-      const exponent = notWritable
-        ? Math.max(this.rejectionCount - 2, 0)
-        : this.rejectionCount - 1;
-      const retryDelayMs =
-        notWritable && this.rejectionCount === 1
-          ? 0
-          : cappedExponentialBackoff(
-              this.initialBackoffMs,
-              this.maxBackoffMs,
-              exponent,
-            );
       throw new RetriableIngressNackError(
         frame.frameSequence,
         response.status,
-        retryDelayMs,
+        cappedExponentialBackoff(
+          this.initialBackoffMs,
+          this.maxBackoffMs,
+          this.poisonStrikes - 1,
+        ),
         response.errorMessage,
       );
+    }
+
+    if (frame.dictionaryCatchup) {
+      const error = new QwpProtocolError(
+        `QuestDB rejected QWP symbol dictionary catch-up [status=0x${response.status.toString(16)}]${
+          response.errorMessage ? `: ${response.errorMessage}` : ""
+        }`,
+      );
+      this.failTerminal(error);
+      return undefined;
     }
 
     const replayError = new QwpReplayRejectedError(
@@ -691,6 +793,91 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       lastCovered = frame.frameSequence;
     }
     if (lastCovered !== undefined) await this.acknowledgeThrough(lastCovered);
+  }
+
+  private clearPoisonThrough(frameSequence: bigint): void {
+    if (
+      this.poisonFrameSequence === undefined ||
+      frameSequence < this.poisonFrameSequence
+    ) {
+      return;
+    }
+    this.poisonFrameSequence = undefined;
+    this.poisonFirstStrikeMs = 0;
+    this.poisonStrikes = 0;
+  }
+
+  private recordPoisonStrike(frameSequence: bigint): boolean {
+    const now = Date.now();
+    if (this.poisonFrameSequence === frameSequence) {
+      this.poisonStrikes++;
+    } else {
+      this.poisonFrameSequence = frameSequence;
+      this.poisonStrikes = 1;
+      this.poisonFirstStrikeMs = now;
+    }
+    return (
+      this.poisonStrikes >= this.maxFrameRejections &&
+      now - this.poisonFirstStrikeMs >= this.poisonMinEscalationWindowMs
+    );
+  }
+
+  private classifyConnectionLoss(
+    cause: unknown,
+    closeInfo?: QwpConnectionCloseInfo,
+  ): Error {
+    const orderly = closeInfo?.code === 1000 || closeInfo?.code === 1001;
+    const head = orderly ? undefined : this.currentPoisonHead();
+    if (!head) {
+      return new RetriableIngressConnectionError(
+        this.nextExemptRecycleDelay(),
+        cause,
+      );
+    }
+    if (this.recordPoisonStrike(head.frameSequence)) {
+      const closeDetail = closeInfo
+        ? `code=${closeInfo.code}, reason=${closeInfo.reason}`
+        : "transport ended without an orderly close";
+      return new QwpProtocolError(
+        `QWP ingress frame repeatedly caused a non-orderly connection loss [frameSequence=${head.frameSequence}, strikes=${this.poisonStrikes}, ${closeDetail}]`,
+      );
+    }
+    return new RetriableIngressConnectionError(
+      cappedExponentialBackoff(
+        this.initialBackoffMs,
+        this.maxBackoffMs,
+        this.poisonStrikes - 1,
+      ),
+      cause,
+    );
+  }
+
+  private currentPoisonHead(): ReplayFrame | undefined {
+    const progress =
+      this.highestOkFrameSequence > this.acknowledgedFrameSequence
+        ? this.highestOkFrameSequence
+        : this.acknowledgedFrameSequence;
+    return this.wireFrames.find(
+      (frame) => !frame.dictionaryCatchup && frame.frameSequence > progress,
+    );
+  }
+
+  private nextExemptRecycleDelay(): number {
+    const progress =
+      this.highestOkFrameSequence > this.acknowledgedFrameSequence
+        ? this.highestOkFrameSequence
+        : this.acknowledgedFrameSequence;
+    if (progress > this.progressAtLastExemptRecycle) {
+      this.zeroProgressRecycles = 0;
+    }
+    this.progressAtLastExemptRecycle = progress;
+    const level = this.zeroProgressRecycles++;
+    if (level === 0) return 0;
+    return cappedExponentialBackoff(
+      this.initialBackoffMs,
+      this.maxBackoffMs,
+      level - 1,
+    );
   }
 
   private async acknowledgeThrough(frameSequence: bigint): Promise<void> {
@@ -1059,6 +1246,7 @@ function validateReconnectPolicy(
   maxBackoffMs: number,
   maxDurationMs: number,
   maxFrameRejections: number,
+  poisonMinEscalationWindowMs: number,
 ): void {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 0) {
     throw new RangeError(
@@ -1069,6 +1257,7 @@ function validateReconnectPolicy(
     ["initialBackoffMs", initialBackoffMs],
     ["maxBackoffMs", maxBackoffMs],
     ["maxDurationMs", maxDurationMs],
+    ["poisonMinEscalationWindowMs", poisonMinEscalationWindowMs],
   ] as const) {
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError(
@@ -1095,7 +1284,16 @@ function isRetryableReconnectError(error: unknown): boolean {
       isRetryableReconnectError(attempt.error),
     );
   }
-  return !(error instanceof QwpReplayRejectedError);
+  return !(
+    error instanceof QwpReplayRejectedError || error instanceof QwpProtocolError
+  );
+}
+
+function reconnectDelayMs(error: unknown): number {
+  return error instanceof RetriableIngressNackError ||
+    error instanceof RetriableIngressConnectionError
+    ? error.retryDelayMs
+    : 0;
 }
 
 function isRetriableIngressStatus(status: number): boolean {

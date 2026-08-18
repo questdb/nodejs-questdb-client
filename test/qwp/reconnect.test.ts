@@ -25,6 +25,7 @@ import {
   QwpIngressReplayRecord,
   QwpIngressReplayStore,
   QwpHandshakeMetadata,
+  QwpProtocolError,
   QwpSymbolDictionary,
   QwpTableBuffer,
   QwpReconnectEvent,
@@ -639,6 +640,7 @@ describe("QWP ingress reconnect and replay", () => {
         reconnect: {
           maxAttempts: 1,
           maxFrameRejections: 2,
+          poisonMinEscalationWindowMs: 0,
           initialBackoffMs: 0,
           maxBackoffMs: 0,
         },
@@ -652,6 +654,184 @@ describe("QWP ingress reconnect and replay", () => {
 
     await expect(pending).rejects.toBeInstanceOf(QwpReplayRejectedError);
     expect(connections).toHaveLength(0);
+    await session.close();
+  });
+
+  it("allows a suspect frame to recover inside the poison dwell window", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const third = new FakeConnection("primary");
+    const connections = [first, second, third];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          maxFrameRejections: 2,
+          poisonMinEscalationWindowMs: 10_000,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.receive(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n));
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    second.receive(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n));
+    await vi.waitFor(() => expect(third.sent).toHaveLength(1));
+    third.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    await session.close();
+  });
+
+  it("does not count NOT_WRITABLE as a poison-frame strike", async () => {
+    const first = new FakeConnection("replica");
+    const second = new FakeConnection("primary");
+    const connections = [first, second];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          maxFrameRejections: 1,
+          poisonMinEscalationWindowMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.receive(ingressResponse(QWP_STATUS.NOT_WRITABLE, 0n));
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    second.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    await session.close();
+  });
+
+  it("stops replaying a head frame that repeatedly causes non-orderly closes", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const replayStore = new TrackingReplayStore();
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        replayStore,
+        reconnect: {
+          maxAttempts: 1,
+          maxFrameRejections: 2,
+          poisonMinEscalationWindowMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.drop();
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    second.drop();
+
+    await expect(pending).rejects.toThrow(/frameSequence=0, strikes=2/);
+    await expect(pending).rejects.toBeInstanceOf(QwpProtocolError);
+    expect(connections).toHaveLength(0);
+    expect(Array.from(replayStore.records.keys())).toEqual([0n]);
+    await session.close();
+  });
+
+  it("does not count orderly ingress closes as poison-frame strikes", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          maxFrameRejections: 1,
+          poisonMinEscalationWindowMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    await first.close(1001, "rolling restart");
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    second.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    await session.close();
+  });
+
+  it("does not reconnect after a malformed ingress response", async () => {
+    const connection = new FakeConnection("primary");
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 3,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+    connection.receive(Uint8Array.of(QWP_STATUS.OK));
+
+    await expect(pending).rejects.toBeInstanceOf(QwpProtocolError);
+    expect(factoryCalls).toBe(1);
+    await session.close();
+  });
+
+  it("clamps an ingress ACK to the highest wire sequence sent", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
+    });
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 999n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
     await session.close();
   });
 

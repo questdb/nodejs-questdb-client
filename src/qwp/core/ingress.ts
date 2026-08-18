@@ -673,7 +673,7 @@ export function decodeQwpIngressResponse(
 
   const messageLength = reader.readUint16("NACK message length");
   if (messageLength > QWP_MAX_ERROR_MESSAGE_LENGTH) {
-    throw new Error(
+    throw new QwpProtocolError(
       `QWP error message exceeds ${QWP_MAX_ERROR_MESSAGE_LENGTH} bytes`,
     );
   }

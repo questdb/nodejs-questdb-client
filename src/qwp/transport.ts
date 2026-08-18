@@ -195,6 +195,12 @@ export interface QwpReconnectOptions {
    * as poison and retained for inspection. Defaults to 4.
    */
   maxFrameRejections?: number;
+  /**
+   * Minimum time the same ingress frame must remain suspect before repeated
+   * rejections or non-orderly closes become terminal. Defaults to 5s; zero
+   * escalates as soon as maxFrameRejections is reached.
+   */
+  poisonMinEscalationWindowMs?: number;
   onEvent?: (event: QwpReconnectEvent) => void;
 }
 

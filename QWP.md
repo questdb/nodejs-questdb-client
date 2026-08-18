@@ -273,6 +273,13 @@ bounded exponential backoff and emits lifecycle events. Node ingress requires a
 persistent replay store when reconnect is enabled; browser ingress can only replay
 from memory for the lifetime of the page.
 
+Ingress also detects a replay head that is repeatedly NACKed or followed by a
+non-orderly WebSocket close. `maxFrameRejections` controls the strike threshold and
+`poisonMinEscalationWindowMs` (5 seconds by default) prevents a brief outage from
+being mistaken for a deterministic poison frame. Normal and going-away closes,
+`NOT_WRITABLE`, and retriable symbol-dictionary catch-up rejections are retried with
+pacing but do not count as poison strikes.
+
 Node.js sees the rejected upgrade status and `X-QuestDB-Role`, so a read-only replica
 or catching-up primary can be classified and skipped. Browsers deliberately expose
 an opaque upgrade error because their WebSocket API hides the HTTP response. Avoid
