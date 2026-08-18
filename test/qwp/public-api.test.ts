@@ -13,6 +13,8 @@ const sharedRuntimeContract = [
   "QwpBindValues",
   "QwpDurableAckUnavailableError",
   "QwpEgressQuery",
+  "QwpEgressQueryAbandonedError",
+  "QwpEgressQueryCancelTimeoutError",
   "QwpEgressQueryError",
   "QwpEgressQueryTimeoutError",
   "QwpEgressReplayRequiredError",

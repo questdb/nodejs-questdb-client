@@ -31,6 +31,8 @@ export interface QwpEgressSessionOptions {
   serverInfoTimeoutMs?: number;
   /** Default per-query deadline. Zero or undefined disables query deadlines. */
   queryTimeoutMs?: number;
+  /** Maximum wait for a terminal response after CANCEL. Defaults to 5 seconds. */
+  cancelDrainTimeoutMs?: number;
   /** Enables bounded reconnects. Active operations replay only with onReplayReset. */
   reconnect?: QwpReconnectOptions;
   /**
@@ -64,6 +66,7 @@ export interface QwpEgressQueryOptions {
 interface QwpValidatedEgressSessionOptions {
   readonly serverInfoTimeoutMs: number;
   readonly queryTimeoutMs: number;
+  readonly cancelDrainTimeoutMs: number;
 }
 
 function validateOptionalTimeout(
@@ -92,7 +95,18 @@ function validateEgressSessionOptions(
       options.queryTimeoutMs,
       "queryTimeoutMs",
     ),
+    cancelDrainTimeoutMs: validatePositiveTimeout(
+      options.cancelDrainTimeoutMs ?? 5_000,
+      "cancelDrainTimeoutMs",
+    ),
   };
+}
+
+function validatePositiveTimeout(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`${name} must be a positive finite number`);
+  }
+  return value;
 }
 
 export type QwpQueryCompletion = QwpResultEndMessage | QwpExecDoneMessage;
@@ -119,6 +133,27 @@ export class QwpEgressQueryTimeoutError extends Error {
   }
 }
 
+/** Result iteration ended before the server completed the query. */
+export class QwpEgressQueryAbandonedError extends Error {
+  constructor(readonly requestId: bigint) {
+    super(`QWP query result was abandoned [requestId=${requestId}]`);
+    this.name = "QwpEgressQueryAbandonedError";
+  }
+}
+
+/** The server did not terminate a cancelled query within the drain deadline. */
+export class QwpEgressQueryCancelTimeoutError extends Error {
+  constructor(
+    readonly requestId: bigint,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `QWP cancelled query did not terminate after ${timeoutMs}ms [requestId=${requestId}]`,
+    );
+    this.name = "QwpEgressQueryCancelTimeoutError";
+  }
+}
+
 export class QwpEgressSessionClosedError extends Error {
   constructor(readonly closeInfo?: QwpConnectionCloseInfo) {
     super(
@@ -132,6 +167,7 @@ export class QwpEgressSessionClosedError extends Error {
 
 interface QwpEgressQueryControl {
   cancel(requestId: bigint): Promise<void>;
+  abandon(requestId: bigint): Promise<void>;
   grantCredit(
     requestId: bigint,
     additionalBytes: number | bigint,
@@ -157,6 +193,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   constructor(
     readonly requestId: bigint,
     private readonly control: QwpEgressQueryControl,
+    private readonly creditEnabled: boolean,
     private readonly autoCredit: boolean,
   ) {
     let resolve!: (value: QwpQueryCompletion) => void;
@@ -181,6 +218,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
         if (result.done) return { value: undefined, done: true };
         this.deliveredCreditBytes = result.value.creditBytes;
         return { value: result.value.batch, done: false };
+      },
+      return: async () => {
+        if (this.terminal) this.discardBufferedResults();
+        else await this.control.abandon(this.requestId);
+        return { value: undefined, done: true };
       },
     };
   }
@@ -228,11 +270,22 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.rejectCompletion(error);
   }
 
-  /** @internal Discards queued results and surfaces a deadline immediately. */
-  expire(error: QwpEgressQueryTimeoutError): void {
-    if (this.terminal) return;
-    this.batches.clear();
+  /** @internal Discards queued results and retires the consumer immediately. */
+  retire(error: Error): number {
+    if (this.terminal) return 0;
+    const discardedCredit = this.discardBufferedResults();
     this.fail(error);
+    return discardedCredit;
+  }
+
+  /** @internal Whether the consumer has retired while the wire still drains. */
+  get retired(): boolean {
+    return this.terminal;
+  }
+
+  /** @internal Credit needed to discard a late batch while cancellation drains. */
+  lateBatchCredit(creditBytes: number): number {
+    return this.creditEnabled ? creditBytes : 0;
   }
 
   /** @internal */
@@ -245,6 +298,15 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     if (!this.timeoutTimer) return;
     clearTimeout(this.timeoutTimer);
     this.timeoutTimer = undefined;
+  }
+
+  private discardBufferedResults(): number {
+    let creditBytes = this.deliveredCreditBytes;
+    this.deliveredCreditBytes = 0;
+    for (const queued of this.batches.clear()) {
+      creditBytes += queued.creditBytes;
+    }
+    return this.creditEnabled ? creditBytes : 0;
   }
 
   private async releaseDeliveredCredit(): Promise<void> {
@@ -275,6 +337,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly rejectServerInfo: (error: unknown) => void;
   private readonly serverInfoTimer: ReturnType<typeof setTimeout>;
   private readonly defaultQueryTimeoutMs: number;
+  private readonly cancelDrainTimeoutMs: number;
   private active?: QwpEgressQuery;
   private nextRequestId = 0n;
   private sendTail: Promise<void> = Promise.resolve();
@@ -282,6 +345,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private failure?: Error;
   private closing = false;
   private closePromise?: Promise<void>;
+  private cancelDrainRequestId?: bigint;
+  private cancelDrainTimer?: ReturnType<typeof setTimeout>;
   readonly ready: Promise<QwpServerInfoMessage>;
 
   constructor(
@@ -310,6 +375,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       throw error;
     }
     this.defaultQueryTimeoutMs = validated.queryTimeoutMs;
+    this.cancelDrainTimeoutMs = validated.cancelDrainTimeoutMs;
     let resolve!: (value: QwpServerInfoMessage) => void;
     let reject!: (error: unknown) => void;
     this.ready = new Promise<QwpServerInfoMessage>((res, rej) => {
@@ -422,6 +488,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     const query = new QwpEgressQuery(
       requestId,
       this,
+      creditEnabled,
       creditEnabled && (options.autoCredit ?? true),
     );
     this.decoder.resetQuerySchema();
@@ -450,7 +517,15 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   cancel(requestId: bigint): Promise<void> {
     this.requireActive(requestId);
-    return this.send(encodeQwpCancel(requestId));
+    return this.cancelAndDrain(requestId, 0);
+  }
+
+  abandon(requestId: bigint): Promise<void> {
+    const query = this.requireActive(requestId);
+    const discardedCredit = query.retire(
+      new QwpEgressQueryAbandonedError(requestId),
+    );
+    return this.cancelAndDrain(requestId, discardedCredit);
   }
 
   grantCredit(
@@ -458,14 +533,21 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     additionalBytes: number | bigint,
   ): Promise<void> {
     this.requireActive(requestId);
-    return this.send(encodeQwpCredit(requestId, additionalBytes));
+    return this.sendWhileActive(
+      requestId,
+      encodeQwpCredit(requestId, additionalBytes),
+    );
   }
 
   expire(requestId: bigint, timeoutMs: number): void {
     if (!this.active || this.active.requestId !== requestId) return;
-    this.active.expire(new QwpEgressQueryTimeoutError(requestId, timeoutMs));
+    const discardedCredit = this.active.retire(
+      new QwpEgressQueryTimeoutError(requestId, timeoutMs),
+    );
     try {
-      void this.send(encodeQwpCancel(requestId)).catch(() => undefined);
+      void this.cancelAndDrain(requestId, discardedCredit).catch(
+        () => undefined,
+      );
     } catch (error) {
       this.fail(error);
     }
@@ -479,6 +561,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private async closeNow(code: number, reason: string): Promise<void> {
     this.closing = true;
     clearTimeout(this.serverInfoTimer);
+    this.clearCancelDrain();
     const error = new QwpEgressSessionClosedError();
     this.rejectServerInfo(error);
     this.active?.fail(error);
@@ -515,24 +598,38 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             break;
           case "result-batch": {
             const query = this.requireActive(message.requestId);
-            query.push(this.decoder.decode(message), payload.byteLength);
+            const batch = this.decoder.decode(message);
+            if (query.retired) {
+              const creditBytes = query.lateBatchCredit(payload.byteLength);
+              if (creditBytes > 0) {
+                void this.sendWhileActive(
+                  message.requestId,
+                  encodeQwpCredit(message.requestId, creditBytes),
+                ).catch(() => undefined);
+              }
+            } else {
+              query.push(batch, payload.byteLength);
+            }
             break;
           }
           case "result-end": {
             const query = this.requireActive(message.requestId);
             this.active = undefined;
+            this.clearCancelDrain(message.requestId);
             query.finish(message);
             break;
           }
           case "exec-done": {
             const query = this.requireActive(message.requestId);
             this.active = undefined;
+            this.clearCancelDrain(message.requestId);
             query.finish(message);
             break;
           }
           case "query-error": {
             const query = this.requireActive(message.requestId);
             this.active = undefined;
+            this.clearCancelDrain(message.requestId);
             query.fail(
               new QwpEgressQueryError(
                 message.requestId,
@@ -573,10 +670,79 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     this.active?.resetForReplay();
   }
 
+  private cancelAndDrain(
+    requestId: bigint,
+    discardedCredit: number,
+  ): Promise<void> {
+    this.armCancelDrain(requestId);
+    const cancelling = this.sendWhileActive(
+      requestId,
+      encodeQwpCancel(requestId),
+    );
+    if (discardedCredit === 0) return cancelling;
+    return cancelling.then(() =>
+      this.sendWhileActive(
+        requestId,
+        encodeQwpCredit(requestId, discardedCredit),
+      ),
+    );
+  }
+
+  private armCancelDrain(requestId: bigint): void {
+    if (this.cancelDrainRequestId === requestId && this.cancelDrainTimer)
+      return;
+    this.clearCancelDrain();
+    this.cancelDrainRequestId = requestId;
+    this.cancelDrainTimer = setTimeout(() => {
+      this.cancelDrainTimer = undefined;
+      this.cancelDrainRequestId = undefined;
+      if (!this.active || this.active.requestId !== requestId) return;
+      const error = new QwpEgressQueryCancelTimeoutError(
+        requestId,
+        this.cancelDrainTimeoutMs,
+      );
+      this.fail(error);
+      try {
+        void this.connection
+          .close(1011, "QWP cancellation drain timed out")
+          .catch(() => undefined);
+      } catch {
+        // The typed cancellation failure remains the session's terminal error.
+      }
+    }, this.cancelDrainTimeoutMs);
+  }
+
+  private clearCancelDrain(requestId?: bigint): void {
+    if (
+      requestId !== undefined &&
+      this.cancelDrainRequestId !== undefined &&
+      requestId !== this.cancelDrainRequestId
+    ) {
+      return;
+    }
+    if (this.cancelDrainTimer) clearTimeout(this.cancelDrainTimer);
+    this.cancelDrainTimer = undefined;
+    this.cancelDrainRequestId = undefined;
+  }
+
   private send(payload: Uint8Array): Promise<void> {
     this.throwIfUnavailable();
     const sending = this.sendTail.then(async () => {
       this.throwIfUnavailable();
+      await this.connection.send(payload);
+    });
+    this.sendTail = sending.catch((error: unknown) => this.fail(error));
+    return sending;
+  }
+
+  private sendWhileActive(
+    requestId: bigint,
+    payload: Uint8Array,
+  ): Promise<void> {
+    this.throwIfUnavailable();
+    const sending = this.sendTail.then(async () => {
+      this.throwIfUnavailable();
+      if (!this.active || this.active.requestId !== requestId) return;
       await this.connection.send(payload);
     });
     this.sendTail = sending.catch((error: unknown) => this.fail(error));
@@ -591,6 +757,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private fail(error: unknown): void {
     if (this.failure) return;
     clearTimeout(this.serverInfoTimer);
+    this.clearCancelDrain();
     this.failure =
       error instanceof Error ? error : new Error(`QWP egress failed: ${error}`);
     this.rejectServerInfo(this.failure);

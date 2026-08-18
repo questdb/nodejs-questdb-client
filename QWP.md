@@ -367,8 +367,16 @@ a slow consumer limits server read-ahead. Set `autoCredit: false` and call
 A session `queryTimeoutMs` supplies the default deadline; per-query `timeoutMs`
 overrides it, and zero disables it. Expiry rejects iteration and `completion` with
 `QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and drains the terminal response
-before the connection accepts another query. Call `query.cancel()` for explicit
-cancellation.
+before the connection accepts another query. Breaking out of `for await` early also
+discards buffered batches, restores their flow-control credit, sends `CANCEL`, and
+rejects `completion` with `QwpEgressQueryAbandonedError`. Call `query.cancel()` for
+explicit cancellation.
+
+Cancellation draining is bounded by `cancelDrainTimeoutMs` (5 seconds by default).
+Late batches are decoded and credited while the terminal response is pending. If the
+server does not terminate the query within the bound, the client fails with
+`QwpEgressQueryCancelTimeoutError` and closes the unusable connection instead of
+leaving the session permanently occupied.
 
 Node.js can request Zstd with `compression: "zstd"` or `"auto"` and a level from 1
 through 22. Raw remains the compatibility default. Check
@@ -403,20 +411,22 @@ const session = await connectQwpBrowserEgress({
 
 The public error classes preserve enough context for policy decisions:
 
-| Error                           | Meaning                                                                                                     |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `QwpUpgradeError`               | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
-| `QwpDurableAckUnavailableError` | Durable acknowledgement was required but not negotiated                                                     |
-| `QwpSendTimeoutError`           | A send did not drain before its deadline; delivery is unknown                                               |
-| `QwpIngressNackError`           | QuestDB rejected an ingress frame                                                                           |
-| `QwpBatchTooLargeError`         | One encoded row cannot fit the effective ingress cap                                                        |
-| `QwpReconnectExhaustedError`    | The configured reconnect boundary was reached                                                               |
-| `QwpReplayRejectedError`        | A replayed frame was rejected and retained for inspection                                                   |
-| `QwpReplayStoreFullError`       | The Node.js replay journal reached its configured size                                                      |
-| `QwpReplayStoreLockedError`     | Another process owns the configured Node.js replay directory                                                |
-| `QwpEgressQueryError`           | QuestDB returned a terminal query error                                                                     |
-| `QwpEgressQueryTimeoutError`    | The client deadline expired and cancellation began                                                          |
-| `QwpEgressReplayRequiredError`  | Re-execution needs an explicit reset callback                                                               |
+| Error                              | Meaning                                                                                                     |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `QwpUpgradeError`                  | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
+| `QwpDurableAckUnavailableError`    | Durable acknowledgement was required but not negotiated                                                     |
+| `QwpSendTimeoutError`              | A send did not drain before its deadline; delivery is unknown                                               |
+| `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |
+| `QwpBatchTooLargeError`            | One encoded row cannot fit the effective ingress cap                                                        |
+| `QwpReconnectExhaustedError`       | The configured reconnect boundary was reached                                                               |
+| `QwpReplayRejectedError`           | A replayed frame was rejected and retained for inspection                                                   |
+| `QwpReplayStoreFullError`          | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreLockedError`        | Another process owns the configured Node.js replay directory                                                |
+| `QwpEgressQueryError`              | QuestDB returned a terminal query error                                                                     |
+| `QwpEgressQueryAbandonedError`     | Result iteration ended before the server completed the query                                                |
+| `QwpEgressQueryTimeoutError`       | The client deadline expired and cancellation began                                                          |
+| `QwpEgressQueryCancelTimeoutError` | A cancelled query did not produce a terminal server response before the drain deadline                      |
+| `QwpEgressReplayRequiredError`     | Re-execution needs an explicit reset callback                                                               |
 
 Always close senders and sessions in `finally`. Closing is idempotent and bounded by
 `closeTimeoutMs`. `connectTimeoutMs`, `sendTimeoutMs`, acknowledgement timeouts, and

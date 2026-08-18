@@ -48,11 +48,14 @@ export class QwpAsyncQueue<T> implements AsyncIterable<T> {
     for (const pending of this.pending.splice(0)) pending.reject(error);
   }
 
-  /** Drops values not yet handed to the single consumer. */
-  clear(): void {
+  /** Drops and returns values not yet handed to the single consumer. */
+  clear(): T[] {
+    const dropped: T[] = [];
     for (const entry of this.values.splice(0)) {
-      if (entry.kind === "barrier") entry.resolve();
+      if (entry.kind === "value") dropped.push(entry.value);
+      else entry.resolve();
     }
+    return dropped;
   }
 
   /** Resolves once the consumer asks for the item after this queue position. */

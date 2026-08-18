@@ -84,6 +84,11 @@ const queryOptionsContract: QwpEgressQueryOptions = {
   binds: (binds) => binds.setVarchar(0, "ETH-USD"),
 };
 
+const egressSessionOptionsContract: QwpEgressSessionOptions = {
+  queryTimeoutMs: 30_000,
+  cancelDrainTimeoutMs: 5_000,
+};
+
 const qwpExtraOptionsContract: QwpExtraOptions = {
   webSocket: {
     requestDurableAck: true,
@@ -111,5 +116,6 @@ void nodeIngressSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
 void queryOptionsContract;
+void egressSessionOptionsContract;
 void rootExtraOptionsContract;
 void Sender;

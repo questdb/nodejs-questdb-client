@@ -302,7 +302,10 @@ credit explicitly through `query.grantCredit()`.
 `timeoutMs` overrides it, and zero disables the deadline. When a deadline
 expires, the client rejects iteration and `query.completion` with
 `QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and waits for the terminal
-server response before accepting another query on that connection.
+server response before accepting another query on that connection. Breaking out
+of `for await` early cancels the query too. `cancelDrainTimeoutMs` bounds that
+wait (5 seconds by default); an unresponsive cancellation closes the connection
+with `QwpEgressQueryCancelTimeoutError` instead of wedging the session.
 
 ### Authentication and secure connection
 
