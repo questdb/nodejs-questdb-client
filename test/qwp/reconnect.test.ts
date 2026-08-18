@@ -441,13 +441,18 @@ describe("QWP ingress reconnect and replay", () => {
       pendingReplayFrames: 2,
       totalFramesSent: 0,
     });
+    expect(session.publishedFrameSequence).toBe(1n);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
+    const acknowledged = session.waitForAcknowledged(1n, 1_000);
 
     releaseOnline();
     await vi.waitFor(() =>
       expect(connection.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]),
     );
     connection.receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await expect(acknowledged).resolves.toBeUndefined();
     await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+    expect(session.acknowledgedFrameSequence).toBe(1n);
     expect(session.metrics).toMatchObject({
       acknowledgedSequence: 1n,
       pendingReplayFrames: 0,
@@ -996,20 +1001,29 @@ describe("QWP ingress reconnect and replay", () => {
     connection.receive(ingressResponse(QWP_STATUS.OK, 2n, [["trades", 50n]]));
     await expect(Promise.all(responses)).resolves.toHaveLength(3);
     expect(Array.from(replayStore.records.keys())).toEqual([0n, 1n, 2n]);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
+    let watermarkSettled = false;
+    const watermark = session.waitForAcknowledged(2n, 1_000).then(() => {
+      watermarkSettled = true;
+    });
 
     connection.receive(durableResponse([["trades", 41n]]));
     await vi.waitFor(() => expect(session.metrics.totalDurableAcks).toBe(1));
     expect(Array.from(replayStore.records.keys())).toEqual([0n, 1n, 2n]);
+    expect(watermarkSettled).toBe(false);
 
     connection.receive(durableResponse([["trades", 42n]]));
     await vi.waitFor(() =>
       expect(Array.from(replayStore.records.keys())).toEqual([2n]),
     );
     expect(session.metrics.replayAcknowledgedFrameSequence).toBe(1n);
+    expect(watermarkSettled).toBe(false);
 
     connection.receive(durableResponse([["trades", 50n]]));
+    await watermark;
     await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
     expect(session.metrics.replayAcknowledgedFrameSequence).toBe(2n);
+    expect(session.acknowledgedFrameSequence).toBe(2n);
     await session.close();
   });
 
@@ -1188,12 +1202,15 @@ describe("QWP ingress reconnect and replay", () => {
       pendingReplayFrames: 0,
       totalFramesReplayed: 1,
     });
+    expect(session.publishedFrameSequence).toBe(7n);
+    expect(session.acknowledgedFrameSequence).toBe(7n);
 
     const currentFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
     const current = session.sendFrame(currentFrame);
     await vi.waitFor(() =>
       expect(connection.sent).toEqual([committed, currentFrame]),
     );
+    expect(session.publishedFrameSequence).toBe(8n);
     connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["trades", 43n]]));
     await expect(current).resolves.toMatchObject({ sequence: 0n });
     connection.receive(durableResponse([["trades", 43n]]));
@@ -1202,6 +1219,7 @@ describe("QWP ingress reconnect and replay", () => {
         (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
       ).toEqual([]),
     );
+    expect(session.acknowledgedFrameSequence).toBe(8n);
     await session.close();
     await rm(directory, { recursive: true, force: true });
   });

@@ -24,6 +24,7 @@ const sharedRuntimeContract = [
   "QwpEgressReplayRequiredError",
   "QwpEgressSession",
   "QwpIngressNackError",
+  "QwpIngressAckTimeoutError",
   "QwpIngressSession",
   "QwpProtocolError",
   "QwpPoolAcquireTimeoutError",

@@ -50,6 +50,8 @@ export interface QwpSenderOptions {
 /** The subset of QwpIngressSession used by QwpSender. */
 export interface QwpSenderSession {
   readonly metrics?: QwpIngressMetrics;
+  readonly publishedFrameSequence?: bigint;
+  readonly acknowledgedFrameSequence?: bigint;
   sendTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
@@ -65,6 +67,10 @@ export interface QwpSenderSession {
   publishTablesDelta?(
     tables: readonly QwpTableBuffer[],
     options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): Promise<void>;
+  waitForAcknowledged?(
+    targetSequence: bigint,
+    timeoutMs?: number,
   ): Promise<void>;
   waitForDurable(
     response: QwpIngressResponse,
@@ -106,6 +112,11 @@ interface StagedTable {
     string,
     Pick<StagedColumn, "type" | "geohashPrecision" | "decimalScale">
   >;
+}
+
+interface QwpSenderFlushResult {
+  readonly flushed: boolean;
+  readonly sequence: bigint;
 }
 
 const DEFAULT_AUTO_FLUSH_ROWS = 1_000;
@@ -777,6 +788,60 @@ export class QwpSender {
   }
 
   /**
+   * Publishes pending rows without waiting for their server ACK and returns
+   * the highest frame sequence produced by this call, or -1n when empty.
+   * Pass the result to waitForAcknowledged() when an explicit delivery
+   * barrier is needed.
+   */
+  flushAndGetSequence(): Promise<bigint> {
+    return this.enqueueSequenceFlush(false);
+  }
+
+  /** Highest cumulative ACK watermark, or -1n before acknowledgement. */
+  get acknowledgedSequence(): bigint {
+    return this.activeSession
+      ? sessionAcknowledgedSequence(this.activeSession)
+      : -1n;
+  }
+
+  /** Highest stable frame sequence published by this sender. */
+  get publishedSequence(): bigint {
+    return this.activeSession
+      ? sessionPublishedSequence(this.activeSession)
+      : -1n;
+  }
+
+  /** Independently waits until the cumulative ACK watermark covers a frame. */
+  async waitForAcknowledged(
+    targetSequence: bigint,
+    timeoutMs?: number,
+  ): Promise<void> {
+    this.throwIfUnavailable();
+    if (typeof targetSequence !== "bigint") {
+      throw new TypeError("QWP ACK target sequence must be a bigint");
+    }
+    if (
+      timeoutMs !== undefined &&
+      (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    ) {
+      throw new RangeError(
+        "QWP ACK watermark timeout must be positive and finite",
+      );
+    }
+    const session =
+      targetSequence < 0n && !this.activeSession
+        ? undefined
+        : await this.getSession();
+    if (!session) return;
+    if (!session.waitForAcknowledged) {
+      throw new Error(
+        "this QWP ingress session does not expose an ACK watermark",
+      );
+    }
+    await session.waitForAcknowledged(targetSequence, timeoutMs);
+  }
+
+  /**
    * Commits rows previously sent by transactional auto-flush. This is an
    * ergonomic alias for flush(); pending local rows are included in the same
    * group-closing frame.
@@ -786,8 +851,25 @@ export class QwpSender {
   }
 
   private enqueueFlush(deferCommit: boolean): Promise<boolean> {
+    return this.enqueueFlushResult(deferCommit, false).then(
+      (result) => result.flushed,
+    );
+  }
+
+  private enqueueSequenceFlush(deferCommit: boolean): Promise<bigint> {
+    return this.enqueueFlushResult(deferCommit, true).then(
+      (result) => result.sequence,
+    );
+  }
+
+  private enqueueFlushResult(
+    deferCommit: boolean,
+    publicationOnly: boolean,
+  ): Promise<QwpSenderFlushResult> {
     this.throwIfUnavailable();
-    const flushing = this.flushTail.then(() => this.flushNow(deferCommit));
+    const flushing = this.flushTail.then(() =>
+      this.flushNow(deferCommit, publicationOnly),
+    );
     void flushing.catch(() => {
       this.totalFlushFailures++;
     });
@@ -950,18 +1032,26 @@ export class QwpSender {
     }
   }
 
-  private async flushNow(deferCommit: boolean): Promise<boolean> {
+  private async flushNow(
+    deferCommit: boolean,
+    publicationOnly: boolean,
+  ): Promise<QwpSenderFlushResult> {
     if (
       this.pendingRowCount === 0 &&
       (deferCommit || !this.hasDeferredMessages)
     ) {
-      return false;
+      if (this.activeSession?.waitForAcknowledged) {
+        await this.activeSession.waitForAcknowledged(-1n);
+      }
+      return { flushed: false, sequence: -1n };
     }
     const session = await this.getSession();
     const snapshots = this.tables
       .filter((table) => table.rows.length > 0)
       .map((table) => ({ table, rows: table.rows.slice() }));
-    if (snapshots.length === 0 && !this.hasDeferredMessages) return false;
+    if (snapshots.length === 0 && !this.hasDeferredMessages) {
+      return { flushed: false, sequence: -1n };
+    }
 
     const wireTables = snapshots.map(({ table, rows }) =>
       this.buildTable(table.name, rows),
@@ -973,9 +1063,12 @@ export class QwpSender {
     const useDelta =
       (encode?.symbolDictionary ?? "delta") === "delta" &&
       session.sendTablesDelta;
+    const beforeSequence = sessionPublishedSequence(session);
     let response: Promise<QwpIngressResponse> | undefined;
     let publication: Promise<void> | undefined;
-    if (this.awaitServerAck) {
+    let publishedSequence = -1n;
+    const waitForServerAck = this.awaitServerAck && !publicationOnly;
+    if (waitForServerAck) {
       response = useDelta
         ? session.sendTablesDelta!(wireTables, {
             gorilla: encode?.gorilla,
@@ -994,10 +1087,17 @@ export class QwpSender {
           "this QWP ingress session does not support publication-only flushes",
         );
       }
-      publication = publisher.call(session, wireTables, {
-        gorilla: encode?.gorilla,
-        deferCommit,
-      });
+      publication = publisher
+        .call(session, wireTables, {
+          gorilla: encode?.gorilla,
+          deferCommit,
+        })
+        .then(() => {
+          publishedSequence = advancedSequence(
+            beforeSequence,
+            sessionPublishedSequence(session),
+          );
+        });
     }
     this.totalFlushes++;
     // Publication-only Node store-and-forward transfers row ownership only
@@ -1027,21 +1127,29 @@ export class QwpSender {
         // never creates an unhandled rejection; flush()/commit() still awaits it.
         void response.catch(() => undefined);
       }
-      return true;
+      return { flushed: true, sequence: publishedSequence };
     }
 
     const deferredAcks = this.deferredAcks.splice(0);
     this.hasDeferredMessages = false;
     this.deferredRowCount = 0;
     const ack = response ? await response : undefined;
-    if (deferredAcks.length > 0) await Promise.all(deferredAcks);
+    if (response) {
+      publishedSequence = advancedSequence(
+        beforeSequence,
+        sessionPublishedSequence(session),
+      );
+    }
+    if (!publicationOnly && deferredAcks.length > 0) {
+      await Promise.all(deferredAcks);
+    }
     if (this.transactional && (closesDeferredTransaction || sentRows > 0)) {
       this.totalTransactionsCommitted++;
     }
     if (this.options.awaitDurableAck && ack) {
       await session.waitForDurable(ack, this.options.durableAckTimeoutMs);
     }
-    return true;
+    return { flushed: true, sequence: publishedSequence };
   }
 
   private buildTable(
@@ -1096,4 +1204,26 @@ export class QwpSender {
     this.throwIfClosed();
     if (this.closing) throw new Error("QWP sender is closing");
   }
+}
+
+function sessionPublishedSequence(session: QwpSenderSession): bigint {
+  return (
+    session.publishedFrameSequence ??
+    session.metrics?.replayPublishedFrameSequence ??
+    session.metrics?.publishedSequence ??
+    -1n
+  );
+}
+
+function sessionAcknowledgedSequence(session: QwpSenderSession): bigint {
+  return (
+    session.acknowledgedFrameSequence ??
+    session.metrics?.replayAcknowledgedFrameSequence ??
+    session.metrics?.acknowledgedSequence ??
+    -1n
+  );
+}
+
+function advancedSequence(before: bigint, after: bigint): bigint {
+  return after > before ? after : -1n;
 }

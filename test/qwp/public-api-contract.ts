@@ -151,6 +151,37 @@ const qwpExtraOptionsContract: QwpExtraOptions = {
   },
 };
 
+function senderSequenceContract(
+  sender: QwpSender,
+  session: QwpIngressSession,
+): void {
+  const published: Promise<bigint> = sender.flushAndGetSequence();
+  const senderWait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
+  const senderPublished: bigint = sender.publishedSequence;
+  const senderAcknowledged: bigint = sender.acknowledgedSequence;
+  const sessionWait: Promise<void> = session.waitForAcknowledged(0n, 5_000);
+  const sessionPublished: bigint = session.publishedFrameSequence;
+  const sessionAcknowledged: bigint = session.acknowledgedFrameSequence;
+  void published;
+  void senderWait;
+  void senderPublished;
+  void senderAcknowledged;
+  void sessionWait;
+  void sessionPublished;
+  void sessionAcknowledged;
+}
+
+function rootSenderSequenceContract(sender: Sender): void {
+  const published: Promise<bigint> = sender.flushAndGetSequence();
+  const wait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
+  const publishedWatermark: bigint = sender.publishedSequence;
+  const acknowledgedWatermark: bigint = sender.acknowledgedSequence;
+  void published;
+  void wait;
+  void publishedWatermark;
+  void acknowledgedWatermark;
+}
+
 const rootExtraOptionsContract: ExtraOptions = {
   qwp: qwpExtraOptionsContract,
 };
@@ -173,4 +204,6 @@ void egressSessionOptionsContract;
 void browserEgressOptionsContract;
 void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
+void senderSequenceContract;
+void rootSenderSequenceContract;
 void Sender;

@@ -30,6 +30,7 @@ import {
   encodeQwpFrame,
   encodeQwpIngressFrame,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+  QwpIngressAckTimeoutError,
   QwpIngressNackError,
   QwpIngressSession,
   QwpIngressSessionClosedError,
@@ -1174,6 +1175,163 @@ describe("QWP WebSocket adapters", () => {
 });
 
 describe("QwpIngressSession", () => {
+  it("returns the highest split-frame sequence from the browser sender", async () => {
+    const socket = new FakeWebSocket();
+    const cap = encodeQwpIngressFrame([longTable("events", [1n])], {
+      gorilla: false,
+    }).byteLength;
+    const sender = createQwpBrowserSender(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      {
+        autoFlush: false,
+        encode: { symbolDictionary: "full", gorilla: false },
+      },
+      { maxBatchSizeBytes: cap },
+    );
+    const connecting = sender.connect();
+    socket.open();
+    await connecting;
+    for (const value of [1n, 2n, 3n, 4n]) {
+      await sender.table("events").longColumn("value", value).atNow();
+    }
+
+    await expect(sender.flushAndGetSequence()).resolves.toBe(3n);
+    expect(sender.publishedSequence).toBe(3n);
+    expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1, 1]);
+    const acknowledged = sender.waitForAcknowledged(3n, 1_000);
+    socket.message(
+      ingressResponse(QWP_STATUS.OK, 3n, undefined, [["events", 4n]]),
+    );
+    await expect(acknowledged).resolves.toBeUndefined();
+    expect(sender.acknowledgedSequence).toBe(3n);
+    await sender.close();
+  });
+
+  it("publishes frame sequences and resolves cumulative ACK waits independently", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting);
+
+    await session.publishFrame(Uint8Array.of(1));
+    expect(session.publishedFrameSequence).toBe(0n);
+    await session.publishFrame(Uint8Array.of(2));
+    expect(session.publishedFrameSequence).toBe(1n);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
+
+    const first = session.waitForAcknowledged(0n, 1_000);
+    const second = session.waitForAcknowledged(1n, 1_000);
+    socket.message(ingressResponse(QWP_STATUS.OK, 1n));
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(session.acknowledgedFrameSequence).toBe(1n);
+    await expect(session.waitForAcknowledged(-1n)).resolves.toBeUndefined();
+    await session.close();
+  });
+
+  it("times out an independent ACK watermark wait without closing the session", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const session = new QwpIngressSession(await connecting);
+      await session.publishFrame(Uint8Array.of(1));
+      const sequence = session.publishedFrameSequence;
+      const waiting = session.waitForAcknowledged(sequence, 25);
+      const timedOut = expect(waiting).rejects.toEqual(
+        expect.objectContaining({
+          name: "QwpIngressAckTimeoutError",
+          targetSequence: 0n,
+          acknowledgedSequence: -1n,
+          timeoutMs: 25,
+        } satisfies Partial<QwpIngressAckTimeoutError>),
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      await timedOut;
+      expect(session.metrics.lastError).toBeInstanceOf(
+        QwpIngressAckTimeoutError,
+      );
+      await expect(
+        session.publishFrame(Uint8Array.of(2)),
+      ).resolves.toBeUndefined();
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the durable watermark when durable ACKs are negotiated", async () => {
+    const socket = new FakeWebSocket();
+    socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+    const connecting = connectQwpBrowserIngress(
+      {
+        url: "ws://localhost:9000/write/v4",
+        requestDurableAck: true,
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      { durableAckKeepaliveMs: 0 },
+    );
+    socket.open();
+    const session = await connecting;
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+      );
+    };
+
+    await session.publishFrame(Uint8Array.of(1));
+    const sequence = session.publishedFrameSequence;
+    await vi.waitFor(() =>
+      expect(session.metrics.acknowledgedSequence).toBe(0n),
+    );
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
+    let settled = false;
+    const waiting = session.waitForAcknowledged(sequence, 1_000).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    socket.message(durableResponse([["trades", 42n]]));
+    await waiting;
+    expect(session.acknowledgedFrameSequence).toBe(0n);
+    await session.close();
+  });
+
+  it("latches publication-only NACKs for later ACK watermark waits", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting);
+    await session.publishFrame(Uint8Array.of(1));
+    await session.publishFrame(Uint8Array.of(2));
+    socket.message(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n, "write failed"));
+    await vi.waitFor(() => expect(session.metrics.totalNacks).toBe(1));
+
+    await expect(session.waitForAcknowledged(1n, 1_000)).rejects.toMatchObject({
+      name: "QwpIngressNackError",
+      response: { sequence: 0n, errorMessage: "write failed" },
+    } satisfies Partial<QwpIngressNackError>);
+    await expect(session.waitForAcknowledged(-1n)).resolves.toBeUndefined();
+    await session.close();
+  });
+
   it("validates session timeouts before invoking its connection factory", async () => {
     let factoryCalls = 0;
     await expect(

@@ -179,6 +179,30 @@ try {
 }
 ```
 
+For producer-controlled acknowledgement barriers, publish first and wait for the
+cumulative ACK watermark separately:
+
+```typescript
+await sender
+  .table("telemetry")
+  .symbol("device", "sensor-7")
+  .longColumn("sequence", 43n)
+  .atNow();
+
+const sequence = await sender.flushAndGetSequence();
+await sender.waitForAcknowledged(sequence, 5_000);
+```
+
+`flushAndGetSequence()` always resolves at the publication boundary, independently
+of `awaitServerAck`, and returns the highest stable frame sequence published by that
+call. It returns `-1n` when there was nothing to publish. `publishedSequence` and
+`acknowledgedSequence` expose the current immutable watermarks. ACK waits are
+cumulative, so one later acknowledgement resolves all covered waits and callers may
+wait for different sequences concurrently. When durable ACK was negotiated, the
+acknowledged watermark advances only after QuestDB reports durable progress;
+otherwise it follows ordinary protocol OK responses. A deadline failure raises
+`QwpIngressAckTimeoutError` without closing an otherwise healthy session.
+
 Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` or
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to
 assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`, or
@@ -562,6 +586,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpDurableAckUnavailableError`    | Durable acknowledgement was required but not negotiated                                                     |
 | `QwpSendTimeoutError`              | A send did not drain before its deadline; delivery is unknown                                               |
 | `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |
+| `QwpIngressAckTimeoutError`        | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
 | `QwpBatchTooLargeError`            | One encoded row cannot fit the effective ingress cap                                                        |
 | `QwpReconnectExhaustedError`       | The configured reconnect boundary was reached                                                               |
 | `QwpReplayRejectedError`           | A replayed frame was rejected and retained for inspection                                                   |

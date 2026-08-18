@@ -1,6 +1,6 @@
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sender } from "../../src";
 import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
@@ -35,6 +35,7 @@ describe("Sender QWP integration", () => {
 
   it("uses ws:: configuration, bearer authentication, and fluent rows", async () => {
     const frames: Uint8Array[] = [];
+    let acknowledge: (() => void) | undefined;
     let authorization: string | undefined;
     let requestPath: string | undefined;
     server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -47,7 +48,8 @@ describe("Sender QWP integration", () => {
       requestPath = request.url;
       socket.on("message", (payload) => {
         frames.push(new Uint8Array(payload as Buffer));
-        socket.send(okResponse(BigInt(frames.length - 1), "trades"));
+        acknowledge = () =>
+          socket.send(okResponse(BigInt(frames.length - 1), "trades"));
       });
     });
     await new Promise<void>((resolve, reject) => {
@@ -66,7 +68,14 @@ describe("Sender QWP integration", () => {
       .floatColumn("price", 2_615.54)
       .intColumn("amount", 2)
       .atNow();
-    await expect(sender.flush()).resolves.toBe(true);
+    await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
+    expect(sender.publishedSequence).toBe(0n);
+    expect(sender.acknowledgedSequence).toBe(-1n);
+    await vi.waitFor(() => expect(acknowledge).toBeTypeOf("function"));
+    const acknowledged = sender.waitForAcknowledged(0n, 1_000);
+    acknowledge!();
+    await expect(acknowledged).resolves.toBeUndefined();
+    expect(sender.acknowledgedSequence).toBe(0n);
     await sender.close();
 
     expect(authorization).toBe("Bearer secret");

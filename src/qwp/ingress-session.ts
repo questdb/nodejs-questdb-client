@@ -251,6 +251,13 @@ interface PendingDurableResponse {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+interface PendingAcknowledgedSequence {
+  readonly targetSequence: bigint;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 export class QwpIngressNackError extends Error {
   constructor(readonly response: QwpIngressResponse) {
     super(
@@ -269,6 +276,20 @@ export class QwpIngressSessionClosedError extends Error {
         : "QWP ingress session is closed",
     );
     this.name = "QwpIngressSessionClosedError";
+  }
+}
+
+/** The ingress ACK watermark did not reach the requested frame in time. */
+export class QwpIngressAckTimeoutError extends Error {
+  constructor(
+    readonly targetSequence: bigint,
+    readonly acknowledgedSequence: bigint,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `timed out waiting for QWP ACK watermark [targetSequence=${targetSequence}, acknowledgedSequence=${acknowledgedSequence}, timeoutMs=${timeoutMs}]`,
+    );
+    this.name = "QwpIngressAckTimeoutError";
   }
 }
 
@@ -322,6 +343,16 @@ export class QwpIngressSession {
   private readonly durableWatermarks = new Map<string, bigint>();
   private readonly pendingDurableTargets = new Map<string, bigint>();
   private readonly durableWaiters = new Set<PendingDurableResponse>();
+  private readonly acknowledgedSequenceWaiters =
+    new Set<PendingAcknowledgedSequence>();
+  private readonly durableFrameTargets = new Map<
+    bigint,
+    ReadonlyMap<string, bigint>
+  >();
+  private acknowledgementRejection?: {
+    readonly sequence: bigint;
+    readonly error: QwpIngressNackError;
+  };
   private nextSequence = 0n;
   private sendTail: Promise<void> = Promise.resolve();
   private durablePollTimer?: ReturnType<typeof setTimeout>;
@@ -330,6 +361,7 @@ export class QwpIngressSession {
   private publishedMaxSymbolId = -1;
   private deltaSymbolsPublished = false;
   private acknowledgedSequence = -1n;
+  private durableAcknowledgedSequence = -1n;
   private totalFramesPublished = 0;
   private totalBytesPublished = 0;
   private totalFramesSent = 0;
@@ -423,6 +455,26 @@ export class QwpIngressSession {
       : serverBatchCap === undefined
         ? this.localMaxBatchSizeBytes
         : Math.min(this.localMaxBatchSizeBytes, serverBatchCap);
+  }
+
+  /** Highest stable frame sequence published by this session/transport. */
+  get publishedFrameSequence(): bigint {
+    return (
+      this.connection.getIngressMetrics?.().publishedFrameSequence ??
+      this.nextSequence - 1n
+    );
+  }
+
+  /**
+   * Highest cumulative ACK watermark. When durable ACK was negotiated this
+   * advances only after durability; otherwise it follows ordinary OK ACKs.
+   */
+  get acknowledgedFrameSequence(): bigint {
+    const transport = this.connection.getIngressMetrics?.();
+    if (transport) return transport.acknowledgedFrameSequence;
+    return this.connection.handshake.durableAckEnabled
+      ? this.durableAcknowledgedSequence
+      : this.acknowledgedSequence;
   }
 
   get metrics(): QwpIngressMetrics {
@@ -731,6 +783,57 @@ export class QwpIngressSession {
   }
 
   /**
+   * Waits independently for the cumulative frame ACK watermark. A negative
+   * target is already satisfied, but still surfaces a latched session error.
+   */
+  waitForAcknowledged(
+    targetSequence: bigint,
+    timeoutMs = this.options.ackTimeoutMs ?? 15_000,
+  ): Promise<void> {
+    this.throwIfUnavailable();
+    if (typeof targetSequence !== "bigint") {
+      return Promise.reject(
+        new TypeError("QWP ACK target sequence must be a bigint"),
+      );
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(
+        new RangeError("QWP ACK watermark timeout must be positive and finite"),
+      );
+    }
+    const rejection = this.acknowledgementFailure(targetSequence);
+    if (rejection) return Promise.reject(rejection);
+    if (
+      targetSequence < 0n ||
+      this.acknowledgedFrameSequence >= targetSequence
+    ) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const pending: PendingAcknowledgedSequence = {
+        targetSequence,
+        resolve,
+        reject,
+      };
+      pending.timer = setTimeout(() => {
+        if (!this.acknowledgedSequenceWaiters.delete(pending)) return;
+        const error = new QwpIngressAckTimeoutError(
+          targetSequence,
+          this.acknowledgedFrameSequence,
+          timeoutMs,
+        );
+        reject(error);
+        this.recordError(error, false);
+      }, timeoutMs);
+      this.acknowledgedSequenceWaiters.add(pending);
+      // Close the ACK-before-registration race. JavaScript is single-threaded,
+      // but a custom connection can synchronously enqueue a response callback.
+      this.resolveAcknowledgedSequenceWaiters();
+    });
+  }
+
+  /**
    * Waits until a durable ACK covers every table transaction in an OK ACK.
    * Durable tracking must have been enabled with durableAckKeepaliveMs.
    */
@@ -857,6 +960,7 @@ export class QwpIngressSession {
     }
     if (response.status === QWP_STATUS.OK) {
       this.totalAcks++;
+      this.trackDurableFrame(response);
       this.trackDurableTargets(response);
       for (const [sequence, pending] of this.pending) {
         if (sequence > response.sequence) break;
@@ -872,19 +976,25 @@ export class QwpIngressSession {
           response,
         );
       }
+      this.resolveAcknowledgedSequenceWaiters();
       return;
     }
 
     this.totalNacks++;
     const pending = this.pending.get(response.sequence);
-    if (!pending) {
-      // A late response after timeout, or a duplicate response, is harmless.
-      return;
-    }
-    this.pending.delete(response.sequence);
-    if (pending.timer) clearTimeout(pending.timer);
     const error = new QwpIngressNackError(response);
-    pending.reject(error);
+    if (
+      !this.acknowledgementRejection ||
+      response.sequence < this.acknowledgementRejection.sequence
+    ) {
+      this.acknowledgementRejection = { sequence: response.sequence, error };
+    }
+    if (pending) {
+      this.pending.delete(response.sequence);
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.rejectAcknowledgedSequenceWaitersThrough(response.sequence, error);
     const dictionaryGap =
       this.deltaSymbolsPublished &&
       response.status === QWP_STATUS.DICTIONARY_GAP;
@@ -958,6 +1068,17 @@ export class QwpIngressSession {
     this.scheduleDurablePoll();
   }
 
+  private trackDurableFrame(response: QwpIngressResponse): void {
+    if (!this.connection.handshake.durableAckEnabled) return;
+    this.durableFrameTargets.set(
+      response.sequence!,
+      new Map(
+        response.tables.map((table) => [table.name, table.sequenceTransaction]),
+      ),
+    );
+    this.advanceDurableFrameWatermark();
+  }
+
   private applyDurableAck(response: QwpIngressResponse): boolean {
     let advanced = false;
     for (const table of response.tables) {
@@ -978,12 +1099,58 @@ export class QwpIngressSession {
       if (waiter.timer) clearTimeout(waiter.timer);
       waiter.resolve();
     }
+    const frameAdvanced = this.advanceDurableFrameWatermark();
+    this.resolveAcknowledgedSequenceWaiters();
     if (this.pendingDurableTargets.size === 0) {
       this.clearDurablePoll();
     } else {
       this.scheduleDurablePoll();
     }
+    return advanced || frameAdvanced;
+  }
+
+  private advanceDurableFrameWatermark(): boolean {
+    let advanced = false;
+    for (const [sequence, targets] of this.durableFrameTargets) {
+      if (!this.areDurableTargetsCovered(targets)) break;
+      this.durableFrameTargets.delete(sequence);
+      if (sequence > this.durableAcknowledgedSequence) {
+        this.durableAcknowledgedSequence = sequence;
+        advanced = true;
+      }
+    }
     return advanced;
+  }
+
+  private resolveAcknowledgedSequenceWaiters(): void {
+    const acknowledged = this.acknowledgedFrameSequence;
+    for (const pending of this.acknowledgedSequenceWaiters) {
+      if (pending.targetSequence > acknowledged) continue;
+      this.acknowledgedSequenceWaiters.delete(pending);
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.resolve();
+    }
+  }
+
+  private acknowledgementFailure(
+    targetSequence: bigint,
+  ): QwpIngressNackError | undefined {
+    const rejection = this.acknowledgementRejection;
+    return rejection && rejection.sequence <= targetSequence
+      ? rejection.error
+      : undefined;
+  }
+
+  private rejectAcknowledgedSequenceWaitersThrough(
+    sequence: bigint,
+    error: Error,
+  ): void {
+    for (const pending of this.acknowledgedSequenceWaiters) {
+      if (pending.targetSequence < sequence) continue;
+      this.acknowledgedSequenceWaiters.delete(pending);
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
   }
 
   private areDurableTargetsCovered(
@@ -1057,5 +1224,10 @@ export class QwpIngressSession {
       pending.reject(error);
     }
     this.durableWaiters.clear();
+    for (const pending of this.acknowledgedSequenceWaiters) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.acknowledgedSequenceWaiters.clear();
   }
 }
