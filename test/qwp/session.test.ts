@@ -18,6 +18,7 @@ import {
   QWP_EGRESS_MESSAGE,
   QWP_FLAG_DEFER_COMMIT,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+  QWP_INGRESS_PROGRESS_KIND,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
   QwpBatchTooLargeError,
@@ -547,10 +548,7 @@ describe("QWP WebSocket adapters", () => {
     socket.open();
     await connecting;
 
-    const autoFlush = sender
-      .table("events")
-      .longColumn("value", 42n)
-      .atNow();
+    const autoFlush = sender.table("events").longColumn("value", 42n).atNow();
     await expect(autoFlush).resolves.toBeUndefined();
     expect(socket.sent).toHaveLength(1);
     expect(decodeQwpFrame(socket.sent[0]).flags & QWP_FLAG_DEFER_COMMIT).toBe(
@@ -560,7 +558,22 @@ describe("QWP WebSocket adapters", () => {
 
     await expect(sender.flush()).resolves.toBe(true);
     expect(socket.sent).toHaveLength(2);
-    expect(decodeQwpFrame(socket.sent[1]).flags & QWP_FLAG_DEFER_COMMIT).toBe(0);
+    expect(decodeQwpFrame(socket.sent[1]).flags & QWP_FLAG_DEFER_COMMIT).toBe(
+      0,
+    );
+    expect(sender.metrics).toMatchObject({
+      totalRowsStaged: 1,
+      totalRowsPublished: 1,
+      totalFlushes: 2,
+      totalTransactionsCommitted: 1,
+      ingress: {
+        publishedSequence: 1n,
+        acknowledgedSequence: 1n,
+        totalFramesPublished: 2,
+        totalFramesSent: 2,
+        totalAcks: 1,
+      },
+    });
     await sender.close();
   });
 
@@ -1407,6 +1420,78 @@ describe("QwpIngressSession", () => {
       { status: QWP_STATUS.OK, sequence: 1n },
     ]);
     expect(socket.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+    await session.close();
+  });
+
+  it("reports immutable ingress metrics, progress, and protected error callbacks", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const progress: string[] = [];
+    const errors: { terminal: boolean; message: string }[] = [];
+    const session = new QwpIngressSession(await connecting, {
+      durableAckKeepaliveMs: 0,
+      onProgress: (event) => progress.push(event.kind),
+      onError: (event) => {
+        errors.push({
+          terminal: event.terminal,
+          message: event.error.message,
+        });
+        throw new Error("observer failure must be contained");
+      },
+    });
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(
+        sequence === 0n
+          ? ingressResponse(QWP_STATUS.OK, sequence, undefined, [
+              ["events", 7n],
+            ])
+          : ingressResponse(QWP_STATUS.WRITE_ERROR, sequence, "write failed"),
+      );
+    };
+
+    await expect(session.sendFrame(Uint8Array.of(1))).resolves.toMatchObject({
+      sequence: 0n,
+    });
+    socket.message(durableResponse([["events", 7n]]));
+    await vi.waitFor(() =>
+      expect(progress).toContain(
+        QWP_INGRESS_PROGRESS_KIND.DURABLE_ACKNOWLEDGED,
+      ),
+    );
+    await expect(session.sendFrame(Uint8Array.of(2))).rejects.toMatchObject({
+      name: "QwpIngressNackError",
+    });
+
+    expect(progress).toEqual([
+      QWP_INGRESS_PROGRESS_KIND.PUBLISHED,
+      QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED,
+      QWP_INGRESS_PROGRESS_KIND.DURABLE_ACKNOWLEDGED,
+      QWP_INGRESS_PROGRESS_KIND.PUBLISHED,
+    ]);
+    expect(errors).toEqual([{ terminal: false, message: "write failed" }]);
+    expect(session.metrics).toMatchObject({
+      publishedSequence: 1n,
+      acknowledgedSequence: 0n,
+      pendingResponses: 0,
+      pendingResponseBytes: 0,
+      pendingDurableTables: 0,
+      totalFramesPublished: 2,
+      totalBytesPublished: 2,
+      totalFramesSent: 2,
+      totalBytesSent: 2,
+      totalFramesReplayed: 0,
+      totalAcks: 1,
+      totalNacks: 1,
+      totalDurableAcks: 1,
+      totalErrors: 1,
+      lastError: expect.objectContaining({ name: "QwpIngressNackError" }),
+    });
+    expect(Object.isFrozen(session.metrics)).toBe(true);
     await session.close();
   });
 

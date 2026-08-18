@@ -18,6 +18,7 @@ import {
   QwpHandshakeMetadata,
   QwpIngressReplayRecord,
   QwpIngressReplayStore,
+  QwpIngressTransportMetrics,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
   QwpReconnectOptions,
@@ -118,6 +119,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private wireFrames: ReplayFrame[] = [];
   private nextFrameSequence = 0n;
   private nextClientSequence = 0n;
+  private acknowledgedFrameSequence = -1n;
   private rejectedFrameSequence?: bigint;
   private rejectionCount = 0;
   private generation = 0;
@@ -128,6 +130,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private cancelBackoff?: () => void;
   private closing = false;
   private closedSettled = false;
+  private totalFramesSent = 0;
+  private totalBytesSent = 0;
+  private totalFramesReplayed = 0;
+  private totalBytesReplayed = 0;
+  private totalReconnectAttempts = 0;
+  private totalReconnectsSucceeded = 0;
+  private totalFailovers = 0;
+  private totalReconnectErrors = 0;
+  private totalServerNacks = 0;
   readonly messages: AsyncIterable<Uint8Array> = this.messagesQueue;
   readonly closed: Promise<QwpConnectionCloseInfo>;
   ping?: () => Promise<void>;
@@ -176,6 +187,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       };
       this.frames.set(frame.frameSequence, frame);
       previous = frame.frameSequence;
+    }
+    if (records.length > 0) {
+      this.acknowledgedFrameSequence = records[0].frameSequence - 1n;
     }
     this.nextFrameSequence = previous + 1n;
   }
@@ -229,6 +243,28 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
   get ingressSymbolDictionary(): readonly string[] {
     return this.symbolDictionary.slice();
+  }
+
+  getIngressMetrics(): QwpIngressTransportMetrics {
+    let pendingReplayBytes = 0;
+    for (const frame of this.frames.values()) {
+      pendingReplayBytes += frame.payload.byteLength;
+    }
+    return Object.freeze({
+      publishedFrameSequence: this.nextFrameSequence - 1n,
+      acknowledgedFrameSequence: this.acknowledgedFrameSequence,
+      pendingReplayFrames: this.frames.size,
+      pendingReplayBytes,
+      totalFramesSent: this.totalFramesSent,
+      totalBytesSent: this.totalBytesSent,
+      totalFramesReplayed: this.totalFramesReplayed,
+      totalBytesReplayed: this.totalBytesReplayed,
+      totalReconnectAttempts: this.totalReconnectAttempts,
+      totalReconnectsSucceeded: this.totalReconnectsSucceeded,
+      totalFailovers: this.totalFailovers,
+      totalReconnectErrors: this.totalReconnectErrors,
+      totalServerNacks: this.totalServerNacks,
+    });
   }
 
   send(payload: Uint8Array): Promise<void> {
@@ -325,6 +361,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       }
       this.throwIfUnavailable();
       attempt++;
+      if (reconnecting) this.totalReconnectAttempts++;
       let candidate: QwpBinaryConnection | undefined;
       try {
         candidate = await this.factory();
@@ -338,19 +375,29 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         this.install(candidate, replayed);
         this.connectingCandidate = undefined;
         if (reconnecting) {
+          this.totalReconnectsSucceeded++;
+          const failedOver =
+            previousEndpoint !== undefined &&
+            String(previousEndpoint) !== String(candidate.endpoint);
+          if (failedOver) this.totalFailovers++;
           this.emitEvent({
-            kind:
-              previousEndpoint !== undefined &&
-              String(previousEndpoint) !== String(candidate.endpoint)
-                ? QWP_RECONNECT_EVENT_KIND.FAILED_OVER
-                : QWP_RECONNECT_EVENT_KIND.RECONNECTED,
+            kind: failedOver
+              ? QWP_RECONNECT_EVENT_KIND.FAILED_OVER
+              : QWP_RECONNECT_EVENT_KIND.RECONNECTED,
             attempt,
             endpoint: candidate.endpoint,
             previousEndpoint,
           });
+        } else {
+          this.emitEvent({
+            kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
+            attempt: 0,
+            endpoint: candidate.endpoint,
+          });
         }
         return;
       } catch (error) {
+        if (reconnecting) this.totalReconnectErrors++;
         lastError = error;
         if (this.connectingCandidate === candidate) {
           this.connectingCandidate = undefined;
@@ -395,7 +442,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         dictionaryCatchup: true,
       };
       replayed.push(frame);
-      await connection.send(payload);
+      await this.sendPhysical(connection, payload, false);
     }
     for (const frame of this.frames.values()) {
       if (!frame.transmitted) continue;
@@ -406,7 +453,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         );
       }
       replayed.push(frame);
-      await connection.send(frame.payload);
+      await this.sendPhysical(connection, frame.payload, true);
     }
     return replayed;
   }
@@ -532,6 +579,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       return rewriteResponseSequence(payload, clientTarget.clientSequence);
     }
 
+    this.totalServerNacks++;
+
     if (isRetriableIngressStatus(response.status)) {
       const sameFrame = this.rejectedFrameSequence === frame.frameSequence;
       this.rejectedFrameSequence = frame.frameSequence;
@@ -598,6 +647,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (sequence > frameSequence) break;
       this.frames.delete(sequence);
     }
+    if (frameSequence > this.acknowledgedFrameSequence) {
+      this.acknowledgedFrameSequence = frameSequence;
+    }
   }
 
   private async persistSymbolDictionaryDelta(
@@ -653,10 +705,24 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     frame.transmitted = true;
     this.wireFrames.push(frame);
     try {
-      await connection.send(frame.payload);
+      await this.sendPhysical(connection, frame.payload, false);
     } catch (error) {
       await this.requestReconnect(error, connection);
     }
+  }
+
+  private async sendPhysical(
+    connection: QwpBinaryConnection,
+    payload: Uint8Array,
+    replayed: boolean,
+  ): Promise<void> {
+    this.totalFramesSent++;
+    this.totalBytesSent += payload.byteLength;
+    if (replayed) {
+      this.totalFramesReplayed++;
+      this.totalBytesReplayed += payload.byteLength;
+    }
+    await connection.send(payload);
   }
 
   private async requireConnection(): Promise<QwpBinaryConnection> {
@@ -724,9 +790,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     });
   }
 
-  private emitEvent(event: QwpReconnectEvent): void {
+  private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {
     try {
-      this.reconnectOptions.onEvent?.(event);
+      this.reconnectOptions.onEvent?.({ ...event, timestampMs: Date.now() });
     } catch {
       // Connection observers must not interfere with replay progress.
     }

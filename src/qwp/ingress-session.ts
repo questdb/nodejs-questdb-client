@@ -171,11 +171,74 @@ export interface QwpIngressSessionOptions {
   durableAckKeepaliveMs?: number;
   onResponse?: (response: QwpIngressResponse) => void;
   onDurableAck?: (response: QwpIngressResponse) => void;
+  /** Monotonic send/accept/durability notifications. Callback errors are ignored. */
+  onProgress?: (event: QwpIngressProgressEvent) => void;
+  /** Server rejections, deadlines, and terminal session failures. */
+  onError?: (event: QwpIngressErrorEvent) => void;
+}
+
+export const QWP_INGRESS_PROGRESS_KIND = {
+  PUBLISHED: "published",
+  ACKNOWLEDGED: "acknowledged",
+  DURABLE_ACKNOWLEDGED: "durable-acknowledged",
+} as const;
+
+export type QwpIngressProgressKind =
+  (typeof QWP_INGRESS_PROGRESS_KIND)[keyof typeof QWP_INGRESS_PROGRESS_KIND];
+
+/** Immutable point-in-time ingress telemetry, safe in browsers and Node.js. */
+export interface QwpIngressMetrics {
+  /** Highest client-session sequence allocated, or -1 before the first send. */
+  readonly publishedSequence: bigint;
+  /** Highest client-session sequence covered by a successful cumulative ACK. */
+  readonly acknowledgedSequence: bigint;
+  readonly pendingResponses: number;
+  readonly pendingResponseBytes: number;
+  readonly pendingDurableTables: number;
+  readonly totalFramesPublished: number;
+  readonly totalBytesPublished: number;
+  /** Physical sends; includes replay and dictionary catch-up when available. */
+  readonly totalFramesSent: number;
+  readonly totalBytesSent: number;
+  readonly totalFramesReplayed: number;
+  readonly totalBytesReplayed: number;
+  readonly totalAcks: number;
+  readonly totalNacks: number;
+  readonly totalDurableAcks: number;
+  readonly totalErrors: number;
+  readonly totalReconnectAttempts: number;
+  readonly totalReconnectsSucceeded: number;
+  readonly totalFailovers: number;
+  readonly totalReconnectErrors: number;
+  /** Stable store-and-forward watermark; absent without reconnect/replay. */
+  readonly replayPublishedFrameSequence?: bigint;
+  /** Trim watermark; in durable-ACK mode it advances only after durability. */
+  readonly replayAcknowledgedFrameSequence?: bigint;
+  readonly pendingReplayFrames: number;
+  readonly pendingReplayBytes: number;
+  readonly lastError?: Error;
+}
+
+export interface QwpIngressProgressEvent {
+  readonly kind: QwpIngressProgressKind;
+  readonly timestampMs: number;
+  readonly sequence?: bigint;
+  readonly response?: QwpIngressResponse;
+  readonly metrics: QwpIngressMetrics;
+}
+
+export interface QwpIngressErrorEvent {
+  readonly error: Error;
+  readonly terminal: boolean;
+  readonly timestampMs: number;
+  readonly response?: QwpIngressResponse;
+  readonly metrics: QwpIngressMetrics;
 }
 
 interface PendingResponse {
   resolve: (response: QwpIngressResponse) => void;
   reject: (error: unknown) => void;
+  readonly payloadBytes: number;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -264,6 +327,16 @@ export class QwpIngressSession {
   private readonly symbolDictionary = new QwpSymbolDictionary();
   private publishedMaxSymbolId = -1;
   private deltaSymbolsPublished = false;
+  private acknowledgedSequence = -1n;
+  private totalFramesPublished = 0;
+  private totalBytesPublished = 0;
+  private totalFramesSent = 0;
+  private totalBytesSent = 0;
+  private totalAcks = 0;
+  private totalNacks = 0;
+  private totalDurableAcks = 0;
+  private totalErrors = 0;
+  private lastError?: Error;
   private failure?: Error;
   private closing = false;
   private closePromise?: Promise<void>;
@@ -341,6 +414,40 @@ export class QwpIngressSession {
       : serverBatchCap === undefined
         ? this.localMaxBatchSizeBytes
         : Math.min(this.localMaxBatchSizeBytes, serverBatchCap);
+  }
+
+  get metrics(): QwpIngressMetrics {
+    const transport = this.connection.getIngressMetrics?.();
+    let pendingResponseBytes = 0;
+    for (const pending of this.pending.values()) {
+      pendingResponseBytes += pending.payloadBytes;
+    }
+    return Object.freeze({
+      publishedSequence: this.nextSequence - 1n,
+      acknowledgedSequence: this.acknowledgedSequence,
+      pendingResponses: this.pending.size,
+      pendingResponseBytes,
+      pendingDurableTables: this.pendingDurableTargets.size,
+      totalFramesPublished: this.totalFramesPublished,
+      totalBytesPublished: this.totalBytesPublished,
+      totalFramesSent: transport?.totalFramesSent ?? this.totalFramesSent,
+      totalBytesSent: transport?.totalBytesSent ?? this.totalBytesSent,
+      totalFramesReplayed: transport?.totalFramesReplayed ?? 0,
+      totalBytesReplayed: transport?.totalBytesReplayed ?? 0,
+      totalAcks: this.totalAcks,
+      totalNacks: transport?.totalServerNacks ?? this.totalNacks,
+      totalDurableAcks: this.totalDurableAcks,
+      totalErrors: this.totalErrors,
+      totalReconnectAttempts: transport?.totalReconnectAttempts ?? 0,
+      totalReconnectsSucceeded: transport?.totalReconnectsSucceeded ?? 0,
+      totalFailovers: transport?.totalFailovers ?? 0,
+      totalReconnectErrors: transport?.totalReconnectErrors ?? 0,
+      replayPublishedFrameSequence: transport?.publishedFrameSequence,
+      replayAcknowledgedFrameSequence: transport?.acknowledgedFrameSequence,
+      pendingReplayFrames: transport?.pendingReplayFrames ?? 0,
+      pendingReplayBytes: transport?.pendingReplayBytes ?? 0,
+      lastError: this.lastError,
+    });
   }
 
   sendTables(
@@ -446,9 +553,11 @@ export class QwpIngressSession {
     const sequence = this.nextSequence++;
     let pending!: PendingResponse;
     const response = new Promise<QwpIngressResponse>((resolve, reject) => {
-      pending = { resolve, reject };
+      pending = { resolve, reject, payloadBytes: frame.byteLength };
     });
     this.pending.set(sequence, pending);
+    this.totalFramesPublished++;
+    this.totalBytesPublished += frame.byteLength;
 
     const sending = this.sendTail.then(async () => {
       this.throwIfUnavailable();
@@ -457,8 +566,13 @@ export class QwpIngressSession {
     this.sendTail = sending.catch((error: unknown) => {
       this.fail(error);
     });
+    // Publish the callback only after sendTail owns this frame so a callback
+    // that queues another frame cannot reorder it ahead of this sequence.
+    this.emitProgress(QWP_INGRESS_PROGRESS_KIND.PUBLISHED, sequence);
     void sending.then(
       () => {
+        this.totalFramesSent++;
+        this.totalBytesSent += frame.byteLength;
         if (this.pending.get(sequence) !== pending) return;
         // QuestDB deliberately sends no ACK for a deferred frame. The later
         // group-closing frame has its own deadline and cumulatively resolves
@@ -467,9 +581,11 @@ export class QwpIngressSession {
         if (ackDeferredUntilCommit) return;
         pending.timer = setTimeout(() => {
           if (!this.pending.delete(sequence)) return;
-          pending.reject(
-            new Error(`timed out waiting for QWP ACK [sequence=${sequence}]`),
+          const error = new Error(
+            `timed out waiting for QWP ACK [sequence=${sequence}]`,
           );
+          pending.reject(error);
+          this.recordError(error, false);
         }, this.options.ackTimeoutMs ?? 15_000);
       },
       () => undefined,
@@ -524,7 +640,9 @@ export class QwpIngressSession {
       const pending: PendingDurableResponse = { targets, resolve, reject };
       pending.timer = setTimeout(() => {
         if (!this.durableWaiters.delete(pending)) return;
-        reject(new Error("timed out waiting for QWP durable ACK"));
+        const error = new Error("timed out waiting for QWP durable ACK");
+        reject(error);
+        this.recordError(error, false);
       }, timeoutMs);
       this.durableWaiters.add(pending);
     });
@@ -574,14 +692,23 @@ export class QwpIngressSession {
   private handleResponse(response: QwpIngressResponse): void {
     this.invokeCallback(this.options.onResponse, response);
     if (response.status === QWP_STATUS.DURABLE_ACK) {
-      this.applyDurableAck(response);
+      this.totalDurableAcks++;
+      const advanced = this.applyDurableAck(response);
       this.invokeCallback(this.options.onDurableAck, response);
+      if (advanced) {
+        this.emitProgress(
+          QWP_INGRESS_PROGRESS_KIND.DURABLE_ACKNOWLEDGED,
+          undefined,
+          response,
+        );
+      }
       return;
     }
     if (response.sequence === null) {
       throw new QwpProtocolError("QWP response is missing its wire sequence");
     }
     if (response.status === QWP_STATUS.OK) {
+      this.totalAcks++;
       this.trackDurableTargets(response);
       for (const [sequence, pending] of this.pending) {
         if (sequence > response.sequence) break;
@@ -589,9 +716,18 @@ export class QwpIngressSession {
         if (pending.timer) clearTimeout(pending.timer);
         pending.resolve(response);
       }
+      if (response.sequence > this.acknowledgedSequence) {
+        this.acknowledgedSequence = response.sequence;
+        this.emitProgress(
+          QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED,
+          response.sequence,
+          response,
+        );
+      }
       return;
     }
 
+    this.totalNacks++;
     const pending = this.pending.get(response.sequence);
     if (!pending) {
       // A late response after timeout, or a duplicate response, is harmless.
@@ -601,26 +737,62 @@ export class QwpIngressSession {
     if (pending.timer) clearTimeout(pending.timer);
     const error = new QwpIngressNackError(response);
     pending.reject(error);
-    if (
+    const dictionaryGap =
       this.deltaSymbolsPublished &&
-      response.status === QWP_STATUS.DICTIONARY_GAP
-    ) {
+      response.status === QWP_STATUS.DICTIONARY_GAP;
+    this.recordError(error, dictionaryGap, response);
+    if (dictionaryGap) {
       // This wire cannot repair a missing prefix without reconnect catch-up.
-      this.fail(error);
+      this.fail(error, true);
       void this.connection.close(1002, "QWP symbol dictionary gap");
     }
   }
 
-  private invokeCallback(
-    callback: ((response: QwpIngressResponse) => void) | undefined,
-    response: QwpIngressResponse,
+  private invokeCallback<T>(
+    callback: ((event: T) => void) | undefined,
+    event: T,
   ): void {
     if (!callback) return;
     try {
-      callback(response);
+      callback(event);
     } catch {
       // Observability callbacks must not break protocol progress.
     }
+  }
+
+  private emitProgress(
+    kind: QwpIngressProgressKind,
+    sequence?: bigint,
+    response?: QwpIngressResponse,
+  ): void {
+    this.invokeCallback(this.options.onProgress, {
+      kind,
+      timestampMs: Date.now(),
+      sequence,
+      response,
+      metrics: this.metrics,
+    });
+  }
+
+  private recordError(
+    error: unknown,
+    terminal: boolean,
+    response?: QwpIngressResponse,
+  ): Error {
+    const observed =
+      error instanceof Error
+        ? error
+        : new Error(`QWP ingress failed: ${error}`);
+    this.lastError = observed;
+    this.totalErrors++;
+    this.invokeCallback(this.options.onError, {
+      error: observed,
+      terminal,
+      timestampMs: Date.now(),
+      response,
+      metrics: this.metrics,
+    });
+    return observed;
   }
 
   private trackDurableTargets(response: QwpIngressResponse): void {
@@ -638,11 +810,13 @@ export class QwpIngressSession {
     this.scheduleDurablePoll();
   }
 
-  private applyDurableAck(response: QwpIngressResponse): void {
+  private applyDurableAck(response: QwpIngressResponse): boolean {
+    let advanced = false;
     for (const table of response.tables) {
       const watermark = this.durableWatermarks.get(table.name);
       if (watermark === undefined || table.sequenceTransaction > watermark) {
         this.durableWatermarks.set(table.name, table.sequenceTransaction);
+        advanced = true;
       }
       const target = this.pendingDurableTargets.get(table.name);
       if (target !== undefined && table.sequenceTransaction >= target) {
@@ -661,6 +835,7 @@ export class QwpIngressSession {
     } else {
       this.scheduleDurablePoll();
     }
+    return advanced;
   }
 
   private areDurableTargetsCovered(
@@ -712,13 +887,14 @@ export class QwpIngressSession {
     if (this.closing) throw new QwpIngressSessionClosedError();
   }
 
-  private fail(error: unknown): void {
+  private fail(error: unknown, alreadyObserved = false): void {
     if (this.failure) return;
     this.clearDurablePoll();
-    this.failure =
-      error instanceof Error
+    this.failure = alreadyObserved
+      ? error instanceof Error
         ? error
-        : new Error(`QWP ingress failed: ${error}`);
+        : new Error(`QWP ingress failed: ${error}`)
+      : this.recordError(error, true);
     this.rejectAll(this.failure);
   }
 

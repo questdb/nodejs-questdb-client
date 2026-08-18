@@ -6,6 +6,7 @@ import {
   QwpTableBuffer,
   flattenQwpArray,
 } from "./core";
+import type { QwpIngressMetrics } from "./ingress-session";
 
 export type QwpTimestampUnit = "ns" | "us" | "ms";
 
@@ -41,6 +42,7 @@ export interface QwpSenderOptions {
 
 /** The subset of QwpIngressSession used by QwpSender. */
 export interface QwpSenderSession {
+  readonly metrics?: QwpIngressMetrics;
   sendTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
@@ -57,6 +59,22 @@ export interface QwpSenderSession {
 }
 
 export type QwpSenderSessionFactory = () => Promise<QwpSenderSession>;
+
+/** Immutable high-level sender counters plus the active ingress snapshot. */
+export interface QwpSenderMetrics {
+  readonly totalRowsStaged: number;
+  /** Rows whose encoded frames have entered the ingress session. */
+  readonly totalRowsPublished: number;
+  readonly totalFlushes: number;
+  readonly totalFlushFailures: number;
+  readonly totalTransactionsCommitted: number;
+  readonly pendingRows: number;
+  readonly deferredRows: number;
+  readonly connected: boolean;
+  readonly closing: boolean;
+  readonly closed: boolean;
+  readonly ingress?: QwpIngressMetrics;
+}
 
 interface StagedColumn {
   name: string;
@@ -260,6 +278,7 @@ export class QwpSender {
   private pendingRowCount = 0;
   private lastFlushTime = Date.now();
   private sessionPromise?: Promise<QwpSenderSession>;
+  private activeSession?: QwpSenderSession;
   private flushTail: Promise<void> = Promise.resolve();
   private closePromise?: Promise<void>;
   private closing = false;
@@ -267,6 +286,11 @@ export class QwpSender {
   private hasDeferredMessages = false;
   private deferredRowCount = 0;
   private readonly deferredAcks: Promise<QwpIngressResponse>[] = [];
+  private totalRowsStaged = 0;
+  private totalRowsPublished = 0;
+  private totalFlushes = 0;
+  private totalFlushFailures = 0;
+  private totalTransactionsCommitted = 0;
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
@@ -299,6 +323,23 @@ export class QwpSender {
     this.throwIfUnavailable();
     await this.getSession();
     return true;
+  }
+
+  get metrics(): QwpSenderMetrics {
+    return Object.freeze({
+      totalRowsStaged: this.totalRowsStaged,
+      totalRowsPublished: this.totalRowsPublished,
+      totalFlushes: this.totalFlushes,
+      totalFlushFailures: this.totalFlushFailures,
+      totalTransactionsCommitted: this.totalTransactionsCommitted,
+      pendingRows: this.pendingRowCount,
+      deferredRows: this.deferredRowCount,
+      connected:
+        this.activeSession !== undefined && !this.closing && !this.closed,
+      closing: this.closing,
+      closed: this.closed,
+      ingress: this.activeSession?.metrics,
+    });
   }
 
   reset(): QwpSender {
@@ -725,6 +766,9 @@ export class QwpSender {
   private enqueueFlush(deferCommit: boolean): Promise<boolean> {
     this.throwIfUnavailable();
     const flushing = this.flushTail.then(() => this.flushNow(deferCommit));
+    void flushing.catch(() => {
+      this.totalFlushFailures++;
+    });
     this.flushTail = flushing.then(
       () => undefined,
       () => undefined,
@@ -838,6 +882,7 @@ export class QwpSender {
     this.currentRow = new Map();
     this.current = undefined;
     this.pendingRowCount++;
+    this.totalRowsStaged++;
     this.log("debug", `Pending QWP row count: ${this.pendingRowCount}`);
   }
 
@@ -881,6 +926,7 @@ export class QwpSender {
     const wireTables = snapshots.map(({ table, rows }) =>
       this.buildTable(table.name, rows),
     );
+    const closesDeferredTransaction = this.hasDeferredMessages;
     // sendTables encodes synchronously. Do not compact staging if encoding
     // throws, but transfer ownership once the frame has entered the session.
     const encode = this.options.encode;
@@ -895,12 +941,14 @@ export class QwpSender {
             gorilla: encode?.gorilla,
             deferCommit,
           });
+    this.totalFlushes++;
     for (const { table, rows } of snapshots) table.rows.splice(0, rows.length);
     const sentRows = snapshots.reduce(
       (count, item) => count + item.rows.length,
       0,
     );
     this.pendingRowCount -= sentRows;
+    this.totalRowsPublished += sentRows;
     this.lastFlushTime = Date.now();
     this.log(
       "debug",
@@ -923,6 +971,9 @@ export class QwpSender {
     this.hasDeferredMessages = false;
     this.deferredRowCount = 0;
     await Promise.all(deferredAcks);
+    if (this.transactional && (closesDeferredTransaction || sentRows > 0)) {
+      this.totalTransactionsCommitted++;
+    }
     if (this.options.awaitDurableAck) {
       await session.waitForDurable(ack, this.options.durableAckTimeoutMs);
     }
@@ -953,11 +1004,17 @@ export class QwpSender {
 
   private getSession(): Promise<QwpSenderSession> {
     if (!this.sessionPromise) {
-      const connecting = this.sessionFactory().catch((error: unknown) => {
-        if (this.sessionPromise === connecting) this.sessionPromise = undefined;
-        throw error;
-      });
-      this.sessionPromise = connecting;
+      const connecting = this.sessionFactory();
+      const tracked = connecting
+        .then((session) => {
+          this.activeSession = session;
+          return session;
+        })
+        .catch((error: unknown) => {
+          if (this.sessionPromise === tracked) this.sessionPromise = undefined;
+          throw error;
+        });
+      this.sessionPromise = tracked;
     }
     return this.sessionPromise;
   }

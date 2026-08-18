@@ -236,6 +236,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
             endpoint: candidate.endpoint,
             previousEndpoint,
           });
+        } else {
+          this.emitEvent({
+            kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
+            attempt: 0,
+            endpoint: candidate.endpoint,
+          });
         }
         return;
       } catch (error) {
@@ -472,9 +478,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     });
   }
 
-  private emitEvent(event: QwpReconnectEvent): void {
+  private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {
     try {
-      this.reconnectOptions.onEvent?.(event);
+      this.reconnectOptions.onEvent?.({ ...event, timestampMs: Date.now() });
     } catch {
       // Connection observers must not interfere with replay progress.
     }

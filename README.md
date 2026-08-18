@@ -131,6 +131,46 @@ enabled, it starts only after the transaction commits. Closing without an
 explicit commit abandons the open transaction and logs a warning; QuestDB
 rolls it back when the WebSocket disconnects.
 
+Ingress sessions expose browser-safe progress/error callbacks and immutable
+metrics snapshots. Reconnect events remain on `reconnect.onEvent`, keeping
+connection topology separate from batch acceptance and durable progress.
+
+```typescript
+import {
+  QWP_INGRESS_PROGRESS_KIND,
+  createQwpBrowserSender,
+} from "@questdb/nodejs-client/qwp/browser";
+
+const sender = createQwpBrowserSender(
+  { url },
+  { autoFlush: false },
+  {
+    reconnect: {
+      onEvent: (event) => console.info("QWP connection", event),
+    },
+    onProgress: (event) => {
+      if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
+        console.info("accepted through", event.sequence);
+      }
+    },
+    onError: (event) => console.error("QWP ingress", event.error),
+  },
+);
+
+await sender.connect();
+const snapshot = sender.metrics;
+console.info(
+  snapshot.totalRowsPublished,
+  snapshot.ingress?.totalFramesReplayed,
+);
+```
+
+Snapshots distinguish the client-session acceptance sequence from persistent
+replay watermarks. With durable ACKs, `replayAcknowledgedFrameSequence`
+advances only after the durable watermark covers a frame. Observer exceptions
+are contained so they cannot fail the session, but callbacks should remain
+lightweight because browser and Node JavaScript share the event loop.
+
 When QuestDB authentication is enabled, establish the browser's HttpOnly
 `qdb_session` cookie over REST before opening a QWP WebSocket. A QuestDB REST
 token and an OIDC access token both use the `bearer` form. The application is

@@ -272,9 +272,28 @@ describe("QWP ingress reconnect and replay", () => {
 
     await expect(pending).resolves.toMatchObject({ sequence: 1n });
     expect(events.map((event) => event.kind)).toEqual([
+      QWP_RECONNECT_EVENT_KIND.CONNECTED,
       QWP_RECONNECT_EVENT_KIND.RECONNECTING,
       QWP_RECONNECT_EVENT_KIND.FAILED_OVER,
     ]);
+    expect(events.every((event) => event.timestampMs > 0)).toBe(true);
+    expect(session.metrics).toMatchObject({
+      publishedSequence: 1n,
+      acknowledgedSequence: 1n,
+      totalFramesPublished: 2,
+      totalFramesSent: 3,
+      totalBytesSent: 3,
+      totalFramesReplayed: 1,
+      totalBytesReplayed: 1,
+      totalReconnectAttempts: 1,
+      totalReconnectsSucceeded: 1,
+      totalFailovers: 1,
+      totalReconnectErrors: 0,
+      replayPublishedFrameSequence: 1n,
+      replayAcknowledgedFrameSequence: 1n,
+      pendingReplayFrames: 0,
+      pendingReplayBytes: 0,
+    });
     await session.close();
   });
 
@@ -472,6 +491,13 @@ describe("QWP ingress reconnect and replay", () => {
     await expect(pending).resolves.toMatchObject({
       status: QWP_STATUS.OK,
       sequence: 0n,
+    });
+    expect(session.metrics).toMatchObject({
+      totalNacks: 1,
+      totalFramesSent: 2,
+      totalFramesReplayed: 1,
+      totalReconnectAttempts: 1,
+      totalReconnectsSucceeded: 1,
     });
     await session.close();
   });

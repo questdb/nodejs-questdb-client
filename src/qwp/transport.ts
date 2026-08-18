@@ -140,7 +140,28 @@ export interface QwpIngressReplayStore {
   close(): Promise<void>;
 }
 
+/** Physical ingress delivery counters maintained by reconnecting transports. */
+export interface QwpIngressTransportMetrics {
+  /** Highest stable replay-frame sequence handed to the transport. */
+  readonly publishedFrameSequence: bigint;
+  /** Highest replay-frame sequence removed from store-and-forward. */
+  readonly acknowledgedFrameSequence: bigint;
+  readonly pendingReplayFrames: number;
+  readonly pendingReplayBytes: number;
+  /** Physical WebSocket sends, including replay and dictionary catch-up. */
+  readonly totalFramesSent: number;
+  readonly totalBytesSent: number;
+  readonly totalFramesReplayed: number;
+  readonly totalBytesReplayed: number;
+  readonly totalReconnectAttempts: number;
+  readonly totalReconnectsSucceeded: number;
+  readonly totalFailovers: number;
+  readonly totalReconnectErrors: number;
+  readonly totalServerNacks: number;
+}
+
 export const QWP_RECONNECT_EVENT_KIND = {
+  CONNECTED: "connected",
   RECONNECTING: "reconnecting",
   ATTEMPT_FAILED: "attempt-failed",
   RECONNECTED: "reconnected",
@@ -152,8 +173,9 @@ export type QwpReconnectEventKind =
 
 export interface QwpReconnectEvent {
   readonly kind: QwpReconnectEventKind;
-  /** One-based reconnect sweep number within the current outage. */
+  /** One-based reconnect sweep number; zero for lifecycle-only events. */
   readonly attempt: number;
+  readonly timestampMs: number;
   readonly endpoint?: string | URL;
   readonly previousEndpoint?: string | URL;
   readonly cause?: unknown;
@@ -304,6 +326,9 @@ export interface QwpBinaryConnection {
   readonly ingressSymbolDictionary?: readonly string[];
   /** Endpoint backing this connection, when supplied by its adapter. */
   readonly endpoint?: string | URL;
+
+  /** @internal Physical delivery metrics exposed by replaying transports. */
+  getIngressMetrics?(): QwpIngressTransportMetrics;
 
   send(payload: Uint8Array): Promise<void>;
   /** Sends an RFC 6455 PING when the underlying runtime supports it. */

@@ -115,6 +115,8 @@ describe("QWP high-level sender", () => {
       expect.objectContaining({ message: "session closed" }),
     );
     expect(session.closeCount).toBe(1);
+    expect(sender.metrics.totalFlushFailures).toBe(1);
+    expect(sender.metrics.connected).toBe(false);
   });
 
   it("uses the existing Sender fluent API and preserves an unfinished row", async () => {
@@ -277,6 +279,19 @@ describe("QWP high-level sender", () => {
       options: { deferCommit: false },
     });
     expect(session.durable).toHaveLength(1);
+    expect(sender.metrics).toMatchObject({
+      totalRowsStaged: 1,
+      totalRowsPublished: 1,
+      totalFlushes: 2,
+      totalFlushFailures: 0,
+      totalTransactionsCommitted: 1,
+      pendingRows: 0,
+      deferredRows: 0,
+      connected: true,
+      closing: false,
+      closed: false,
+    });
+    expect(Object.isFrozen(sender.metrics)).toBe(true);
     await expect(sender.flush()).resolves.toBe(false);
   });
 
