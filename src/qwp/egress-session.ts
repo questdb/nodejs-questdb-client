@@ -44,7 +44,8 @@ export interface QwpEgressSessionOptions {
   /**
    * Explicitly opts into at-least-once re-execution after a disconnect. The
    * query's not-yet-consumed batches are discarded before this callback, and
-   * callers must discard any result prefix they already consumed.
+   * callers must discard any result prefix they already consumed. The event
+   * includes the authoritative SERVER_INFO for the replacement endpoint.
    */
   onReplayReset?: (event: QwpEgressReplayResetEvent) => void | Promise<void>;
 }

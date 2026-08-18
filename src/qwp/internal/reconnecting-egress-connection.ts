@@ -429,6 +429,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     try {
       await this.onReplayReset({
         requestId,
+        serverInfo,
         previousEndpoint,
         endpoint: connection.endpoint,
         cause,

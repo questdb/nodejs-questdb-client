@@ -1,4 +1,5 @@
 import type { QwpNegotiatedEgressCompression } from "./core/compression";
+import type { QwpServerInfoMessage } from "./core/egress";
 
 export interface QwpConnectionCloseInfo {
   code: number;
@@ -236,7 +237,10 @@ export interface QwpReconnectOptions {
 }
 
 export interface QwpEgressReplayResetEvent {
-  readonly requestId?: bigint;
+  /** Client request being re-executed on the replacement connection. */
+  readonly requestId: bigint;
+  /** Authoritative SERVER_INFO received from the replacement endpoint. */
+  readonly serverInfo: QwpServerInfoMessage;
   readonly previousEndpoint?: string | URL;
   readonly endpoint?: string | URL;
   readonly cause?: unknown;

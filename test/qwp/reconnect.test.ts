@@ -1747,7 +1747,13 @@ describe("QWP egress reconnect and replay", () => {
           initialBackoffMs: 0,
           maxBackoffMs: 0,
         },
-        onReplayReset: (event) => resets.push(event.requestId!),
+        onReplayReset: (event) => {
+          resets.push(event.requestId);
+          expect(event.serverInfo).toMatchObject({
+            nodeId: "secondary",
+            capabilities: 0,
+          });
+        },
       },
     );
     const query = await session.query("select $1", {
@@ -1797,7 +1803,7 @@ describe("QWP egress reconnect and replay", () => {
           maxBackoffMs: 0,
         },
         bufferPoolSize: 1,
-        onReplayReset: (event) => resets.push(event.requestId!),
+        onReplayReset: (event) => resets.push(event.requestId),
       },
     );
     const query = await session.query("select * from x");
@@ -1859,7 +1865,7 @@ describe("QWP egress reconnect and replay", () => {
           initialBackoffMs: 0,
           maxBackoffMs: 0,
         },
-        onReplayReset: (event) => resets.push(event.requestId!),
+        onReplayReset: (event) => resets.push(event.requestId),
       },
     );
     const query = await session.queryViews("select * from x", async () => {
