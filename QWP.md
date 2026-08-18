@@ -578,6 +578,12 @@ microsecond and nanosecond timestamps, strings, UUIDs, LONG256, geohashes,
 decimals, and typed nulls. Set values in ascending index order. `bindPayload` and
 `bindCount` remain advanced escape hatches for pre-encoded data.
 
+Set per-query `resetDictionary: true` to ask the server to reset its
+connection-scoped egress symbol dictionary before execution. The client sends the
+flag only when `SERVER_INFO` advertises `QUERY_FLAGS`; older servers receive the
+same flag-free request as the default path, so this option remains safe during a
+rolling upgrade.
+
 The high-level client defaults `initialCredit` to 256 KiB, bounding unread wire data
 to roughly that window plus at most one server batch. The exact wire size of each
 batch is replenished when iteration advances beyond it, so a slow consumer limits

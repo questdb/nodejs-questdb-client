@@ -65,7 +65,10 @@ export interface QwpEgressQueryOptions {
   bindCount?: number;
   /** Advanced escape hatch for an already encoded bind section. */
   bindPayload?: Uint8Array;
-  /** Ask a capable server to reset its connection-scoped symbol dictionary. */
+  /**
+   * Ask a capable server to reset its connection-scoped symbol dictionary.
+   * Silently omitted when the server lacks QUERY_FLAGS for rolling upgrades.
+   */
   resetDictionary?: boolean;
 }
 
@@ -685,12 +688,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     if (this.active) {
       throw new Error("a QWP query is already active on this connection");
     }
-    if (
-      options.resetDictionary &&
-      (this.serverInfo!.capabilities & QWP_EGRESS_CAPABILITY.QUERY_FLAGS) === 0
-    ) {
-      throw new Error("the QWP server does not support query flags");
-    }
+    const supportsQueryFlags =
+      (this.serverInfo!.capabilities & QWP_EGRESS_CAPABILITY.QUERY_FLAGS) !== 0;
 
     const requestId = this.nextRequestId++;
     const creditEnabled =
@@ -714,9 +713,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       binds: options.binds,
       bindCount: options.bindCount,
       bindPayload: options.bindPayload,
-      queryFlags: options.resetDictionary
-        ? QWP_QUERY_FLAG_RESET_DICTIONARY
-        : undefined,
+      queryFlags:
+        options.resetDictionary && supportsQueryFlags
+          ? QWP_QUERY_FLAG_RESET_DICTIONARY
+          : undefined,
     };
     try {
       await this.send(encodeQwpQueryRequest(request));

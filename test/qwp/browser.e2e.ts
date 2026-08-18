@@ -344,6 +344,61 @@ describe("QWP in a real browser", () => {
     }
   });
 
+  it("omits resetDictionary for an older egress server in a real browser", async () => {
+    let requestPayload: Uint8Array | undefined;
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("connection", (socket) => {
+      socket.send(browserServerInfo());
+      socket.on("message", (data) => {
+        requestPayload = new Uint8Array(data as Buffer).slice();
+        const reader = new QwpByteReader(requestPayload);
+        expect(reader.readUint8()).toBe(QWP_EGRESS_MESSAGE.QUERY_REQUEST);
+        socket.send(browserResultEnd(reader.readBigUint64()));
+      });
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const session = await qwp.connectQwpBrowserEgress({ url });
+          try {
+            const query = await session.query("select 1", {
+              resetDictionary: true,
+            });
+            await query.completion;
+          } finally {
+            await session.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/read/v1`,
+        },
+      );
+
+      const request = new QwpByteReader(requestPayload!);
+      expect(request.readUint8()).toBe(QWP_EGRESS_MESSAGE.QUERY_REQUEST);
+      expect(request.readBigUint64()).toBe(0n);
+      const sqlLength = Number(readQwpVarint(request));
+      expect(request.readUtf8(sqlLength)).toBe("select 1");
+      expect(readQwpVarint(request)).toBe(
+        BigInt(QWP_DEFAULT_EGRESS_INITIAL_CREDIT),
+      );
+      expect(readQwpVarint(request)).toBe(0n);
+      expect(request.remaining).toBe(0);
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
   it("falls back cleanly when an older ingress server sends no cap", async () => {
     const server = new WebSocketServer({
       host: "127.0.0.1",

@@ -125,6 +125,7 @@ const queryOptionsContract: QwpEgressQueryOptions = {
   initialCredit: 1024,
   autoCredit: true,
   timeoutMs: 30_000,
+  resetDictionary: true,
   binds: (binds) => binds.setVarchar(0, "ETH-USD"),
 };
 

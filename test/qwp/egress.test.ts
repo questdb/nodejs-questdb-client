@@ -11,6 +11,7 @@ import {
   QWP_FLAG_ZSTD,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
   QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
+  QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_STATUS,
   QwpBinaryConnection,
   QwpByteReader,
@@ -49,13 +50,15 @@ function writeU16String(writer: QwpByteWriter, value: string): void {
   writer.writeUint16(bytes.length).writeBytes(bytes);
 }
 
-function serverInfo(): Uint8Array {
+function serverInfo(
+  capabilities = QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+): Uint8Array {
   const payload = new QwpByteWriter();
   payload
     .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
     .writeUint8(0)
     .writeBigUint64(1n)
-    .writeUint32(QWP_EGRESS_CAPABILITY.QUERY_FLAGS)
+    .writeUint32(capabilities)
     .writeBigInt64(123n);
   writeU16String(payload, "cluster");
   writeU16String(payload, "node");
@@ -746,6 +749,40 @@ describe("QwpEgressSession", () => {
       totalRows: 3n,
     });
     await session.close();
+  });
+
+  it("silently omits resetDictionary when QUERY_FLAGS is unavailable", async () => {
+    const captureRequest = async (
+      capabilities: number,
+      resetDictionary: boolean,
+    ): Promise<Uint8Array> => {
+      const connection = new FakeConnection();
+      const session = new QwpEgressSession(connection);
+      connection.receive(serverInfo(capabilities));
+      const query = await session.query("select 1", { resetDictionary });
+      connection.receive(resultEnd(query.requestId, 0n));
+      await query.completion;
+      await session.close();
+      return connection.sent[0];
+    };
+
+    const legacyBaseline = await captureRequest(0, false);
+    const legacyReset = await captureRequest(0, true);
+    expect(legacyReset).toEqual(legacyBaseline);
+
+    const capableBaseline = await captureRequest(
+      QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+      false,
+    );
+    const capableReset = await captureRequest(
+      QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+      true,
+    );
+    expect(capableReset).toHaveLength(capableBaseline.byteLength + 1);
+    expect(capableReset.subarray(0, capableBaseline.byteLength)).toEqual(
+      capableBaseline,
+    );
+    expect(capableReset.at(-1)).toBe(QWP_QUERY_FLAG_RESET_DICTIONARY);
   });
 
   it("automatically replenishes credit after the consumer advances", async () => {
