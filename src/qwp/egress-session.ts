@@ -1,5 +1,6 @@
 import {
   decodeQwpEgressMessage,
+  encodeQwpBinds,
   encodeQwpCancel,
   encodeQwpCredit,
   encodeQwpQueryRequest,
@@ -11,7 +12,6 @@ import {
   QwpExecDoneMessage,
   type QwpNegotiatedEgressCompression,
   QwpProtocolError,
-  QwpQueryRequest,
   QwpResultBatch,
   QwpResultBatchDecoder,
   QwpResultBatchView,
@@ -78,6 +78,15 @@ interface QwpValidatedEgressSessionOptions {
   readonly bufferPoolSize: number;
   readonly queryTimeoutMs: number;
   readonly cancelDrainTimeoutMs: number;
+}
+
+interface QwpReplayableQueryRequest {
+  readonly requestId: bigint;
+  readonly sql: string;
+  readonly initialCredit: number | bigint;
+  readonly bindCount?: number;
+  readonly bindPayload?: Uint8Array;
+  readonly resetDictionary: boolean;
 }
 
 /** Default bounded send-ahead window used by high-level egress queries. */
@@ -508,6 +517,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly cancelDrainTimeoutMs: number;
   private readonly idleWaiters = new Set<() => void>();
   private active?: QwpEgressQuery;
+  private activeRequest?: QwpReplayableQueryRequest;
   private nextRequestId = 0n;
   private sendTail: Promise<void> = Promise.resolve();
   private serverInfo?: QwpServerInfoMessage;
@@ -577,7 +587,16 @@ export class QwpEgressSession implements QwpEgressQueryControl {
           factory,
           options.reconnect,
           validated.serverInfoTimeoutMs,
-          () => state.session?.prepareConnectionReset(),
+          (serverInfo) => state.session?.prepareConnectionReset(serverInfo),
+          (serverInfo, requestId) => {
+            const session = state.session;
+            if (!session) {
+              throw new QwpProtocolError(
+                "QWP egress session is unavailable while encoding a query",
+              );
+            }
+            return session.encodeActiveQueryRequest(serverInfo, requestId);
+          },
           options.onReplayReset
             ? async (event) => {
                 await options.onReplayReset!(event);
@@ -688,9 +707,6 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     if (this.active) {
       throw new Error("a QWP query is already active on this connection");
     }
-    const supportsQueryFlags =
-      (this.serverInfo!.capabilities & QWP_EGRESS_CAPABILITY.QUERY_FLAGS) !== 0;
-
     const requestId = this.nextRequestId++;
     const creditEnabled =
       typeof initialCredit === "bigint"
@@ -704,22 +720,30 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       this.bufferPoolSize,
       viewHandler,
     );
-    this.decoder.resetQuerySchema();
-    this.active = query;
-    const request: QwpQueryRequest = {
+    if (
+      options.binds !== undefined &&
+      (options.bindCount !== undefined || options.bindPayload !== undefined)
+    ) {
+      throw new Error(
+        "typed binds cannot be mixed with raw bindCount/bindPayload",
+      );
+    }
+    const encodedBinds = options.binds
+      ? encodeQwpBinds(options.binds)
+      : undefined;
+    const request: QwpReplayableQueryRequest = {
       requestId,
       sql,
       initialCredit,
-      binds: options.binds,
-      bindCount: options.bindCount,
-      bindPayload: options.bindPayload,
-      queryFlags:
-        options.resetDictionary && supportsQueryFlags
-          ? QWP_QUERY_FLAG_RESET_DICTIONARY
-          : undefined,
+      bindCount: encodedBinds?.count ?? options.bindCount,
+      bindPayload: (encodedBinds?.payload ?? options.bindPayload)?.slice(),
+      resetDictionary: options.resetDictionary === true,
     };
+    this.decoder.resetQuerySchema();
+    this.active = query;
+    this.activeRequest = request;
     try {
-      await this.send(encodeQwpQueryRequest(request));
+      await this.send(this.encodeQueryRequest(request, this.serverInfo!));
     } catch (error) {
       this.clearActive(query);
       query.fail(error);
@@ -929,10 +953,45 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     return this.active;
   }
 
-  private async prepareConnectionReset(): Promise<void> {
+  private async prepareConnectionReset(
+    serverInfo: QwpServerInfoMessage,
+  ): Promise<void> {
+    this.serverInfo = serverInfo;
     await this.active?.resetForReplay();
     this.decoder.applyCacheReset(QWP_RESET_MASK_DICTIONARY);
     this.decoder.resetQuerySchema();
+  }
+
+  private encodeActiveQueryRequest(
+    serverInfo: QwpServerInfoMessage,
+    requestId: bigint,
+  ): Uint8Array {
+    const request = this.activeRequest;
+    if (!request || request.requestId !== requestId) {
+      throw new QwpProtocolError(
+        `QWP egress replay references inactive request ID ${requestId}`,
+      );
+    }
+    return this.encodeQueryRequest(request, serverInfo);
+  }
+
+  private encodeQueryRequest(
+    request: QwpReplayableQueryRequest,
+    serverInfo: QwpServerInfoMessage,
+  ): Uint8Array {
+    const supportsQueryFlags =
+      (serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_FLAGS) !== 0;
+    return encodeQwpQueryRequest({
+      requestId: request.requestId,
+      sql: request.sql,
+      initialCredit: request.initialCredit,
+      bindCount: request.bindCount,
+      bindPayload: request.bindPayload,
+      queryFlags:
+        request.resetDictionary && supportsQueryFlags
+          ? QWP_QUERY_FLAG_RESET_DICTIONARY
+          : undefined,
+    });
   }
 
   private cancelAndDrain(
@@ -1023,6 +1082,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     if (expected && this.active !== expected) return;
     if (!this.active) return;
     this.active = undefined;
+    this.activeRequest = undefined;
     for (const resolve of this.idleWaiters) resolve();
     this.idleWaiters.clear();
   }

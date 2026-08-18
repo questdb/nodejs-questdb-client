@@ -25,6 +25,7 @@ import {
   QWP_COLUMN_TYPE,
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
+  QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_SERVER_ROLE,
   QWP_STATUS,
   QWP_UPGRADE_ERROR_KIND,
@@ -48,6 +49,7 @@ import {
   encodeQwpFrame,
   encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
+  encodeQwpQueryRequest,
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../src/qwp";
@@ -97,15 +99,15 @@ function serverInfo(
   node: string,
   role = QWP_SERVER_ROLE.STANDALONE,
   zone?: string,
+  capabilities = QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
 ): Uint8Array {
-  const capabilities =
-    QWP_EGRESS_CAPABILITY.QUERY_FLAGS |
-    (zone === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE);
+  const advertisedCapabilities =
+    capabilities | (zone === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE);
   const payload = new QwpByteWriter()
     .writeUint8(QWP_EGRESS_MESSAGE.SERVER_INFO)
     .writeUint8(role)
     .writeBigUint64(1n)
-    .writeUint32(capabilities)
+    .writeUint32(advertisedCapabilities)
     .writeBigInt64(123n);
   writeUint16String(payload, "cluster");
   writeUint16String(payload, node);
@@ -1658,6 +1660,117 @@ describe("QWP egress reconnect and replay", () => {
     first.drop();
     await vi.waitFor(() => expect(session.negotiatedZstdLevel).toBe(1));
     expect(session.handshake.contentEncoding).toBe("zstd;level=1");
+    await session.close();
+  });
+
+  it("re-encodes a query queued during a capability downgrade", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    let releaseSecondInfo!: () => void;
+    const secondInfoReady = new Promise<void>((resolve) => {
+      releaseSecondInfo = resolve;
+    });
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        if (connection === second) await secondInfoReady;
+        queueMicrotask(() =>
+          connection.receive(
+            serverInfo(
+              connection.endpoint,
+              QWP_SERVER_ROLE.STANDALONE,
+              undefined,
+              connection === first ? QWP_EGRESS_CAPABILITY.QUERY_FLAGS : 0,
+            ),
+          ),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    first.drop();
+    await vi.waitFor(() => expect(connections).toHaveLength(0));
+    const querying = session.query("select 1", {
+      initialCredit: 0,
+      resetDictionary: true,
+    });
+    releaseSecondInfo();
+    const query = await querying;
+    expect(second.sent).toEqual([
+      encodeQwpQueryRequest({
+        requestId: 0n,
+        sql: "select 1",
+        initialCredit: 0,
+      }),
+    ]);
+    second.receive(resultEnd());
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await session.close();
+  });
+
+  it("re-encodes an active query after a capability downgrade", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const resets: bigint[] = [];
+    let bindCalls = 0;
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(
+            serverInfo(
+              connection.endpoint,
+              QWP_SERVER_ROLE.STANDALONE,
+              undefined,
+              connection === first ? QWP_EGRESS_CAPABILITY.QUERY_FLAGS : 0,
+            ),
+          ),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        onReplayReset: (event) => resets.push(event.requestId!),
+      },
+    );
+    const query = await session.query("select $1", {
+      initialCredit: 0,
+      resetDictionary: true,
+      binds: (binds) => {
+        bindCalls++;
+        binds.setInt(0, 42);
+      },
+    });
+    expect(first.sent).toHaveLength(1);
+    expect(first.sent[0].at(-1)).toBe(QWP_QUERY_FLAG_RESET_DICTIONARY);
+
+    first.drop();
+    await vi.waitFor(() => expect(resets).toEqual([0n]));
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    expect(second.sent[0]).toEqual(first.sent[0].subarray(0, -1));
+    expect(bindCalls).toBe(1);
+
+    second.receive(resultEnd());
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
     await session.close();
   });
 

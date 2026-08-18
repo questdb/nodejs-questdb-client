@@ -25,7 +25,13 @@ import { QwpAsyncQueue } from "./async-queue";
 type ReplayResetHandler = (
   event: QwpEgressReplayResetEvent,
 ) => void | Promise<void>;
-type ConnectionResetHandler = () => void | Promise<void>;
+type ConnectionResetHandler = (
+  serverInfo: QwpServerInfoMessage,
+) => void | Promise<void>;
+type QueryRequestEncoder = (
+  serverInfo: QwpServerInfoMessage,
+  requestId: bigint,
+) => Uint8Array | Promise<Uint8Array>;
 
 class ReplayResetCallbackError extends Error {
   readonly cause: unknown;
@@ -54,6 +60,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   private lastHandshake?: QwpHandshakeMetadata;
   private lastEndpoint?: string | URL;
   private initialServerInfo?: QwpServerInfoMessage;
+  private currentServerInfo?: QwpServerInfoMessage;
   private outboundReplay: Uint8Array[] = [];
   private generation = 0;
   private sendTail: Promise<void> = Promise.resolve();
@@ -70,6 +77,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     private readonly reconnectOptions: QwpReconnectOptions,
     private readonly serverInfoTimeoutMs: number,
     private readonly onConnectionReset: ConnectionResetHandler,
+    private readonly encodeQueryRequest: QueryRequestEncoder,
     private readonly onReplayReset?: ReplayResetHandler,
   ) {
     this.maxAttempts = reconnectOptions.maxAttempts ?? 3;
@@ -94,6 +102,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     reconnectOptions: QwpReconnectOptions,
     serverInfoTimeoutMs: number,
     onConnectionReset: ConnectionResetHandler,
+    encodeQueryRequest: QueryRequestEncoder,
     onReplayReset?: ReplayResetHandler,
   ): Promise<QwpReconnectingEgressConnection> {
     const reconnecting = new QwpReconnectingEgressConnection(
@@ -101,6 +110,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       reconnectOptions,
       serverInfoTimeoutMs,
       onConnectionReset,
+      encodeQueryRequest,
       onReplayReset,
     );
     try {
@@ -129,9 +139,10 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     const sending = this.sendTail.then(async () => {
       this.throwIfUnavailable();
       const connection = await this.requireConnection();
-      this.trackOutbound(copy);
+      const prepared = await this.prepareOutboundQuery(copy);
+      this.trackOutbound(prepared);
       try {
-        await connection.send(copy);
+        await connection.send(prepared);
       } catch (error) {
         await this.requestReconnect(error, connection);
       }
@@ -217,12 +228,19 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         }
         if (reconnecting) {
           this.validateServerInfo(serverInfo, candidate);
-          await this.replayInto(candidate, previousEndpoint, initialCause);
+          await this.replayInto(
+            candidate,
+            serverInfo,
+            previousEndpoint,
+            initialCause,
+          );
         } else {
           this.initialServerInfo = serverInfo;
+          this.currentServerInfo = serverInfo;
           this.messagesQueue.push(serverInfoPayload);
         }
         if (this.closing) throw new QwpSendClosedError();
+        this.currentServerInfo = serverInfo;
         this.install(candidate, iterator);
         this.connectingCandidate = undefined;
         if (reconnecting) {
@@ -364,18 +382,6 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         "QWP reconnect started before the initial SERVER_INFO was received",
       );
     }
-    const missingCapabilities = initial.capabilities & ~serverInfo.capabilities;
-    if (missingCapabilities !== 0) {
-      throw new QwpUpgradeError(
-        `QWP reconnect target lacks required egress capabilities [missing=0x${missingCapabilities.toString(16)}]`,
-        {
-          kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
-          retryable: true,
-          tryNextEndpoint: true,
-          url: connection.endpoint,
-        },
-      );
-    }
     if (
       initial.clusterId &&
       serverInfo.clusterId &&
@@ -395,6 +401,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
 
   private async replayInto(
     connection: QwpBinaryConnection,
+    serverInfo: QwpServerInfoMessage,
     previousEndpoint: string | URL | undefined,
     cause: unknown,
   ): Promise<void> {
@@ -402,15 +409,20 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       // A terminal response may already be queued. Let the bounded session
       // consume it before resetting connection-scoped decoder state.
       await this.messagesQueue.barrier();
-      await this.onConnectionReset();
+      await this.onConnectionReset(serverInfo);
       return;
     }
     // An active operation will be replayed from its request. Drop raw stale
     // messages before resetting the decoded queue; waiting for a barrier here
     // can deadlock when that queue is deliberately at its client-side bound.
     this.messagesQueue.clear();
-    await this.onConnectionReset();
+    await this.onConnectionReset(serverInfo);
     const requestId = replayRequestId(this.outboundReplay);
+    if (requestId === undefined) {
+      throw new QwpProtocolError(
+        "QWP egress replay is missing its QUERY_REQUEST",
+      );
+    }
     if (!this.onReplayReset) {
       throw new QwpEgressReplayRequiredError(requestId);
     }
@@ -424,7 +436,25 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     } catch (error) {
       throw new ReplayResetCallbackError(error);
     }
+    const request = await this.encodeQueryRequest(serverInfo, requestId);
+    validateEncodedRequest(request, requestId);
+    const preparedRequest = request.slice();
+    this.outboundReplay[0] = preparedRequest;
     for (const payload of this.outboundReplay) await connection.send(payload);
+  }
+
+  private async prepareOutboundQuery(payload: Uint8Array): Promise<Uint8Array> {
+    if (payload[0] !== QWP_EGRESS_MESSAGE.QUERY_REQUEST) return payload;
+    const requestId = replayRequestId([payload]);
+    const serverInfo = this.currentServerInfo;
+    if (requestId === undefined || !serverInfo) {
+      throw new QwpProtocolError(
+        "QWP QUERY_REQUEST cannot be prepared before SERVER_INFO",
+      );
+    }
+    const encoded = await this.encodeQueryRequest(serverInfo, requestId);
+    validateEncodedRequest(encoded, requestId);
+    return encoded.slice();
   }
 
   private trackOutbound(payload: Uint8Array): void {
@@ -535,6 +565,18 @@ function replayRequestId(payloads: readonly Uint8Array[]): bigint | undefined {
     query.byteOffset,
     query.byteLength,
   ).getBigUint64(1, true);
+}
+
+function validateEncodedRequest(
+  payload: Uint8Array,
+  expectedRequestId: bigint,
+): void {
+  const requestId = replayRequestId([payload]);
+  if (requestId !== expectedRequestId) {
+    throw new QwpProtocolError(
+      `QWP query encoder returned the wrong request [expected=${expectedRequestId}, actual=${requestId ?? "missing"}]`,
+    );
+  }
 }
 
 function validateReconnectPolicy(
