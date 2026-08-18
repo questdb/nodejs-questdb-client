@@ -2070,6 +2070,83 @@ describe("QWP ingress reconnect and replay", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it.each(["structurally corrupt", "stale but valid"] as const)(
+    "rebuilds a %s symbol sidecar from self-contained committed frames",
+    async (failureKind) => {
+      const directory = await createTemporaryDirectory();
+      const dictionary = new QwpSymbolDictionary();
+      const replayFrame = encodeQwpIngressFrame([symbolTable("ETH-USD")], {
+        dictionary,
+        confirmedMaxSymbolId: -1,
+      });
+      const seed = new QwpNodeFileReplayStore({ directory });
+      await seed.load();
+      await seed.appendSymbolDictionary(
+        0,
+        failureKind === "stale but valid"
+          ? ["STALE-SYMBOL"]
+          : dictionary.entriesFrom(0),
+      );
+      await seed.append({ frameSequence: 5n, payload: replayFrame });
+      await seed.close();
+      if (failureKind === "structurally corrupt") {
+        await writeFile(join(directory, "symbols.qwpdict"), Uint8Array.of(0));
+      }
+
+      const connection = new FakeConnection("primary");
+      const session = await QwpIngressSession.connect(async () => connection, {
+        reconnect: { maxAttempts: 1 },
+        replayStore: new QwpNodeFileReplayStore({ directory }),
+      });
+      expect(connection.sent).toHaveLength(2);
+      expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toEqual(
+        {
+          startId: 0,
+          entries: ["ETH-USD"],
+        },
+      );
+      expect(connection.sent[1]).toEqual(replayFrame);
+      await session.close();
+
+      const verify = new QwpNodeFileReplayStore({ directory });
+      await expect(verify.load()).resolves.toHaveLength(1);
+      await expect(verify.loadSymbolDictionary()).resolves.toEqual(["ETH-USD"]);
+      await verify.close();
+      await rm(directory, { recursive: true, force: true });
+    },
+  );
+
+  it("rejects corrupt sidecar recovery when committed frames are not self-contained", async () => {
+    const directory = await createTemporaryDirectory();
+    const dictionary = new QwpSymbolDictionary();
+    dictionary.getOrAdd("ETH-USD");
+    const replayFrame = encodeQwpIngressFrame([symbolTable("BTC-USD")], {
+      dictionary,
+      confirmedMaxSymbolId: 0,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.appendSymbolDictionary(0, dictionary.entriesFrom(0));
+    await seed.append({ frameSequence: 5n, payload: replayFrame });
+    await seed.close();
+    await writeFile(join(directory, "symbols.qwpdict"), Uint8Array.of(0));
+
+    await expect(
+      QwpIngressSession.connect(async () => new FakeConnection("primary"), {
+        reconnect: { maxAttempts: 1 },
+        replayStore: new QwpNodeFileReplayStore({ directory }),
+      }),
+    ).rejects.toBeInstanceOf(QwpUnrecoverableReplayDictionaryError);
+
+    const verify = new QwpNodeFileReplayStore({ directory });
+    await expect(verify.load()).resolves.toHaveLength(1);
+    await expect(verify.loadSymbolDictionary()).rejects.toBeInstanceOf(
+      QwpReplayStoreCorruptionError,
+    );
+    await verify.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("rejects a surviving delta with an unreconstructable dictionary gap", async () => {
     const directory = await createTemporaryDirectory();
     const dictionary = new QwpSymbolDictionary();

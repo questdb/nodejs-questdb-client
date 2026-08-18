@@ -218,10 +218,12 @@ require an offline migration.
 
 On startup, a dictionary sidecar truncated at a complete-block boundary is rebuilt
 from the ordered symbol deltas embedded in surviving committed frames and healed
-before replay. If the frame journal is structurally corrupt, or the surviving deltas
-contain a dictionary gap or conflict that cannot be reconstructed, the foreground
-slot is renamed to `<slot>.unreplayable-N`, marked with `.qwp.failed`, and preserved
-for inspection. The sender then starts once with a clean slot at the configured path.
+before replay. A corrupt or stale dictionary sidecar is replaced when those committed
+frames independently reconstruct a complete dense dictionary from ID zero. If the
+frame journal is structurally corrupt, or the surviving deltas contain a dictionary
+gap or conflict that cannot be reconstructed, the foreground slot is renamed to
+`<slot>.unreplayable-N`, marked with `.qwp.failed`, and preserved for inspection. The
+sender then starts once with a clean slot at the configured path.
 `onRecoveryQuarantine` receives the original and quarantine paths plus the terminal
 cause and a typed `senderError`. The shared `onSenderError` callback receives the same
 `data-loss` / `abandoned` verdict and its `quarantinedPath`. This build-time recovery

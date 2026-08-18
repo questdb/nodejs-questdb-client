@@ -348,7 +348,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     errorInboxCapacity = 256,
     onSenderError?: (error: QwpSenderError) => void,
   ): Promise<QwpReconnectingIngressConnection> {
-    const store = replayStore ?? new QwpMemoryReplayStore();
+    const store: QwpIngressReplayStore =
+      replayStore ?? new QwpMemoryReplayStore();
     let connection: QwpReconnectingIngressConnection | undefined;
     try {
       const records = await store.load();
@@ -359,15 +360,23 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             ? 1
             : 0,
       );
-      const persistedSymbolDictionary = store.loadSymbolDictionary
-        ? await store.loadSymbolDictionary()
-        : [];
+      let persistedSymbolDictionary: readonly string[] = [];
+      let persistedSymbolDictionaryFailure: unknown;
+      if (store.loadSymbolDictionary) {
+        try {
+          persistedSymbolDictionary = await store.loadSymbolDictionary();
+        } catch (error) {
+          if (!store.replaceSymbolDictionary) throw error;
+          persistedSymbolDictionaryFailure = error;
+        }
+      }
       const recoveredDiscardTail = analyzeRecoveredDiscardTail(sortedRecords);
       const symbolDictionary = await recoverSymbolDictionary(
         sortedRecords,
         persistedSymbolDictionary,
         recoveredDiscardTail,
         store,
+        persistedSymbolDictionaryFailure,
       );
       connection = new QwpReconnectingIngressConnection(
         factory,
@@ -1569,13 +1578,73 @@ async function recoverSymbolDictionary(
   persistedDictionary: readonly string[],
   discardTail: RecoveredDiscardTail | undefined,
   store: QwpIngressReplayStore,
+  persistedDictionaryFailure?: unknown,
 ): Promise<readonly string[]> {
   const hasDictionaryPersistence =
     store.loadSymbolDictionary !== undefined &&
     store.appendSymbolDictionary !== undefined;
-  const dictionary = [...persistedDictionary];
+  let recoveredFromPersisted = true;
+  let dictionary: string[];
+  try {
+    dictionary = reconstructSymbolDictionary(
+      records,
+      persistedDictionary,
+      discardTail,
+      hasDictionaryPersistence,
+      persistedDictionaryFailure,
+    );
+  } catch (error) {
+    if (!store.replaceSymbolDictionary || persistedDictionary.length === 0) {
+      throw error;
+    }
+    // A structurally valid sidecar can still belong to an older dictionary
+    // generation. Only discard it when the committed frames independently
+    // reconstruct a complete dense dictionary from ID zero.
+    dictionary = reconstructSymbolDictionary(
+      records,
+      [],
+      discardTail,
+      hasDictionaryPersistence,
+      error,
+    );
+    recoveredFromPersisted = false;
+  }
+  const replacePersistedDictionary =
+    persistedDictionaryFailure !== undefined || !recoveredFromPersisted;
+  if (replacePersistedDictionary) {
+    try {
+      await store.replaceSymbolDictionary!(dictionary);
+    } catch (error) {
+      throw new QwpReplayDictionaryError(
+        "could not replace the unusable QWP symbol dictionary from surviving frame deltas",
+        error,
+      );
+    }
+  } else if (dictionary.length > persistedDictionary.length) {
+    try {
+      await store.appendSymbolDictionary!(
+        persistedDictionary.length,
+        dictionary.slice(persistedDictionary.length),
+      );
+    } catch (error) {
+      throw new QwpReplayDictionaryError(
+        "could not heal the recovered QWP symbol dictionary from surviving frame deltas",
+        error,
+      );
+    }
+  }
+  return dictionary;
+}
+
+function reconstructSymbolDictionary(
+  records: readonly QwpIngressReplayRecord[],
+  baseline: readonly string[],
+  discardTail: RecoveredDiscardTail | undefined,
+  hasDictionaryPersistence: boolean,
+  recoveryCause?: unknown,
+): string[] {
+  const dictionary = [...baseline];
   const dictionaryIds = new Map(dictionary.map((entry, id) => [entry, id]));
-  const persistedSize = dictionary.length;
   for (const record of records) {
     // A wholly deferred recovery tail is retired locally and never replayed.
     // Its dictionary additions therefore cannot make a committed prefix safe.
@@ -1591,7 +1660,7 @@ async function recoverSymbolDictionary(
     } catch (error) {
       throw new QwpUnrecoverableReplayDictionaryError(
         `persisted QWP frame contains an invalid symbol dictionary delta [sequence=${record.frameSequence}]`,
-        error,
+        recoveryCause ?? error,
       );
     }
     if (!delta) continue;
@@ -1603,6 +1672,7 @@ async function recoverSymbolDictionary(
     if (delta.startId > dictionary.length) {
       throw new QwpUnrecoverableReplayDictionaryError(
         `persisted QWP frame references a symbol dictionary gap that cannot be reconstructed [startId=${delta.startId}, dictionarySize=${dictionary.length}]`,
+        recoveryCause,
       );
     }
     delta.entries.forEach((entry, index) => {
@@ -1611,6 +1681,7 @@ async function recoverSymbolDictionary(
       if (existing !== undefined && existing !== entry) {
         throw new QwpUnrecoverableReplayDictionaryError(
           `persisted QWP frame conflicts with symbol dictionary at ID ${id}`,
+          recoveryCause,
         );
       }
       if (id === dictionary.length) {
@@ -1618,25 +1689,13 @@ async function recoverSymbolDictionary(
         if (duplicateId !== undefined) {
           throw new QwpUnrecoverableReplayDictionaryError(
             `persisted QWP frame assigns symbol dictionary value ${JSON.stringify(entry)} to both ID ${duplicateId} and ID ${id}`,
+            recoveryCause,
           );
         }
         dictionary.push(entry);
         dictionaryIds.set(entry, id);
       }
     });
-  }
-  if (dictionary.length > persistedSize) {
-    try {
-      await store.appendSymbolDictionary!(
-        persistedSize,
-        dictionary.slice(persistedSize),
-      );
-    } catch (error) {
-      throw new QwpReplayDictionaryError(
-        "could not heal the recovered QWP symbol dictionary from surviving frame deltas",
-        error,
-      );
-    }
   }
   return dictionary;
 }

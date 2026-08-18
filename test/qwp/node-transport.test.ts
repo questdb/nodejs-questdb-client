@@ -12,6 +12,8 @@ import {
   connectQwpNodeWebSocket,
   createQwpNodeSender,
   encodeQwpFrame,
+  encodeQwpIngressFrame,
+  QWP_COLUMN_TYPE,
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
   QWP_SERVER_ROLE,
@@ -24,6 +26,8 @@ import {
   QwpNodeFileReplayStore,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreQuarantinedError,
+  QwpSymbolDictionary,
+  QwpTableBuffer,
   QwpUpgradeError,
   type QwpSenderError,
   writeQwpVarint,
@@ -498,6 +502,63 @@ describe("QWP Node transport", () => {
       expect(
         (await readdir(directory)).filter((name) => name.endsWith(".qwps")),
       ).toEqual([]);
+    } finally {
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs a corrupt dictionary sidecar instead of quarantining self-contained frames", async () => {
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+    });
+    const received: Uint8Array[] = [];
+    server.on("connection", (socket) => {
+      socket.on("message", (payload) => {
+        received.push(new Uint8Array(payload as Buffer));
+      });
+    });
+    await listen(server);
+
+    const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-recovery-"));
+    const directory = join(rootDirectory, "sender-0");
+    const dictionary = new QwpSymbolDictionary();
+    const table = new QwpTableBuffer("trades");
+    table
+      .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+      .values.push("ETH-USD");
+    table.nextRow();
+    const replayFrame = encodeQwpIngressFrame([table], {
+      dictionary,
+      confirmedMaxSymbolId: -1,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.appendSymbolDictionary(0, dictionary.entriesFrom(0));
+    await seed.append({ frameSequence: 0n, payload: replayFrame });
+    await seed.close();
+    await writeFile(join(directory, "symbols.qwpdict"), Uint8Array.of(0));
+
+    const quarantined: QwpReplayStoreQuarantinedError[] = [];
+    const address = server.address() as AddressInfo;
+    try {
+      const session = await connectQwpNodeIngress({
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        storeAndForward: {
+          directory,
+          initialConnectMode: "sync",
+          onRecoveryQuarantine: (event) => quarantined.push(event.error),
+        },
+      });
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      await session.close();
+
+      expect(quarantined).toEqual([]);
+      expect(await readdir(rootDirectory)).toEqual(["sender-0"]);
+      const verify = new QwpNodeFileReplayStore({ directory });
+      await expect(verify.load()).resolves.toHaveLength(1);
+      await expect(verify.loadSymbolDictionary()).resolves.toEqual(["ETH-USD"]);
+      await verify.close();
     } finally {
       await rm(rootDirectory, { recursive: true, force: true });
     }

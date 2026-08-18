@@ -168,6 +168,11 @@ export interface QwpIngressReplayStore {
     startId: number,
     entries: readonly string[],
   ): Promise<void>;
+  /**
+   * Atomically replaces an unusable dictionary after surviving committed
+   * frames prove that its complete ID space can be reconstructed.
+   */
+  replaceSymbolDictionary?(entries: readonly string[]): Promise<void>;
   close(): Promise<void>;
 }
 

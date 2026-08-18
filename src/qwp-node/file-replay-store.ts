@@ -276,6 +276,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private operationTail: Promise<void> = Promise.resolve();
   private totalBytes = 0;
   private dictionaryFileSize = 0;
+  private dictionaryLoadError?: unknown;
   private acknowledgedThrough = -1n;
   private dictionaryDirty = false;
   private acknowledgementDirty = false;
@@ -518,7 +519,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         if (this.totalBytes > this.maxBytes) {
           throw new QwpReplayStoreFullError(this.maxBytes, this.totalBytes);
         }
-        await this.loadDictionaryFile();
+        try {
+          await this.loadDictionaryFile();
+        } catch (error) {
+          // Frame recovery decides whether this sidecar is load-bearing. Keep
+          // the file untouched until the ordered committed-frame scan either
+          // reconstructs it completely or rejects the slot as unreplayable.
+          this.symbols.length = 0;
+          this.symbolValues.clear();
+          this.dictionaryFileSize = 0;
+          this.dictionaryLoadError = error;
+        }
         this.loaded = true;
         loadSucceeded = true;
         this.scheduleCheckpoint();
@@ -611,6 +622,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
       this.assertReady();
+      if (this.dictionaryLoadError) throw this.dictionaryLoadError;
       return this.symbols.slice();
     });
   }
@@ -622,6 +634,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
       this.assertReady();
+      if (this.dictionaryLoadError) throw this.dictionaryLoadError;
       if (startId !== this.symbols.length) {
         throw new QwpReplayStoreError(
           `QWP symbol dictionary is not dense [expected=${this.symbols.length}, received=${startId}]`,
@@ -703,6 +716,79 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       for (const entry of entries) this.symbolValues.add(entry);
       this.dictionaryFileSize += addedBytes;
       this.totalBytes = requiredBytes;
+    });
+  }
+
+  replaceSymbolDictionary(entries: readonly string[]): Promise<void> {
+    if (this.closing || this.closed) return Promise.reject(this.closedError());
+    return this.enqueue(async () => {
+      this.assertReady();
+      validateReplacementDictionary(entries);
+      const finalPath = join(this.directory, DICTIONARY_FILE);
+      const previousSize = this.dictionaryFileSize;
+      if (entries.length === 0) {
+        try {
+          await ignoreMissing(unlink(finalPath));
+          if (this.durability === QWP_SF_DURABILITY.APPEND) {
+            await syncDirectory(this.directory);
+          } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+            this.directoryDirty = true;
+          }
+        } catch (error) {
+          throw new QwpReplayStoreError(
+            "could not remove unusable QWP symbol dictionary",
+            error,
+          );
+        }
+        this.symbols.length = 0;
+        this.symbolValues.clear();
+        this.totalBytes -= previousSize;
+        this.dictionaryFileSize = 0;
+        this.dictionaryLoadError = undefined;
+        this.dictionaryDirty = false;
+        return;
+      }
+
+      const replacement = Buffer.concat([
+        encodeDictionaryHeader(),
+        encodeDictionaryBlock(0, entries),
+      ]);
+      const temporaryPath = join(
+        this.directory,
+        `${DICTIONARY_FILE}${TEMP_MARKER}${process.pid}-${randomUUID()}`,
+      );
+      try {
+        const file = await open(temporaryPath, "wx", 0o600);
+        try {
+          await file.writeFile(replacement);
+          if (this.durability === QWP_SF_DURABILITY.APPEND) {
+            await file.sync();
+          }
+        } finally {
+          await file.close();
+        }
+        await ignoreMissing(unlink(finalPath));
+        await rename(temporaryPath, finalPath);
+        if (this.durability === QWP_SF_DURABILITY.APPEND) {
+          await syncDirectory(this.directory);
+        } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+          this.dictionaryDirty = true;
+          this.directoryDirty = true;
+        }
+      } catch (error) {
+        await ignoreMissing(unlink(temporaryPath));
+        throw new QwpReplayStoreError(
+          "could not replace unusable QWP symbol dictionary",
+          error,
+        );
+      }
+      this.symbols.length = 0;
+      this.symbols.push(...entries);
+      this.symbolValues.clear();
+      for (const entry of entries) this.symbolValues.add(entry);
+      this.totalBytes = this.totalBytes - previousSize + replacement.byteLength;
+      this.dictionaryFileSize = replacement.byteLength;
+      this.dictionaryLoadError = undefined;
     });
   }
 
@@ -1501,6 +1587,28 @@ function encodeDictionaryBlock(
     .digest();
   digest.copy(block, 12);
   return block;
+}
+
+function validateReplacementDictionary(entries: readonly string[]): void {
+  if (entries.length > QWP_MAX_SYMBOL_DICTIONARY_SIZE) {
+    throw new QwpReplayStoreError(
+      `QWP symbol dictionary exceeds maximum size ${QWP_MAX_SYMBOL_DICTIONARY_SIZE}`,
+    );
+  }
+  const values = new Set<string>();
+  for (const entry of entries) {
+    if (typeof entry !== "string") {
+      throw new QwpReplayStoreError(
+        "QWP symbol dictionary values must be strings",
+      );
+    }
+    if (values.has(entry)) {
+      throw new QwpReplayStoreError(
+        `QWP symbol dictionary contains a duplicate value: '${entry}'`,
+      );
+    }
+    values.add(entry);
+  }
 }
 
 function corruptDictionary(reason: string): QwpReplayStoreCorruptionError {
