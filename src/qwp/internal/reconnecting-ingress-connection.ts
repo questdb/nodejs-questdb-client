@@ -31,6 +31,7 @@ import {
   QwpReplayDictionaryPersistenceError,
   QwpReplayRejectedError,
   QwpSendClosedError,
+  QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
@@ -304,17 +305,23 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             ? 1
             : 0,
       );
-      const symbolDictionary = store.loadSymbolDictionary
+      const persistedSymbolDictionary = store.loadSymbolDictionary
         ? await store.loadSymbolDictionary()
         : [];
-      validateRecoveredDictionary(sortedRecords, symbolDictionary, store);
+      const recoveredDiscardTail = analyzeRecoveredDiscardTail(sortedRecords);
+      const symbolDictionary = await recoverSymbolDictionary(
+        sortedRecords,
+        persistedSymbolDictionary,
+        recoveredDiscardTail,
+        store,
+      );
       connection = new QwpReconnectingIngressConnection(
         factory,
         reconnectOptions,
         store,
         sortedRecords,
         symbolDictionary,
-        analyzeRecoveredDiscardTail(sortedRecords),
+        recoveredDiscardTail,
         localMaxBatchSizeBytes,
         backgroundStoreAndForward,
         orphanStoreAndForward,
@@ -1343,36 +1350,81 @@ function isRecoveredCommitBarrier(payload: Uint8Array): boolean {
   }
 }
 
-function validateRecoveredDictionary(
+async function recoverSymbolDictionary(
   records: readonly QwpIngressReplayRecord[],
-  dictionary: readonly string[],
+  persistedDictionary: readonly string[],
+  discardTail: RecoveredDiscardTail | undefined,
   store: QwpIngressReplayStore,
-): void {
+): Promise<readonly string[]> {
   const hasDictionaryPersistence =
     store.loadSymbolDictionary !== undefined &&
     store.appendSymbolDictionary !== undefined;
+  const dictionary = [...persistedDictionary];
+  const dictionaryIds = new Map(dictionary.map((entry, id) => [entry, id]));
+  const persistedSize = dictionary.length;
   for (const record of records) {
-    const delta = readSymbolDictionaryDelta(record.payload);
+    // A wholly deferred recovery tail is retired locally and never replayed.
+    // Its dictionary additions therefore cannot make a committed prefix safe.
+    if (
+      discardTail !== undefined &&
+      record.frameSequence >= discardTail.startSequence
+    ) {
+      break;
+    }
+    let delta: ReturnType<typeof readSymbolDictionaryDelta>;
+    try {
+      delta = readSymbolDictionaryDelta(record.payload);
+    } catch (error) {
+      throw new QwpUnrecoverableReplayDictionaryError(
+        `persisted QWP frame contains an invalid symbol dictionary delta [sequence=${record.frameSequence}]`,
+        error,
+      );
+    }
     if (!delta) continue;
     if (!hasDictionaryPersistence) {
-      throw new QwpReplayDictionaryError(
+      throw new QwpUnrecoverableReplayDictionaryError(
         "persisted QWP delta frames require a replay store with dictionary persistence",
       );
     }
-    if (delta.startId + delta.entries.length > dictionary.length) {
-      throw new QwpReplayDictionaryError(
-        `persisted QWP frame references an incomplete symbol dictionary [startId=${delta.startId}, count=${delta.entries.length}, dictionarySize=${dictionary.length}]`,
+    if (delta.startId > dictionary.length) {
+      throw new QwpUnrecoverableReplayDictionaryError(
+        `persisted QWP frame references a symbol dictionary gap that cannot be reconstructed [startId=${delta.startId}, dictionarySize=${dictionary.length}]`,
       );
     }
     delta.entries.forEach((entry, index) => {
       const id = delta.startId + index;
-      if (dictionary[id] !== entry) {
-        throw new QwpReplayDictionaryError(
+      const existing = dictionary[id];
+      if (existing !== undefined && existing !== entry) {
+        throw new QwpUnrecoverableReplayDictionaryError(
           `persisted QWP frame conflicts with symbol dictionary at ID ${id}`,
         );
       }
+      if (id === dictionary.length) {
+        const duplicateId = dictionaryIds.get(entry);
+        if (duplicateId !== undefined) {
+          throw new QwpUnrecoverableReplayDictionaryError(
+            `persisted QWP frame assigns symbol dictionary value ${JSON.stringify(entry)} to both ID ${duplicateId} and ID ${id}`,
+          );
+        }
+        dictionary.push(entry);
+        dictionaryIds.set(entry, id);
+      }
     });
   }
+  if (dictionary.length > persistedSize) {
+    try {
+      await store.appendSymbolDictionary!(
+        persistedSize,
+        dictionary.slice(persistedSize),
+      );
+    } catch (error) {
+      throw new QwpReplayDictionaryError(
+        "could not heal the recovered QWP symbol dictionary from surviving frame deltas",
+        error,
+      );
+    }
+  }
+  return dictionary;
 }
 
 function dictionaryCatchupFrames(

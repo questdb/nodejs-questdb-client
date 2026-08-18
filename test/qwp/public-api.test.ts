@@ -42,6 +42,7 @@ const sharedRuntimeContract = [
   "QwpSendTimeoutError",
   "QwpSender",
   "QwpSenderCloseTimeoutError",
+  "QwpUnrecoverableReplayDictionaryError",
   "QwpUpgradeError",
 ] as const;
 
@@ -67,9 +68,11 @@ const nodeRuntimeContract = [
   "QwpNodeOrphanDrainer",
   "QwpReplayStoreAppendTimeoutError",
   "QwpReplayStoreCheckpointError",
+  "QwpReplayStoreCorruptionError",
   "QwpReplayStoreError",
   "QwpReplayStoreFullError",
   "QwpReplayStoreLockedError",
+  "QwpReplayStoreQuarantinedError",
   "QwpVersionMismatchError",
   "connectQwpNodeEgress",
   "connectQwpNodeIngress",

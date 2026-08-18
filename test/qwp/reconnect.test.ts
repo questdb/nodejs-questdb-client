@@ -3,6 +3,8 @@ import {
   mkdtemp,
   readdir,
   rm,
+  stat,
+  truncate,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -16,6 +18,7 @@ import {
   QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreCheckpointError,
+  QwpReplayStoreCorruptionError,
   QwpReplayStoreError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
@@ -45,6 +48,7 @@ import {
   QwpReconnectExhaustedError,
   QwpReplayRejectedError,
   QwpReplayDictionaryPersistenceError,
+  QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   encodeQwpFrame,
   encodeQwpDurableAckPollFrame,
@@ -1498,6 +1502,76 @@ describe("QWP ingress reconnect and replay", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("reconstructs and heals a truncated symbol dictionary from surviving deltas", async () => {
+    const directory = await createTemporaryDirectory();
+    const dictionary = new QwpSymbolDictionary();
+    encodeQwpIngressFrame([symbolTable("ETH-USD")], {
+      dictionary,
+      confirmedMaxSymbolId: -1,
+    });
+
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.appendSymbolDictionary(0, dictionary.entriesFrom(0));
+    const persistedPrefixSize = (await stat(join(directory, "symbols.qwpdict")))
+      .size;
+
+    const replayFrame = encodeQwpIngressFrame([symbolTable("BTC-USD")], {
+      dictionary,
+      confirmedMaxSymbolId: 0,
+    });
+    await seed.appendSymbolDictionary(1, dictionary.entriesFrom(1));
+    await seed.append({ frameSequence: 5n, payload: replayFrame });
+    await seed.close();
+    await truncate(join(directory, "symbols.qwpdict"), persistedPrefixSize);
+
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+    });
+    expect(connection.sent).toHaveLength(2);
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toEqual({
+      startId: 0,
+      entries: ["ETH-USD", "BTC-USD"],
+    });
+    expect(connection.sent[1]).toEqual(replayFrame);
+    await session.close();
+
+    const verify = new QwpNodeFileReplayStore({ directory });
+    await expect(verify.load()).resolves.toHaveLength(1);
+    await expect(verify.loadSymbolDictionary()).resolves.toEqual([
+      "ETH-USD",
+      "BTC-USD",
+    ]);
+    await verify.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects a surviving delta with an unreconstructable dictionary gap", async () => {
+    const directory = await createTemporaryDirectory();
+    const dictionary = new QwpSymbolDictionary();
+    dictionary.getOrAdd("ETH-USD");
+    dictionary.getOrAdd("BTC-USD");
+    const replayFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")], {
+      dictionary,
+      confirmedMaxSymbolId: 1,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.appendSymbolDictionary(0, ["ETH-USD"]);
+    await seed.append({ frameSequence: 5n, payload: replayFrame });
+    await seed.close();
+
+    await expect(
+      QwpIngressSession.connect(async () => new FakeConnection("primary"), {
+        reconnect: { maxAttempts: 1 },
+        replayStore: new QwpNodeFileReplayStore({ directory }),
+      }),
+    ).rejects.toBeInstanceOf(QwpUnrecoverableReplayDictionaryError);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("recovers a Node journal before new frames and removes it after ACK", async () => {
     const directory = await createTemporaryDirectory();
     const seed = new QwpNodeFileReplayStore({ directory });
@@ -2520,7 +2594,9 @@ describe("QWP Node file replay store", () => {
     await writeFile(join(directory, record), Uint8Array.of(0));
 
     const recovered = new QwpNodeFileReplayStore({ directory });
-    await expect(recovered.load()).rejects.toBeInstanceOf(QwpReplayStoreError);
+    await expect(recovered.load()).rejects.toBeInstanceOf(
+      QwpReplayStoreCorruptionError,
+    );
     await recovered.close();
   });
 

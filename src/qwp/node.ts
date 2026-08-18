@@ -5,6 +5,7 @@ import type { Agent } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
 import { basename, dirname, join } from "node:path";
 import WebSocket from "ws";
+import { log } from "../logging";
 import {
   decodeQwpContentEncoding,
   encodeQwpAcceptEncoding,
@@ -29,6 +30,7 @@ import {
   QwpEgressRoutingOptions,
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
+  QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
 } from "./transport";
@@ -36,7 +38,12 @@ import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 import { QwpSender, QwpSenderOptions } from "./sender";
 import { QwpClient, QwpClientPoolOptions } from "./client";
-import { QwpNodeFileReplayStore } from "../qwp-node/file-replay-store";
+import {
+  quarantineQwpNodeReplayStore,
+  QwpNodeFileReplayStore,
+  QwpReplayStoreCorruptionError,
+  QwpReplayStoreQuarantinedError,
+} from "../qwp-node/file-replay-store";
 import type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
 import {
   QwpNodeOrphanDrainer,
@@ -49,9 +56,11 @@ export {
   QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreCheckpointError,
+  QwpReplayStoreCorruptionError,
   QwpReplayStoreError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
+  QwpReplayStoreQuarantinedError,
 } from "../qwp-node/file-replay-store";
 export type {
   QwpNodeFileReplayStoreMetrics,
@@ -193,6 +202,14 @@ export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
   storeAndForward?: QwpNodeStoreAndForwardOptions;
 }
 
+/** Notification that an unreplayable foreground slot was preserved aside. */
+export interface QwpNodeReplayRecoveryEvent {
+  readonly timestampMs: number;
+  readonly directory: string;
+  readonly quarantineDirectory: string;
+  readonly error: QwpReplayStoreQuarantinedError;
+}
+
 /** Node store-and-forward controls layered on the crash-safe replay journal. */
 export interface QwpNodeStoreAndForwardOptions
   extends QwpNodeFileReplayStoreOptions {
@@ -219,6 +236,11 @@ export interface QwpNodeStoreAndForwardOptions
   orphanScanIntervalMs?: number;
   /** Receives isolated scanner and drainer lifecycle notifications. */
   onOrphanDrainEvent?: (event: QwpNodeOrphanDrainEvent) => void;
+  /**
+   * Receives a data-loss notification when corrupt foreground replay bytes are
+   * preserved under an `.unreplayable-N` pathname and a fresh slot is opened.
+   */
+  onRecoveryQuarantine?: (event: QwpNodeReplayRecoveryEvent) => void;
 }
 
 export interface QwpNodeEgressOptions
@@ -497,7 +519,7 @@ async function connectQwpNodeIngressInternal(
       "Node QWP ingress reconnection requires a persistent storeAndForward directory",
     );
   }
-  const replayStore = options.storeAndForward
+  let replayStore = options.storeAndForward
     ? new QwpNodeFileReplayStore(options.storeAndForward)
     : sessionOptions.replayStore;
   const reconnect = options.storeAndForward
@@ -525,15 +547,67 @@ async function connectQwpNodeIngressInternal(
     startOrphanDrainer && options.storeAndForward?.drainOrphans === true
       ? createStandaloneOrphanDrainer(options, sessionOptions)
       : undefined;
-  const session = await QwpIngressSession.connect(
-    createQwpNodeConnectionFactory(options),
-    effectiveSessionOptions,
-  );
+  const connectionFactory = createQwpNodeConnectionFactory(options);
+  let session: QwpIngressSession;
+  try {
+    session = await QwpIngressSession.connect(
+      connectionFactory,
+      effectiveSessionOptions,
+    );
+  } catch (error) {
+    if (
+      !options.storeAndForward ||
+      sessionOptions.orphanStoreAndForward === true ||
+      !isQuarantinableReplayRecoveryError(error)
+    ) {
+      throw error;
+    }
+    const recoveryError = await quarantineQwpNodeReplayStore(
+      options.storeAndForward.directory,
+      error,
+    );
+    emitReplayRecoveryQuarantine(options.storeAndForward, recoveryError);
+    replayStore = new QwpNodeFileReplayStore(options.storeAndForward);
+    session = await QwpIngressSession.connect(connectionFactory, {
+      ...effectiveSessionOptions,
+      replayStore,
+    });
+  }
   if (orphanDrainer) {
     session.registerCloseHook(() => orphanDrainer.close());
     orphanDrainer.start();
   }
   return session;
+}
+
+function isQuarantinableReplayRecoveryError(error: unknown): boolean {
+  return (
+    error instanceof QwpReplayStoreCorruptionError ||
+    error instanceof QwpUnrecoverableReplayDictionaryError
+  );
+}
+
+function emitReplayRecoveryQuarantine(
+  options: QwpNodeStoreAndForwardOptions,
+  error: QwpReplayStoreQuarantinedError,
+): void {
+  const event: QwpNodeReplayRecoveryEvent = {
+    timestampMs: Date.now(),
+    directory: error.directory,
+    quarantineDirectory: error.quarantineDirectory,
+    error,
+  };
+  if (!options.onRecoveryQuarantine) {
+    log("error", error);
+    return;
+  }
+  try {
+    options.onRecoveryQuarantine(event);
+  } catch {
+    // Recovery already succeeded. A notification callback must not brick the
+    // fresh producer slot; fall back to the default logger instead.
+    log("error", error);
+  }
 }
 
 /**

@@ -4,7 +4,10 @@ import type {
   QwpConnectionCloseInfo,
   QwpIngressTransportMetrics,
 } from "../qwp/transport";
-import { QwpReplayStoreLockedError } from "./file-replay-store";
+import {
+  isQwpNodeReplayQuarantineSlotName,
+  QwpReplayStoreLockedError,
+} from "./file-replay-store";
 
 const RECORD_SUFFIX = ".qwp";
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -98,7 +101,13 @@ export async function scanQwpNodeOrphanSlots(
 
   const candidates: string[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory() || excludeSlot?.(entry.name)) continue;
+    if (
+      !entry.isDirectory() ||
+      isQwpNodeReplayQuarantineSlotName(entry.name) ||
+      excludeSlot?.(entry.name)
+    ) {
+      continue;
+    }
     const directory = join(rootDirectory, entry.name);
     let children;
     try {

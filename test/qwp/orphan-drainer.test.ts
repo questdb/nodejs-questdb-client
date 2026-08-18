@@ -90,6 +90,7 @@ describe("QWP Node orphan drainer", () => {
     await recordSlot(rootDirectory, "live");
     const failed = await recordSlot(rootDirectory, "failed");
     await writeFile(join(failed, QWP_ORPHAN_FAILED_SENTINEL), "inspect me");
+    await recordSlot(rootDirectory, "sender-0.unreplayable-0");
     await mkdir(join(rootDirectory, "empty"));
 
     await expect(

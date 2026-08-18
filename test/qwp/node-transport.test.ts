@@ -1,6 +1,6 @@
 import type { AddressInfo, Socket } from "node:net";
 import { createServer as createTcpServer } from "node:net";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -20,6 +20,8 @@ import {
   QWP_UPGRADE_TIMEOUT_PHASE,
   QwpByteWriter,
   QwpNodeFileReplayStore,
+  QwpReplayStoreCorruptionError,
+  QwpReplayStoreQuarantinedError,
   QwpUpgradeError,
   writeQwpVarint,
 } from "../../src/qwp/node";
@@ -420,6 +422,65 @@ describe("QWP Node transport", () => {
     } finally {
       await client.close();
       await closeServer(endpoint);
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("quarantines a corrupt foreground slot and continues with a fresh producer", async () => {
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+    });
+    server.on("connection", (socket) => {
+      socket.on("message", () => socket.send(okResponse(0n, "trades", 1n)));
+    });
+    await listen(server);
+
+    const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-recovery-"));
+    const directory = join(rootDirectory, "sender-0");
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await seed.close();
+    const [record] = (await readdir(directory)).filter((name) =>
+      name.endsWith(".qwp"),
+    );
+    await writeFile(join(directory, record), Uint8Array.of(0));
+
+    const events: QwpReplayStoreQuarantinedError[] = [];
+    const address = server.address() as AddressInfo;
+    try {
+      const session = await connectQwpNodeIngress({
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        storeAndForward: {
+          directory,
+          initialConnectMode: "sync",
+          onRecoveryQuarantine: (event) => events.push(event.error),
+        },
+      });
+      try {
+        await expect(
+          session.sendFrame(Uint8Array.of(2)),
+        ).resolves.toMatchObject({ sequence: 0n });
+      } finally {
+        await session.close();
+      }
+
+      const quarantineDirectory = join(
+        rootDirectory,
+        "sender-0.unreplayable-0",
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0]).toBeInstanceOf(QwpReplayStoreQuarantinedError);
+      expect(events[0].cause).toBeInstanceOf(QwpReplayStoreCorruptionError);
+      expect(events[0].quarantineDirectory).toBe(quarantineDirectory);
+      expect(await readdir(quarantineDirectory)).toEqual(
+        expect.arrayContaining([record, ".qwp.failed"]),
+      );
+      expect(
+        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+      ).toEqual([]);
+    } finally {
       await rm(rootDirectory, { recursive: true, force: true });
     }
   });

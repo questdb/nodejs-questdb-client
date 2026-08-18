@@ -110,6 +110,17 @@ export class QwpReplayDictionaryError extends Error {
 }
 
 /**
+ * Recovered delta frames depend on symbol IDs that neither the durable
+ * dictionary prefix nor the surviving frames can reconstruct.
+ */
+export class QwpUnrecoverableReplayDictionaryError extends QwpReplayDictionaryError {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause);
+    this.name = "QwpUnrecoverableReplayDictionaryError";
+  }
+}
+
+/**
  * A replay dictionary sidecar rejected an append before its delta frame was
  * published. The reconnecting transport has permanently switched to full,
  * self-contained symbol encoding; retrying the logical batch is safe.

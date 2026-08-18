@@ -7,10 +7,12 @@ import {
   rename,
   rm,
   rmdir,
+  stat,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { QWP_MAX_SYMBOL_DICTIONARY_SIZE } from "../qwp/core";
 import {
   QwpIngressReplayRecord,
@@ -32,6 +34,9 @@ const LOCK_DIRECTORY = ".qwp.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const LOCK_RECOVERY_FILE = "recovery.json";
 const ABANDONED_LOCK_PREFIX = ".qwp.lock.abandoned-";
+const QUARANTINE_SLOT_INFIX = ".unreplayable-";
+const QUARANTINE_FAILED_SENTINEL = ".qwp.failed";
+const MAX_QUARANTINE_SLOT_ATTEMPTS = 64;
 // The file-per-frame journal has no fixed segment working set. Preserve two
 // default-sized QWP batches instead, mirroring Java's active+spare liveness
 // floor when the current dictionary generation consumes the configured cap.
@@ -127,6 +132,29 @@ export class QwpReplayStoreError extends Error {
     super(message);
     this.name = "QwpReplayStoreError";
     this.cause = cause;
+  }
+}
+
+/** Durable journal bytes are structurally corrupt and cannot be replayed. */
+export class QwpReplayStoreCorruptionError extends QwpReplayStoreError {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause);
+    this.name = "QwpReplayStoreCorruptionError";
+  }
+}
+
+/** A terminal replay slot was preserved under a quarantine pathname. */
+export class QwpReplayStoreQuarantinedError extends QwpReplayStoreError {
+  constructor(
+    readonly directory: string,
+    readonly quarantineDirectory: string,
+    cause: unknown,
+  ) {
+    super(
+      `QWP store-and-forward recovery could not replay the existing slot; its data was preserved at ${quarantineDirectory} and the producer continued with a fresh slot at ${directory}`,
+      cause,
+    );
+    this.name = "QwpReplayStoreQuarantinedError";
   }
 }
 
@@ -326,13 +354,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           }
           const record = decodeRecord(bytes, name);
           if (record.frameSequence <= previous) {
-            throw new QwpReplayStoreError(
+            throw new QwpReplayStoreCorruptionError(
               `QWP store-and-forward sequence is not strictly increasing [file=${name}]`,
+            );
+          }
+          if (previous >= 0n && record.frameSequence !== previous + 1n) {
+            throw new QwpReplayStoreCorruptionError(
+              `QWP store-and-forward sequence has a gap [previous=${previous}, received=${record.frameSequence}]`,
             );
           }
           const expectedName = recordFileName(record.frameSequence);
           if (name !== expectedName) {
-            throw new QwpReplayStoreError(
+            throw new QwpReplayStoreCorruptionError(
               `QWP store-and-forward filename does not match its sequence [file=${name}, expected=${expectedName}]`,
             );
           }
@@ -1129,8 +1162,10 @@ function encodeDictionaryBlock(
   return block;
 }
 
-function corruptDictionary(reason: string): QwpReplayStoreError {
-  return new QwpReplayStoreError(`corrupt QWP symbol dictionary: ${reason}`);
+function corruptDictionary(reason: string): QwpReplayStoreCorruptionError {
+  return new QwpReplayStoreCorruptionError(
+    `corrupt QWP symbol dictionary: ${reason}`,
+  );
 }
 
 async function truncateDictionaryTail(
@@ -1148,10 +1183,93 @@ async function truncateDictionaryTail(
   await syncDirectory(directory);
 }
 
-function corruptRecord(name: string, reason: string): QwpReplayStoreError {
-  return new QwpReplayStoreError(
+function corruptRecord(
+  name: string,
+  reason: string,
+): QwpReplayStoreCorruptionError {
+  return new QwpReplayStoreCorruptionError(
     `corrupt QWP store-and-forward record [file=${name}]: ${reason}`,
   );
+}
+
+/** @internal True for slot names reserved for operator-inspected data loss. */
+export function isQwpNodeReplayQuarantineSlotName(name: string): boolean {
+  const marker = name.lastIndexOf(QUARANTINE_SLOT_INFIX);
+  if (marker <= 0) return false;
+  return /^\d+$/.test(name.slice(marker + QUARANTINE_SLOT_INFIX.length));
+}
+
+/**
+ * @internal Preserves a proven-unreplayable slot and frees its stable pathname
+ * for a fresh producer. The caller must have closed the replay store first.
+ */
+export async function quarantineQwpNodeReplayStore(
+  directory: string,
+  cause: unknown,
+): Promise<QwpReplayStoreQuarantinedError> {
+  const normalized = directory.trim();
+  if (!normalized) {
+    throw new QwpReplayStoreError(
+      "cannot quarantine an empty QWP store-and-forward directory",
+      cause,
+    );
+  }
+  const parent = dirname(normalized);
+  const slotName = basename(normalized);
+  let quarantineDirectory: string | undefined;
+  for (let attempt = 0; attempt < MAX_QUARANTINE_SLOT_ATTEMPTS; attempt++) {
+    const candidate = join(
+      parent,
+      `${slotName}${QUARANTINE_SLOT_INFIX}${attempt}`,
+    );
+    if (await pathExists(candidate)) continue;
+    try {
+      await rename(normalized, candidate);
+      quarantineDirectory = candidate;
+      break;
+    } catch (error) {
+      if (
+        nodeErrorCode(error) === "EEXIST" ||
+        nodeErrorCode(error) === "ENOTEMPTY"
+      ) {
+        continue;
+      }
+      throw new QwpReplayStoreError(
+        `could not quarantine unreplayable QWP store-and-forward slot [directory=${normalized}, target=${candidate}]`,
+        error,
+      );
+    }
+  }
+  if (!quarantineDirectory) {
+    throw new QwpReplayStoreError(
+      `could not quarantine unreplayable QWP store-and-forward slot; ${MAX_QUARANTINE_SLOT_ATTEMPTS} quarantine paths already exist [directory=${normalized}]`,
+      cause,
+    );
+  }
+
+  const recoveryError =
+    cause instanceof Error ? cause : new Error(String(cause));
+  await writeFile(
+    join(quarantineDirectory, QUARANTINE_FAILED_SENTINEL),
+    `${new Date().toISOString()} ${recoveryError.name}: ${recoveryError.message}\n`,
+    { encoding: "utf8", flag: "wx", mode: 0o600 },
+  ).catch(() => undefined);
+  await syncDirectory(parent);
+  return new QwpReplayStoreQuarantinedError(
+    normalized,
+    quarantineDirectory,
+    recoveryError,
+  );
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function validateFrameSequence(frameSequence: bigint): void {

@@ -171,6 +171,18 @@ Locks left by a terminated process on the same host are recovered automatically;
 locks owned by a live local process, another host, or an unidentifiable owner fail
 closed.
 
+On startup, a dictionary sidecar truncated at a complete-block boundary is rebuilt
+from the ordered symbol deltas embedded in surviving committed frames and healed
+before replay. If the frame journal is structurally corrupt, or the surviving deltas
+contain a dictionary gap or conflict that cannot be reconstructed, the foreground
+slot is renamed to `<slot>.unreplayable-N`, marked with `.qwp.failed`, and preserved
+for inspection. The sender then starts once with a clean slot at the configured path.
+`onRecoveryQuarantine` receives the original and quarantine paths plus the terminal
+cause; its callback cannot interrupt recovery. Quarantined paths are never adopted by
+the orphan scanner. Operational filesystem errors are not quarantined and still fail
+startup, so a temporary permissions or disk problem cannot be mistaken for data
+corruption.
+
 For a standalone sender, `drainOrphans: true` scans sibling directories beneath the
 configured journal directory's parent, excludes the sender's own directory, and
 adopts record-bearing slots left by failed producers. Adoption is lock-protected and

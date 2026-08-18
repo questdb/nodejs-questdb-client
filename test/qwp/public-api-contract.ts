@@ -30,6 +30,7 @@ import type {
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
   QwpNodeOrphanDrainEvent,
+  QwpNodeReplayRecoveryEvent,
   QwpNodeStoreAndForwardOptions,
   QwpNodeWebSocketOptions,
 } from "../../src/qwp/node";
@@ -149,6 +150,8 @@ const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
   maxBackgroundDrainers: 2,
   orphanScanIntervalMs: 30_000,
   onOrphanDrainEvent: (event: QwpNodeOrphanDrainEvent) => void event.metrics,
+  onRecoveryQuarantine: (event: QwpNodeReplayRecoveryEvent) =>
+    void event.quarantineDirectory,
 };
 
 const queryOptionsContract: QwpEgressQueryOptions = {
