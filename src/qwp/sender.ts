@@ -25,6 +25,12 @@ export interface QwpSenderOptions {
   autoFlush?: boolean;
   autoFlushRows?: number;
   autoFlushIntervalMs?: number;
+  /**
+   * Keep auto-flushed rows in an open server-side transaction. An explicit
+   * flush()/commit() closes the transaction. QWP transactions are atomic per
+   * table, rather than across every table in a multi-table flush.
+   */
+  transactional?: boolean;
   /** Wait for durable upload after every successful ingress ACK. */
   awaitDurableAck?: boolean;
   durableAckTimeoutMs?: number;
@@ -41,7 +47,7 @@ export interface QwpSenderSession {
   ): Promise<QwpIngressResponse>;
   sendTablesDelta?(
     tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla">,
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
   ): Promise<QwpIngressResponse>;
   waitForDurable(
     response: QwpIngressResponse,
@@ -258,10 +264,14 @@ export class QwpSender {
   private closePromise?: Promise<void>;
   private closing = false;
   private closed = false;
+  private hasDeferredMessages = false;
+  private deferredRowCount = 0;
+  private readonly deferredAcks: Promise<QwpIngressResponse>[] = [];
 
   private readonly autoFlush: boolean;
   private readonly autoFlushRows: number;
   private readonly autoFlushIntervalMs: number;
+  private readonly transactional: boolean;
   private readonly log: QwpSenderLogger;
 
   constructor(
@@ -272,6 +282,7 @@ export class QwpSender {
     this.autoFlushRows = options.autoFlushRows ?? DEFAULT_AUTO_FLUSH_ROWS;
     this.autoFlushIntervalMs =
       options.autoFlushIntervalMs ?? DEFAULT_AUTO_FLUSH_INTERVAL_MS;
+    this.transactional = options.transactional ?? false;
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
     if (
@@ -699,8 +710,21 @@ export class QwpSender {
   }
 
   flush(): Promise<boolean> {
+    return this.enqueueFlush(false);
+  }
+
+  /**
+   * Commits rows previously sent by transactional auto-flush. This is an
+   * ergonomic alias for flush(); pending local rows are included in the same
+   * group-closing frame.
+   */
+  commit(): Promise<boolean> {
+    return this.flush();
+  }
+
+  private enqueueFlush(deferCommit: boolean): Promise<boolean> {
     this.throwIfUnavailable();
-    const flushing = this.flushTail.then(() => this.flushNow());
+    const flushing = this.flushTail.then(() => this.flushNow(deferCommit));
     this.flushTail = flushing.then(
       () => undefined,
       () => undefined,
@@ -741,6 +765,12 @@ export class QwpSender {
       this.log(
         "warn",
         `QWP sender contains ${this.pendingRowCount} completed row(s) and ${this.currentRow.size} unfinished column(s) which will be lost`,
+      );
+    }
+    if (this.hasDeferredMessages) {
+      this.log(
+        "warn",
+        `QWP sender is closing with ${this.deferredRowCount} auto-flushed row(s) awaiting commit; QuestDB will roll the open transaction back`,
       );
     }
     this.closed = true;
@@ -831,17 +861,22 @@ export class QwpSender {
         (this.autoFlushIntervalMs > 0 &&
           Date.now() - this.lastFlushTime >= this.autoFlushIntervalMs))
     ) {
-      await this.flush();
+      await this.enqueueFlush(this.transactional);
     }
   }
 
-  private async flushNow(): Promise<boolean> {
-    if (this.pendingRowCount === 0) return false;
+  private async flushNow(deferCommit: boolean): Promise<boolean> {
+    if (
+      this.pendingRowCount === 0 &&
+      (deferCommit || !this.hasDeferredMessages)
+    ) {
+      return false;
+    }
     const session = await this.getSession();
     const snapshots = this.tables
       .filter((table) => table.rows.length > 0)
       .map((table) => ({ table, rows: table.rows.slice() }));
-    if (snapshots.length === 0) return false;
+    if (snapshots.length === 0 && !this.hasDeferredMessages) return false;
 
     const wireTables = snapshots.map(({ table, rows }) =>
       this.buildTable(table.name, rows),
@@ -852,8 +887,14 @@ export class QwpSender {
     const response =
       (encode?.symbolDictionary ?? "delta") === "delta" &&
       session.sendTablesDelta
-        ? session.sendTablesDelta(wireTables, { gorilla: encode?.gorilla })
-        : session.sendTables(wireTables, { gorilla: encode?.gorilla });
+        ? session.sendTablesDelta(wireTables, {
+            gorilla: encode?.gorilla,
+            deferCommit,
+          })
+        : session.sendTables(wireTables, {
+            gorilla: encode?.gorilla,
+            deferCommit,
+          });
     for (const { table, rows } of snapshots) table.rows.splice(0, rows.length);
     const sentRows = snapshots.reduce(
       (count, item) => count + item.rows.length,
@@ -861,9 +902,27 @@ export class QwpSender {
     );
     this.pendingRowCount -= sentRows;
     this.lastFlushTime = Date.now();
-    this.log("debug", `Flushing ${sentRows} QWP row(s)`);
+    this.log(
+      "debug",
+      `${deferCommit ? "Auto-flushing" : "Flushing"} ${sentRows} QWP row(s)${deferCommit ? " with commit deferred" : ""}`,
+    );
+
+    if (deferCommit) {
+      this.hasDeferredMessages = true;
+      this.deferredRowCount += sentRows;
+      this.deferredAcks.push(response);
+      // The server intentionally withholds this ACK until a later commit.
+      // Observe rejection now so abandoning an open transaction during close
+      // never creates an unhandled rejection; flush()/commit() still awaits it.
+      void response.catch(() => undefined);
+      return true;
+    }
 
     const ack = await response;
+    const deferredAcks = this.deferredAcks.splice(0);
+    this.hasDeferredMessages = false;
+    this.deferredRowCount = 0;
+    await Promise.all(deferredAcks);
     if (this.options.awaitDurableAck) {
       await session.waitForDurable(ack, this.options.durableAckTimeoutMs);
     }

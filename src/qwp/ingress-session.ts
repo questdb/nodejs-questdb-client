@@ -432,6 +432,9 @@ export class QwpIngressSession {
 
   sendFrame(frame: Uint8Array): Promise<QwpIngressResponse> {
     this.throwIfUnavailable();
+    const ackDeferredUntilCommit =
+      frame.byteLength > QWP_FLAGS_OFFSET &&
+      (frame[QWP_FLAGS_OFFSET] & QWP_FLAG_DEFER_COMMIT) !== 0;
     if (
       this.maxBatchSizeBytes !== undefined &&
       frame.byteLength > this.maxBatchSizeBytes
@@ -457,6 +460,11 @@ export class QwpIngressSession {
     void sending.then(
       () => {
         if (this.pending.get(sequence) !== pending) return;
+        // QuestDB deliberately sends no ACK for a deferred frame. The later
+        // group-closing frame has its own deadline and cumulatively resolves
+        // this waiter, so starting a per-frame timer here would make valid
+        // transactions fail merely because they stayed open for ackTimeoutMs.
+        if (ackDeferredUntilCommit) return;
         pending.timer = setTimeout(() => {
           if (!this.pending.delete(sequence)) return;
           pending.reject(

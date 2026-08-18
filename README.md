@@ -98,6 +98,39 @@ await sender.flush();
 await sender.close();
 ```
 
+For batches larger than the automatic flush threshold, transactional mode
+keeps each auto-flushed frame in an open server-side transaction. An explicit
+`flush()` (or its `commit()` alias) sends the group-closing frame and waits for
+the cumulative ACK. QuestDB guarantees this atomicity per table; a flush that
+contains multiple tables is not one cross-table transaction.
+
+```typescript
+const sender = await connectQwpBrowserSender(
+  { url },
+  {
+    autoFlushRows: 10_000,
+    transactional: true,
+  },
+);
+
+for (const event of events) {
+  await sender
+    .table("events")
+    .symbol("source", event.source)
+    .longColumn("value", event.value)
+    .at(event.timestamp, "ms");
+}
+await sender.commit();
+await sender.close();
+```
+
+The server intentionally withholds ACKs for deferred frames until commit. The
+sender pipelines transactional auto-flushes without waiting for those ACKs,
+then waits for all of them at `flush()`/`commit()`. If durable ACK waiting is
+enabled, it starts only after the transaction commits. Closing without an
+explicit commit abandons the open transaction and logs a warning; QuestDB
+rolls it back when the WebSocket disconnects.
+
 When QuestDB authentication is enabled, establish the browser's HttpOnly
 `qdb_session` cookie over REST before opening a QWP WebSocket. A QuestDB REST
 token and an OIDC access token both use the `bearer` form. The application is

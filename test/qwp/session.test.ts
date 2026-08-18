@@ -522,6 +522,48 @@ describe("QWP WebSocket adapters", () => {
     await sender.close();
   });
 
+  it("pipelines transactional browser auto-flush until an explicit commit ACK", async () => {
+    const socket = new FakeWebSocket();
+    const sender = createQwpBrowserSender(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      {
+        autoFlushRows: 1,
+        autoFlushIntervalMs: 0,
+        transactional: true,
+      },
+      { ackTimeoutMs: 10 },
+    );
+    socket.onSend = () => {
+      if (socket.sent.length === 2) {
+        socket.message(
+          ingressResponse(QWP_STATUS.OK, 1n, undefined, [["events", 1n]]),
+        );
+      }
+    };
+    const connecting = sender.connect();
+    socket.open();
+    await connecting;
+
+    const autoFlush = sender
+      .table("events")
+      .longColumn("value", 42n)
+      .atNow();
+    await expect(autoFlush).resolves.toBeUndefined();
+    expect(socket.sent).toHaveLength(1);
+    expect(decodeQwpFrame(socket.sent[0]).flags & QWP_FLAG_DEFER_COMMIT).toBe(
+      QWP_FLAG_DEFER_COMMIT,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.sent).toHaveLength(2);
+    expect(decodeQwpFrame(socket.sent[1]).flags & QWP_FLAG_DEFER_COMMIT).toBe(0);
+    await sender.close();
+  });
+
   it("adds Node-only QWP upgrade headers", async () => {
     const socket = new FakeWebSocket();
     let capturedHeaders: Record<string, string> | undefined;

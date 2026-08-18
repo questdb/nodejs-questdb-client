@@ -36,7 +36,7 @@ class RecordingSession implements QwpSenderSession {
 
   sendTablesDelta(
     tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla">,
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
   ): Promise<QwpIngressResponse> {
     this.deltaSendCount++;
     return this.sendTables(tables, options);
@@ -48,6 +48,32 @@ class RecordingSession implements QwpSenderSession {
 
   async close(): Promise<void> {
     this.closeCount++;
+  }
+}
+
+class CommitAwareSession extends RecordingSession {
+  private readonly deferred: {
+    resolve: (response: QwpIngressResponse) => void;
+  }[] = [];
+
+  override sendTables(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): Promise<QwpIngressResponse> {
+    this.sends.push({ tables, options });
+    const response = {
+      status: QWP_STATUS.OK,
+      sequence: BigInt(this.sends.length - 1),
+      tables: tables.map((table) => ({
+        name: table.name,
+        sequenceTransaction: BigInt(table.rowCount),
+      })),
+    } satisfies QwpIngressResponse;
+    if (options?.deferCommit) {
+      return new Promise((resolve) => this.deferred.push({ resolve }));
+    }
+    for (const pending of this.deferred.splice(0)) pending.resolve(response);
+    return Promise.resolve(response);
   }
 }
 
@@ -224,6 +250,74 @@ describe("QWP high-level sender", () => {
     expect(session.sends).toHaveLength(1);
     expect(session.durable).toHaveLength(1);
     await expect(sender.flush()).resolves.toBe(false);
+  });
+
+  it("defers transactional auto-flush and commits without waiting on its withheld ACK", async () => {
+    const session = new CommitAwareSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+      transactional: true,
+      awaitDurableAck: true,
+    });
+
+    await expect(
+      sender.table("events").longColumn("value", 42n).atNow(),
+    ).resolves.toBeUndefined();
+    expect(session.sends).toHaveLength(1);
+    expect(session.sends[0]).toMatchObject({
+      options: { deferCommit: true },
+    });
+    expect(session.durable).toHaveLength(0);
+
+    await expect(sender.commit()).resolves.toBe(true);
+    expect(session.sends).toHaveLength(2);
+    expect(session.sends[1].tables).toHaveLength(0);
+    expect(session.sends[1]).toMatchObject({
+      options: { deferCommit: false },
+    });
+    expect(session.durable).toHaveLength(1);
+    await expect(sender.flush()).resolves.toBe(false);
+  });
+
+  it("uses an explicit data flush to close a deferred transaction", async () => {
+    const session = new CommitAwareSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 2,
+      autoFlushIntervalMs: 0,
+      transactional: true,
+    });
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await sender.table("events").longColumn("value", 2n).atNow();
+    await sender.table("events").longColumn("value", 3n).atNow();
+
+    expect(session.sends).toHaveLength(1);
+    expect(session.sends[0].options?.deferCommit).toBe(true);
+    expect(session.sends[0].tables[0].rowCount).toBe(2);
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.sends[1].tables[0].rowCount).toBe(1);
+    expect(session.sends[1].options?.deferCommit).toBe(false);
+  });
+
+  it("warns when close abandons an uncommitted transactional auto-flush", async () => {
+    const session = new CommitAwareSession();
+    const messages: (string | Error)[] = [];
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+      transactional: true,
+      log: (level, message) => {
+        if (level === "warn") messages.push(message);
+      },
+    });
+
+    await sender.table("events").longColumn("value", 42n).atNow();
+    await sender.close();
+    expect(session.sends).toHaveLength(1);
+    expect(messages).toEqual([
+      expect.stringContaining("1 auto-flushed row(s) awaiting commit"),
+    ]);
   });
 
   it("allows the high-level sender to opt out of symbol deltas", async () => {
