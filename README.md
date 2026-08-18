@@ -92,8 +92,10 @@ can start and accept flushes while QuestDB is offline. `flush()` then resolves
 after local durable journal publication and a background drainer reconnects
 and sends in order. Set `qwp.sender.awaitServerAck: true` to wait for the
 QuestDB ACK instead, or `awaitDurableAck: true` to wait through durable upload.
-Set `initialConnectMode` to `"off"`, `"sync"`, or `"async"` (the default) to
-choose fail-fast, bounded blocking, or background startup. The configuration-string
+Set `initialConnectMode` to `"off"` (the default), `"sync"`, or `"async"` to
+choose fail-fast, bounded blocking, or background startup. Supplying reconnect
+budget settings without an explicit mode promotes initial startup to `"sync"`,
+matching the Java client. The configuration-string
 equivalent is `initial_connect_retry`, used together with the store-and-forward
 options in `extraOptions.qwp`.
 Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
@@ -148,7 +150,7 @@ await sender.commit();
 await sender.close();
 ```
 
-QWP `close()` publishes completed rows and waits up to 5 seconds for their
+QWP `close()` publishes completed rows and waits up to 60 seconds for their
 committed-frame ACK watermark. Configure `closeFlushTimeoutMs` (or
 `close_flush_timeout_millis` in a `ws::` string); `0` publishes without waiting.
 An unfinished row is not completed implicitly.

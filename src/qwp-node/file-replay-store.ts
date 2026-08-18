@@ -41,6 +41,7 @@ const MAX_QUARANTINE_SLOT_ATTEMPTS = 64;
 // default-sized QWP batches instead, mirroring Java's active+spare liveness
 // floor when the current dictionary generation consumes the configured cap.
 const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
+const DEFAULT_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
 const DEFAULT_APPEND_DEADLINE_MS = 30_000;
 const MAX_TIMER_DELAY_MS = 0x7fffffff;
@@ -92,6 +93,12 @@ export interface QwpNodeFileReplayStoreOptions {
    * retires that dictionary generation.
    */
   maxBytes?: number;
+  /**
+   * Maximum QWP frame payload stored in one journal record. The TypeScript
+   * journal is file-per-frame rather than segmented, but this preserves the
+   * Java `sf_max_segment_bytes` batching boundary. Defaults to 4 MiB.
+   */
+  maxSegmentBytes?: number;
   /**
    * Local persistence barrier. `append` preserves the existing fsync-per-frame
    * behavior, `periodic` checkpoints dirty files in the background, and
@@ -170,6 +177,18 @@ export class QwpReplayStoreFullError extends QwpReplayStoreError {
   }
 }
 
+export class QwpReplayStoreSegmentTooLargeError extends QwpReplayStoreError {
+  constructor(
+    readonly maxSegmentBytes: number,
+    readonly payloadBytes: number,
+  ) {
+    super(
+      `QWP store-and-forward frame exceeds sf_max_segment_bytes [maxSegmentBytes=${maxSegmentBytes}, payloadBytes=${payloadBytes}]`,
+    );
+    this.name = "QwpReplayStoreSegmentTooLargeError";
+  }
+}
+
 export class QwpReplayStoreAppendTimeoutError extends QwpReplayStoreError {
   constructor(
     readonly maxBytes: number,
@@ -225,6 +244,7 @@ export class QwpReplayStoreLockedError extends QwpReplayStoreError {
 export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly directory: string;
   private readonly maxBytes: number;
+  private readonly maxSegmentBytes: number;
   private readonly liveFrameBytes: number;
   private readonly durability: QwpSfDurability;
   private readonly checkpointIntervalMs: number;
@@ -266,6 +286,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.directory = directory;
     this.maxBytes = maxBytes;
+    this.maxSegmentBytes = validatePositiveSafeInteger(
+      options.maxSegmentBytes ?? DEFAULT_MAX_SEGMENT_BYTES,
+      "store-and-forward maxSegmentBytes",
+    );
     this.liveFrameBytes = Math.min(maxBytes, DEFAULT_LIVE_FRAME_BYTES);
     this.durability = validateDurability(
       options.durability ?? QWP_SF_DURABILITY.APPEND,
@@ -393,6 +417,14 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   append(record: QwpIngressReplayRecord): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
+    if (record.payload.byteLength > this.maxSegmentBytes) {
+      return Promise.reject(
+        new QwpReplayStoreSegmentTooLargeError(
+          this.maxSegmentBytes,
+          record.payload.byteLength,
+        ),
+      );
+    }
     const bytes = encodeRecord(record);
     if (bytes.byteLength > this.maxBytes) {
       return Promise.reject(
@@ -1340,6 +1372,13 @@ function validateTimerDelay(value: number, name: string): number {
     throw new RangeError(
       `${name} must be a positive safe integer no greater than ${MAX_TIMER_DELAY_MS}`,
     );
+  }
+  return value;
+}
+
+function validatePositiveSafeInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RangeError(`${name} must be a positive safe integer`);
   }
   return value;
 }

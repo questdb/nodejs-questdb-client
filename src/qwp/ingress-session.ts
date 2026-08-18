@@ -157,9 +157,9 @@ export interface QwpIngressSessionOptions {
   reconnect?: QwpReconnectOptions | false;
   /** @internal Node adapter hook for persistent store-and-forward. */
   replayStore?: QwpIngressReplayStore;
-  /** @internal Starts the Node persistent drainer without waiting for a server. */
+  /** @internal Starts memory or persistent replay without waiting for a server. */
   backgroundStoreAndForward?: boolean;
-  /** @internal Initial connection policy supplied by the Node SF adapter. */
+  /** @internal Initial connection policy supplied by the Node adapter. */
   initialConnectMode?: QwpInitialConnectMode;
   /** @internal Orphan sessions may quarantine persistent catch-up cap gaps. */
   orphanStoreAndForward?: boolean;
@@ -180,6 +180,16 @@ export interface QwpIngressSessionOptions {
    * but disables automatic polling.
    */
   durableAckKeepaliveMs?: number;
+  /**
+   * Validated Java-compatible connection listener inbox capacity. Reserved
+   * until a connection-listener callback is installed on this session.
+   */
+  connectionListenerInboxCapacity?: number;
+  /**
+   * Validated Java-compatible async error inbox capacity. Reserved until the
+   * callback dispatcher exposes bounded delivery controls.
+   */
+  errorInboxCapacity?: number;
   onResponse?: (response: QwpIngressResponse) => void;
   onDurableAck?: (response: QwpIngressResponse) => void;
   /** Monotonic send/accept/durability notifications. Callback errors are ignored. */
@@ -344,6 +354,21 @@ function validateIngressSessionOptions(
       "durableAckKeepaliveMs must be a non-negative finite number",
     );
   }
+  for (const [name, value, minimum] of [
+    [
+      "connectionListenerInboxCapacity",
+      options.connectionListenerInboxCapacity,
+      1,
+    ],
+    ["errorInboxCapacity", options.errorInboxCapacity, 16],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (!Number.isSafeInteger(value) || value < minimum)
+    ) {
+      throw new RangeError(`${name} must be an integer of at least ${minimum}`);
+    }
+  }
 }
 
 /**
@@ -433,11 +458,6 @@ export class QwpIngressSession {
     validateIngressSessionOptions(options);
     if (options.replayStore && options.reconnect === false) {
       throw new RangeError("a QWP replayStore requires ingress reconnect");
-    }
-    if (options.backgroundStoreAndForward && !options.replayStore) {
-      throw new RangeError(
-        "background QWP store-and-forward requires a replayStore",
-      );
     }
     const reconnectOptions =
       options.reconnect === false

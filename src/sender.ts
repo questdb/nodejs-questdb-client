@@ -597,6 +597,9 @@ function createConfiguredQwpSender(
       closeFlushTimeoutMs: isInteger(options.close_flush_timeout_millis, 0)
         ? options.close_flush_timeout_millis
         : configuredSender.closeFlushTimeoutMs,
+      maxNameLength: isInteger(options.max_name_len, 1)
+        ? options.max_name_len
+        : configuredSender.maxNameLength,
       log: logger,
     },
     options.qwp?.session,

@@ -1,7 +1,6 @@
 import {
   QWP_COLUMN_TYPE,
   QWP_MAX_COLUMNS_PER_TABLE,
-  QWP_MAX_COLUMN_NAME_LENGTH,
   QWP_MAX_TABLE_NAME_LENGTH,
   QwpColumnType,
 } from "./constants";
@@ -33,18 +32,21 @@ export interface QwpColumnBuffer {
 /** Mutable columnar staging area for one QWP ingress table. */
 export class QwpTableBuffer {
   readonly name: string;
+  private readonly maxNameLength: number;
   private readonly columnList: QwpColumnBuffer[] = [];
   private readonly columnsByName = new Map<string, QwpColumnBuffer>();
   private rows = 0;
 
-  constructor(name: string) {
+  constructor(name: string, maxNameLength = QWP_MAX_TABLE_NAME_LENGTH) {
+    if (!Number.isSafeInteger(maxNameLength) || maxNameLength < 1) {
+      throw new RangeError("maxNameLength must be a positive safe integer");
+    }
     if (!name) throw new Error("table name cannot be empty");
-    if (utf8Length(name) > QWP_MAX_TABLE_NAME_LENGTH) {
-      throw new Error(
-        `table name too long [maxLength=${QWP_MAX_TABLE_NAME_LENGTH}]`,
-      );
+    if (utf8Length(name) > maxNameLength) {
+      throw new Error(`table name too long [maxLength=${maxNameLength}]`);
     }
     this.name = name;
+    this.maxNameLength = maxNameLength;
   }
 
   get rowCount(): number {
@@ -81,10 +83,8 @@ export class QwpTableBuffer {
       return existing;
     }
 
-    if (utf8Length(name) > QWP_MAX_COLUMN_NAME_LENGTH) {
-      throw new Error(
-        `column name too long [maxLength=${QWP_MAX_COLUMN_NAME_LENGTH}]`,
-      );
+    if (utf8Length(name) > this.maxNameLength) {
+      throw new Error(`column name too long [maxLength=${this.maxNameLength}]`);
     }
     if (this.columnList.length >= QWP_MAX_COLUMNS_PER_TABLE) {
       throw new Error(
@@ -192,7 +192,7 @@ export class QwpTableBuffer {
       );
     }
 
-    const result = new QwpTableBuffer(this.name);
+    const result = new QwpTableBuffer(this.name, this.maxNameLength);
     result.rows = end - start;
     for (const column of this.columnList) {
       let valueStart = 0;

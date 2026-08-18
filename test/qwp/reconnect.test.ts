@@ -22,6 +22,7 @@ import {
   QwpReplayStoreError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
+  QwpReplayStoreSegmentTooLargeError,
 } from "../../src/qwp/node";
 import {
   QWP_RECONNECT_EVENT_KIND,
@@ -2392,6 +2393,22 @@ describe("QWP Node file replay store", () => {
     expect(
       () => new QwpNodeFileReplayStore({ directory, appendDeadlineMs: 0 }),
     ).toThrow(/appendDeadlineMs must be a positive safe integer/);
+    expect(
+      () => new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 0 }),
+    ).toThrow(/maxSegmentBytes must be a positive safe integer/);
+
+    const segmented = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 2,
+    });
+    await segmented.load();
+    await expect(
+      segmented.append({
+        frameSequence: 0n,
+        payload: Uint8Array.of(1, 2, 3),
+      }),
+    ).rejects.toBeInstanceOf(QwpReplayStoreSegmentTooLargeError);
+    await segmented.close();
 
     const defaults = new QwpNodeFileReplayStore({ directory });
     expect(defaults.metrics).toMatchObject({

@@ -61,6 +61,7 @@ export {
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
   QwpReplayStoreQuarantinedError,
+  QwpReplayStoreSegmentTooLargeError,
 } from "../qwp-node/file-replay-store";
 export type {
   QwpNodeFileReplayStoreMetrics,
@@ -200,6 +201,11 @@ export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
    * store-and-forward. Use a directory owned exclusively by this session.
    */
   storeAndForward?: QwpNodeStoreAndForwardOptions;
+  /**
+   * Slot name below storeAndForward.directory. Unified configurations default
+   * to `default`; pooled clients derive `<senderId>-<slot>` names.
+   */
+  senderId?: string;
 }
 
 /** Notification that an unreplayable foreground slot was preserved aside. */
@@ -214,8 +220,8 @@ export interface QwpNodeReplayRecoveryEvent {
 export interface QwpNodeStoreAndForwardOptions
   extends QwpNodeFileReplayStoreOptions {
   /**
-   * Initial server connection policy. Defaults to `async` for compatibility:
-   * persisted rows may be published before an endpoint is online.
+   * Initial server connection policy. Defaults to `off`; an explicitly tuned
+   * reconnect policy promotes it to `sync`, matching the Java client.
    */
   initialConnectMode?: QwpInitialConnectMode;
   /**
@@ -267,10 +273,10 @@ export interface QwpNodeClientOptions {
   egressSession?: QwpEgressSessionOptions;
   pool?: QwpClientPoolOptions;
   /**
-   * Coordinates a non-blocking startup: persistent ingress connects in the
-   * background and the egress pool remains cold until the first query. Requires
-   * ingress store-and-forward and conflicts with a positive queryPoolMin or a
-   * non-async initialConnectMode.
+   * Coordinates a non-blocking startup: ingress connects in the background,
+   * using memory replay when store-and-forward is absent, and the egress pool
+   * remains cold until the first query. Conflicts with a positive queryPoolMin
+   * or a non-async initialConnectMode.
    */
   lazyConnect?: boolean;
 }
@@ -505,38 +511,55 @@ async function connectQwpNodeIngressInternal(
   sessionOptions: QwpIngressSessionOptions,
   startOrphanDrainer: boolean,
 ): Promise<QwpIngressSession> {
-  if (options.storeAndForward && sessionOptions.replayStore) {
+  const storeAndForward = resolveNodeStoreAndForwardOptions(options);
+  if (storeAndForward && sessionOptions.replayStore) {
     throw new RangeError(
       "storeAndForward and a custom replayStore cannot both be configured",
     );
   }
-  let replayStore = options.storeAndForward
-    ? new QwpNodeFileReplayStore(options.storeAndForward)
+  let replayStore = storeAndForward
+    ? new QwpNodeFileReplayStore(storeAndForward)
     : sessionOptions.replayStore;
-  const reconnect = options.storeAndForward
+  const reconnect = storeAndForward
     ? (sessionOptions.reconnect ?? {})
     : sessionOptions.reconnect;
-  const initialConnectMode = options.storeAndForward
+  const initialConnectMode = storeAndForward
     ? validateInitialConnectMode(
-        options.storeAndForward.initialConnectMode ??
-          QWP_INITIAL_CONNECT_MODE.ASYNC,
+        storeAndForward.initialConnectMode ??
+          (sessionOptions.reconnect === undefined
+            ? QWP_INITIAL_CONNECT_MODE.OFF
+            : QWP_INITIAL_CONNECT_MODE.SYNC),
       )
-    : undefined;
+    : sessionOptions.initialConnectMode;
+  const backgroundReplay =
+    storeAndForward !== undefined ||
+    sessionOptions.backgroundStoreAndForward === true ||
+    initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC;
+  const storeBatchCap =
+    storeAndForward?.maxSegmentBytes ??
+    (storeAndForward ? 4 * 1024 * 1024 : undefined);
   const effectiveSessionOptions: QwpIngressSessionOptions = {
     ...sessionOptions,
     reconnect,
     replayStore,
-    backgroundStoreAndForward: options.storeAndForward !== undefined,
+    backgroundStoreAndForward: backgroundReplay,
     initialConnectMode,
+    maxBatchSizeBytes: minimumDefined(
+      sessionOptions.maxBatchSizeBytes,
+      storeBatchCap,
+    ),
     catchUpCapGapMinEscalationWindowMs:
-      options.storeAndForward?.catchUpCapGapMinEscalationWindowMs,
+      storeAndForward?.catchUpCapGapMinEscalationWindowMs,
     durableAckKeepaliveMs: options.requestDurableAck
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : sessionOptions.durableAckKeepaliveMs,
   };
   const orphanDrainer =
-    startOrphanDrainer && options.storeAndForward?.drainOrphans === true
-      ? createStandaloneOrphanDrainer(options, sessionOptions)
+    startOrphanDrainer && storeAndForward?.drainOrphans === true
+      ? createStandaloneOrphanDrainer(
+          { ...options, senderId: undefined, storeAndForward },
+          sessionOptions,
+        )
       : undefined;
   const connectionFactory = createQwpNodeConnectionFactory(options);
   let session: QwpIngressSession;
@@ -547,18 +570,18 @@ async function connectQwpNodeIngressInternal(
     );
   } catch (error) {
     if (
-      !options.storeAndForward ||
+      !storeAndForward ||
       sessionOptions.orphanStoreAndForward === true ||
       !isQuarantinableReplayRecoveryError(error)
     ) {
       throw error;
     }
     const recoveryError = await quarantineQwpNodeReplayStore(
-      options.storeAndForward.directory,
+      storeAndForward.directory,
       error,
     );
-    emitReplayRecoveryQuarantine(options.storeAndForward, recoveryError);
-    replayStore = new QwpNodeFileReplayStore(options.storeAndForward);
+    emitReplayRecoveryQuarantine(storeAndForward, recoveryError);
+    replayStore = new QwpNodeFileReplayStore(storeAndForward);
     session = await QwpIngressSession.connect(connectionFactory, {
       ...effectiveSessionOptions,
       replayStore,
@@ -614,7 +637,11 @@ export function createQwpNodeSender(
     ...senderOptions,
     awaitServerAck:
       senderOptions.awaitServerAck ??
-      (options.storeAndForward ? senderOptions.awaitDurableAck === true : true),
+      (options.storeAndForward ||
+      sessionOptions.backgroundStoreAndForward === true ||
+      sessionOptions.initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC
+        ? senderOptions.awaitDurableAck === true
+        : true),
   };
   return new QwpSender(
     () =>
@@ -741,19 +768,31 @@ function resolveNodeClientOptions(
 function normalizeQwpNodeClientOptions(
   options: QwpNodeClientOptions,
 ): QwpNodeClientOptions {
-  if (!options.lazyConnect) return options;
   const storeAndForward = options.ingress.storeAndForward;
-  if (!storeAndForward) {
-    throw new RangeError(
-      "conflicting configuration: lazyConnect requires ingress storeAndForward so writes remain available while the server is down",
-    );
-  }
+  const storeInitialConnectMode = storeAndForward?.initialConnectMode;
+  const sessionInitialConnectMode = options.ingressSession?.initialConnectMode;
   if (
-    storeAndForward.initialConnectMode !== undefined &&
-    storeAndForward.initialConnectMode !== QWP_INITIAL_CONNECT_MODE.ASYNC
+    storeInitialConnectMode !== undefined &&
+    sessionInitialConnectMode !== undefined &&
+    storeInitialConnectMode !== sessionInitialConnectMode
   ) {
     throw new RangeError(
-      `conflicting configuration: lazyConnect requires storeAndForward.initialConnectMode='async', got '${storeAndForward.initialConnectMode}'`,
+      `conflicting configuration: storeAndForward.initialConnectMode='${storeInitialConnectMode}' differs from ingressSession.initialConnectMode='${sessionInitialConnectMode}'`,
+    );
+  }
+  if (!options.lazyConnect) return options;
+  for (const configuredInitialConnectMode of [
+    storeInitialConnectMode,
+    sessionInitialConnectMode,
+  ]) {
+    if (
+      configuredInitialConnectMode === undefined ||
+      configuredInitialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC
+    ) {
+      continue;
+    }
+    throw new RangeError(
+      `conflicting configuration: lazyConnect requires initialConnectMode='async', got '${configuredInitialConnectMode}'`,
     );
   }
   if ((options.pool?.queryPoolMin ?? 0) > 0) {
@@ -765,10 +804,21 @@ function normalizeQwpNodeClientOptions(
     ...options,
     ingress: {
       ...options.ingress,
-      storeAndForward: {
-        ...storeAndForward,
-        initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
-      },
+      storeAndForward: storeAndForward
+        ? {
+            ...storeAndForward,
+            initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
+          }
+        : undefined,
+    },
+    sender: {
+      ...options.sender,
+      awaitServerAck: options.sender?.awaitServerAck ?? false,
+    },
+    ingressSession: {
+      ...options.ingressSession,
+      backgroundStoreAndForward: true,
+      initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
     },
     pool: { ...options.pool, queryPoolMin: 0 },
   };
@@ -797,9 +847,13 @@ function pooledNodeIngressOptions(
   }
   return {
     ...options,
+    senderId: undefined,
     storeAndForward: {
       ...options.storeAndForward,
-      directory: join(rootDirectory, `sender-${slot}`),
+      directory: join(
+        rootDirectory,
+        `${validateQwpSenderId(options.senderId ?? "sender")}-${slot}`,
+      ),
       // The client-level drainer owns sibling adoption. Per-sender scanners
       // would contend with other managed pool slots during prewarm/borrows.
       drainOrphans: false,
@@ -831,12 +885,13 @@ function createPooledOrphanDrainer(
     throw new RangeError("storeAndForward directory must not be empty");
   }
   const managedSlotCount = options.pool?.senderPoolMax ?? 4;
+  const senderId = validateQwpSenderId(options.ingress.senderId ?? "sender");
   return createNodeOrphanDrainer(
     options.ingress,
     options.ingressSession ?? {},
     rootDirectory,
     (slotName) => {
-      const managedIndex = parseCanonicalSenderSlot(slotName);
+      const managedIndex = parseCanonicalSenderSlot(slotName, senderId);
       if (managedIndex !== undefined && managedIndex < managedSlotCount) {
         return true;
       }
@@ -869,6 +924,7 @@ function createNodeOrphanDrainer(
       connectQwpNodeIngressInternal(
         {
           ...options,
+          senderId: undefined,
           storeAndForward: {
             ...storeAndForward,
             directory,
@@ -908,11 +964,49 @@ function orphanIngressSessionOptions(
   };
 }
 
-function parseCanonicalSenderSlot(name: string): number | undefined {
-  const match = /^sender-(0|[1-9]\d*)$/.exec(name);
+function parseCanonicalSenderSlot(
+  name: string,
+  senderId = "sender",
+): number | undefined {
+  const escapedSenderId = senderId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${escapedSenderId}-(0|[1-9]\\d*)$`).exec(name);
   if (!match) return undefined;
   const index = Number(match[1]);
   return Number.isSafeInteger(index) ? index : undefined;
+}
+
+function resolveNodeStoreAndForwardOptions(
+  options: QwpNodeIngressOptions,
+): QwpNodeStoreAndForwardOptions | undefined {
+  const storeAndForward = options.storeAndForward;
+  if (!storeAndForward || options.senderId === undefined)
+    return storeAndForward;
+  const rootDirectory = storeAndForward.directory.trim();
+  if (!rootDirectory) {
+    throw new RangeError("storeAndForward directory must not be empty");
+  }
+  return {
+    ...storeAndForward,
+    directory: join(rootDirectory, validateQwpSenderId(options.senderId)),
+  };
+}
+
+function validateQwpSenderId(value: string): string {
+  if (!value || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new RangeError(
+      "senderId must contain only letters, digits, underscores, and hyphens",
+    );
+  }
+  return value;
+}
+
+function minimumDefined(
+  left: number | undefined,
+  right: number | undefined,
+): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.min(left, right);
 }
 
 function validateInitialConnectMode(

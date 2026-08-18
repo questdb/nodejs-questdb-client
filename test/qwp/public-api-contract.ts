@@ -142,6 +142,7 @@ const nodeOrphanRetrySignature: (directory: string) => Promise<void> =
 
 const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
   directory: "/tmp/qwp-public-api-contract",
+  maxSegmentBytes: 4 * 1024 * 1024,
   durability: "periodic",
   checkpointIntervalMs: 5_000,
   backpressurePolicy: "wait",
@@ -204,6 +205,7 @@ const qwpExtraOptionsContract: QwpExtraOptions = {
   sender: {
     transactional: true,
     autoFlushBytes: 4 * 1024 * 1024,
+    maxNameLength: 255,
     closeFlushTimeoutMs: 5_000,
     awaitDurableAck: true,
   },

@@ -15,6 +15,10 @@ import type { QwpReconnectOptions, QwpTarget } from "../qwp/transport";
 
 const DEFAULT_QWP_PORT = 9000;
 const MAX_BATCH_ROWS = 1_048_576;
+const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 60_000;
+const DEFAULT_SF_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
+const DEFAULT_SF_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
+const DEFAULT_SF_APPEND_DEADLINE_MS = 30_000;
 
 const SUPPORTED_KEYS = new Set([
   "addr",
@@ -25,6 +29,7 @@ const SUPPORTED_KEYS = new Set([
   "token",
   "tls_verify",
   "tls_roots",
+  "tls_roots_password",
   "auth_timeout_ms",
   "connect_timeout",
   "auto_flush",
@@ -72,6 +77,11 @@ const SUPPORTED_KEYS = new Set([
   "max_lifetime_ms",
   "housekeeper_interval_ms",
   "lazy_connect",
+  "connection_listener_inbox_capacity",
+  "error_inbox_capacity",
+  "max_name_len",
+  "sender_id",
+  "sf_max_segment_bytes",
   // Reserved by the shared QWP configuration vocabulary. They are accepted
   // as intentional no-ops until the TypeScript client exposes these policies.
   "on_internal_error",
@@ -80,15 +90,6 @@ const SUPPORTED_KEYS = new Set([
   "on_security_error",
   "on_server_error",
   "on_write_error",
-]);
-
-const UNSUPPORTED_KEYS = new Set([
-  "tls_roots_password",
-  "connection_listener_inbox_capacity",
-  "error_inbox_capacity",
-  "max_name_len",
-  "sender_id",
-  "sf_max_segment_bytes",
 ]);
 
 interface ParsedConfig {
@@ -105,6 +106,12 @@ export function resolveQwpNodeClientConfig(
   const value = (key: string): string | undefined =>
     parsed.values.get(key)?.[0];
   const endpoints = parseEndpoints(parsed);
+  const lazyConnect =
+    optionalBoolean(value("lazy_connect"), "lazy_connect") ?? false;
+  const initialConnectMode = resolveInitialConnectMode(
+    parsed.values,
+    lazyConnect,
+  );
 
   validateAuthentication(parsed.values);
   validateTls(parsed);
@@ -130,6 +137,7 @@ export function resolveQwpNodeClientConfig(
   const configuredStoreAndForward = parseStoreAndForward(
     parsed.values,
     extraOptions.storeAndForward?.directory,
+    initialConnectMode,
   );
   const storeAndForward = extraOptions.storeAndForward
     ? { ...configuredStoreAndForward, ...extraOptions.storeAndForward }
@@ -154,17 +162,36 @@ export function resolveQwpNodeClientConfig(
       "auto_flush_interval",
       0,
     ),
-    closeFlushTimeoutMs: optionalInteger(
-      value("close_flush_timeout_millis"),
-      "close_flush_timeout_millis",
-      0,
-    ),
+    closeFlushTimeoutMs:
+      optionalInteger(
+        value("close_flush_timeout_millis"),
+        "close_flush_timeout_millis",
+        0,
+      ) ?? DEFAULT_CLOSE_FLUSH_TIMEOUT_MS,
+    maxNameLength:
+      optionalInteger(value("max_name_len"), "max_name_len", 16) ?? 127,
     transactional: optionalBoolean(value("transaction"), "transaction"),
     ...extraOptions.sender,
   };
 
   const ingressSession: QwpIngressSessionOptions = {
     reconnect: ingressReconnect,
+    initialConnectMode,
+    maxBatchSizeBytes: optionalSize(
+      value("sf_max_segment_bytes"),
+      "sf_max_segment_bytes",
+      1,
+    ),
+    connectionListenerInboxCapacity: optionalInteger(
+      value("connection_listener_inbox_capacity"),
+      "connection_listener_inbox_capacity",
+      1,
+    ),
+    errorInboxCapacity: optionalInteger(
+      value("error_inbox_capacity"),
+      "error_inbox_capacity",
+      16,
+    ),
     durableAckKeepaliveMs: optionalInteger(
       value("durable_ack_keepalive_interval_millis"),
       "durable_ack_keepalive_interval_millis",
@@ -239,6 +266,7 @@ export function resolveQwpNodeClientConfig(
       extraOptions.webSocket?.requestDurableAck ??
       optionalBoolean(value("request_durable_ack"), "request_durable_ack"),
     storeAndForward,
+    senderId: validateSenderId(value("sender_id") ?? "default"),
   };
   const egress: QwpNodeEgressOptions = {
     ...common,
@@ -279,8 +307,7 @@ export function resolveQwpNodeClientConfig(
     ingressSession,
     egressSession,
     pool,
-    lazyConnect:
-      optionalBoolean(value("lazy_connect"), "lazy_connect") ?? false,
+    lazyConnect,
   };
 }
 
@@ -308,11 +335,6 @@ function parseConfigurationString(configurationString: string): ParsedConfig {
     const rawKey = setting.slice(0, equals);
     const rawValue = setting.slice(equals + 1);
     validateConfigText(rawKey, rawValue);
-    if (UNSUPPORTED_KEYS.has(rawKey)) {
-      throw new Error(
-        `QWP cluster configuration key '${rawKey}' is not supported by the TypeScript client`,
-      );
-    }
     if (!SUPPORTED_KEYS.has(rawKey)) {
       throw new Error(`Unknown QWP cluster configuration key: '${rawKey}'`);
     }
@@ -478,15 +500,27 @@ function createAuthorization(
 
 function validateTls(parsed: ParsedConfig): void {
   const tlsVerify = parsed.values.get("tls_verify")?.[0];
+  const tlsRoots = parsed.values.get("tls_roots")?.[0];
+  const tlsRootsPassword = parsed.values.get("tls_roots_password")?.[0];
   if (tlsVerify !== undefined) {
     optionalEnum(tlsVerify, "tls_verify", ["on", "unsafe_off"] as const);
   }
   if (
     parsed.schema === "ws" &&
-    (tlsVerify !== undefined || parsed.values.has("tls_roots"))
+    (tlsVerify !== undefined ||
+      tlsRoots !== undefined ||
+      tlsRootsPassword !== undefined)
   ) {
     throw new Error(
-      "tls_verify and tls_roots are only supported by the wss schema",
+      "tls_verify, tls_roots, and tls_roots_password are only supported by the wss schema",
+    );
+  }
+  if (tlsRootsPassword !== undefined && tlsRoots === undefined) {
+    throw new Error("tls_roots_password requires tls_roots");
+  }
+  if (tlsRoots !== undefined && tlsVerify === "unsafe_off") {
+    throw new Error(
+      "tls_roots cannot be combined with tls_verify=unsafe_off; remove tls_verify to use custom roots, or remove tls_roots to disable certificate validation",
     );
   }
 }
@@ -494,9 +528,13 @@ function validateTls(parsed: ParsedConfig): void {
 function createTlsAgent(parsed: ParsedConfig): HttpsAgent | undefined {
   const tlsVerify = parsed.values.get("tls_verify")?.[0];
   const tlsRoots = parsed.values.get("tls_roots")?.[0];
+  const tlsRootsPassword = parsed.values.get("tls_roots_password")?.[0];
   if (tlsVerify === undefined && tlsRoots === undefined) return undefined;
+  const roots = tlsRoots ? readFileSync(tlsRoots) : undefined;
   return new HttpsAgent({
-    ca: tlsRoots ? readFileSync(tlsRoots) : undefined,
+    ca: tlsRootsPassword === undefined ? roots : undefined,
+    pfx: tlsRootsPassword === undefined ? undefined : roots,
+    passphrase: tlsRootsPassword,
     rejectUnauthorized: tlsVerify !== "unsafe_off",
   });
 }
@@ -505,20 +543,17 @@ function parseIngressReconnect(
   values: ReadonlyMap<string, readonly string[]>,
 ): QwpReconnectOptions | undefined {
   const reconnect: QwpReconnectOptions = {
-    initialBackoffMs: optionalInteger(
+    initialBackoffMs: optionalPositiveInteger(
       values.get("reconnect_initial_backoff_millis")?.[0],
       "reconnect_initial_backoff_millis",
-      0,
     ),
-    maxBackoffMs: optionalInteger(
+    maxBackoffMs: optionalPositiveInteger(
       values.get("reconnect_max_backoff_millis")?.[0],
       "reconnect_max_backoff_millis",
-      0,
     ),
-    maxDurationMs: optionalInteger(
+    maxDurationMs: optionalPositiveInteger(
       values.get("reconnect_max_duration_millis")?.[0],
       "reconnect_max_duration_millis",
-      0,
     ),
     maxFrameRejections: optionalInteger(
       values.get("max_frame_rejections")?.[0],
@@ -571,6 +606,7 @@ function parseEgressReconnect(
 function parseStoreAndForward(
   values: ReadonlyMap<string, readonly string[]>,
   fallbackDirectory?: string,
+  initialConnectMode?: "off" | "sync" | "async",
 ): QwpNodeStoreAndForwardOptions | undefined {
   const directory = values.get("sf_dir")?.[0] ?? fallbackDirectory;
   if (!directory) return undefined;
@@ -581,27 +617,31 @@ function parseStoreAndForward(
   );
   return {
     directory,
-    maxBytes: optionalSize(
-      values.get("sf_max_total_bytes")?.[0],
-      "sf_max_total_bytes",
-      1,
-    ),
-    durability,
+    maxBytes:
+      optionalSize(
+        values.get("sf_max_total_bytes")?.[0],
+        "sf_max_total_bytes",
+        1,
+      ) ?? DEFAULT_SF_MAX_TOTAL_BYTES,
+    maxSegmentBytes:
+      optionalSize(
+        values.get("sf_max_segment_bytes")?.[0],
+        "sf_max_segment_bytes",
+        1,
+      ) ?? DEFAULT_SF_MAX_SEGMENT_BYTES,
+    durability: durability ?? "memory",
     checkpointIntervalMs: optionalInteger(
       values.get("sf_sync_interval_millis")?.[0],
       "sf_sync_interval_millis",
       0,
     ),
-    backpressurePolicy: values.has("sf_append_deadline_millis")
-      ? "wait"
-      : undefined,
-    appendDeadlineMs: optionalPositiveInteger(
-      values.get("sf_append_deadline_millis")?.[0],
-      "sf_append_deadline_millis",
-    ),
-    initialConnectMode: optionalInitialConnectMode(
-      values.get("initial_connect_retry")?.[0],
-    ),
+    backpressurePolicy: "wait",
+    appendDeadlineMs:
+      optionalPositiveInteger(
+        values.get("sf_append_deadline_millis")?.[0],
+        "sf_append_deadline_millis",
+      ) ?? DEFAULT_SF_APPEND_DEADLINE_MS,
+    initialConnectMode,
     catchUpCapGapMinEscalationWindowMs: optionalInteger(
       values.get("catch_up_cap_gap_min_escalation_window_millis")?.[0],
       "catch_up_cap_gap_min_escalation_window_millis",
@@ -625,12 +665,6 @@ function validateStoreAndForwardDependencies(
   storeAndForward: QwpNodeStoreAndForwardOptions | undefined,
 ): void {
   const sfOnlyKeys = [
-    "initial_connect_retry",
-    "reconnect_initial_backoff_millis",
-    "reconnect_max_backoff_millis",
-    "reconnect_max_duration_millis",
-    "max_frame_rejections",
-    "poison_min_escalation_window_millis",
     "catch_up_cap_gap_min_escalation_window_millis",
     "drain_orphans",
     "max_background_drainers",
@@ -656,6 +690,31 @@ function validateStoreAndForwardDependencies(
     "QWP ingress reconnect",
   );
   validateReconnectBounds(parseEgressReconnect(values), "QWP egress failover");
+}
+
+function resolveInitialConnectMode(
+  values: ReadonlyMap<string, readonly string[]>,
+  lazyConnect: boolean,
+): "off" | "sync" | "async" {
+  const explicit = optionalInitialConnectMode(
+    values.get("initial_connect_retry")?.[0],
+  );
+  if (explicit !== undefined) return explicit;
+  if (lazyConnect) return "async";
+  return values.has("reconnect_initial_backoff_millis") ||
+    values.has("reconnect_max_backoff_millis") ||
+    values.has("reconnect_max_duration_millis")
+    ? "sync"
+    : "off";
+}
+
+function validateSenderId(value: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error(
+      "sender_id must contain only letters, digits, underscores, and hyphens",
+    );
+  }
+  return value;
 }
 
 function validateReconnectBounds(

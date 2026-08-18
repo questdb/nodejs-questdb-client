@@ -549,7 +549,7 @@ describe("QWP Node transport", () => {
       {
         url: `ws://127.0.0.1:${port}/write/v4`,
         connectTimeoutMs: 100,
-        storeAndForward: { directory },
+        storeAndForward: { directory, initialConnectMode: "async" },
       },
       { autoFlush: false },
       {

@@ -207,6 +207,32 @@ describe("QWP high-level sender", () => {
     ).toThrow(/closeFlushTimeoutMs must be a non-negative safe integer/);
   });
 
+  it("applies a configurable UTF-8 table and column name limit", async () => {
+    const session = new RecordingSession();
+    expect(
+      () => new QwpSender(async () => session, { maxNameLength: 15 }),
+    ).toThrow(/maxNameLength must be a safe integer of at least 16/);
+
+    const defaultSender = new QwpSender(async () => session);
+    expect(() => defaultSender.table("t".repeat(128))).toThrow(
+      /table name too long.*maxLength=127/,
+    );
+    await defaultSender.close();
+
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      maxNameLength: 256,
+    });
+    await sender
+      .table("t".repeat(128))
+      .longColumn("c".repeat(128), 42n)
+      .atNow();
+    await sender.flush();
+    expect(session.sends.at(-1)?.tables[0].name).toHaveLength(128);
+    expect(session.sends.at(-1)?.tables[0].columns[0].name).toHaveLength(128);
+    await sender.close();
+  });
+
   it("returns a publication sequence and waits for its ACK independently", async () => {
     const session = new WatermarkSession();
     const sender = new QwpSender(async () => session, {

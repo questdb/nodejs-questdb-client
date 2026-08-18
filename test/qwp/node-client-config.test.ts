@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -108,6 +108,40 @@ describe("QWP unified Node client configuration", () => {
     expect(options.pool?.queryPoolMin).toBe(0);
   });
 
+  it("uses Java-compatible startup and store-and-forward defaults", () => {
+    const defaults = parseQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp-unified-test;",
+    );
+
+    expect(defaults.ingress.storeAndForward).toMatchObject({
+      directory: "/tmp/qwp-unified-test",
+      maxBytes: 10 * 1024 * 1024 * 1024,
+      maxSegmentBytes: 4 * 1024 * 1024,
+      durability: "memory",
+      backpressurePolicy: "wait",
+      appendDeadlineMs: 30_000,
+      initialConnectMode: "off",
+    });
+    expect(defaults.ingress.senderId).toBe("default");
+    expect(defaults.ingressSession?.initialConnectMode).toBe("off");
+    expect(defaults.sender).toMatchObject({
+      closeFlushTimeoutMs: 60_000,
+      maxNameLength: 127,
+    });
+
+    const tuned = parseQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp-unified-test;reconnect_max_duration_millis=1234;",
+    );
+    expect(tuned.ingress.storeAndForward?.initialConnectMode).toBe("sync");
+    expect(tuned.ingressSession?.initialConnectMode).toBe("sync");
+
+    const tunedMemory = parseQwpNodeClientConfig(
+      "ws::addr=localhost;reconnect_initial_backoff_millis=25;",
+    );
+    expect(tunedMemory.ingress.storeAndForward).toBeUndefined();
+    expect(tunedMemory.ingressSession?.initialConnectMode).toBe("sync");
+  });
+
   it("preserves failover=off as an explicit programmatic opt-out", () => {
     const options = parseQwpNodeClientConfig(
       "ws::addr=localhost;failover=off;",
@@ -116,13 +150,37 @@ describe("QWP unified Node client configuration", () => {
     expect(options.egressSession?.reconnect).toBe(false);
   });
 
+  it("fails fast on the default persistent initial connection", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "qwp-unified-off-"));
+    let attempts = 0;
+    const client = createQwpNodeClient(
+      `ws::addr=offline.example;sf_dir=${directory};sender_pool_max=1;query_pool_min=0;`,
+      {
+        webSocket: {
+          webSocketFactory: (_url, { onConnected }) => {
+            attempts++;
+            onConnected();
+            return new RejectingWebSocket() as unknown as QwpWebSocketLike;
+          },
+        },
+      },
+    );
+    try {
+      await expect(client.connect()).rejects.toThrow();
+      expect(attempts).toBe(1);
+    } finally {
+      await client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("starts lazy persistent ingress without prewarming egress", async () => {
     const directory = await mkdtemp(join(tmpdir(), "qwp-unified-client-"));
     const attemptedPaths: string[] = [];
     let client: Awaited<ReturnType<typeof connectQwpNodeClient>> | undefined;
     try {
       client = await connectQwpNodeClient(
-        `ws::addr=offline.example;sf_dir=${directory};lazy_connect=on;sender_pool_max=1;`,
+        `ws::addr=offline.example;sf_dir=${directory};sender_id=producer_1;lazy_connect=on;sender_pool_max=1;`,
         {
           webSocket: {
             webSocketFactory: (url, { onConnected }) => {
@@ -137,13 +195,43 @@ describe("QWP unified Node client configuration", () => {
       expect(attemptedPaths).toEqual(["/write/v4"]);
       expect(client.metrics.senders.total).toBe(1);
       expect(client.metrics.queries.total).toBe(0);
+      expect(await readdir(directory)).toContain("producer_1-0");
     } finally {
       await client?.close();
       await rm(directory, { recursive: true, force: true });
     }
   });
 
-  it("rejects lazy startup conflicts before constructing the client", () => {
+  it("starts lazy memory-buffered ingress without sf_dir", async () => {
+    const attemptedPaths: string[] = [];
+    const client = await connectQwpNodeClient(
+      "ws::addr=offline.example;lazy_connect=on;sender_pool_max=1;",
+      {
+        webSocket: {
+          webSocketFactory: (url, { onConnected }) => {
+            attemptedPaths.push(new URL(url).pathname);
+            onConnected();
+            return new RejectingWebSocket() as unknown as QwpWebSocketLike;
+          },
+        },
+        sender: { closeFlushTimeoutMs: 0 },
+      },
+    );
+    try {
+      expect(attemptedPaths).toEqual(["/write/v4"]);
+      expect(client.metrics.senders.total).toBe(1);
+      expect(client.metrics.queries.total).toBe(0);
+      const sender = await client.borrowSender();
+      await sender.table("events").longColumn("value", 42n).atNow();
+      await sender.flush();
+      expect(sender.metrics.totalRowsPublished).toBe(1);
+      await sender.close();
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("rejects lazy startup conflicts before constructing the client", async () => {
     expect(() =>
       parseQwpNodeClientConfig(
         "ws::addr=localhost;lazy_connect=on;initial_connect_retry=sync;sf_dir=/tmp/qwp;",
@@ -155,15 +243,34 @@ describe("QWP unified Node client configuration", () => {
       ),
     ).toThrow(/lazyConnect requires queryPoolMin=0/);
     expect(() =>
-      parseQwpNodeClientConfig("ws::addr=localhost;lazy_connect=on;"),
-    ).toThrow(/lazyConnect requires ingress storeAndForward/);
-    expect(() =>
       createQwpNodeClient({
-        ingress: { url: "ws://localhost:9000/write/v4" },
+        ingress: {
+          url: "ws://localhost:9000/write/v4",
+          storeAndForward: {
+            directory: "/tmp/qwp",
+            initialConnectMode: "off",
+          },
+        },
         egress: { url: "ws://localhost:9000/read/v1" },
-        lazyConnect: true,
+        ingressSession: { initialConnectMode: "sync" },
       }),
-    ).toThrow(/lazyConnect requires ingress storeAndForward/);
+    ).toThrow(/initialConnectMode.*differs/);
+    const memoryOptions = parseQwpNodeClientConfig(
+      "ws::addr=localhost;lazy_connect=on;",
+    );
+    expect(memoryOptions.ingress.storeAndForward).toBeUndefined();
+    expect(memoryOptions.ingressSession).toMatchObject({
+      backgroundStoreAndForward: true,
+      initialConnectMode: "async",
+    });
+    const client = createQwpNodeClient({
+      ingress: { url: "ws://localhost:9000/write/v4" },
+      egress: { url: "ws://localhost:9000/read/v1" },
+      lazyConnect: true,
+      pool: { senderPoolMin: 0 },
+    });
+    expect(client.metrics.senders.minimum).toBe(0);
+    await client.close();
   });
 
   it("validates ingress, egress, pool, and shared conflicts up front", () => {
@@ -226,7 +333,7 @@ describe("QWP unified Node client configuration", () => {
     await Promise.all([objectClient.close(), stringClient.close()]);
   });
 
-  it("rejects duplicate, unknown, and unsupported active keys", () => {
+  it("rejects duplicate and unknown active keys", () => {
     expect(() =>
       parseQwpNodeClientConfig(
         "ws::addr=db-a;addr=db-b;target=primary;target=replica;",
@@ -235,9 +342,49 @@ describe("QWP unified Node client configuration", () => {
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=localhost;made_up=1;"),
     ).toThrow(/Unknown.*made_up/);
-    expect(() =>
-      parseQwpNodeClientConfig("ws::addr=localhost;sf_max_segment_bytes=1m;"),
-    ).toThrow(/not supported by the TypeScript client/);
+  });
+
+  it("accepts and validates the remaining Java QWP configuration keys", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "qwp-tls-roots-"));
+    const trustStore = join(directory, "roots.p12");
+    await writeFile(trustStore, Uint8Array.of(1, 2, 3));
+    try {
+      const options = parseQwpNodeClientConfig(
+        `wss::addr=localhost;tls_roots=${trustStore};tls_roots_password=secret;` +
+          "connection_listener_inbox_capacity=7;error_inbox_capacity=32;" +
+          "max_name_len=512;sender_id=producer_1;sf_max_segment_bytes=8m;",
+      );
+      expect(options.ingress.agent).toBeDefined();
+      expect(options.sender?.maxNameLength).toBe(512);
+      expect(options.ingress.senderId).toBe("producer_1");
+      expect(options.ingressSession).toMatchObject({
+        maxBatchSizeBytes: 8 * 1024 * 1024,
+        connectionListenerInboxCapacity: 7,
+        errorInboxCapacity: 32,
+      });
+
+      expect(() =>
+        parseQwpNodeClientConfig(
+          "wss::addr=localhost;tls_roots_password=secret;",
+        ),
+      ).toThrow(/requires tls_roots/);
+      expect(() =>
+        parseQwpNodeClientConfig(
+          `wss::addr=localhost;tls_roots=${trustStore};tls_verify=unsafe_off;`,
+        ),
+      ).toThrow(/cannot be combined/);
+      expect(() =>
+        parseQwpNodeClientConfig("ws::addr=localhost;max_name_len=15;"),
+      ).toThrow(/max_name_len/);
+      expect(() =>
+        parseQwpNodeClientConfig("ws::addr=localhost;sender_id=bad.name;"),
+      ).toThrow(/sender_id/);
+      expect(() =>
+        parseQwpNodeClientConfig("ws::addr=localhost;error_inbox_capacity=15;"),
+      ).toThrow(/error_inbox_capacity/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("validates cluster authorities and supports bracketed IPv6", () => {

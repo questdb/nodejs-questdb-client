@@ -37,6 +37,8 @@ export interface QwpSenderOptions {
    */
   autoFlushBytes?: number;
   autoFlushIntervalMs?: number;
+  /** Maximum UTF-8 byte length of table and column names. Defaults to 127. */
+  maxNameLength?: number;
   /**
    * Keep auto-flushed rows in an open server-side transaction. An explicit
    * flush()/commit() closes the transaction. QWP transactions are atomic per
@@ -55,7 +57,7 @@ export interface QwpSenderOptions {
   durableAckTimeoutMs?: number;
   /**
    * Maximum time close() spends publishing queued rows and waiting for the
-   * server ACK watermark. Zero skips the drain. Defaults to 5 seconds.
+   * server ACK watermark. Zero skips the drain. Defaults to 60 seconds.
    */
   closeFlushTimeoutMs?: number;
   /** QWP frame encoding options supported by the high-level sender. */
@@ -169,7 +171,8 @@ interface QwpSenderFlushResult {
 const DEFAULT_AUTO_FLUSH_ROWS = 1_000;
 const DEFAULT_AUTO_FLUSH_BYTES = 0;
 const DEFAULT_AUTO_FLUSH_INTERVAL_MS = 100;
-const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
+const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_NAME_LENGTH = 127;
 
 function validateNonNegativeInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -422,6 +425,7 @@ export class QwpSender {
   private readonly transactional: boolean;
   private readonly awaitServerAck: boolean;
   private readonly closeFlushTimeoutMs: number;
+  private readonly maxNameLength: number;
   private readonly log: QwpSenderLogger;
 
   constructor(
@@ -437,10 +441,16 @@ export class QwpSender {
     this.awaitServerAck = options.awaitServerAck ?? true;
     this.closeFlushTimeoutMs =
       options.closeFlushTimeoutMs ?? DEFAULT_CLOSE_FLUSH_TIMEOUT_MS;
+    this.maxNameLength = options.maxNameLength ?? DEFAULT_MAX_NAME_LENGTH;
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
     validateNonNegativeInteger(this.autoFlushBytes, "autoFlushBytes");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
     validateNonNegativeInteger(this.closeFlushTimeoutMs, "closeFlushTimeoutMs");
+    if (!Number.isSafeInteger(this.maxNameLength) || this.maxNameLength < 16) {
+      throw new RangeError(
+        "maxNameLength must be a safe integer of at least 16",
+      );
+    }
     if (
       options.durableAckTimeoutMs !== undefined &&
       (!Number.isFinite(options.durableAckTimeoutMs) ||
@@ -496,7 +506,7 @@ export class QwpSender {
     this.throwIfUnavailable();
     if (this.current) throw new Error("Table name has already been set");
     // Validate eagerly rather than waiting for flush.
-    new QwpTableBuffer(name);
+    new QwpTableBuffer(name, this.maxNameLength);
     let table = this.tablesByName.get(name);
     if (!table) {
       table = { name, rows: [], schema: new Map() };
@@ -1176,6 +1186,11 @@ export class QwpSender {
       if (typeof name !== "string") {
         throw new TypeError("column name must be a string");
       }
+      if (name && utf8Length(name) > this.maxNameLength) {
+        throw new Error(
+          `column name too long [maxLength=${this.maxNameLength}]`,
+        );
+      }
       const existingSchema = table.schema.get(name);
       if (
         existingSchema &&
@@ -1381,7 +1396,7 @@ export class QwpSender {
   }
 
   private buildTable(name: string, rows: readonly StagedRow[]): QwpTableBuffer {
-    const result = new QwpTableBuffer(name);
+    const result = new QwpTableBuffer(name, this.maxNameLength);
     for (const row of rows) {
       for (const column of row.columns.values()) {
         const target = result.getOrCreateColumn(column.name, column.type);

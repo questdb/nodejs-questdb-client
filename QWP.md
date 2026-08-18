@@ -109,8 +109,9 @@ to cover the complete WebSocket opening lifecycle and they do not expose
 `authTimeoutMs`.
 
 Give each active sender its own store-and-forward directory. The Node.js journal
-persists frames and their symbol dictionary before sending. Persistent senders can
-start while every endpoint is offline and reconnect indefinitely by default. Unless
+persists frames and their symbol dictionary before sending. Set
+`initialConnectMode: "async"` when a persistent sender must start while every
+endpoint is offline. Unless
 `awaitServerAck: true` or `awaitDurableAck: true` is selected, `flush()` resolves once
 the complete logical flush reaches the configured local journal boundary; a background
 drainer then sends it in order. The default `"append"` boundary is locally durable,
@@ -119,12 +120,15 @@ Applications can therefore keep publishing during an outage until the configured
 `maxBytes` applies backpressure. A failed journal publication leaves the high-level
 rows staged so the caller can retry.
 
-`initialConnectMode` selects persistent startup behavior: `"off"` makes one
+`initialConnectMode` selects persistent startup behavior: `"off"` (the default)
+makes one
 fail-fast attempt, `"sync"` retries on the caller within the configured reconnect
-budget, and `"async"` (the backwards-compatible default) returns immediately while
+budget, and `"async"` returns immediately while
 the background replay loop connects. `Sender.fromConfig()` also accepts
 `initial_connect_retry=off|sync|async` when `qwp.webSocket.storeAndForward` is
 supplied. Initial authentication, upgrade, and capability failures remain terminal.
+When no mode is explicit, configuring any reconnect duration/backoff key promotes
+the initial connection to `"sync"`, so that budget also governs startup.
 After a foreground persistent sender has connected successfully at least once, the
 same failures are retried indefinitely so credential rotation and rolling capability
 changes cannot strand its journal. The configured reconnect attempt/duration budget
@@ -283,7 +287,7 @@ Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` 
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to
 assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`, or
 `ms` timestamp. `close()` publishes completed rows and waits for the committed-frame
-ACK watermark for up to `closeFlushTimeoutMs` (5 seconds by default). Set it to `0`
+ACK watermark for up to `closeFlushTimeoutMs` (60 seconds by default). Set it to `0`
 to publish without the ACK drain. An unfinished row is still discarded with a warning.
 The configuration-string equivalent is `close_flush_timeout_millis`.
 
@@ -730,18 +734,24 @@ sizes may be passed as the second argument. The whole string is still validated
 before overrides are applied, matching the Java builder's fail-fast behavior.
 
 Set `lazy_connect=on` to tolerate an unavailable cluster during startup. In the
-TypeScript client this requires `sf_dir`: ingress uses persistent
-store-and-forward with `initial_connect_retry=async`, while egress uses
+TypeScript client ingress uses memory replay by default, or persistent replay when
+`sf_dir` is present, with `initial_connect_retry=async`; egress uses
 `query_pool_min=0` and connects on the first query. Explicit
 `initial_connect_retry=off|sync` or a positive `query_pool_min` conflicts with
 `lazy_connect` and is rejected before the client is created:
 
 ```typescript
 const db = await connectQwpNodeClient(
-  "wss::addr=node-a.example,node-b.example;" +
-    "sf_dir=/var/lib/my-app/qwp;lazy_connect=on;",
+  "wss::addr=node-a.example,node-b.example;" + "lazy_connect=on;",
 );
 ```
+
+For unified strings with `sf_dir`, Java-compatible defaults apply: memory
+durability, a 10 GiB total journal cap, 4 MiB frame/segment batches, a 30-second
+capacity wait, a 60-second close drain, and fail-fast initial connection. Set
+`sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
+The parser also supports `max_name_len`, password-protected `tls_roots`, and the
+Java listener/error inbox capacity keys.
 
 The object form remains available for cases where constructing the two sides
 separately is useful:
