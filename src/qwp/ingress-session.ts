@@ -154,6 +154,8 @@ export interface QwpIngressSessionOptions {
   reconnect?: QwpReconnectOptions;
   /** @internal Node adapter hook for persistent store-and-forward. */
   replayStore?: QwpIngressReplayStore;
+  /** @internal Starts the Node persistent drainer without waiting for a server. */
+  backgroundStoreAndForward?: boolean;
   /**
    * Optional local ingress frame cap. Browsers cannot read WebSocket upgrade
    * headers, so browser applications should set this to the server's configured
@@ -383,12 +385,18 @@ export class QwpIngressSession {
     if (options.replayStore && !options.reconnect) {
       throw new RangeError("a QWP replayStore requires reconnect options");
     }
+    if (options.backgroundStoreAndForward && !options.replayStore) {
+      throw new RangeError(
+        "background QWP store-and-forward requires a replayStore",
+      );
+    }
     const connection = options.reconnect
       ? await QwpReconnectingIngressConnection.connect(
           factory,
           options.reconnect,
           options.replayStore,
           options.maxBatchSizeBytes,
+          options.backgroundStoreAndForward,
         )
       : await factory();
     try {
@@ -470,6 +478,31 @@ export class QwpIngressSession {
   }
 
   /**
+   * Encodes and publishes tables without waiting for their server ACK. With
+   * Node store-and-forward this resolves only after every frame is durable in
+   * the local journal; browser and non-persistent transports resolve after the
+   * WebSocket accepts the frames.
+   */
+  publishTables(
+    tables: readonly QwpTableBuffer[],
+    encodeOptions: QwpIngressEncodeOptions = {},
+  ): Promise<void> {
+    this.throwIfUnavailable();
+    const cap = this.maxBatchSizeBytes;
+    if (cap === undefined) {
+      return this.publishFrame(encodeQwpIngressFrame(tables, encodeOptions));
+    }
+    let planned: PlannedIngressFrames;
+    try {
+      planned = planIngressFrames(tables, encodeOptions, cap);
+    } catch (error) {
+      if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
+      throw error;
+    }
+    return this.publishPlannedFrames(planned.frames);
+  }
+
+  /**
    * Sends tables using the session's connection-scoped symbol dictionary.
    * String symbol values are assigned stable IDs automatically.
    */
@@ -535,6 +568,88 @@ export class QwpIngressSession {
       this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
       throw error;
     }
+  }
+
+  /** Publishes tables with the automatic connection-scoped symbol dictionary. */
+  async publishTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    encodeOptions: Pick<
+      QwpIngressEncodeOptions,
+      "gorilla" | "deferCommit"
+    > = {},
+  ): Promise<void> {
+    this.throwIfUnavailable();
+    const previousSize = this.symbolDictionary.size;
+    const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
+    const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
+    try {
+      const cap = this.maxBatchSizeBytes;
+      if (cap !== undefined) {
+        const planned = planIngressFrames(
+          tables,
+          {
+            ...encodeOptions,
+            dictionary: this.symbolDictionary,
+            confirmedMaxSymbolId: this.publishedMaxSymbolId,
+          },
+          cap,
+        );
+        this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
+        this.deltaSymbolsPublished = true;
+        await this.publishPlannedFrames(planned.frames);
+        return;
+      }
+
+      const frame = encodeQwpIngressFrame(tables, {
+        ...encodeOptions,
+        dictionary: this.symbolDictionary,
+        confirmedMaxSymbolId: this.publishedMaxSymbolId,
+      });
+      this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
+      this.deltaSymbolsPublished = true;
+      await this.publishFrame(frame);
+    } catch (error) {
+      this.symbolDictionary.truncate(previousSize);
+      this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
+      this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
+      throw error;
+    }
+  }
+
+  /**
+   * Publishes one pre-encoded frame without allocating an ACK waiter.
+   * Applications can observe later acceptance through progress callbacks.
+   */
+  publishFrame(frame: Uint8Array): Promise<void> {
+    this.throwIfUnavailable();
+    if (
+      this.maxBatchSizeBytes !== undefined &&
+      frame.byteLength > this.maxBatchSizeBytes
+    ) {
+      return Promise.reject(
+        new QwpBatchTooLargeError(frame.byteLength, this.maxBatchSizeBytes),
+      );
+    }
+    const sequence = this.nextSequence++;
+    this.totalFramesPublished++;
+    this.totalBytesPublished += frame.byteLength;
+    const publishing = this.sendTail.then(async () => {
+      this.throwIfUnavailable();
+      await this.connection.send(frame);
+    });
+    // A local store-capacity failure is backpressure, not a terminal session
+    // failure. Keep the publication queue usable so callers can retry after
+    // the background drainer frees journal capacity.
+    this.sendTail = publishing.catch(() => undefined);
+    this.emitProgress(QWP_INGRESS_PROGRESS_KIND.PUBLISHED, sequence);
+    void publishing.then(
+      () => {
+        this.totalFramesSent++;
+        this.totalBytesSent += frame.byteLength;
+      },
+      () => undefined,
+    );
+    return publishing;
   }
 
   sendFrame(frame: Uint8Array): Promise<QwpIngressResponse> {
@@ -606,6 +721,12 @@ export class QwpIngressSession {
     const responses = frames.map((frame) => this.sendFrame(frame));
     if (responses.length === 1) return responses[0];
     return Promise.all(responses).then(mergeIngressResponses);
+  }
+
+  private async publishPlannedFrames(
+    frames: readonly Uint8Array[],
+  ): Promise<void> {
+    for (const frame of frames) await this.publishFrame(frame);
   }
 
   /**

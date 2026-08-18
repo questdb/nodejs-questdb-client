@@ -1,13 +1,14 @@
 import type { AddressInfo } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeEgress,
   connectQwpNodeIngress,
   connectQwpNodeWebSocket,
+  createQwpNodeSender,
   encodeQwpFrame,
   QWP_EGRESS_MESSAGE,
   QWP_STATUS,
@@ -246,6 +247,60 @@ describe("QWP Node transport", () => {
     } finally {
       await session.close();
       await Promise.all([closeServer(primary), closeServer(secondary)]);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes through the high-level sender before an endpoint is online", async () => {
+    const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await listen(reservation);
+    const port = (reservation.address() as AddressInfo).port;
+    await closeServer(reservation);
+    const directory = await mkdtemp(join(tmpdir(), "qwp-node-offline-"));
+    const sender = createQwpNodeSender(
+      {
+        url: `ws://127.0.0.1:${port}/write/v4`,
+        connectTimeoutMs: 100,
+        storeAndForward: { directory },
+      },
+      { autoFlush: false },
+      {
+        reconnect: {
+          initialBackoffMs: 10,
+          maxBackoffMs: 10,
+        },
+      },
+    );
+
+    try {
+      await expect(sender.connect()).resolves.toBe(true);
+      await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+      await expect(sender.flush()).resolves.toBe(true);
+      expect(
+        (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+      ).toHaveLength(1);
+
+      server = new WebSocketServer({ host: "127.0.0.1", port });
+      server.on("headers", (headers) => {
+        headers.push("X-QWP-Version: 1");
+      });
+      server.on("connection", (socket) => {
+        let sequence = 0n;
+        socket.on("message", () => {
+          socket.send(okResponse(sequence++, "trades", 1n));
+        });
+      });
+      await listen(server);
+
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await readdir(directory)).filter((name) => name.endsWith(".qwp")),
+          ).toEqual([]),
+        { timeout: 2_000 },
+      );
+    } finally {
+      await sender.close();
       await rm(directory, { recursive: true, force: true });
     }
   });

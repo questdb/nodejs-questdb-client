@@ -339,12 +339,17 @@ export async function connectQwpNodeIngress(
     ? new QwpNodeFileReplayStore(options.storeAndForward)
     : sessionOptions.replayStore;
   const reconnect = options.storeAndForward
-    ? (sessionOptions.reconnect ?? {})
+    ? {
+        maxAttempts: 0,
+        maxDurationMs: 0,
+        ...sessionOptions.reconnect,
+      }
     : sessionOptions.reconnect;
   const effectiveSessionOptions: QwpIngressSessionOptions = {
     ...sessionOptions,
     reconnect,
     replayStore,
+    backgroundStoreAndForward: options.storeAndForward !== undefined,
     durableAckKeepaliveMs: options.requestDurableAck
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : sessionOptions.durableAckKeepaliveMs,
@@ -364,17 +369,23 @@ export function createQwpNodeSender(
   senderOptions: QwpSenderOptions = {},
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
+  const effectiveSenderOptions: QwpSenderOptions = {
+    ...senderOptions,
+    awaitServerAck:
+      senderOptions.awaitServerAck ??
+      (options.storeAndForward ? senderOptions.awaitDurableAck === true : true),
+  };
   return new QwpSender(
     () =>
       connectQwpNodeIngress(
         {
           ...options,
           requestDurableAck:
-            options.requestDurableAck ?? senderOptions.awaitDurableAck,
+            options.requestDurableAck ?? effectiveSenderOptions.awaitDurableAck,
         },
         sessionOptions,
       ),
-    senderOptions,
+    effectiveSenderOptions,
   );
 }
 

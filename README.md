@@ -86,6 +86,13 @@ await sender.flush();
 await sender.close();
 ```
 
+When Node QWP is configured with `qwp.webSocket.storeAndForward`, the sender
+can start and accept flushes while QuestDB is offline. `flush()` then resolves
+after local durable journal publication and a background drainer reconnects
+and sends in order. Set `qwp.sender.awaitServerAck: true` to wait for the
+QuestDB ACK instead, or `awaitDurableAck: true` to wait through durable upload.
+This persistent mode is Node-only; browser senders continue to default to ACK waiting.
+
 Browser applications use the browser entry point, which has no Node.js
 dependencies. Cookies are supplied by the browser during a same-origin
 WebSocket upgrade.

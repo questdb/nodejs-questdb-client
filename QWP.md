@@ -90,10 +90,28 @@ const sender = await Sender.fromConfig(
 ```
 
 Give each active sender its own store-and-forward directory. The Node.js journal
-persists frames and their symbol dictionary before sending. A crash after the server
-accepts a frame but before local acknowledgement cleanup can replay that frame, so
-delivery is at least once. Applications that require exactly-once effects should use
-their own stable event key or another idempotency strategy.
+persists frames and their symbol dictionary before sending. Persistent senders can
+start while every endpoint is offline and reconnect indefinitely by default. Unless
+`awaitServerAck: true` or `awaitDurableAck: true` is selected, `flush()` resolves once
+the complete logical flush is durable in the local journal; a background drainer then
+sends it in order. Applications can therefore keep publishing during an outage until
+the configured `maxBytes` applies backpressure. A failed journal publication leaves
+the high-level rows staged so the caller can retry.
+
+An offline sender cannot inspect the server-advertised batch cap before its first
+publication. Set `qwp.session.maxBatchSizeBytes` to a value no greater than the
+smallest target node's cap when offline startup is required.
+
+Set `awaitServerAck: true` when a particular flush must observe QuestDB's protocol ACK
+before returning. `awaitDurableAck: true` implies server-ACK waiting and additionally
+waits for replicated/durable progress. Browser senders continue to default to their
+existing ACK-waiting behavior and do not offer persistent publication.
+
+A crash after the server accepts a frame but before local acknowledgement cleanup can
+replay that frame, so delivery is at least once. Applications that require exactly-once
+effects should use their own stable event key or another idempotency strategy. Closing
+a persistent sender stops its drainer but preserves published, unacknowledged frames for
+the next sender using that directory.
 
 ### Direct high-level API
 
@@ -137,6 +155,11 @@ The sender automatically maintains connection-scoped symbol IDs, emits dictionar
 deltas, tracks acknowledgements, and splits multi-row batches at the smaller of the
 client cap and the server-advertised cap. One row that cannot fit is rejected with
 `QwpBatchTooLargeError` before it is sent.
+
+Low-level Node sessions expose `publishFrame()`, `publishTables()`, and
+`publishTablesDelta()` for local-publication semantics. Their `send*()` counterparts
+continue to return the server ACK. Use the publication methods only with persistent
+store-and-forward when local durability is the intended completion boundary.
 
 ### Browser ingress
 
@@ -405,7 +428,9 @@ For the common fluent API, migration is primarily a transport change:
 
 Review these behavioral differences before rollout:
 
-- QWP `flush()` waits for a protocol ACK; optionally it also waits for durable upload.
+- QWP `flush()` waits for a protocol ACK by default. With Node persistent
+  store-and-forward it defaults to local durable publication; set `awaitServerAck` to
+  restore ACK waiting, or `awaitDurableAck` to wait through durable upload.
 - QWP symbol dictionaries are connection-scoped and automatic.
 - Large batches are split to the negotiated WebSocket payload cap.
 - QWP transactional auto-flush is per table and must be explicitly committed.

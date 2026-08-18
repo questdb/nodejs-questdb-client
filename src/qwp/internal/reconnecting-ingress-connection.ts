@@ -134,6 +134,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private rejectionCount = 0;
   private generation = 0;
   private sendTail: Promise<void> = Promise.resolve();
+  private drainTail: Promise<void> = Promise.resolve();
   private reconnectTask?: Promise<void>;
   private storeClosePromise?: Promise<void>;
   private terminalError?: Error;
@@ -161,6 +162,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     symbolDictionary: readonly string[],
     recoveredDiscardTail: RecoveredDiscardTail | undefined,
     localMaxBatchSizeBytes?: number,
+    private readonly backgroundStoreAndForward = false,
   ) {
     this.store = store;
     this.symbolDictionary = [...symbolDictionary];
@@ -211,6 +213,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     reconnectOptions: QwpReconnectOptions,
     replayStore?: QwpIngressReplayStore,
     localMaxBatchSizeBytes?: number,
+    backgroundStoreAndForward = false,
   ): Promise<QwpReconnectingIngressConnection> {
     const store = replayStore ?? new QwpMemoryReplayStore();
     let connection: QwpReconnectingIngressConnection | undefined;
@@ -235,9 +238,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         symbolDictionary,
         analyzeRecoveredDiscardTail(sortedRecords),
         localMaxBatchSizeBytes,
+        backgroundStoreAndForward,
       );
       await connection.retireRecoveredDiscardTailIfReady();
-      await connection.connectLoop(undefined, false);
+      if (backgroundStoreAndForward) connection.startBackgroundConnect();
+      else await connection.connectLoop(undefined, false);
       return connection;
     } catch (error) {
       await connection?.close().catch(() => undefined);
@@ -247,8 +252,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   get handshake(): QwpHandshakeMetadata {
-    if (!this.lastHandshake)
+    if (!this.lastHandshake) {
+      if (this.backgroundStoreAndForward) return { qwpVersion: 1 };
       throw new Error("QWP connection is not established");
+    }
     return this.lastHandshake;
   }
 
@@ -292,12 +299,16 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       ackDelivered: false,
       transmitted: false,
     };
-    const sending = this.sendTail.then(async () => {
+    const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
       const delta = readSymbolDictionaryDelta(frame.payload);
       if (delta) await this.persistSymbolDictionaryDelta(delta);
       await this.store.append(frame);
       this.frames.set(frame.frameSequence, frame);
+      if (this.backgroundStoreAndForward) {
+        this.enqueueDrain(frame);
+        return;
+      }
       try {
         await this.transmit(frame);
       } catch (error) {
@@ -305,8 +316,30 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         throw error;
       }
     });
-    this.sendTail = sending.catch(() => undefined);
-    return sending;
+    this.sendTail = publishing.catch(() => undefined);
+    return publishing;
+  }
+
+  private enqueueDrain(frame: ReplayFrame): void {
+    const draining = this.drainTail.then(async () => {
+      if (this.closing) return;
+      await this.transmit(frame);
+    });
+    this.drainTail = draining.catch((error: unknown) => {
+      if (!this.closing) this.failTerminal(error);
+    });
+  }
+
+  private startBackgroundConnect(): void {
+    const connecting = this.connectLoop(undefined, false);
+    this.reconnectTask = connecting;
+    void connecting
+      .catch((error: unknown) => {
+        if (!this.closing) this.failTerminal(error);
+      })
+      .finally(() => {
+        if (this.reconnectTask === connecting) this.reconnectTask = undefined;
+      });
   }
 
   async close(code = 1000, reason = ""): Promise<void> {

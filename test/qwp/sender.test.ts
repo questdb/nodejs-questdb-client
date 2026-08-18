@@ -96,6 +96,28 @@ class ClosingUnblocksSession extends RecordingSession {
   }
 }
 
+class PublishingSession extends RecordingSession {
+  publicationAttempts = 0;
+  failPublication = false;
+
+  async publishTables(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): Promise<void> {
+    this.publicationAttempts++;
+    this.sends.push({ tables, options });
+    if (this.failPublication) throw new Error("journal is full");
+  }
+
+  publishTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): Promise<void> {
+    this.deltaSendCount++;
+    return this.publishTables(tables, options);
+  }
+}
+
 function column(table: QwpTableBuffer, name: string) {
   const result = table.columns.find((candidate) => candidate.name === name);
   if (!result) throw new Error(`missing column '${name}'`);
@@ -103,6 +125,60 @@ function column(table: QwpTableBuffer, name: string) {
 }
 
 describe("QWP high-level sender", () => {
+  it("retains rows until publication-only flush succeeds", async () => {
+    const session = new PublishingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      awaitServerAck: false,
+    });
+    await sender.table("events").longColumn("value", 42n).atNow();
+
+    session.failPublication = true;
+    await expect(sender.flush()).rejects.toThrow("journal is full");
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 1,
+      totalRowsPublished: 0,
+      totalFlushFailures: 1,
+    });
+
+    session.failPublication = false;
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.publicationAttempts).toBe(2);
+    expect(session.deltaSendCount).toBe(2);
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 0,
+      totalRowsPublished: 1,
+      totalFlushes: 2,
+    });
+    await sender.close();
+  });
+
+  it("publishes transactional auto-flushes without waiting for ACKs", async () => {
+    const session = new PublishingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+      awaitServerAck: false,
+      transactional: true,
+    });
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    expect(session.sends[0].options).toMatchObject({ deferCommit: true });
+    expect(sender.metrics).toMatchObject({
+      deferredRows: 1,
+      pendingRows: 0,
+    });
+
+    await expect(sender.commit()).resolves.toBe(true);
+    expect(session.sends[1].options).toMatchObject({ deferCommit: false });
+    expect(session.sends[1].tables).toEqual([]);
+    expect(sender.metrics).toMatchObject({
+      deferredRows: 0,
+      totalTransactionsCommitted: 1,
+    });
+    await sender.close();
+  });
+
   it("closes its session before waiting for an in-flight flush", async () => {
     const session = new ClosingUnblocksSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });

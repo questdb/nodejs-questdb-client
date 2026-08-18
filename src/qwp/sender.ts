@@ -32,6 +32,13 @@ export interface QwpSenderOptions {
    * table, rather than across every table in a multi-table flush.
    */
   transactional?: boolean;
+  /**
+   * Wait for the server's protocol ACK before flush()/commit() resolves.
+   * Defaults to true. Node persistent store-and-forward defaults this to false
+   * so a flush resolves after local durable publication and drains in the
+   * background.
+   */
+  awaitServerAck?: boolean;
   /** Wait for durable upload after every successful ingress ACK. */
   awaitDurableAck?: boolean;
   durableAckTimeoutMs?: number;
@@ -51,6 +58,14 @@ export interface QwpSenderSession {
     tables: readonly QwpTableBuffer[],
     options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
   ): Promise<QwpIngressResponse>;
+  publishTables?(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): Promise<void>;
+  publishTablesDelta?(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): Promise<void>;
   waitForDurable(
     response: QwpIngressResponse,
     timeoutMs?: number,
@@ -296,6 +311,7 @@ export class QwpSender {
   private readonly autoFlushRows: number;
   private readonly autoFlushIntervalMs: number;
   private readonly transactional: boolean;
+  private readonly awaitServerAck: boolean;
   private readonly log: QwpSenderLogger;
 
   constructor(
@@ -307,6 +323,7 @@ export class QwpSender {
     this.autoFlushIntervalMs =
       options.autoFlushIntervalMs ?? DEFAULT_AUTO_FLUSH_INTERVAL_MS;
     this.transactional = options.transactional ?? false;
+    this.awaitServerAck = options.awaitServerAck ?? true;
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
     if (
@@ -315,6 +332,11 @@ export class QwpSender {
         options.durableAckTimeoutMs <= 0)
     ) {
       throw new RangeError("durableAckTimeoutMs must be a positive number");
+    }
+    if (!this.awaitServerAck && options.awaitDurableAck) {
+      throw new RangeError(
+        "awaitDurableAck requires awaitServerAck to be enabled",
+      );
     }
     this.log = options.log ?? (() => undefined);
   }
@@ -930,10 +952,14 @@ export class QwpSender {
     // sendTables encodes synchronously. Do not compact staging if encoding
     // throws, but transfer ownership once the frame has entered the session.
     const encode = this.options.encode;
-    const response =
+    const useDelta =
       (encode?.symbolDictionary ?? "delta") === "delta" &&
-      session.sendTablesDelta
-        ? session.sendTablesDelta(wireTables, {
+      session.sendTablesDelta;
+    let response: Promise<QwpIngressResponse> | undefined;
+    let publication: Promise<void> | undefined;
+    if (this.awaitServerAck) {
+      response = useDelta
+        ? session.sendTablesDelta!(wireTables, {
             gorilla: encode?.gorilla,
             deferCommit,
           })
@@ -941,7 +967,25 @@ export class QwpSender {
             gorilla: encode?.gorilla,
             deferCommit,
           });
+    } else {
+      const publisher = useDelta
+        ? session.publishTablesDelta
+        : session.publishTables;
+      if (!publisher) {
+        throw new Error(
+          "this QWP ingress session does not support publication-only flushes",
+        );
+      }
+      publication = publisher.call(session, wireTables, {
+        gorilla: encode?.gorilla,
+        deferCommit,
+      });
+    }
     this.totalFlushes++;
+    // Publication-only Node store-and-forward transfers row ownership only
+    // after every frame is durable locally. A disk-capacity or I/O failure
+    // therefore leaves the staged rows available for retry.
+    if (publication) await publication;
     for (const { table, rows } of snapshots) table.rows.splice(0, rows.length);
     const sentRows = snapshots.reduce(
       (count, item) => count + item.rows.length,
@@ -958,23 +1002,25 @@ export class QwpSender {
     if (deferCommit) {
       this.hasDeferredMessages = true;
       this.deferredRowCount += sentRows;
-      this.deferredAcks.push(response);
-      // The server intentionally withholds this ACK until a later commit.
-      // Observe rejection now so abandoning an open transaction during close
-      // never creates an unhandled rejection; flush()/commit() still awaits it.
-      void response.catch(() => undefined);
+      if (response) {
+        this.deferredAcks.push(response);
+        // The server intentionally withholds this ACK until a later commit.
+        // Observe rejection now so abandoning an open transaction during close
+        // never creates an unhandled rejection; flush()/commit() still awaits it.
+        void response.catch(() => undefined);
+      }
       return true;
     }
 
-    const ack = await response;
     const deferredAcks = this.deferredAcks.splice(0);
     this.hasDeferredMessages = false;
     this.deferredRowCount = 0;
-    await Promise.all(deferredAcks);
+    const ack = response ? await response : undefined;
+    if (deferredAcks.length > 0) await Promise.all(deferredAcks);
     if (this.transactional && (closesDeferredTransaction || sentRows > 0)) {
       this.totalTransactionsCommitted++;
     }
-    if (this.options.awaitDurableAck) {
+    if (this.options.awaitDurableAck && ack) {
       await session.waitForDurable(ack, this.options.durableAckTimeoutMs);
     }
     return true;

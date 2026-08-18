@@ -190,6 +190,29 @@ class TrackingReplayStore implements QwpIngressReplayStore {
   }
 }
 
+class FailOnceDictionaryReplayStore extends TrackingReplayStore {
+  readonly symbols: string[] = [];
+  appendAttempts = 0;
+
+  override async append(record: QwpIngressReplayRecord): Promise<void> {
+    this.appendAttempts++;
+    if (this.appendAttempts === 1) throw new Error("journal is full");
+    await super.append(record);
+  }
+
+  async loadSymbolDictionary(): Promise<readonly string[]> {
+    return this.symbols.slice();
+  }
+
+  async appendSymbolDictionary(
+    startId: number,
+    entries: readonly string[],
+  ): Promise<void> {
+    if (startId !== this.symbols.length) throw new Error("dictionary gap");
+    this.symbols.push(...entries);
+  }
+}
+
 describe("QWP endpoint failover", () => {
   it("walks all endpoints and rotates away from the last successful one", async () => {
     const attempts: string[] = [];
@@ -238,6 +261,104 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("publishes while initially offline and drains after a background connection", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new TrackingReplayStore();
+    let releaseOnline!: () => void;
+    const online = new Promise<void>((resolve) => {
+      releaseOnline = resolve;
+    });
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        if (factoryCalls++ === 0) {
+          throw new QwpUpgradeError("offline", {
+            kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+            retryable: true,
+            tryNextEndpoint: true,
+          });
+        }
+        await online;
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+
+    await expect(
+      session.publishFrame(Uint8Array.of(1)),
+    ).resolves.toBeUndefined();
+    await expect(
+      session.publishFrame(Uint8Array.of(2)),
+    ).resolves.toBeUndefined();
+    expect(Array.from(replayStore.records.keys())).toEqual([0n, 1n]);
+    expect(connection.sent).toEqual([]);
+    expect(session.metrics).toMatchObject({
+      pendingResponses: 0,
+      pendingReplayFrames: 2,
+      totalFramesSent: 0,
+    });
+
+    releaseOnline();
+    await vi.waitFor(() =>
+      expect(connection.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]),
+    );
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+    expect(session.metrics).toMatchObject({
+      acknowledgedSequence: 1n,
+      pendingReplayFrames: 0,
+      totalFramesSent: 2,
+    });
+    await session.close();
+  });
+
+  it("retries a delta publication after journal backpressure", async () => {
+    const replayStore = new FailOnceDictionaryReplayStore();
+    const session = await QwpIngressSession.connect(
+      async () => {
+        throw new QwpUpgradeError("offline", {
+          kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+          retryable: true,
+          tryNextEndpoint: true,
+        });
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 10_000,
+          maxBackoffMs: 10_000,
+        },
+        replayStore,
+      },
+    );
+
+    await expect(
+      session.publishTablesDelta([symbolTable("ETH-USD")]),
+    ).rejects.toThrow("journal is full");
+    expect(replayStore.symbols).toEqual(["ETH-USD"]);
+    expect(replayStore.records.size).toBe(0);
+
+    await expect(
+      session.publishTablesDelta([symbolTable("ETH-USD")]),
+    ).resolves.toBeUndefined();
+    expect(replayStore.appendAttempts).toBe(2);
+    expect(
+      decodeQwpIngressSymbolDictionaryDelta(replayStore.records.get(1n)!),
+    ).toEqual({ startId: 0, entries: ["ETH-USD"] });
+    await session.close();
+  });
+
   it("replays only unacknowledged browser frames and translates wire ACKs", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
