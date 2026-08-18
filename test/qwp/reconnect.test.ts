@@ -472,7 +472,7 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
-  it("retries a delta publication after journal backpressure", async () => {
+  it("preserves durable dictionary IDs after frame journal backpressure", async () => {
     const replayStore = new FailOnceDictionaryReplayStore();
     const session = await QwpIngressSession.connect(
       async () => {
@@ -501,12 +501,13 @@ describe("QWP ingress reconnect and replay", () => {
     expect(replayStore.records.size).toBe(0);
 
     await expect(
-      session.publishTablesDelta([symbolTable("ETH-USD")]),
+      session.publishTablesDelta([symbolTable("BTC-USD")]),
     ).resolves.toBeUndefined();
     expect(replayStore.appendAttempts).toBe(2);
+    expect(replayStore.symbols).toEqual(["ETH-USD", "BTC-USD"]);
     expect(
       decodeQwpIngressSymbolDictionaryDelta(replayStore.records.get(1n)!),
-    ).toEqual({ startId: 0, entries: ["ETH-USD"] });
+    ).toEqual({ startId: 0, entries: ["ETH-USD", "BTC-USD"] });
     await session.close();
   });
 

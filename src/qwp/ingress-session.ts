@@ -662,10 +662,32 @@ export class QwpIngressSession {
       this.deltaSymbolsPublished = true;
       await this.publishFrame(frame);
     } catch (error) {
-      this.symbolDictionary.truncate(previousSize);
+      this.restoreDeltaStateAfterPublishFailure(previousSize);
       this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
       this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
       throw error;
+    }
+  }
+
+  /**
+   * Restores the dictionary ID allocator after a failed asynchronous publish.
+   *
+   * A replay transport persists new dictionary entries before it appends the
+   * frame that uses them. If that frame append fails, the persisted dictionary
+   * is authoritative even though the frame-publication watermark must roll
+   * back. Keeping those IDs prevents a changed retry from assigning a
+   * different symbol to an already durable ID. The unchanged published
+   * watermark makes the retry include the durable-but-unpublished prefix.
+   */
+  private restoreDeltaStateAfterPublishFailure(previousSize: number): void {
+    if (!(this.connection instanceof QwpReconnectingIngressConnection)) {
+      this.symbolDictionary.truncate(previousSize);
+      return;
+    }
+    const recovered = this.connection.ingressSymbolDictionary;
+    this.symbolDictionary.reset();
+    for (const entry of recovered) {
+      this.symbolDictionary.addRecovered(entry);
     }
   }
 
