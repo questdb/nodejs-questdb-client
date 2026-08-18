@@ -312,6 +312,13 @@ server can stream ahead. Tune `initialCredit` on the session or individual query
 set it to zero only to opt into legacy unbounded streaming. Set `autoCredit: false`
 to manage credit explicitly through `query.grantCredit()`.
 
+For allocation-sensitive consumers, `session.queryViews(sql, onBatch)` supplies
+bounded, reusable column views instead of materializing every value into JavaScript
+arrays. Typed accessors read fixed-width values directly from QWP bytes, and raw
+byte views are available for vectorized processing. The callback is awaited before
+credit is replenished. Views are invalid when it returns; copy a byte view with
+`.slice()` or call `batch.materialize()` inside the callback to retain data.
+
 `queryTimeoutMs` sets the session's default query deadline; a per-query
 `timeoutMs` overrides it, and zero disables the deadline. When a deadline
 expires, the client rejects iteration and `query.completion` with

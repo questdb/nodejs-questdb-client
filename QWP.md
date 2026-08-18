@@ -461,6 +461,51 @@ try {
 }
 ```
 
+### Bounded reusable result views
+
+`query()` keeps its convenient materialized batches. For hot paths, `queryViews()`
+avoids allocating a JavaScript value array for every column and delivers one
+reusable batch view through an awaited callback:
+
+```typescript
+const query = await session.queryViews(
+  "select timestamp, symbol, price from trades",
+  async (batch) => {
+    const timestamp = batch.column(0);
+    const symbol = batch.column(1);
+    const price = batch.column(2);
+
+    // Fixed-width values are read directly from the QWP little-endian bytes.
+    for (let row = 0; row < batch.rowCount; row++) {
+      if (!price.isNull(row)) {
+        consume(
+          timestamp.getLong(row),
+          symbol.getSymbol(row),
+          price.getDouble(row),
+        );
+      }
+    }
+
+    // Raw views are available for vectorized consumers.
+    consumePackedDoubles(price.valuesBytes()!);
+  },
+  { initialCredit: 256 * 1024 },
+);
+await query.completion;
+```
+
+The batch, its column objects, and every `Uint8Array`/`Int32Array` returned by a
+column are valid only until the callback settles. The decoder reuses those objects
+and its NULL-index, symbol-ID, array-offset, and Gorilla-timestamp scratch storage
+for later batches. Copy an individual byte view with `.slice()`, or call
+`batch.materialize()` inside the callback, when data must be retained.
+
+Raw fixed-width, NULL, VARCHAR/BINARY, and array data views point into the current
+decoded frame; Zstd results point into that batch's decompressed buffer. Accessors
+such as `getString()` and `get()` decode or construct only the requested cell. The
+callback is awaited before automatic credit is replenished, so the configured
+credit window bounds server read-ahead while application work is in progress.
+
 `target` accepts `any` (the default), `primary`, or `replica`. Primary routing also
 accepts standalone servers and a primary completing catch-up, matching the Java
 client. `zone` is an opaque, case-insensitive preference for `any` and `replica`;
@@ -695,7 +740,8 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Durable delivery             | `requestDurableAck` plus `awaitDurableAck`                    |
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Query parameters             | `session.query(sql, { binds })`                               |
-| Result batches               | `for await (const batch of query)`                            |
+| Materialized result batches  | `for await (const batch of query)`                            |
+| Reusable result views        | `session.queryViews(sql, onBatch)`                            |
 
 Do not translate Java threading assumptions directly: callbacks, WebSocket delivery,
 and iteration all share the JavaScript event loop.

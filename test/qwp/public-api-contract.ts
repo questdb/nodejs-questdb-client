@@ -37,8 +37,12 @@ import type {
   QwpEgressQueryOptions,
   QwpEgressSession,
   QwpEgressSessionOptions,
+  QwpEgressViewQuery,
   QwpIngressSession,
   QwpIngressSessionOptions,
+  QwpQueryLease,
+  QwpResultBatchView,
+  QwpResultBatchViewHandler,
   QwpSender,
   QwpSenderOptions,
 } from "../../src/qwp";
@@ -188,6 +192,30 @@ function rootSenderSequenceContract(sender: Sender): void {
   void acknowledgedWatermark;
 }
 
+function queryViewContract(
+  session: QwpEgressSession,
+  lease: QwpQueryLease,
+): void {
+  const handler: QwpResultBatchViewHandler = (batch, query) => {
+    const typedBatch: QwpResultBatchView = batch;
+    const requestId: bigint = query.requestId;
+    const rawValues: Uint8Array | undefined = batch.column(0).valuesBytes();
+    void typedBatch;
+    void requestId;
+    void rawValues;
+  };
+  const direct: Promise<QwpEgressViewQuery> = session.queryViews(
+    "select * from trades",
+    handler,
+  );
+  const pooled: Promise<QwpEgressViewQuery> = lease.queryViews(
+    "select * from trades",
+    handler,
+  );
+  void direct;
+  void pooled;
+}
+
 const rootExtraOptionsContract: ExtraOptions = {
   qwp: qwpExtraOptionsContract,
 };
@@ -212,4 +240,5 @@ void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
 void senderSequenceContract;
 void rootSenderSequenceContract;
+void queryViewContract;
 void Sender;

@@ -33,6 +33,8 @@ const sharedRuntimeContract = [
   "QwpRoleMismatchError",
   "QwpReplayRejectedError",
   "QwpResultBatch",
+  "QwpResultBatchView",
+  "QwpResultColumnView",
   "QwpQueryLease",
   "QwpSendTimeoutError",
   "QwpSender",

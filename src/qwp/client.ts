@@ -2,6 +2,8 @@ import {
   QwpEgressQuery,
   QwpEgressQueryOptions,
   QwpEgressSession,
+  QwpEgressViewQuery,
+  QwpResultBatchViewHandler,
 } from "./egress-session";
 import { QwpSender } from "./sender";
 import { QwpHandshakeMetadata } from "./transport";
@@ -347,6 +349,15 @@ export class QwpQueryLease {
   ): Promise<QwpEgressQuery> {
     this.throwIfReleased();
     return this.session.query(sql, options);
+  }
+
+  queryViews(
+    sql: string,
+    onBatch: QwpResultBatchViewHandler,
+    options: QwpEgressQueryOptions = {},
+  ): Promise<QwpEgressViewQuery> {
+    this.throwIfReleased();
+    return this.session.queryViews(sql, onBatch, options);
   }
 
   close(): Promise<void> {

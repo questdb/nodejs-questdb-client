@@ -22,6 +22,7 @@ import {
   QwpEgressQueryTimeoutError,
   QwpEgressSession,
   QwpResultBatchDecoder,
+  QwpResultBatchView,
   readQwpVarint,
   writeQwpVarint,
 } from "../../src/qwp";
@@ -283,6 +284,114 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
+  it("exposes bounded zero-copy column views without value arrays", () => {
+    const message = decodeQwpEgressMessage(firstResultBatch());
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const batch = new QwpResultBatchDecoder().decodeView(message);
+    expect(batch).toBeInstanceOf(QwpResultBatchView);
+    expect(batch.valid).toBe(true);
+    expect(batch.rowCount).toBe(3);
+    expect(batch.columns.map((column) => column.name)).toEqual([
+      "id",
+      "name",
+      "sym",
+      "ts",
+    ]);
+
+    const id = batch.column(0);
+    expect(id.valuesBytes()!.buffer).toBe(message.body.buffer);
+    expect(id.nullBitmapBytes()!.buffer).toBe(message.body.buffer);
+    expect(id.nonNullIndexView()).toEqual(Int32Array.of(0, -1, 1));
+    expect(id.getInt(0)).toBe(7);
+    expect(id.isNull(1)).toBe(true);
+    expect(id.getInt(1)).toBe(0);
+    expect(id.getInt(2)).toBe(9);
+
+    const name = batch.column(1);
+    expect(new TextDecoder().decode(name.getUtf8View(1)!)).toBe("bb");
+    expect(new TextDecoder().decode(name.stringBytes()!)).toBe("abb");
+    const symbol = batch.column(2);
+    expect(symbol.symbolIdView()).toEqual(Int32Array.of(0, 1, 0));
+    expect(symbol.symbolDictionarySize).toBe(2);
+    expect(symbol.getSymbolId(1)).toBe(1);
+    expect(symbol.getSymbolForId(1)).toBe("beta");
+    expect(symbol.getSymbol(2)).toBe("alpha");
+    const timestamp = batch.column(3);
+    expect(timestamp.valuesBytes()).toHaveLength(24);
+    expect([0, 1, 2].map((row) => timestamp.getLong(row))).toEqual([
+      100n,
+      200n,
+      300n,
+    ]);
+
+    const retained = batch.materialize();
+    batch.release();
+    expect(batch.valid).toBe(false);
+    expect(() => batch.rowCount).toThrow(/no longer valid/i);
+    expect(() => id.getInt(0)).toThrow(/no longer valid/i);
+    expect([...retained.rows()]).toEqual([
+      [7, "a", "alpha", 100n],
+      [null, "bb", "beta", 200n],
+      [9, "", "alpha", 300n],
+    ]);
+  });
+
+  it("lazily reads every result type and detaches materialized binary", () => {
+    const frame = scalarResultBatch();
+    const message = decodeQwpEgressMessage(frame);
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decodeView(message);
+    const row = batch.columns.map((column) => column.get(0));
+
+    expect(row.slice(0, 8)).toEqual([true, -2, -3, "Q", -4n, 1.5, -2.5, 123n]);
+    expect(row[8]).toEqual({ low: 1n, high: 2n });
+    expect(row[9]).toEqual({ words: [1n, 2n, 3n, 4n] });
+    expect(row[10]).toEqual({ bits: 21n, precisionBits: 5 });
+    expect(row[11]).toBe(456n);
+    expect(row[12]).toEqual({ dimensions: [1, 2], values: [1.25, 2.5] });
+    expect(row[13]).toEqual({ dimensions: [2], values: [10n, 20n] });
+    expect(row.slice(14, 17)).toEqual([
+      { unscaled: 1234n, scale: 2 },
+      { unscaled: 123456n, scale: 3 },
+      { unscaled: 987654n, scale: 4 },
+    ]);
+    expect(batch.column(8).getUuidLow(0)).toBe(1n);
+    expect(batch.column(8).getUuidHigh(0)).toBe(2n);
+    expect(batch.column(9).getLong256Word(0, 3)).toBe(4n);
+    expect(batch.column(10).getGeohashBits(0)).toBe(21n);
+    expect(batch.column(12).getArrayDimensionCount(0)).toBe(2);
+    expect(batch.column(14).getDecimalUnscaled(0)).toBe(1234n);
+    expect(batch.column(14).bytesPerValue).toBe(8);
+    expect(batch.column(17).getBinaryView(0)).toEqual(Uint8Array.of(1, 2, 3));
+    expect(batch.column(18).getInt(0)).toBe(-1);
+
+    const retained = batch.materialize();
+    batch.column(17).getBinaryView(0)![0] = 99;
+    expect(retained.get(0, 17)).toEqual(Uint8Array.of(1, 2, 3));
+  });
+
+  it("reuses batch and column view objects across decodes", () => {
+    const decoder = new QwpResultBatchDecoder();
+    const firstMessage = decodeQwpEgressMessage(scalarResultBatch());
+    if (firstMessage.kind !== "result-batch") {
+      throw new Error("unexpected message");
+    }
+    const first = decoder.decodeView(firstMessage);
+    const firstColumn = first.column(0);
+    first.release();
+    decoder.resetQuerySchema();
+
+    const secondMessage = decodeQwpEgressMessage(scalarResultBatch());
+    if (secondMessage.kind !== "result-batch") {
+      throw new Error("unexpected message");
+    }
+    const second = decoder.decodeView(secondMessage);
+    expect(second).toBe(first);
+    expect(second.column(0)).toBe(firstColumn);
+    expect(second.column(0).getBoolean(0)).toBe(true);
+  });
+
   it("rejects a continuation batch before a schema-bearing batch", () => {
     const bytes = firstResultBatch();
     // RESULT_BATCH sequence is the byte immediately after kind + request ID.
@@ -330,6 +439,17 @@ describe("QWP result batch decoder", () => {
       values: new Array(100).fill(42),
     });
     expect(batch.get(99, 0)).toBe(42);
+  });
+
+  it("exposes a reusable view over a Zstd RESULT_BATCH", () => {
+    const message = decodeQwpEgressMessage(compressedIntResultBatch(7n));
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const batch = new QwpResultBatchDecoder().decodeView(message);
+    expect(batch.requestId).toBe(7n);
+    expect(batch.rowCount).toBe(100);
+    expect(batch.column(0).valuesBytes()).toHaveLength(400);
+    expect(batch.column(0).getInt(99)).toBe(42);
   });
 
   it("requires a bounded, single Zstd frame", () => {
@@ -538,6 +658,85 @@ describe("QwpEgressSession", () => {
     connection.receive(resultEnd(query.requestId));
     await expect(next).resolves.toEqual({ value: undefined, done: true });
     await query.completion;
+    await session.close();
+  });
+
+  it("bounds reusable views to an awaited callback and then replenishes credit", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+
+    let enterHandler!: () => void;
+    const handlerEntered = new Promise<void>((resolve) => {
+      enterHandler = resolve;
+    });
+    let releaseHandler!: () => void;
+    const handlerReleased = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    let delivered: QwpResultBatchView | undefined;
+    let retainedRows: readonly (readonly unknown[])[] = [];
+    const query = await session.queryViews(
+      "select * from x",
+      async (batch, control) => {
+        delivered = batch;
+        expect(control.requestId).toBe(batch.requestId);
+        expect(batch.valid).toBe(true);
+        expect(batch.column(0).getInt(2)).toBe(9);
+        retainedRows = [...batch.materialize().rows()];
+        enterHandler();
+        await handlerReleased;
+        expect(batch.valid).toBe(true);
+      },
+      { initialCredit: 64 },
+    );
+    const resultFrame = firstResultBatch(query.requestId);
+    connection.receive(resultFrame);
+
+    await handlerEntered;
+    expect(connection.sent).toHaveLength(1);
+    releaseHandler();
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    expect(delivered!.valid).toBe(false);
+    expect(() => delivered!.column(0)).toThrow(/no longer valid/i);
+    expect(retainedRows[2]).toEqual([9, "", "alpha", 300n]);
+
+    const credit = new QwpByteReader(connection.sent[1]);
+    expect(credit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+    expect(credit.readBigUint64()).toBe(query.requestId);
+    expect(readQwpVarint(credit)).toBe(BigInt(resultFrame.byteLength));
+    connection.receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({ totalRows: 3n });
+    await session.close();
+  });
+
+  it("cancels and drains when a result-view callback fails", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const handlerError = new Error("consumer failed");
+    let delivered: QwpResultBatchView | undefined;
+    const query = await session.queryViews("select * from x", (batch) => {
+      delivered = batch;
+      throw handlerError;
+    });
+
+    connection.receive(firstResultBatch(query.requestId));
+    await expect(query.completion).rejects.toBe(handlerError);
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    expect(delivered!.valid).toBe(false);
+    const cancel = new QwpByteReader(connection.sent[1]);
+    expect(cancel.readUint8()).toBe(QWP_EGRESS_MESSAGE.CANCEL);
+    expect(cancel.readBigUint64()).toBe(query.requestId);
+
+    connection.receive(
+      queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const next = await session.query("select 2");
+    connection.receive(resultEnd(next.requestId, 0n));
+    await next.completion;
     await session.close();
   });
 

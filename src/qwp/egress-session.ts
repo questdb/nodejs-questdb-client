@@ -13,6 +13,7 @@ import {
   QwpQueryRequest,
   QwpResultBatch,
   QwpResultBatchDecoder,
+  QwpResultBatchView,
   QwpResultEndMessage,
   QwpServerInfoMessage,
 } from "./core";
@@ -201,12 +202,30 @@ interface QwpEgressQueryControl {
     additionalBytes: number | bigint,
   ): Promise<void>;
   expire(requestId: bigint, timeoutMs: number): void;
+  rejectView(requestId: bigint, error: Error): Promise<void>;
 }
 
 interface QwpQueuedResultBatch {
   readonly batch: QwpResultBatch;
   readonly creditBytes: number;
 }
+
+/** Control handle returned by queryViews(). */
+export interface QwpEgressViewQuery {
+  readonly requestId: bigint;
+  readonly completion: Promise<QwpQueryCompletion>;
+  cancel(): Promise<void>;
+  grantCredit(additionalBytes: number | bigint): Promise<void>;
+}
+
+/**
+ * Runs while one reusable batch view is valid. Do not retain the batch,
+ * columns, or raw byte slices after the callback settles.
+ */
+export type QwpResultBatchViewHandler = (
+  batch: QwpResultBatchView,
+  query: QwpEgressViewQuery,
+) => void | Promise<void>;
 
 /** One QWP query/statement and its stream of materialized result batches. */
 export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
@@ -223,6 +242,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     private readonly control: QwpEgressQueryControl,
     private readonly creditEnabled: boolean,
     private readonly autoCredit: boolean,
+    private readonly viewHandler?: QwpResultBatchViewHandler,
   ) {
     let resolve!: (value: QwpQueryCompletion) => void;
     let reject!: (error: unknown) => void;
@@ -238,6 +258,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 
   [Symbol.asyncIterator](): AsyncIterator<QwpResultBatch> {
+    if (this.viewHandler) {
+      throw new Error(
+        "queryViews() delivers batches through its callback and is not async-iterable",
+      );
+    }
     const iterator = this.batches[Symbol.asyncIterator]();
     return {
       next: async () => {
@@ -276,6 +301,38 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   push(batch: QwpResultBatch, creditBytes: number): void {
     if (this.terminal) return;
     this.batches.push({ batch, creditBytes });
+  }
+
+  /** @internal */
+  async pushView(
+    batch: QwpResultBatchView,
+    creditBytes: number,
+  ): Promise<void> {
+    if (this.terminal) {
+      batch.release();
+      return;
+    }
+    let handlerError: Error | undefined;
+    try {
+      await this.viewHandler!(batch, this);
+    } catch (error) {
+      handlerError = error instanceof Error ? error : new Error(String(error));
+    } finally {
+      batch.release();
+    }
+    if (handlerError) {
+      await this.control
+        .rejectView(this.requestId, handlerError)
+        .catch(() => undefined);
+      return;
+    }
+    if (!this.autoCredit || this.terminal || creditBytes === 0) return;
+    await this.control.grantCredit(this.requestId, creditBytes);
+  }
+
+  /** @internal */
+  get usesViews(): boolean {
+    return this.viewHandler !== undefined;
   }
 
   /** @internal */
@@ -488,6 +545,30 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     sql: string,
     options: QwpEgressQueryOptions = {},
   ): Promise<QwpEgressQuery> {
+    return this.startQuery(sql, options);
+  }
+
+  /**
+   * Executes a query through a bounded, reusable, zero-copy batch callback.
+   * The callback is awaited before its batch is invalidated and flow-control
+   * credit is replenished.
+   */
+  async queryViews(
+    sql: string,
+    onBatch: QwpResultBatchViewHandler,
+    options: QwpEgressQueryOptions = {},
+  ): Promise<QwpEgressViewQuery> {
+    if (typeof onBatch !== "function") {
+      throw new TypeError("queryViews onBatch must be a function");
+    }
+    return this.startQuery(sql, options, onBatch);
+  }
+
+  private async startQuery(
+    sql: string,
+    options: QwpEgressQueryOptions,
+    viewHandler?: QwpResultBatchViewHandler,
+  ): Promise<QwpEgressQuery> {
     const timeoutMs = validateOptionalTimeout(
       options.timeoutMs ?? this.defaultQueryTimeoutMs,
       "timeoutMs",
@@ -524,6 +605,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       this,
       creditEnabled,
       creditEnabled && (options.autoCredit ?? true),
+      viewHandler,
     );
     this.decoder.resetQuerySchema();
     this.active = query;
@@ -585,6 +667,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     } catch (error) {
       this.fail(error);
     }
+  }
+
+  async rejectView(requestId: bigint, error: Error): Promise<void> {
+    const query = this.requireActive(requestId);
+    const discardedCredit = query.retire(error);
+    await this.cancelAndDrain(requestId, discardedCredit);
   }
 
   close(code = 1000, reason = ""): Promise<void> {
@@ -654,8 +742,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             break;
           case "result-batch": {
             const query = this.requireActive(message.requestId);
-            const batch = this.decoder.decode(message);
+            const batch = query.usesViews
+              ? this.decoder.decodeView(message)
+              : this.decoder.decode(message);
             if (query.retired) {
+              if (batch instanceof QwpResultBatchView) batch.release();
               const creditBytes = query.lateBatchCredit(payload.byteLength);
               if (creditBytes > 0) {
                 void this.sendWhileActive(
@@ -663,6 +754,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
                   encodeQwpCredit(message.requestId, creditBytes),
                 ).catch(() => undefined);
               }
+            } else if (batch instanceof QwpResultBatchView) {
+              await query.pushView(batch, payload.byteLength);
             } else {
               query.push(batch, payload.byteLength);
             }

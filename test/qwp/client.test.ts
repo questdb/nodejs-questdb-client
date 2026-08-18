@@ -45,6 +45,17 @@ function queryError(requestId: bigint): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array());
 }
 
+function resultEnd(requestId: bigint): Uint8Array {
+  return encodeQwpFrame(
+    new QwpByteWriter()
+      .writeUint8(QWP_EGRESS_MESSAGE.RESULT_END)
+      .writeBigUint64(requestId)
+      .writeUint8(0)
+      .writeUint8(0)
+      .toUint8Array(),
+  );
+}
+
 class FakeConnection implements QwpBinaryConnection {
   readonly handshake: QwpHandshakeMetadata = { qwpVersion: 1 };
   readonly messages: AsyncIterable<Uint8Array>;
@@ -249,6 +260,34 @@ describe("QWP pooled client", () => {
     await Promise.all([second.close(), third.close()]);
     await client.close();
     expect(connections).toHaveLength(2);
+  });
+
+  it("runs reusable view queries through a pooled query lease", async () => {
+    const connections: FakeConnection[] = [];
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: (slot) => createQuerySession(slot, connections),
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    );
+
+    const lease = await client.borrowQuery();
+    const query = await lease.queryViews("select 1", () => {
+      throw new Error("a RESULT_BATCH was not expected");
+    });
+    connections[0].receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({ totalRows: 0n });
+    await lease.close();
+    expect(client.metrics.queries).toMatchObject({ available: 1, leased: 0 });
+    await client.close();
   });
 
   it("times out when every query connection is leased", async () => {
