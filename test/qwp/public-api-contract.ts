@@ -34,6 +34,7 @@ import type {
 import type {
   QwpBinaryConnection,
   QwpClient,
+  QwpClientPoolOptions,
   QwpEgressQueryOptions,
   QwpEgressSession,
   QwpEgressSessionOptions,
@@ -100,6 +101,17 @@ const nodeWebSocketSignature: (
 const nodeClientSignature: (
   options: QwpNodeClientOptions,
 ) => Promise<QwpClient> = connectQwpNodeClient;
+
+const poolOptionsContract: QwpClientPoolOptions = {
+  senderPoolMin: 1,
+  senderPoolMax: 2,
+  queryPoolMin: 1,
+  queryPoolMax: 8,
+  acquireTimeoutMs: 5_000,
+  idleTimeoutMs: 60_000,
+  maxLifetimeMs: 30 * 60_000,
+  housekeepingIntervalMs: 5_000,
+};
 
 const nodeOrphanScanSignature: (
   rootDirectory: string,
@@ -249,6 +261,7 @@ void nodeIngressSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
 void nodeClientSignature;
+void poolOptionsContract;
 void nodeOrphanScanSignature;
 void nodeOrphanRetrySignature;
 void nodeStoreAndForwardContract;

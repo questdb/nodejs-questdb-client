@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   encodeQwpFrame,
   QWP_EGRESS_MESSAGE,
@@ -132,6 +132,26 @@ async function createQuerySession(
 }
 
 describe("QWP pooled client", () => {
+  it("validates idle, lifetime, and housekeeping options", () => {
+    const factories = {
+      createSender: async () => {
+        throw new Error("sender factory should not run");
+      },
+      createQuerySession: async () => {
+        throw new Error("query factory should not run");
+      },
+    };
+    expect(() => new QwpClient(factories, { idleTimeoutMs: -1 })).toThrow(
+      "idleTimeoutMs must be a non-negative number",
+    );
+    expect(
+      () => new QwpClient(factories, { maxLifetimeMs: Number.NaN }),
+    ).toThrow("maxLifetimeMs must be a non-negative number");
+    expect(
+      () => new QwpClient(factories, { housekeepingIntervalMs: 99 }),
+    ).toThrow("housekeepingIntervalMs must be at least 100");
+  });
+
   it("starts and stops runtime background services exactly once", async () => {
     let starts = 0;
     let closes = 0;
@@ -303,6 +323,184 @@ describe("QWP pooled client", () => {
     await Promise.all([second.close(), third.close()]);
     await client.close();
     expect(connections).toHaveLength(2);
+  });
+
+  it("reaps idle excess connections without shrinking below pool minimums", async () => {
+    vi.useFakeTimers();
+    try {
+      const senderSessions: FakeSenderSession[] = [];
+      const connections: FakeConnection[] = [];
+      let queryCreations = 0;
+      const client = new QwpClient(
+        {
+          createSender: async () => {
+            const session = new FakeSenderSession();
+            senderSessions.push(session);
+            const sender = new QwpSender(async () => session, {
+              autoFlush: false,
+            });
+            await sender.connect();
+            return sender;
+          },
+          createQuerySession: async (slot) => {
+            queryCreations++;
+            return createQuerySession(slot, connections);
+          },
+        },
+        {
+          senderPoolMin: 0,
+          senderPoolMax: 1,
+          queryPoolMin: 1,
+          queryPoolMax: 2,
+          idleTimeoutMs: 200,
+          maxLifetimeMs: 0,
+          housekeepingIntervalMs: 100,
+        },
+      );
+      await client.connect();
+
+      const sender = await client.borrowSender();
+      const [first, second] = await Promise.all([
+        client.borrowQuery(),
+        client.borrowQuery(),
+      ]);
+      await Promise.all([sender.close(), first.close(), second.close()]);
+      expect(client.metrics).toMatchObject({
+        senders: { total: 1, available: 1 },
+        queries: { total: 2, available: 2 },
+      });
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(client.metrics).toMatchObject({
+        senders: { total: 0, available: 0 },
+        queries: { total: 1, available: 1 },
+      });
+      expect(senderSessions[0].closes).toBe(1);
+      expect(connections.reduce((sum, item) => sum + item.closeCount, 0)).toBe(
+        1,
+      );
+
+      const retained = await client.borrowQuery();
+      expect(queryCreations).toBe(2);
+      await retained.close();
+      await client.close();
+      expect(connections.reduce((sum, item) => sum + item.closeCount, 0)).toBe(
+        2,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recycles over-age connections after their active lease returns", async () => {
+    vi.useFakeTimers();
+    try {
+      const connections: FakeConnection[] = [];
+      let queryCreations = 0;
+      const client = new QwpClient(
+        {
+          createSender: async () => {
+            throw new Error("sender factory should not run");
+          },
+          createQuerySession: async (slot) => {
+            queryCreations++;
+            return createQuerySession(slot, connections);
+          },
+        },
+        {
+          senderPoolMin: 0,
+          senderPoolMax: 1,
+          queryPoolMin: 0,
+          queryPoolMax: 1,
+          idleTimeoutMs: 0,
+          maxLifetimeMs: 250,
+          housekeepingIntervalMs: 100,
+        },
+      );
+
+      const first = await client.borrowQuery();
+      await first.close();
+      await vi.advanceTimersByTimeAsync(200);
+      const active = await client.borrowQuery();
+      expect(queryCreations).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(connections[0].closeCount).toBe(0);
+      await active.close();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(connections[0].closeCount).toBe(1);
+      expect(client.metrics.queries.total).toBe(0);
+
+      const replacement = await client.borrowQuery();
+      expect(queryCreations).toBe(2);
+      await replacement.close();
+      await client.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reuse a reaped slot until its teardown completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const connections: FakeConnection[] = [];
+      let queryCreations = 0;
+      let releaseClose!: () => void;
+      const closeReleased = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const client = new QwpClient(
+        {
+          createSender: async () => {
+            throw new Error("sender factory should not run");
+          },
+          createQuerySession: async (slot) => {
+            queryCreations++;
+            const session = await createQuerySession(slot, connections);
+            if (queryCreations === 1) {
+              const close = session.close.bind(session);
+              vi.spyOn(session, "close").mockImplementation(async () => {
+                await closeReleased;
+                await close();
+              });
+            }
+            return session;
+          },
+        },
+        {
+          senderPoolMin: 0,
+          senderPoolMax: 1,
+          queryPoolMin: 0,
+          queryPoolMax: 1,
+          acquireTimeoutMs: 1_000,
+          idleTimeoutMs: 100,
+          maxLifetimeMs: 0,
+          housekeepingIntervalMs: 100,
+        },
+      );
+
+      const first = await client.borrowQuery();
+      await first.close();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(client.metrics.queries.total).toBe(0);
+
+      let replacementResolved = false;
+      const borrowing = client.borrowQuery().then((lease) => {
+        replacementResolved = true;
+        return lease;
+      });
+      await Promise.resolve();
+      expect(replacementResolved).toBe(false);
+      expect(queryCreations).toBe(1);
+
+      releaseClose();
+      const replacement = await borrowing;
+      expect(queryCreations).toBe(2);
+      await replacement.close();
+      await client.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("leaves a timed-out query lease alive and closes it on late return", async () => {

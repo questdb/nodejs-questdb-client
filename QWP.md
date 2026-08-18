@@ -684,6 +684,9 @@ const db = await connectQwpNodeClient({
     queryPoolMin: 1,
     queryPoolMax: 8,
     acquireTimeoutMs: 5_000,
+    idleTimeoutMs: 60_000,
+    maxLifetimeMs: 30 * 60_000,
+    housekeepingIntervalMs: 5_000,
   },
 });
 
@@ -726,6 +729,10 @@ exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active
 query sends `CANCEL` and waits for the session's bounded cancellation drain; a
 connection that cannot drain is closed instead of being handed to another borrower.
+The shared housekeeper closes excess connections after `idleTimeoutMs` and recycles
+connections older than `maxLifetimeMs` once they are idle, while always retaining
+each configured pool minimum. Set either timeout to zero to disable that policy;
+`housekeepingIntervalMs` controls how quickly an expired idle connection is noticed.
 Prefer returning application-owned leases before calling `QwpClient.close()`.
 If shutdown races a borrower, it rejects queued borrowers, closes idle connections,
 and waits up to `acquireTimeoutMs` (capped at five seconds) for active leases to

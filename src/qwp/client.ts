@@ -15,6 +15,10 @@ import type {
 const DEFAULT_POOL_MIN = 1;
 const DEFAULT_POOL_MAX = 4;
 const DEFAULT_ACQUIRE_TIMEOUT_MS = 5_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_LIFETIME_MS = 30 * 60_000;
+const DEFAULT_HOUSEKEEPING_INTERVAL_MS = 5_000;
+const MIN_HOUSEKEEPING_INTERVAL_MS = 100;
 const MAX_CLOSE_CREATION_WAIT_MS = 5_000;
 const MAX_CLOSE_LEASE_WAIT_MS = 5_000;
 
@@ -27,6 +31,12 @@ export interface QwpClientPoolOptions {
   queryPoolMin?: number;
   /** Maximum concurrently borrowed query connections. Defaults to 4. */
   queryPoolMax?: number;
+  /** Idle time before an excess pooled connection is closed. Defaults to 60s; zero disables. */
+  idleTimeoutMs?: number;
+  /** Maximum pooled connection age before recycling it while idle. Defaults to 30m; zero disables. */
+  maxLifetimeMs?: number;
+  /** Idle/lifetime sweep interval. Defaults to 5s and must be at least 100ms. */
+  housekeepingIntervalMs?: number;
   /**
    * Maximum wait for a returned pool slot and for leases during shutdown.
    * The shutdown wait is capped at 5 seconds. Defaults to 5 seconds.
@@ -105,11 +115,16 @@ interface ValidatedPoolOptions {
   readonly queryPoolMin: number;
   readonly queryPoolMax: number;
   readonly acquireTimeoutMs: number;
+  readonly idleTimeoutMs: number;
+  readonly maxLifetimeMs: number;
+  readonly housekeepingIntervalMs: number;
 }
 
 interface PoolEntry<T> {
   readonly slot: number;
   readonly value: T;
+  readonly createdAtMs: number;
+  idleSinceMs: number;
   leased: boolean;
   destroyPromise?: Promise<void>;
 }
@@ -129,6 +144,7 @@ class QwpResourcePool<T> {
   private readonly all = new Map<number, PoolEntry<T>>();
   private readonly available: PoolEntry<T>[] = [];
   private readonly creatingSlots = new Set<number>();
+  private readonly destroyingSlots = new Set<number>();
   private readonly creationOperations = new Set<Promise<void>>();
   private readonly waiters = new Set<PoolWaiter>();
   private readonly closeWaiters = new Set<PoolCloseWaiter>();
@@ -141,6 +157,8 @@ class QwpResourcePool<T> {
     private readonly minimum: number,
     private readonly maximum: number,
     private readonly acquireTimeoutMs: number,
+    private readonly idleTimeoutMs: number,
+    private readonly maxLifetimeMs: number,
     private readonly createResource: (slot: number) => Promise<T>,
     private readonly destroyResource: (resource: T) => Promise<void>,
   ) {}
@@ -208,7 +226,7 @@ class QwpResourcePool<T> {
       if (this.all.get(entry.slot) === entry) this.all.delete(entry.slot);
       this.pendingLeaseTeardowns++;
       try {
-        await this.destroy(entry);
+        await this.destroyRetired(entry);
       } finally {
         this.pendingLeaseTeardowns--;
         this.wakeWaiters();
@@ -216,6 +234,7 @@ class QwpResourcePool<T> {
       }
       return;
     }
+    entry.idleSinceMs = Date.now();
     this.available.push(entry);
     this.wakeWaiters();
     this.wakeCloseWaiters();
@@ -224,6 +243,30 @@ class QwpResourcePool<T> {
   close(): Promise<void> {
     if (!this.closePromise) this.closePromise = this.closeNow();
     return this.closePromise;
+  }
+
+  async reapIdle(nowMs = Date.now()): Promise<void> {
+    if (this.closed || this.all.size <= this.minimum) return;
+    const reaped: PoolEntry<T>[] = [];
+    let index = 0;
+    while (index < this.available.length && this.all.size > this.minimum) {
+      const entry = this.available[index];
+      const idleExpired =
+        this.idleTimeoutMs > 0 &&
+        nowMs - entry.idleSinceMs >= this.idleTimeoutMs;
+      const lifetimeExpired =
+        this.maxLifetimeMs > 0 &&
+        nowMs - entry.createdAtMs >= this.maxLifetimeMs;
+      if (!idleExpired && !lifetimeExpired) {
+        index++;
+        continue;
+      }
+      this.available.splice(index, 1);
+      this.all.delete(entry.slot);
+      reaped.push(entry);
+    }
+    if (reaped.length === 0) return;
+    await Promise.all(reaped.map((entry) => this.destroyRetired(entry)));
   }
 
   private async closeNow(): Promise<void> {
@@ -264,11 +307,18 @@ class QwpResourcePool<T> {
   }
 
   private reserveSlot(): number | undefined {
-    if (this.all.size + this.creatingSlots.size >= this.maximum) {
+    if (
+      this.all.size + this.creatingSlots.size + this.destroyingSlots.size >=
+      this.maximum
+    ) {
       return undefined;
     }
     for (let slot = 0; slot < this.maximum; slot++) {
-      if (!this.all.has(slot) && !this.creatingSlots.has(slot)) {
+      if (
+        !this.all.has(slot) &&
+        !this.creatingSlots.has(slot) &&
+        !this.destroyingSlots.has(slot)
+      ) {
         this.creatingSlots.add(slot);
         return slot;
       }
@@ -293,7 +343,14 @@ class QwpResourcePool<T> {
         await this.destroyResource(value).catch(() => undefined);
         throw new QwpClientClosedError();
       }
-      const entry: PoolEntry<T> = { slot, value, leased: true };
+      const nowMs = Date.now();
+      const entry: PoolEntry<T> = {
+        slot,
+        value,
+        createdAtMs: nowMs,
+        idleSinceMs: nowMs,
+        leased: true,
+      };
       this.all.set(slot, entry);
       return entry;
     } finally {
@@ -366,6 +423,17 @@ class QwpResourcePool<T> {
       );
     }
     return entry.destroyPromise;
+  }
+
+  private async destroyRetired(entry: PoolEntry<T>): Promise<void> {
+    this.destroyingSlots.add(entry.slot);
+    try {
+      await this.destroy(entry);
+    } finally {
+      this.destroyingSlots.delete(entry.slot);
+      this.wakeWaiters();
+      this.wakeCloseWaiters();
+    }
   }
 
   private throwIfClosed(): void {
@@ -456,6 +524,9 @@ export class QwpClient {
   private closePromise?: Promise<void>;
   private readonly startFactories?: () => void | Promise<void>;
   private readonly closeFactories?: () => void | Promise<void>;
+  private readonly housekeepingIntervalMs: number;
+  private housekeepingTask: Promise<void> = Promise.resolve();
+  private housekeeperTimer?: ReturnType<typeof setInterval>;
   private closing = false;
   private closed = false;
 
@@ -469,6 +540,8 @@ export class QwpClient {
       validated.senderPoolMin,
       validated.senderPoolMax,
       validated.acquireTimeoutMs,
+      validated.idleTimeoutMs,
+      validated.maxLifetimeMs,
       factories.createSender,
       (sender) => sender.close(),
     );
@@ -477,11 +550,14 @@ export class QwpClient {
       validated.queryPoolMin,
       validated.queryPoolMax,
       validated.acquireTimeoutMs,
+      validated.idleTimeoutMs,
+      validated.maxLifetimeMs,
       factories.createQuerySession,
       (session) => session.close(),
     );
     this.startFactories = factories.start;
     this.closeFactories = factories.close;
+    this.housekeepingIntervalMs = validated.housekeepingIntervalMs;
   }
 
   /** Pre-connects the configured minimum sender and query pool sizes. */
@@ -546,7 +622,9 @@ export class QwpClient {
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
+    this.stopHousekeeper();
     await this.startPromise?.catch(() => undefined);
+    await this.housekeepingTask;
     try {
       await Promise.resolve()
         .then(() => this.closeFactories?.())
@@ -559,9 +637,37 @@ export class QwpClient {
 
   private ensureStarted(): Promise<void> {
     if (!this.startPromise) {
-      this.startPromise = Promise.resolve().then(() => this.startFactories?.());
+      this.startPromise = Promise.resolve()
+        .then(() => this.startFactories?.())
+        .then(() => {
+          if (!this.closing && !this.closed) this.startHousekeeper();
+        });
     }
     return this.startPromise;
+  }
+
+  private startHousekeeper(): void {
+    if (this.housekeeperTimer) return;
+    this.housekeeperTimer = setInterval(() => {
+      this.housekeepingTask = this.housekeepingTask
+        .then(async () => {
+          if (this.closing || this.closed) return;
+          const nowMs = Date.now();
+          await Promise.all([
+            this.senderPool.reapIdle(nowMs),
+            this.queryPool.reapIdle(nowMs),
+          ]);
+        })
+        .catch(() => undefined);
+    }, this.housekeepingIntervalMs);
+    const timer = this.housekeeperTimer as unknown as { unref?: () => void };
+    timer.unref?.();
+  }
+
+  private stopHousekeeper(): void {
+    if (!this.housekeeperTimer) return;
+    clearInterval(this.housekeeperTimer);
+    this.housekeeperTimer = undefined;
   }
 
   private throwIfUnavailable(): void {
@@ -630,6 +736,10 @@ function validatePoolOptions(
     queryPoolMin: options.queryPoolMin ?? DEFAULT_POOL_MIN,
     queryPoolMax: options.queryPoolMax ?? DEFAULT_POOL_MAX,
     acquireTimeoutMs: options.acquireTimeoutMs ?? DEFAULT_ACQUIRE_TIMEOUT_MS,
+    idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+    maxLifetimeMs: options.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS,
+    housekeepingIntervalMs:
+      options.housekeepingIntervalMs ?? DEFAULT_HOUSEKEEPING_INTERVAL_MS,
   };
   validatePoolBounds(
     validated.senderPoolMin,
@@ -643,7 +753,23 @@ function validatePoolOptions(
   ) {
     throw new RangeError("acquireTimeoutMs must be a non-negative number");
   }
+  validateOptionalPoolTimeout(validated.idleTimeoutMs, "idleTimeoutMs");
+  validateOptionalPoolTimeout(validated.maxLifetimeMs, "maxLifetimeMs");
+  if (
+    !Number.isFinite(validated.housekeepingIntervalMs) ||
+    validated.housekeepingIntervalMs < MIN_HOUSEKEEPING_INTERVAL_MS
+  ) {
+    throw new RangeError(
+      `housekeepingIntervalMs must be at least ${MIN_HOUSEKEEPING_INTERVAL_MS}`,
+    );
+  }
   return validated;
+}
+
+function validateOptionalPoolTimeout(value: number, name: string): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative number`);
+  }
 }
 
 function validatePoolBounds(
