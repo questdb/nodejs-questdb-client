@@ -47,10 +47,19 @@ export interface QwpClientPoolOptions {
 export interface QwpClientFactories {
   createSender(slot: number): Promise<QwpSender>;
   createQuerySession(slot: number): Promise<QwpEgressSession>;
+  /** @internal Coordinates stable persistent sender slots with recovery. */
+  senderSlotReservation?: QwpPoolSlotReservation;
   /** @internal Starts runtime-specific background services on first use. */
   start?(): void | Promise<void>;
   /** @internal Stops runtime-specific background services during close. */
   close?(): void | Promise<void>;
+}
+
+/** @internal Cross-owner reservation for stable pooled sender slot indexes. */
+export interface QwpPoolSlotReservation {
+  tryReserve(slot: number): boolean;
+  release(slot: number): void;
+  onAvailable(listener: () => void): () => void;
 }
 
 export interface QwpResourcePoolMetrics {
@@ -148,6 +157,8 @@ class QwpResourcePool<T> {
   private readonly creationOperations = new Set<Promise<void>>();
   private readonly waiters = new Set<PoolWaiter>();
   private readonly closeWaiters = new Set<PoolCloseWaiter>();
+  private readonly reservedSlots = new Set<number>();
+  private readonly unsubscribeSlotAvailability?: () => void;
   private closePromise?: Promise<void>;
   private pendingLeaseTeardowns = 0;
   private closed = false;
@@ -162,7 +173,12 @@ class QwpResourcePool<T> {
     private readonly createResource: (slot: number) => Promise<T>,
     private readonly destroyResource: (resource: T) => Promise<void>,
     private readonly closeLeasedOnShutdown = false,
-  ) {}
+    private readonly slotReservation?: QwpPoolSlotReservation,
+  ) {
+    this.unsubscribeSlotAvailability = slotReservation?.onAvailable(() =>
+      this.wakeWaiters(),
+    );
+  }
 
   get metrics(): QwpResourcePoolMetrics {
     return Object.freeze({
@@ -273,6 +289,7 @@ class QwpResourcePool<T> {
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.unsubscribeSlotAvailability?.();
     for (const waiter of this.waiters) {
       if (waiter.timer) clearTimeout(waiter.timer);
       waiter.reject(new QwpClientClosedError());
@@ -338,6 +355,10 @@ class QwpResourcePool<T> {
         !this.creatingSlots.has(slot) &&
         !this.destroyingSlots.has(slot)
       ) {
+        if (this.slotReservation && !this.slotReservation.tryReserve(slot)) {
+          continue;
+        }
+        if (this.slotReservation) this.reservedSlots.add(slot);
         this.creatingSlots.add(slot);
         return slot;
       }
@@ -351,6 +372,7 @@ class QwpResourcePool<T> {
       finishCreation = resolve;
     });
     this.creationOperations.add(operation);
+    let retained = false;
     try {
       let value: T;
       try {
@@ -371,9 +393,11 @@ class QwpResourcePool<T> {
         leased: true,
       };
       this.all.set(slot, entry);
+      retained = true;
       return entry;
     } finally {
       this.creatingSlots.delete(slot);
+      if (!retained) this.releaseSlotReservation(slot);
       finishCreation();
       this.creationOperations.delete(operation);
       this.wakeWaiters();
@@ -437,11 +461,16 @@ class QwpResourcePool<T> {
 
   private destroy(entry: PoolEntry<T>): Promise<void> {
     if (!entry.destroyPromise) {
-      entry.destroyPromise = this.destroyResource(entry.value).catch(
-        () => undefined,
-      );
+      entry.destroyPromise = this.destroyResource(entry.value)
+        .catch(() => undefined)
+        .finally(() => this.releaseSlotReservation(entry.slot));
     }
     return entry.destroyPromise;
+  }
+
+  private releaseSlotReservation(slot: number): void {
+    if (!this.reservedSlots.delete(slot)) return;
+    this.slotReservation?.release(slot);
   }
 
   private async destroyRetired(entry: PoolEntry<T>): Promise<void> {
@@ -572,6 +601,8 @@ export class QwpClient {
       validated.maxLifetimeMs,
       factories.createSender,
       (sender) => sender.close(),
+      false,
+      factories.senderSlotReservation,
     );
     this.queryPool = new QwpResourcePool(
       "query",
@@ -656,10 +687,22 @@ export class QwpClient {
     await this.startPromise?.catch(() => undefined);
     await this.housekeepingTask;
     try {
-      await Promise.resolve()
-        .then(() => this.closeFactories?.())
-        .catch(() => undefined);
-      await Promise.all([this.queryPool.close(), this.senderPool.close()]);
+      let runtimeClose: Promise<void>;
+      try {
+        runtimeClose = Promise.resolve(this.closeFactories?.()).catch(
+          () => undefined,
+        );
+      } catch {
+        runtimeClose = Promise.resolve();
+      }
+      // Stop runtime scanners and reject pool waiters in the same phase. This
+      // prevents a recovery-slot release during shutdown from waking an older
+      // borrow into a newly created foreground connection.
+      await Promise.all([
+        runtimeClose,
+        this.queryPool.close(),
+        this.senderPool.close(),
+      ]);
     } finally {
       this.closed = true;
     }

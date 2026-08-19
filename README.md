@@ -125,9 +125,10 @@ dictionary formats. The active segment and a preallocated temporary hot spare ke
 open handles.
 Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
 the Node client scans and drains slots left by failed producer processes with bounded
-concurrency. Pooled QWP clients recover out-of-range `sender-N` slots automatically,
-including leftovers after `senderPoolMax` is reduced. Terminally bad slots are marked
-`.failed` for inspection and can be re-enabled with
+concurrency. Pooled QWP clients recover idle in-range and out-of-range `sender-N`
+slots automatically without raising `senderPoolMin`, including leftovers after
+`senderPoolMax` is reduced. Terminally bad slots are marked `.failed` for inspection
+and can be re-enabled with
 `retryQwpNodeOrphanSlot()`. This persistent mode is Node-only; browser senders
 use the in-memory replay boundary.
 

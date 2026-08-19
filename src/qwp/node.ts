@@ -42,7 +42,11 @@ import {
   type QwpSenderError,
 } from "./sender-error";
 import { QwpSender, QwpSenderOptions } from "./sender";
-import { QwpClient, QwpClientPoolOptions } from "./client";
+import {
+  QwpClient,
+  QwpClientPoolOptions,
+  type QwpPoolSlotReservation,
+} from "./client";
 import {
   quarantineQwpNodeReplayStore,
   QwpNodeFileReplayStore,
@@ -252,12 +256,15 @@ export interface QwpNodeStoreAndForwardOptions
   /**
    * Adopts sibling replay slots left by terminated producers. Standalone
    * senders default this to false; pooled clients always recover their own
-   * out-of-range `sender-N` slots after a pool-size reduction.
+   * idle in-range and out-of-range `sender-N` slots.
    */
   drainOrphans?: boolean;
   /** Maximum sibling slots drained concurrently. Defaults to 4. */
   maxBackgroundDrainers?: number;
-  /** Rescan cadence; zero scans only at startup. Defaults to 30 seconds. */
+  /**
+   * Periodic rescan cadence; zero disables the timer. Pooled ownership
+   * changes can still trigger a scan. Defaults to 30 seconds.
+   */
   orphanScanIntervalMs?: number;
   /**
    * Receives isolated scanner, drainer, durable-ACK capability-gap, and
@@ -792,7 +799,9 @@ export function createQwpNodeClient(
     optionsOrConfiguration,
     extraOptions,
   );
-  const orphanDrainer = createPooledOrphanDrainer(options);
+  const slotCoordinator = createPooledSlotCoordinator(options);
+  const orphanDrainer = createPooledOrphanDrainer(options, slotCoordinator);
+  let unsubscribeRecoveryScan: (() => void) | undefined;
   return new QwpClient(
     {
       createSender: async (slot) => {
@@ -812,10 +821,22 @@ export function createQwpNodeClient(
       },
       createQuerySession: () =>
         connectQwpNodeEgress(options.egress, options.egressSession),
-      start: () => orphanDrainer?.start(),
-      close: () => orphanDrainer?.close(),
+      senderSlotReservation: slotCoordinator,
+      start: () => {
+        if (orphanDrainer && slotCoordinator) {
+          unsubscribeRecoveryScan = slotCoordinator.onAvailable(() =>
+            orphanDrainer.scanNow(),
+          );
+        }
+        orphanDrainer?.start();
+      },
+      close: async () => {
+        unsubscribeRecoveryScan?.();
+        unsubscribeRecoveryScan = undefined;
+        await orphanDrainer?.close();
+      },
     },
-    pooledNodeClientOptions(options),
+    options.pool,
   );
 }
 
@@ -902,18 +923,6 @@ function normalizeQwpNodeClientOptions(
   };
 }
 
-function pooledNodeClientOptions(
-  options: QwpNodeClientOptions,
-): QwpClientPoolOptions | undefined {
-  if (!options.ingress.storeAndForward) return options.pool;
-  const senderPoolMax = options.pool?.senderPoolMax ?? 4;
-  return {
-    ...options.pool,
-    senderPoolMin: senderPoolMax,
-    senderPoolMax,
-  };
-}
-
 function pooledNodeIngressOptions(
   options: QwpNodeIngressOptions,
   slot: number,
@@ -955,6 +964,7 @@ function createStandaloneOrphanDrainer(
 
 function createPooledOrphanDrainer(
   options: QwpNodeClientOptions,
+  slotCoordinator?: QwpPooledSfaSlotCoordinator,
 ): QwpNodeOrphanDrainer | undefined {
   const storeAndForward = options.ingress.storeAndForward;
   if (!storeAndForward) return undefined;
@@ -970,15 +980,17 @@ function createPooledOrphanDrainer(
     rootDirectory,
     (slotName) => {
       const managedIndex = parseCanonicalSenderSlot(slotName, senderId);
-      if (managedIndex !== undefined && managedIndex < managedSlotCount) {
-        return true;
+      if (managedIndex !== undefined) {
+        return (
+          managedIndex < managedSlotCount &&
+          slotCoordinator?.isForegroundReserved(managedIndex) === true
+        );
       }
-      // Same-base slots outside the new pool range are always recovered. A
-      // caller must opt in before unrelated sibling names are adopted.
-      return (
-        managedIndex === undefined && storeAndForward.drainOrphans !== true
-      );
+      // Same-base slots in and outside the current pool range are always
+      // recovered. A caller must opt in before unrelated siblings are adopted.
+      return storeAndForward.drainOrphans !== true;
     },
+    slotCoordinator,
   );
 }
 
@@ -987,11 +999,18 @@ function createNodeOrphanDrainer(
   sessionOptions: QwpIngressSessionOptions,
   rootDirectory: string,
   excludeSlot: (slotName: string) => boolean,
+  slotCoordinator?: QwpPooledSfaSlotCoordinator,
 ): QwpNodeOrphanDrainer {
   const storeAndForward = options.storeAndForward!;
   return new QwpNodeOrphanDrainer({
     rootDirectory,
     excludeSlot,
+    tryReserveSlot: slotCoordinator
+      ? (directory) => slotCoordinator.tryReserveRecovery(directory)
+      : undefined,
+    releaseSlot: slotCoordinator
+      ? (directory) => slotCoordinator.releaseRecovery(directory)
+      : undefined,
     maxConcurrent: storeAndForward.maxBackgroundDrainers,
     scanIntervalMs: storeAndForward.orphanScanIntervalMs,
     durableAckPollIntervalMs: options.requestDurableAck
@@ -1019,6 +1038,72 @@ function createNodeOrphanDrainer(
         false,
       ),
   });
+}
+
+function createPooledSlotCoordinator(
+  options: QwpNodeClientOptions,
+): QwpPooledSfaSlotCoordinator | undefined {
+  if (!options.ingress.storeAndForward) return undefined;
+  return new QwpPooledSfaSlotCoordinator(
+    validateQwpSenderId(options.ingress.senderId ?? "sender"),
+    options.pool?.senderPoolMax ?? 4,
+  );
+}
+
+/** Serializes foreground pool creation with recovery of its stable SFA slots. */
+class QwpPooledSfaSlotCoordinator implements QwpPoolSlotReservation {
+  private readonly foreground = new Set<number>();
+  private readonly recovering = new Set<number>();
+  private readonly listeners = new Set<() => void>();
+
+  constructor(
+    private readonly senderId: string,
+    private readonly managedSlotCount: number,
+  ) {}
+
+  tryReserve(slot: number): boolean {
+    if (this.foreground.has(slot) || this.recovering.has(slot)) return false;
+    this.foreground.add(slot);
+    return true;
+  }
+
+  release(slot: number): void {
+    if (!this.foreground.delete(slot)) return;
+    this.notifyAvailable();
+  }
+
+  onAvailable(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  isForegroundReserved(slot: number): boolean {
+    return this.foreground.has(slot);
+  }
+
+  tryReserveRecovery(directory: string): boolean {
+    const slot = parseCanonicalSenderSlot(basename(directory), this.senderId);
+    if (slot === undefined || slot >= this.managedSlotCount) return true;
+    if (this.foreground.has(slot) || this.recovering.has(slot)) return false;
+    this.recovering.add(slot);
+    return true;
+  }
+
+  releaseRecovery(directory: string): void {
+    const slot = parseCanonicalSenderSlot(basename(directory), this.senderId);
+    if (
+      slot === undefined ||
+      slot >= this.managedSlotCount ||
+      !this.recovering.delete(slot)
+    ) {
+      return;
+    }
+    this.notifyAvailable();
+  }
+
+  private notifyAvailable(): void {
+    for (const listener of this.listeners) listener();
+  }
 }
 
 function orphanIngressSessionOptions(

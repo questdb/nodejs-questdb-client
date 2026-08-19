@@ -101,9 +101,16 @@ export interface QwpNodeOrphanDrainerOptions {
     directory: string,
     onReconnectEvent?: (event: QwpReconnectEvent) => void,
   ): Promise<QwpNodeOrphanDrainSession>;
+  /** Atomically reserves a candidate against a foreground pool owner. */
+  tryReserveSlot?: (directory: string) => boolean;
+  /** Releases a reservation previously granted by tryReserveSlot. */
+  releaseSlot?: (directory: string) => void;
   /** Maximum slots drained concurrently. Defaults to 4. */
   maxConcurrent?: number;
-  /** Rescan cadence; zero performs only the startup scan. Defaults to 30s. */
+  /**
+   * Periodic rescan cadence; zero disables the timer. Explicit scanNow()
+   * requests remain available. Defaults to 30s.
+   */
   scanIntervalMs?: number;
   /** Durable-ACK prompt cadence for adopted sessions. Zero disables it. */
   durableAckPollIntervalMs?: number;
@@ -215,6 +222,8 @@ export class QwpNodeOrphanDrainer {
     directory: string,
     onReconnectEvent?: (event: QwpReconnectEvent) => void,
   ) => Promise<QwpNodeOrphanDrainSession>;
+  private readonly tryReserveSlot?: (directory: string) => boolean;
+  private readonly releaseSlot?: (directory: string) => void;
   private readonly maxConcurrent: number;
   private readonly scanIntervalMs: number;
   private readonly durableAckPollIntervalMs: number;
@@ -226,6 +235,7 @@ export class QwpNodeOrphanDrainer {
   private readonly workers = new Set<Promise<void>>();
   private scanTimer?: ReturnType<typeof setTimeout>;
   private scanPromise?: Promise<void>;
+  private scanRequested = false;
   private closePromise?: Promise<void>;
   private started = false;
   private closing = false;
@@ -275,6 +285,16 @@ export class QwpNodeOrphanDrainer {
     this.rootDirectory = rootDirectory;
     this.excludeSlot = options.excludeSlot;
     this.createSession = options.createSession;
+    if (
+      (options.tryReserveSlot === undefined) !==
+      (options.releaseSlot === undefined)
+    ) {
+      throw new RangeError(
+        "QWP orphan-drain slot reservation requires both tryReserveSlot and releaseSlot",
+      );
+    }
+    this.tryReserveSlot = options.tryReserveSlot;
+    this.releaseSlot = options.releaseSlot;
     this.maxConcurrent = maxConcurrent;
     this.scanIntervalMs = scanIntervalMs;
     this.durableAckPollIntervalMs = durableAckPollIntervalMs;
@@ -314,7 +334,13 @@ export class QwpNodeOrphanDrainer {
   start(): void {
     if (this.started || this.closing || this.closed) return;
     this.started = true;
-    this.scanPromise = this.scanOnce();
+    this.requestScan();
+  }
+
+  /** Requests an immediate scan, coalescing with one already in progress. */
+  scanNow(): void {
+    if (!this.started || this.closing || this.closed) return;
+    this.requestScan();
   }
 
   close(): Promise<void> {
@@ -345,14 +371,40 @@ export class QwpNodeOrphanDrainer {
         undefined,
         toError(error, "QWP orphan-slot scan failed"),
       );
-    } finally {
-      if (!this.closing && this.scanIntervalMs > 0) {
-        this.scanTimer = setTimeout(() => {
-          this.scanTimer = undefined;
-          this.scanPromise = this.scanOnce();
-        }, this.scanIntervalMs);
-        this.scanTimer.unref?.();
-      }
+    }
+  }
+
+  private requestScan(): void {
+    if (this.closing || this.closed) return;
+    if (this.scanPromise) {
+      this.scanRequested = true;
+      return;
+    }
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = undefined;
+    const scanning = this.scanOnce();
+    this.scanPromise = scanning;
+    void scanning.then(
+      () => this.finishScan(scanning),
+      () => this.finishScan(scanning),
+    );
+  }
+
+  private finishScan(scanning: Promise<void>): void {
+    if (this.scanPromise !== scanning) return;
+    this.scanPromise = undefined;
+    if (this.closing || this.closed) return;
+    if (this.scanRequested) {
+      this.scanRequested = false;
+      this.requestScan();
+      return;
+    }
+    if (this.scanIntervalMs > 0) {
+      this.scanTimer = setTimeout(() => {
+        this.scanTimer = undefined;
+        this.requestScan();
+      }, this.scanIntervalMs);
+      this.scanTimer.unref?.();
     }
   }
 
@@ -374,7 +426,10 @@ export class QwpNodeOrphanDrainer {
 
   private async drainOne(directory: string): Promise<void> {
     let session: QwpNodeOrphanDrainSession | undefined;
+    let reserved = false;
     try {
+      if (this.tryReserveSlot && !this.tryReserveSlot(directory)) return;
+      reserved = this.tryReserveSlot !== undefined;
       session = await this.createSession(directory, (event) =>
         this.emitReconnectEvent(directory, event),
       );
@@ -406,6 +461,7 @@ export class QwpNodeOrphanDrainer {
           .close(1000, "QWP orphan slot drained")
           .catch(() => undefined);
       }
+      if (reserved) this.releaseSlot?.(directory);
     }
   }
 
@@ -447,6 +503,7 @@ export class QwpNodeOrphanDrainer {
     this.closing = true;
     if (this.scanTimer) clearTimeout(this.scanTimer);
     this.scanTimer = undefined;
+    this.scanRequested = false;
     this.queue.length = 0;
     await this.scanPromise?.catch(() => undefined);
     await Promise.all(

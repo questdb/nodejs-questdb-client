@@ -1015,13 +1015,14 @@ while a sender that outlives the bounded wait owns its eventual teardown.
 Pooled sender `close()` flushes completed rows, discards an unfinished row with a
 warning, and resets staging before reuse. With Node store-and-forward enabled, the
 configured directory is treated as a pool root and each stable sender slot owns a
-`sender-N` child directory, avoiding journal lock conflicts. A connected pooled
-client prewarms every persistent sender slot (overriding `senderPoolMin`) so journals
-left by previously busy slots are recovered even when current traffic is lower. A
-client-level orphan scanner also drains canonical `sender-N` slots outside the current
-pool range, covering restarts where `senderPoolMax` was reduced. This managed-slot
-recovery is automatic; `drainOrphans: true` additionally adopts noncanonical sibling
-slots beneath the pool root.
+`sender-N` child directory, avoiding journal lock conflicts. The configured
+`senderPoolMin` remains authoritative. A client-level recovery scanner reserves and
+drains inactive canonical slots independently of foreground pool connections, both
+inside the current range and outside it after `senderPoolMax` is reduced. Foreground
+creation and recovery share an atomic slot coordinator, so neither can acquire a
+managed journal while the other owns it. This managed-slot recovery is automatic;
+`drainOrphans: true` additionally adopts noncanonical sibling slots beneath the pool
+root.
 
 ## Error handling and cleanup
 

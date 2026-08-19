@@ -429,6 +429,77 @@ describe("QWP Node transport", () => {
     }
   });
 
+  it("recovers an idle in-range SFA slot without prewarming to pool maximum", async () => {
+    const endpoint = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    endpoint.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+    });
+    const received: Uint8Array[] = [];
+    endpoint.on("connection", (socket) => {
+      let sequence = 0n;
+      socket.on("message", (payload) => {
+        received.push(new Uint8Array(payload as Buffer));
+        socket.send(okResponse(sequence++, "trades", 1n));
+      });
+    });
+    await listen(endpoint);
+    const address = endpoint.address() as AddressInfo;
+    const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-pool-in-"));
+    const idleManagedDirectory = join(rootDirectory, "sender-1");
+    const idleManaged = new QwpNodeFileReplayStore({
+      directory: idleManagedDirectory,
+    });
+    await idleManaged.load();
+    await idleManaged.append({
+      frameSequence: 0n,
+      payload: Uint8Array.of(7, 8, 9),
+    });
+    await idleManaged.close();
+
+    const events: string[] = [];
+    const client = await connectQwpNodeClient({
+      ingress: {
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        storeAndForward: {
+          directory: rootDirectory,
+          orphanScanIntervalMs: 0,
+          onOrphanDrainEvent: (event) => events.push(event.kind),
+        },
+      },
+      egress: {
+        url: `ws://127.0.0.1:${address.port}/read/v1`,
+      },
+      pool: {
+        senderPoolMin: 1,
+        senderPoolMax: 2,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    });
+    try {
+      expect(client.metrics.senders).toMatchObject({
+        minimum: 1,
+        maximum: 2,
+        total: 1,
+      });
+      await vi.waitFor(
+        async () => {
+          expect(await assignedReplaySegments(idleManagedDirectory)).toEqual(
+            [],
+          );
+          expect(events).toContain("drained");
+        },
+        { timeout: 2_000 },
+      );
+      expect(received).toContainEqual(Uint8Array.of(7, 8, 9));
+      expect(client.metrics.senders.total).toBe(1);
+    } finally {
+      await client.close();
+      await closeServer(endpoint);
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("quarantines a corrupt foreground slot and continues with a fresh producer", async () => {
     server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     server.on("headers", (headers) => {

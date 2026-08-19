@@ -16,6 +16,7 @@ import {
   QwpHandshakeMetadata,
   QwpIngressResponse,
   QwpPoolAcquireTimeoutError,
+  type QwpPoolSlotReservation,
   QwpSender,
   QwpSenderSession,
 } from "../../src/qwp";
@@ -163,6 +164,66 @@ async function createQuerySession(
 }
 
 describe("QWP pooled client", () => {
+  it("coordinates a pooled sender slot with background recovery", async () => {
+    const listeners = new Set<() => void>();
+    let recovering = true;
+    let reserved = false;
+    let creations = 0;
+    let releases = 0;
+    const reservation: QwpPoolSlotReservation = {
+      tryReserve: () => {
+        if (recovering || reserved) return false;
+        reserved = true;
+        return true;
+      },
+      release: () => {
+        reserved = false;
+        releases++;
+      },
+      onAvailable: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const client = new QwpClient(
+      {
+        senderSlotReservation: reservation,
+        createSender: async () => {
+          creations++;
+          const session = new FakeSenderSession();
+          const sender = new QwpSender(async () => session, {
+            autoFlush: false,
+          });
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 500,
+      },
+    );
+
+    const borrowing = client.borrowSender();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(creations).toBe(0);
+
+    recovering = false;
+    for (const listener of listeners) listener();
+    const sender = await borrowing;
+    expect(creations).toBe(1);
+    await sender.close();
+    expect(releases).toBe(0);
+    await client.close();
+    expect(releases).toBe(1);
+  });
+
   it("validates idle, lifetime, and housekeeping options", () => {
     const factories = {
       createSender: async () => {
