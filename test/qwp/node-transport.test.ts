@@ -1,6 +1,6 @@
 import type { AddressInfo, Socket } from "node:net";
 import { createServer as createTcpServer } from "node:net";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -415,11 +415,7 @@ describe("QWP Node transport", () => {
     try {
       await vi.waitFor(
         async () => {
-          expect(
-            (await readdir(orphanDirectory)).filter((name) =>
-              name.endsWith(".qwps"),
-            ),
-          ).toEqual([]);
+          expect(await assignedReplaySegments(orphanDirectory)).toEqual([]);
           expect(events).toContain("drained");
         },
         { timeout: 2_000 },
@@ -449,9 +445,7 @@ describe("QWP Node transport", () => {
     await seed.load();
     await seed.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
     await seed.close();
-    const [record] = (await readdir(directory)).filter((name) =>
-      name.endsWith(".qwps"),
-    );
+    const [record] = await assignedReplaySegments(directory);
     await writeFile(join(directory, record), Uint8Array.of(0));
 
     const events: QwpReplayStoreQuarantinedError[] = [];
@@ -499,9 +493,7 @@ describe("QWP Node transport", () => {
       expect(await readdir(quarantineDirectory)).toEqual(
         expect.arrayContaining([record, ".qwp.failed"]),
       );
-      expect(
-        (await readdir(directory)).filter((name) => name.endsWith(".qwps")),
-      ).toEqual([]);
+      expect(await assignedReplaySegments(directory)).toEqual([]);
     } finally {
       await rm(rootDirectory, { recursive: true, force: true });
     }
@@ -643,9 +635,7 @@ describe("QWP Node transport", () => {
       await expect(sender.connect()).resolves.toBe(true);
       await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
       await expect(sender.flush()).resolves.toBe(true);
-      expect(
-        (await readdir(directory)).filter((name) => name.endsWith(".qwps")),
-      ).toHaveLength(1);
+      expect(await assignedReplaySegments(directory)).toHaveLength(1);
 
       server = new WebSocketServer({ host: "127.0.0.1", port });
       server.on("headers", (headers) => {
@@ -660,10 +650,7 @@ describe("QWP Node transport", () => {
       await listen(server);
 
       await vi.waitFor(
-        async () =>
-          expect(
-            (await readdir(directory)).filter((name) => name.endsWith(".qwps")),
-          ).toEqual([]),
+        async () => expect(await assignedReplaySegments(directory)).toEqual([]),
         { timeout: 2_000 },
       );
     } finally {
@@ -688,4 +675,41 @@ function closeServer(server: WebSocketServer): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
+}
+
+async function assignedReplaySegments(directory: string): Promise<string[]> {
+  const names = (await readdir(directory)).filter((name) =>
+    name.endsWith(".qwpseg"),
+  );
+  const assigned: string[] = [];
+  for (const name of names) {
+    let file;
+    try {
+      file = await open(join(directory, name), "r");
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    try {
+      const header = Buffer.alloc(24);
+      const { bytesRead } = await file.read(header, 0, header.byteLength, 0);
+      if (
+        bytesRead !== header.byteLength ||
+        header.toString("ascii", 0, 4) !== "QWPS" ||
+        header.readUInt8(5) !== 0
+      ) {
+        assigned.push(name);
+      }
+    } finally {
+      await file.close();
+    }
+  }
+  return assigned;
 }

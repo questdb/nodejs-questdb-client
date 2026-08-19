@@ -11,6 +11,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { QWP_MAX_SYMBOL_DICTIONARY_SIZE } from "../qwp/core";
@@ -20,12 +21,18 @@ import {
 } from "../qwp/transport";
 
 const MAGIC = Buffer.from("QWPR");
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 const HEADER_SIZE = 52;
 const SHA256_SIZE = 32;
 const MAX_FRAME_SEQUENCE = 0xffffffffffffffffn;
-const RECORD_SUFFIX = ".qwp";
-const SEGMENT_SUFFIX = ".qwps";
+const LEGACY_RECORD_SUFFIX = ".qwp";
+const LEGACY_SEGMENT_SUFFIX = ".qwps";
+const SEGMENT_MAGIC = Buffer.from("QWPS");
+const SEGMENT_SUFFIX = ".qwpseg";
+const SEGMENT_HEADER_SIZE = 64;
+const SEGMENT_HEADER_PREFIX_SIZE = 32;
+const SEGMENT_STATE_SPARE = 0;
+const SEGMENT_STATE_ASSIGNED = 1;
 const TEMP_MARKER = ".tmp-";
 const ACK_MAGIC = Buffer.from("QWPA");
 const ACK_FILE = "ack.qwpstate";
@@ -47,6 +54,7 @@ const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
 const DEFAULT_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
 const DEFAULT_APPEND_DEADLINE_MS = 30_000;
+const TRIM_BATCH_SIZE = 8;
 const MAX_TIMER_DELAY_MS = 0x7fffffff;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
@@ -75,9 +83,20 @@ interface StoredRecord {
 
 interface StoredSegment {
   readonly path: string;
+  readonly generation: bigint;
   readonly firstSequence: bigint;
-  size: number;
+  readonly capacity: number;
+  readonly size: number;
+  logicalSize: number;
   liveRecords: number;
+  handle?: FileHandle;
+}
+
+interface HotSpareSegment {
+  readonly path: string;
+  readonly generation: bigint;
+  readonly size: number;
+  readonly handle: FileHandle;
 }
 
 interface RecoveredStoredRecord {
@@ -103,16 +122,16 @@ export interface QwpNodeFileReplayStoreOptions {
   /** Exclusive directory used by one ingress session. */
   directory: string;
   /**
-   * Target maximum journal size including record headers and symbol metadata.
-   * Defaults to 1 GiB. The current symbol dictionary may exceed this target so
-   * it cannot consume the journal's live frame budget before a drained close
-   * retires that dictionary generation.
+   * Target maximum journal size including fixed segment reservations and
+   * symbol metadata. Defaults to 1 GiB. The current symbol dictionary may
+   * exceed this target so it cannot consume the journal's live frame budget
+   * before a drained close retires that dictionary generation.
    */
   maxBytes?: number;
   /**
-   * Maximum QWP frame payload and target segment data size. Segments may exceed
-   * this value by one record header so a maximum-sized frame still fits.
-   * Defaults to 4 MiB.
+   * Maximum QWP frame payload and target segment data size. Each fixed segment
+   * reserves this value plus one record header and its 64-byte segment header,
+   * so a maximum-sized frame still fits. Defaults to 4 MiB.
    */
   maxSegmentBytes?: number;
   /**
@@ -164,6 +183,16 @@ export class QwpReplayStoreCorruptionError extends QwpReplayStoreError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
     this.name = "QwpReplayStoreCorruptionError";
+  }
+}
+
+/** An existing journal belongs to the retired experimental disk format. */
+export class QwpReplayStoreFormatError extends QwpReplayStoreError {
+  constructor(readonly directory: string) {
+    super(
+      `QWP store-and-forward journal uses the retired experimental disk format [directory=${directory}]; drain it with the previous client or explicitly discard the slot`,
+    );
+    this.name = "QwpReplayStoreFormatError";
   }
 }
 
@@ -252,9 +281,10 @@ export class QwpReplayStoreLockedError extends QwpReplayStoreError {
 /**
  * Node store-and-forward journal with configurable local durability.
  *
- * `append` fsyncs each frame before its atomic rename, while `periodic` batches
- * those barriers and `memory` relies on OS writeback. An ACK removes its
- * covered files. A crash between the server ACK and local deletion can cause
+ * The active fixed-size segment and one hot spare remain open for positional
+ * writes. `append` fsyncs each frame, `periodic` batches barriers, and `memory`
+ * relies on OS writeback. An ACK persists its cursor before bounded background
+ * trimming. A crash between the server ACK and local deletion can cause
  * at-least-once replay. An exclusive, lifetime lock prevents another process
  * from recovering or mutating the same directory.
  */
@@ -262,6 +292,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly directory: string;
   private readonly maxBytes: number;
   private readonly maxSegmentBytes: number;
+  private readonly segmentFileSize: number;
   private readonly liveFrameBytes: number;
   private readonly durability: QwpSfDurability;
   private readonly checkpointIntervalMs: number;
@@ -273,6 +304,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly symbolValues = new Set<string>();
   private readonly dirtyRecordPaths = new Set<string>();
   private readonly capacityWaiters = new Set<PendingCapacity>();
+  private readonly pendingTrimSegments: StoredSegment[] = [];
   private operationTail: Promise<void> = Promise.resolve();
   private totalBytes = 0;
   private dictionaryFileSize = 0;
@@ -284,6 +316,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private capacityGeneration = 0;
   private checkpointTimer?: ReturnType<typeof setTimeout>;
   private checkpointFailure?: QwpReplayStoreCheckpointError;
+  private maintenanceFailure?: QwpReplayStoreError;
   private totalCheckpoints = 0;
   private totalCheckpointFailures = 0;
   private totalBackpressureStalls = 0;
@@ -294,6 +327,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private closing = false;
   private closed = false;
   private activeSegment?: StoredSegment;
+  private hotSpare?: HotSpareSegment;
+  private nextSegmentGeneration = 0n;
+  private maintenanceScheduled = false;
 
   constructor(options: QwpNodeFileReplayStoreOptions) {
     const directory = options.directory.trim();
@@ -312,6 +348,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       options.maxSegmentBytes ?? DEFAULT_MAX_SEGMENT_BYTES,
       "store-and-forward maxSegmentBytes",
     );
+    if (this.maxSegmentBytes > 0xffffffff) {
+      throw new RangeError(
+        "store-and-forward maxSegmentBytes must fit in uint32",
+      );
+    }
+    this.segmentFileSize =
+      SEGMENT_HEADER_SIZE + this.maxSegmentBytes + HEADER_SIZE;
+    if (!Number.isSafeInteger(this.segmentFileSize)) {
+      throw new RangeError(
+        "store-and-forward maxSegmentBytes is too large for a fixed segment",
+      );
+    }
     this.liveFrameBytes = Math.min(maxBytes, DEFAULT_LIVE_FRAME_BYTES);
     this.durability = validateDurability(
       options.durability ?? QWP_SF_DURABILITY.APPEND,
@@ -373,29 +421,42 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       try {
         await this.acquireDirectoryLock();
         const entries = await readdir(this.directory, { withFileTypes: true });
-        const recordNames: string[] = [];
         const segmentNames: string[] = [];
         let removedTemporaryFile = false;
+        let hasRetiredFormat = false;
         for (const entry of entries) {
           if (!entry.isFile()) continue;
           if (entry.name.includes(TEMP_MARKER)) {
             await ignoreMissing(unlink(join(this.directory, entry.name)));
             removedTemporaryFile = true;
-          } else if (entry.name.endsWith(RECORD_SUFFIX)) {
-            recordNames.push(entry.name);
+          } else if (
+            entry.name.endsWith(LEGACY_RECORD_SUFFIX) ||
+            entry.name.endsWith(LEGACY_SEGMENT_SUFFIX)
+          ) {
+            hasRetiredFormat = true;
           } else if (entry.name.endsWith(SEGMENT_SUFFIX)) {
             segmentNames.push(entry.name);
           }
         }
         if (removedTemporaryFile) await syncDirectory(this.directory);
-        recordNames.sort();
+        if (hasRetiredFormat) {
+          throw new QwpReplayStoreFormatError(this.directory);
+        }
         segmentNames.sort();
 
         const acknowledgedThrough = await this.loadAcknowledgedThrough();
         const recoveredEntries: RecoveredStoredRecord[] = [];
-        let removedDrainedSegment = false;
-        for (let index = 0; index < segmentNames.length; index++) {
-          const name = segmentNames[index];
+        const recoveredSegments: Array<{
+          readonly name: string;
+          readonly path: string;
+          readonly decoded: DecodedSegment;
+        }> = [];
+        const spareSegments: Array<{
+          readonly name: string;
+          readonly path: string;
+          readonly decoded: DecodedSegment;
+        }> = [];
+        for (const name of segmentNames) {
           const path = join(this.directory, name);
           let bytes: Buffer;
           try {
@@ -407,29 +468,60 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             );
           }
           const decoded = decodeSegment(bytes, name);
-          if (decoded.tornTail) {
-            if (
-              decoded.records.length === 0 ||
-              index !== segmentNames.length - 1
-            ) {
-              throw corruptRecord(
-                name,
-                "segment has an unrecoverable torn record tail",
-              );
-            }
-            await truncateSegmentTail(path, decoded.validBytes, this.directory);
-            bytes = bytes.subarray(0, decoded.validBytes);
-          }
-          if (decoded.records.length === 0) {
-            await ignoreMissing(unlink(path));
-            removedDrainedSegment = true;
-            continue;
-          }
-          const firstSequence = decoded.records[0].frameSequence;
-          const expectedName = segmentFileName(firstSequence);
+          const expectedName = segmentFileName(decoded.generation);
           if (name !== expectedName) {
             throw new QwpReplayStoreCorruptionError(
-              `QWP store-and-forward segment filename does not match its first sequence [file=${name}, expected=${expectedName}]`,
+              `QWP store-and-forward segment filename does not match its generation [file=${name}, expected=${expectedName}]`,
+            );
+          }
+          this.nextSegmentGeneration = maxBigInt(
+            this.nextSegmentGeneration,
+            decoded.generation + 1n,
+          );
+          const entry = { name, path, decoded };
+          if (!decoded.assigned) {
+            if (
+              decoded.records.length !== 0 ||
+              decoded.logicalSize !== 0 ||
+              decoded.tornTail
+            ) {
+              throw corruptRecord(name, "unassigned spare contains records");
+            }
+            spareSegments.push(entry);
+          } else {
+            recoveredSegments.push(entry);
+          }
+        }
+        recoveredSegments.sort((left, right) =>
+          compareBigInt(
+            left.decoded.firstSequence,
+            right.decoded.firstSequence,
+          ),
+        );
+        let changedDirectory = false;
+        for (let index = 0; index < recoveredSegments.length; index++) {
+          const { name, path, decoded } = recoveredSegments[index];
+          if (decoded.tornTail) {
+            if (index !== recoveredSegments.length - 1) {
+              throw corruptRecord(
+                name,
+                "non-active segment has a torn record tail",
+              );
+            }
+            await repairSegmentTail(
+              path,
+              SEGMENT_HEADER_SIZE + decoded.logicalSize,
+              decoded.size,
+              this.directory,
+            );
+          }
+          if (
+            decoded.records.length > 0 &&
+            decoded.records[0].frameSequence !== decoded.firstSequence
+          ) {
+            throw corruptRecord(
+              name,
+              `first record sequence does not match segment base [base=${decoded.firstSequence}, received=${decoded.records[0].frameSequence}]`,
             );
           }
           const liveRecords = decoded.records.filter(
@@ -437,17 +529,20 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           );
           if (liveRecords.length === 0) {
             await ignoreMissing(unlink(path));
-            removedDrainedSegment = true;
+            changedDirectory = true;
             continue;
           }
           const segment: StoredSegment = {
             path,
-            firstSequence,
-            size: bytes.byteLength,
+            generation: decoded.generation,
+            firstSequence: decoded.firstSequence,
+            capacity: decoded.capacity,
+            size: decoded.size,
+            logicalSize: decoded.logicalSize,
             liveRecords: liveRecords.length,
           };
           this.segments.set(path, segment);
-          this.totalBytes += bytes.byteLength;
+          this.totalBytes += segment.size;
           for (const record of liveRecords) {
             recoveredEntries.push({
               record,
@@ -456,40 +551,25 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           }
           this.activeSegment = segment;
         }
-        if (removedDrainedSegment) await syncDirectory(this.directory);
-
-        let previous = acknowledgedThrough;
-        for (const name of recordNames) {
-          const path = join(this.directory, name);
-          let bytes: Buffer;
-          try {
-            bytes = await readFile(path);
-          } catch (error) {
-            throw new QwpReplayStoreError(
-              `could not read QWP store-and-forward record [file=${name}]`,
-              error,
-            );
-          }
-          const record = decodeRecord(bytes, name);
-          const expectedName = recordFileName(record.frameSequence);
-          if (name !== expectedName) {
-            throw new QwpReplayStoreCorruptionError(
-              `QWP store-and-forward filename does not match its sequence [file=${name}, expected=${expectedName}]`,
-            );
-          }
-          this.totalBytes += bytes.byteLength;
-          if (record.frameSequence > acknowledgedThrough) {
-            recoveredEntries.push({
-              record,
-              stored: { path, size: bytes.byteLength },
-            });
+        if (this.activeSegment) {
+          this.activeSegment.handle = await open(this.activeSegment.path, "r+");
+        }
+        for (let index = 0; index < spareSegments.length; index++) {
+          const { path, decoded } = spareSegments[index];
+          if (!this.hotSpare && decoded.capacity === this.maxSegmentBytes) {
+            this.hotSpare = {
+              path,
+              generation: decoded.generation,
+              size: decoded.size,
+              handle: await open(path, "r+"),
+            };
+            this.totalBytes += decoded.size;
           } else {
             await ignoreMissing(unlink(path));
-            this.totalBytes -= bytes.byteLength;
-            removedDrainedSegment = true;
+            changedDirectory = true;
           }
         }
-        if (removedDrainedSegment) await syncDirectory(this.directory);
+        if (changedDirectory) await syncDirectory(this.directory);
         recoveredEntries.sort((left, right) =>
           left.record.frameSequence < right.record.frameSequence
             ? -1
@@ -497,6 +577,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
               ? 1
               : 0,
         );
+        let previous = acknowledgedThrough;
         const recovered: QwpIngressReplayRecord[] = [];
         for (const { record, stored } of recoveredEntries) {
           if (record.frameSequence <= previous) {
@@ -516,9 +597,6 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         if (recovered.length === 0 && acknowledgedThrough >= 0n) {
           await this.removeAcknowledgedThrough();
         }
-        if (this.totalBytes > this.maxBytes) {
-          throw new QwpReplayStoreFullError(this.maxBytes, this.totalBytes);
-        }
         try {
           await this.loadDictionaryFile();
         } catch (error) {
@@ -531,11 +609,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           this.dictionaryLoadError = error;
         }
         this.loaded = true;
+        await this.ensureHotSpare(false);
         loadSucceeded = true;
         this.scheduleCheckpoint();
         return recovered;
       } finally {
-        if (!loadSucceeded) await this.releaseDirectoryLock();
+        if (!loadSucceeded) {
+          try {
+            await this.closeSegmentHandles();
+          } finally {
+            await this.releaseDirectoryLock();
+          }
+        }
       }
     });
   }
@@ -595,26 +680,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         this.records.delete(sequence);
       }
       for (const segment of emptiedSegments) {
-        try {
-          await ignoreMissing(unlink(segment.path));
-        } catch (error) {
-          throw new QwpReplayStoreError(
-            `could not acknowledge QWP store-and-forward segment [firstSequence=${segment.firstSequence}]`,
-            error,
-          );
-        }
-        this.segments.delete(segment.path);
-        this.dirtyRecordPaths.delete(segment.path);
-        this.totalBytes -= segment.size;
         if (this.activeSegment === segment) this.activeSegment = undefined;
+        this.pendingTrimSegments.push(segment);
       }
-      if (this.records.size === 0) await this.removeAcknowledgedThrough();
-      if (this.durability === QWP_SF_DURABILITY.APPEND) {
-        await syncDirectory(this.directory);
-      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
-        this.directoryDirty = true;
-      }
-      this.signalCapacity();
+      this.scheduleMaintenance();
     });
   }
 
@@ -801,6 +870,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.closePromise = this.operationTail.then(async () => {
       let failure: unknown;
       try {
+        await this.drainPendingMaintenance();
         if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
           await this.checkpointDirty();
         }
@@ -808,6 +878,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         await this.retireDrainedDictionary();
       } catch (error) {
         failure = error;
+      }
+      try {
+        await this.discardHotSpare();
+        await this.closeSegmentHandles();
+      } catch (error) {
+        failure ??= error;
       }
       try {
         await this.releaseDirectoryLock();
@@ -868,86 +944,302 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         `QWP store-and-forward sequence already exists [frameSequence=${record.frameSequence}]`,
       );
     }
-    const requiredBytes = this.totalBytes + bytes.byteLength;
-    const frameBytes = this.totalBytes - this.dictionaryFileSize;
-    const requiredFrameBytes = frameBytes + bytes.byteLength;
-    const preservesLiveness =
-      this.dictionaryFileSize > 0 &&
-      (requiredFrameBytes <= this.liveFrameBytes || frameBytes === 0);
-    if (requiredBytes > this.maxBytes && !preservesLiveness) {
-      throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
-    }
-
-    const segmentLimit = this.maxSegmentBytes + HEADER_SIZE;
     let segment = this.activeSegment;
-    if (!segment || segment.size + bytes.byteLength > segmentLimit) {
-      const name = segmentFileName(record.frameSequence);
-      const finalPath = join(this.directory, name);
-      const temporaryPath = join(
-        this.directory,
-        `${name}${TEMP_MARKER}${process.pid}-${randomUUID()}`,
-      );
-      try {
-        const file = await open(temporaryPath, "wx", 0o600);
-        try {
-          await file.writeFile(bytes);
-          if (this.durability === QWP_SF_DURABILITY.APPEND) await file.sync();
-        } finally {
-          await file.close();
-        }
-        await rename(temporaryPath, finalPath);
-        if (this.durability === QWP_SF_DURABILITY.APPEND) {
-          await syncDirectory(this.directory);
-        } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
-          this.dirtyRecordPaths.add(finalPath);
-          this.directoryDirty = true;
-        }
-      } catch (error) {
-        await ignoreMissing(unlink(temporaryPath));
-        throw new QwpReplayStoreError(
-          `could not create QWP store-and-forward segment [frameSequence=${record.frameSequence}]`,
-          error,
-        );
-      }
-      segment = {
-        path: finalPath,
-        firstSequence: record.frameSequence,
-        size: 0,
-        liveRecords: 0,
-      };
-      this.segments.set(finalPath, segment);
-      this.activeSegment = segment;
-    } else {
-      const previousSize = segment.size;
-      try {
-        const file = await open(segment.path, "a", 0o600);
-        try {
-          await file.writeFile(bytes);
-          if (this.durability === QWP_SF_DURABILITY.APPEND) await file.sync();
-        } catch (error) {
-          await file.truncate(previousSize).catch(() => undefined);
-          throw error;
-        } finally {
-          await file.close();
-        }
-        if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
-          this.dirtyRecordPaths.add(segment.path);
-        }
-      } catch (error) {
-        throw new QwpReplayStoreError(
-          `could not append QWP store-and-forward segment [frameSequence=${record.frameSequence}]`,
-          error,
-        );
-      }
+    if (
+      !segment ||
+      segment.logicalSize + bytes.byteLength > segment.capacity + HEADER_SIZE
+    ) {
+      segment = await this.activateHotSpare(record.frameSequence);
     }
-    segment.size += bytes.byteLength;
+    const handle = segment.handle;
+    if (!handle) {
+      throw new QwpReplayStoreError(
+        `active QWP store-and-forward segment is not open [file=${segment.path}]`,
+      );
+    }
+    const writeOffset = SEGMENT_HEADER_SIZE + segment.logicalSize;
+    try {
+      await writeFully(handle, bytes, writeOffset);
+      if (this.durability === QWP_SF_DURABILITY.APPEND) {
+        await handle.sync();
+      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+        this.dirtyRecordPaths.add(segment.path);
+      }
+    } catch (error) {
+      // The fixed file cannot be shortened without losing its reservation.
+      // Clear the attempted range so recovery still observes canonical zero
+      // padding if the caller retries after a transient write failure.
+      await zeroRange(handle, writeOffset, bytes.byteLength).catch(
+        () => undefined,
+      );
+      throw new QwpReplayStoreError(
+        `could not append QWP store-and-forward segment [frameSequence=${record.frameSequence}]`,
+        error,
+      );
+    }
+    segment.logicalSize += bytes.byteLength;
     segment.liveRecords++;
     this.records.set(record.frameSequence, {
       path: segment.path,
       size: 0,
       segment,
     });
-    this.totalBytes = requiredBytes;
+    this.scheduleHotSpare();
+  }
+
+  private async activateHotSpare(
+    firstSequence: bigint,
+  ): Promise<StoredSegment> {
+    const previous = this.activeSegment;
+    if (previous?.handle) {
+      if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+        await previous.handle.sync();
+        this.dirtyRecordPaths.delete(previous.path);
+      }
+      await previous.handle.close();
+      previous.handle = undefined;
+    }
+    await this.ensureHotSpare(true);
+    const spare = this.hotSpare;
+    if (!spare) {
+      throw new QwpReplayStoreFullError(
+        this.maxBytes,
+        this.totalBytes + this.segmentFileSize,
+      );
+    }
+    try {
+      await writeFully(
+        spare.handle,
+        encodeSegmentHeader(
+          spare.generation,
+          firstSequence,
+          this.maxSegmentBytes,
+          true,
+        ),
+        0,
+      );
+      if (this.durability === QWP_SF_DURABILITY.APPEND) {
+        await spare.handle.sync();
+      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+        this.dirtyRecordPaths.add(spare.path);
+      }
+    } catch (error) {
+      throw new QwpReplayStoreError(
+        `could not activate QWP store-and-forward hot spare [frameSequence=${firstSequence}]`,
+        error,
+      );
+    }
+    const segment: StoredSegment = {
+      path: spare.path,
+      generation: spare.generation,
+      firstSequence,
+      capacity: this.maxSegmentBytes,
+      size: spare.size,
+      logicalSize: 0,
+      liveRecords: 0,
+      handle: spare.handle,
+    };
+    this.hotSpare = undefined;
+    this.segments.set(segment.path, segment);
+    this.activeSegment = segment;
+    if (previous && previous.liveRecords === 0) {
+      await this.trimSegment(previous);
+    }
+    return segment;
+  }
+
+  private async ensureHotSpare(required: boolean): Promise<void> {
+    if (this.hotSpare || this.closing || this.closed) return;
+    const requiredBytes = this.totalBytes + this.segmentFileSize;
+    const frameBytes = this.totalBytes - this.dictionaryFileSize;
+    const preservesLiveness =
+      this.dictionaryFileSize > 0 &&
+      (frameBytes < this.liveFrameBytes || this.segments.size === 0);
+    if (requiredBytes > this.maxBytes && !preservesLiveness) {
+      if (required) {
+        throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
+      }
+      return;
+    }
+    const generation = this.nextSegmentGeneration++;
+    const name = segmentFileName(generation);
+    const path = join(this.directory, name);
+    const temporaryPath = join(
+      this.directory,
+      `${name}${TEMP_MARKER}${process.pid}-${randomUUID()}`,
+    );
+    let temporaryHandle: FileHandle | undefined;
+    let handle: FileHandle | undefined;
+    try {
+      temporaryHandle = await open(temporaryPath, "wx+", 0o600);
+      await temporaryHandle.truncate(this.segmentFileSize);
+      await writeFully(
+        temporaryHandle,
+        encodeSegmentHeader(generation, 0n, this.maxSegmentBytes, false),
+        0,
+      );
+      if (this.durability === QWP_SF_DURABILITY.APPEND) {
+        await temporaryHandle.sync();
+      }
+      await temporaryHandle.close();
+      temporaryHandle = undefined;
+      await rename(temporaryPath, path);
+      if (this.durability === QWP_SF_DURABILITY.APPEND) {
+        await syncDirectory(this.directory);
+      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+        this.directoryDirty = true;
+      }
+      handle = await open(path, "r+");
+      this.hotSpare = {
+        path,
+        generation,
+        size: this.segmentFileSize,
+        handle,
+      };
+      this.totalBytes = requiredBytes;
+    } catch (error) {
+      await temporaryHandle?.close().catch(() => undefined);
+      await handle?.close().catch(() => undefined);
+      await ignoreMissing(unlink(temporaryPath));
+      await ignoreMissing(unlink(path));
+      throw new QwpReplayStoreError(
+        `could not provision QWP store-and-forward hot spare [generation=${generation}]`,
+        error,
+      );
+    }
+  }
+
+  private scheduleHotSpare(): void {
+    if (this.hotSpare || this.closing || this.closed) return;
+    queueMicrotask(() => {
+      if (this.hotSpare || this.closing || this.closed) return;
+      void this.enqueue(() => this.ensureHotSpare(false)).catch(() => {
+        // Capacity exhaustion is expected: ACK trimming will make a later
+        // rotation retry provisioning synchronously. Other failures surface on
+        // that required path rather than as an unhandled background rejection.
+      });
+    });
+  }
+
+  private scheduleMaintenance(): void {
+    if (
+      this.maintenanceScheduled ||
+      this.pendingTrimSegments.length === 0 ||
+      this.closing ||
+      this.closed
+    ) {
+      return;
+    }
+    this.maintenanceScheduled = true;
+    queueMicrotask(() => {
+      if (this.closing || this.closed) {
+        this.maintenanceScheduled = false;
+        return;
+      }
+      void this.enqueue(() => this.runMaintenanceBatch()).catch((error) => {
+        this.maintenanceScheduled = false;
+        this.maintenanceFailure =
+          error instanceof QwpReplayStoreError
+            ? error
+            : new QwpReplayStoreError(
+                `QWP store-and-forward background maintenance failed [directory=${this.directory}]`,
+                error,
+              );
+        this.rejectCapacityWaiters(this.maintenanceFailure);
+      });
+    });
+  }
+
+  private async runMaintenanceBatch(): Promise<void> {
+    this.maintenanceScheduled = false;
+    let trimmed = 0;
+    while (trimmed < TRIM_BATCH_SIZE && this.pendingTrimSegments.length > 0) {
+      const segment = this.pendingTrimSegments[0];
+      await this.trimSegment(segment);
+      this.pendingTrimSegments.shift();
+      trimmed++;
+    }
+    if (trimmed > 0) {
+      if (this.durability === QWP_SF_DURABILITY.APPEND) {
+        await syncDirectory(this.directory);
+      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+        this.directoryDirty = true;
+      }
+      this.signalCapacity();
+      this.scheduleHotSpare();
+    }
+    if (this.records.size === 0 && this.pendingTrimSegments.length === 0) {
+      await this.removeAcknowledgedThrough();
+    }
+    if (this.pendingTrimSegments.length > 0) this.scheduleMaintenance();
+  }
+
+  private async drainPendingMaintenance(): Promise<void> {
+    this.maintenanceFailure = undefined;
+    while (this.pendingTrimSegments.length > 0) {
+      await this.runMaintenanceBatch();
+    }
+    if (this.records.size === 0) await this.removeAcknowledgedThrough();
+  }
+
+  private async trimSegment(segment: StoredSegment): Promise<void> {
+    try {
+      await segment.handle?.close();
+      segment.handle = undefined;
+      await ignoreMissing(unlink(segment.path));
+    } catch (error) {
+      throw new QwpReplayStoreError(
+        `could not trim QWP store-and-forward segment [firstSequence=${segment.firstSequence}]`,
+        error,
+      );
+    }
+    this.segments.delete(segment.path);
+    this.dirtyRecordPaths.delete(segment.path);
+    this.totalBytes -= segment.size;
+    if (this.activeSegment === segment) this.activeSegment = undefined;
+  }
+
+  private async closeSegmentHandles(): Promise<void> {
+    const handles = new Set<FileHandle>();
+    for (const segment of this.segments.values()) {
+      if (segment.handle) handles.add(segment.handle);
+      segment.handle = undefined;
+    }
+    if (this.hotSpare) handles.add(this.hotSpare.handle);
+    this.hotSpare = undefined;
+    let failure: unknown;
+    for (const handle of handles) {
+      try {
+        await handle.close();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure) {
+      throw new QwpReplayStoreError(
+        `could not close QWP store-and-forward segment handles [directory=${this.directory}]`,
+        failure,
+      );
+    }
+  }
+
+  private async discardHotSpare(): Promise<void> {
+    const spare = this.hotSpare;
+    if (!spare) return;
+    this.hotSpare = undefined;
+    try {
+      await spare.handle.close();
+      await ignoreMissing(unlink(spare.path));
+      this.totalBytes -= spare.size;
+      if (this.durability !== QWP_SF_DURABILITY.MEMORY) {
+        await syncDirectory(this.directory);
+      }
+    } catch (error) {
+      throw new QwpReplayStoreError(
+        `could not discard QWP store-and-forward hot spare [file=${spare.path}]`,
+        error,
+      );
+    }
   }
 
   private waitForCapacity(
@@ -957,6 +1249,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   ): Promise<void> {
     if (this.checkpointFailure) {
       return Promise.reject(this.checkpointFailure);
+    }
+    if (this.maintenanceFailure) {
+      return Promise.reject(this.maintenanceFailure);
     }
     if (capacityGeneration !== this.capacityGeneration) {
       return Promise.resolve();
@@ -1032,7 +1327,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       return;
     }
     try {
-      for (const path of this.dirtyRecordPaths) await syncFile(path);
+      for (const path of this.dirtyRecordPaths) {
+        if (this.activeSegment?.path === path && this.activeSegment.handle) {
+          await this.activeSegment.handle.sync();
+        } else {
+          await syncFile(path);
+        }
+      }
       if (this.dictionaryDirty) {
         await syncFile(join(this.directory, DICTIONARY_FILE));
       }
@@ -1407,6 +1708,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       );
     }
     if (this.checkpointFailure) throw this.checkpointFailure;
+    if (this.maintenanceFailure) throw this.maintenanceFailure;
   }
 
   private closedError(): QwpReplayStoreError {
@@ -1462,33 +1764,171 @@ function decodeRecord(bytes: Buffer, name: string): QwpIngressReplayRecord {
 }
 
 interface DecodedSegment {
+  readonly generation: bigint;
+  readonly firstSequence: bigint;
+  readonly assigned: boolean;
+  readonly capacity: number;
+  readonly size: number;
   readonly records: QwpIngressReplayRecord[];
-  readonly validBytes: number;
+  /** Bytes occupied by encoded records, excluding the fixed segment header. */
+  readonly logicalSize: number;
   readonly tornTail: boolean;
 }
 
+function encodeSegmentHeader(
+  generation: bigint,
+  firstSequence: bigint,
+  capacity: number,
+  assigned: boolean,
+): Buffer {
+  const bytes = Buffer.alloc(SEGMENT_HEADER_SIZE);
+  SEGMENT_MAGIC.copy(bytes, 0);
+  bytes.writeUInt8(FORMAT_VERSION, 4);
+  bytes.writeUInt8(assigned ? SEGMENT_STATE_ASSIGNED : SEGMENT_STATE_SPARE, 5);
+  bytes.writeUInt16LE(SEGMENT_HEADER_SIZE, 6);
+  bytes.writeBigUInt64LE(generation, 8);
+  bytes.writeBigUInt64LE(firstSequence, 16);
+  bytes.writeUInt32LE(capacity, 24);
+  createHash("sha256")
+    .update(bytes.subarray(0, SEGMENT_HEADER_PREFIX_SIZE))
+    .digest()
+    .copy(bytes, SEGMENT_HEADER_PREFIX_SIZE);
+  return bytes;
+}
+
 function decodeSegment(bytes: Buffer, name: string): DecodedSegment {
+  if (bytes.byteLength < SEGMENT_HEADER_SIZE) {
+    throw corruptRecord(name, "fixed segment is shorter than its header");
+  }
+  if (!bytes.subarray(0, SEGMENT_MAGIC.byteLength).equals(SEGMENT_MAGIC)) {
+    throw corruptRecord(name, "invalid segment magic");
+  }
+  if (bytes.readUInt8(4) !== FORMAT_VERSION) {
+    throw corruptRecord(
+      name,
+      `unsupported segment version ${bytes.readUInt8(4)}`,
+    );
+  }
+  const state = bytes.readUInt8(5);
+  if (state !== SEGMENT_STATE_SPARE && state !== SEGMENT_STATE_ASSIGNED) {
+    throw corruptRecord(name, `invalid fixed segment state ${state}`);
+  }
+  if (bytes.readUInt16LE(6) !== SEGMENT_HEADER_SIZE) {
+    throw corruptRecord(name, "invalid fixed segment header size");
+  }
+  const capacity = bytes.readUInt32LE(24);
+  const expectedSize = SEGMENT_HEADER_SIZE + capacity + HEADER_SIZE;
+  if (capacity === 0 || bytes.byteLength !== expectedSize) {
+    throw corruptRecord(
+      name,
+      `fixed segment has invalid capacity or size [capacity=${capacity}, expectedSize=${expectedSize}, receivedSize=${bytes.byteLength}]`,
+    );
+  }
+  const expectedDigest = bytes.subarray(
+    SEGMENT_HEADER_PREFIX_SIZE,
+    SEGMENT_HEADER_SIZE,
+  );
+  const actualDigest = createHash("sha256")
+    .update(bytes.subarray(0, SEGMENT_HEADER_PREFIX_SIZE))
+    .digest();
+  if (!actualDigest.equals(expectedDigest)) {
+    throw corruptRecord(name, "segment header checksum mismatch");
+  }
+  const generation = bytes.readBigUInt64LE(8);
+  const firstSequence = bytes.readBigUInt64LE(16);
+  const assigned = state === SEGMENT_STATE_ASSIGNED;
   const records: QwpIngressReplayRecord[] = [];
-  let offset = 0;
+  let offset = SEGMENT_HEADER_SIZE;
   while (offset < bytes.byteLength) {
+    if (bytes[offset] === 0 && isZeroFilled(bytes, offset)) {
+      return {
+        generation,
+        firstSequence,
+        assigned,
+        capacity,
+        size: bytes.byteLength,
+        records,
+        logicalSize: offset - SEGMENT_HEADER_SIZE,
+        tornTail: false,
+      };
+    }
     const remaining = bytes.byteLength - offset;
     if (remaining < HEADER_SIZE) {
-      return { records, validBytes: offset, tornTail: true };
+      return {
+        generation,
+        firstSequence,
+        assigned,
+        capacity,
+        size: bytes.byteLength,
+        records,
+        logicalSize: offset - SEGMENT_HEADER_SIZE,
+        tornTail: true,
+      };
     }
     if (!bytes.subarray(offset, offset + MAGIC.byteLength).equals(MAGIC)) {
-      throw corruptRecord(name, `invalid record magic at offset ${offset}`);
+      return {
+        generation,
+        firstSequence,
+        assigned,
+        capacity,
+        size: bytes.byteLength,
+        records,
+        logicalSize: offset - SEGMENT_HEADER_SIZE,
+        tornTail: true,
+      };
     }
     const payloadLength = bytes.readUInt32LE(offset + 16);
     const recordEnd = offset + HEADER_SIZE + payloadLength;
     if (recordEnd > bytes.byteLength) {
-      return { records, validBytes: offset, tornTail: true };
+      return {
+        generation,
+        firstSequence,
+        assigned,
+        capacity,
+        size: bytes.byteLength,
+        records,
+        logicalSize: offset - SEGMENT_HEADER_SIZE,
+        tornTail: true,
+      };
     }
-    records.push(
-      decodeRecord(bytes.subarray(offset, recordEnd), `${name}@${offset}`),
-    );
+    try {
+      records.push(
+        decodeRecord(bytes.subarray(offset, recordEnd), `${name}@${offset}`),
+      );
+    } catch (error) {
+      if (error instanceof QwpReplayStoreCorruptionError) {
+        return {
+          generation,
+          firstSequence,
+          assigned,
+          capacity,
+          size: bytes.byteLength,
+          records,
+          logicalSize: offset - SEGMENT_HEADER_SIZE,
+          tornTail: true,
+        };
+      }
+      throw error;
+    }
     offset = recordEnd;
   }
-  return { records, validBytes: offset, tornTail: false };
+  return {
+    generation,
+    firstSequence,
+    assigned,
+    capacity,
+    size: bytes.byteLength,
+    records,
+    logicalSize: offset - SEGMENT_HEADER_SIZE,
+    tornTail: false,
+  };
+}
+
+function isZeroFilled(bytes: Buffer, offset: number): boolean {
+  for (let index = offset; index < bytes.byteLength; index++) {
+    if (bytes[index] !== 0) return false;
+  }
+  return true;
 }
 
 function encodeAcknowledgedThrough(frameSequence: bigint): Buffer {
@@ -1632,14 +2072,16 @@ async function truncateDictionaryTail(
   await syncDirectory(directory);
 }
 
-async function truncateSegmentTail(
+async function repairSegmentTail(
   path: string,
-  size: number,
+  logicalEnd: number,
+  fixedSize: number,
   directory: string,
 ): Promise<void> {
   const file = await open(path, "r+");
   try {
-    await file.truncate(size);
+    await file.truncate(logicalEnd);
+    await file.truncate(fixedSize);
     await file.sync();
   } finally {
     await file.close();
@@ -1744,12 +2186,52 @@ function validateFrameSequence(frameSequence: bigint): void {
   }
 }
 
-function recordFileName(frameSequence: bigint): string {
-  return `${frameSequence.toString().padStart(20, "0")}${RECORD_SUFFIX}`;
+function segmentFileName(generation: bigint): string {
+  return `${generation.toString().padStart(20, "0")}${SEGMENT_SUFFIX}`;
 }
 
-function segmentFileName(frameSequence: bigint): string {
-  return `${frameSequence.toString().padStart(20, "0")}${SEGMENT_SUFFIX}`;
+function compareBigInt(left: bigint, right: bigint): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function maxBigInt(left: bigint, right: bigint): bigint {
+  return left > right ? left : right;
+}
+
+async function writeFully(
+  handle: FileHandle,
+  bytes: Uint8Array,
+  position: number,
+): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const { bytesWritten } = await handle.write(
+      bytes,
+      offset,
+      bytes.byteLength - offset,
+      position + offset,
+    );
+    if (bytesWritten === 0) {
+      throw new QwpReplayStoreError("fixed segment write made no progress");
+    }
+    offset += bytesWritten;
+  }
+}
+
+async function zeroRange(
+  handle: FileHandle,
+  position: number,
+  length: number,
+): Promise<void> {
+  const zeroes = Buffer.alloc(Math.min(length, 64 * 1024));
+  let remaining = length;
+  let offset = position;
+  while (remaining > 0) {
+    const chunk = zeroes.subarray(0, Math.min(remaining, zeroes.byteLength));
+    await writeFully(handle, chunk, offset);
+    offset += chunk.byteLength;
+    remaining -= chunk.byteLength;
+  }
 }
 
 async function syncDirectory(directory: string): Promise<void> {

@@ -173,8 +173,8 @@ The connect-string key
 
 `durability` controls the local persistence barrier:
 
-- `"append"` (the backwards-compatible default) fsyncs every segment append and its
-  atomic segment creation before publication resolves.
+- `"append"` (the default) fsyncs every positional write to the open active segment;
+  hot-spare creation and activation are durable before publication resolves.
 - `"periodic"` checkpoints segment files, symbol metadata, and directory changes in the
   background. The default interval is 5 seconds, and `close()` performs a final
   checkpoint. A power failure can lose the most recent checkpoint window.
@@ -183,7 +183,8 @@ The connect-string key
 
 `backpressurePolicy: "error"` preserves the existing immediate
 `QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
-ACK advances the checksummed cursor and deletes fully drained segments.
+ACK advances the checksummed cursor, then a bounded background trimmer deletes fully
+drained segments.
 `appendDeadlineMs` bounds each such pause (30 seconds by
 default) and expiry raises `QwpReplayStoreAppendTimeoutError`. Waiting appenders do
 not hold the journal mutation queue, so ACK cleanup can continue. Direct users of
@@ -191,13 +192,15 @@ not hold the journal mutation queue, so ACK cleanup can continue. Direct users o
 checkpoint work, checkpoint failures, active waiters, stalls, and timeouts.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
-cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target, but the
-journal preserves up to 32 MiB (or the configured target when smaller) for live frame
-records if dictionary growth uses all remaining headroom. Dictionary persistence
-itself is never rejected by the target, so actual disk usage can exceed it by the
-current dictionary overshoot. Frame growth beyond the liveness allowance remains
-backpressured until ACK trimming frees complete segments. A partly acknowledged
-segment remains charged to the disk budget until its last live record is acknowledged.
+cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target together
+with each complete fixed-segment reservation, including the hot spare. The journal
+preserves up to 32 MiB (or the configured target when smaller) for live frame segments
+if dictionary growth uses all remaining headroom. Dictionary persistence itself is
+never rejected by the target, so actual disk usage can exceed it by the current
+dictionary overshoot and at most one liveness segment. Frame growth beyond that
+allowance remains backpressured until background ACK trimming frees complete segments.
+A partly acknowledged segment remains charged to the disk budget until its last live
+record is acknowledged.
 Once every frame is acknowledged,
 `close()` removes the dictionary under the journal lock; the next clean start uses a
 fresh symbol-ID space. A partially drained close retains the dictionary required by
@@ -210,11 +213,16 @@ Locks left by a terminated process on the same host are recovered automatically;
 locks owned by a live local process, another host, or an unidentifiable owner fail
 closed.
 
-New journals coalesce records into bounded `.qwps` segments, targeting
-`maxSegmentBytes` (4 MiB by default) plus at most one record header. This bounds inode
-growth during long outages. Existing file-per-frame `.qwp` slots remain readable and
-can be drained alongside new segmented appends, so the storage upgrade does not
-require an offline migration.
+New journals use fixed-size `.qwpseg` files. Each file reserves a 64-byte segment
+header, `maxSegmentBytes` of target data (4 MiB by default), and one record header so
+a maximum-sized frame fits. The active segment and one unassigned hot spare keep open
+file handles; rotation activates the spare and provisions its replacement away from
+the normal append path. ACK trimming runs in bounded background batches.
+
+This v2 layout intentionally does not read the retired experimental file-per-frame
+`.qwp` or variable `.qwps` formats. `load()` raises `QwpReplayStoreFormatError` and
+leaves those files untouched. Drain such a slot with the previous client or discard
+it explicitly before upgrading.
 
 On startup, a dictionary sidecar truncated at a complete-block boundary is rebuilt
 from the ordered symbol deltas embedded in surviving committed frames and healed

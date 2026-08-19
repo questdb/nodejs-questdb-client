@@ -86,7 +86,7 @@ describe("QWP Node orphan drainer", () => {
   ): Promise<string> {
     const directory = join(rootDirectory, name);
     await mkdir(directory);
-    await writeFile(join(directory, "00000000000000000000.qwp"), "frame");
+    await writeFile(join(directory, "00000000000000000000.qwpseg"), "frame");
     return directory;
   }
 
@@ -95,7 +95,7 @@ describe("QWP Node orphan drainer", () => {
     const orphan = await recordSlot(rootDirectory, "orphan");
     const segmented = join(rootDirectory, "segmented");
     await mkdir(segmented);
-    await writeFile(join(segmented, "00000000000000000000.qwps"), "segment");
+    await writeFile(join(segmented, "00000000000000000000.qwpseg"), "segment");
     await recordSlot(rootDirectory, "live");
     const failed = await recordSlot(rootDirectory, "failed");
     await writeFile(join(failed, QWP_ORPHAN_FAILED_SENTINEL), "inspect me");
@@ -160,7 +160,7 @@ describe("QWP Node orphan drainer", () => {
         const session = new FakeDrainSession();
         session.pollDurableAck = async () => {
           session.pendingReplayFrames = 0;
-          await rm(join(directory, "00000000000000000000.qwp"));
+          await rm(join(directory, "00000000000000000000.qwpseg"));
         };
         return session;
       },

@@ -1,4 +1,4 @@
-import { readdir, unlink, writeFile } from "node:fs/promises";
+import { open, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   QWP_RECONNECT_EVENT_KIND,
@@ -17,8 +17,9 @@ import {
   type QwpSenderError,
 } from "../qwp/sender-error";
 
-const RECORD_SUFFIX = ".qwp";
-const SEGMENT_SUFFIX = ".qwps";
+const SEGMENT_SUFFIX = ".qwpseg";
+const SEGMENT_HEADER_PROBE_SIZE = 24;
+const SEGMENT_STATE_SPARE = 0;
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_SCAN_INTERVAL_MS = 30_000;
 const DEFAULT_PROGRESS_POLL_MS = 50;
@@ -157,19 +158,43 @@ export async function scanQwpNodeOrphanSlots(
     ) {
       continue;
     }
-    if (
-      children.some(
-        (child) =>
-          child.isFile() &&
-          (child.name.endsWith(RECORD_SUFFIX) ||
-            child.name.endsWith(SEGMENT_SUFFIX)),
-      )
-    ) {
+    let hasAssignedSegment = false;
+    for (const child of children) {
+      if (!child.isFile() || !child.name.endsWith(SEGMENT_SUFFIX)) continue;
+      if (await isAssignedSegmentOrInvalid(join(directory, child.name))) {
+        hasAssignedSegment = true;
+        break;
+      }
+    }
+    if (hasAssignedSegment) {
       candidates.push(directory);
     }
   }
   candidates.sort();
   return candidates;
+}
+
+async function isAssignedSegmentOrInvalid(path: string): Promise<boolean> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+    const header = Buffer.alloc(SEGMENT_HEADER_PROBE_SIZE);
+    const { bytesRead } = await handle.read(header, 0, header.byteLength, 0);
+    if (
+      bytesRead !== header.byteLength ||
+      header.toString("ascii", 0, 4) !== "QWPS" ||
+      header.readUInt8(4) !== 2
+    ) {
+      return true;
+    }
+    return header.readUInt8(5) !== SEGMENT_STATE_SPARE;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    // Let adoption report/quarantine an unreadable or malformed segment.
+    return true;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 /**

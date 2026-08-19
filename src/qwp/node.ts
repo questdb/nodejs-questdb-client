@@ -67,6 +67,7 @@ export {
   QwpReplayStoreCheckpointError,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreError,
+  QwpReplayStoreFormatError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
   QwpReplayStoreQuarantinedError,
