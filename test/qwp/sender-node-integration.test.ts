@@ -164,7 +164,8 @@ describe("Sender QWP integration", () => {
       await sender.connect();
       await sender.table("events").intColumn("value", 42).atNow();
 
-      expect(frames).toHaveLength(1);
+      expect(sender.publishedSequence).toBe(0n);
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
       await expect(sender.flush()).resolves.toBe(false);
     } finally {
       await sender.close();

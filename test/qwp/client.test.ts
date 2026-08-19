@@ -119,14 +119,24 @@ class FakeConnection implements QwpBinaryConnection {
 class FakeSenderSession implements QwpSenderSession {
   flushes = 0;
   closes = 0;
+  publishedFrameSequence = -1n;
+  acknowledgedFrameSequence = -1n;
 
   sendTables(): Promise<QwpIngressResponse> {
     this.flushes++;
+    const sequence = ++this.publishedFrameSequence;
+    this.acknowledgedFrameSequence = sequence;
     return Promise.resolve({
       status: QWP_STATUS.OK,
-      sequence: BigInt(this.flushes - 1),
+      sequence,
       tables: [],
     });
+  }
+
+  publishTables(): Promise<void> {
+    this.flushes++;
+    this.acknowledgedFrameSequence = ++this.publishedFrameSequence;
+    return Promise.resolve();
   }
 
   waitForDurable(): Promise<void> {

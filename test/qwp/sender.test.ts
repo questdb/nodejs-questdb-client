@@ -18,6 +18,7 @@ class RecordingSession implements QwpSenderSession {
   }[] = [];
   readonly durable: QwpIngressResponse[] = [];
   deltaSendCount = 0;
+  publicationCount = 0;
   closeCount = 0;
   publishedFrameSequence = -1n;
   acknowledgedFrameSequence = -1n;
@@ -45,6 +46,24 @@ class RecordingSession implements QwpSenderSession {
   ): Promise<QwpIngressResponse> {
     this.deltaSendCount++;
     return this.sendTables(tables, options);
+  }
+
+  async publishTables(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): Promise<void> {
+    this.publicationCount++;
+    this.sends.push({ tables, options });
+    const sequence = ++this.publishedFrameSequence;
+    if (!options?.deferCommit) this.acknowledgedFrameSequence = sequence;
+  }
+
+  async publishTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): Promise<void> {
+    this.deltaSendCount++;
+    await this.publishTables(tables, options);
   }
 
   async waitForDurable(response: QwpIngressResponse): Promise<void> {
@@ -175,6 +194,36 @@ function column(table: QwpTableBuffer, name: string) {
 }
 
 describe("QWP high-level sender", () => {
+  it("uses the Java-compatible local-publication flush boundary by default", async () => {
+    const session = new PublishingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 42n).atNow();
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.publicationAttempts).toBe(1);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
+    expect(sender.publishedSequence).toBe(0n);
+    expect(sender.acknowledgedSequence).toBe(-1n);
+
+    session.acknowledgedFrameSequence = 0n;
+    await sender.close();
+  });
+
+  it("retains explicit server-ACK flush behavior", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      awaitServerAck: true,
+    });
+    await sender.table("events").longColumn("value", 42n).atNow();
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.deltaSendCount).toBe(1);
+    expect(session.publicationCount).toBe(0);
+    expect(sender.acknowledgedSequence).toBe(0n);
+    await sender.close();
+  });
+
   it("validates the byte auto-flush threshold", () => {
     const session = new RecordingSession();
     expect(
@@ -369,6 +418,7 @@ describe("QWP high-level sender", () => {
     const session = new ClosingUnblocksSession();
     const sender = new QwpSender(async () => session, {
       autoFlush: false,
+      awaitServerAck: true,
       closeFlushTimeoutMs: 10,
     });
     await sender.table("events").longColumn("value", 42n).atNow();

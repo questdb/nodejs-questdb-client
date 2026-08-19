@@ -668,6 +668,28 @@ describe("QWP WebSocket adapters", () => {
     await session.close();
   });
 
+  it("uses the local-publication flush boundary in browsers by default", async () => {
+    const socket = new FakeWebSocket();
+    const sender = createQwpBrowserSender(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      { autoFlush: false, closeFlushTimeoutMs: 0 },
+    );
+    const connecting = sender.connect();
+    socket.open();
+    socket.message(ingressServerInfo(1_024));
+    await connecting;
+
+    await sender.table("events").longColumn("value", 42n).atNow();
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.sent).toHaveLength(1);
+    expect(sender.publishedSequence).toBe(0n);
+    expect(sender.acknowledgedSequence).toBe(-1n);
+    await sender.close();
+  });
+
   it("splits fluent browser rows under the negotiated server cap", async () => {
     const socket = new FakeWebSocket();
     const sender = createQwpBrowserSender(

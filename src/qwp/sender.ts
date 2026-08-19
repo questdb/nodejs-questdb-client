@@ -49,12 +49,15 @@ export interface QwpSenderOptions {
   transactional?: boolean;
   /**
    * Wait for the server's protocol ACK before flush()/commit() resolves.
-   * Defaults to true. Node persistent store-and-forward defaults this to false
-   * so a flush resolves after local durable publication and drains in the
-   * background.
+   * Defaults to false, matching the Java QWP sender's local-publication
+   * boundary. Set this to true for an acknowledgement barrier, or use
+   * flushAndGetSequence() followed by waitForAcknowledged().
    */
   awaitServerAck?: boolean;
-  /** Wait for durable upload after every successful ingress ACK. */
+  /**
+   * Wait for durable upload after every successful ingress ACK. When true,
+   * this implies awaitServerAck unless awaitServerAck is explicitly false.
+   */
   awaitDurableAck?: boolean;
   durableAckTimeoutMs?: number;
   /**
@@ -448,7 +451,8 @@ export class QwpSender {
     this.autoFlushIntervalMs =
       options.autoFlushIntervalMs ?? DEFAULT_AUTO_FLUSH_INTERVAL_MS;
     this.transactional = options.transactional ?? false;
-    this.awaitServerAck = options.awaitServerAck ?? true;
+    this.awaitServerAck =
+      options.awaitServerAck ?? options.awaitDurableAck === true;
     this.closeFlushTimeoutMs =
       options.closeFlushTimeoutMs ?? DEFAULT_CLOSE_FLUSH_TIMEOUT_MS;
     this.maxNameLength = options.maxNameLength ?? DEFAULT_MAX_NAME_LENGTH;
@@ -910,6 +914,10 @@ export class QwpSender {
     await this.tryFlush();
   }
 
+  /**
+   * Publishes completed rows to the local ingress/replay boundary. This does
+   * not wait for a server ACK unless awaitServerAck or awaitDurableAck is set.
+   */
   flush(): Promise<boolean> {
     return this.enqueueFlush(false);
   }
@@ -1391,7 +1399,8 @@ export class QwpSender {
         this.deferredAcks.push(response);
         // The server intentionally withholds this ACK until a later commit.
         // Observe rejection now so abandoning an open transaction during close
-        // never creates an unhandled rejection; flush()/commit() still awaits it.
+        // never creates an unhandled rejection; an ACK-waiting flush/commit
+        // still awaits it.
         void response.catch(() => undefined);
       }
       return { flushed: true, sequence: publishedSequence };

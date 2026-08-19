@@ -296,8 +296,8 @@ smallest target node's cap when offline startup is required.
 
 Set `awaitServerAck: true` when a particular flush must observe QuestDB's protocol ACK
 before returning. `awaitDurableAck: true` implies server-ACK waiting and additionally
-waits for replicated/durable progress. Browser senders continue to default to their
-existing ACK-waiting behavior and do not offer persistent publication.
+waits for replicated/durable progress. Browser senders use the in-memory replay
+publication boundary by default and do not offer persistent disk publication.
 
 A crash after the server accepts a frame but before local acknowledgement cleanup can
 replay that frame, so delivery is at least once. Applications that require exactly-once
@@ -338,6 +338,11 @@ try {
   await sender.close();
 }
 ```
+
+Like the Java QWP sender, `flush()` and `commit()` resolve after the complete
+logical flush reaches the local ingress/replay publication boundary. They do
+not wait for a server ACK by default. Set `awaitServerAck: true` for an
+implicit ACK barrier, or use the explicit sequence API below.
 
 For producer-controlled acknowledgement barriers, publish first and wait for the
 cumulative ACK watermark separately:
@@ -462,8 +467,9 @@ const sender = await connectQwpBrowserSender({
 ### Transactions and durable acknowledgement
 
 Transactional auto-flush keeps automatically emitted frames in an open server-side
-transaction. `commit()` (an alias for `flush()`) closes the group and waits for its
-cumulative acknowledgement:
+transaction. `commit()` (an alias for `flush()`) publishes the group-closing frame.
+The example also waits for its cumulative durable acknowledgement because it enables
+`awaitDurableAck`:
 
 ```typescript
 const sender = await connectQwpBrowserSender(
@@ -1066,9 +1072,10 @@ For the common fluent API, migration is primarily a transport change:
 
 Review these behavioral differences before rollout:
 
-- QWP `flush()` waits for a protocol ACK by default. With Node persistent
-  store-and-forward it defaults to local durable publication; set `awaitServerAck` to
-  restore ACK waiting, or `awaitDurableAck` to wait through durable upload.
+- QWP `flush()` uses the Java-compatible local-publication boundary by default in
+  browsers and Node.js. Set `awaitServerAck` for a protocol ACK barrier, or
+  `awaitDurableAck` to wait through durable upload. With Node persistent
+  store-and-forward, local publication means durable journal append.
 - QWP symbol dictionaries are connection-scoped and automatic.
 - Table and column identifiers are rejected locally using the Java client's rules;
   column identity is case-insensitive and preserves the spelling first declared.
@@ -1101,7 +1108,8 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | ---------------------------- | ------------------------------------------------------------- |
 | Sender/builder configuration | `Sender.fromConfig()` in Node.js, or `connectQwp*Sender()`    |
 | Fluent table row             | `table()`, typed column methods, `at()` / `atNow()`           |
-| Explicit drain/commit        | `flush()` / `commit()`                                        |
+| Local publish/commit         | `flush()` / `commit()`                                        |
+| Explicit ACK barrier         | `flushAndGetSequence()` plus `waitForAcknowledged()`          |
 | Durable delivery             | `requestDurableAck` plus `awaitDurableAck`                    |
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Fire-and-forget UDP ingress  | Node `udp::` or `connectQwpNodeUdpSender()`                   |

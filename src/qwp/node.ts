@@ -674,27 +674,17 @@ export function createQwpNodeSender(
   senderOptions: QwpSenderOptions = {},
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
-  const effectiveSenderOptions: QwpSenderOptions = {
-    ...senderOptions,
-    awaitServerAck:
-      senderOptions.awaitServerAck ??
-      (options.storeAndForward ||
-      sessionOptions.backgroundStoreAndForward === true ||
-      sessionOptions.initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC
-        ? senderOptions.awaitDurableAck === true
-        : true),
-  };
   return new QwpSender(
     () =>
       connectQwpNodeIngress(
         {
           ...options,
           requestDurableAck:
-            options.requestDurableAck ?? effectiveSenderOptions.awaitDurableAck,
+            options.requestDurableAck ?? senderOptions.awaitDurableAck,
         },
         sessionOptions,
       ),
-    effectiveSenderOptions,
+    senderOptions,
   );
 }
 
@@ -902,10 +892,6 @@ function normalizeQwpNodeClientOptions(
             initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
           }
         : undefined,
-    },
-    sender: {
-      ...options.sender,
-      awaitServerAck: options.sender?.awaitServerAck ?? false,
     },
     ingressSession: {
       ...options.ingressSession,
