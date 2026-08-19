@@ -117,11 +117,10 @@ budget settings without an explicit mode promotes initial startup to `"sync"`,
 matching the Java client. The configuration-string
 equivalent is `initial_connect_retry`, used together with the store-and-forward
 options in `extraOptions.qwp`.
-Persistent frames are coalesced into fixed-size 4 MiB `.qwpseg` segments by default,
-with persistent active/hot-spare handles and a checksummed ACK cursor for partially
-acknowledged segments. The retired experimental `.qwp`/`.qwps` disk format is not
-readable; drain it with the previous client or explicitly discard the slot before
-upgrading.
+Persistent frames are coalesced into fixed-size 4 MiB `.sfa` segments by default,
+using the shared Java/Rust/Python SFA envelope, manifest, ACK watermark, and symbol
+dictionary formats. The active segment and a preallocated temporary hot spare keep
+open handles.
 Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
 the Node client scans and drains slots left by failed producer processes with bounded
 concurrency. Pooled QWP clients recover out-of-range `sender-N` slots automatically,

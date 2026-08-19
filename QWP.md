@@ -213,16 +213,23 @@ Locks left by a terminated process on the same host are recovered automatically;
 locks owned by a live local process, another host, or an unidentifiable owner fail
 closed.
 
-New journals use fixed-size `.qwpseg` files. Each file reserves a 64-byte segment
-header, `maxSegmentBytes` of target data (4 MiB by default), and one record header so
-a maximum-sized frame fits. The active segment and one unassigned hot spare keep open
-file handles; rotation activates the spare and provisions its replacement away from
-the normal append path. ACK trimming runs in bounded background batches.
+New journals use the cross-client SFA persistence layout. Fixed-size
+`sf-<generation>.sfa` files have the Java/Rust 24-byte `SF01` header and
+`[crc32c, payloadLength, payload]` frame envelope. `sf-manifest.bin` and
+`.ack-watermark` use the shared dual-slot checksummed metadata layout, while
+`.symbol-dict` uses the shared chunked `SYD1` representation. TypeScript tests load
+Java-produced segment and dictionary fixtures and compare TypeScript output with the
+same normalized bytes.
 
-This v2 layout intentionally does not read the retired experimental file-per-frame
-`.qwp` or variable `.qwps` formats. `load()` raises `QwpReplayStoreFormatError` and
-leaves those files untouched. Drain such a slot with the previous client or discard
-it explicitly before upgrading.
+Each segment reserves `maxSegmentBytes` of target payload data (4 MiB by default)
+plus one frame header so a maximum-sized frame fits. The active segment and one
+preallocated temporary hot spare keep open file handles; rotation activates the
+spare and provisions its replacement away from the normal append path. ACK trimming
+advances the durable manifest head before unlinking segments and runs in bounded
+background batches.
+
+Recovery also handles the canonical creation crash window in which a valid SFA
+segment becomes durable before its manifest.
 
 On startup, a dictionary sidecar truncated at a complete-block boundary is rebuilt
 from the ordered symbol deltas embedded in surviving committed frames and healed
@@ -992,8 +999,8 @@ client prewarms every persistent sender slot (overriding `senderPoolMin`) so jou
 left by previously busy slots are recovered even when current traffic is lower. A
 client-level orphan scanner also drains canonical `sender-N` slots outside the current
 pool range, covering restarts where `senderPoolMax` was reduced. This managed-slot
-recovery is automatic; `drainOrphans: true` additionally adopts noncanonical/legacy
-sibling slots beneath the pool root.
+recovery is automatic; `drainOrphans: true` additionally adopts noncanonical sibling
+slots beneath the pool root.
 
 ## Error handling and cleanup
 

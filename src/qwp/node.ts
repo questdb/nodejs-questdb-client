@@ -67,7 +67,6 @@ export {
   QwpReplayStoreCheckpointError,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreError,
-  QwpReplayStoreFormatError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
   QwpReplayStoreQuarantinedError,
@@ -989,7 +988,7 @@ function createPooledOrphanDrainer(
         return true;
       }
       // Same-base slots outside the new pool range are always recovered. A
-      // caller must opt in before unrelated/legacy sibling names are adopted.
+      // caller must opt in before unrelated sibling names are adopted.
       return (
         managedIndex === undefined && storeAndForward.drainOrphans !== true
       );

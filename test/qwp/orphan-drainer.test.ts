@@ -65,6 +65,16 @@ class FakeDrainSession implements QwpNodeOrphanDrainSession {
   }
 }
 
+function assignedSfaSegment(): Buffer {
+  const bytes = Buffer.alloc(24 + 8);
+  bytes.write("SF01", 0, "ascii");
+  bytes.writeUInt8(1, 4);
+  // A non-zero envelope probe is enough for the read-only orphan scanner;
+  // adoption performs full CRC and manifest validation under the slot lock.
+  bytes.writeUInt8(1, 24);
+  return bytes;
+}
+
 describe("QWP Node orphan drainer", () => {
   const roots: string[] = [];
 
@@ -86,7 +96,10 @@ describe("QWP Node orphan drainer", () => {
   ): Promise<string> {
     const directory = join(rootDirectory, name);
     await mkdir(directory);
-    await writeFile(join(directory, "00000000000000000000.qwpseg"), "frame");
+    await writeFile(
+      join(directory, "sf-0000000000000000.sfa"),
+      assignedSfaSegment(),
+    );
     return directory;
   }
 
@@ -95,7 +108,10 @@ describe("QWP Node orphan drainer", () => {
     const orphan = await recordSlot(rootDirectory, "orphan");
     const segmented = join(rootDirectory, "segmented");
     await mkdir(segmented);
-    await writeFile(join(segmented, "00000000000000000000.qwpseg"), "segment");
+    await writeFile(
+      join(segmented, "sf-0000000000000000.sfa"),
+      assignedSfaSegment(),
+    );
     await recordSlot(rootDirectory, "live");
     const failed = await recordSlot(rootDirectory, "failed");
     await writeFile(join(failed, QWP_ORPHAN_FAILED_SENTINEL), "inspect me");
@@ -160,7 +176,7 @@ describe("QWP Node orphan drainer", () => {
         const session = new FakeDrainSession();
         session.pollDurableAck = async () => {
           session.pendingReplayFrames = 0;
-          await rm(join(directory, "00000000000000000000.qwpseg"));
+          await rm(join(directory, "sf-0000000000000000.sfa"));
         };
         return session;
       },

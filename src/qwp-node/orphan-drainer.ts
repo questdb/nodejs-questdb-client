@@ -17,9 +17,10 @@ import {
   type QwpSenderError,
 } from "../qwp/sender-error";
 
-const SEGMENT_SUFFIX = ".qwpseg";
-const SEGMENT_HEADER_PROBE_SIZE = 24;
-const SEGMENT_STATE_SPARE = 0;
+const SEGMENT_SUFFIX = ".sfa";
+const SEGMENT_HEADER_SIZE = 24;
+const FRAME_HEADER_SIZE = 8;
+const SEGMENT_HEADER_PROBE_SIZE = SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE;
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_SCAN_INTERVAL_MS = 30_000;
 const DEFAULT_PROGRESS_POLL_MS = 50;
@@ -181,13 +182,18 @@ async function isAssignedSegmentOrInvalid(path: string): Promise<boolean> {
     const header = Buffer.alloc(SEGMENT_HEADER_PROBE_SIZE);
     const { bytesRead } = await handle.read(header, 0, header.byteLength, 0);
     if (
-      bytesRead !== header.byteLength ||
-      header.toString("ascii", 0, 4) !== "QWPS" ||
-      header.readUInt8(4) !== 2
+      bytesRead < SEGMENT_HEADER_SIZE ||
+      header.toString("ascii", 0, 4) !== "SF01" ||
+      header.readUInt8(4) !== 1 ||
+      header.readUInt16LE(6) !== 0
     ) {
       return true;
     }
-    return header.readUInt8(5) !== SEGMENT_STATE_SPARE;
+    if (bytesRead < SEGMENT_HEADER_PROBE_SIZE) return false;
+    for (let offset = SEGMENT_HEADER_SIZE; offset < bytesRead; offset++) {
+      if (header[offset] !== 0) return true;
+    }
+    return false;
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") return false;
     // Let adoption report/quarantine an unreadable or malformed segment.

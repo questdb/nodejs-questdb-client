@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -22,7 +21,6 @@ import {
   QwpReplayStoreCheckpointError,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreError,
-  QwpReplayStoreFormatError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
   QwpReplayStoreSegmentTooLargeError,
@@ -2038,7 +2036,7 @@ describe("QWP ingress reconnect and replay", () => {
     const seed = new QwpNodeFileReplayStore({ directory });
     await seed.load();
     await seed.appendSymbolDictionary(0, dictionary.entriesFrom(0));
-    const persistedPrefixSize = (await stat(join(directory, "symbols.qwpdict")))
+    const persistedPrefixSize = (await stat(join(directory, ".symbol-dict")))
       .size;
 
     const replayFrame = encodeQwpIngressFrame([symbolTable("BTC-USD")], {
@@ -2048,7 +2046,7 @@ describe("QWP ingress reconnect and replay", () => {
     await seed.appendSymbolDictionary(1, dictionary.entriesFrom(1));
     await seed.append({ frameSequence: 5n, payload: replayFrame });
     await seed.close();
-    await truncate(join(directory, "symbols.qwpdict"), persistedPrefixSize);
+    await truncate(join(directory, ".symbol-dict"), persistedPrefixSize);
 
     const connection = new FakeConnection("primary");
     const session = await QwpIngressSession.connect(async () => connection, {
@@ -2093,7 +2091,7 @@ describe("QWP ingress reconnect and replay", () => {
       await seed.append({ frameSequence: 5n, payload: replayFrame });
       await seed.close();
       if (failureKind === "structurally corrupt") {
-        await writeFile(join(directory, "symbols.qwpdict"), Uint8Array.of(0));
+        await writeFile(join(directory, ".symbol-dict"), Uint8Array.of(0));
       }
 
       const connection = new FakeConnection("primary");
@@ -2132,7 +2130,7 @@ describe("QWP ingress reconnect and replay", () => {
     await seed.appendSymbolDictionary(0, dictionary.entriesFrom(0));
     await seed.append({ frameSequence: 5n, payload: replayFrame });
     await seed.close();
-    await writeFile(join(directory, "symbols.qwpdict"), Uint8Array.of(0));
+    await writeFile(join(directory, ".symbol-dict"), Uint8Array.of(0));
 
     await expect(
       QwpIngressSession.connect(async () => new FakeConnection("primary"), {
@@ -2225,7 +2223,9 @@ describe("QWP ingress reconnect and replay", () => {
       replayStore: new QwpNodeFileReplayStore({ directory }),
     });
     expect(connection.sent).toEqual([]);
-    expect(await assignedReplaySegments(directory)).toEqual([]);
+    await vi.waitFor(async () =>
+      expect(await assignedReplaySegments(directory)).toEqual([]),
+    );
     expect(session.metrics).toMatchObject({
       replayPublishedFrameSequence: 7n,
       replayAcknowledgedFrameSequence: 7n,
@@ -2967,7 +2967,7 @@ describe("QWP Node file replay store", () => {
     await second.acknowledgeThrough(0n);
     await second.close();
     expect(await readdir(directory)).toEqual(
-      expect.arrayContaining(["ack.qwpstate"]),
+      expect.arrayContaining([".ack-watermark"]),
     );
 
     const third = new QwpNodeFileReplayStore({ directory });
@@ -2979,7 +2979,10 @@ describe("QWP Node file replay store", () => {
 
   it("detects a replay gap immediately after a persisted ACK watermark", async () => {
     const directory = await trackedDirectory();
-    const first = new QwpNodeFileReplayStore({ directory });
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+    });
     await first.load();
     for (let sequence = 0n; sequence < 3n; sequence++) {
       await first.append({
@@ -2990,22 +2993,22 @@ describe("QWP Node file replay store", () => {
     await first.acknowledgeThrough(0n);
     await first.close();
 
-    const [segment] = await assignedReplaySegments(directory);
-    const path = join(directory, segment);
+    const segments = await assignedReplaySegments(directory);
+    const path = join(directory, segments[segments.length - 1]);
     const file = await open(path, "r+");
     try {
       const sequence = Buffer.alloc(8);
-      sequence.writeBigUInt64LE(2n);
-      // Fixed header + first one-byte record + record sequence field.
-      await file.write(sequence, 0, sequence.byteLength, 64 + 53 + 8);
+      sequence.writeBigUInt64LE(3n);
+      // SFA derives frame sequences from each segment's durable base.
+      await file.write(sequence, 0, sequence.byteLength, 8);
       await file.sync();
     } finally {
       await file.close();
     }
 
     const recovered = new QwpNodeFileReplayStore({ directory });
-    await expect(recovered.load()).rejects.toThrow(
-      /sequence has a gap \[previous=0, received=2\]/,
+    await expect(recovered.load()).rejects.toBeInstanceOf(
+      QwpReplayStoreCorruptionError,
     );
     await recovered.close();
   });
@@ -3017,7 +3020,7 @@ describe("QWP Node file replay store", () => {
       maxSegmentBytes: 256,
     });
     await store.load();
-    for (let sequence = 0n; sequence < 25n; sequence++) {
+    for (let sequence = 0n; sequence < 100n; sequence++) {
       await store.append({
         frameSequence: sequence,
         payload: Uint8Array.of(1),
@@ -3025,18 +3028,18 @@ describe("QWP Node file replay store", () => {
     }
     const segments = await assignedReplaySegments(directory);
     expect(segments.length).toBeGreaterThan(1);
-    expect(segments.length).toBeLessThan(25);
+    expect(segments.length).toBeLessThan(100);
     expect(store.metrics).toMatchObject({
-      pendingRecords: 25,
+      pendingRecords: 100,
       pendingSegments: segments.length,
     });
     for (const segment of segments) {
-      expect((await stat(join(directory, segment))).size).toBe(64 + 256 + 52);
+      expect((await stat(join(directory, segment))).size).toBe(24 + 8 + 256);
     }
     await store.close();
   });
 
-  it("recovers v2 segments after maxSegmentBytes changes", async () => {
+  it("recovers SFA segments after maxSegmentBytes changes", async () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({
       directory,
@@ -3077,7 +3080,7 @@ describe("QWP Node file replay store", () => {
     const validSize = (await stat(join(directory, segment))).size;
     const file = await open(join(directory, segment), "r+");
     try {
-      await file.write(Uint8Array.of(0x51, 0x57), 0, 2, 64 + 55);
+      await file.write(Uint8Array.of(0x51, 0x57), 0, 2, 24 + 8 + 3);
       await file.sync();
     } finally {
       await file.close();
@@ -3089,28 +3092,6 @@ describe("QWP Node file replay store", () => {
     ]);
     expect((await stat(join(directory, segment))).size).toBe(validSize);
     await recovered.close();
-  });
-
-  it("rejects the retired experimental file-per-frame format", async () => {
-    const directory = await trackedDirectory();
-    await writeFile(
-      join(directory, "00000000000000000005.qwp"),
-      encodeLegacyReplayRecord(5n, Uint8Array.of(1, 2)),
-    );
-    await writeFile(
-      join(directory, "00000000000000000006.qwps"),
-      encodeLegacyReplayRecord(6n, Uint8Array.of(3, 4)),
-    );
-
-    const first = new QwpNodeFileReplayStore({ directory });
-    await expect(first.load()).rejects.toBeInstanceOf(
-      QwpReplayStoreFormatError,
-    );
-    expect(await readdir(directory)).toEqual([
-      "00000000000000000005.qwp",
-      "00000000000000000006.qwps",
-    ]);
-    await first.close();
   });
 
   it.each([
@@ -3134,7 +3115,7 @@ describe("QWP Node file replay store", () => {
         "ETH-USD",
         "BTC-USD",
       ]);
-      expect(await readdir(directory)).toContain("symbols.qwpdict");
+      expect(await readdir(directory)).toContain(".symbol-dict");
       await first.close();
       expect(await readdir(directory)).toEqual([]);
 
@@ -3239,11 +3220,9 @@ describe("QWP Node file replay store", () => {
     await first.appendSymbolDictionary(0, ["ETH-USD", "BTC-USD"]);
     await first.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
     await first.close();
-    await writeFile(
-      join(directory, "symbols.qwpdict"),
-      Uint8Array.of(1, 2, 3),
-      { flag: "a" },
-    );
+    await writeFile(join(directory, ".symbol-dict"), Uint8Array.of(1, 2, 3), {
+      flag: "a",
+    });
 
     const recovered = new QwpNodeFileReplayStore({ directory });
     await recovered.load();
@@ -3331,7 +3310,7 @@ describe("QWP Node file replay store", () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 234,
+      maxBytes: 66,
       maxSegmentBytes: 1,
       durability: QWP_SF_DURABILITY.PERIODIC,
       checkpointIntervalMs: 250,
@@ -3342,7 +3321,7 @@ describe("QWP Node file replay store", () => {
     await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
     await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
     await store.appendSymbolDictionary(0, ["BTC-USD"]);
-    await unlink(join(directory, "symbols.qwpdict"));
+    await unlink(join(directory, ".symbol-dict"));
 
     const blocked = store.append({
       frameSequence: 2n,
@@ -3365,7 +3344,7 @@ describe("QWP Node file replay store", () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 234,
+      maxBytes: 66,
       maxSegmentBytes: 1,
       backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
       appendDeadlineMs: 1_000,
@@ -3394,7 +3373,7 @@ describe("QWP Node file replay store", () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 234,
+      maxBytes: 66,
       maxSegmentBytes: 1,
       backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
       appendDeadlineMs: 100,
@@ -3409,8 +3388,8 @@ describe("QWP Node file replay store", () => {
     });
     const rejection = expect(blocked).rejects.toMatchObject({
       name: "QwpReplayStoreAppendTimeoutError",
-      maxBytes: 234,
-      requiredBytes: 351,
+      maxBytes: 66,
+      requiredBytes: 99,
       timeoutMs: 100,
     } satisfies Partial<QwpReplayStoreAppendTimeoutError>);
     await vi.waitFor(() => expect(store.metrics.waitingAppends).toBe(1));
@@ -3427,13 +3406,13 @@ describe("QWP Node file replay store", () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 60,
+      maxBytes: 32,
       maxSegmentBytes: 1,
     });
     await first.load();
-    // Header + block metadata + this entry occupy 66 bytes, already above
-    // the configured target. Unlike frame bytes, this prefix never shrinks.
-    await first.appendSymbolDictionary(0, ["abcdefghij"]);
+    // Header + block metadata + this entry exceed the configured target.
+    // Unlike frame bytes, this prefix never shrinks.
+    await first.appendSymbolDictionary(0, ["abcdefghijklmnopqrstuvwxyz1234"]);
     await expect(
       first.append({ frameSequence: 0n, payload: Uint8Array.of(1) }),
     ).resolves.toBeUndefined();
@@ -3449,14 +3428,14 @@ describe("QWP Node file replay store", () => {
 
     const recovered = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 60,
+      maxBytes: 32,
       maxSegmentBytes: 1,
     });
     await expect(recovered.load()).resolves.toEqual([
       { frameSequence: 1n, payload: Uint8Array.of(2) },
     ]);
     await expect(recovered.loadSymbolDictionary()).resolves.toEqual([
-      "abcdefghij",
+      "abcdefghijklmnopqrstuvwxyz1234",
     ]);
     await recovered.acknowledgeThrough(1n);
     await expect(
@@ -3496,52 +3475,5 @@ async function createTemporaryDirectory(): Promise<string> {
 }
 
 async function assignedReplaySegments(directory: string): Promise<string[]> {
-  const names = (await readdir(directory)).filter((name) =>
-    name.endsWith(".qwpseg"),
-  );
-  const assigned: string[] = [];
-  for (const name of names) {
-    let file;
-    try {
-      file = await open(join(directory, name), "r");
-    } catch (error) {
-      if (
-        error &&
-        typeof error === "object" &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
-        continue;
-      }
-      throw error;
-    }
-    try {
-      const header = Buffer.alloc(24);
-      const { bytesRead } = await file.read(header, 0, header.byteLength, 0);
-      if (
-        bytesRead !== header.byteLength ||
-        header.toString("ascii", 0, 4) !== "QWPS" ||
-        header.readUInt8(5) !== 0
-      ) {
-        assigned.push(name);
-      }
-    } finally {
-      await file.close();
-    }
-  }
-  return assigned;
-}
-
-function encodeLegacyReplayRecord(
-  frameSequence: bigint,
-  payload: Uint8Array,
-): Buffer {
-  const bytes = Buffer.alloc(52 + payload.byteLength);
-  bytes.write("QWPR", 0, "ascii");
-  bytes.writeUInt8(1, 4);
-  bytes.writeBigUInt64LE(frameSequence, 8);
-  bytes.writeUInt32LE(payload.byteLength, 16);
-  createHash("sha256").update(payload).digest().copy(bytes, 20);
-  Buffer.from(payload).copy(bytes, 52);
-  return bytes;
+  return (await readdir(directory)).filter((name) => name.endsWith(".sfa"));
 }

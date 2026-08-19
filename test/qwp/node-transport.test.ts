@@ -1,6 +1,6 @@
 import type { AddressInfo, Socket } from "node:net";
 import { createServer as createTcpServer } from "node:net";
-import { mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -529,7 +529,7 @@ describe("QWP Node transport", () => {
     await seed.appendSymbolDictionary(0, dictionary.entriesFrom(0));
     await seed.append({ frameSequence: 0n, payload: replayFrame });
     await seed.close();
-    await writeFile(join(directory, "symbols.qwpdict"), Uint8Array.of(0));
+    await writeFile(join(directory, ".symbol-dict"), Uint8Array.of(0));
 
     const quarantined: QwpReplayStoreQuarantinedError[] = [];
     const address = server.address() as AddressInfo;
@@ -678,38 +678,5 @@ function closeServer(server: WebSocketServer): Promise<void> {
 }
 
 async function assignedReplaySegments(directory: string): Promise<string[]> {
-  const names = (await readdir(directory)).filter((name) =>
-    name.endsWith(".qwpseg"),
-  );
-  const assigned: string[] = [];
-  for (const name of names) {
-    let file;
-    try {
-      file = await open(join(directory, name), "r");
-    } catch (error) {
-      if (
-        error &&
-        typeof error === "object" &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
-        continue;
-      }
-      throw error;
-    }
-    try {
-      const header = Buffer.alloc(24);
-      const { bytesRead } = await file.read(header, 0, header.byteLength, 0);
-      if (
-        bytesRead !== header.byteLength ||
-        header.toString("ascii", 0, 4) !== "QWPS" ||
-        header.readUInt8(5) !== 0
-      ) {
-        assigned.push(name);
-      }
-    } finally {
-      await file.close();
-    }
-  }
-  return assigned;
+  return (await readdir(directory)).filter((name) => name.endsWith(".sfa"));
 }
