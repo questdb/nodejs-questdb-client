@@ -517,6 +517,12 @@ rejection) and then by zone affinity; configuration order breaks ties. Health ou
 zone, so a known healthy cross-zone node is preferred to an untried local node. Every
 connection sweep can still try every endpoint, allowing role and health changes to
 recover. A non-orderly close demotes the selected endpoint before the next sweep.
+Each standalone Node sender/drainer family, and each pooled orphan scanner, shares one
+live health ledger among its walkers while keeping independent sweep cursors, so
+concurrent drainers cannot consume one another's endpoint attempts. After a foreground
+round is exhausted, stale classifications are reset while learned zone tiers persist;
+the most recent successful same-zone endpoint remains sticky. Background orphan
+drainers publish health observations but never reset foreground classifications.
 Ingress reconnect is enabled by default for factory-created browser and Node sessions.
 Unacknowledged frames are retained in memory and replayed at least once after a
 transport failure. The built-in memory replay queue is capped at 128 MiB. When the

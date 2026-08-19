@@ -6,11 +6,11 @@ import {
 import {
   QwpBinaryConnection,
   QwpConnectionFactory,
-  QwpEgressRoutingOptions,
   QwpSendClosedError,
 } from "../transport";
 import {
   createQwpFailoverConnectionFactory,
+  QwpFailoverSelectionOptions,
   QwpValidatedConnection,
 } from "./failover";
 
@@ -23,7 +23,7 @@ export function createQwpEgressFailoverConnectionFactory(
   preferredUrl: string | URL,
   failoverUrls: readonly (string | URL)[] | undefined,
   connect: (endpoint: string | URL) => Promise<QwpBinaryConnection>,
-  routing: QwpEgressRoutingOptions,
+  routing: QwpFailoverSelectionOptions,
   serverInfoTimeoutMs: number,
 ): QwpConnectionFactory {
   return createQwpFailoverConnectionFactory(

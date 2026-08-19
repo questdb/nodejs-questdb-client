@@ -32,6 +32,152 @@ type ZoneTier = (typeof ZONE_TIER)[keyof typeof ZONE_TIER];
 interface QwpEndpointHealth {
   state: HostState;
   zoneTier: ZoneTier;
+  lastSuccessEpoch: number;
+}
+
+/**
+ * Shared endpoint classifications used by independent connection walkers.
+ * Each factory keeps its own sweep cursor while publishing observations here,
+ * so concurrent pooled sessions and orphan drainers cannot steal attempts from
+ * one another but immediately benefit from one another's health discoveries.
+ */
+export class QwpFailoverHealthTracker {
+  private readonly endpointKeys: readonly string[];
+  private readonly health: QwpEndpointHealth[];
+  private successEpoch = 0;
+
+  constructor(
+    preferredUrl: string | URL,
+    failoverUrls: readonly (string | URL)[] | undefined,
+    private readonly target: QwpTarget,
+    private readonly configuredZone: string | undefined,
+  ) {
+    this.endpointKeys = endpointKeys(preferredUrl, failoverUrls);
+    const zoneBlind = this.zoneBlind;
+    this.health = this.endpointKeys.map(() => ({
+      state: HOST_STATE.UNKNOWN,
+      zoneTier: zoneBlind ? ZONE_TIER.SAME : ZONE_TIER.UNKNOWN,
+      lastSuccessEpoch: 0,
+    }));
+  }
+
+  assertCompatible(
+    preferredUrl: string | URL,
+    failoverUrls: readonly (string | URL)[] | undefined,
+    target: QwpTarget,
+    configuredZone: string | undefined,
+  ): void {
+    const keys = endpointKeys(preferredUrl, failoverUrls);
+    if (
+      target !== this.target ||
+      configuredZone !== this.configuredZone ||
+      keys.length !== this.endpointKeys.length ||
+      keys.some((key, index) => key !== this.endpointKeys[index])
+    ) {
+      throw new RangeError(
+        "QWP failover health tracker does not match the endpoint routing configuration",
+      );
+    }
+  }
+
+  newRoundCursor(deferredEndpoint?: number): QwpFailoverRoundCursor {
+    return new QwpFailoverRoundCursor(this.health, deferredEndpoint);
+  }
+
+  /**
+   * Starts a recovery round with stale classifications forgotten. The newest
+   * successful same-zone endpoint stays healthy, matching the Java client's
+   * locality-aware stickiness; learned zone tiers persist across rounds.
+   */
+  forgetClassifications(): void {
+    let stickyIndex = -1;
+    let newestSuccess = -1;
+    for (let index = 0; index < this.health.length; index++) {
+      const health = this.health[index];
+      if (
+        health.state === HOST_STATE.HEALTHY &&
+        health.zoneTier === ZONE_TIER.SAME &&
+        health.lastSuccessEpoch > newestSuccess
+      ) {
+        stickyIndex = index;
+        newestSuccess = health.lastSuccessEpoch;
+      }
+    }
+    for (let index = 0; index < this.health.length; index++) {
+      if (index !== stickyIndex) this.health[index].state = HOST_STATE.UNKNOWN;
+    }
+  }
+
+  recordFailure(index: number, error: unknown): void {
+    const health = this.health[index];
+    if (error instanceof QwpUpgradeError) {
+      this.recordZone(index, error.serverZone);
+      if (error.kind === QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED) {
+        health.state =
+          normalizeRole(error.serverRole) === "PRIMARY_CATCHUP"
+            ? HOST_STATE.TRANSIENT_REJECT
+            : HOST_STATE.TOPOLOGY_REJECT;
+        return;
+      }
+    }
+    health.state = HOST_STATE.TRANSPORT_ERROR;
+  }
+
+  recordSuccess(index: number): void {
+    const health = this.health[index];
+    health.state = HOST_STATE.HEALTHY;
+    health.lastSuccessEpoch = ++this.successEpoch;
+  }
+
+  recordZone(index: number, serverZone: string | undefined): void {
+    const normalized = normalizeZone(serverZone);
+    if (!normalized) return;
+    this.health[index].zoneTier =
+      this.zoneBlind || normalized === this.configuredZone
+        ? ZONE_TIER.SAME
+        : ZONE_TIER.OTHER;
+  }
+
+  recordMidStreamFailure(index: number): void {
+    const health = this.health[index];
+    if (health.state === HOST_STATE.HEALTHY) {
+      health.state = HOST_STATE.TRANSPORT_ERROR;
+    }
+  }
+
+  recordTransientReject(index: number): void {
+    this.health[index].state = HOST_STATE.TRANSIENT_REJECT;
+  }
+
+  private get zoneBlind(): boolean {
+    return (
+      this.configuredZone === undefined || this.target === QWP_TARGET.PRIMARY
+    );
+  }
+}
+
+class QwpFailoverRoundCursor {
+  private readonly attempted = new Set<number>();
+
+  constructor(
+    private readonly health: readonly QwpEndpointHealth[],
+    private readonly deferredEndpoint?: number,
+  ) {}
+
+  next(): number | undefined {
+    const selected = pickNextEndpoint(
+      this.health,
+      this.attempted,
+      this.deferredEndpoint,
+    );
+    if (selected === undefined) return undefined;
+    this.attempted.add(selected);
+    return selected;
+  }
+
+  get exhausted(): boolean {
+    return this.attempted.size === this.health.length;
+  }
 }
 
 export interface QwpValidatedConnection {
@@ -45,6 +191,24 @@ export interface QwpFailoverSelectionOptions extends QwpEgressRoutingOptions {
   validateConnection?: (
     connection: QwpBinaryConnection,
   ) => Promise<QwpValidatedConnection>;
+  /** @internal Shares classifications without sharing a walker's cursor. */
+  healthTracker?: QwpFailoverHealthTracker;
+  /** @internal Background walkers must not reset shared classifications. */
+  resetClassificationsAfterExhaustion?: boolean;
+}
+
+/** Creates a health ledger that can be shared by independent walkers. */
+export function createQwpFailoverHealthTracker(
+  preferredUrl: string | URL,
+  failoverUrls: readonly (string | URL)[] | undefined,
+  options: QwpEgressRoutingOptions = {},
+): QwpFailoverHealthTracker {
+  return new QwpFailoverHealthTracker(
+    preferredUrl,
+    failoverUrls,
+    normalizeTarget(options.target),
+    normalizeZone(options.zone),
+  );
 }
 
 /**
@@ -61,23 +225,41 @@ export function createQwpFailoverConnectionFactory(
   const endpoints = [preferredUrl, ...(failoverUrls ?? [])];
   const target = normalizeTarget(options.target);
   const configuredZone = normalizeZone(options.zone);
-  const zoneBlind =
-    configuredZone === undefined || target === QWP_TARGET.PRIMARY;
-  const health: QwpEndpointHealth[] = endpoints.map(() => ({
-    state: HOST_STATE.UNKNOWN,
-    zoneTier: zoneBlind ? ZONE_TIER.SAME : ZONE_TIER.UNKNOWN,
-  }));
+  const healthTracker =
+    options.healthTracker ??
+    new QwpFailoverHealthTracker(
+      preferredUrl,
+      failoverUrls,
+      target,
+      configuredZone,
+    );
+  healthTracker.assertCompatible(
+    preferredUrl,
+    failoverUrls,
+    target,
+    configuredZone,
+  );
+  const resetClassificationsAfterExhaustion =
+    options.resetClassificationsAfterExhaustion !== false;
   let deferredEndpoint: number | undefined;
+  let resetClassificationsBeforeSweep = false;
 
   return async (): Promise<QwpBinaryConnection> => {
+    if (
+      resetClassificationsBeforeSweep &&
+      resetClassificationsAfterExhaustion
+    ) {
+      healthTracker.forgetClassifications();
+    }
+    resetClassificationsBeforeSweep = false;
     const attempts: QwpFailoverAttempt[] = [];
-    const attempted = new Set<number>();
     const deferredForSweep = deferredEndpoint;
     deferredEndpoint = undefined;
+    const cursor = healthTracker.newRoundCursor(deferredForSweep);
 
-    while (attempted.size < endpoints.length) {
-      const index = pickNextEndpoint(health, attempted, deferredForSweep);
-      attempted.add(index);
+    while (true) {
+      const index = cursor.next();
+      if (index === undefined) break;
       const endpoint = endpoints[index];
       let candidate: QwpBinaryConnection | undefined;
       try {
@@ -98,12 +280,7 @@ export function createQwpFailoverConnectionFactory(
           };
         }
         candidate = validated.connection;
-        recordZone(
-          health[index],
-          configuredZone,
-          zoneBlind,
-          validated.serverZone,
-        );
+        healthTracker.recordZone(index, validated.serverZone);
         if (!matchesTarget(validated.serverRole, target)) {
           throw new QwpRoleMismatchError(
             target,
@@ -112,13 +289,20 @@ export function createQwpFailoverConnectionFactory(
             validated.serverZone,
           );
         }
-        health[index].state = HOST_STATE.HEALTHY;
-        return observeConnectionHealth(candidate, health[index], () => {
-          health[index].state = HOST_STATE.TRANSIENT_REJECT;
-          deferredEndpoint = index;
-        });
+        healthTracker.recordSuccess(index);
+        resetClassificationsBeforeSweep = cursor.exhausted;
+        return observeConnectionHealth(
+          candidate,
+          () => {
+            healthTracker.recordMidStreamFailure(index);
+          },
+          () => {
+            healthTracker.recordTransientReject(index);
+            deferredEndpoint = index;
+          },
+        );
       } catch (error) {
-        recordFailure(health[index], configuredZone, zoneBlind, error);
+        healthTracker.recordFailure(index, error);
         attempts.push({ endpoint, error });
         if (candidate) await candidate.close().catch(() => undefined);
         if (error instanceof QwpUpgradeError && !error.tryNextEndpoint) {
@@ -126,6 +310,7 @@ export function createQwpFailoverConnectionFactory(
         }
       }
     }
+    resetClassificationsBeforeSweep = true;
     if (attempts.length === 1) throw attempts[0].error;
     throw new QwpFailoverError(attempts);
   };
@@ -168,7 +353,7 @@ function pickNextEndpoint(
   health: readonly QwpEndpointHealth[],
   attempted: ReadonlySet<number>,
   deferredEndpoint?: number,
-): number {
+): number | undefined {
   let selected = -1;
   for (let index = 0; index < health.length; index++) {
     if (attempted.has(index) || index === deferredEndpoint) continue;
@@ -177,13 +362,10 @@ function pickNextEndpoint(
     }
   }
   if (selected >= 0) return selected;
-  if (
-    deferredEndpoint !== undefined &&
-    !attempted.has(deferredEndpoint)
-  ) {
+  if (deferredEndpoint !== undefined && !attempted.has(deferredEndpoint)) {
     return deferredEndpoint;
   }
-  throw new Error("QWP endpoint sweep has no unattempted endpoint");
+  return undefined;
 }
 
 function compareHealth(
@@ -195,52 +377,14 @@ function compareHealth(
   return 0;
 }
 
-function recordZone(
-  health: QwpEndpointHealth,
-  configuredZone: string | undefined,
-  zoneBlind: boolean,
-  serverZone: string | undefined,
-): void {
-  const normalized = normalizeZone(serverZone);
-  if (!normalized) return;
-  health.zoneTier =
-    zoneBlind || normalized === configuredZone
-      ? ZONE_TIER.SAME
-      : ZONE_TIER.OTHER;
-}
-
-function recordFailure(
-  health: QwpEndpointHealth,
-  configuredZone: string | undefined,
-  zoneBlind: boolean,
-  error: unknown,
-): void {
-  if (error instanceof QwpUpgradeError) {
-    recordZone(health, configuredZone, zoneBlind, error.serverZone);
-    if (error.kind === QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED) {
-      health.state =
-        normalizeRole(error.serverRole) === "PRIMARY_CATCHUP"
-          ? HOST_STATE.TRANSIENT_REJECT
-          : HOST_STATE.TOPOLOGY_REJECT;
-      return;
-    }
-  }
-  health.state = HOST_STATE.TRANSPORT_ERROR;
-}
-
 function observeConnectionHealth(
   connection: QwpBinaryConnection,
-  health: QwpEndpointHealth,
+  demoteEndpoint: () => void,
   deprioritizeEndpoint: () => void,
 ): QwpBinaryConnection {
-  const demote = (): void => {
-    if (health.state === HOST_STATE.HEALTHY) {
-      health.state = HOST_STATE.TRANSPORT_ERROR;
-    }
-  };
   void connection.closed.then((info) => {
-    if (!info.wasClean) demote();
-  }, demote);
+    if (!info.wasClean) demoteEndpoint();
+  }, demoteEndpoint);
   const observed: QwpBinaryConnection = {
     messages: connection.messages,
     closed: connection.closed,
@@ -257,7 +401,7 @@ function observeConnectionHealth(
       try {
         await connection.send(payload);
       } catch (error) {
-        demote();
+        demoteEndpoint();
         throw error;
       }
     },
@@ -268,7 +412,7 @@ function observeConnectionHealth(
       try {
         await connection.ping!();
       } catch (error) {
-        demote();
+        demoteEndpoint();
         throw error;
       }
     };
@@ -277,4 +421,11 @@ function observeConnectionHealth(
     observed.getIngressMetrics = () => connection.getIngressMetrics!();
   }
   return observed;
+}
+
+function endpointKeys(
+  preferredUrl: string | URL,
+  failoverUrls: readonly (string | URL)[] | undefined,
+): readonly string[] {
+  return [preferredUrl, ...(failoverUrls ?? [])].map(String);
 }

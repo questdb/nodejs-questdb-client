@@ -17,7 +17,11 @@ import {
   QwpWebSocketLike,
   validateQwpWebSocketTimeouts,
 } from "./internal/websocket-connection";
-import { createQwpFailoverConnectionFactory } from "./internal/failover";
+import {
+  createQwpFailoverConnectionFactory,
+  createQwpFailoverHealthTracker,
+  QwpFailoverHealthTracker,
+} from "./internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
 import { validateQwpMaxBatchRows } from "./internal/egress-limits";
 import { resolveQwpNodeClientConfig } from "../qwp-node/client-config";
@@ -378,10 +382,19 @@ export function connectQwpNodeWebSocket(
 export function createQwpNodeConnectionFactory(
   options: QwpNodeWebSocketOptions,
 ): QwpConnectionFactory {
+  return createQwpNodeConnectionFactoryInternal(options);
+}
+
+function createQwpNodeConnectionFactoryInternal(
+  options: QwpNodeWebSocketOptions,
+  healthTracker?: QwpFailoverHealthTracker,
+  resetClassificationsAfterExhaustion = true,
+): QwpConnectionFactory {
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
     (endpoint) => connectQwpNodeEndpoint(options, endpoint),
+    { healthTracker, resetClassificationsAfterExhaustion },
   );
 }
 
@@ -539,7 +552,11 @@ async function connectQwpNodeIngressInternal(
   options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions,
   startOrphanDrainer: boolean,
+  sharedHealthTracker?: QwpFailoverHealthTracker,
 ): Promise<QwpIngressSession> {
+  const healthTracker =
+    sharedHealthTracker ??
+    createQwpFailoverHealthTracker(options.url, options.failoverUrls);
   const storeAndForward = resolveNodeStoreAndForwardOptions(options);
   if (storeAndForward && sessionOptions.replayStore) {
     throw new RangeError(
@@ -588,9 +605,14 @@ async function connectQwpNodeIngressInternal(
       ? createStandaloneOrphanDrainer(
           { ...options, senderId: undefined, storeAndForward },
           sessionOptions,
+          healthTracker,
         )
       : undefined;
-  const connectionFactory = createQwpNodeConnectionFactory(options);
+  const connectionFactory = createQwpNodeConnectionFactoryInternal(
+    options,
+    healthTracker,
+    startOrphanDrainer,
+  );
   let session: QwpIngressSession;
   try {
     session = await QwpIngressSession.connect(
@@ -951,6 +973,7 @@ function pooledNodeIngressOptions(
 function createStandaloneOrphanDrainer(
   options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions,
+  healthTracker: QwpFailoverHealthTracker,
 ): QwpNodeOrphanDrainer {
   const storeAndForward = options.storeAndForward!;
   const ownDirectory = storeAndForward.directory.trim();
@@ -959,6 +982,7 @@ function createStandaloneOrphanDrainer(
     sessionOptions,
     dirname(ownDirectory),
     (slotName) => slotName === basename(ownDirectory),
+    healthTracker,
   );
 }
 
@@ -974,6 +998,10 @@ function createPooledOrphanDrainer(
   }
   const managedSlotCount = options.pool?.senderPoolMax ?? 4;
   const senderId = validateQwpSenderId(options.ingress.senderId ?? "sender");
+  const healthTracker = createQwpFailoverHealthTracker(
+    options.ingress.url,
+    options.ingress.failoverUrls,
+  );
   return createNodeOrphanDrainer(
     options.ingress,
     options.ingressSession ?? {},
@@ -990,6 +1018,7 @@ function createPooledOrphanDrainer(
       // recovered. A caller must opt in before unrelated siblings are adopted.
       return storeAndForward.drainOrphans !== true;
     },
+    healthTracker,
     slotCoordinator,
   );
 }
@@ -999,6 +1028,7 @@ function createNodeOrphanDrainer(
   sessionOptions: QwpIngressSessionOptions,
   rootDirectory: string,
   excludeSlot: (slotName: string) => boolean,
+  healthTracker: QwpFailoverHealthTracker,
   slotCoordinator?: QwpPooledSfaSlotCoordinator,
 ): QwpNodeOrphanDrainer {
   const storeAndForward = options.storeAndForward!;
@@ -1036,6 +1066,7 @@ function createNodeOrphanDrainer(
         },
         orphanIngressSessionOptions(sessionOptions, onReconnectEvent),
         false,
+        healthTracker,
       ),
   });
 }

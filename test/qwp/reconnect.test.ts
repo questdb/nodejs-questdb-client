@@ -72,7 +72,10 @@ import {
 } from "../../src/qwp";
 import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
 import { createQwpEgressFailoverConnectionFactory } from "../../src/qwp/internal/egress-routing";
-import { createQwpFailoverConnectionFactory } from "../../src/qwp/internal/failover";
+import {
+  createQwpFailoverConnectionFactory,
+  createQwpFailoverHealthTracker,
+} from "../../src/qwp/internal/failover";
 
 function nativeFlock(fd: number, operation: "exnb" | "un"): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -302,6 +305,90 @@ class FailingDictionaryPersistenceReplayStore extends TrackingReplayStore {
 }
 
 describe("QWP endpoint failover", () => {
+  it("shares live health without sharing concurrent sweep cursors", async () => {
+    const tracker = createQwpFailoverHealthTracker("primary", ["secondary"]);
+    const attempts: string[] = [];
+    const createFactory = (walker: string) =>
+      createQwpFailoverConnectionFactory(
+        "primary",
+        ["secondary"],
+        async (endpoint) => {
+          attempts.push(`${walker}:${endpoint}`);
+          return new FakeConnection(String(endpoint));
+        },
+        { healthTracker: tracker },
+      );
+    const first = createFactory("first");
+    const second = createFactory("second");
+
+    await Promise.all([first(), second()]);
+    expect(attempts).toEqual(["first:primary", "second:primary"]);
+
+    const primary = await first();
+    primary.deprioritizeEndpoint!();
+    const sharedObservation = await second();
+    expect(sharedObservation.endpoint).toBe("secondary");
+  });
+
+  it("keeps only the newest same-zone success sticky across resets", () => {
+    const tracker = createQwpFailoverHealthTracker(
+      "older-local",
+      ["newer-local", "remote"],
+      { target: "replica", zone: "zone-a" },
+    );
+    tracker.recordZone(0, "zone-a");
+    tracker.recordSuccess(0);
+    tracker.recordZone(1, "zone-a");
+    tracker.recordSuccess(1);
+    tracker.recordZone(2, "zone-b");
+    tracker.recordSuccess(2);
+
+    tracker.forgetClassifications();
+    const cursor = tracker.newRoundCursor();
+    expect([
+      cursor.next(),
+      cursor.next(),
+      cursor.next(),
+      cursor.next(),
+    ]).toEqual([1, 0, 2, undefined]);
+  });
+
+  it("lets background walkers retain shared classifications across sweeps", async () => {
+    const run = async (resetClassificationsAfterExhaustion: boolean) => {
+      const attempts: string[] = [];
+      const factory = createQwpFailoverConnectionFactory(
+        "topology-reject",
+        ["transport-error"],
+        async (endpoint) => {
+          attempts.push(String(endpoint));
+          if (endpoint === "topology-reject") {
+            throw new QwpUpgradeError("wrong role", {
+              kind: QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED,
+              retryable: true,
+              tryNextEndpoint: true,
+              serverRole: "REPLICA",
+            });
+          }
+          throw new Error("unreachable");
+        },
+        { resetClassificationsAfterExhaustion },
+      );
+      await expect(factory()).rejects.toBeDefined();
+      attempts.length = 0;
+      await expect(factory()).rejects.toBeDefined();
+      return attempts;
+    };
+
+    await expect(run(true)).resolves.toEqual([
+      "topology-reject",
+      "transport-error",
+    ]);
+    await expect(run(false)).resolves.toEqual([
+      "transport-error",
+      "topology-reject",
+    ]);
+  });
+
   it("keeps a healthy endpoint sticky until a mid-stream failure", async () => {
     const attempts: string[] = [];
     let primaryAvailable = false;
