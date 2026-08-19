@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      fs-ext-extra-prebuilt:
+        specifier: 2.2.11
+        version: 2.2.11
       undici:
         specifier: ^7.8.0
         version: 7.8.0
@@ -1412,6 +1415,10 @@ packages:
   fs-constants@1.0.0:
     resolution: {integrity: sha512-y6OAwoSIf7FyjMIv94u+b5rdheZEjzR63GTyZJm5qh4Bi+2YgwLCcI/fPFZkL5PSixOt6ZNKm+w+Hfp/Bciwow==}
 
+  fs-ext-extra-prebuilt@2.2.11:
+    resolution: {integrity: sha512-uCD7z+RlNFvyYQ0rNK5FdhJVScuYrtNsY5PPFtpF1XcEAfHy06eYOu9vDNR4G1r/gq0BX9VyNU/2nhxy2tdQaA==}
+    engines: {node: '>= 8.0.0'}
+
   fsevents@2.3.2:
     resolution: {integrity: sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -1765,6 +1772,9 @@ packages:
 
   nan@2.22.0:
     resolution: {integrity: sha512-nbajikzWTMwsW+eSsNm3QwlOs7het9gGJU5dDZzRTQGk03vyBOauxgI4VakDzE0PtsGTmXPsXTbbjVhRwR5mpw==}
+
+  nan@2.28.0:
+    resolution: {integrity: sha512-fTsDz99OTq2sVePhGdp4qQhggZFtKr64ZNVyVajRKtMOkJxYekplBh577PiJB12v/D3s2E5cGtOI45LWp6rnLQ==}
 
   nanoid@3.3.8:
     resolution: {integrity: sha512-WNLf5Sd8oZxOm+TzppcYk8gVOgP+l58xNy58D0nbUnOxOWRWvlcCV4kUF7ltmI6PsrLl/BgKEyS4mqsGChFN0w==}
@@ -3811,6 +3821,10 @@ snapshots:
 
   fs-constants@1.0.0: {}
 
+  fs-ext-extra-prebuilt@2.2.11:
+    dependencies:
+      nan: 2.28.0
+
   fsevents@2.3.2:
     optional: true
 
@@ -4100,6 +4114,8 @@ snapshots:
 
   nan@2.22.0:
     optional: true
+
+  nan@2.28.0: {}
 
   nanoid@3.3.8: {}
 

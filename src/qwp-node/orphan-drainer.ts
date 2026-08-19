@@ -28,7 +28,8 @@ const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
 const DEFAULT_ERROR_INBOX_CAPACITY = 256;
 
 /** A terminal orphan-drain failure marker. Remove it to retry the slot. */
-export const QWP_ORPHAN_FAILED_SENTINEL = ".qwp.failed";
+/** Java-compatible marker that excludes a failed slot from automatic drain. */
+export const QWP_ORPHAN_FAILED_SENTINEL = ".failed";
 
 export const QWP_ORPHAN_DRAIN_EVENT_KIND = {
   DISCOVERED: "discovered",

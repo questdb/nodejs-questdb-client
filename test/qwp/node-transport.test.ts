@@ -491,7 +491,7 @@ describe("QWP Node transport", () => {
         quarantinedPath: quarantineDirectory,
       });
       expect(await readdir(quarantineDirectory)).toEqual(
-        expect.arrayContaining([record, ".qwp.failed"]),
+        expect.arrayContaining([record, ".failed"]),
       );
       expect(await assignedReplaySegments(directory)).toEqual([]);
     } finally {
@@ -546,7 +546,10 @@ describe("QWP Node transport", () => {
       await session.close();
 
       expect(quarantined).toEqual([]);
-      expect(await readdir(rootDirectory)).toEqual(["sender-0"]);
+      expect((await readdir(rootDirectory)).sort()).toEqual([
+        ".slot-locks",
+        "sender-0",
+      ]);
       const verify = new QwpNodeFileReplayStore({ directory });
       await expect(verify.load()).resolves.toHaveLength(1);
       await expect(verify.loadSymbolDictionary()).resolves.toEqual(["ETH-USD"]);

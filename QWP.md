@@ -209,9 +209,14 @@ the surviving frames.
 The journal takes an exclusive lock when it is loaded and holds it until the sender
 or session closes. A second live process using the same directory fails with
 `QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents.
-Locks left by a terminated process on the same host are recovered automatically;
-locks owned by a live local process, another host, or an unidentifiable owner fail
-closed.
+The stable `.lock` file is protected by `flock` on Unix and `LockFileEx` on Windows,
+with the holder PID recorded in `.lock.pid` for diagnostics. These are the same files
+and native lock primitives used by the Java client, so Java and Node processes cannot
+simultaneously own one slot. The kernel releases the lock when a process terminates;
+the lock and PID files deliberately remain so their inode is never replaced beneath a
+live owner, and the next holder refreshes the PID sidecar. Short-lived locks under the
+shared parent directory's `.slot-locks` child also match Java and serialize orphan
+adoption with close/rename/recreate quarantine transitions.
 
 New journals use the cross-client SFA persistence layout. Fixed-size
 `sf-<generation>.sfa` files have the Java/Rust 24-byte `SF01` header and
@@ -237,7 +242,7 @@ before replay. A corrupt or stale dictionary sidecar is replaced when those comm
 frames independently reconstruct a complete dense dictionary from ID zero. If the
 frame journal is structurally corrupt, or the surviving deltas contain a dictionary
 gap or conflict that cannot be reconstructed, the foreground slot is renamed to
-`<slot>.unreplayable-N`, marked with `.qwp.failed`, and preserved for inspection. The
+`<slot>.unreplayable-N`, marked with `.failed`, and preserved for inspection. The
 sender then starts once with a clean slot at the configured path.
 `onRecoveryQuarantine` receives the original and quarantine paths plus the terminal
 cause and a typed `senderError`. The shared `onSenderError` callback receives the same
@@ -254,7 +259,7 @@ adopts record-bearing slots left by failed producers. Adoption is lock-protected
 uses an independent QWP connection per slot, bounded by `maxBackgroundDrainers` (4 by
 default). The scanner runs immediately and then every 30 seconds; set
 `orphanScanIntervalMs: 0` for a startup-only scan. Terminal recovery failures create
-`.qwp.failed` in the slot so a corrupt or permanently rejected head cannot cause a hot
+`.failed` in the slot so a corrupt or permanently rejected head cannot cause a hot
 retry loop. After inspection or repair, call `retryQwpNodeOrphanSlot(slotDirectory)`
 to make it eligible again. `onOrphanDrainEvent` reports discovery, drain, lock
 contention, quarantine, scanner failures, durable-ACK capability gaps, and transient
@@ -267,7 +272,7 @@ endpoint lacks durable-ACK support. Asynchronous foreground startup and steady-s
 store-and-forward reconnects retain their records and retry through rolling upgrades.
 An orphan slot retries a consecutive durable-ACK capability-gap episode until either
 16 connection sweeps or the configured reconnect `maxDurationMs` is reached, then it
-is quarantined behind `.qwp.failed` (`maxDurationMs: 0` disables only the time half of
+is quarantined behind `.failed` (`maxDurationMs: 0` disables only the time half of
 the budget). A transport outage or an all-replica window resets both halves of this
 orphan budget; neither transient condition can itself quarantine persisted data. The
 `durable-ack-unavailable`,

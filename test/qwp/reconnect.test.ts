@@ -3,14 +3,16 @@ import {
   mkdtemp,
   open,
   readdir,
+  readFile,
   rm,
   stat,
   truncate,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { flock } from "fs-ext-extra-prebuilt";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeIngress,
@@ -69,6 +71,21 @@ import {
 import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
 import { createQwpEgressFailoverConnectionFactory } from "../../src/qwp/internal/egress-routing";
 import { createQwpFailoverConnectionFactory } from "../../src/qwp/internal/failover";
+
+function nativeFlock(fd: number, operation: "exnb" | "un"): Promise<void> {
+  return new Promise((resolve, reject) => {
+    flock(fd, operation, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function expectOnlyJavaSlotLockMetadata(
+  directory: string,
+): Promise<void> {
+  expect((await readdir(directory)).sort()).toEqual([".lock", ".lock.pid"]);
+}
 
 function ingressResponse(
   status: number,
@@ -2021,7 +2038,7 @@ describe("QWP ingress reconnect and replay", () => {
       verify.appendSymbolDictionary(0, ["BTC-USD"]),
     ).resolves.toBeUndefined();
     await verify.close();
-    expect(await readdir(directory)).toEqual([]);
+    await expectOnlyJavaSlotLockMetadata(directory);
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -3117,7 +3134,7 @@ describe("QWP Node file replay store", () => {
       ]);
       expect(await readdir(directory)).toContain(".symbol-dict");
       await first.close();
-      expect(await readdir(directory)).toEqual([]);
+      await expectOnlyJavaSlotLockMetadata(directory);
 
       const second = new QwpNodeFileReplayStore({ directory, durability });
       await expect(second.load()).resolves.toEqual([]);
@@ -3126,7 +3143,7 @@ describe("QWP Node file replay store", () => {
         second.appendSymbolDictionary(0, ["BTC-USD"]),
       ).resolves.toBeUndefined();
       await second.close();
-      expect(await readdir(directory)).toEqual([]);
+      await expectOnlyJavaSlotLockMetadata(directory);
     },
   );
 
@@ -3147,7 +3164,7 @@ describe("QWP Node file replay store", () => {
     await expect(second.loadSymbolDictionary()).resolves.toEqual(["ETH-USD"]);
     await second.acknowledgeThrough(1n);
     await second.close();
-    expect(await readdir(directory)).toEqual([]);
+    await expectOnlyJavaSlotLockMetadata(directory);
   });
 
   it("holds an exclusive directory lock for the store lifetime", async () => {
@@ -3160,7 +3177,6 @@ describe("QWP Node file replay store", () => {
       name: "QwpReplayStoreLockedError",
       directory,
       holderPid: process.pid,
-      holderHostname: hostname(),
     } satisfies Partial<QwpReplayStoreLockedError>);
 
     await first.append({ frameSequence: 0n, payload: Uint8Array.of(7) });
@@ -3171,20 +3187,10 @@ describe("QWP Node file replay store", () => {
     await second.close();
   });
 
-  it("recovers a lock left by a terminated local process", async () => {
+  it("arbitrates acquisition over stale Java lock metadata", async () => {
     const directory = await trackedDirectory();
-    const lockDirectory = join(directory, ".qwp.lock");
-    await mkdir(lockDirectory);
-    await writeFile(
-      join(lockDirectory, "owner.json"),
-      JSON.stringify({
-        version: 1,
-        token: "abandoned",
-        pid: 2_147_483_647,
-        hostname: hostname(),
-        createdAtMs: 0,
-      }),
-    );
+    await writeFile(join(directory, ".lock"), "");
+    await writeFile(join(directory, ".lock.pid"), "2147483647\n");
 
     const stores = [
       new QwpNodeFileReplayStore({ directory }),
@@ -3202,15 +3208,68 @@ describe("QWP Node file replay store", () => {
       status: "rejected",
       reason: { name: "QwpReplayStoreLockedError" },
     });
-    expect(
-      (await readdir(directory)).filter((name) =>
-        name.startsWith(".qwp.lock.abandoned-"),
-      ),
-    ).toEqual([]);
     await stores[winner].close();
     await expect(stores[loser].load()).resolves.toEqual([]);
     await stores[loser].close();
-    expect(await readdir(directory)).toEqual([]);
+    await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("contends with a Java-compatible native advisory lock", async () => {
+    const directory = await trackedDirectory();
+    const lockPath = join(directory, ".lock");
+    const lockHandle = await open(lockPath, "a+");
+    await nativeFlock(lockHandle.fd, "exnb");
+    await writeFile(join(directory, ".lock.pid"), "4242\n");
+
+    const store = new QwpNodeFileReplayStore({ directory });
+    await expect(store.load()).rejects.toMatchObject({
+      name: "QwpReplayStoreLockedError",
+      directory,
+      holderPid: 4242,
+    } satisfies Partial<QwpReplayStoreLockedError>);
+
+    await nativeFlock(lockHandle.fd, "un");
+    await lockHandle.close();
+    await expect(store.load()).resolves.toEqual([]);
+    expect(await readFile(join(directory, ".lock.pid"), "utf8")).toBe(
+      `${process.pid}\n`,
+    );
+    await store.close();
+  });
+
+  it("contends with Java's parent-anchored logical slot lock", async () => {
+    const rootDirectory = await trackedDirectory();
+    const directory = join(rootDirectory, "sender-0");
+    const logicalLockDirectory = join(rootDirectory, ".slot-locks");
+    await mkdir(directory);
+    await mkdir(logicalLockDirectory);
+    const lockPath = join(logicalLockDirectory, "sender-0.lock");
+    const lockHandle = await open(lockPath, "a+");
+    await nativeFlock(lockHandle.fd, "exnb");
+    await writeFile(join(logicalLockDirectory, "sender-0.lock.pid"), "9090\n");
+
+    const store = new QwpNodeFileReplayStore({ directory });
+    await expect(store.load()).rejects.toMatchObject({
+      name: "QwpReplayStoreLockedError",
+      directory,
+      holderPid: 9090,
+    } satisfies Partial<QwpReplayStoreLockedError>);
+
+    await nativeFlock(lockHandle.fd, "un");
+    await lockHandle.close();
+    await expect(store.load()).resolves.toEqual([]);
+    await store.close();
+  });
+
+  it("retires logical lock files after a slot is fully drained", async () => {
+    const rootDirectory = await trackedDirectory();
+    const directory = join(rootDirectory, "sender-0");
+    const store = new QwpNodeFileReplayStore({ directory });
+    await store.load();
+    await store.close();
+
+    expect(await readdir(join(rootDirectory, ".slot-locks"))).toEqual([]);
+    await expectOnlyJavaSlotLockMetadata(directory);
   });
 
   it("recovers a persisted dictionary and truncates a torn append tail", async () => {
@@ -3254,7 +3313,7 @@ describe("QWP Node file replay store", () => {
     await expect(
       store.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) }),
     ).rejects.toBeInstanceOf(QwpReplayStoreFullError);
-    expect(await readdir(directory)).toEqual([".qwp.lock"]);
+    await expectOnlyJavaSlotLockMetadata(directory);
     await store.close();
   });
 
@@ -3337,7 +3396,10 @@ describe("QWP Node file replay store", () => {
     await expect(store.close()).rejects.toBeInstanceOf(
       QwpReplayStoreCheckpointError,
     );
-    expect(await readdir(directory)).not.toContain(".qwp.lock");
+    const lockHandle = await open(join(directory, ".lock"), "r+");
+    await nativeFlock(lockHandle.fd, "exnb");
+    await nativeFlock(lockHandle.fd, "un");
+    await lockHandle.close();
   });
 
   it("waits for ACK trimming without blocking the acknowledgement queue", async () => {

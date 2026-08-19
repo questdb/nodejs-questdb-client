@@ -125,7 +125,7 @@ Set `drainOrphans: true` when sibling journal directories share a dedicated pare
 the Node client scans and drains slots left by failed producer processes with bounded
 concurrency. Pooled QWP clients recover out-of-range `sender-N` slots automatically,
 including leftovers after `senderPoolMax` is reduced. Terminally bad slots are marked
-`.qwp.failed` for inspection and can be re-enabled with
+`.failed` for inspection and can be re-enabled with
 `retryQwpNodeOrphanSlot()`. This persistent mode is Node-only; browser senders
 continue to default to ACK waiting.
 
