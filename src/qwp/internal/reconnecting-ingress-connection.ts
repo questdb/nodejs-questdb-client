@@ -23,6 +23,7 @@ import {
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpIngressReplayRecord,
+  QwpIngressReplayReference,
   QwpIngressReplayStore,
   QwpIngressTransportMetrics,
   QwpInitialConnectMode,
@@ -100,13 +101,21 @@ class QwpDurableAckPersistentFailureError extends Error {
   }
 }
 
-interface ReplayFrame extends QwpIngressReplayRecord {
+interface ReplayFrame extends QwpIngressReplayReference {
+  payload?: Uint8Array;
   readonly clientSequence?: bigint;
   ackDelivered: boolean;
   transmitted: boolean;
   durableTargets?: Map<string, bigint>;
   dictionaryCatchup?: boolean;
 }
+
+type LoadedReplayRecord = QwpIngressReplayReference & {
+  readonly payload?: Uint8Array;
+};
+
+type LazyReplayStore = QwpIngressReplayStore &
+  Required<Pick<QwpIngressReplayStore, "loadReferences" | "readPayload">>;
 
 interface RecoveredDiscardTail {
   readonly startSequence: bigint;
@@ -312,6 +321,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly durableWatermarks = new Map<string, bigint>();
   private readonly symbolDictionary: string[];
   private readonly store: QwpIngressReplayStore;
+  private readonly lazyReplayStore?: LazyReplayStore;
   private readonly maxAttempts: number;
   private readonly initialBackoffMs: number;
   private readonly maxBackoffMs: number;
@@ -373,7 +383,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     private readonly factory: QwpConnectionFactory,
     private readonly reconnectOptions: QwpReconnectOptions,
     store: QwpIngressReplayStore,
-    records: readonly QwpIngressReplayRecord[],
+    records: readonly LoadedReplayRecord[],
     symbolDictionary: readonly string[],
     recoveredDiscardTail: RecoveredDiscardTail | undefined,
     localMaxBatchSizeBytes?: number,
@@ -386,6 +396,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     onSenderError?: (error: QwpSenderError) => void,
   ) {
     this.store = store;
+    this.lazyReplayStore = isLazyReplayStore(store) ? store : undefined;
     this.symbolDictionary = [...symbolDictionary];
     this.deltaSymbolDictionaryEnabled =
       store.loadSymbolDictionary !== undefined &&
@@ -435,9 +446,20 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           "QWP replay store records must have strictly increasing non-negative sequences",
         );
       }
+      if (
+        !Number.isSafeInteger(record.payloadLength) ||
+        record.payloadLength < 0 ||
+        (record.payload !== undefined &&
+          record.payload.byteLength !== record.payloadLength)
+      ) {
+        throw new Error(
+          `QWP replay store returned an invalid payload length [frameSequence=${record.frameSequence}, payloadLength=${record.payloadLength}]`,
+        );
+      }
       const frame: ReplayFrame = {
         frameSequence: record.frameSequence,
-        payload: record.payload.slice(),
+        payloadLength: record.payloadLength,
+        payload: record.payload?.slice(),
         ackDelivered: true,
         transmitted: true,
       };
@@ -478,7 +500,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       );
     let connection: QwpReconnectingIngressConnection | undefined;
     try {
-      const records = await store.load();
+      const lazyStore = isLazyReplayStore(store) ? store : undefined;
+      const records: readonly LoadedReplayRecord[] = lazyStore
+        ? await lazyStore.loadReferences()
+        : (await store.load()).map((record) => ({
+            ...record,
+            payloadLength: record.payload.byteLength,
+          }));
       const sortedRecords = [...records].sort((a, b) =>
         a.frameSequence < b.frameSequence
           ? -1
@@ -496,9 +524,17 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           persistedSymbolDictionaryFailure = error;
         }
       }
-      const recoveredDiscardTail = analyzeRecoveredDiscardTail(sortedRecords);
+      const loadPayload = (record: LoadedReplayRecord) =>
+        record.payload
+          ? Promise.resolve(record.payload)
+          : lazyStore!.readPayload(record.frameSequence);
+      const recoveredDiscardTail = await analyzeRecoveredDiscardTail(
+        sortedRecords,
+        loadPayload,
+      );
       const symbolDictionary = await recoverSymbolDictionary(
         sortedRecords,
+        loadPayload,
         persistedSymbolDictionary,
         recoveredDiscardTail,
         store,
@@ -587,7 +623,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   getIngressMetrics(): QwpIngressTransportMetrics {
     let pendingReplayBytes = 0;
     for (const frame of this.frames.values()) {
-      pendingReplayBytes += frame.payload.byteLength;
+      pendingReplayBytes += frame.payloadLength;
     }
     const memoryMetrics =
       this.store instanceof QwpMemoryReplayStore
@@ -641,12 +677,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       frameSequence: this.nextFrameSequence++,
       clientSequence: this.nextClientSequence++,
       payload: payload.slice(),
+      payloadLength: payload.byteLength,
       ackDelivered: false,
       transmitted: false,
     };
     const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
-      const delta = readSymbolDictionaryDelta(frame.payload);
+      const delta = readSymbolDictionaryDelta(frame.payload!);
       if (delta) {
         if (!this.deltaSymbolDictionaryEnabled) {
           throw new QwpReplayDictionaryError(
@@ -655,10 +692,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         }
         await this.persistSymbolDictionaryDelta(delta);
       }
-      await this.store.append(frame);
+      await this.store.append({
+        frameSequence: frame.frameSequence,
+        payload: frame.payload!,
+      });
       this.frames.set(frame.frameSequence, frame);
       this.publishedFrameSequence = frame.frameSequence;
       if (this.backgroundStoreAndForward) {
+        if (this.lazyReplayStore) frame.payload = undefined;
         this.enqueueDrain(frame);
         return;
       }
@@ -1002,6 +1043,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       const frame: ReplayFrame = {
         frameSequence: -1n,
         payload,
+        payloadLength: payload.byteLength,
         ackDelivered: true,
         transmitted: true,
         dictionaryCatchup: true,
@@ -1013,13 +1055,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (!frame.transmitted) continue;
       if (this.isRecoveredDiscardFrame(frame.frameSequence)) continue;
       frame.durableTargets = undefined;
-      if (cap !== undefined && frame.payload.byteLength > cap) {
+      if (cap !== undefined && frame.payloadLength > cap) {
         throw new RangeError(
-          `persisted QWP frame exceeds reconnect target batch cap [size=${frame.payload.byteLength}, max=${cap}]`,
+          `persisted QWP frame exceeds reconnect target batch cap [size=${frame.payloadLength}, max=${cap}]`,
         );
       }
+      const payload = await this.readFramePayload(frame);
       replayed.push(frame);
-      await this.sendPhysical(connection, frame.payload, true);
+      await this.sendPhysical(connection, payload, true);
     }
     return replayed;
   }
@@ -1497,18 +1540,39 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       connection.handshake.maxBatchSizeBytes,
       this.localMaxBatchSizeBytes,
     );
-    if (cap !== undefined && frame.payload.byteLength > cap) {
+    if (cap !== undefined && frame.payloadLength > cap) {
       throw new RangeError(
-        `QWP frame exceeds reconnect target batch cap [size=${frame.payload.byteLength}, max=${cap}]`,
+        `QWP frame exceeds reconnect target batch cap [size=${frame.payloadLength}, max=${cap}]`,
       );
     }
+    const payload = await this.readFramePayload(frame);
     frame.transmitted = true;
     this.wireFrames.push(frame);
     try {
-      await this.sendPhysical(connection, frame.payload, false);
+      await this.sendPhysical(connection, payload, false);
+      if (this.lazyReplayStore) frame.payload = undefined;
     } catch (error) {
       await this.requestReconnect(error, connection);
+      if (this.lazyReplayStore) frame.payload = undefined;
     }
+  }
+
+  private async readFramePayload(frame: ReplayFrame): Promise<Uint8Array> {
+    let payload = frame.payload;
+    if (!payload) {
+      if (!this.lazyReplayStore) {
+        throw new QwpProtocolError(
+          `QWP replay payload is unavailable [frameSequence=${frame.frameSequence}]`,
+        );
+      }
+      payload = await this.lazyReplayStore.readPayload(frame.frameSequence);
+    }
+    if (payload.byteLength !== frame.payloadLength) {
+      throw new QwpProtocolError(
+        `persisted QWP frame length changed [frameSequence=${frame.frameSequence}, expected=${frame.payloadLength}, received=${payload.byteLength}]`,
+      );
+    }
+    return payload;
   }
 
   private async sendPhysical(
@@ -1670,6 +1734,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 }
 
+function isLazyReplayStore(
+  store: QwpIngressReplayStore,
+): store is LazyReplayStore {
+  return (
+    typeof store.loadReferences === "function" &&
+    typeof store.readPayload === "function"
+  );
+}
+
 function readSymbolDictionaryDelta(payload: Uint8Array) {
   // Preserve support for opaque/custom payloads used with the low-level API.
   if (
@@ -1681,12 +1754,13 @@ function readSymbolDictionaryDelta(payload: Uint8Array) {
   return decodeQwpIngressSymbolDictionaryDelta(payload);
 }
 
-function analyzeRecoveredDiscardTail(
-  records: readonly QwpIngressReplayRecord[],
-): RecoveredDiscardTail | undefined {
+async function analyzeRecoveredDiscardTail(
+  records: readonly LoadedReplayRecord[],
+  loadPayload: (record: LoadedReplayRecord) => Promise<Uint8Array>,
+): Promise<RecoveredDiscardTail | undefined> {
   let boundaryIndex = -1;
   for (let index = 0; index < records.length; index++) {
-    if (isRecoveredCommitBarrier(records[index].payload)) {
+    if (isRecoveredCommitBarrier(await loadPayload(records[index]))) {
       boundaryIndex = index;
     }
   }
@@ -1721,7 +1795,8 @@ function isRecoveredCommitBarrier(payload: Uint8Array): boolean {
 }
 
 async function recoverSymbolDictionary(
-  records: readonly QwpIngressReplayRecord[],
+  records: readonly LoadedReplayRecord[],
+  loadPayload: (record: LoadedReplayRecord) => Promise<Uint8Array>,
   persistedDictionary: readonly string[],
   discardTail: RecoveredDiscardTail | undefined,
   store: QwpIngressReplayStore,
@@ -1733,8 +1808,9 @@ async function recoverSymbolDictionary(
   let recoveredFromPersisted = true;
   let dictionary: string[];
   try {
-    dictionary = reconstructSymbolDictionary(
+    dictionary = await reconstructSymbolDictionary(
       records,
+      loadPayload,
       persistedDictionary,
       discardTail,
       hasDictionaryPersistence,
@@ -1747,8 +1823,9 @@ async function recoverSymbolDictionary(
     // A structurally valid sidecar can still belong to an older dictionary
     // generation. Only discard it when the committed frames independently
     // reconstruct a complete dense dictionary from ID zero.
-    dictionary = reconstructSymbolDictionary(
+    dictionary = await reconstructSymbolDictionary(
       records,
+      loadPayload,
       [],
       discardTail,
       hasDictionaryPersistence,
@@ -1783,13 +1860,14 @@ async function recoverSymbolDictionary(
   return dictionary;
 }
 
-function reconstructSymbolDictionary(
-  records: readonly QwpIngressReplayRecord[],
+async function reconstructSymbolDictionary(
+  records: readonly LoadedReplayRecord[],
+  loadPayload: (record: LoadedReplayRecord) => Promise<Uint8Array>,
   baseline: readonly string[],
   discardTail: RecoveredDiscardTail | undefined,
   hasDictionaryPersistence: boolean,
   recoveryCause?: unknown,
-): string[] {
+): Promise<string[]> {
   const dictionary = [...baseline];
   const dictionaryIds = new Map(dictionary.map((entry, id) => [entry, id]));
   for (const record of records) {
@@ -1803,7 +1881,7 @@ function reconstructSymbolDictionary(
     }
     let delta: ReturnType<typeof readSymbolDictionaryDelta>;
     try {
-      delta = readSymbolDictionaryDelta(record.payload);
+      delta = readSymbolDictionaryDelta(await loadPayload(record));
     } catch (error) {
       throw new QwpUnrecoverableReplayDictionaryError(
         `persisted QWP frame contains an invalid symbol dictionary delta [sequence=${record.frameSequence}]`,

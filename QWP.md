@@ -179,7 +179,8 @@ The connect-string key
 
 `durability` controls the local persistence barrier:
 
-- `"append"` (the default) fsyncs every positional write to the open active segment;
+- `"append"` (the default) issues a data-only durability barrier after every vectored
+  positional frame write; manifest and directory metadata retain full barriers;
   hot-spare creation and activation are durable before publication resolves.
 - `"periodic"` checkpoints segment files, symbol metadata, and directory changes in the
   background. The default interval is 5 seconds, and `close()` performs a final
@@ -234,10 +235,19 @@ same normalized bytes.
 
 Each segment reserves `maxSegmentBytes` of target payload data (4 MiB by default)
 plus one frame header so a maximum-sized frame fits. The active segment and one
-preallocated temporary hot spare keep open file handles; rotation activates the
-spare and provisions its replacement away from the normal append path. ACK trimming
-advances the durable manifest head before unlinking segments and runs in bounded
-background batches.
+pre-sized temporary hot spare keep open file handles; rotation activates the spare.
+A process-wide, unreferenced worker provisions replacements, checkpoints dirty paths,
+and performs ACK-driven unlink and directory barriers. ACK trimming advances the
+durable manifest head before handing removal to that worker and runs in bounded
+background batches. Frame append uses a vectored header-plus-payload write, avoiding
+an additional payload-sized journal buffer.
+
+Recovery validates segment CRCs with a reusable 64 KiB scanner and indexes only frame
+sequence, file offset, and payload length. The reconnect loop reads one payload from
+its retained segment handle when it is ready to send it; it does not materialize the
+complete persisted backlog. Fresh background store-and-forward frames likewise drop
+their resident payload after journal publication and are read back on demand. Memory
+therefore scales with the active encoding/send window rather than total disk backlog.
 
 Recovery also handles the canonical creation crash window in which a valid SFA
 segment becomes durable before its manifest.

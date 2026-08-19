@@ -126,8 +126,10 @@ equivalent is `initial_connect_retry`, used together with the store-and-forward
 options in `extraOptions.qwp`.
 Persistent frames are coalesced into fixed-size 4 MiB `.sfa` segments by default,
 using the shared Java/Rust/Python SFA envelope, manifest, ACK watermark, and symbol
-dictionary formats. The active segment and a preallocated temporary hot spare keep
-open handles.
+dictionary formats. The active segment and a pre-sized temporary hot spare keep open
+handles. A shared worker provisions spares, checkpoints files, and trims acknowledged
+segments. Recovery keeps only frame offsets in memory and reads payloads from disk as
+they are sent, so a large persisted backlog is not duplicated on the JavaScript heap.
 Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
 the Node client scans and drains slots left by failed producer processes with bounded
 concurrency. Pooled QWP clients recover idle in-range and out-of-range `sender-N`

@@ -185,9 +185,22 @@ export interface QwpIngressReplayRecord {
   readonly payload: Uint8Array;
 }
 
+/** Lightweight durable-frame descriptor used by disk-backed replay stores. */
+export interface QwpIngressReplayReference {
+  readonly frameSequence: bigint;
+  readonly payloadLength: number;
+}
+
 /** Browser-safe abstraction; Node supplies a persistent filesystem implementation. */
 export interface QwpIngressReplayStore {
   load(): Promise<readonly QwpIngressReplayRecord[]>;
+  /**
+   * Opens and validates the journal without materializing every payload.
+   * Implementations that provide this must also provide `readPayload`.
+   */
+  loadReferences?(): Promise<readonly QwpIngressReplayReference[]>;
+  /** Reads one previously loaded durable payload on demand. */
+  readPayload?(frameSequence: bigint): Promise<Uint8Array>;
   append(record: QwpIngressReplayRecord): Promise<void>;
   acknowledgeThrough(frameSequence: bigint): Promise<void>;
   /** Loads the durable, dense symbol prefix used by persisted delta frames. */

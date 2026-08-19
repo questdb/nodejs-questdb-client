@@ -49,6 +49,7 @@ import {
   QwpIngressSession,
   QwpIngressSessionClosedError,
   QwpIngressReplayRecord,
+  QwpIngressReplayReference,
   QwpIngressReplayStore,
   QwpHandshakeMetadata,
   QwpMemoryReplayAppendTimeoutError,
@@ -259,6 +260,30 @@ class TrackingReplayStore implements QwpIngressReplayStore {
 
   async close(): Promise<void> {
     this.closeCount++;
+  }
+}
+
+class LazyTrackingReplayStore extends TrackingReplayStore {
+  readonly reads: bigint[] = [];
+  loadCalls = 0;
+
+  override async load(): Promise<readonly QwpIngressReplayRecord[]> {
+    this.loadCalls++;
+    throw new Error("eager replay load must not be used");
+  }
+
+  async loadReferences(): Promise<readonly QwpIngressReplayReference[]> {
+    return Array.from(this.records, ([frameSequence, payload]) => ({
+      frameSequence,
+      payloadLength: payload.byteLength,
+    }));
+  }
+
+  async readPayload(frameSequence: bigint): Promise<Uint8Array> {
+    this.reads.push(frameSequence);
+    const payload = this.records.get(frameSequence);
+    if (!payload) throw new Error(`missing replay frame ${frameSequence}`);
+    return payload.slice();
   }
 }
 
@@ -960,6 +985,51 @@ describe("QWP ingress reconnect and replay", () => {
       pendingReplayFrames: 0,
       totalFramesSent: 2,
     });
+    await session.close();
+  });
+
+  it("drops background payloads after persistence and reads them lazily for drain", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new LazyTrackingReplayStore();
+    let releaseOnline!: () => void;
+    const online = new Promise<void>((resolve) => {
+      releaseOnline = resolve;
+    });
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        if (factoryCalls++ === 0) {
+          throw new QwpUpgradeError("offline", {
+            kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+            retryable: true,
+            tryNextEndpoint: true,
+          });
+        }
+        await online;
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(1));
+    await session.publishFrame(Uint8Array.of(2));
+    expect(replayStore.loadCalls).toBe(0);
+    expect(replayStore.reads).toEqual([]);
+
+    releaseOnline();
+    await vi.waitFor(() =>
+      expect(connection.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]),
+    );
+    expect(replayStore.reads).toEqual([0n, 1n]);
     await session.close();
   });
 
@@ -3204,6 +3274,29 @@ describe("QWP Node file replay store", () => {
       { frameSequence: 1n, payload: Uint8Array.of(3, 4) },
     ]);
     await third.close();
+  });
+
+  it("indexes recovered frames without materializing their payloads", async () => {
+    const directory = await trackedDirectory();
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({
+      frameSequence: 0n,
+      payload: Uint8Array.of(1, 2, 3),
+    });
+    await seed.append({ frameSequence: 1n, payload: Uint8Array.of(4) });
+    await seed.close();
+
+    const recovered = new QwpNodeFileReplayStore({ directory });
+    await expect(recovered.loadReferences()).resolves.toEqual([
+      { frameSequence: 0n, payloadLength: 3 },
+      { frameSequence: 1n, payloadLength: 1 },
+    ]);
+    await expect(recovered.readPayload(1n)).resolves.toEqual(Uint8Array.of(4));
+    await expect(recovered.readPayload(2n)).rejects.toThrow(
+      /frame is not available/,
+    );
+    await recovered.close();
   });
 
   it("detects a replay gap immediately after a persisted ACK watermark", async () => {
