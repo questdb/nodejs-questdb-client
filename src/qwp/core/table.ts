@@ -4,7 +4,11 @@ import {
   QWP_MAX_TABLE_NAME_LENGTH,
   QwpColumnType,
 } from "./constants";
-import { utf8Length } from "./bytes";
+import {
+  qwpColumnNameKey,
+  validateQwpColumnName,
+  validateQwpTableName,
+} from "./identifiers";
 
 export interface QwpSymbolValue {
   id: number;
@@ -41,10 +45,7 @@ export class QwpTableBuffer {
     if (!Number.isSafeInteger(maxNameLength) || maxNameLength < 1) {
       throw new RangeError("maxNameLength must be a positive safe integer");
     }
-    if (!name) throw new Error("table name cannot be empty");
-    if (utf8Length(name) > maxNameLength) {
-      throw new Error(`table name too long [maxLength=${maxNameLength}]`);
-    }
+    validateQwpTableName(name, maxNameLength);
     this.name = name;
     this.maxNameLength = maxNameLength;
   }
@@ -70,7 +71,8 @@ export class QwpTableBuffer {
       throw new Error("column name cannot be empty");
     }
 
-    const existing = this.columnsByName.get(name);
+    const nameKey = qwpColumnNameKey(name);
+    const existing = this.columnsByName.get(nameKey);
     if (existing) {
       if (existing.type !== type) {
         throw new Error(
@@ -83,9 +85,7 @@ export class QwpTableBuffer {
       return existing;
     }
 
-    if (utf8Length(name) > this.maxNameLength) {
-      throw new Error(`column name too long [maxLength=${this.maxNameLength}]`);
-    }
+    if (!designatedTimestamp) validateQwpColumnName(name, this.maxNameLength);
     if (this.columnList.length >= QWP_MAX_COLUMNS_PER_TABLE) {
       throw new Error(
         `column count exceeds maximum ${QWP_MAX_COLUMNS_PER_TABLE}`,
@@ -102,7 +102,7 @@ export class QwpTableBuffer {
     column.nulls.push(false);
     column.size++;
     this.columnList.push(column);
-    this.columnsByName.set(name, column);
+    this.columnsByName.set(nameKey, column);
     return column;
   }
 
@@ -168,7 +168,7 @@ export class QwpTableBuffer {
     for (let index = this.columnList.length - 1; index >= 0; index--) {
       const column = this.columnList[index];
       if (this.rows === 0 && column.size === 0) {
-        this.columnsByName.delete(column.name);
+        this.columnsByName.delete(qwpColumnNameKey(column.name));
         this.columnList.splice(index, 1);
       }
     }
@@ -213,7 +213,7 @@ export class QwpTableBuffer {
         decimalScale: column.decimalScale,
       };
       result.columnList.push(sliced);
-      result.columnsByName.set(sliced.name, sliced);
+      result.columnsByName.set(qwpColumnNameKey(sliced.name), sliced);
     }
     return result;
   }

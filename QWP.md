@@ -1060,6 +1060,8 @@ Review these behavioral differences before rollout:
   store-and-forward it defaults to local durable publication; set `awaitServerAck` to
   restore ACK waiting, or `awaitDurableAck` to wait through durable upload.
 - QWP symbol dictionaries are connection-scoped and automatic.
+- Table and column identifiers are rejected locally using the Java client's rules;
+  column identity is case-insensitive and preserves the spelling first declared.
 - Large batches are split to the negotiated WebSocket payload cap.
 - QWP transactional auto-flush is per table and must be explicitly committed.
 - Browser and Node QWP ingress reconnect by default with in-memory, at-least-once

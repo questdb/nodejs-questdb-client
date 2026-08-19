@@ -197,6 +197,68 @@ describe("QWP frame envelope", () => {
 });
 
 describe("QWP ingress codec", () => {
+  it("applies Java-compatible table and column identifier rules", () => {
+    for (const name of [
+      "",
+      " leading",
+      "trailing ",
+      ".hidden",
+      "trailing.",
+      "double..dot",
+      "bad/name",
+      "bad\nname",
+      "bad\ufeffname",
+    ]) {
+      expect(() => new QwpTableBuffer(name)).toThrow(
+        /table name (cannot be empty|contains illegal characters)/,
+      );
+    }
+    for (const name of [
+      "bad.column",
+      "bad-column",
+      "bad/name",
+      "bad\tname",
+      "bad\u007fname",
+    ]) {
+      const table = new QwpTableBuffer("valid table.csv");
+      expect(() => table.getOrCreateColumn(name, QWP_COLUMN_TYPE.LONG)).toThrow(
+        /column name contains illegal characters/,
+      );
+    }
+
+    expect(() => new QwpTableBuffer("😀", 2)).not.toThrow();
+    expect(() => new QwpTableBuffer("😀", 1)).toThrow(
+      /table name too long.*maxLength=1/,
+    );
+    const unicode = new QwpTableBuffer("t", 2);
+    expect(() =>
+      unicode.getOrCreateColumn("😀", QWP_COLUMN_TYPE.LONG),
+    ).not.toThrow();
+  });
+
+  it("tracks columns case-insensitively and preserves first spelling", () => {
+    const table = new QwpTableBuffer("events");
+    const first = table.getOrCreateColumn("Value", QWP_COLUMN_TYPE.LONG)!;
+    first.values.push(1n);
+    expect(table.getOrCreateColumn("VALUE", QWP_COLUMN_TYPE.LONG)).toBeNull();
+    table.nextRow();
+
+    const second = table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!;
+    expect(second).toBe(first);
+    second.values.push(2n);
+    table.nextRow();
+
+    expect(table.columns).toHaveLength(1);
+    expect(table.columns[0]).toMatchObject({
+      name: "Value",
+      values: [1n, 2n],
+      nulls: [false, false],
+    });
+    expect(() =>
+      table.getOrCreateColumn("vAlUe", QWP_COLUMN_TYPE.DOUBLE),
+    ).toThrow(/column type mismatch/);
+  });
+
   it("slices compacted table rows without losing null positions", () => {
     const table = new QwpTableBuffer("events");
     table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(10n);

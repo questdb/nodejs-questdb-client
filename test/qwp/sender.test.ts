@@ -207,7 +207,7 @@ describe("QWP high-level sender", () => {
     ).toThrow(/closeFlushTimeoutMs must be a non-negative safe integer/);
   });
 
-  it("applies a configurable UTF-8 table and column name limit", async () => {
+  it("applies a configurable Java-compatible identifier length", async () => {
     const session = new RecordingSession();
     expect(
       () => new QwpSender(async () => session, { maxNameLength: 15 }),
@@ -230,6 +230,39 @@ describe("QWP high-level sender", () => {
     await sender.flush();
     expect(session.sends.at(-1)?.tables[0].name).toHaveLength(128);
     expect(session.sends.at(-1)?.tables[0].columns[0].name).toHaveLength(128);
+    await sender.close();
+  });
+
+  it("uses case-insensitive column identity in the fluent sender", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender
+      .table("events")
+      .longColumn("Value", 1n)
+      .longColumn("VALUE", 99n)
+      .atNow();
+    await sender.table("events").longColumn("value", 2n).atNow();
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(table.columns).toHaveLength(1);
+    expect(column(table, "Value").values).toEqual([1n, 2n]);
+    expect(() => column(table, "VALUE")).toThrow(/missing column/);
+    await sender.close();
+  });
+
+  it("rejects illegal identifiers before publishing", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    expect(() => sender.table("bad/table")).toThrow(
+      /table name contains illegal characters/,
+    );
+    expect(() => sender.table("events").longColumn("bad-column", 1n)).toThrow(
+      /column name contains illegal characters/,
+    );
+    expect(session.sends).toHaveLength(0);
     await sender.close();
   });
 

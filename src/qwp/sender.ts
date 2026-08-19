@@ -13,6 +13,7 @@ import {
   type QwpIngressSendResult,
   type QwpIngressMetrics,
 } from "./ingress-session";
+import { qwpColumnNameKey, validateQwpColumnName } from "./core/identifiers";
 
 export type QwpTimestampUnit = "ns" | "us" | "ms";
 
@@ -38,7 +39,7 @@ export interface QwpSenderOptions {
    */
   autoFlushBytes?: number;
   autoFlushIntervalMs?: number;
-  /** Maximum UTF-8 byte length of table and column names. Defaults to 127. */
+  /** Maximum UTF-16 length of table and column names. Defaults to 127. */
   maxNameLength?: number;
   /**
    * Keep auto-flushed rows in an open server-side transaction. An explicit
@@ -163,7 +164,7 @@ interface StagedTable {
   rows: StagedRow[];
   schema: Map<
     string,
-    Pick<StagedColumn, "type" | "geohashPrecision" | "decimalScale">
+    Pick<StagedColumn, "name" | "type" | "geohashPrecision" | "decimalScale">
   >;
 }
 
@@ -894,7 +895,7 @@ export class QwpSender {
   ): Promise<void> {
     try {
       const timestamp = timestampValue(value, unit);
-      this.addColumn("", timestamp.type, timestamp.value);
+      this.addColumn("", timestamp.type, timestamp.value, {}, true);
       this.finishRow();
     } catch (error) {
       this.failRow(error);
@@ -1188,6 +1189,7 @@ export class QwpSender {
     type: QwpColumnType,
     value: unknown,
     metadata: Pick<StagedColumn, "geohashPrecision" | "decimalScale"> = {},
+    designatedTimestamp = false,
   ): QwpSender {
     try {
       this.throwIfUnavailable();
@@ -1195,12 +1197,11 @@ export class QwpSender {
       if (typeof name !== "string") {
         throw new TypeError("column name must be a string");
       }
-      if (name && utf8Length(name) > this.maxNameLength) {
-        throw new Error(
-          `column name too long [maxLength=${this.maxNameLength}]`,
-        );
+      if (!designatedTimestamp) {
+        validateQwpColumnName(name, this.maxNameLength);
       }
-      const existingSchema = table.schema.get(name);
+      const nameKey = qwpColumnNameKey(name);
+      const existingSchema = table.schema.get(nameKey);
       if (
         existingSchema &&
         (existingSchema.type !== type ||
@@ -1209,9 +1210,15 @@ export class QwpSender {
       ) {
         throw new Error(`column type mismatch for '${name}'`);
       }
-      if (this.currentRow.has(name)) return this;
-      table.schema.set(name, { type, ...metadata });
-      this.currentRow.set(name, { name, type, value, ...metadata });
+      if (this.currentRow.has(nameKey)) return this;
+      const canonicalName = existingSchema?.name ?? name;
+      table.schema.set(nameKey, { name: canonicalName, type, ...metadata });
+      this.currentRow.set(nameKey, {
+        name: canonicalName,
+        type,
+        value,
+        ...metadata,
+      });
       return this;
     } catch (error) {
       return this.failRow(error);
