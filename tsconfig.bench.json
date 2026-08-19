@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Importing `vitest` pulls in vite's importGlob types that reference DOM
+    // globals (WebWorker etc.), which the es-only base lib does not define.
+    // Those are declaration-file errors in a vendored .d.ts, so skipLibCheck
+    // suppresses them without widening src's lib (which would break undici's
+    // extended RequestInit in src/utils.ts). Benchmark source itself is still
+    // fully type-checked. The base config sets no `strict`; do not raise it
+    // here — that is a repo-wide decision (see plan Task 3).
+    "skipLibCheck": true
+  },
+  "include": ["src", "benchmarks"]
+}

@@ -1,11 +1,11 @@
 // @ts-check
 import { log, Logger } from "./logging";
-import { SenderOptions, ExtraOptions } from "./options";
+import { SenderOptions, ExtraOptions, WS, WSS } from "./options";
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
+import { deriveConnectMode, ConnectMode, QwpTransport } from "./qwp/transport";
+import { QwpBuffer } from "./qwp/buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
-
-const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
 /**
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection. <br>
@@ -94,6 +94,10 @@ class Sender {
   private lastFlushTime: number;
   private pendingRowCount: number;
 
+  /** QWP seals share one mutable dictionary baseline; flushes must seal in order. */
+  private qwpFlushActive = false;
+  private readonly qwpFlushQueue: Array<() => void> = [];
+
   private readonly log: Logger;
 
   /**
@@ -106,6 +110,16 @@ class Sender {
     this.transport = createTransport(options);
     this.buffer = createBuffer(options);
 
+    // Wire the producer buffer into the QWP transport so delta symbol-dictionary
+    // mode runs end-to-end: the transport shares its connection dictionary with
+    // the buffer and installs the engine's write-ahead persist hook, and recovery
+    // seeding (transport.doConnect) then re-pins the buffer baseline (spec 8.1.6).
+    if (options.protocol === WS || options.protocol === WSS) {
+      (this.transport as unknown as QwpTransport).attachSymbolBuffer(
+        this.buffer as unknown as QwpBuffer,
+      );
+    }
+
     this.log = typeof options.log === "function" ? options.log : log;
 
     this.autoFlush = isBoolean(options.auto_flush) ? options.auto_flush : true;
@@ -114,9 +128,24 @@ class Sender {
       : this.transport.getDefaultAutoFlushRows();
     this.autoFlushInterval = isInteger(options.auto_flush_interval, 0)
       ? options.auto_flush_interval
-      : DEFAULT_AUTO_FLUSH_INTERVAL;
+      : this.transport.getDefaultAutoFlushInterval();
 
     this.reset();
+
+    // Derived connect mode (spec 4.3): any reconnect_* key upgrades construction
+    // from non-connecting to connecting-with-retry. Fire-and-forget because
+    // construction is synchronous; an eventual fatal failure surfaces through
+    // the error dispatcher rather than as an unhandled rejection.
+    if (options.protocol === WS || options.protocol === WSS) {
+      if (deriveConnectMode(options) === ConnectMode.SYNC) {
+        this.connect().catch((e) =>
+          this.log(
+            "warn",
+            `initial QWP connect failed: ${(e as Error).message}`,
+          ),
+        );
+      }
+    }
   }
 
   /**
@@ -185,6 +214,27 @@ class Sender {
    * @return {Promise<boolean>} Resolves to true when there was data in the buffer to send, and it was sent successfully.
    */
   async flush(): Promise<boolean> {
+    // QWP can produce several frames per flush; ILP always produces one.
+    const buf = this.buffer as unknown as {
+      sealFrames?: (cap: number) => Buffer[];
+    };
+    const tx = this.transport as unknown as {
+      sendFrames?: (f: Buffer[]) => Promise<boolean>;
+      maxBatchSize?: number;
+    };
+    if (buf.sealFrames && tx.sendFrames) {
+      return this.enqueueQwpFlush(async () => {
+        const frames = buf.sealFrames!(
+          tx.maxBatchSize ?? Number.MAX_SAFE_INTEGER,
+        );
+        if (frames.length === 0) return false;
+        this.log("debug", `Flushing ${frames.length} QWP frame(s)`);
+        this.resetAutoFlush();
+        await tx.sendFrames!(frames);
+        return true;
+      });
+    }
+
     const dataToSend: Buffer = this.buffer.toBufferNew();
     if (!dataToSend) {
       return false; // Nothing to send
@@ -200,6 +250,28 @@ class Sender {
     return true;
   }
 
+  private enqueueQwpFlush(work: () => Promise<boolean>): Promise<boolean> {
+    if (!this.qwpFlushActive) {
+      this.qwpFlushActive = true;
+      return this.runQwpFlush(work);
+    }
+    return new Promise<boolean>((resolve, reject) => {
+      this.qwpFlushQueue.push(() => {
+        void this.runQwpFlush(work).then(resolve, reject);
+      });
+    });
+  }
+
+  private async runQwpFlush(work: () => Promise<boolean>): Promise<boolean> {
+    try {
+      return await work();
+    } finally {
+      const next = this.qwpFlushQueue.shift();
+      if (next) queueMicrotask(next);
+      else this.qwpFlushActive = false;
+    }
+  }
+
   /**
    * Closes the connection to the database. <br>
    * Data sitting in the Sender's buffer will be lost unless flush() is called before close().
@@ -211,6 +283,10 @@ class Sender {
         "warn",
         `Buffer contains data which has not been flushed before closing the sender, and it will be lost [position=${pos}]`,
       );
+    }
+    if (this.qwpFlushActive) {
+      // Join every already-queued QWP flush before transport teardown.
+      await this.enqueueQwpFlush(async () => false);
     }
     return this.transport.close();
   }

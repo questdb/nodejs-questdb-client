@@ -6,6 +6,7 @@ import * as https from "https";
 
 import { Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
+import { parseAddrList, Endpoint } from "./qwp/endpoints";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 
 const HTTP_PORT = 9000;
@@ -15,6 +16,8 @@ const HTTP = "http";
 const HTTPS = "https";
 const TCP = "tcp";
 const TCPS = "tcps";
+const WS = "ws";
+const WSS = "wss";
 
 const ON = "on";
 const OFF = "off";
@@ -150,6 +153,35 @@ class SenderOptions {
   addr?: string;
   host?: string; // derived from addr
   port?: number; // derived from addr
+  /** ws/wss only: the parsed multi-host list; host/port point at the first entry. */
+  endpoints?: Endpoint[];
+
+  // ws/wss only: reconnect budget + notification inbox capacities (spec 4.2, 9.1).
+  reconnect_initial_backoff_millis?: number;
+  reconnect_max_backoff_millis?: number;
+  reconnect_max_duration_millis?: number;
+  error_inbox_capacity?: number;
+  connection_listener_inbox_capacity?: number;
+  max_frame_rejections?: number;
+  poison_min_escalation_window_millis?: number;
+  /** spec 9.1: keepalive PING interval for the ws socket; < = 0 disables. */
+  durable_ack_keepalive_interval_millis?: number;
+  /** spec 9.1: connect + handshake timeout for a ws endpoint. */
+  auth_timeout_ms?: number;
+  /** spec 9.1 / 7.5: orphan-drainer catch-up cap-gap dwell window. */
+  catch_up_cap_gap_min_escalation_window_millis?: number;
+
+  // ws/wss store-and-forward (spec 8, 9).
+  sf_dir?: string;
+  sender_id?: string;
+  sf_durability?: string;
+  sf_sync_interval_millis?: number;
+  drain_orphans?: boolean;
+  sf_max_total_bytes?: number;
+  sf_segment_bytes?: number;
+  sf_append_deadline_millis?: number;
+  request_durable_ack?: boolean;
+  max_background_drainers?: number;
 
   // replaces `auth` and `jwk` options
   username?: string;
@@ -364,6 +396,8 @@ function parseConfigurationString(
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
   parseStdlibTransport(options);
+  parseQwpOptions(options);
+  parseSfOptions(options);
 }
 
 function parseSettings(
@@ -431,6 +465,26 @@ const ValidConfigKeys = [
   "tls_ca",
   "tls_roots",
   "tls_roots_password",
+  "reconnect_initial_backoff_millis",
+  "reconnect_max_backoff_millis",
+  "reconnect_max_duration_millis",
+  "error_inbox_capacity",
+  "connection_listener_inbox_capacity",
+  "max_frame_rejections",
+  "poison_min_escalation_window_millis",
+  "durable_ack_keepalive_interval_millis",
+  "auth_timeout_ms",
+  "catch_up_cap_gap_min_escalation_window_millis",
+  "sf_dir",
+  "sender_id",
+  "sf_durability",
+  "sf_sync_interval_millis",
+  "drain_orphans",
+  "sf_max_total_bytes",
+  "sf_segment_bytes",
+  "sf_append_deadline_millis",
+  "request_durable_ack",
+  "max_background_drainers",
 ];
 
 function validateConfigKey(key: string) {
@@ -467,16 +521,24 @@ function parseProtocol(options: SenderOptions, configString: string) {
     case HTTPS:
     case TCP:
     case TCPS:
+    case WS:
+    case WSS:
       break;
     default:
       throw new Error(
-        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps'`,
+        `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
       );
   }
   return index + 2;
 }
 
 function parseProtocolVersion(options: SenderOptions) {
+  if (options.protocol === WS || options.protocol === WSS) {
+    if (options.protocol_version !== undefined && options.protocol_version !== null) {
+      throw new Error("protocol version is not supported for WebSocket protocol");
+    }
+    return; // stays undefined: createBuffer branches on protocol first
+  }
   const protocol_version = options.protocol_version ?? PROTOCOL_VERSION_AUTO;
   switch (protocol_version) {
     case PROTOCOL_VERSION_AUTO:
@@ -506,12 +568,24 @@ function parseAddress(options: SenderOptions) {
     throw new Error("Invalid configuration, 'addr' is required");
   }
 
+  // ws/wss addr is a comma-separated, IPv6-aware endpoint LIST (spec 1.2).
+  // host/port are kept pointing at the first entry so existing transport paths
+  // that read them continue to work.
+  if (options.protocol === WS || options.protocol === WSS) {
+    options.endpoints = parseAddrList(options.addr, HTTP_PORT);
+    options.host = options.endpoints[0].host;
+    options.port = options.endpoints[0].port;
+    return;
+  }
+
   const index = options.addr.indexOf(":");
   if (index < 0) {
     options.host = options.addr;
     switch (options.protocol) {
       case HTTP:
       case HTTPS:
+      case WS:
+      case WSS:
         options.port = HTTP_PORT;
         return;
       case TCP:
@@ -520,7 +594,7 @@ function parseAddress(options: SenderOptions) {
         return;
       default:
         throw new Error(
-          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps'`,
+          `Invalid protocol: '${options.protocol}', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss'`,
         );
     }
   }
@@ -578,6 +652,62 @@ function parseStdlibTransport(options: SenderOptions) {
   parseBoolean(options, "stdlib_http", "stdlib http");
 }
 
+function parseQwpOptions(options: SenderOptions) {
+  parseInteger(options, "reconnect_initial_backoff_millis", "reconnect initial backoff", 0);
+  parseInteger(options, "reconnect_max_backoff_millis", "reconnect max backoff", 0);
+  parseInteger(options, "reconnect_max_duration_millis", "reconnect max duration", 0);
+  parseInteger(options, "error_inbox_capacity", "error inbox capacity", 16);
+  parseInteger(options, "connection_listener_inbox_capacity", "connection listener inbox capacity", 16);
+  parseInteger(options, "max_frame_rejections", "max frame rejections", 1);
+  parseInteger(options, "poison_min_escalation_window_millis", "poison min escalation window", 0);
+  parseInteger(options, "auth_timeout_ms", "auth timeout", 1);
+  parseInteger(options, "durable_ack_keepalive_interval_millis", "durable ack keepalive interval", -1);
+}
+
+function parseSfOptions(options: SenderOptions) {
+  if (options.protocol !== WS && options.protocol !== WSS) return;
+  parseInteger(options, "sf_max_total_bytes", "sf max total bytes", 1);
+  parseInteger(options, "sf_segment_bytes", "sf segment bytes", 1);
+  parseInteger(options, "sf_append_deadline_millis", "sf append deadline", 1);
+  parseInteger(options, "sf_sync_interval_millis", "sf sync interval millis", 1);
+  parseInteger(options, "max_background_drainers", "max background drainers", 1);
+  parseInteger(options, "catch_up_cap_gap_min_escalation_window_millis", "catch-up cap-gap min escalation window", 0);
+  parseBoolean(options, "drain_orphans", "drain orphans");
+  parseBoolean(options, "request_durable_ack", "request durable ack");
+  if (options.sf_durability) {
+    // Enum values are case-insensitive (spec 9.1.1).
+    const d = options.sf_durability.toLowerCase();
+    switch (d) {
+      case "memory":
+      case "periodic":
+        options.sf_durability = d;
+        break;
+      case "flush":
+      case "append":
+        throw new Error(
+          `sf_durability=${options.sf_durability} is not yet supported (use sf_durability=memory or periodic)`,
+        );
+      default:
+        throw new Error(`Invalid sf_durability option: '${options.sf_durability}'`);
+    }
+  }
+  if (options.sf_dir && options.sf_dir.includes(";")) {
+    throw new Error("Invalid sf_dir option: ';' is not allowed");
+  }
+  if (!options.sf_dir && options.sf_durability === "periodic") {
+    // spec 9.2: periodic durability requires disk mode.
+    throw new Error("sf_durability=periodic requires sf_dir");
+  }
+  if (options.sf_sync_interval_millis !== undefined && options.sf_durability !== "periodic") {
+    // spec 9.2: the sync interval only makes sense against a periodic barrier.
+    throw new Error("sf_sync_interval_millis requires sf_durability=periodic");
+  }
+  if (options.drain_orphans && !options.sf_dir) {
+    // spec 9.2: orphan draining replays slot files, which requires disk mode.
+    throw new Error("drain_orphans requires sf_dir");
+  }
+}
+
 function parseBoolean(
   options: SenderOptions,
   property: string,
@@ -629,6 +759,8 @@ export {
   HTTPS,
   TCP,
   TCPS,
+  WS,
+  WSS,
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,

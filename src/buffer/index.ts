@@ -7,11 +7,14 @@ import {
   PROTOCOL_VERSION_V2,
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V3,
+  WS,
+  WSS,
 } from "../options";
 import { TimestampUnit } from "../utils";
 import { SenderBufferV1 } from "./bufferv1";
 import { SenderBufferV2 } from "./bufferv2";
 import { SenderBufferV3 } from "./bufferv3";
+import { QwpBuffer } from "../qwp/buffer";
 
 // Default initial buffer size in bytes (64 KB).
 const DEFAULT_BUFFER_SIZE = 65536; //  64 KB
@@ -27,6 +30,11 @@ const DEFAULT_MAX_BUFFER_SIZE = 104857600; // 100 MB
  * @throws Error if protocol version is not specified or is unsupported
  */
 function createBuffer(options: SenderOptions): SenderBuffer {
+  // QWP has no protocol_version; this MUST precede the version switch or a
+  // ws:// sender silently receives SenderBufferV1 and emits ILP text.
+  if (options.protocol === WS || options.protocol === WSS) {
+    return new QwpBuffer();
+  }
   switch (options.protocol_version) {
     case PROTOCOL_VERSION_V3:
       return new SenderBufferV3(options);

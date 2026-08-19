@@ -25,6 +25,55 @@ The Undici HTTP agent was introduced in 4.0.0, and it is the default HTTP transp
 The standard HTTP/HTTPS modules of Node.js are still supported for backwards compatibility.
 Use the <i>stdlib_http</i> option to switch to the standard HTTP/HTTPS modules.
 
+## Transport support matrix
+
+| Protocol | Transport | Notes |
+|---|---|---|
+| `http` / `https` | HTTP | ILP, request/response |
+| `tcp` / `tcps` | TCP | ILP, persistent |
+| `ws` / `wss` | WebSocket | **QWP** — columnar binary, store-and-forward |
+
+### QWP caveats
+
+These properties of the WebSocket (QWP) sender differ from what the HTTP/ILP
+senders do, and each one can surprise a user who assumes otherwise:
+
+- `flush()` resolves once rows are **published** to the send log, not when the
+  server acknowledges them. This differs from `http::`.
+- Delivery is **at-least-once**. A retried batch can duplicate rows; use a
+  `DEDUP` table if you need idempotence.
+- Symbol columns are serialized in **delta mode**: a connection dictionary is
+  shared with the buffer and persisted to `<sf_dir>/.symbol-dict` in disk mode,
+  so only newly-introduced symbols ride each frame. Recovery re-seeds it
+  positionally, keeping ids dense from 0 — so **don't** assume symbol ids are
+  stable across senders or restarts.
+- An acknowledgement means server-side **commit**, not object-store durability.
+  Set `request_durable_ack=on` if durability gates downstream work — the client
+  then requests durable ACKs and **fails fast at connect** if the server cannot
+  confirm them (`X-QWP-Durable-Ack: enabled`).
+- `sf_dir` alone is **not** power-loss durability. The default
+  `sf_durability=memory` never fsyncs, so bytes survive a *process* crash but
+  not a power loss. `sf_durability=periodic` (requires `sf_dir`) runs a
+  background barrier every `sf_sync_interval_millis` that fsyncs the active
+  segment and the ack watermark, making bytes survive an OS/power crash up to
+  that cadence.
+- `drain_orphans` (off by default) replays slots left by a crashed process: on
+  startup, the client scans `<sf_dir>/` for slot directories not held by a live
+  lock and hands each to a background drainer (bounded by
+  `max_background_drainers`) that opens its own WebSocket, re-registers the
+  recovered symbol dictionary, and replays unacked frames to the server before
+  releasing the slot. A terminal failure drops a `.failed` sentinel so the slot
+  is retried only after an operator clears it; a transient outage is retried
+  indefinitely. Requires `sf_dir`.
+- In disk mode, recovery cross-checks the scanned segment chain against
+  `sf-manifest.bin`, a crash-safe boundary record (magic `SFM1`) written on
+  each segment rotation using the same alternating-generation scheme as the ack
+  watermark, and quarantines the slot when the manifest's recorded chain head is
+  ahead of what is actually on disk (a vanished tail segment = real data loss).
+- `tls_roots` accepts PEM or PKCS#12.
+- `tls_roots` accepts PEM or PKCS#12. **JKS keystores are not supported** by
+  Node; convert them first.
+
 ## Configuration options
 
 Detailed description of the client's configuration options can be found in

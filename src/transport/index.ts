@@ -1,10 +1,11 @@
 // @ts-check
 import { Buffer } from "node:buffer";
 
-import { SenderOptions, HTTP, HTTPS, TCP, TCPS } from "../options";
+import { SenderOptions, HTTP, HTTPS, TCP, TCPS, WS, WSS } from "../options";
 import { UndiciTransport } from "./http/undici";
 import { TcpTransport } from "./tcp";
 import { HttpTransport } from "./http/stdlib";
+import { QwpTransport } from "../qwp/transport";
 
 /**
  * Interface for QuestDB transport implementations. <br>
@@ -37,6 +38,13 @@ interface SenderTransport {
    * @returns Default auto-flush row count
    */
   getDefaultAutoFlushRows(): number;
+
+  /**
+   * Gets the default auto-flush interval (ms) for this transport. QWP uses
+   * 100 ms (spec 9.1); the ILP transports inherit the historical 1000 ms.
+   * @returns Default auto-flush interval in milliseconds
+   */
+  getDefaultAutoFlushInterval(): number;
 }
 
 /**
@@ -62,6 +70,9 @@ function createTransport(options: SenderOptions): SenderTransport {
     case TCP:
     case TCPS:
       return new TcpTransport(options);
+    case WS:
+    case WSS:
+      return new QwpTransport(options);
     default:
       throw new Error(`Invalid protocol: '${options.protocol}'`);
   }
