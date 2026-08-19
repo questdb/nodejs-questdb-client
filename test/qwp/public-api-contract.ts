@@ -9,10 +9,15 @@ import {
   connectQwpBrowserSender,
 } from "../../src/qwp/browser";
 import type {
+  QwpBrowserClusterOptions,
+  QwpBrowserClientEgressOptions,
+  QwpBrowserClientIngressOptions,
   QwpBrowserClientOptions,
   QwpBrowserSessionBootstrapOptions,
   QwpBrowserSessionBootstrapResult,
   QwpBrowserEgressOptions,
+  QwpBrowserSplitClientOptions,
+  QwpBrowserUnifiedClientOptions,
   QwpBrowserWebSocketOptions,
 } from "../../src/qwp/browser";
 import {
@@ -215,6 +220,43 @@ const browserEgressOptionsContract: QwpBrowserEgressOptions = {
   zone: "eu-west-1a",
   maxBatchRows: 512,
 };
+
+const browserClusterOptionsContract: QwpBrowserClusterOptions = {
+  url: "wss://node-1.example/qdb",
+  failoverUrls: ["wss://node-2.example/qdb"],
+  connectTimeoutMs: 5_000,
+  sessionBootstrap: {
+    authentication: { type: "bearer", token: "oidc-token" },
+  },
+};
+
+const browserIngressOverridesContract: QwpBrowserClientIngressOptions = {
+  requestDurableAck: true,
+  ingressNegotiationTimeoutMs: 1_000,
+};
+
+const browserEgressOverridesContract: QwpBrowserClientEgressOptions = {
+  target: "replica",
+  zone: "eu-west-1a",
+  compression: "zstd",
+  maxBatchRows: 512,
+};
+
+const browserUnifiedClientContract: QwpBrowserUnifiedClientOptions = {
+  cluster: browserClusterOptionsContract,
+  ingress: browserIngressOverridesContract,
+  egress: browserEgressOverridesContract,
+};
+
+const browserSplitClientContract: QwpBrowserSplitClientOptions = {
+  ingress: { url: "wss://node-1.example/write/v4" },
+  egress: { url: "wss://node-1.example/read/v1" },
+};
+
+const browserClientOptionsContracts: readonly QwpBrowserClientOptions[] = [
+  browserUnifiedClientContract,
+  browserSplitClientContract,
+];
 
 const nodeEgressOptionsContract: QwpNodeEgressOptions = {
   url: "wss://node-1.example/read/v1",

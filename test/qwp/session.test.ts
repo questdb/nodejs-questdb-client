@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   bootstrapQwpBrowserSession,
+  connectQwpBrowserClient,
   connectQwpBrowserEgress,
   connectQwpBrowserIngress,
   connectQwpBrowserWebSocket,
+  createQwpBrowserClient,
   createQwpBrowserSender,
   QwpBrowserSessionBootstrapError,
   QwpWebSocketLike,
@@ -421,6 +423,110 @@ describe("QWP WebSocket adapters", () => {
     );
     expect(events[1]).toBe("websocket");
     await connection.close();
+  });
+
+  it("uses one browser cluster for authenticated ingress, egress, and failover", async () => {
+    const webSocketUrls: URL[] = [];
+    const bootstrapUrls: URL[] = [];
+    const client = await connectQwpBrowserClient({
+      cluster: {
+        url: "wss://node-a.example/qdb?tenant=blue",
+        failoverUrls: ["wss://node-b.example/qdb?tenant=blue"],
+        sessionBootstrap: {
+          authentication: { type: "bearer", token: "access-token" },
+          fetch: async (input) => {
+            bootstrapUrls.push(new URL(input));
+            return new Response("{}", { status: 200 });
+          },
+        },
+        webSocketFactory: (url) => {
+          const requestUrl = new URL(url);
+          webSocketUrls.push(requestUrl);
+          if (requestUrl.hostname === "node-a.example") {
+            throw new QwpUpgradeError("offline", {
+              kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+              retryable: true,
+              tryNextEndpoint: true,
+              url,
+            });
+          }
+          const socket = new FakeWebSocket();
+          queueMicrotask(() => {
+            socket.open();
+            socket.message(
+              requestUrl.pathname.endsWith("/read/v1")
+                ? serverInfoFrame()
+                : ingressServerInfo(1_048_576),
+            );
+          });
+          return asQwpSocket(socket);
+        },
+      },
+      ingress: { ingressNegotiationTimeoutMs: 1_000 },
+      egress: { target: "any", maxBatchRows: 512 },
+    });
+    try {
+      expect(
+        webSocketUrls.map((url) => `${url.hostname}${url.pathname}`).sort(),
+      ).toEqual([
+        "node-a.example/qdb/read/v1",
+        "node-a.example/qdb/write/v4",
+        "node-b.example/qdb/read/v1",
+        "node-b.example/qdb/write/v4",
+      ]);
+      expect(
+        webSocketUrls.every((url) => url.searchParams.get("tenant") === "blue"),
+      ).toBe(true);
+      expect(
+        webSocketUrls
+          .find((url) => url.pathname.endsWith("/read/v1"))
+          ?.searchParams.get("qwp_max_batch_rows"),
+      ).toBe("512");
+      expect(
+        bootstrapUrls.map((url) => `${url.hostname}${url.pathname}`).sort(),
+      ).toEqual([
+        "node-a.example/qdb/exec",
+        "node-a.example/qdb/exec",
+        "node-b.example/qdb/exec",
+        "node-b.example/qdb/exec",
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("rejects connection fields duplicated under unified browser overrides", () => {
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: { url: "wss://questdb.example" },
+        ingress: { url: "wss://other.example/write/v4" },
+      } as never),
+    ).toThrow("ingress.url must be configured once under cluster.url");
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: { url: "wss://questdb.example" },
+        egress: {
+          sessionBootstrap: {
+            authentication: { type: "bearer", token: "other-token" },
+          },
+        },
+      } as never),
+    ).toThrow(
+      "egress.sessionBootstrap must be configured once under cluster.sessionBootstrap",
+    );
+  });
+
+  it("validates unified browser cluster URLs before opening a socket", () => {
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: { url: "https://questdb.example" },
+      }),
+    ).toThrow("QWP browser cluster URL must use WS or WSS");
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: { url: "wss://questdb.example/#fragment" },
+      }),
+    ).toThrow("QWP browser cluster URL cannot contain a fragment");
   });
 
   it("buffers browser messages until a consumer is attached", async () => {

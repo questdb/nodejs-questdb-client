@@ -300,14 +300,85 @@ export interface QwpBrowserEgressOptions
   maxBatchRows?: number;
 }
 
-/** Browser configuration for a combined pooled QWP ingress/egress client. */
-export interface QwpBrowserClientOptions {
-  ingress: QwpBrowserWebSocketOptions;
-  egress: QwpBrowserEgressOptions;
+/** Shared browser transport and authentication for one QWP cluster. */
+export interface QwpBrowserClusterOptions extends QwpWebSocketConnectOptions {
+  /**
+   * Authenticates before every connection attempt. When `url` is omitted from
+   * this bootstrap, its REST endpoint follows the active cluster endpoint.
+   */
+  sessionBootstrap?: QwpBrowserSessionBootstrapConfig;
+  /** Shared test or framework hook; either side may override it. */
+  webSocketFactory?: (
+    url: string | URL,
+    protocols?: string | string[],
+  ) => QwpWebSocketLike;
+}
+
+/** Ingress-only overrides for a unified browser cluster. */
+export type QwpBrowserClientIngressOptions = Partial<
+  Pick<
+    QwpBrowserWebSocketOptions,
+    | "protocols"
+    | "connectTimeoutMs"
+    | "sendTimeoutMs"
+    | "closeTimeoutMs"
+    | "requestDurableAck"
+    | "ingressNegotiationTimeoutMs"
+    | "webSocketFactory"
+  >
+>;
+
+/** Egress-only overrides for a unified browser cluster. */
+export type QwpBrowserClientEgressOptions = Partial<
+  Pick<
+    QwpBrowserEgressOptions,
+    | "protocols"
+    | "connectTimeoutMs"
+    | "sendTimeoutMs"
+    | "closeTimeoutMs"
+    | "webSocketFactory"
+    | "target"
+    | "zone"
+    | "compression"
+    | "compressionLevel"
+    | "maxBatchRows"
+  >
+>;
+
+interface QwpBrowserClientBaseOptions {
   sender?: QwpSenderOptions;
   ingressSession?: QwpIngressSessionOptions;
   egressSession?: QwpEgressSessionOptions;
   pool?: QwpClientPoolOptions;
+}
+
+/**
+ * Recommended combined-browser form. One endpoint list and authentication
+ * bootstrap are shared while side-specific protocol options remain explicit.
+ */
+export interface QwpBrowserUnifiedClientOptions
+  extends QwpBrowserClientBaseOptions {
+  cluster: QwpBrowserClusterOptions;
+  ingress?: QwpBrowserClientIngressOptions;
+  egress?: QwpBrowserClientEgressOptions;
+}
+
+/** Backwards-compatible form with completely independent connection trees. */
+export interface QwpBrowserSplitClientOptions
+  extends QwpBrowserClientBaseOptions {
+  cluster?: never;
+  ingress: QwpBrowserWebSocketOptions;
+  egress: QwpBrowserEgressOptions;
+}
+
+/** Browser configuration for a combined pooled QWP ingress/egress client. */
+export type QwpBrowserClientOptions =
+  | QwpBrowserUnifiedClientOptions
+  | QwpBrowserSplitClientOptions;
+
+interface QwpResolvedBrowserClientOptions extends QwpBrowserClientBaseOptions {
+  ingress: QwpBrowserWebSocketOptions;
+  egress: QwpBrowserEgressOptions;
 }
 
 /**
@@ -635,17 +706,111 @@ export async function connectQwpBrowserEgress(
   );
 }
 
+const CLUSTER_OWNED_BROWSER_OPTION_NAMES = [
+  "url",
+  "failoverUrls",
+  "sessionBootstrap",
+] as const;
+
+function assertNoBrowserClusterOptionConflicts(
+  side: "ingress" | "egress",
+  options: object | undefined,
+): void {
+  if (!options) return;
+  for (const name of CLUSTER_OWNED_BROWSER_OPTION_NAMES) {
+    if (Object.prototype.hasOwnProperty.call(options, name)) {
+      throw new TypeError(
+        `conflicting browser client configuration: ${side}.${name} must be configured once under cluster.${name}`,
+      );
+    }
+  }
+}
+
+function browserClusterEndpoint(
+  endpoint: string | URL,
+  route: "write/v4" | "read/v1",
+): URL {
+  const url =
+    endpoint instanceof URL
+      ? new URL(endpoint)
+      : new URL(endpoint, globalThis.location?.href);
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new TypeError(`QWP browser cluster URL must use WS or WSS: ${url}`);
+  }
+  if (url.hash) {
+    throw new TypeError(
+      `QWP browser cluster URL cannot contain a fragment: ${url}`,
+    );
+  }
+  const qwpRoute = /\/(?:write\/v4|read\/v1)\/?$/;
+  if (qwpRoute.test(url.pathname)) {
+    url.pathname = url.pathname.replace(qwpRoute, `/${route}`);
+  } else {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/${route}`;
+  }
+  return url;
+}
+
+function resolveQwpBrowserClientOptions(
+  options: QwpBrowserClientOptions,
+): QwpResolvedBrowserClientOptions {
+  if ("cluster" in options && options.cluster !== undefined) {
+    assertNoBrowserClusterOptionConflicts("ingress", options.ingress);
+    assertNoBrowserClusterOptionConflicts("egress", options.egress);
+    const { url, failoverUrls, ...shared } = options.cluster;
+    const ingress: QwpBrowserWebSocketOptions = {
+      ...shared,
+      ...options.ingress,
+      url: browserClusterEndpoint(url, "write/v4"),
+      failoverUrls: failoverUrls?.map((endpoint) =>
+        browserClusterEndpoint(endpoint, "write/v4"),
+      ),
+    };
+    const egress: QwpBrowserEgressOptions = {
+      ...shared,
+      ...options.egress,
+      url: browserClusterEndpoint(url, "read/v1"),
+      failoverUrls: failoverUrls?.map((endpoint) =>
+        browserClusterEndpoint(endpoint, "read/v1"),
+      ),
+    };
+    return {
+      ingress,
+      egress,
+      sender: options.sender,
+      ingressSession: options.ingressSession,
+      egressSession: options.egressSession,
+      pool: options.pool,
+    };
+  }
+  if (!options.ingress || !options.egress) {
+    throw new TypeError(
+      "browser client configuration requires either cluster or both ingress and egress",
+    );
+  }
+  const split = options as QwpBrowserSplitClientOptions;
+  return {
+    ingress: split.ingress,
+    egress: split.egress,
+    sender: split.sender,
+    ingressSession: split.ingressSession,
+    egressSession: split.egressSession,
+    pool: split.pool,
+  };
+}
+
 /** Creates a lazy browser QWP client with bounded sender and query pools. */
 export function createQwpBrowserClient(
   options: QwpBrowserClientOptions,
 ): QwpClient {
+  const resolved = resolveQwpBrowserClientOptions(options);
   return new QwpClient(
     {
       createSender: async () => {
         const sender = createQwpBrowserSender(
-          options.ingress,
-          options.sender,
-          options.ingressSession,
+          resolved.ingress,
+          resolved.sender,
+          resolved.ingressSession,
         );
         try {
           await sender.connect();
@@ -656,9 +821,9 @@ export function createQwpBrowserClient(
         }
       },
       createQuerySession: () =>
-        connectQwpBrowserEgress(options.egress, options.egressSession),
+        connectQwpBrowserEgress(resolved.egress, resolved.egressSession),
     },
-    options.pool,
+    resolved.pool,
   );
 }
 

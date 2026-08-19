@@ -916,6 +916,42 @@ try {
 }
 ```
 
+Browser applications can likewise describe the cluster, REST/OIDC
+authentication bootstrap, and failover order once. A cluster URL may be an
+origin, a reverse-proxy base path, or an existing `/write/v4` or `/read/v1`
+endpoint; the facade derives both protocol routes while preserving query
+parameters. Omit `sessionBootstrap.url` to derive the matching `/exec` route
+for every failover endpoint:
+
+```typescript
+import { connectQwpBrowserClient } from "@questdb/nodejs-client/qwp/browser";
+
+const db = await connectQwpBrowserClient({
+  cluster: {
+    url: "wss://node-a.example/qdb",
+    failoverUrls: ["wss://node-b.example/qdb"],
+    sessionBootstrap: {
+      authentication: { type: "bearer", token: oidcOrRestAccessToken },
+      serviceAccount: "analytics",
+    },
+  },
+  ingress: { requestDurableAck: true },
+  egress: {
+    target: "replica",
+    zone: "eu-west-1a",
+    compression: "zstd",
+  },
+  pool: { senderPoolMax: 2, queryPoolMax: 8 },
+});
+```
+
+`url`, `failoverUrls`, and `sessionBootstrap` belong to `cluster` in this
+unified form and are rejected if repeated under `ingress` or `egress`.
+Side-specific timeouts, WebSocket factories, durable-ACK settings, routing, and
+compression remain available as explicit overrides. The original split object
+form with complete `ingress` and `egress` trees remains supported for advanced
+cases that intentionally connect the two sides differently.
+
 `connectQwpNodeClient()` and `connectQwpBrowserClient()` prewarm each configured
 pool minimum. Their `createQwp*Client()` counterparts are lazy. Pools grow to
 their maximum under concurrent borrows and apply one FIFO acquisition deadline;
