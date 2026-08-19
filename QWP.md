@@ -1154,6 +1154,14 @@ later JavaScript event-loop turns. This keeps user callbacks out of protocol cal
 but CPU-bound callback code still blocks the runtime and belongs in a Worker or
 `worker_threads` task.
 
+## Development benchmarks
+
+The repository includes diagnostic QWP benchmarks for ingress encoding, fluent sender
+construction, symbol dictionaries, egress materialization and reusable views, Zstd,
+store-and-forward persistence/recovery, and live completion-boundary latency. See
+[`benchmarks/README.md`](benchmarks/README.md) for commands and result interpretation.
+They are intentionally not CI performance gates.
+
 ## Public API policy
 
 Only the four package entry points listed at the top are public. In particular,

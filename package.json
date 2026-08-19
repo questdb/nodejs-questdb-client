@@ -9,6 +9,11 @@
     "eslint": "eslint src/**",
     "typecheck": "tsc --noEmit",
     "typecheck:qwp-browser": "tsc --noEmit -p tsconfig.qwp-browser.json",
+    "bench": "vitest bench --run benchmarks",
+    "bench:e2e": "vitest run --config vitest.bench-e2e.config.ts",
+    "typecheck:bench": "tsc --noEmit -p tsconfig.bench.json",
+    "lint:bench": "eslint 'benchmarks/**/*.ts' vitest.bench-e2e.config.ts",
+    "format:bench": "prettier --write 'benchmarks/**/*.{ts,md}' tsconfig.bench.json vitest.bench-e2e.config.ts",
     "format": "prettier --write '{src,test}/**/*.{ts,js,json}'",
     "docs": "typedoc --out docs src/index.ts",
     "preview:docs": "serve docs"
