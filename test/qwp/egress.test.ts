@@ -10,6 +10,7 @@ import {
   QWP_FLAG_GORILLA,
   QWP_FLAG_ZSTD,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
+  QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
   QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_STATUS,
@@ -703,6 +704,28 @@ describe("QwpEgressSession", () => {
     }
   });
 
+  it("uses the Java-compatible SERVER_INFO timeout by default", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = new QwpEgressSession(connection);
+      const ready = session.ready.catch((error: unknown) => error);
+
+      expect(QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS).toBe(5_000);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(connection.closeCalls).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(ready).resolves.toMatchObject({
+        message: "timed out waiting for QWP SERVER_INFO",
+      });
+      expect(connection.closeCalls).toEqual([
+        { code: 1002, reason: "missing QWP SERVER_INFO" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("close interrupts an egress request whose send has not settled", async () => {
     const connection = new FakeConnection();
     const session = new QwpEgressSession(connection);
@@ -990,7 +1013,7 @@ describe("QwpEgressSession", () => {
     await session.close();
   });
 
-  it("uses bounded credit by default and allows a session-level override", async () => {
+  it("defaults to Java-compatible unbounded credit and allows a bounded override", async () => {
     const connection = new FakeConnection();
     const session = new QwpEgressSession(connection);
     connection.receive(serverInfo());
@@ -1003,37 +1026,35 @@ describe("QwpEgressSession", () => {
     expect(readQwpVarint(request)).toBe(
       BigInt(QWP_DEFAULT_EGRESS_INITIAL_CREDIT),
     );
+    expect(QWP_DEFAULT_EGRESS_INITIAL_CREDIT).toBe(0);
 
     const resultFrame = firstResultBatch(query.requestId);
     connection.receive(resultFrame);
     const iterator = query[Symbol.asyncIterator]();
     await iterator.next();
     const next = iterator.next();
-    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
-    const credit = new QwpByteReader(connection.sent[1]);
-    expect(credit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
-    expect(credit.readBigUint64()).toBe(query.requestId);
-    expect(readQwpVarint(credit)).toBe(BigInt(resultFrame.byteLength));
+    await Promise.resolve();
+    expect(connection.sent).toHaveLength(1);
     connection.receive(resultEnd(query.requestId));
     await next;
     await query.completion;
     await session.close();
 
-    const unboundedConnection = new FakeConnection();
-    const unbounded = new QwpEgressSession(unboundedConnection, {
-      initialCredit: 0,
+    const boundedConnection = new FakeConnection();
+    const bounded = new QwpEgressSession(boundedConnection, {
+      initialCredit: 64,
     });
-    unboundedConnection.receive(serverInfo());
-    const unboundedQuery = await unbounded.query("select 1");
-    const unboundedRequest = new QwpByteReader(unboundedConnection.sent[0]);
-    unboundedRequest.readUint8();
-    unboundedRequest.readBigUint64();
-    const unboundedSqlLength = Number(readQwpVarint(unboundedRequest));
-    unboundedRequest.readBytes(unboundedSqlLength);
-    expect(readQwpVarint(unboundedRequest)).toBe(0n);
-    unboundedConnection.receive(resultEnd(unboundedQuery.requestId));
-    await unboundedQuery.completion;
-    await unbounded.close();
+    boundedConnection.receive(serverInfo());
+    const boundedQuery = await bounded.query("select 1");
+    const boundedRequest = new QwpByteReader(boundedConnection.sent[0]);
+    boundedRequest.readUint8();
+    boundedRequest.readBigUint64();
+    const boundedSqlLength = Number(readQwpVarint(boundedRequest));
+    boundedRequest.readBytes(boundedSqlLength);
+    expect(readQwpVarint(boundedRequest)).toBe(64n);
+    boundedConnection.receive(resultEnd(boundedQuery.requestId));
+    await boundedQuery.completion;
+    await bounded.close();
   });
 
   it("bounds decoded materialized batches when wire credit is unbounded", async () => {
@@ -1176,6 +1197,48 @@ describe("QwpEgressSession", () => {
     connection.receive(resultEnd(nextQuery.requestId, 0n));
     await nextQuery.completion;
     await session.close();
+  });
+
+  it("bounds completion waiting without cancelling the query", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = new QwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from slow_table");
+
+      expect(query.isDone()).toBe(false);
+      await expect(query.awaitCompletion(0)).resolves.toBe(false);
+      const waiting = query.awaitCompletion(25);
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(waiting).resolves.toBe(false);
+      expect(query.isDone()).toBe(false);
+      expect(connection.sent).toHaveLength(1);
+      await expect(session.query("select 2")).rejects.toThrow(
+        "a QWP query is already active",
+      );
+
+      connection.receive(resultEnd(query.requestId, 0n));
+      await query.completion;
+      expect(query.isDone()).toBe(true);
+      await expect(query.awaitCompletion(0)).resolves.toBe(true);
+      expect(connection.sent).toHaveLength(1);
+      await expect(query.awaitCompletion(-1)).rejects.toThrow(
+        "completion timeoutMs must be a non-negative finite number",
+      );
+
+      const failed = await session.query("broken sql");
+      const failureWait = failed.awaitCompletion(25);
+      connection.receive(queryError(failed.requestId, "bad syntax"));
+      await expect(failureWait).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        message: "bad syntax",
+      });
+      expect(failed.isDone()).toBe(true);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("times out a query, sends CANCEL, and drains the terminal response", async () => {

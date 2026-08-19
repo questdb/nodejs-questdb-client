@@ -760,12 +760,11 @@ flag only when `SERVER_INFO` advertises `QUERY_FLAGS`; older servers receive the
 same flag-free request as the default path, so this option remains safe during a
 rolling upgrade.
 
-The high-level client defaults `initialCredit` to 256 KiB, bounding unread wire data
-to roughly that window plus at most one server batch. The exact wire size of each
-batch is replenished when iteration advances beyond it, so a slow consumer limits
-server read-ahead in Node.js and browsers. Set a session-level `initialCredit` to tune
-the default, override it per query, or explicitly set zero for legacy unbounded
-streaming. Set `autoCredit: false` and call `query.grantCredit()` for manual control.
+Matching Java, the high-level client defaults `initialCredit` to zero, allowing
+unbounded server send-ahead. Set a positive session-level or per-query value to bound
+wire buffering, particularly in browsers. With positive credit, the exact wire size
+of each consumed batch is replenished automatically. Set `autoCredit: false` and call
+`query.grantCredit()` for manual control.
 
 Both materialized `query()` results and zero-copy `queryViews()` use a client-side
 decoded-batch pool with four slots by default. Set the session-level
@@ -785,6 +784,13 @@ before the connection accepts another query. Breaking out of `for await` early a
 discards buffered batches, restores their flow-control credit, sends `CANCEL`, and
 rejects `completion` with `QwpEgressQueryAbandonedError`. Call `query.cancel()` for
 explicit cancellation.
+
+`await query.awaitCompletion(timeoutMs)` bounds only the caller's wait and returns
+`false` without cancelling when the timeout expires, matching Java
+`Completion.await(timeout, unit)`. `query.isDone()` reports terminal state. Use the
+query deadline options only when timeout should actively cancel the server query.
+The initial and reconnect `SERVER_INFO` timeout defaults to five seconds, matching
+Java, and remains configurable through `serverInfoTimeoutMs`.
 
 Cancellation draining is bounded by `cancelDrainTimeoutMs` (5 seconds by default).
 Late batches are decoded and credited while the terminal response is pending. If the

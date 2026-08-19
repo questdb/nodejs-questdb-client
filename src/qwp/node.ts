@@ -39,7 +39,11 @@ import {
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
 } from "./transport";
-import { QwpEgressSession, QwpEgressSessionOptions } from "./egress-session";
+import {
+  QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
+  QwpEgressSession,
+  QwpEgressSessionOptions,
+} from "./egress-session";
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 import {
   createQwpDataLossSenderError,
@@ -791,7 +795,8 @@ export async function connectQwpNodeEgress(
       transport.failoverUrls,
       (endpoint) => connectQwpNodeEndpoint(transport, endpoint),
       { target: options.target, zone: options.zone },
-      sessionOptions.serverInfoTimeoutMs ?? 15_000,
+      sessionOptions.serverInfoTimeoutMs ??
+        QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
     ),
     sessionOptions,
   );

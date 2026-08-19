@@ -30,8 +30,9 @@ import {
 } from "./transport";
 
 export interface QwpEgressSessionOptions {
+  /** SERVER_INFO handshake deadline. Defaults to 5 seconds. */
   serverInfoTimeoutMs?: number;
-  /** Default per-query send-ahead credit. Defaults to 256 KiB; zero is unbounded. */
+  /** Default per-query send-ahead credit. Defaults to zero (unbounded). */
   initialCredit?: number | bigint;
   /** Maximum decoded batches waiting for a consumer. Defaults to 4. */
   bufferPoolSize?: number;
@@ -93,8 +94,10 @@ interface QwpReplayableQueryRequest {
   readonly resetDictionary: boolean;
 }
 
-/** Default bounded send-ahead window used by high-level egress queries. */
-export const QWP_DEFAULT_EGRESS_INITIAL_CREDIT = 256 * 1024;
+/** Default send-ahead credit used by Java and TypeScript: zero is unbounded. */
+export const QWP_DEFAULT_EGRESS_INITIAL_CREDIT = 0;
+/** Default wait for the initial or reconnected SERVER_INFO frame. */
+export const QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS = 5_000;
 /** Default decoded result-buffer pool depth, matching the Java client. */
 export const QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE = 4;
 
@@ -120,7 +123,8 @@ function validateOptionalTimeout(
 function validateEgressSessionOptions(
   options: QwpEgressSessionOptions,
 ): QwpValidatedEgressSessionOptions {
-  const serverInfoTimeoutMs = options.serverInfoTimeoutMs ?? 15_000;
+  const serverInfoTimeoutMs =
+    options.serverInfoTimeoutMs ?? QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS;
   if (!Number.isFinite(serverInfoTimeoutMs) || serverInfoTimeoutMs <= 0) {
     throw new RangeError(
       "serverInfoTimeoutMs must be a positive finite number",
@@ -254,12 +258,20 @@ type QwpViewBatchReservation =
   | { readonly status: "reserved"; readonly slot: number }
   | { readonly status: "retired" | "reset" };
 
+interface QwpCompletionWaiter {
+  readonly resolve: () => void;
+  readonly reject: (error: unknown) => void;
+}
+
 /** Control handle returned by queryViews(). */
 export interface QwpEgressViewQuery {
   readonly requestId: bigint;
   readonly completion: Promise<QwpQueryCompletion>;
+  /** Waits without cancelling; false means only this wait timed out. */
+  awaitCompletion(timeoutMs: number): Promise<boolean>;
   cancel(): Promise<void>;
   grantCredit(additionalBytes: number | bigint): Promise<void>;
+  isDone(): boolean;
 }
 
 /**
@@ -276,6 +288,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private readonly batches = new QwpAsyncQueue<QwpQueuedResultBatch>();
   private readonly resolveCompletion: (value: QwpQueryCompletion) => void;
   private readonly rejectCompletion: (error: unknown) => void;
+  private readonly completionWaiters = new Set<QwpCompletionWaiter>();
   private deliveredCreditBytes = 0;
   private bufferedBatchCount = 0;
   private bufferGeneration = 0;
@@ -341,6 +354,42 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
 
   grantCredit(additionalBytes: number | bigint): Promise<void> {
     return this.control.grantCredit(this.requestId, additionalBytes);
+  }
+
+  /**
+   * Waits for completion without changing the query lifecycle. A finite wait
+   * returns false on expiry; the query remains active until it completes, is
+   * cancelled explicitly, or its configured query deadline expires.
+   */
+  async awaitCompletion(timeoutMs: number): Promise<boolean> {
+    const timeout = validateOptionalTimeout(timeoutMs, "completion timeoutMs");
+    if (this.terminal) {
+      await this.completion;
+      return true;
+    }
+    if (timeout === 0) return false;
+    return new Promise<boolean>((resolve, reject) => {
+      const waiter: QwpCompletionWaiter = {
+        resolve: () => {
+          clearTimeout(timer);
+          resolve(true);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      };
+      const timer = setTimeout(() => {
+        this.completionWaiters.delete(waiter);
+        resolve(false);
+      }, timeout);
+      this.completionWaiters.add(waiter);
+    });
+  }
+
+  /** Whether the query has reached any terminal outcome. */
+  isDone(): boolean {
+    return this.terminal;
   }
 
   /** @internal Starts the deadline after QUERY_REQUEST reaches the transport. */
@@ -470,6 +519,8 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.deliveredCreditBytes = 0;
     this.batches.end();
     this.resolveCompletion(completion);
+    for (const waiter of this.completionWaiters) waiter.resolve();
+    this.completionWaiters.clear();
   }
 
   /** @internal Preserves batch/callback order before a wire query error. */
@@ -489,6 +540,8 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.deliveredCreditBytes = 0;
     this.batches.fail(error);
     this.rejectCompletion(error);
+    for (const waiter of this.completionWaiters) waiter.reject(error);
+    this.completionWaiters.clear();
   }
 
   /** @internal Discards queued results and retires the consumer immediately. */

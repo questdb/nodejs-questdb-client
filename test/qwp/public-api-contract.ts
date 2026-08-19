@@ -345,6 +345,8 @@ function queryViewContract(
   const handler: QwpResultBatchViewHandler = (batch, query) => {
     const typedBatch: QwpResultBatchView = batch;
     const requestId: bigint = query.requestId;
+    const completionWait: Promise<boolean> = query.awaitCompletion(1_000);
+    const done: boolean = query.isDone();
     const rawValues: Uint8Array | undefined = batch.column(0).valuesBytes();
     const directRow: QwpResultRowView = batch.row(0);
     const rowCallback: QwpResultRowViewCallback = (row) => {
@@ -356,6 +358,8 @@ function queryViewContract(
     batch.forEachRow(rowCallback);
     void typedBatch;
     void requestId;
+    void completionWait;
+    void done;
     void rawValues;
     void directRow;
   };

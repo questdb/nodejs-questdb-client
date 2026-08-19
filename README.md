@@ -368,12 +368,11 @@ Both `"zstd"` and `"auto"` advertise Zstd followed by raw fallback, and the
 server still sends an individual batch raw when compression would make it
 larger.
 
-Egress queries use a bounded 256 KiB `initialCredit` window by default. The client
-automatically replenishes the exact wire size of each result batch after the async
-iterator advances past it, so a slow Node.js or browser consumer limits how far the
-server can stream ahead. Tune `initialCredit` on the session or individual query;
-set it to zero only to opt into legacy unbounded streaming. Set `autoCredit: false`
-to manage credit explicitly through `query.grantCredit()`.
+Matching the Java client, egress queries default `initialCredit` to zero, meaning
+unbounded server send-ahead. Set a positive session or per-query value to bound wire
+buffering—particularly in browsers. With positive credit, the client automatically
+replenishes the exact wire size of each result batch after consumption. Set
+`autoCredit: false` to manage credit explicitly through `query.grantCredit()`.
 
 For allocation-sensitive consumers, `session.queryViews(sql, onBatch)` supplies
 bounded, reusable column views instead of materializing every value into JavaScript
@@ -392,6 +391,10 @@ server response before accepting another query on that connection. Breaking out
 of `for await` early cancels the query too. `cancelDrainTimeoutMs` bounds that
 wait (5 seconds by default); an unresponsive cancellation closes the connection
 with `QwpEgressQueryCancelTimeoutError` instead of wedging the session.
+To bound only the caller's wait without cancelling, use
+`await query.awaitCompletion(timeoutMs)`. It returns `false` on timeout and leaves
+the query active, matching Java `Completion.await(timeout, unit)`. The SERVER_INFO
+handshake timeout defaults to five seconds on both clients.
 
 ### Authentication and secure connection
 
