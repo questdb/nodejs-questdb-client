@@ -48,12 +48,11 @@ describe("Sender QWP integration", () => {
     );
     const directory = await mkdtemp(join(tmpdir(), "qwp-sender-startup-"));
     const sender = await Sender.fromConfig(
-      `ws::addr=127.0.0.1:${port};initial_connect_retry=off`,
+      `ws::addr=127.0.0.1:${port};sf_dir=${directory};initial_connect_retry=off`,
       {
         qwp: {
           webSocket: {
             connectTimeoutMs: 100,
-            storeAndForward: { directory },
           },
           session: {
             reconnect: {
@@ -136,6 +135,47 @@ describe("Sender QWP integration", () => {
         frames[0].byteLength,
       ).getUint32(0, true),
     ).toBe(QWP_MAGIC);
+  });
+
+  it("uses the unified cluster vocabulary and fails over between addr entries", async () => {
+    let authorization: string | undefined;
+    let clientId: string | undefined;
+    let requestPath: string | undefined;
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Max-Batch-Size: 1048576");
+    });
+    server.on("connection", (_socket, request) => {
+      authorization = request.headers.authorization;
+      clientId = request.headers["x-qwp-client-id"] as string | undefined;
+      requestPath = request.url;
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+    const { port } = server.address() as AddressInfo;
+
+    const sender = await Sender.fromConfig(
+      "ws::" +
+        `addr=127.0.0.1:1,127.0.0.1:${port};` +
+        "user=admin;pass=secret;client_id=sender-config-test;" +
+        "connect_timeout=250;reconnect_initial_backoff_millis=1;" +
+        "reconnect_max_backoff_millis=2;reconnect_max_duration_millis=1000;" +
+        "request_durable_ack=off;target=replica;compression=raw;" +
+        "sender_pool_min=0;query_pool_min=0;auto_flush=off;",
+    );
+    try {
+      await sender.connect();
+      expect(requestPath).toBe("/write/v4");
+      expect(clientId).toBe("sender-config-test");
+      expect(authorization).toBe(
+        `Basic ${Buffer.from("admin:secret", "utf8").toString("base64")}`,
+      );
+    } finally {
+      await sender.close();
+    }
   });
 
   it("honors auto_flush_bytes from the ws:: configuration string", async () => {

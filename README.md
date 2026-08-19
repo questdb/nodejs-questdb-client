@@ -87,6 +87,11 @@ await sender.flush();
 await sender.close();
 ```
 
+The regular `Sender` accepts the same unified QWP configuration vocabulary as
+the pooled Node client. Use comma-separated or repeated `addr` values for
+failover; standalone ingress validates but otherwise ignores egress- and
+pool-only keys.
+
 Node.js also supports fire-and-forget QWP-over-UDP through the same API:
 
 ```typescript

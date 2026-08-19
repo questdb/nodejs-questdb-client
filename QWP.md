@@ -59,6 +59,12 @@ try {
 `username` plus `password` selects HTTP Basic authentication for the WebSocket
 upgrade. `token` selects Bearer authentication. Use `wss::` in production.
 
+`Sender.fromConfig()` uses the same Java-compatible `ws::`/`wss::` vocabulary
+as `connectQwpNodeClient()`. Comma-separated or repeated `addr` values configure
+ordered failover endpoints, and ingress, egress, pool, and reserved policy keys
+are validated from one schema. The standalone sender applies ingress-owned keys;
+keys owned only by egress or the pooled facade are accepted as intentional no-ops.
+
 ### Node.js fire-and-forget UDP
 
 `udp::` selects Node-only QWP v1 over IPv4 UDP while retaining the fluent row API:
@@ -1091,8 +1097,9 @@ Review these behavioral differences before rollout:
 - Browser and Node QWP ingress reconnect by default with in-memory, at-least-once
   replay. That queue has a 128 MiB cap and a bounded 30-second capacity wait by
   default. Configure Node store-and-forward when replay must survive process failure.
-- Existing HTTP, TCP, and TLS options do not automatically apply to QWP; put QWP-only
-  connection and session controls under `extraOptions.qwp`.
+- HTTP/TCP-only keys do not carry over to `ws::`; use the unified QWP connect-string
+  vocabulary. Programmatic callbacks, custom agents, and other non-string hooks remain
+  available under `extraOptions.qwp`.
 
 Roll out `ws::` per sender instance so the existing protocols can remain in service
 during migration.

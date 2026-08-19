@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
+import { Agent as UndiciAgent } from "undici";
 import { log, Logger } from "./logging";
 import { SenderOptions, ExtraOptions, UDP, WS, WSS } from "./options";
 import { SenderTransport, createTransport } from "./transport";
@@ -13,8 +14,14 @@ import {
   createQwpNodeUdpSender,
   QwpSender,
 } from "./qwp/node";
+import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
+const RESOLVED_QWP_SENDER = Symbol("resolvedQwpSender");
+
+type ResolvedQwpSenderOptions = SenderOptions & {
+  readonly [RESOLVED_QWP_SENDER]: QwpSender;
+};
 
 /**
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection. <br>
@@ -119,6 +126,17 @@ class Sender {
    */
   constructor(options: SenderOptions) {
     this.log = options && typeof options.log === "function" ? options.log : log;
+    const resolvedQwpSender = options
+      ? (options as Partial<ResolvedQwpSenderOptions>)[RESOLVED_QWP_SENDER]
+      : undefined;
+    if (resolvedQwpSender) {
+      this.qwpSender = resolvedQwpSender;
+      this.autoFlush = false;
+      this.autoFlushRows = 0;
+      this.autoFlushInterval = 0;
+      this.resetAutoFlush();
+      return;
+    }
     if (
       options?.protocol === WS ||
       options?.protocol === WSS ||
@@ -164,6 +182,9 @@ class Sender {
     configurationString: string,
     extraOptions?: ExtraOptions,
   ): Promise<Sender> {
+    if (isQwpWebSocketConfiguration(configurationString)) {
+      return createConfiguredQwpSenderFacade(configurationString, extraOptions);
+    }
     return new Sender(
       await SenderOptions.fromConfig(configurationString, extraOptions),
     );
@@ -181,9 +202,7 @@ class Sender {
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
   static async fromEnv(extraOptions?: ExtraOptions): Promise<Sender> {
-    return new Sender(
-      await SenderOptions.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions),
-    );
+    return Sender.fromConfig(process.env.QDB_CLIENT_CONF, extraOptions);
   }
 
   /**
@@ -542,6 +561,66 @@ class Sender {
     ) {
       await this.flush();
     }
+  }
+}
+
+function isQwpWebSocketConfiguration(configurationString: string): boolean {
+  const separator = configurationString?.indexOf("::") ?? -1;
+  if (separator < 0) return false;
+  const schema = configurationString.slice(0, separator);
+  return schema === WS || schema === WSS;
+}
+
+function createConfiguredQwpSenderFacade(
+  configurationString: string,
+  extraOptions: ExtraOptions | undefined,
+): Sender {
+  validateQwpExtraOptions(extraOptions);
+  const logger = extraOptions?.log ?? log;
+  const configuredWebSocket = extraOptions?.qwp?.webSocket;
+  const { storeAndForward, senderId, failoverUrls, ...webSocketOverrides } =
+    configuredWebSocket ?? {};
+  let agent = webSocketOverrides.agent;
+  if (!agent && extraOptions?.agent instanceof http.Agent) {
+    agent = extraOptions.agent;
+  }
+  const resolved = resolveQwpNodeClientConfig(configurationString, {
+    webSocket: { ...webSocketOverrides, agent },
+    storeAndForward,
+    sender: { ...extraOptions?.qwp?.sender, log: logger },
+    ingressSession: extraOptions?.qwp?.session,
+  });
+  const qwpSender = createQwpNodeSender(
+    {
+      ...resolved.ingress,
+      failoverUrls: failoverUrls ?? resolved.ingress.failoverUrls,
+      senderId: senderId ?? resolved.ingress.senderId,
+    },
+    resolved.sender,
+    resolved.ingressSession,
+  );
+  const separator = configurationString.indexOf("::");
+  const options = {
+    protocol: configurationString.slice(0, separator),
+    log: logger,
+    [RESOLVED_QWP_SENDER]: qwpSender,
+  } as ResolvedQwpSenderOptions;
+  return new Sender(options);
+}
+
+function validateQwpExtraOptions(extraOptions: ExtraOptions | undefined): void {
+  if (extraOptions?.log && typeof extraOptions.log !== "function") {
+    throw new Error("Invalid logging function");
+  }
+  const agent = extraOptions?.agent;
+  if (
+    agent &&
+    !(agent instanceof UndiciAgent) &&
+    !(agent instanceof http.Agent) &&
+    // @ts-expect-error TypeScript narrows the Agent union too aggressively.
+    !(agent instanceof https.Agent)
+  ) {
+    throw new Error("Invalid HTTP agent");
   }
 }
 
