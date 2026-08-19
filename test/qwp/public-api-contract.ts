@@ -209,6 +209,11 @@ const fixedConnectionIngressContract: QwpIngressSessionOptions = {
     ],
 };
 
+const memoryReplayIngressContract: QwpIngressSessionOptions = {
+  memoryReplayMaxBytes: 128 * 1024 * 1024,
+  memoryReplayAppendDeadlineMs: 30_000,
+};
+
 const fixedConnectionEgressContract: QwpEgressSessionOptions = {
   reconnect: false,
 };
@@ -375,6 +380,7 @@ const rootExtraOptionsContract: ExtraOptions = {
 void browserSenderSignature;
 void defaultSenderErrorHandlerSignature;
 void browserIngressSignature;
+void memoryReplayIngressContract;
 void browserEgressSignature;
 void bootstrapSignature;
 void browserClientSignature;

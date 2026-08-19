@@ -352,13 +352,16 @@ describe("QWP unified Node client configuration", () => {
       const options = parseQwpNodeClientConfig(
         `wss::addr=localhost;tls_roots=${trustStore};tls_roots_password=secret;` +
           "connection_listener_inbox_capacity=7;error_inbox_capacity=32;" +
-          "max_name_len=512;sender_id=producer_1;sf_max_segment_bytes=8m;",
+          "max_name_len=512;sender_id=producer_1;sf_max_segment_bytes=8m;" +
+          "sf_max_total_bytes=64m;sf_append_deadline_millis=1234;",
       );
       expect(options.ingress.agent).toBeDefined();
       expect(options.sender?.maxNameLength).toBe(512);
       expect(options.ingress.senderId).toBe("producer_1");
       expect(options.ingressSession).toMatchObject({
         maxBatchSizeBytes: 8 * 1024 * 1024,
+        memoryReplayMaxBytes: 64 * 1024 * 1024,
+        memoryReplayAppendDeadlineMs: 1234,
         connectionListenerInboxCapacity: 7,
         errorInboxCapacity: 32,
       });

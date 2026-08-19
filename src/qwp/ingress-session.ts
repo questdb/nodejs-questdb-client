@@ -167,6 +167,17 @@ export interface QwpIngressSessionOptions {
    * are not acceptable.
    */
   reconnect?: QwpReconnectOptions | false;
+  /**
+   * Hard cap for the built-in memory-only replay queue, including estimated
+   * per-frame bookkeeping. Defaults to 128 MiB. This applies in browsers and
+   * non-persistent Node sessions; custom replay stores enforce their own cap.
+   */
+  memoryReplayMaxBytes?: number;
+  /**
+   * Maximum time a memory replay append waits for ACK-driven trimming after
+   * reaching memoryReplayMaxBytes. Defaults to 30 seconds.
+   */
+  memoryReplayAppendDeadlineMs?: number;
   /** @internal Node adapter hook for persistent store-and-forward. */
   replayStore?: QwpIngressReplayStore;
   /** @internal Starts memory or persistent replay without waiting for a server. */
@@ -270,6 +281,11 @@ export interface QwpIngressMetrics {
   readonly replayAcknowledgedFrameSequence?: bigint;
   readonly pendingReplayFrames: number;
   readonly pendingReplayBytes: number;
+  readonly memoryReplayMaxBytes?: number;
+  readonly memoryReplayUsedBytes?: number;
+  readonly waitingMemoryReplayAppends: number;
+  readonly totalMemoryReplayBackpressureStalls: number;
+  readonly totalMemoryReplayAppendTimeouts: number;
   readonly lastError?: Error;
 }
 
@@ -391,6 +407,35 @@ function validateIngressSessionOptions(
   ) {
     throw new RangeError("maxBatchSizeBytes must be a positive safe integer");
   }
+  const memoryReplayMaxBytes = options.memoryReplayMaxBytes;
+  if (
+    memoryReplayMaxBytes !== undefined &&
+    (!Number.isSafeInteger(memoryReplayMaxBytes) || memoryReplayMaxBytes <= 0)
+  ) {
+    throw new RangeError(
+      "memoryReplayMaxBytes must be a positive safe integer",
+    );
+  }
+  const memoryReplayAppendDeadlineMs = options.memoryReplayAppendDeadlineMs;
+  if (
+    memoryReplayAppendDeadlineMs !== undefined &&
+    (!Number.isSafeInteger(memoryReplayAppendDeadlineMs) ||
+      memoryReplayAppendDeadlineMs <= 0 ||
+      memoryReplayAppendDeadlineMs > 2_147_483_647)
+  ) {
+    throw new RangeError(
+      "memoryReplayAppendDeadlineMs must be a positive safe integer no greater than 2147483647",
+    );
+  }
+  if (
+    options.replayStore &&
+    (memoryReplayMaxBytes !== undefined ||
+      memoryReplayAppendDeadlineMs !== undefined)
+  ) {
+    throw new RangeError(
+      "memory replay capacity options cannot be combined with a custom replayStore",
+    );
+  }
   const keepalive = options.durableAckKeepaliveMs;
   if (
     keepalive !== undefined &&
@@ -488,6 +533,15 @@ export class QwpIngressSession {
           "ingress reconnect options require QwpIngressSession.connect(factory, options)",
         );
       }
+      if (
+        (options.memoryReplayMaxBytes !== undefined ||
+          options.memoryReplayAppendDeadlineMs !== undefined) &&
+        !(connection instanceof QwpReconnectingIngressConnection)
+      ) {
+        throw new Error(
+          "memory replay capacity options require ingress reconnect",
+        );
+      }
       validateIngressSessionOptions(options);
     } catch (error) {
       try {
@@ -557,6 +611,8 @@ export class QwpIngressSession {
           reconnectOptions,
           options.replayStore,
           options.maxBatchSizeBytes,
+          options.memoryReplayMaxBytes,
+          options.memoryReplayAppendDeadlineMs,
           options.backgroundStoreAndForward,
           initialConnectMode,
           options.orphanStoreAndForward,
@@ -658,6 +714,13 @@ export class QwpIngressSession {
       replayAcknowledgedFrameSequence: transport?.acknowledgedFrameSequence,
       pendingReplayFrames: transport?.pendingReplayFrames ?? 0,
       pendingReplayBytes: transport?.pendingReplayBytes ?? 0,
+      memoryReplayMaxBytes: transport?.memoryReplayMaxBytes,
+      memoryReplayUsedBytes: transport?.memoryReplayUsedBytes,
+      waitingMemoryReplayAppends: transport?.waitingMemoryReplayAppends ?? 0,
+      totalMemoryReplayBackpressureStalls:
+        transport?.totalMemoryReplayBackpressureStalls ?? 0,
+      totalMemoryReplayAppendTimeouts:
+        transport?.totalMemoryReplayAppendTimeouts ?? 0,
       lastError: this.lastError,
     });
   }

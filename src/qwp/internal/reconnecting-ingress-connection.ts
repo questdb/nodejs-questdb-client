@@ -26,6 +26,8 @@ import {
   QwpIngressReplayStore,
   QwpIngressTransportMetrics,
   QwpInitialConnectMode,
+  QwpMemoryReplayAppendTimeoutError,
+  QwpMemoryReplayFrameTooLargeError,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
   QwpReconnectOptions,
@@ -50,6 +52,12 @@ const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
 const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
 const MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS = 16;
+const DEFAULT_MEMORY_REPLAY_MAX_BYTES = 128 * 1024 * 1024;
+const DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS = 30_000;
+// Charge a conservative fixed amount so even empty/very small opaque frames
+// cannot grow the replay Map without bound. Payload arrays are not copied by
+// the store, so the configured budget primarily tracks live frame storage.
+const MEMORY_REPLAY_RECORD_OVERHEAD_BYTES = 64;
 
 type ConnectAttemptPolicy = "single" | "configured" | "unbounded";
 
@@ -142,6 +150,30 @@ class RetriableIngressConnectionError extends Error {
 class QwpMemoryReplayStore implements QwpIngressReplayStore {
   private readonly records = new Map<bigint, Uint8Array>();
   private readonly symbols: string[] = [];
+  private readonly capacityWaiters = new Set<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  private usedBytes = 0;
+  private closing = false;
+  private totalBackpressureStalls = 0;
+  private totalAppendTimeouts = 0;
+
+  constructor(
+    readonly maxBytes = DEFAULT_MEMORY_REPLAY_MAX_BYTES,
+    private readonly appendDeadlineMs = DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS,
+  ) {}
+
+  get metrics() {
+    return {
+      maxBytes: this.maxBytes,
+      usedBytes: this.usedBytes,
+      waitingAppends: this.capacityWaiters.size,
+      totalBackpressureStalls: this.totalBackpressureStalls,
+      totalAppendTimeouts: this.totalAppendTimeouts,
+    } as const;
+  }
 
   async load(): Promise<readonly QwpIngressReplayRecord[]> {
     return Array.from(this.records, ([frameSequence, payload]) => ({
@@ -151,14 +183,54 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
   }
 
   async append(record: QwpIngressReplayRecord): Promise<void> {
-    this.records.set(record.frameSequence, record.payload.slice());
+    if (this.closing) throw new QwpSendClosedError();
+    if (this.records.has(record.frameSequence)) {
+      throw new Error(
+        `QWP memory replay sequence already exists [frameSequence=${record.frameSequence}]`,
+      );
+    }
+    const requiredBytes =
+      record.payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+    if (requiredBytes > this.maxBytes) {
+      throw new QwpMemoryReplayFrameTooLargeError(
+        this.maxBytes,
+        record.payload.byteLength,
+        requiredBytes,
+      );
+    }
+    if (this.usedBytes + requiredBytes > this.maxBytes) {
+      this.totalBackpressureStalls++;
+      const deadline = Date.now() + this.appendDeadlineMs;
+      while (this.usedBytes + requiredBytes > this.maxBytes) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          this.totalAppendTimeouts++;
+          throw new QwpMemoryReplayAppendTimeoutError(
+            this.maxBytes,
+            this.usedBytes,
+            requiredBytes,
+            this.appendDeadlineMs,
+          );
+        }
+        await this.waitForCapacity(remainingMs, requiredBytes);
+        if (this.closing) throw new QwpSendClosedError();
+      }
+    }
+    // send() already made the replay-owned payload copy. Sharing it between
+    // the connection and this accounting store avoids doubling the backlog.
+    this.records.set(record.frameSequence, record.payload);
+    this.usedBytes += requiredBytes;
   }
 
   async acknowledgeThrough(frameSequence: bigint): Promise<void> {
     for (const sequence of this.records.keys()) {
       if (sequence > frameSequence) break;
+      const payload = this.records.get(sequence)!;
+      this.usedBytes -=
+        payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
       this.records.delete(sequence);
     }
+    this.releaseCapacityWaiters();
   }
 
   async loadSymbolDictionary(): Promise<readonly string[]> {
@@ -177,7 +249,56 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     this.symbols.push(...entries);
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
+    const error = new QwpSendClosedError();
+    for (const waiter of this.capacityWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.capacityWaiters.clear();
+    this.records.clear();
+    this.symbols.length = 0;
+    this.usedBytes = 0;
+  }
+
+  private waitForCapacity(
+    timeoutMs: number,
+    requiredBytes: number,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        resolve: () => {
+          clearTimeout(waiter.timer);
+          this.capacityWaiters.delete(waiter);
+          resolve();
+        },
+        reject: (error: Error) => {
+          clearTimeout(waiter.timer);
+          this.capacityWaiters.delete(waiter);
+          reject(error);
+        },
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+      };
+      waiter.timer = setTimeout(() => {
+        this.totalAppendTimeouts++;
+        waiter.reject(
+          new QwpMemoryReplayAppendTimeoutError(
+            this.maxBytes,
+            this.usedBytes,
+            requiredBytes,
+            this.appendDeadlineMs,
+          ),
+        );
+      }, timeoutMs);
+      this.capacityWaiters.add(waiter);
+    });
+  }
+
+  private releaseCapacityWaiters(): void {
+    for (const waiter of [...this.capacityWaiters]) waiter.resolve();
+  }
 }
 
 /**
@@ -335,6 +456,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     reconnectOptions: QwpReconnectOptions,
     replayStore?: QwpIngressReplayStore,
     localMaxBatchSizeBytes?: number,
+    memoryReplayMaxBytes = DEFAULT_MEMORY_REPLAY_MAX_BYTES,
+    memoryReplayAppendDeadlineMs = DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS,
     backgroundStoreAndForward = false,
     initialConnectMode: QwpInitialConnectMode = backgroundStoreAndForward
       ? QWP_INITIAL_CONNECT_MODE.ASYNC
@@ -348,7 +471,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     onSenderError?: (error: QwpSenderError) => void,
   ): Promise<QwpReconnectingIngressConnection> {
     const store: QwpIngressReplayStore =
-      replayStore ?? new QwpMemoryReplayStore();
+      replayStore ??
+      new QwpMemoryReplayStore(
+        memoryReplayMaxBytes,
+        memoryReplayAppendDeadlineMs,
+      );
     let connection: QwpReconnectingIngressConnection | undefined;
     try {
       const records = await store.load();
@@ -462,11 +589,21 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     for (const frame of this.frames.values()) {
       pendingReplayBytes += frame.payload.byteLength;
     }
+    const memoryMetrics =
+      this.store instanceof QwpMemoryReplayStore
+        ? this.store.metrics
+        : undefined;
     return Object.freeze({
       publishedFrameSequence: this.publishedFrameSequence,
       acknowledgedFrameSequence: this.acknowledgedFrameSequence,
       pendingReplayFrames: this.frames.size,
       pendingReplayBytes,
+      memoryReplayMaxBytes: memoryMetrics?.maxBytes,
+      memoryReplayUsedBytes: memoryMetrics?.usedBytes,
+      waitingMemoryReplayAppends: memoryMetrics?.waitingAppends ?? 0,
+      totalMemoryReplayBackpressureStalls:
+        memoryMetrics?.totalBackpressureStalls ?? 0,
+      totalMemoryReplayAppendTimeouts: memoryMetrics?.totalAppendTimeouts ?? 0,
       totalFramesSent: this.totalFramesSent,
       totalBytesSent: this.totalBytesSent,
       totalFramesReplayed: this.totalFramesReplayed,
@@ -589,6 +726,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     try {
       await this.closeStore();
     } finally {
+      this.releaseMemoryReplayReferences();
       await Promise.all([
         this.connectionDispatcher?.close(),
         this.errorDispatcher?.close(),
@@ -1502,7 +1640,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       reason: this.terminalError.message,
       wasClean: false,
     });
-    void this.closeStore().catch(() => undefined);
+    void this.closeStore()
+      .catch(() => undefined)
+      .finally(() => this.releaseMemoryReplayReferences());
     void this.connection
       ?.close(1011, "QWP reconnect failed")
       .catch(() => undefined);
@@ -1519,6 +1659,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       this.storeClosePromise = Promise.resolve().then(() => this.store.close());
     }
     return this.storeClosePromise;
+  }
+
+  private releaseMemoryReplayReferences(): void {
+    if (!(this.store instanceof QwpMemoryReplayStore)) return;
+    this.frames.clear();
+    this.wireFrames = [];
+    this.symbolDictionary.length = 0;
+    this.durableWatermarks.clear();
   }
 }
 

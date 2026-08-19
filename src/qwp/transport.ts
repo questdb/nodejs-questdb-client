@@ -47,6 +47,35 @@ export class QwpSendClosedError extends QwpSendError {
   }
 }
 
+/** One frame can never fit in the configured in-memory replay budget. */
+export class QwpMemoryReplayFrameTooLargeError extends RangeError {
+  constructor(
+    readonly maxBytes: number,
+    readonly payloadBytes: number,
+    readonly requiredBytes: number,
+  ) {
+    super(
+      `QWP frame exceeds the in-memory replay budget [maxBytes=${maxBytes}, payloadBytes=${payloadBytes}, requiredBytes=${requiredBytes}]`,
+    );
+    this.name = "QwpMemoryReplayFrameTooLargeError";
+  }
+}
+
+/** ACK-driven trimming did not free in-memory replay capacity in time. */
+export class QwpMemoryReplayAppendTimeoutError extends Error {
+  constructor(
+    readonly maxBytes: number,
+    readonly usedBytes: number,
+    readonly requiredBytes: number,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `QWP in-memory replay append remained backpressured for ${timeoutMs} ms [maxBytes=${maxBytes}, usedBytes=${usedBytes}, requiredBytes=${requiredBytes}]`,
+    );
+    this.name = "QwpMemoryReplayAppendTimeoutError";
+  }
+}
+
 export interface QwpFailoverAttempt {
   readonly endpoint: string | URL;
   readonly error: unknown;
@@ -184,6 +213,13 @@ export interface QwpIngressTransportMetrics {
   readonly acknowledgedFrameSequence: bigint;
   readonly pendingReplayFrames: number;
   readonly pendingReplayBytes: number;
+  /** Configured cap for the built-in memory replay store. */
+  readonly memoryReplayMaxBytes?: number;
+  /** Estimated payload and record-bookkeeping bytes charged to that cap. */
+  readonly memoryReplayUsedBytes?: number;
+  readonly waitingMemoryReplayAppends: number;
+  readonly totalMemoryReplayBackpressureStalls: number;
+  readonly totalMemoryReplayAppendTimeouts: number;
   /** Physical WebSocket sends, including replay and dictionary catch-up. */
   readonly totalFramesSent: number;
   readonly totalBytesSent: number;

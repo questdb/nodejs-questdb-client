@@ -177,6 +177,15 @@ export function resolveQwpNodeClientConfig(
   const ingressSession: QwpIngressSessionOptions = {
     reconnect: ingressReconnect,
     initialConnectMode,
+    memoryReplayMaxBytes: storeAndForward
+      ? undefined
+      : optionalSize(value("sf_max_total_bytes"), "sf_max_total_bytes", 1),
+    memoryReplayAppendDeadlineMs: storeAndForward
+      ? undefined
+      : optionalPositiveInteger(
+          value("sf_append_deadline_millis"),
+          "sf_append_deadline_millis",
+        ),
     maxBatchSizeBytes: optionalSize(
       value("sf_max_segment_bytes"),
       "sf_max_segment_bytes",
@@ -668,9 +677,7 @@ function validateStoreAndForwardDependencies(
     "catch_up_cap_gap_min_escalation_window_millis",
     "drain_orphans",
     "max_background_drainers",
-    "sf_append_deadline_millis",
     "sf_durability",
-    "sf_max_total_bytes",
     "sf_sync_interval_millis",
   ];
   const configured = sfOnlyKeys.find((key) => values.has(key));

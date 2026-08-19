@@ -513,11 +513,19 @@ connection sweep can still try every endpoint, allowing role and health changes 
 recover. A non-orderly close demotes the selected endpoint before the next sweep.
 Ingress reconnect is enabled by default for factory-created browser and Node sessions.
 Unacknowledged frames are retained in memory and replayed at least once after a
-transport failure. The default memory policy uses full-jitter backoff from 100 ms to
-5 seconds and a five-minute per-outage deadline; the initial connection remains
-fail-fast. Set `reconnect: false` for one fixed connection. Supplying a `reconnect`
-object tunes the bounds, emits lifecycle events through `onEvent`, and retains the
-earlier opt-in behavior of retrying initial connection establishment.
+transport failure. The built-in memory replay queue is capped at 128 MiB. When the
+cap is full, publication waits for ACK-driven trimming for at most 30 seconds, then
+rejects with `QwpMemoryReplayAppendTimeoutError`; a single frame that can never fit
+is rejected immediately with `QwpMemoryReplayFrameTooLargeError`. Set
+`memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on ingress session options
+to tune these bounds. The accounting includes a fixed per-frame allowance so many
+small frames cannot bypass the byte cap.
+
+The default memory policy uses full-jitter backoff from 100 ms to 5 seconds and a
+five-minute per-outage deadline; the initial connection remains fail-fast. Set
+`reconnect: false` for one fixed connection. Supplying a `reconnect` object tunes the
+bounds, emits lifecycle events through `onEvent`, and retains the earlier opt-in
+behavior of retrying initial connection establishment.
 
 Each retry delay is selected between zero and the current exponential ceiling,
 preventing clients disconnected together from retrying in lockstep. Configured attempt
@@ -871,6 +879,8 @@ For unified strings with `sf_dir`, Java-compatible defaults apply: memory
 durability, a 10 GiB total journal cap, 4 MiB frame/segment batches, a 30-second
 capacity wait, a 60-second close drain, and fail-fast initial connection. Set
 `sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
+Without `sf_dir`, `sf_max_total_bytes` and `sf_append_deadline_millis` tune the
+built-in memory replay queue instead.
 The parser also supports `max_name_len`, password-protected `tls_roots`, and the
 Java listener/error inbox capacity keys. Those capacities actively bound asynchronous
 connection and typed-error delivery and are reflected in ingress drop counters.
@@ -1065,7 +1075,8 @@ Review these behavioral differences before rollout:
 - Large batches are split to the negotiated WebSocket payload cap.
 - QWP transactional auto-flush is per table and must be explicitly committed.
 - Browser and Node QWP ingress reconnect by default with in-memory, at-least-once
-  replay. Configure Node store-and-forward when replay must survive process failure.
+  replay. That queue has a 128 MiB cap and a bounded 30-second capacity wait by
+  default. Configure Node store-and-forward when replay must survive process failure.
 - Existing HTTP, TCP, and TLS options do not automatically apply to QWP; put QWP-only
   connection and session controls under `extraOptions.qwp`.
 

@@ -51,6 +51,8 @@ import {
   QwpIngressReplayRecord,
   QwpIngressReplayStore,
   QwpHandshakeMetadata,
+  QwpMemoryReplayAppendTimeoutError,
+  QwpMemoryReplayFrameTooLargeError,
   QwpProtocolError,
   QwpSymbolDictionary,
   QwpTableBuffer,
@@ -536,6 +538,124 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("bounds memory replay and resumes publication after ACK trimming", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      memoryReplayMaxBytes: 130,
+      memoryReplayAppendDeadlineMs: 1_000,
+    });
+
+    await session.publishFrame(Uint8Array.of(1));
+    await session.publishFrame(Uint8Array.of(2));
+    const blocked = session.publishFrame(Uint8Array.of(3));
+
+    await vi.waitFor(() =>
+      expect(session.metrics).toMatchObject({
+        memoryReplayMaxBytes: 130,
+        memoryReplayUsedBytes: 130,
+        waitingMemoryReplayAppends: 1,
+        totalMemoryReplayBackpressureStalls: 1,
+        totalMemoryReplayAppendTimeouts: 0,
+      }),
+    );
+    expect(connection.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(blocked).resolves.toBeUndefined();
+    expect(connection.sent).toEqual([
+      Uint8Array.of(1),
+      Uint8Array.of(2),
+      Uint8Array.of(3),
+    ]);
+    expect(session.metrics).toMatchObject({
+      memoryReplayUsedBytes: 130,
+      waitingMemoryReplayAppends: 0,
+      totalMemoryReplayBackpressureStalls: 1,
+      totalMemoryReplayAppendTimeouts: 0,
+    });
+    await session.close();
+  });
+
+  it("bounds memory replay waits with typed capacity errors", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      memoryReplayMaxBytes: 65,
+      memoryReplayAppendDeadlineMs: 50,
+    });
+
+    await session.publishFrame(Uint8Array.of(1));
+    await expect(session.publishFrame(Uint8Array.of(2))).rejects.toMatchObject({
+      name: "QwpMemoryReplayAppendTimeoutError",
+      maxBytes: 65,
+      usedBytes: 65,
+      requiredBytes: 65,
+      timeoutMs: 50,
+    } satisfies Partial<QwpMemoryReplayAppendTimeoutError>);
+    expect(session.metrics).toMatchObject({
+      pendingReplayFrames: 1,
+      pendingReplayBytes: 1,
+      waitingMemoryReplayAppends: 0,
+      totalMemoryReplayBackpressureStalls: 1,
+      totalMemoryReplayAppendTimeouts: 1,
+    });
+
+    await expect(
+      QwpIngressSession.connect(async () => new FakeConnection("other"), {
+        memoryReplayMaxBytes: 64,
+      }).then((tooSmall) =>
+        tooSmall.publishFrame(Uint8Array.of(1)).finally(() => tooSmall.close()),
+      ),
+    ).rejects.toBeInstanceOf(QwpMemoryReplayFrameTooLargeError);
+    await session.close();
+  });
+
+  it("interrupts a memory replay capacity wait on close", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      memoryReplayMaxBytes: 65,
+      memoryReplayAppendDeadlineMs: 60_000,
+    });
+
+    await session.publishFrame(Uint8Array.of(1));
+    const blocked = session.publishFrame(Uint8Array.of(2));
+    const rejected = expect(blocked).rejects.toMatchObject({
+      name: "QwpSendClosedError",
+    });
+    await vi.waitFor(() =>
+      expect(session.metrics.waitingMemoryReplayAppends).toBe(1),
+    );
+
+    await session.close();
+    await rejected;
+    expect(session.metrics).toMatchObject({
+      pendingReplayFrames: 0,
+      pendingReplayBytes: 0,
+      memoryReplayUsedBytes: 0,
+      waitingMemoryReplayAppends: 0,
+    });
+  });
+
+  it("validates memory replay capacity controls", async () => {
+    await expect(
+      QwpIngressSession.connect(async () => new FakeConnection("primary"), {
+        memoryReplayMaxBytes: 0,
+      }),
+    ).rejects.toThrow(/memoryReplayMaxBytes must be a positive safe integer/);
+    await expect(
+      QwpIngressSession.connect(async () => new FakeConnection("primary"), {
+        memoryReplayAppendDeadlineMs: 0,
+      }),
+    ).rejects.toThrow(
+      /memoryReplayAppendDeadlineMs must be a positive safe integer/,
+    );
+    await expect(
+      QwpIngressSession.connect(async () => new FakeConnection("primary"), {
+        memoryReplayMaxBytes: 1024,
+        replayStore: new TrackingReplayStore(),
+      }),
+    ).rejects.toThrow(/cannot be combined with a custom replayStore/);
+  });
+
   it("keeps default ingress initial connection establishment fail-fast", async () => {
     const failure = new Error("offline");
     let factoryCalls = 0;
@@ -1495,6 +1615,11 @@ describe("QWP ingress reconnect and replay", () => {
       replayAcknowledgedFrameSequence: 1n,
       pendingReplayFrames: 0,
       pendingReplayBytes: 0,
+      memoryReplayMaxBytes: 128 * 1024 * 1024,
+      memoryReplayUsedBytes: 0,
+      waitingMemoryReplayAppends: 0,
+      totalMemoryReplayBackpressureStalls: 0,
+      totalMemoryReplayAppendTimeouts: 0,
     });
     await session.close();
   });
