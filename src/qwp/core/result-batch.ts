@@ -1261,14 +1261,14 @@ interface PreparedResultBatch {
 /** Stateful decoder for connection-scoped QWP result batches. */
 export class QwpResultBatchDecoder {
   private readonly symbolDictionary: string[] = [];
-  private readonly viewBatch = new QwpResultBatchView();
-  private readonly viewLayouts: QwpResultColumnViewLayout[] = [];
-  private readonly viewLayoutPool: QwpResultColumnViewLayout[] = [];
+  private readonly viewBatches: QwpResultBatchView[] = [];
+  private readonly viewLayouts: QwpResultColumnViewLayout[][] = [];
+  private readonly viewLayoutPools: QwpResultColumnViewLayout[][] = [];
   private schema?: QwpResultColumnSchema[];
   private expectedBatchSequence = 0n;
 
   resetQuerySchema(): void {
-    this.viewBatch.release();
+    for (const batch of this.viewBatches) batch.release();
     this.schema = undefined;
     this.expectedBatchSequence = 0n;
   }
@@ -1277,6 +1277,12 @@ export class QwpResultBatchDecoder {
     if ((resetMask & QWP_RESET_MASK_DICTIONARY) !== 0) {
       this.symbolDictionary.length = 0;
     }
+  }
+
+  /** @internal Drops frame-backed references after a failed slot decode. */
+  releaseView(slot: number): void {
+    this.viewBatches[slot]?.release();
+    for (const layout of this.viewLayoutPools[slot] ?? []) layout.release();
   }
 
   decode(message: QwpResultBatchMessage): QwpResultBatch {
@@ -1297,31 +1303,41 @@ export class QwpResultBatchDecoder {
   }
 
   /**
-   * Decodes into one reusable batch/column-view set without materializing a
-   * JavaScript value array. A subsequent decode invalidates the prior view.
+   * Decodes into one slot from a reusable batch/column-view pool without
+   * materializing a JavaScript value array. Reusing the same slot invalidates
+   * its prior view; callers must not reuse a slot until its consumer releases
+   * the preceding batch.
    */
-  decodeView(message: QwpResultBatchMessage): QwpResultBatchView {
-    this.viewBatch.release();
+  decodeView(message: QwpResultBatchMessage, slot = 0): QwpResultBatchView {
+    if (!Number.isSafeInteger(slot) || slot < 0) {
+      throw new RangeError(
+        "QWP result view slot must be a non-negative integer",
+      );
+    }
+    const viewBatch = (this.viewBatches[slot] ??= new QwpResultBatchView());
+    const viewLayouts = (this.viewLayouts[slot] ??= []);
+    const viewLayoutPool = (this.viewLayoutPools[slot] ??= []);
+    viewBatch.release();
     const { reader, tableName, rowCount, deltaMode } = this.prepare(message);
     const schema = this.schema!;
-    while (this.viewLayoutPool.length < schema.length) {
-      this.viewLayoutPool.push(new QwpResultColumnViewLayout());
+    while (viewLayoutPool.length < schema.length) {
+      viewLayoutPool.push(new QwpResultColumnViewLayout());
     }
-    this.viewLayouts.length = schema.length;
+    viewLayouts.length = schema.length;
     for (let index = 0; index < schema.length; index++) {
-      const layout = this.viewLayoutPool[index];
-      this.viewLayouts[index] = layout;
+      const layout = viewLayoutPool[index];
+      viewLayouts[index] = layout;
       layout.reset(schema[index], rowCount);
       this.readColumnView(reader, layout, deltaMode, message.flags);
     }
     reader.expectEnd("RESULT_BATCH");
     this.expectedBatchSequence++;
-    return this.viewBatch.reset(
+    return viewBatch.reset(
       message.requestId,
       message.batchSequence,
       tableName,
       rowCount,
-      this.viewLayouts,
+      viewLayouts,
     );
   }
 

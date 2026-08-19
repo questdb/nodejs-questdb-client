@@ -864,6 +864,59 @@ describe("QwpEgressSession", () => {
     await session.close();
   });
 
+  it("decodes reusable views ahead through a bounded slot pool", async () => {
+    const decodeView = vi.spyOn(QwpResultBatchDecoder.prototype, "decodeView");
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection, {
+      initialCredit: 0,
+      bufferPoolSize: 2,
+    });
+    connection.receive(serverInfo());
+
+    const entered: number[] = [];
+    const releases: Array<() => void> = [];
+    const delivered: QwpResultBatchView[] = [];
+    try {
+      const query = await session.queryViews(
+        "select * from x",
+        async (batch) => {
+          const sequence = Number(batch.batchSequence);
+          delivered.push(batch);
+          entered.push(sequence);
+          await new Promise<void>((resolve) => {
+            releases[sequence] = resolve;
+          });
+        },
+      );
+
+      connection.receive(emptyResultBatch(query.requestId, 0));
+      connection.receive(emptyResultBatch(query.requestId, 1));
+      connection.receive(emptyResultBatch(query.requestId, 2));
+      connection.receive(resultEnd(query.requestId, 0n));
+
+      await vi.waitFor(() => expect(decodeView).toHaveBeenCalledTimes(2));
+      expect(entered).toEqual([0]);
+      await Promise.resolve();
+      expect(decodeView).toHaveBeenCalledTimes(2);
+
+      releases[0]();
+      await vi.waitFor(() => {
+        expect(decodeView).toHaveBeenCalledTimes(3);
+        expect(entered).toEqual([0, 1]);
+      });
+
+      releases[1]();
+      await vi.waitFor(() => expect(entered).toEqual([0, 1, 2]));
+      expect(new Set(delivered).size).toBe(2);
+
+      releases[2]();
+      await expect(query.completion).resolves.toMatchObject({ totalRows: 0n });
+    } finally {
+      decodeView.mockRestore();
+      await session.close();
+    }
+  });
+
   it("cancels and drains when a result-view callback fails", async () => {
     const connection = new FakeConnection();
     const session = new QwpEgressSession(connection);
@@ -888,6 +941,49 @@ describe("QwpEgressSession", () => {
     );
     await Promise.resolve();
     await Promise.resolve();
+    const next = await session.query("select 2");
+    connection.receive(resultEnd(next.requestId, 0n));
+    await next.completion;
+    await session.close();
+  });
+
+  it("keeps a query error ordered after an active result-view callback", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+
+    let releaseHandler!: () => void;
+    const handlerReleased = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    let delivered: QwpResultBatchView | undefined;
+    let enterHandler!: () => void;
+    const handlerEntered = new Promise<void>((resolve) => {
+      enterHandler = resolve;
+    });
+    const query = await session.queryViews("select * from x", async (batch) => {
+      delivered = batch;
+      enterHandler();
+      await handlerReleased;
+      expect(batch.valid).toBe(true);
+    });
+
+    connection.receive(firstResultBatch(query.requestId));
+    connection.receive(queryError(query.requestId, "query failed"));
+    await handlerEntered;
+
+    await expect(session.query("select 2")).rejects.toThrow(
+      "a QWP query is already active",
+    );
+    expect(delivered!.valid).toBe(true);
+
+    releaseHandler();
+    await expect(query.completion).rejects.toMatchObject({
+      name: "QwpEgressQueryError",
+      message: "query failed",
+    });
+    expect(delivered!.valid).toBe(false);
+
     const next = await session.query("select 2");
     connection.receive(resultEnd(next.requestId, 0n));
     await next.completion;

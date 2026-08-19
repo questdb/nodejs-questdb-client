@@ -379,8 +379,10 @@ For allocation-sensitive consumers, `session.queryViews(sql, onBatch)` supplies
 bounded, reusable column views instead of materializing every value into JavaScript
 arrays. Typed accessors read fixed-width values directly from QWP bytes, and raw
 byte views are available for vectorized processing. The callback is awaited before
-credit is replenished. Views are invalid when it returns; copy a byte view with
-`.slice()` or call `batch.materialize()` inside the callback to retain data.
+credit is replenished, while the receive loop decodes ahead through the bounded
+reusable buffer pool. Views are invalid when their callback returns; copy a byte
+view with `.slice()` or call `batch.materialize()` inside the callback to retain
+data. Tune the default four-slot pool with the session's `bufferPoolSize`.
 
 `queryTimeoutMs` sets the session's default query deadline; a per-query
 `timeoutMs` overrides it, and zero disables the deadline. When a deadline

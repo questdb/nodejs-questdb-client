@@ -33,7 +33,7 @@ export interface QwpEgressSessionOptions {
   serverInfoTimeoutMs?: number;
   /** Default per-query send-ahead credit. Defaults to 256 KiB; zero is unbounded. */
   initialCredit?: number | bigint;
-  /** Maximum decoded materialized batches waiting for a consumer. Defaults to 4. */
+  /** Maximum decoded batches waiting for a consumer. Defaults to 4. */
   bufferPoolSize?: number;
   /** Default per-query deadline. Zero or undefined disables query deadlines. */
   queryTimeoutMs?: number;
@@ -95,7 +95,7 @@ interface QwpReplayableQueryRequest {
 
 /** Default bounded send-ahead window used by high-level egress queries. */
 export const QWP_DEFAULT_EGRESS_INITIAL_CREDIT = 256 * 1024;
-/** Default decoded materialized-result queue depth, matching the Java client. */
+/** Default decoded result-buffer pool depth, matching the Java client. */
 export const QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE = 4;
 
 const MAX_UINT64 = 0xffffffffffffffffn;
@@ -250,6 +250,10 @@ interface QwpQueuedResultBatch {
 
 type QwpBatchReservation = "reserved" | "retired" | "reset";
 
+type QwpViewBatchReservation =
+  | { readonly status: "reserved"; readonly slot: number }
+  | { readonly status: "retired" | "reset" };
+
 /** Control handle returned by queryViews(). */
 export interface QwpEgressViewQuery {
   readonly requestId: bigint;
@@ -276,8 +280,9 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private bufferedBatchCount = 0;
   private bufferGeneration = 0;
   private readonly bufferWaiters = new Set<() => void>();
-  private viewInProgress = false;
-  private readonly viewReleaseWaiters = new Set<() => void>();
+  private readonly availableViewSlots: number[];
+  private viewTail: Promise<void> = Promise.resolve();
+  private wireComplete = false;
   private terminal = false;
   private timeoutTimer?: ReturnType<typeof setTimeout>;
   readonly completion: Promise<QwpQueryCompletion>;
@@ -301,6 +306,9 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     void this.completion.catch(() => undefined);
     this.resolveCompletion = resolve;
     this.rejectCompletion = reject;
+    this.availableViewSlots = viewHandler
+      ? Array.from({ length: bufferPoolSize }, (_, slot) => slot)
+      : [];
   }
 
   [Symbol.asyncIterator](): AsyncIterator<QwpResultBatch> {
@@ -374,37 +382,76 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.releaseBufferedBatches(1);
   }
 
-  /** @internal */
-  async pushView(
+  /** @internal Waits for one reusable zero-copy view slot. */
+  async reserveViewBatch(): Promise<QwpViewBatchReservation> {
+    const generation = this.bufferGeneration;
+    while (
+      !this.terminal &&
+      generation === this.bufferGeneration &&
+      this.availableViewSlots.length === 0
+    ) {
+      await new Promise<void>((resolve) => this.bufferWaiters.add(resolve));
+    }
+    if (this.terminal) return { status: "retired" };
+    if (generation !== this.bufferGeneration) return { status: "reset" };
+    return { status: "reserved", slot: this.availableViewSlots.shift()! };
+  }
+
+  /** @internal Queues a decoded view after reserveViewBatch(). */
+  pushReservedView(
     batch: QwpResultBatchView,
     creditBytes: number,
-  ): Promise<void> {
+    slot: number,
+  ): void {
     if (this.terminal) {
       batch.release();
+      this.releaseViewSlot(slot);
       return;
     }
     const generation = this.bufferGeneration;
-    this.viewInProgress = true;
-    let handlerError: Error | undefined;
-    try {
-      await this.viewHandler!(batch, this);
-    } catch (error) {
-      handlerError = error instanceof Error ? error : new Error(String(error));
-    } finally {
-      batch.release();
-      this.viewInProgress = false;
-      for (const resolve of this.viewReleaseWaiters) resolve();
-      this.viewReleaseWaiters.clear();
-    }
-    if (generation !== this.bufferGeneration) return;
-    if (handlerError) {
-      await this.control
-        .rejectView(this.requestId, handlerError)
+    this.viewTail = this.viewTail.then(async () => {
+      if (this.terminal || generation !== this.bufferGeneration) {
+        batch.release();
+        this.releaseViewSlot(slot);
+        return;
+      }
+      let handlerError: Error | undefined;
+      try {
+        await this.viewHandler!(batch, this);
+      } catch (error) {
+        handlerError =
+          error instanceof Error ? error : new Error(String(error));
+      } finally {
+        batch.release();
+        this.releaseViewSlot(slot);
+      }
+      if (generation !== this.bufferGeneration) return;
+      if (handlerError) {
+        void this.control
+          .rejectView(this.requestId, handlerError)
+          .catch(() => undefined);
+        return;
+      }
+      if (
+        !this.autoCredit ||
+        this.terminal ||
+        this.wireComplete ||
+        creditBytes === 0
+      ) {
+        return;
+      }
+      // Credit and cancellation sends must not hold a view slot or its drain
+      // barrier: reconnect resets wait on that barrier before transport sends
+      // resume. The session send tail preserves wire order and owns failures.
+      void this.control
+        .grantCredit(this.requestId, creditBytes)
         .catch(() => undefined);
-      return;
-    }
-    if (!this.autoCredit || this.terminal || creditBytes === 0) return;
-    await this.control.grantCredit(this.requestId, creditBytes);
+    });
+  }
+
+  /** @internal Releases a reservation when zero-copy decoding fails. */
+  releaseViewBatch(slot: number): void {
+    this.releaseViewSlot(slot);
   }
 
   /** @internal */
@@ -413,7 +460,9 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 
   /** @internal */
-  finish(completion: QwpQueryCompletion): void {
+  async finish(completion: QwpQueryCompletion): Promise<void> {
+    this.wireComplete = true;
+    if (this.viewHandler) await this.viewTail;
     if (this.terminal) return;
     this.terminal = true;
     this.wakeBufferWaiters();
@@ -421,6 +470,14 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.deliveredCreditBytes = 0;
     this.batches.end();
     this.resolveCompletion(completion);
+  }
+
+  /** @internal Preserves batch/callback order before a wire query error. */
+  async finishError(error: Error): Promise<void> {
+    this.wireComplete = true;
+    if (this.viewHandler) await this.viewTail;
+    if (this.terminal) return;
+    this.fail(error);
   }
 
   /** @internal */
@@ -456,13 +513,15 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   async resetForReplay(): Promise<void> {
     this.deliveredCreditBytes = 0;
     this.bufferGeneration++;
+    this.wireComplete = false;
     this.releaseBufferedBatches(this.batches.clear().length);
     this.wakeBufferWaiters();
-    if (this.viewInProgress) {
-      await new Promise<void>((resolve) =>
-        this.viewReleaseWaiters.add(resolve),
-      );
-    }
+    await this.viewTail;
+  }
+
+  /** @internal Waits until all callback-scoped views have been released. */
+  waitForViewDrain(): Promise<void> {
+    return this.viewTail;
   }
 
   private clearTimeout(): void {
@@ -492,6 +551,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private wakeBufferWaiters(): void {
     for (const resolve of this.bufferWaiters) resolve();
     this.bufferWaiters.clear();
+  }
+
+  private releaseViewSlot(slot: number): void {
+    this.availableViewSlots.push(slot);
+    this.wakeBufferWaiters();
   }
 
   private async releaseDeliveredCredit(): Promise<void> {
@@ -694,8 +758,9 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   /**
    * Executes a query through a bounded, reusable, zero-copy batch callback.
-   * The callback is awaited before its batch is invalidated and flow-control
-   * credit is replenished.
+   * Callbacks run serially and are awaited before their batch is invalidated
+   * and flow-control credit is replenished. The receive loop decodes ahead
+   * into the remaining reusable slots, up to bufferPoolSize.
    */
   async queryViews(
     sql: string,
@@ -878,7 +943,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     this.clearCancelDrain();
     const error = new QwpEgressSessionClosedError();
     this.rejectServerInfo(error);
-    this.active?.fail(error);
+    const active = this.active;
+    active?.fail(error);
     this.clearActive();
     let transportClose: Promise<void>;
     try {
@@ -890,6 +956,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       this.sendTail,
       transportClose,
       this.receiveLoop,
+      active?.waitForViewDrain() ?? Promise.resolve(),
     ]);
     if (closeResult.status === "rejected") throw closeResult.reason;
   }
@@ -924,10 +991,28 @@ export class QwpEgressSession implements QwpEgressQueryControl {
                   ).catch(() => undefined);
                 }
               } else if (query.usesViews) {
-                await query.pushView(
-                  this.decoder.decodeView(message),
-                  payload.byteLength,
-                );
+                const reservation = await query.reserveViewBatch();
+                if (reservation.status === "retired") {
+                  const creditBytes = query.lateBatchCredit(payload.byteLength);
+                  if (creditBytes > 0) {
+                    void this.sendWhileActive(
+                      message.requestId,
+                      encodeQwpCredit(message.requestId, creditBytes),
+                    ).catch(() => undefined);
+                  }
+                } else if (reservation.status === "reserved") {
+                  try {
+                    query.pushReservedView(
+                      this.decoder.decodeView(message, reservation.slot),
+                      payload.byteLength,
+                      reservation.slot,
+                    );
+                  } catch (error) {
+                    this.decoder.releaseView(reservation.slot);
+                    query.releaseViewBatch(reservation.slot);
+                    throw error;
+                  }
+                }
               } else {
                 const reservation = await query.reserveMaterializedBatch();
                 if (reservation === "retired") {
@@ -954,29 +1039,29 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             }
             case "result-end": {
               const query = this.requireActive(message.requestId);
-              this.clearActive(query);
               this.clearCancelDrain(message.requestId);
-              query.finish(message);
+              await query.finish(message);
+              this.clearActive(query);
               break;
             }
             case "exec-done": {
               const query = this.requireActive(message.requestId);
-              this.clearActive(query);
               this.clearCancelDrain(message.requestId);
-              query.finish(message);
+              await query.finish(message);
+              this.clearActive(query);
               break;
             }
             case "query-error": {
               const query = this.requireActive(message.requestId);
-              this.clearActive(query);
               this.clearCancelDrain(message.requestId);
-              query.fail(
+              await query.finishError(
                 new QwpEgressQueryError(
                   message.requestId,
                   message.status,
                   message.message,
                 ),
               );
+              this.clearActive(query);
               break;
             }
           }

@@ -767,15 +767,16 @@ server read-ahead in Node.js and browsers. Set a session-level `initialCredit` t
 the default, override it per query, or explicitly set zero for legacy unbounded
 streaming. Set `autoCredit: false` and call `query.grantCredit()` for manual control.
 
-Materialized `query()` results also use a client-side decoded-batch pool with four
-slots by default. Set the session-level `bufferPoolSize` to tune this bound. Once the
-pool fills, decoding pauses until iteration requests another batch; callers must
-consume a multi-batch SELECT before awaiting its terminal `completion`. This bound is
-independent of QWP credit, so `initialCredit: 0` no longer permits an unbounded queue
-of materialized JavaScript value arrays. Protocol credit remains the stronger
-end-to-end bound, particularly in browsers where the WebSocket implementation may
-buffer raw frames before JavaScript reads them. `queryViews()` already has a single
-reusable decoded batch and does not consume materialized-pool slots.
+Both materialized `query()` results and zero-copy `queryViews()` use a client-side
+decoded-batch pool with four slots by default. Set the session-level
+`bufferPoolSize` to tune this bound. Materialized decoding pauses when all slots are
+queued until iteration requests another batch. For `queryViews()`, callbacks remain
+serial and callback-scoped, while the receive loop continues decoding into the other
+reusable slots; a slow callback stalls decoding only after the pool fills. This bound
+is independent of QWP credit, so `initialCredit: 0` no longer permits an unbounded
+queue of decoded batches. Protocol credit remains the stronger end-to-end bound,
+particularly in browsers where the WebSocket implementation may buffer raw frames
+before JavaScript reads them.
 
 A session `queryTimeoutMs` supplies the default deadline; per-query `timeoutMs`
 overrides it, and zero disables it. Expiry rejects iteration and `completion` with
