@@ -1939,6 +1939,51 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("waits for a larger-cap node instead of failing a journalled frame", async () => {
+    // A frame journalled while offline was never transmitted, so replayInto()
+    // skips it and the drain loop calls transmit() -- the path that used to
+    // treat a smaller-cap node as terminal. The Java client retries a
+    // foreground sender forever rather than reclassifying data the producer
+    // already handed over as unsendable.
+    const tooSmall = new FakeConnection("small-cap", {
+      qwpVersion: 1,
+      maxBatchSizeBytes: 4,
+    });
+    const large = new FakeConnection("large-cap");
+    const attempts: unknown[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        attempts.push(1);
+        if (attempts.length === 1) {
+          throw new QwpUpgradeError("offline", {
+            kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+            retryable: true,
+            tryNextEndpoint: true,
+          });
+        }
+        return attempts.length === 2 ? tooSmall : large;
+      },
+      {
+        backgroundStoreAndForward: true,
+        ackTimeoutMs: 1_000,
+        reconnect: { maxAttempts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+      },
+    );
+
+    const payload = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8);
+    await expect(session.publishFrame(payload)).resolves.toBeUndefined();
+
+    // The small-cap node cannot take the journalled frame; the session must
+    // roll on to one that can rather than going terminal.
+    await vi.waitFor(() => expect(large.sent).toHaveLength(1), {
+      timeout: 5_000,
+    });
+    expect(large.sent[0]).toEqual(payload);
+    large.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await session.close();
+  }, 20_000);
+
   it("chunks reconnect dictionary catch-up under the negotiated batch cap", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary", {

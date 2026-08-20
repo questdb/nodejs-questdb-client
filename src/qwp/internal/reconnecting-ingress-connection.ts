@@ -1571,9 +1571,22 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       this.localMaxBatchSizeBytes,
     );
     if (cap !== undefined && frame.payloadLength > cap) {
-      throw new RangeError(
-        `QWP frame exceeds reconnect target batch cap [size=${frame.payloadLength}, max=${cap}]`,
+      // Data the producer already handed over is never reclassified as
+      // unsendable because a failover landed on a smaller-cap node: that would
+      // invent a terminal for a frame an earlier node would have taken. Treat
+      // it as a connection-level failure, exactly as replayInto() does with the
+      // identical check, so the reconnect loop keeps looking for a node that
+      // can take it. Marking it transmitted is what puts it in replayInto()'s
+      // resend set; it is deliberately not pushed onto the wire log, because
+      // nothing reached the wire and the log is indexed by wire sequence.
+      frame.transmitted = true;
+      await this.requestReconnect(
+        new RangeError(
+          `QWP frame exceeds reconnect target batch cap [size=${frame.payloadLength}, max=${cap}]`,
+        ),
+        connection,
       );
+      return;
     }
     const payload = await this.readFramePayload(frame);
     frame.transmitted = true;
