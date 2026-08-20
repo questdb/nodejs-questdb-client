@@ -317,6 +317,33 @@ class FailOnceDictionaryReplayStore extends TrackingReplayStore {
   }
 }
 
+/** Rejects sequence holes the way QwpNodeFileReplayStore does. */
+class ContiguousReplayStore extends TrackingReplayStore {
+  appendAttempts = 0;
+  private lastSequence?: bigint;
+
+  constructor(private readonly failOnAppendAttempt = 1) {
+    super();
+  }
+
+  override async append(record: QwpIngressReplayRecord): Promise<void> {
+    this.appendAttempts++;
+    if (this.appendAttempts === this.failOnAppendAttempt) {
+      throw new Error("journal is full");
+    }
+    const expected =
+      this.lastSequence === undefined ? 0n : this.lastSequence + 1n;
+    if (record.frameSequence !== expected) {
+      throw new Error(
+        "QWP store-and-forward sequence must be contiguous " +
+          `[previous=${this.lastSequence ?? -1n}, received=${record.frameSequence}]`,
+      );
+    }
+    this.lastSequence = record.frameSequence;
+    await super.append(record);
+  }
+}
+
 class FailingDictionaryPersistenceReplayStore extends TrackingReplayStore {
   appendSymbolDictionaryCalls = 0;
 
@@ -1550,9 +1577,55 @@ describe("QWP ingress reconnect and replay", () => {
     ).resolves.toBeUndefined();
     expect(replayStore.appendAttempts).toBe(2);
     expect(replayStore.symbols).toEqual(["ETH-USD", "BTC-USD"]);
+    // The rejected append consumed no frame sequence, so the surviving record
+    // is the journal's first. A hole here would make the store reject every
+    // later append as non-contiguous.
+    expect([...replayStore.records.keys()]).toEqual([0n]);
     expect(
-      decodeQwpIngressSymbolDictionaryDelta(replayStore.records.get(1n)!),
+      decodeQwpIngressSymbolDictionaryDelta(replayStore.records.get(0n)!),
     ).toEqual({ startId: 0, entries: ["ETH-USD", "BTC-USD"] });
+    await session.close();
+  });
+
+  it("keeps journal appends contiguous after a rejected append", async () => {
+    const replayStore = new ContiguousReplayStore();
+    const session = await QwpIngressSession.connect(
+      async () => {
+        throw new QwpUpgradeError("offline", {
+          kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+          retryable: true,
+          tryNextEndpoint: true,
+        });
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 10_000,
+          maxBackoffMs: 10_000,
+        },
+        replayStore,
+      },
+    );
+
+    await expect(session.publishFrame(Uint8Array.of(1))).rejects.toThrow(
+      "journal is full",
+    );
+
+    // Journal exhaustion is the one error a producer may see, and it must be
+    // survivable: once there is room again every later frame has to be
+    // accepted. Consuming a sequence for the rejected append would leave a
+    // hole and make the store reject everything that followed until the
+    // journal drained completely.
+    await expect(
+      session.publishFrame(Uint8Array.of(2)),
+    ).resolves.toBeUndefined();
+    await expect(
+      session.publishFrame(Uint8Array.of(3)),
+    ).resolves.toBeUndefined();
+    expect([...replayStore.records.keys()]).toEqual([0n, 1n]);
+
     await session.close();
   });
 

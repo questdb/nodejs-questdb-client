@@ -101,7 +101,10 @@ class QwpDurableAckPersistentFailureError extends Error {
   }
 }
 
-interface ReplayFrame extends QwpIngressReplayReference {
+interface ReplayFrame extends Omit<QwpIngressReplayReference, "frameSequence"> {
+  // Assigned inside send()'s serialized tail, immediately before the journal
+  // append, so a frame that never reaches the store consumes no sequence.
+  frameSequence: bigint;
   payload?: Uint8Array;
   readonly clientSequence?: bigint;
   ackDelivered: boolean;
@@ -666,15 +669,19 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   skipIngressClientSequence(): void {
+    // Only the client sequence is reserved. The skipped frame never reaches
+    // the journal, so consuming a frame sequence here would leave a hole that
+    // makes every later append non-contiguous.
     this.nextClientSequence++;
-    this.nextFrameSequence++;
   }
 
   send(payload: Uint8Array): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closing) return Promise.reject(new QwpSendClosedError());
     const frame: ReplayFrame = {
-      frameSequence: this.nextFrameSequence++,
+      // Placeholder; the real sequence is allocated in the tail below, once
+      // the journal has accepted the frame.
+      frameSequence: -1n,
       clientSequence: this.nextClientSequence++,
       payload: payload.slice(),
       payloadLength: payload.byteLength,
@@ -692,10 +699,18 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         }
         await this.persistSymbolDictionaryDelta(delta);
       }
+      // Sends are serialized on sendTail, so allocating here rather than at
+      // call time keeps frame sequences dense and in append order. A rejected
+      // append -- an exhausted journal, a missed append deadline -- must not
+      // consume one: the store enforces contiguity, so a hole would make every
+      // later append fail until the journal drained completely.
+      const frameSequence = this.nextFrameSequence;
       await this.store.append({
-        frameSequence: frame.frameSequence,
+        frameSequence,
         payload: frame.payload!,
       });
+      this.nextFrameSequence = frameSequence + 1n;
+      frame.frameSequence = frameSequence;
       this.frames.set(frame.frameSequence, frame);
       this.publishedFrameSequence = frame.frameSequence;
       if (this.backgroundStoreAndForward) {
