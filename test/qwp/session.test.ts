@@ -787,6 +787,42 @@ describe("QWP WebSocket adapters", () => {
     await sender.close();
   });
 
+  it("stays usable after a row that cannot fit the negotiated batch cap", async () => {
+    const socket = new FakeWebSocket();
+    const cap = 200;
+    const sender = createQwpBrowserSender(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      { autoFlush: false, encode: { gorilla: false } },
+      { maxBatchSizeBytes: cap },
+    );
+    const connecting = sender.connect();
+    socket.open();
+    await connecting;
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(ingressResponse(QWP_STATUS.OK, sequence));
+    };
+
+    // The splitter bisects a batch down to single rows; one row above the cap
+    // is unsplittable and always re-encodes to the same oversized frame.
+    await sender.table("events").stringColumn("v", "x".repeat(500)).atNow();
+    await expect(sender.flush()).rejects.toBeInstanceOf(QwpBatchTooLargeError);
+
+    // Retaining those rows would wedge the sender: the same error on every
+    // later flush, pendingRows growing without bound, and close() discarding
+    // everything staged after it.
+    expect(sender.metrics.pendingRows).toBe(0);
+    await sender.table("events").stringColumn("v", "ok").atNow();
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.sent).toHaveLength(1);
+    expect(socket.sent[0].byteLength).toBeLessThanOrEqual(cap);
+
+    await sender.close();
+  });
+
   it("pipelines transactional browser auto-flush until an explicit commit ACK", async () => {
     const socket = new FakeWebSocket();
     const sender = createQwpBrowserSender(
