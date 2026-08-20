@@ -756,6 +756,39 @@ function createSenderLease(
   let closePromise: Promise<void> | undefined;
   const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
 
+  const guardTableWriter = <T extends object>(writer: T): T => {
+    // Memoized per writer, matching the sender proxy below: appends re-enter
+    // this trap per row, so a fresh closure per access would allocate on the
+    // hot path and hand out unstable method identities.
+    const writerMethods = new Map<
+      PropertyKey,
+      (...args: unknown[]) => unknown
+    >();
+    const guarded: T = new Proxy(writer, {
+      get(target, property) {
+        if (released) {
+          throw new QwpClientClosedError("QWP sender lease is closed");
+        }
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        let wrapped = writerMethods.get(property);
+        if (!wrapped) {
+          wrapped = (...args: unknown[]) => {
+            if (released) {
+              throw new QwpClientClosedError("QWP sender lease is closed");
+            }
+            // Re-enter through the proxy so multi-row helpers such as rows()
+            // re-check the lease between appends instead of only on entry.
+            return Reflect.apply(value, guarded, args);
+          };
+          writerMethods.set(property, wrapped);
+        }
+        return wrapped;
+      },
+    });
+    return guarded;
+  };
+
   const release = (): Promise<void> => {
     if (closePromise) return closePromise;
     released = true;
@@ -790,6 +823,9 @@ function createSenderLease(
             throw new QwpClientClosedError("QWP sender lease is closed");
           }
           const result = Reflect.apply(value, target, args);
+          if (property === "writer" && typeof result === "object" && result) {
+            return guardTableWriter(result);
+          }
           return result === target ? proxy : result;
         };
         methods.set(property, wrapped);

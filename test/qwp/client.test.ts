@@ -19,6 +19,9 @@ import {
   type QwpPoolSlotReservation,
   QwpSender,
   QwpSenderSession,
+  designatedTimestamp,
+  long,
+  symbol as qwpSymbol,
 } from "../../src/qwp";
 import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
 
@@ -306,10 +309,15 @@ describe("QWP pooled client", () => {
 
     const first = await client.borrowSender();
     await first.table("trades").symbol("symbol", "ETH-USD").atNow();
+    const objects = first.writer("objects", { symbol: qwpSymbol() });
+    // The lease guard memoizes its wrappers, so method identity is stable.
+    expect(objects.row).toBe(objects.row);
+    await objects.row({ symbol: "BTC-USD" });
     await first.close();
     expect(senderSessions[0].flushes).toBe(1);
     expect(senderSessions[0].closes).toBe(0);
     expect(() => first.table("late")).toThrow(QwpClientClosedError);
+    expect(() => objects.row({ symbol: "late" })).toThrow(QwpClientClosedError);
 
     const second = await client.borrowSender();
     expect(senderCreations).toBe(1);
@@ -322,6 +330,71 @@ describe("QWP pooled client", () => {
 
     await client.close();
     expect(senderSessions[0].closes).toBe(1);
+  });
+
+  it("stops an in-flight writer stream when its lease is released", async () => {
+    const senderSessions: FakeSenderSession[] = [];
+    let senderCreations = 0;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          senderCreations++;
+          const session = new FakeSenderSession();
+          senderSessions.push(session);
+          const sender = new QwpSender(async () => session, {
+            autoFlush: false,
+          });
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 1,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    );
+    await client.connect();
+
+    const first = await client.borrowSender();
+    const events = first.writer("events", {
+      value: long(),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    let resumeSource!: () => void;
+    const suspended = new Promise<void>((resolve) => {
+      resumeSource = resolve;
+    });
+    async function* source() {
+      yield { value: 1n, timestamp: 10n };
+      await suspended;
+      yield { value: 2n, timestamp: 20n };
+      yield { value: 3n, timestamp: 30n };
+    }
+
+    const inFlight = events.rows(source());
+    await new Promise((resolve) => setImmediate(resolve));
+    await first.close();
+    expect(senderSessions[0].flushes).toBe(1);
+
+    // The pool hands the very same sender to the next borrower.
+    const second = await client.borrowSender();
+    expect(senderCreations).toBe(1);
+
+    resumeSource();
+    await expect(inFlight).rejects.toBeInstanceOf(QwpClientClosedError);
+
+    // Rows yielded after the release must not reach the new lease.
+    await second.flush();
+    expect(senderSessions[0].flushes).toBe(1);
+
+    await second.close();
+    await client.close();
   });
 
   it("waits for a borrowed sender without closing it underneath its owner", async () => {

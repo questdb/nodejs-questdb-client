@@ -13,3 +13,26 @@ export * from "./ingress-session";
 export * from "./sender";
 export * from "./sender-error";
 export * from "./transport";
+export {
+  bool,
+  byte,
+  designatedTimestamp,
+  double,
+  float32,
+  float64,
+  int32,
+  int64,
+  long,
+  short,
+  symbol,
+  timestamp,
+  varchar,
+  QwpWriterRowError,
+} from "./writer";
+export type {
+  QwpTimestampUnit,
+  QwpWriterColumn,
+  QwpWriterColumnKind,
+  QwpWriterRow,
+  QwpWriterSchema,
+} from "./writer";

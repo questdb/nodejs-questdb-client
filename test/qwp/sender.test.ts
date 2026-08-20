@@ -8,7 +8,21 @@ import {
   QwpSenderCloseTimeoutError,
   QwpSenderSession,
   QwpTableBuffer,
+  QwpWriterRowError,
+  bool,
+  byte,
+  designatedTimestamp,
+  double,
   encodeQwpIngressFrame,
+  float32,
+  float64,
+  int32,
+  int64,
+  long,
+  short,
+  symbol as qwpSymbol,
+  timestamp,
+  varchar,
 } from "../../src/qwp";
 
 class RecordingSession implements QwpSenderSession {
@@ -615,6 +629,242 @@ describe("QWP high-level sender", () => {
 
     const table = session.sends[0].tables[0];
     expect(table.columns.map((item) => item.name)).toEqual(["kept"]);
+  });
+
+  it("compiles a typed table writer and appends object rows", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const trades = sender.writer("trades", {
+      symbol: qwpSymbol(),
+      side: qwpSymbol(),
+      venue: varchar(),
+      active: bool(),
+      flags: byte(),
+      partition: short(),
+      sequence: int32(),
+      quantity: int64(),
+      spread: float32(),
+      price: float64(),
+      received: timestamp("ms"),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    await trades.row({
+      symbol: "ETH-USD",
+      side: "sell",
+      venue: "LDN",
+      active: true,
+      flags: 1,
+      partition: 2,
+      sequence: 3,
+      quantity: 42n,
+      spread: 0.25,
+      price: 2_615.54,
+      received: 1_723_000_000_000,
+      timestamp: 1_723_000_000_000_000_000n,
+    });
+    await trades.rows([
+      {
+        symbol: "BTC-USD",
+        price: 39_269.98,
+        timestamp: 1_723_000_001_000_000_000n,
+      },
+    ]);
+    async function* moreRows() {
+      yield {
+        symbol: "SOL-USD",
+        quantity: 7n,
+        timestamp: 1_723_000_002_000_000_000n,
+      };
+    }
+    await trades.rows(moreRows());
+
+    expect(sender.metrics).toMatchObject({
+      totalRowsStaged: 3,
+      pendingRows: 3,
+    });
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(table.name).toBe("trades");
+    expect(table.rowCount).toBe(3);
+    expect(column(table, "symbol")).toMatchObject({
+      type: QWP_COLUMN_TYPE.SYMBOL,
+      values: ["ETH-USD", "BTC-USD", "SOL-USD"],
+      nulls: [false, false, false],
+    });
+    expect(column(table, "side")).toMatchObject({
+      values: ["sell"],
+      nulls: [false, true, true],
+    });
+    expect(column(table, "quantity")).toMatchObject({
+      type: QWP_COLUMN_TYPE.LONG,
+      values: [42n, 7n],
+      nulls: [false, true, false],
+    });
+    // Widths are pinned deliberately: the fluent API's floatColumn() and
+    // intColumn() are 64-bit, so the writer's names must not drift.
+    expect(column(table, "spread")).toMatchObject({
+      type: QWP_COLUMN_TYPE.FLOAT,
+      values: [0.25],
+    });
+    expect(column(table, "price")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DOUBLE,
+      values: [2_615.54, 39_269.98],
+    });
+    expect(column(table, "sequence")).toMatchObject({
+      type: QWP_COLUMN_TYPE.INT,
+      values: [3],
+    });
+    expect(column(table, "received")).toMatchObject({
+      type: QWP_COLUMN_TYPE.TIMESTAMP,
+      values: [1_723_000_000_000_000n],
+    });
+    expect(column(table, "")).toMatchObject({
+      type: QWP_COLUMN_TYPE.TIMESTAMP_NANOS,
+      values: [
+        1_723_000_000_000_000_000n,
+        1_723_000_001_000_000_000n,
+        1_723_000_002_000_000_000n,
+      ],
+    });
+  });
+
+  it("maps width aliases onto the same column types", () => {
+    expect(double()).toEqual(float64());
+    expect(long()).toEqual(int64());
+    expect(float32()).not.toEqual(float64());
+    expect(int32()).not.toEqual(int64());
+  });
+
+  it("reports an open fluent row ahead of object-row validation", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    const trades = sender.writer("trades", {
+      price: double(),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    sender.table("trades").symbol("side", "buy");
+    // Both faults apply; the conflicting fluent row is the actionable one.
+    await expect(
+      trades.row({ price: "nope", timestamp: 1n } as never),
+    ).rejects.toMatchObject({
+      name: "QwpWriterRowError",
+      columnName: undefined,
+    });
+    await expect(trades.row({ price: 1, timestamp: 1n })).rejects.toThrow(
+      /a fluent row is already in progress/,
+    );
+
+    // Closing the fluent row hands the table back to the writer.
+    await sender.at(5n, "ns");
+    await trades.row({ price: 1, timestamp: 1n });
+    expect(sender.metrics.pendingRows).toBe(2);
+  });
+
+  it("rejects invalid object rows without poisoning writer state", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const trades = sender.writer("trades", {
+      symbol: qwpSymbol(),
+      price: double(),
+      quantity: long(),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    await expect(
+      trades.row({
+        symbol: "bad",
+        price: "not-a-number",
+        timestamp: 1n,
+      } as never),
+    ).rejects.toMatchObject({
+      name: "QwpWriterRowError",
+      tableName: "trades",
+      columnName: "price",
+      rowIndex: undefined,
+    });
+    expect(sender.metrics.pendingRows).toBe(0);
+
+    await expect(
+      trades.rows([
+        { symbol: "ETH-USD", price: 2_615.54, timestamp: 2n },
+        {
+          symbol: "BTC-USD",
+          price: 39_269.98,
+          timestamp: undefined,
+        } as never,
+      ]),
+    ).rejects.toMatchObject({
+      name: "QwpWriterRowError",
+      columnName: "timestamp",
+      rowIndex: 1,
+    });
+    expect(sender.metrics.pendingRows).toBe(1);
+
+    await trades.row({
+      symbol: "SOL-USD",
+      quantity: 7n,
+      timestamp: 3n,
+    });
+    await sender.flush();
+    const table = session.sends[0].tables[0];
+    expect(table.rowCount).toBe(2);
+    expect(column(table, "symbol").values).toEqual(["ETH-USD", "SOL-USD"]);
+  });
+
+  it("rejects unknown keys and invalid compiled schemas", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    const trades = sender.writer("trades", {
+      price: double(),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    await expect(
+      trades.row({ price: 1, timestamp: 1n, prise: 2 } as never),
+    ).rejects.toMatchObject<QwpWriterRowError>({
+      columnName: "prise",
+      rowIndex: undefined,
+    });
+    expect(() =>
+      sender.writer("trades", {
+        timestamp: designatedTimestamp("ns"),
+        received: designatedTimestamp("us"),
+      }),
+    ).toThrow(/more than one designated timestamp/);
+    expect(() =>
+      sender.writer("trades", {
+        Price: double(),
+        price: double(),
+      }),
+    ).toThrow(/duplicate case-insensitive/);
+    expect(() => sender.writer("trades", { price: {} as never })).toThrow(
+      /invalid QWP writer descriptor/,
+    );
+  });
+
+  it("keeps compiled rows atomic across concurrent calls and sender reset", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const events = sender.writer("events", {
+      value: long(),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    await Promise.all([
+      events.row({ value: 1n, timestamp: 10n }),
+      events.row({ value: 2n, timestamp: 20n }),
+    ]);
+    sender.reset();
+    await events.row({ value: 3n, timestamp: 30n });
+    await sender.flush();
+
+    expect(session.sends[0].tables[0].rowCount).toBe(1);
+    expect(column(session.sends[0].tables[0], "value").values).toEqual([3n]);
   });
 
   it("can await durable ACKs and auto-flush by row count", async () => {

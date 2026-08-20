@@ -14,6 +14,8 @@ import {
   createQwpNodeUdpSender,
   QwpSender,
 } from "./qwp/node";
+import type { QwpTableWriter } from "./qwp/sender";
+import type { QwpWriterSchema } from "./qwp/writer";
 import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
@@ -219,6 +221,22 @@ class Sender {
     this.buffer!.reset();
     this.resetAutoFlush();
     return this;
+  }
+
+  /**
+   * Compiles a table-bound object-row writer for QWP transports.
+   * Legacy ILP transports continue to use the fluent row API.
+   */
+  writer<const Schema extends QwpWriterSchema>(
+    tableName: string,
+    schema: Schema,
+  ): QwpTableWriter<Schema> {
+    if (!this.qwpSender) {
+      throw new Error(
+        "compiled table writers are available only with QWP transports",
+      );
+    }
+    return this.qwpSender.writer(tableName, schema);
   }
 
   /**

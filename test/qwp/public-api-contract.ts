@@ -1,6 +1,12 @@
 import { Sender } from "../../src";
 import type { ExtraOptions, QwpExtraOptions } from "../../src";
-import { defaultQwpSenderErrorHandler } from "../../src/qwp";
+import {
+  defaultQwpSenderErrorHandler,
+  designatedTimestamp,
+  double,
+  long,
+  symbol as qwpSymbol,
+} from "../../src/qwp";
 import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
@@ -64,6 +70,8 @@ import type {
   QwpServerInfoMessage,
   QwpSender,
   QwpSenderOptions,
+  QwpTableWriter,
+  QwpWriterRow,
 } from "../../src/qwp";
 
 // This file is part of the repository typecheck. Assignments deliberately
@@ -335,6 +343,35 @@ function rootSenderSequenceContract(sender: Sender): void {
   void acknowledgedWatermark;
 }
 
+function compiledWriterContract(sender: QwpSender, rootSender: Sender): void {
+  const schema = {
+    symbol: qwpSymbol(),
+    price: double(),
+    quantity: long(),
+    timestamp: designatedTimestamp("ns"),
+  } as const;
+  const writer: QwpTableWriter<typeof schema> = sender.writer("trades", schema);
+  const row: QwpWriterRow<typeof schema> = {
+    symbol: "ETH-USD",
+    price: 2_615.54,
+    quantity: 42n,
+    timestamp: 1_723_000_000_000_000_000n,
+  };
+  const single: Promise<void> = writer.row(row);
+  const batch: Promise<void> = writer.rows([row]);
+  const rootWriter: QwpTableWriter<typeof schema> = rootSender.writer(
+    "trades",
+    schema,
+  );
+  // @ts-expect-error The designated timestamp is required.
+  void writer.row({ price: 1 });
+  // @ts-expect-error LONG values are bigint, not number.
+  void writer.row({ quantity: 42, timestamp: 1n });
+  void single;
+  void batch;
+  void rootWriter;
+}
+
 function queryViewContract(
   session: QwpEgressSession,
   lease: QwpQueryLease,
@@ -409,5 +446,6 @@ void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
 void senderSequenceContract;
 void rootSenderSequenceContract;
+void compiledWriterContract;
 void queryViewContract;
 void Sender;

@@ -14,8 +14,16 @@ import {
   type QwpIngressMetrics,
 } from "./ingress-session";
 import { qwpColumnNameKey, validateQwpColumnName } from "./core/identifiers";
+import {
+  isQwpWriterColumn,
+  QwpWriterRowError,
+  type QwpTimestampUnit,
+  type QwpWriterColumn,
+  type QwpWriterRow,
+  type QwpWriterSchema,
+} from "./writer";
 
-export type QwpTimestampUnit = "ns" | "us" | "ms";
+export type { QwpTimestampUnit } from "./writer";
 
 export type QwpSenderLogger = (
   level: "error" | "warn" | "info" | "debug",
@@ -174,6 +182,20 @@ interface StagedTable {
 interface StagedRow {
   readonly columns: Map<string, StagedColumn>;
   readonly estimatedBytes: number;
+}
+
+interface CompiledQwpWriterColumn {
+  readonly inputName: string;
+  readonly wireName: string;
+  readonly nameKey: string;
+  readonly type: QwpColumnType;
+  readonly descriptor: QwpWriterColumn<unknown, boolean>;
+}
+
+interface CompiledQwpWriterSchema {
+  readonly tableName: string;
+  readonly columns: readonly CompiledQwpWriterColumn[];
+  readonly inputNames: ReadonlySet<string>;
 }
 
 interface QwpSenderFlushResult {
@@ -400,6 +422,135 @@ function parseIpv4(value: string | number): number {
   return packed;
 }
 
+function qwpWriterColumnType(
+  descriptor: QwpWriterColumn<unknown, boolean>,
+): QwpColumnType {
+  switch (descriptor.kind) {
+    case "symbol":
+      return QWP_COLUMN_TYPE.SYMBOL;
+    case "varchar":
+      return QWP_COLUMN_TYPE.VARCHAR;
+    case "bool":
+      return QWP_COLUMN_TYPE.BOOLEAN;
+    case "byte":
+      return QWP_COLUMN_TYPE.BYTE;
+    case "short":
+      return QWP_COLUMN_TYPE.SHORT;
+    case "int32":
+      return QWP_COLUMN_TYPE.INT;
+    case "int64":
+      return QWP_COLUMN_TYPE.LONG;
+    case "float32":
+      return QWP_COLUMN_TYPE.FLOAT;
+    case "float64":
+      return QWP_COLUMN_TYPE.DOUBLE;
+    case "timestamp":
+      return descriptor.unit === "ns"
+        ? QWP_COLUMN_TYPE.TIMESTAMP_NANOS
+        : QWP_COLUMN_TYPE.TIMESTAMP;
+  }
+}
+
+function encodeQwpWriterValue(
+  column: CompiledQwpWriterColumn,
+  value: unknown,
+): unknown {
+  switch (column.descriptor.kind) {
+    case "symbol":
+    case "varchar":
+      if (typeof value !== "string") {
+        throw new TypeError(`${column.descriptor.kind} accepts only strings`);
+      }
+      return value;
+    case "bool":
+      if (typeof value !== "boolean") {
+        throw new TypeError("bool accepts only booleans");
+      }
+      return value;
+    case "byte":
+      if (typeof value !== "number") {
+        throw new TypeError("byte accepts only numbers");
+      }
+      return checkedRange(value, -128, 127, "byte value");
+    case "short":
+      if (typeof value !== "number") {
+        throw new TypeError("short accepts only numbers");
+      }
+      return checkedRange(value, -32_768, 32_767, "short value");
+    case "int32":
+      if (typeof value !== "number") {
+        throw new TypeError("int32 accepts only numbers");
+      }
+      return checkedRange(value, -2_147_483_648, 2_147_483_647, "int32 value");
+    case "int64":
+      if (typeof value !== "bigint") {
+        throw new TypeError("int64 accepts only bigint values");
+      }
+      return checkedInt64(value, "int64 value", true);
+    case "float32":
+    case "float64":
+      if (typeof value !== "number") {
+        throw new TypeError(`${column.descriptor.kind} accepts only numbers`);
+      }
+      return value;
+    case "timestamp": {
+      if (typeof value !== "number" && typeof value !== "bigint") {
+        throw new TypeError("timestamp accepts only number or bigint values");
+      }
+      return timestampValue(value, column.descriptor.unit ?? "us").value;
+    }
+  }
+}
+
+const QWP_TABLE_WRITER_CONSTRUCTOR = Symbol("QWP table writer constructor");
+
+/** A reusable table-bound writer compiled from a QWP schema. */
+export class QwpTableWriter<Schema extends QwpWriterSchema> {
+  /** @internal Construct table writers with QwpSender.writer(). */
+  constructor(
+    token: typeof QWP_TABLE_WRITER_CONSTRUCTOR,
+    readonly tableName: string,
+    private readonly appendRow: (
+      row: unknown,
+      rowIndex?: number,
+    ) => Promise<void>,
+  ) {
+    if (token !== QWP_TABLE_WRITER_CONSTRUCTOR) {
+      throw new TypeError("QWP table writers must be created by QwpSender");
+    }
+  }
+
+  /** Validates and atomically appends one complete object row. */
+  row(row: QwpWriterRow<Schema>): Promise<void> {
+    return this.appendRow(row);
+  }
+
+  /** Appends a synchronous or asynchronous stream of complete object rows. */
+  async rows(
+    rows: Iterable<QwpWriterRow<Schema>> | AsyncIterable<QwpWriterRow<Schema>>,
+  ): Promise<void> {
+    const source = rows as
+      | Partial<
+          Iterable<QwpWriterRow<Schema>> & AsyncIterable<QwpWriterRow<Schema>>
+        >
+      | null
+      | undefined;
+    if (
+      source === null ||
+      source === undefined ||
+      (typeof source[Symbol.iterator] !== "function" &&
+        typeof source[Symbol.asyncIterator] !== "function")
+    ) {
+      throw new TypeError("QWP table writer rows must be iterable");
+    }
+
+    let rowIndex = 0;
+    for await (const row of rows) {
+      await this.appendRow(row, rowIndex++);
+    }
+  }
+}
+
 /**
  * Browser-safe high-level QWP ingress API.
  *
@@ -514,6 +665,23 @@ export class QwpSender {
     this.currentRow.clear();
     this.resetAutoFlush();
     return this;
+  }
+
+  /**
+   * Compiles an immutable table schema into an atomic object-row writer.
+   * The returned writer remains usable after this sender is reset.
+   */
+  writer<const Schema extends QwpWriterSchema>(
+    tableName: string,
+    schema: Schema,
+  ): QwpTableWriter<Schema> {
+    this.throwIfUnavailable();
+    const compiled = this.compileWriterSchema(tableName, schema);
+    return new QwpTableWriter(
+      QWP_TABLE_WRITER_CONSTRUCTOR,
+      tableName,
+      (row, rowIndex) => this.appendCompiledWriterRow(compiled, row, rowIndex),
+    );
   }
 
   table(name: string): QwpSender {
@@ -1166,6 +1334,226 @@ export class QwpSender {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  private compileWriterSchema<Schema extends QwpWriterSchema>(
+    tableName: string,
+    schema: Schema,
+  ): CompiledQwpWriterSchema {
+    // Reuse the wire buffer's table validation so both sender APIs accept the
+    // exact same identifiers.
+    new QwpTableBuffer(tableName, this.maxNameLength);
+    if (
+      typeof schema !== "object" ||
+      schema === null ||
+      Array.isArray(schema)
+    ) {
+      throw new TypeError("QWP writer schema must be an object");
+    }
+
+    const entries = Object.entries(schema);
+    if (entries.length === 0) {
+      throw new TypeError("QWP writer schema must contain at least one column");
+    }
+
+    const columns: CompiledQwpWriterColumn[] = [];
+    const inputNames = new Set<string>();
+    const nameKeys = new Set<string>();
+    let designatedTimestampCount = 0;
+    for (const [inputName, candidate] of entries) {
+      validateQwpColumnName(inputName, this.maxNameLength);
+      if (!isQwpWriterColumn(candidate)) {
+        throw new TypeError(
+          `invalid QWP writer descriptor for column '${inputName}'`,
+        );
+      }
+      if (candidate.designatedTimestamp) designatedTimestampCount++;
+      if (designatedTimestampCount > 1) {
+        throw new TypeError(
+          "QWP writer schema cannot contain more than one designated timestamp",
+        );
+      }
+      const wireName = candidate.designatedTimestamp ? "" : inputName;
+      const nameKey = qwpColumnNameKey(wireName);
+      if (nameKeys.has(nameKey)) {
+        throw new TypeError(
+          `duplicate case-insensitive QWP writer column '${inputName}'`,
+        );
+      }
+      nameKeys.add(nameKey);
+      inputNames.add(inputName);
+      columns.push(
+        Object.freeze({
+          inputName,
+          wireName,
+          nameKey,
+          type: qwpWriterColumnType(candidate),
+          descriptor: candidate,
+        }),
+      );
+    }
+
+    return Object.freeze({
+      tableName,
+      columns: Object.freeze(columns),
+      inputNames,
+    });
+  }
+
+  private encodeCompiledWriterRow(
+    schema: CompiledQwpWriterSchema,
+    input: unknown,
+    rowIndex: number | undefined,
+  ): StagedRow {
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+      throw new QwpWriterRowError(
+        schema.tableName,
+        undefined,
+        rowIndex,
+        new TypeError("row must be an object"),
+      );
+    }
+
+    let inputKeys: string[];
+    try {
+      inputKeys = Object.keys(input);
+    } catch (error) {
+      throw new QwpWriterRowError(schema.tableName, undefined, rowIndex, error);
+    }
+    const unknownName = inputKeys.find(
+      (inputName) => !schema.inputNames.has(inputName),
+    );
+    if (unknownName !== undefined) {
+      throw new QwpWriterRowError(
+        schema.tableName,
+        unknownName,
+        rowIndex,
+        new TypeError("column is not present in the compiled schema"),
+      );
+    }
+
+    const values = input as Record<string, unknown>;
+    const columns = new Map<string, StagedColumn>();
+    for (const column of schema.columns) {
+      let value: unknown;
+      try {
+        value = Object.prototype.hasOwnProperty.call(input, column.inputName)
+          ? values[column.inputName]
+          : undefined;
+      } catch (error) {
+        throw new QwpWriterRowError(
+          schema.tableName,
+          column.inputName,
+          rowIndex,
+          error,
+        );
+      }
+      if (value === null || value === undefined) {
+        if (column.descriptor.designatedTimestamp) {
+          throw new QwpWriterRowError(
+            schema.tableName,
+            column.inputName,
+            rowIndex,
+            new TypeError("designated timestamp is required"),
+          );
+        }
+        continue;
+      }
+      try {
+        columns.set(column.nameKey, {
+          name: column.wireName,
+          type: column.type,
+          value: encodeQwpWriterValue(column, value),
+        });
+      } catch (error) {
+        throw new QwpWriterRowError(
+          schema.tableName,
+          column.inputName,
+          rowIndex,
+          error,
+        );
+      }
+    }
+
+    if (columns.size === 0) {
+      throw new QwpWriterRowError(
+        schema.tableName,
+        undefined,
+        rowIndex,
+        new TypeError("row must contain at least one non-null value"),
+      );
+    }
+    return { columns, estimatedBytes: stagedRowBytes(columns) };
+  }
+
+  private async appendCompiledWriterRow(
+    schema: CompiledQwpWriterSchema,
+    input: unknown,
+    rowIndex: number | undefined,
+  ): Promise<void> {
+    this.throwIfUnavailable();
+    // Report the conflicting fluent row before validating this one: it is the
+    // actionable error, and row contents cannot be staged either way.
+    if (this.current) {
+      throw new QwpWriterRowError(
+        schema.tableName,
+        undefined,
+        rowIndex,
+        new Error("a fluent row is already in progress"),
+      );
+    }
+    const row = this.encodeCompiledWriterRow(schema, input, rowIndex);
+
+    const existingTable = this.tablesByName.get(schema.tableName);
+    if (existingTable) {
+      for (const [nameKey, column] of row.columns) {
+        const existing = existingTable.schema.get(nameKey);
+        if (
+          existing &&
+          (existing.type !== column.type ||
+            existing.geohashPrecision !== column.geohashPrecision ||
+            existing.decimalScale !== column.decimalScale)
+        ) {
+          const inputName = schema.columns.find(
+            (candidate) => candidate.nameKey === nameKey,
+          )?.inputName;
+          throw new QwpWriterRowError(
+            schema.tableName,
+            inputName,
+            rowIndex,
+            new Error("column type conflicts with the sender's staged schema"),
+          );
+        }
+      }
+    }
+
+    let table = existingTable;
+    if (!table) {
+      table = { name: schema.tableName, rows: [], schema: new Map() };
+      this.tablesByName.set(schema.tableName, table);
+      this.tables.push(table);
+    }
+    for (const [nameKey, column] of row.columns) {
+      const existing = table.schema.get(nameKey);
+      if (existing) column.name = existing.name;
+      else {
+        table.schema.set(nameKey, {
+          name: column.name,
+          type: column.type,
+          geohashPrecision: column.geohashPrecision,
+          decimalScale: column.decimalScale,
+        });
+      }
+    }
+    table.rows.push(row);
+    this.pendingRowCount++;
+    this.pendingByteCount += row.estimatedBytes;
+    this.totalRowsStaged++;
+    this.log(
+      "debug",
+      `Pending QWP rows: ${this.pendingRowCount}, estimated bytes: ${this.pendingByteCount}`,
+    );
+    await this.tryFlush();
   }
 
   private fixedDecimalColumn(

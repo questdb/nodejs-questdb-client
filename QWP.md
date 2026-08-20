@@ -327,6 +327,7 @@ Use `QwpSender` directly when QWP-only column types or detailed session controls
 needed:
 
 ```typescript
+import * as qwp from "@questdb/nodejs-client/qwp";
 import { connectQwpNodeSender } from "@questdb/nodejs-client/qwp/node";
 
 const sender = await connectQwpNodeSender(
@@ -354,6 +355,62 @@ try {
   await sender.close();
 }
 ```
+
+### Compiled object-row writers
+
+For repeated rows with one table schema, compile a table-bound writer instead of
+sharing the fluent row-builder state:
+
+```typescript
+const trades = sender.writer("trades", {
+  symbol: qwp.symbol(),
+  side: qwp.symbol(),
+  price: qwp.double(),
+  quantity: qwp.long(),
+  timestamp: qwp.designatedTimestamp("ns"),
+});
+
+await trades.row({
+  symbol: "ETH-USD",
+  side: "sell",
+  price: 2615.54,
+  quantity: 42n,
+  timestamp: 1_723_000_000_000_000_000n,
+});
+
+await trades.rows([
+  {
+    symbol: "BTC-USD",
+    side: "buy",
+    price: 39_269.98,
+    quantity: 7n,
+    timestamp: 1_723_000_001_000_000_000n,
+  },
+]);
+```
+
+`rows()` accepts `Iterable` and `AsyncIterable` sources and applies the sender's
+normal auto-flush, batch-cap, backpressure, transaction, symbol-dictionary, and ACK
+settings. The schema is validated once. `symbol()`, `varchar()`, `bool()`, `byte()`,
+`short()`, `int32()`, `int64()`, `float32()`, `float64()`, `timestamp(unit)`, and
+`designatedTimestamp(unit)` define the currently supported object fields; `long()` and
+`double()` are aliases of `int64()` and `float64()`. LONG and nanosecond timestamp
+inputs are `bigint` so they cannot silently lose precision.
+
+Widths are spelled out deliberately. The fluent row API predates these names and its
+`floatColumn()` and `intColumn()` are 64-bit despite reading as 32-bit, with
+`float32Column()` and `int32Column()` as the narrow forms. Compiled writers avoid the
+ambiguity: `float32()`/`float64()` and `int32()`/`int64()` mean exactly what they say.
+
+Regular fields may be absent, `null`, or `undefined`, which writes a NULL. A schema
+may contain at most one designated timestamp and, when present, that field is required
+in every row. Unknown object keys and type mismatches raise `QwpWriterRowError`; bulk
+errors include the zero-based row index. A failing row is never partly staged. Rows
+successfully completed before a later iterable row fails remain available to flush.
+
+Compiled writers are also available through the regular Node `Sender` when it uses a
+QWP transport. Calling `writer()` for an HTTP or TCP ILP sender raises an error. A
+writer obtained from a pooled sender lease cannot be used after the lease is closed.
 
 Like the Java QWP sender, `flush()` and `commit()` resolve after the complete
 logical flush reaches the local ingress/replay publication boundary. They do

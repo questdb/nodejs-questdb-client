@@ -87,6 +87,31 @@ await sender.flush();
 await sender.close();
 ```
 
+For repeated object rows, compile the table schema once. The resulting writer
+validates each complete row before changing sender state and accepts both individual
+rows and synchronous or asynchronous iterables:
+
+```typescript
+import * as qwp from "@questdb/nodejs-client/qwp";
+
+const trades = sender.writer("trades", {
+  symbol: qwp.symbol(),
+  side: qwp.symbol(),
+  price: qwp.double(),
+  quantity: qwp.long(),
+  timestamp: qwp.designatedTimestamp("ns"),
+});
+
+await trades.row({
+  symbol: "ETH-USD",
+  side: "sell",
+  price: 2615.54,
+  quantity: 42n,
+  timestamp: 1_723_000_000_000_000_000n,
+});
+await trades.rows(moreTrades);
+```
+
 The regular `Sender` accepts the same unified QWP configuration vocabulary as
 the pooled Node client. Use comma-separated or repeated `addr` values for
 failover; standalone ingress validates but otherwise ignores egress- and
