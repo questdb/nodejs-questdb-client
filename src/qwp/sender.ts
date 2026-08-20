@@ -213,7 +213,9 @@ interface QwpSenderFlushResult {
 const DEFAULT_AUTO_FLUSH_ROWS = 1_000;
 const DEFAULT_AUTO_FLUSH_BYTES = 0;
 const DEFAULT_AUTO_FLUSH_INTERVAL_MS = 100;
-const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 60_000;
+// Matches the Java client's close_flush_timeout default so close() costs the
+// same everywhere.
+const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
 function validateNonNegativeInteger(value: number, name: string): void {
@@ -1544,10 +1546,21 @@ export class QwpSender {
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
-    const deadline =
+    // The timeout bounds the ACK drain, and <= 0 opts out of it entirely
+    // ("fast close"), matching the Java client. Publication still has to be
+    // bounded: unlike Java's local hand-off into the send ring, a publication
+    // here can be a socket write that never settles, and leaving it unbounded
+    // made 0 -- the value chosen to make close() cheapest -- the only value
+    // that could hang forever.
+    const drainDeadline =
       this.closeFlushTimeoutMs > 0
         ? Date.now() + this.closeFlushTimeoutMs
         : undefined;
+    const publishDeadline =
+      Date.now() +
+      (this.closeFlushTimeoutMs > 0
+        ? this.closeFlushTimeoutMs
+        : DEFAULT_CLOSE_FLUSH_TIMEOUT_MS);
     let terminalError: unknown;
 
     try {
@@ -1568,12 +1581,12 @@ export class QwpSender {
           throw error;
         }
       });
-      await this.withCloseDeadline(closeFlush, deadline);
+      await this.withCloseDeadline(closeFlush, publishDeadline);
 
       const session = this.activeSession;
       const target = this.lastCommitBoundarySequence;
       if (
-        deadline !== undefined &&
+        drainDeadline !== undefined &&
         session &&
         target >= 0n &&
         sessionAcknowledgedSequence(session) < target
@@ -1583,12 +1596,12 @@ export class QwpSender {
             "this QWP ingress session does not expose an ACK watermark",
           );
         }
-        const remaining = deadline - Date.now();
+        const remaining = drainDeadline - Date.now();
         if (remaining <= 0) throw this.closeTimeoutError();
         try {
           await this.withCloseDeadline(
             session.waitForAcknowledged(target, remaining),
-            deadline,
+            drainDeadline,
           );
         } catch (error) {
           if (error instanceof QwpIngressAckTimeoutError) {

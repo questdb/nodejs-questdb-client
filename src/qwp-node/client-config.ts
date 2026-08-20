@@ -15,7 +15,7 @@ import type { QwpReconnectOptions, QwpTarget } from "../qwp/transport";
 
 const DEFAULT_QWP_PORT = 9000;
 const MAX_BATCH_ROWS = 1_048_576;
-const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 60_000;
+const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
 const DEFAULT_SF_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SF_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
 const DEFAULT_SF_APPEND_DEADLINE_MS = 30_000;

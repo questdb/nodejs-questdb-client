@@ -125,7 +125,7 @@ describe("QWP unified Node client configuration", () => {
     expect(defaults.ingress.senderId).toBe("default");
     expect(defaults.ingressSession?.initialConnectMode).toBe("off");
     expect(defaults.sender).toMatchObject({
-      closeFlushTimeoutMs: 60_000,
+      closeFlushTimeoutMs: 5_000,
       maxNameLength: 127,
     });
 

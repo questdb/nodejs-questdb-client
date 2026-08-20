@@ -674,6 +674,38 @@ describe("QWP high-level sender", () => {
     expect(date).toBe(timestamp - 1);
   });
 
+  it("bounds close() even when the ACK drain is opted out", async () => {
+    // close_flush_timeout_millis <= 0 is "fast close": it skips the ACK drain,
+    // as the Java client does. It must not also remove the bound on the
+    // publication -- that made 0, the value chosen to make close() cheapest,
+    // the only value that could block forever on an unreachable server.
+    class StallingSession extends RecordingSession {
+      override publishTables(): Promise<void> {
+        return new Promise<void>(() => undefined);
+      }
+      override publishTablesDelta(): Promise<void> {
+        return this.publishTables();
+      }
+    }
+
+    const sender = new QwpSender(async () => new StallingSession(), {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
+    await sender.table("events").longColumn("value", 1n).atNow();
+
+    const settled = await Promise.race([
+      sender.close().then(
+        () => "resolved",
+        (error: Error) => error.constructor.name,
+      ),
+      new Promise((resolve) =>
+        setTimeout(() => resolve("still pending"), 8_000),
+      ),
+    ]);
+    expect(settled).toBe("QwpSenderCloseTimeoutError");
+  }, 20_000);
+
   it("rolls back the row when a symbol value cannot be converted", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });

@@ -216,7 +216,7 @@ await sender.commit();
 await sender.close();
 ```
 
-QWP `close()` publishes completed rows and waits up to 60 seconds for their
+QWP `close()` publishes completed rows and waits up to 5 seconds for their
 committed-frame ACK watermark. Configure `closeFlushTimeoutMs` (or
 `close_flush_timeout_millis` in a `ws::` string); `0` publishes without waiting.
 An unfinished row is not completed implicitly.

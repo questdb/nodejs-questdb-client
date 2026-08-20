@@ -516,8 +516,10 @@ Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` 
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to
 assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`, or
 `ms` timestamp. `close()` publishes completed rows and waits for the committed-frame
-ACK watermark for up to `closeFlushTimeoutMs` (60 seconds by default). Set it to `0`
-to publish without the ACK drain. An unfinished row is still discarded with a warning.
+ACK watermark for up to `closeFlushTimeoutMs` (5 seconds by default, matching the
+Java client). Set it to `0` or a negative value for a fast close, which publishes
+without the ACK drain; publication itself stays bounded, so `close()` always
+returns. An unfinished row is still discarded with a warning.
 The configuration-string equivalent is `close_flush_timeout_millis`.
 
 `autoFlushBytes` is a soft threshold over estimated raw column-buffer storage and is
