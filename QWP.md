@@ -65,6 +65,124 @@ ordered failover endpoints, and ingress, egress, pool, and reserved policy keys
 are validated from one schema. The standalone sender applies ingress-owned keys;
 keys owned only by egress or the pooled facade are accepted as intentional no-ops.
 
+## Configuration-string keys
+
+Every `ws::`/`wss::` connect string is parsed by one schema, shared with the
+other QuestDB clients, whichever entry point builds the client —
+`Sender.fromConfig()`, `SenderOptions.fromConfig()`, `connectQwpNodeClient()`,
+or `connectQwpNodeQuery()`. An unrecognised key is rejected with
+`unknown configuration key: <key>`; a legacy ILP key adds a hint pointing at
+where it applies instead.
+
+Keys are grouped by the component that applies them. A client applies the keys
+its own side owns and accepts the rest as intentional no-ops, so one connect
+string can configure a sender, a query client, or the pooled facade. Every key
+also has a programmatic equivalent on the corresponding options object; the
+connect string is the portable spelling.
+
+### Connection
+
+| Key                  | Value              | Default   | Meaning                                                            |
+| -------------------- | ------------------ | --------- | ------------------------------------------------------------------ |
+| `addr`               | `host[:port]`      | port 9000 | Endpoint. Repeat the key, or comma-separate, for ordered failover. |
+| `username`, `user`   | string             | —         | HTTP Basic user for the WebSocket upgrade.                         |
+| `password`, `pass`   | string             | —         | HTTP Basic password.                                               |
+| `token`              | string             | —         | Bearer token; alternative to Basic.                                |
+| `tls_verify`         | `on`, `unsafe_off` | on        | Certificate verification. `unsafe_off` disables it.                |
+| `tls_roots`          | path               | —         | PEM or PKCS#12 trust store for a private CA.                       |
+| `tls_roots_password` | string             | —         | Password for `tls_roots`.                                          |
+| `auth_timeout_ms`    | integer ms         | —         | Deadline for the authentication exchange.                          |
+| `connect_timeout`    | integer ms         | —         | Deadline for establishing one connection.                          |
+
+### Ingress
+
+| Key                                             | Value            | Default   | Meaning                                                                  |
+| ----------------------------------------------- | ---------------- | --------- | ------------------------------------------------------------------------ |
+| `auto_flush`                                    | `on`, `off`      | on        | Master switch for all auto-flush triggers.                               |
+| `auto_flush_rows`                               | integer          | —         | Flush after this many staged rows.                                       |
+| `auto_flush_bytes`                              | integer or `off` | off       | Flush once staged rows reach this estimated size.                        |
+| `auto_flush_interval`                           | integer ms       | —         | Flush when this long has passed. Checked as rows are added.              |
+| `close_flush_timeout_millis`                    | integer ms       | `5000`    | Bound on `close()`'s ACK drain. `0` or negative is a fast close.         |
+| `transaction`                                   | `on`, `off`      | off       | Group each flush into a per-table transaction.                           |
+| `request_durable_ack`                           | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.           |
+| `durable_ack_keepalive_interval_millis`         | integer ms       | —         | Poll interval for durable-ACK progress.                                  |
+| `max_name_len`                                  | integer          | `127`     | Maximum table and column name length.                                    |
+| `sender_id`                                     | string           | `default` | Identifies this producer to the server and in the journal.               |
+| `max_frame_rejections`                          | integer          | —         | Rejections of one frame before the poison-frame detector escalates.      |
+| `poison_min_escalation_window_millis`           | integer ms       | —         | Minimum dwell before a poison frame may escalate.                        |
+| `catch_up_cap_gap_min_escalation_window_millis` | integer ms       | `300000`  | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. |
+| `connection_listener_inbox_capacity`            | integer          | —         | Bound on the connection-event inbox before events are dropped.           |
+| `error_inbox_capacity`                          | integer          | —         | Bound on the `onSenderError` inbox before events are dropped.            |
+
+### Reconnect and failover
+
+| Key                                | Value                       | Default | Meaning                                                                                |
+| ---------------------------------- | --------------------------- | ------- | -------------------------------------------------------------------------------------- |
+| `reconnect_initial_backoff_millis` | integer ms                  | —       | First reconnect delay; grows exponentially with jitter.                                |
+| `reconnect_max_backoff_millis`     | integer ms                  | —       | Ceiling for one reconnect delay.                                                       |
+| `reconnect_max_duration_millis`    | integer ms                  | —       | Budget for a reconnect episode. This is the QWP replacement for ILP's `retry_timeout`. |
+| `failover`                         | `on`, `off`                 | —       | Enables endpoint failover for egress.                                                  |
+| `failover_max_attempts`            | integer ≥ 1                 | —       | Failover attempts before giving up.                                                    |
+| `failover_backoff_initial_ms`      | integer ms                  | —       | First failover delay.                                                                  |
+| `failover_backoff_max_ms`          | integer ms                  | —       | Ceiling for one failover delay.                                                        |
+| `failover_max_duration_ms`         | integer ms                  | —       | Budget for a failover episode.                                                         |
+| `target`                           | `any`, `primary`, `replica` | —       | Server role this client will accept.                                                   |
+| `zone`                             | string                      | —       | Preferred topology zone when ranking endpoints.                                        |
+
+### Store-and-forward (Node only)
+
+Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
+shown as a dash is applied downstream of the connect string, by the sender or
+session that consumes it.
+
+| Key                         | Value                          | Default       | Meaning                                                           |
+| --------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------- |
+| `sf_dir`                    | path                           | —             | Journal directory. Enables store-and-forward.                     |
+| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.              |
+| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.    |
+| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file.                                         |
+| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                |
+| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space before failing.                |
+| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`. |
+| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.               |
+| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                       |
+
+### Egress
+
+| Key                 | Value                 | Default    | Meaning                                            |
+| ------------------- | --------------------- | ---------- | -------------------------------------------------- |
+| `max_batch_rows`    | integer, 1..1048576   | —          | Rows the server puts in one result batch.          |
+| `initial_credit`    | integer ≥ 0           | —          | Starting flow-control credit for a query.          |
+| `buffer_pool_size`  | integer ≥ 1           | —          | Reusable result buffers held per session.          |
+| `compression`       | `raw`, `zstd`, `auto` | negotiated | Result compression to negotiate.                   |
+| `compression_level` | integer, 1..22        | —          | zstd level requested from the server.              |
+| `client_id`         | string                | —          | Identifies this client in server-side diagnostics. |
+
+### Pool
+
+Applied by the pooled facade; a standalone sender or query client ignores them.
+
+| Key                       | Value       | Default | Meaning                                       |
+| ------------------------- | ----------- | ------- | --------------------------------------------- |
+| `sender_pool_min`         | integer     | —       | Senders kept warm.                            |
+| `sender_pool_max`         | integer     | —       | Sender ceiling.                               |
+| `query_pool_min`          | integer     | —       | Query sessions kept warm.                     |
+| `query_pool_max`          | integer     | —       | Query-session ceiling.                        |
+| `acquire_timeout_ms`      | integer ms  | —       | How long `acquire()` waits for a free entry.  |
+| `query_close_timeout_ms`  | integer ms  | —       | Bound on closing a borrowed query session.    |
+| `idle_timeout_ms`         | integer ms  | —       | Idle time before a pooled entry is reaped.    |
+| `max_lifetime_ms`         | integer ms  | —       | Absolute lifetime of a pooled entry.          |
+| `housekeeper_interval_ms` | integer ms  | —       | How often the pool reaps aged entries.        |
+| `lazy_connect`            | `on`, `off` | off     | Start without blocking on a first connection. |
+
+### Reserved
+
+`on_write_error`, `on_server_error`, `on_internal_error`, `on_parse_error`,
+`on_schema_error` and `on_security_error` are part of the shared vocabulary and
+are accepted, but this client does not yet apply them: server-error policy comes
+from `qwpDefaultSenderErrorPolicy` and the `onSenderError` stream. They are
+listed so a connect string written for another QuestDB client is not rejected.
+
 ### Node.js fire-and-forget UDP
 
 `udp::` selects Node-only QWP v1 over IPv4 UDP while retaining the fluent row API:

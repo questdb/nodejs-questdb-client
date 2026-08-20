@@ -42,7 +42,11 @@ const RELOCATED_HINTS = new Map([
   ["multicast_ttl", "(applies to legacy http/tcp/udp transports only)"],
 ]);
 
-const SUPPORTED_KEYS = new Set([
+/**
+ * @internal Every key a ws/wss connect string may carry, shared with the other
+ * QuestDB clients. Exported so the QWP.md reference can be tested against it.
+ */
+export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "addr",
   "username",
   "password",
@@ -366,7 +370,7 @@ function parseConfigurationString(configurationString: string): ParsedConfig {
     const rawKey = setting.slice(0, equals);
     const rawValue = setting.slice(equals + 1);
     validateConfigText(rawKey, rawValue);
-    if (!SUPPORTED_KEYS.has(rawKey)) {
+    if (!QWP_SUPPORTED_CONFIG_KEYS.has(rawKey)) {
       const hint = RELOCATED_HINTS.get(rawKey);
       throw new Error(
         `unknown configuration key: ${rawKey}${hint ? ` ${hint}` : ""}`,
