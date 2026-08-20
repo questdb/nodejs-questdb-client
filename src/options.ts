@@ -7,17 +7,48 @@ import * as https from "https";
 import { Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
+import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
+import type { QwpNodeClientOptions } from "./qwp/node";
 import type {
   QwpNodeIngressOptions,
   QwpNodeUdpOptions,
-  QwpInitialConnectMode,
   QwpIngressSessionOptions,
   QwpSenderOptions,
 } from "./qwp/node";
 
+/**
+ * @ignore
+ * Connect strings for ws/wss, kept aside for the QWP schema to parse. A
+ * WeakMap rather than a field so SenderOptions keeps its legacy ILP shape.
+ */
+const qwpConnectStrings = new WeakMap<SenderOptions, string>();
+
+/** @ignore Configuration resolved from a ws/wss connect string. */
+const qwpConfigs = new WeakMap<SenderOptions, QwpNodeClientOptions>();
+
+/** @ignore Returns the QWP configuration these options resolved to. */
+function qwpConfig(options: SenderOptions): QwpNodeClientOptions | undefined {
+  return qwpConfigs.get(options);
+}
+
+function resolveQwpConfig(
+  options: SenderOptions,
+  configString: string,
+): QwpNodeClientOptions {
+  const configuredWebSocket = options.qwp?.webSocket;
+  const { storeAndForward, ...webSocketOverrides } = configuredWebSocket ?? {};
+  let agent = webSocketOverrides.agent;
+  if (!agent && options.agent instanceof http.Agent) agent = options.agent;
+  return resolveQwpNodeClientConfig(configString, {
+    webSocket: { ...webSocketOverrides, agent },
+    storeAndForward,
+    sender: { ...options.qwp?.sender, log: options.log ?? undefined },
+    ingressSession: options.qwp?.session,
+  });
+}
+
 const HTTP_PORT = 9000;
 const TCP_PORT = 9009;
-const QWP_PORT = 9000;
 const QWP_UDP_PORT = 9007;
 
 const HTTP = "http";
@@ -76,7 +107,9 @@ type DeprecatedOptions = {
  * Connection and protocol options
  * <ul>
  * <li> <b>protocol</b>: <i>enum, accepted values: http, https, tcp, tcps, ws, wss, udp</i> - The protocol used to communicate with the server. <br>
- * WS/WSS select acknowledged QWP ingress. UDP selects Node-only fire-and-forget QWP datagrams. When <i>https</i>, <i>tcps</i>, or <i>wss</i> is used, the connection is secured with TLS encryption.
+ * WS/WSS select acknowledged QWP ingress; their connect strings use the QWP configuration schema,
+ * shared with the other QuestDB clients, and are documented in QWP.md rather than in this list.
+ * UDP selects Node-only fire-and-forget QWP datagrams and uses the options below. When <i>https</i>, <i>tcps</i>, or <i>wss</i> is used, the connection is secured with TLS encryption.
  * </li>
  * <li> <b>protocol_version</b>: <i>enum, accepted values: auto, 1, 2</i> - The protocol version used for data serialization. <br>
  * Version 1 uses text-based serialization for all data types. Version 2 uses binary encoding for doubles and arrays. <br>
@@ -128,22 +161,13 @@ type DeprecatedOptions = {
  * <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
  * The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
  * </li>
- * <li> auto_flush_bytes: <i>integer or off</i> - QWP WebSocket buffered-byte threshold. Defaults to off. <br>
- * Reaching the threshold flushes after the completed row. This option is supported by ws/wss only.
+ * <li> auto_flush_bytes: <i>integer or off</i> - Buffered-byte threshold. Defaults to off. <br>
+ * Reaching the threshold flushes after the completed row. This option is supported by udp only;
+ * on ws/wss it belongs to the QWP configuration schema.
  * </li>
  * <li> auto_flush_interval: <i>integer</i> - The number of milliseconds that will trigger a flush, default value is 1000.
  * When set to 0, interval-based flushing is disabled. <br>
  * Note that the setting is checked only when a new row is added to the buffer. There is no timer registered to flush the buffer automatically.
- * </li>
- * <li> close_flush_timeout_millis: <i>integer</i> - Maximum time QWP close waits for committed rows to be acknowledged.
- * Defaults to 5000; 0 publishes pending rows but skips the ACK drain. This option is supported by ws/wss only.
- * </li>
- * <li> initial_connect_retry: <i>enum, accepted values: off, sync, async</i> - QWP persistent
- * store-and-forward startup policy. Requires <i>qwp.webSocket.storeAndForward</i>.
- * </li>
- * <li> catch_up_cap_gap_min_escalation_window_millis: <i>integer</i> - Minimum dwell
- * before an orphan symbol-dictionary cap gap can be quarantined. Defaults to 300000.
- * Requires <i>qwp.webSocket.storeAndForward</i>.
  * </li>
  * </ul>
  * <br>
@@ -199,9 +223,6 @@ class SenderOptions {
   auto_flush_rows?: number;
   auto_flush_bytes?: number;
   auto_flush_interval?: number;
-  close_flush_timeout_millis?: number;
-  initial_connect_retry?: QwpInitialConnectMode;
-  catch_up_cap_gap_min_escalation_window_millis?: number;
 
   request_min_throughput?: number;
   request_timeout?: number;
@@ -265,6 +286,13 @@ class SenderOptions {
       }
       this.agent = extraOptions.agent;
       this.qwp = extraOptions.qwp;
+    }
+
+    const connectString = qwpConnectStrings.get(this);
+    if (connectString !== undefined) {
+      // Resolve now rather than at Sender construction so a bad key still
+      // fails here, where every other connect-string error is raised.
+      qwpConfigs.set(this, resolveQwpConfig(this, connectString));
     }
   }
 
@@ -401,14 +429,19 @@ function parseConfigurationString(
   }
 
   const position = parseProtocol(options, configString);
+  if (options.protocol === WS || options.protocol === WSS) {
+    // QWP connect strings have their own Java-aligned key vocabulary and are
+    // parsed only by resolveQwpNodeClientConfig(). Parsing them here as well
+    // would be a second, divergent parser for the same string; the Sender
+    // resolves the stashed string through the QWP schema instead.
+    qwpConnectStrings.set(options, configString);
+    return;
+  }
   parseSettings(options, configString, position);
   parseProtocolVersion(options);
   parseAddress(options);
   parseBufferSizes(options);
   parseAutoFlushOptions(options);
-  parseCloseFlushOptions(options);
-  parseInitialConnectOptions(options);
-  parseCatchUpCapGapOptions(options);
   parseTlsOptions(options);
   parseRequestTimeoutOptions(options);
   parseMaxNameLength(options);
@@ -471,9 +504,6 @@ const ValidConfigKeys = [
   "auto_flush_rows",
   "auto_flush_bytes",
   "auto_flush_interval",
-  "close_flush_timeout_millis",
-  "initial_connect_retry",
-  "catch_up_cap_gap_min_escalation_window_millis",
   "request_min_throughput",
   "request_timeout",
   "retry_timeout",
@@ -536,13 +566,9 @@ function parseProtocol(options: SenderOptions, configString: string) {
 }
 
 function parseProtocolVersion(options: SenderOptions) {
-  if (
-    options.protocol === WS ||
-    options.protocol === WSS ||
-    options.protocol === UDP
-  ) {
+  if (options.protocol === UDP) {
     if (options.protocol_version !== undefined) {
-      throw new Error("'protocol_version' is not used by QWP transports");
+      throw new Error("'protocol_version' is not used by the udp transport");
     }
     return;
   }
@@ -587,10 +613,6 @@ function parseAddress(options: SenderOptions) {
       case TCPS:
         options.port = TCP_PORT;
         return;
-      case WS:
-      case WSS:
-        options.port = QWP_PORT;
-        return;
       case UDP:
         options.port = QWP_UDP_PORT;
         return;
@@ -632,74 +654,10 @@ function parseAutoFlushOptions(options: SenderOptions) {
   } else {
     parseInteger(options, "auto_flush_bytes", "auto flush bytes", 0);
   }
-  if (
-    options.auto_flush_bytes !== undefined &&
-    options.protocol !== WS &&
-    options.protocol !== WSS &&
-    options.protocol !== UDP
-  ) {
-    throw new Error("auto_flush_bytes is only supported for QWP transports");
+  if (options.auto_flush_bytes !== undefined && options.protocol !== UDP) {
+    throw new Error("auto_flush_bytes is only supported for the udp transport");
   }
   parseInteger(options, "auto_flush_interval", "auto flush interval", 0);
-}
-
-function parseCloseFlushOptions(options: SenderOptions) {
-  parseInteger(options, "close_flush_timeout_millis", "close flush timeout", 0);
-  if (
-    options.close_flush_timeout_millis !== undefined &&
-    options.protocol !== WS &&
-    options.protocol !== WSS
-  ) {
-    throw new Error(
-      "close_flush_timeout_millis is only supported for QWP ws/wss transport",
-    );
-  }
-}
-
-function parseInitialConnectOptions(options: SenderOptions) {
-  const value = options.initial_connect_retry as unknown;
-  if (value === undefined) return;
-  if (options.protocol !== WS && options.protocol !== WSS) {
-    throw new Error(
-      "initial_connect_retry is only supported for QWP ws/wss transport",
-    );
-  }
-  switch (value) {
-    case "on":
-    case "true":
-    case "sync":
-      options.initial_connect_retry = "sync";
-      return;
-    case "off":
-    case "false":
-      options.initial_connect_retry = "off";
-      return;
-    case "async":
-      options.initial_connect_retry = "async";
-      return;
-    default:
-      throw new Error(
-        `Invalid initial_connect_retry: '${String(value)}', accepted values: 'off', 'sync', 'async'`,
-      );
-  }
-}
-
-function parseCatchUpCapGapOptions(options: SenderOptions) {
-  parseInteger(
-    options,
-    "catch_up_cap_gap_min_escalation_window_millis",
-    "catch-up cap-gap minimum escalation window",
-    0,
-  );
-  if (
-    options.catch_up_cap_gap_min_escalation_window_millis !== undefined &&
-    options.protocol !== WS &&
-    options.protocol !== WSS
-  ) {
-    throw new Error(
-      "catch_up_cap_gap_min_escalation_window_millis is only supported for QWP ws/wss transport",
-    );
-  }
 }
 
 function parseTlsOptions(options: SenderOptions) {
@@ -802,6 +760,7 @@ function parseInteger(
 
 export {
   SenderOptions,
+  qwpConfig,
   ExtraOptions,
   QwpExtraOptions,
   HTTP,

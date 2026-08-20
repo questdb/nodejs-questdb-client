@@ -20,6 +20,28 @@ const DEFAULT_SF_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SF_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
 const DEFAULT_SF_APPEND_DEADLINE_MS = 30_000;
 
+/**
+ * Legacy ILP keys that are not part of the QWP vocabulary. They are rejected
+ * like any other unknown key, with the same relocation hint the Java client
+ * gives, so a connect string behaves identically across QuestDB clients.
+ */
+const RELOCATED_HINTS = new Map([
+  ["retry_timeout", "(use reconnect_max_duration_millis on ws/wss)"],
+  [
+    "protocol_version",
+    "(QWP negotiates the protocol version during the WebSocket upgrade)",
+  ],
+  ["init_buf_size", "(applies to legacy http/tcp/udp transports only)"],
+  ["max_buf_size", "(applies to legacy http/tcp/udp transports only)"],
+  ["request_timeout", "(applies to legacy http/tcp/udp transports only)"],
+  [
+    "request_min_throughput",
+    "(applies to legacy http/tcp/udp transports only)",
+  ],
+  ["max_datagram_size", "(applies to legacy http/tcp/udp transports only)"],
+  ["multicast_ttl", "(applies to legacy http/tcp/udp transports only)"],
+]);
+
 const SUPPORTED_KEYS = new Set([
   "addr",
   "username",
@@ -345,7 +367,10 @@ function parseConfigurationString(configurationString: string): ParsedConfig {
     const rawValue = setting.slice(equals + 1);
     validateConfigText(rawKey, rawValue);
     if (!SUPPORTED_KEYS.has(rawKey)) {
-      throw new Error(`Unknown QWP cluster configuration key: '${rawKey}'`);
+      const hint = RELOCATED_HINTS.get(rawKey);
+      throw new Error(
+        `unknown configuration key: ${rawKey}${hint ? ` ${hint}` : ""}`,
+      );
     }
     const key =
       rawKey === "user" ? "username" : rawKey === "pass" ? "password" : rawKey;

@@ -341,7 +341,7 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/Duplicate.*target/);
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=localhost;made_up=1;"),
-    ).toThrow(/Unknown.*made_up/);
+    ).toThrow(/unknown configuration key: made_up/);
   });
 
   it("accepts and validates the remaining Java QWP configuration keys", async () => {

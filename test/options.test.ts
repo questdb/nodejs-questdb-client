@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Agent } from "undici";
 
+import { Sender } from "../src/sender";
 import { SenderOptions } from "../src";
 import { MockHttp } from "./util/mockhttp";
 import { readFileSync } from "fs";
@@ -240,11 +241,7 @@ describe("Configuration string parser suite", function () {
     expect(options.username).toBe("user1");
     expect(options.token).toBe("jwkprivkey123");
 
-    options = await SenderOptions.fromConfig("ws::addr=hostname");
-    expect(options.host).toBe("hostname");
-    expect(options.port).toBe(9000);
-    expect(options.protocol_version).toBeUndefined();
-
+    // ws/wss endpoints belong to the QWP schema, not the legacy ILP fields.
     options = await SenderOptions.fromConfig("udp::addr=hostname");
     expect(options.host).toBe("hostname");
     expect(options.port).toBe(9007);
@@ -252,9 +249,12 @@ describe("Configuration string parser suite", function () {
   });
 
   it("can parse protocol version", async function () {
+    // Rejected by the QWP schema, with the Java client's relocation hint.
     await expect(
       SenderOptions.fromConfig("ws::addr=hostname;protocol_version=1"),
-    ).rejects.toThrow("'protocol_version' is not used by QWP transports");
+    ).rejects.toThrow(
+      "unknown configuration key: protocol_version (QWP negotiates the protocol version during the WebSocket upgrade)",
+    );
 
     // invalid protocol version
     await expect(
@@ -813,28 +813,22 @@ describe("Configuration string parser suite", function () {
     ).rejects.toThrow("Invalid auto flush rows option, not a number: '1w23'");
   });
 
-  it("parses auto_flush_bytes only for QWP transports", async function () {
-    let options = await SenderOptions.fromConfig(
-      "ws::addr=host:9000;auto_flush_bytes=123;",
-    );
-    expect(options.auto_flush_bytes).toBe(123);
-
-    options = await SenderOptions.fromConfig(
-      "wss::addr=host:9000;auto_flush_bytes=off;",
-    );
-    expect(options.auto_flush_bytes).toBe(0);
-
-    options = await SenderOptions.fromConfig(
+  it("parses auto_flush_bytes only for the udp transport", async function () {
+    // udp is a legacy transport in the Java client's vocabulary, so its keys
+    // stay on this parser; ws/wss carry auto_flush_bytes through the QWP one.
+    const options = await SenderOptions.fromConfig(
       "udp::addr=host:9007;auto_flush_bytes=1400;",
     );
     expect(options.auto_flush_bytes).toBe(1400);
 
     await expect(
-      SenderOptions.fromConfig("ws::addr=host:9000;auto_flush_bytes=-1;"),
+      SenderOptions.fromConfig("udp::addr=host:9007;auto_flush_bytes=-1;"),
     ).rejects.toThrow("Invalid auto flush bytes option: -1");
     await expect(
       SenderOptions.fromConfig("http::addr=host:9000;auto_flush_bytes=123;"),
-    ).rejects.toThrow("auto_flush_bytes is only supported for QWP transports");
+    ).rejects.toThrow(
+      "auto_flush_bytes is only supported for the udp transport",
+    );
   });
 
   it("parses and validates QWP UDP options", async function () {
@@ -853,89 +847,72 @@ describe("Configuration string parser suite", function () {
     await expect(
       SenderOptions.fromConfig("udp::addr=host;tls_verify=on;"),
     ).rejects.toThrow("TLS is not supported for QWP UDP transport");
+    // On ws/wss these are legacy keys, rejected by the QWP schema with the
+    // Java client's relocation hint.
     await expect(
       SenderOptions.fromConfig("ws::addr=host;max_datagram_size=1400;"),
     ).rejects.toThrow(
-      "max_datagram_size and multicast_ttl are only supported for QWP UDP transport",
+      "unknown configuration key: max_datagram_size (applies to legacy http/tcp/udp transports only)",
     );
   });
 
-  it("parses close_flush_timeout_millis only for QWP WebSocket", async function () {
-    let options = await SenderOptions.fromConfig(
-      "ws::addr=host:9000;close_flush_timeout_millis=123;",
-    );
-    expect(options.close_flush_timeout_millis).toBe(123);
+  it("parses a ws connect string with one schema, whichever entry point is used", async function () {
+    // There must be a single QWP parser: Sender.fromConfig() and
+    // SenderOptions.fromConfig() + new Sender() previously disagreed, and
+    // tls_ca/tls_roots were exactly inverted between them.
+    const cases = [
+      ["sf_dir=/tmp/qwp-parity", true],
+      ["transaction=on", true],
+      ["tls_ca=/tmp/nope.pem", false],
+      ["init_buf_size=1024", false],
+      ["max_buf_size=99999", false],
+      ["retry_timeout=1000", false],
+      ["protocol_version=2", false],
+      ["bogus_key=1", false],
+    ] as const;
 
-    options = await SenderOptions.fromConfig(
-      "wss::addr=host:9000;close_flush_timeout_millis=0;",
-    );
-    expect(options.close_flush_timeout_millis).toBe(0);
-
-    await expect(
-      SenderOptions.fromConfig(
-        "ws::addr=host:9000;close_flush_timeout_millis=-1;",
-      ),
-    ).rejects.toThrow("Invalid close flush timeout option: -1");
-    await expect(
-      SenderOptions.fromConfig(
-        "http::addr=host:9000;close_flush_timeout_millis=123;",
-      ),
-    ).rejects.toThrow(
-      "close_flush_timeout_millis is only supported for QWP ws/wss transport",
-    );
+    for (const [setting, accepted] of cases) {
+      const config = `ws::addr=127.0.0.1:9000;${setting};`;
+      const viaOptions = await SenderOptions.fromConfig(config, {
+        log: () => {},
+      }).then(
+        () => "ok",
+        (error: Error) => error.message,
+      );
+      const viaSender = await Sender.fromConfig(config, { log: () => {} }).then(
+        async (sender) => {
+          await sender.close().catch(() => undefined);
+          return "ok";
+        },
+        (error: Error) => error.message,
+      );
+      expect(viaOptions).toBe(viaSender);
+      expect(viaOptions === "ok").toBe(accepted);
+    }
   });
 
-  it("parses initial_connect_retry only for QWP WebSocket", async function () {
-    await expect(
-      SenderOptions.fromConfig("ws::addr=host:9000;initial_connect_retry=off;"),
-    ).resolves.toMatchObject({ initial_connect_retry: "off" });
-    await expect(
-      SenderOptions.fromConfig(
-        "wss::addr=host:9000;initial_connect_retry=sync;",
-      ),
-    ).resolves.toMatchObject({ initial_connect_retry: "sync" });
+  it("leaves QWP-only keys to the QWP schema", async function () {
+    // close_flush_timeout_millis, initial_connect_retry and
+    // catch_up_cap_gap_min_escalation_window_millis are QWP vocabulary. This
+    // parser never sees them: on ws/wss the QWP schema takes the whole connect
+    // string, and on a legacy transport they are simply unknown.
     await expect(
       SenderOptions.fromConfig(
-        "ws::addr=host:9000;initial_connect_retry=async;",
+        "ws::addr=host:9000;close_flush_timeout_millis=123;initial_connect_retry=off;",
       ),
-    ).resolves.toMatchObject({ initial_connect_retry: "async" });
-    await expect(
-      SenderOptions.fromConfig("ws::addr=host:9000;initial_connect_retry=on;"),
-    ).resolves.toMatchObject({ initial_connect_retry: "sync" });
-    await expect(
-      SenderOptions.fromConfig(
-        "http::addr=host:9000;initial_connect_retry=sync;",
-      ),
-    ).rejects.toThrow(
-      "initial_connect_retry is only supported for QWP ws/wss transport",
-    );
-    await expect(
-      SenderOptions.fromConfig(
-        "ws::addr=host:9000;initial_connect_retry=eventually;",
-      ),
-    ).rejects.toThrow("Invalid initial_connect_retry");
-  });
+    ).resolves.toMatchObject({ protocol: "ws" });
 
-  it("parses orphan catch-up cap-gap dwell only for QWP WebSocket", async function () {
-    await expect(
-      SenderOptions.fromConfig(
-        "ws::addr=host:9000;catch_up_cap_gap_min_escalation_window_millis=300000;",
-      ),
-    ).resolves.toMatchObject({
-      catch_up_cap_gap_min_escalation_window_millis: 300_000,
-    });
-    await expect(
-      SenderOptions.fromConfig(
-        "ws::addr=host:9000;catch_up_cap_gap_min_escalation_window_millis=-1;",
-      ),
-    ).rejects.toThrow("Invalid catch-up cap-gap minimum escalation window");
-    await expect(
-      SenderOptions.fromConfig(
-        "http::addr=host:9000;catch_up_cap_gap_min_escalation_window_millis=1;",
-      ),
-    ).rejects.toThrow(
-      "catch_up_cap_gap_min_escalation_window_millis is only supported for QWP ws/wss transport",
-    );
+    for (const key of [
+      "close_flush_timeout_millis=123",
+      "initial_connect_retry=sync",
+      "catch_up_cap_gap_min_escalation_window_millis=1",
+    ]) {
+      await expect(
+        SenderOptions.fromConfig(`http::addr=host:9000;${key};`),
+      ).rejects.toThrow(
+        `Unknown configuration key: '${key.slice(0, key.indexOf("="))}'`,
+      );
+    }
   });
 
   it("can parse auto_flush_interval config", async function () {

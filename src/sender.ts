@@ -2,9 +2,15 @@
 import { readFileSync } from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
-import { Agent as UndiciAgent } from "undici";
 import { log, Logger } from "./logging";
-import { SenderOptions, ExtraOptions, UDP, WS, WSS } from "./options";
+import {
+  SenderOptions,
+  ExtraOptions,
+  qwpConfig,
+  UDP,
+  WS,
+  WSS,
+} from "./options";
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
@@ -16,7 +22,6 @@ import {
 } from "./qwp/node";
 import type { QwpTableWriter } from "./qwp/sender";
 import type { QwpWriterSchema } from "./qwp/writer";
-import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 const RESOLVED_QWP_SENDER = Symbol("resolvedQwpSender");
@@ -144,8 +149,17 @@ class Sender {
       options?.protocol === WSS ||
       options?.protocol === UDP
     ) {
-      this.qwpSender =
-        options.protocol === UDP
+      const resolved = qwpConfig(options);
+      this.qwpSender = resolved
+        ? // SenderOptions already parsed the ws/wss connect string with the
+          // QWP schema, so there is one vocabulary and one parser however the
+          // sender was constructed.
+          createQwpNodeSender(
+            resolved.ingress,
+            resolved.sender,
+            resolved.ingressSession,
+          )
+        : options.protocol === UDP
           ? createConfiguredQwpUdpSender(options, this.log)
           : createConfiguredQwpSender(options, this.log);
       this.autoFlush = false;
@@ -184,9 +198,6 @@ class Sender {
     configurationString: string,
     extraOptions?: ExtraOptions,
   ): Promise<Sender> {
-    if (isQwpWebSocketConfiguration(configurationString)) {
-      return createConfiguredQwpSenderFacade(configurationString, extraOptions);
-    }
     return new Sender(
       await SenderOptions.fromConfig(configurationString, extraOptions),
     );
@@ -582,66 +593,6 @@ class Sender {
   }
 }
 
-function isQwpWebSocketConfiguration(configurationString: string): boolean {
-  const separator = configurationString?.indexOf("::") ?? -1;
-  if (separator < 0) return false;
-  const schema = configurationString.slice(0, separator);
-  return schema === WS || schema === WSS;
-}
-
-function createConfiguredQwpSenderFacade(
-  configurationString: string,
-  extraOptions: ExtraOptions | undefined,
-): Sender {
-  validateQwpExtraOptions(extraOptions);
-  const logger = extraOptions?.log ?? log;
-  const configuredWebSocket = extraOptions?.qwp?.webSocket;
-  const { storeAndForward, senderId, failoverUrls, ...webSocketOverrides } =
-    configuredWebSocket ?? {};
-  let agent = webSocketOverrides.agent;
-  if (!agent && extraOptions?.agent instanceof http.Agent) {
-    agent = extraOptions.agent;
-  }
-  const resolved = resolveQwpNodeClientConfig(configurationString, {
-    webSocket: { ...webSocketOverrides, agent },
-    storeAndForward,
-    sender: { ...extraOptions?.qwp?.sender, log: logger },
-    ingressSession: extraOptions?.qwp?.session,
-  });
-  const qwpSender = createQwpNodeSender(
-    {
-      ...resolved.ingress,
-      failoverUrls: failoverUrls ?? resolved.ingress.failoverUrls,
-      senderId: senderId ?? resolved.ingress.senderId,
-    },
-    resolved.sender,
-    resolved.ingressSession,
-  );
-  const separator = configurationString.indexOf("::");
-  const options = {
-    protocol: configurationString.slice(0, separator),
-    log: logger,
-    [RESOLVED_QWP_SENDER]: qwpSender,
-  } as ResolvedQwpSenderOptions;
-  return new Sender(options);
-}
-
-function validateQwpExtraOptions(extraOptions: ExtraOptions | undefined): void {
-  if (extraOptions?.log && typeof extraOptions.log !== "function") {
-    throw new Error("Invalid logging function");
-  }
-  const agent = extraOptions?.agent;
-  if (
-    agent &&
-    !(agent instanceof UndiciAgent) &&
-    !(agent instanceof http.Agent) &&
-    // @ts-expect-error TypeScript narrows the Agent union too aggressively.
-    !(agent instanceof https.Agent)
-  ) {
-    throw new Error("Invalid HTTP agent");
-  }
-}
-
 function createConfiguredQwpSender(
   options: SenderOptions,
   logger: Logger,
@@ -661,27 +612,10 @@ function createConfiguredQwpSender(
   }
   const authorization =
     configuredWebSocket.authorization ?? qwpAuthorization(options);
-  if (
-    (options.initial_connect_retry !== undefined ||
-      options.catch_up_cap_gap_min_escalation_window_millis !== undefined) &&
-    !configuredWebSocket.storeAndForward
-  ) {
-    throw new Error(
-      "initial_connect_retry and catch_up_cap_gap_min_escalation_window_millis require qwp.webSocket.storeAndForward",
-    );
-  }
-  const storeAndForward = configuredWebSocket.storeAndForward
-    ? {
-        ...configuredWebSocket.storeAndForward,
-        initialConnectMode:
-          options.initial_connect_retry ??
-          configuredWebSocket.storeAndForward.initialConnectMode,
-        catchUpCapGapMinEscalationWindowMs:
-          options.catch_up_cap_gap_min_escalation_window_millis ??
-          configuredWebSocket.storeAndForward
-            .catchUpCapGapMinEscalationWindowMs,
-      }
-    : undefined;
+  // ws/wss connect-string keys are the QWP schema's, parsed only by
+  // resolveQwpNodeClientConfig(). This path builds a sender from a
+  // programmatic options object, so it reads options.qwp.* directly.
+  const storeAndForward = configuredWebSocket.storeAndForward;
   return createQwpNodeSender(
     {
       ...configuredWebSocket,
@@ -698,15 +632,11 @@ function createConfiguredQwpSender(
       autoFlushRows: isInteger(options.auto_flush_rows, 0)
         ? options.auto_flush_rows
         : configuredSender.autoFlushRows,
-      autoFlushBytes: isInteger(options.auto_flush_bytes, 0)
-        ? options.auto_flush_bytes
-        : configuredSender.autoFlushBytes,
+      autoFlushBytes: configuredSender.autoFlushBytes,
       autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
         ? options.auto_flush_interval
         : configuredSender.autoFlushIntervalMs,
-      closeFlushTimeoutMs: isInteger(options.close_flush_timeout_millis, 0)
-        ? options.close_flush_timeout_millis
-        : configuredSender.closeFlushTimeoutMs,
+      closeFlushTimeoutMs: configuredSender.closeFlushTimeoutMs,
       maxNameLength: isInteger(options.max_name_len, 1)
         ? options.max_name_len
         : configuredSender.maxNameLength,
