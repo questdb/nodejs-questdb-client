@@ -1370,9 +1370,13 @@ export class QwpSender {
     });
   }
 
+  /**
+   * Discards the row in progress, including its table selection, so the next
+   * row starts from table() again. Rows already completed stay staged.
+   */
   cancelRow(): QwpSender {
     this.throwIfUnavailable();
-    this.currentRow.clear();
+    this.discardRow();
     return this;
   }
 
@@ -1966,8 +1970,18 @@ export class QwpSender {
     return this.current;
   }
 
-  private failRow(error: unknown): never {
+  /**
+   * Drops the row in progress. A staged row is both its columns and its table
+   * selection, so releasing only the columns would leave the sender inside a
+   * row that table() then refuses to reopen.
+   */
+  private discardRow(): void {
     this.currentRow.clear();
+    this.current = undefined;
+  }
+
+  private failRow(error: unknown): never {
+    this.discardRow();
     throw error;
   }
 

@@ -356,6 +356,31 @@ try {
 }
 ```
 
+A row in progress is the columns staged so far plus the table selected by
+`table()`. When a setter or `at()` rejects a value, the sender discards both, so a
+half-built row can never reach QuestDB and the next row starts from `table()` again:
+
+```typescript
+for (const reading of readings) {
+  try {
+    await sender
+      .table("telemetry")
+      .symbol("device", reading.device)
+      .floatColumn("value", reading.value)
+      .at(reading.timestamp, "ms");
+  } catch (error) {
+    // Only this row is gone. Rows staged earlier stay pending.
+    log.warn(error);
+  }
+}
+await sender.flush();
+```
+
+Setters called after a failure raise `table name must be set before adding columns`
+rather than quietly joining a fresh row. `cancelRow()` discards a row in progress the
+same way without an error, and `reset()` remains the heavier option that also drops
+every row staged since the last flush.
+
 ### Compiled object-row writers
 
 For repeated rows with one table schema, compile a table-bound writer instead of

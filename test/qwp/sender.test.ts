@@ -636,11 +636,89 @@ describe("QWP high-level sender", () => {
     expect(() => sender.stringColumn("bad", 42 as unknown as string)).toThrow(
       /only strings/,
     );
-    await sender.longColumn("kept", 7n).atNow();
+    // The failed row released its table, so the next row starts from table().
+    await sender.table("events").longColumn("kept", 7n).atNow();
     await sender.flush();
 
     const table = session.sends[0].tables[0];
     expect(table.columns.map((item) => item.name)).toEqual(["kept"]);
+  });
+
+  it("keeps the sender usable after a failed row, without losing staged rows", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    sender.table("events").symbol("kind", "start");
+    expect(() => sender.stringColumn("label", 42 as unknown as string)).toThrow(
+      /only strings/,
+    );
+
+    // Recovery no longer needs reset(), which would drop the completed row too.
+    expect(() => sender.table("events")).not.toThrow();
+    await sender.longColumn("value", 2n).atNow();
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(table.rowCount).toBe(2);
+    expect(table.columns.map((item) => item.name)).toEqual(["value"]);
+    expect(column(table, "value").values).toEqual([1n, 2n]);
+  });
+
+  it("refuses to continue a failed row implicitly", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+
+    sender.table("events").longColumn("value", 1n);
+    expect(() => sender.stringColumn("label", 42 as unknown as string)).toThrow(
+      /only strings/,
+    );
+    // Setters after the failure must not silently open a new row.
+    expect(() => sender.longColumn("value", 2n)).toThrow(
+      /table name must be set before adding columns/,
+    );
+    await expect(sender.atNow()).rejects.toThrow(
+      /table name must be set before adding columns/,
+    );
+    expect(sender.metrics.pendingRows).toBe(0);
+  });
+
+  it("releases the row when the designated timestamp is rejected", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    sender.table("events").longColumn("value", 1n);
+    await expect(sender.at(1.5, "us")).rejects.toThrow(/safe integer/);
+
+    await sender.table("events").longColumn("value", 2n).atNow();
+    await sender.flush();
+    expect(column(session.sends[0].tables[0], "value").values).toEqual([2n]);
+  });
+
+  it("cancelRow() discards the row in progress and its table selection", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    sender.table("events").longColumn("value", 99n).cancelRow();
+
+    expect(sender.metrics.pendingRows).toBe(1);
+    await sender.table("other").longColumn("value", 2n).atNow();
+    await sender.flush();
+
+    const tables = session.sends[0].tables;
+    expect(tables.map((table) => table.name)).toEqual(["events", "other"]);
+    expect(column(tables[0], "value").values).toEqual([1n]);
+    expect(column(tables[1], "value").values).toEqual([2n]);
+  });
+
+  it("cancelRow() leaves a closed sender alone", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    await sender.close();
+    expect(() => sender.cancelRow()).toThrow(/closed/);
   });
 
   it("compiles a typed table writer and appends object rows", async () => {
