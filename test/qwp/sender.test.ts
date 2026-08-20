@@ -644,6 +644,34 @@ describe("QWP high-level sender", () => {
     expect(table.columns.map((item) => item.name)).toEqual(["kept"]);
   });
 
+  it("gives DATE the same per-column encoding byte as TIMESTAMP", async () => {
+    const frameFor = async (
+      write: (sender: QwpSender) => QwpSender,
+    ): Promise<number> => {
+      const session = new RecordingSession();
+      const sender = new QwpSender(async () => session, { autoFlush: false });
+      await write(sender.table("t")).atNow();
+      await sender.flush();
+      return encodeQwpIngressFrame(
+        session.sends[0].tables,
+        session.sends[0].options,
+      ).byteLength;
+    };
+
+    const date = await frameFor((s) => s.dateColumn("c", 1_700_000_000_000));
+    const timestamp = await frameFor((s) =>
+      s.timestampColumn("c", 1_700_000_000_000_000n),
+    );
+    const long = await frameFor((s) => s.longColumn("c", 1_700_000_000_000n));
+
+    // The result decoder routes DATE through its timestamp reader, which
+    // consumes a per-column encoding byte whenever QWP_FLAG_GORILLA is set.
+    // Encoding DATE as a raw LONG left the decoder a byte short, so it
+    // consumed the low byte of the first value as the encoding byte.
+    expect(date).toBe(timestamp);
+    expect(date).toBe(long + 1);
+  });
+
   it("rolls back the row when a symbol value cannot be converted", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });

@@ -159,7 +159,11 @@ function columnPayloadSize(
     return size + Math.ceil(valueCount / 8);
   }
 
+  // DATE carries milliseconds since the epoch and the result decoder reads it
+  // through the same timestamp path as TIMESTAMP, so it takes the same
+  // per-column encoding byte and is Gorilla-eligible.
   if (
+    column.type === QWP_COLUMN_TYPE.DATE ||
     column.type === QWP_COLUMN_TYPE.TIMESTAMP ||
     column.type === QWP_COLUMN_TYPE.TIMESTAMP_NANOS
   ) {
@@ -307,14 +311,16 @@ function writeColumn(
       for (const value of column.values) writer.writeFloat32(Number(value));
       return;
     case QWP_COLUMN_TYPE.LONG:
-    case QWP_COLUMN_TYPE.DATE:
       for (const value of column.values) {
         writer.writeBigInt64(BigInt(value as number | bigint));
       }
       return;
+    case QWP_COLUMN_TYPE.DATE:
     case QWP_COLUMN_TYPE.TIMESTAMP:
     case QWP_COLUMN_TYPE.TIMESTAMP_NANOS: {
-      const timestamps = column.values.map((value) => BigInt(value as bigint));
+      const timestamps = column.values.map((value) =>
+        BigInt(value as number | bigint),
+      );
       if (!options.gorilla) {
         for (const timestamp of timestamps) writer.writeBigInt64(timestamp);
         return;
