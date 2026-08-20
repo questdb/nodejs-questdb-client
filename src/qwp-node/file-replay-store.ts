@@ -20,6 +20,7 @@ import {
 import {
   QwpNodeAdvisoryLock,
   QwpNodeAdvisoryLockBusyError,
+  QwpNodeAdvisoryLockUnavailableError,
 } from "./advisory-lock";
 import { qwpSegmentMaintenanceWorker } from "./segment-maintenance-worker";
 
@@ -270,6 +271,26 @@ export class QwpReplayStoreLockedError extends QwpReplayStoreError {
       `QWP store-and-forward directory is already in use [directory=${directory}, holder=${holder}]`,
     );
     this.name = "QwpReplayStoreLockedError";
+  }
+}
+
+/**
+ * Store-and-forward cannot run because its optional native locking module is
+ * missing or has no binding for this platform. There is no lock-free fallback:
+ * the lock is what keeps a second process, Node or Java, off the same slot.
+ */
+export class QwpReplayStoreUnavailableError extends QwpReplayStoreError {
+  constructor(
+    readonly directory: string,
+    cause: unknown,
+  ) {
+    super(
+      "QWP store-and-forward requires the optional native module " +
+        `'fs-ext-extra-prebuilt', which could not be loaded [directory=${directory}, ` +
+        `platform=${process.platform}-${process.arch}]`,
+      cause,
+    );
+    this.name = "QwpReplayStoreUnavailableError";
   }
 }
 
@@ -1849,6 +1870,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           this.directory,
           error.holderPid,
         );
+      } else if (error instanceof QwpNodeAdvisoryLockUnavailableError) {
+        failure = new QwpReplayStoreUnavailableError(this.directory, error);
       } else {
         failure = new QwpReplayStoreError(
           `could not acquire QWP store-and-forward directory lock [directory=${this.directory}]`,
@@ -2494,6 +2517,9 @@ export async function quarantineQwpNodeReplayStore(
   } catch (error) {
     if (error instanceof QwpNodeAdvisoryLockBusyError) {
       throw new QwpReplayStoreLockedError(normalized, error.holderPid);
+    }
+    if (error instanceof QwpNodeAdvisoryLockUnavailableError) {
+      throw new QwpReplayStoreUnavailableError(normalized, error);
     }
     throw new QwpReplayStoreError(
       `could not acquire QWP store-and-forward logical lock for quarantine [directory=${normalized}]`,

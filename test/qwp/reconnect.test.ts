@@ -26,6 +26,7 @@ import {
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
   QwpReplayStoreSegmentTooLargeError,
+  QwpReplayStoreUnavailableError,
 } from "../../src/qwp/node";
 import {
   QWP_RECONNECT_EVENT_KIND,
@@ -3490,6 +3491,33 @@ describe("QWP Node file replay store", () => {
       { frameSequence: 0n, payload: Uint8Array.of(7) },
     ]);
     await second.close();
+  });
+
+  it("fails closed when the native locking module cannot be loaded", async () => {
+    const directory = await trackedDirectory();
+    vi.resetModules();
+    // Reproduces the module-scope throw the optional dependency raises when no
+    // prebuilt binding matches the platform, and MODULE_NOT_FOUND when an
+    // install omitted it.
+    vi.doMock("fs-ext-extra-prebuilt", () => {
+      throw new Error("Failed to load fs-ext native module.");
+    });
+    try {
+      const { QwpNodeFileReplayStore: UnavailableStore } = await import(
+        "../../src/qwp-node/file-replay-store"
+      );
+      const store = new UnavailableStore({ directory });
+      await expect(store.load()).rejects.toMatchObject({
+        name: "QwpReplayStoreUnavailableError",
+        directory,
+      } satisfies Partial<QwpReplayStoreUnavailableError>);
+      // The binding resolves before the lock file is opened, so a slot that
+      // cannot be owned is never given Java-visible lock metadata.
+      await expect(readdir(directory)).resolves.toEqual([]);
+    } finally {
+      vi.doUnmock("fs-ext-extra-prebuilt");
+      vi.resetModules();
+    }
   });
 
   it("arbitrates acquisition over stale Java lock metadata", async () => {

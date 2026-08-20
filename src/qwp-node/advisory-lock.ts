@@ -1,7 +1,6 @@
 import { mkdir, open, readFile, unlink, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { flock } from "fs-ext-extra-prebuilt";
 
 const SLOT_LOCK_FILE = ".lock";
 const SLOT_LOCK_PID_FILE = ".lock.pid";
@@ -13,6 +12,13 @@ const LOGICAL_LOCK_DIRECTORY = ".slot-locks";
 const pendingReleases = new Set<QwpNodeAdvisoryLock>();
 
 type FlockOperation = "exnb" | "un";
+type FlockFn = (typeof import("fs-ext-extra-prebuilt"))["flock"];
+
+// `fs-ext-extra-prebuilt` is an optional native dependency. It is resolved on
+// the first lock rather than at module scope, so ILP-only and
+// store-and-forward-free QWP users neither load the addon nor depend on a
+// prebuilt binary existing for their platform.
+let flockPromise: Promise<FlockFn> | undefined;
 
 /** @internal Native advisory-lock contention with Java-compatible diagnostics. */
 export class QwpNodeAdvisoryLockBusyError extends Error {
@@ -36,6 +42,19 @@ export class QwpNodeAdvisoryLockError extends Error {
   ) {
     super(`${message} [file=${lockPath}]`);
     this.name = "QwpNodeAdvisoryLockError";
+    this.cause = cause;
+  }
+}
+
+/** @internal The optional native locking module is absent or unloadable. */
+export class QwpNodeAdvisoryLockUnavailableError extends Error {
+  constructor(cause?: unknown) {
+    super(
+      "QWP store-and-forward requires the optional native module " +
+        "'fs-ext-extra-prebuilt', which could not be loaded " +
+        `[platform=${process.platform}-${process.arch}, node=${process.versions.node}]`,
+    );
+    this.name = "QwpNodeAdvisoryLockUnavailableError";
     this.cause = cause;
   }
 }
@@ -98,6 +117,9 @@ export class QwpNodeAdvisoryLock {
     lockPath: string,
     pidPath: string,
   ): Promise<QwpNodeAdvisoryLock> {
+    // Resolve the native binding before creating anything: an unsupported
+    // platform must fail without leaving slot metadata behind.
+    await loadFlock();
     await retryPendingReleases();
     let handle: FileHandle;
     try {
@@ -168,7 +190,25 @@ async function retryPendingReleases(): Promise<void> {
   }
 }
 
-function flockAsync(fd: number, operation: FlockOperation): Promise<void> {
+function loadFlock(): Promise<FlockFn> {
+  // A failed attempt is not cached. The module throws from its own module scope
+  // when no binding matches this platform/ABI, and a later Node upgrade or
+  // reinstall can make the very same import succeed.
+  flockPromise ??= import("fs-ext-extra-prebuilt").then(
+    (module) => module.flock,
+    (error) => {
+      flockPromise = undefined;
+      throw new QwpNodeAdvisoryLockUnavailableError(error);
+    },
+  );
+  return flockPromise;
+}
+
+async function flockAsync(
+  fd: number,
+  operation: FlockOperation,
+): Promise<void> {
+  const flock = await loadFlock();
   return new Promise((resolve, reject) => {
     flock(fd, operation, (error) => {
       if (error) reject(error);

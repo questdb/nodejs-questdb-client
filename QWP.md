@@ -225,6 +225,16 @@ live owner, and the next holder refreshes the PID sidecar. Short-lived locks und
 shared parent directory's `.slot-locks` child also match Java and serialize orphan
 adoption with close/rename/recreate quarantine transitions.
 
+Those native primitives come from `fs-ext-extra-prebuilt`, an optional dependency that
+ships prebuilt binaries for macOS, Linux, and Windows on x64 and arm64. It is
+installed by default and imported on the first lock, so ILP-only senders and QWP
+sessions without store-and-forward never load it. An install that skipped it, or a
+platform with no matching prebuilt binary and no build toolchain, therefore leaves the
+rest of the client fully usable and fails only when a store-and-forward journal is
+loaded, raising `QwpReplayStoreUnavailableError`. Store-and-forward never falls back
+to lock-free operation, because the lock is what keeps a second process, Java or Node,
+off the same slot.
+
 New journals use the cross-client SFA persistence layout. Fixed-size
 `sf-<generation>.sfa` files have the Java/Rust 24-byte `SF01` header and
 `[crc32c, payloadLength, payload]` frame envelope. `sf-manifest.bin` and
@@ -1194,6 +1204,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpReplayStoreAppendTimeoutError` | The Node.js replay journal did not regain capacity before the configured append deadline                    |
 | `QwpReplayStoreCheckpointError`    | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
 | `QwpReplayStoreLockedError`        | Another process owns the configured Node.js replay directory                                                |
+| `QwpReplayStoreUnavailableError`   | Store-and-forward's optional native locking module is missing or unusable here                              |
 | `QwpEgressQueryError`              | QuestDB returned a terminal query error                                                                     |
 | `QwpEgressQueryAbandonedError`     | Result iteration ended before the server completed the query                                                |
 | `QwpEgressQueryTimeoutError`       | The client deadline expired and cancellation began                                                          |
