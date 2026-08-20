@@ -341,7 +341,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private connectingCandidate?: QwpBinaryConnection;
   private lastHandshake?: QwpHandshakeMetadata;
   private lastEndpoint?: string | URL;
+  // Wire log for the current connection, indexed by wire sequence minus
+  // wireFramesBase. Acknowledged frames are dropped and the base advances, so
+  // the log stays proportional to what is still unacknowledged rather than to
+  // everything ever sent on the connection.
   private wireFrames: ReplayFrame[] = [];
+  private wireFramesBase = 0;
   private nextFrameSequence = 0n;
   private nextClientSequence = 0n;
   private publishedFrameSequence = -1n;
@@ -1091,6 +1096,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.lastHandshake = connection.handshake;
     this.lastEndpoint = connection.endpoint;
     this.wireFrames = wireFrames;
+    this.wireFramesBase = 0;
     if (connection.ping && !this.ping) {
       // Assigned only when the initial transport supports PING so browser
       // connections keep the optional capability genuinely absent.
@@ -1219,7 +1225,18 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         `QWP response sequence is negative: ${response.sequence}`,
       );
     }
-    if (this.wireFrames.length === 0) {
+    const highestWireIndex = this.wireFramesBase + this.wireFrames.length - 1;
+    const wireIndex = Number(
+      response.sequence > BigInt(highestWireIndex)
+        ? BigInt(highestWireIndex)
+        : response.sequence,
+    );
+    const localIndex = wireIndex - this.wireFramesBase;
+    const frame = localIndex >= 0 ? this.wireFrames[localIndex] : undefined;
+    if (!frame) {
+      // Either nothing has been sent on this connection yet, or this sequence
+      // was covered by an earlier cumulative ACK and trimmed. A duplicate OK
+      // has already been delivered; a NACK still has to be reported.
       if (response.status === QWP_STATUS.OK) return undefined;
       this.totalServerNacks++;
       const pending = this.pendingFsnRange();
@@ -1244,17 +1261,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         }`,
       );
     }
-    const highestWireIndex = this.wireFrames.length - 1;
-    const wireIndex = Number(
-      response.sequence > BigInt(highestWireIndex)
-        ? BigInt(highestWireIndex)
-        : response.sequence,
-    );
-    const frame = this.wireFrames[wireIndex];
 
     if (response.status === QWP_STATUS.OK) {
       if (frame.dictionaryCatchup) return undefined;
-      const covered = this.wireFrames.slice(0, wireIndex + 1);
+      const covered = this.wireFrames.slice(0, localIndex + 1);
       const clientTarget = findLastClientFrame(covered);
       const shouldDeliver = covered.some(
         (candidate) =>
@@ -1276,6 +1286,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       } else {
         await this.acknowledgeThrough(frame.frameSequence);
       }
+      // ACKs are cumulative, so nothing reads the covered prefix again.
+      // Dropping it keeps both the log and the payloads it pins bounded, and
+      // keeps each ACK proportional to the frames it actually covers.
+      this.wireFrames.splice(0, localIndex + 1);
+      this.wireFramesBase += localIndex + 1;
       if (!shouldDeliver || clientTarget?.clientSequence === undefined) {
         return undefined;
       }
@@ -1744,6 +1759,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (!(this.store instanceof QwpMemoryReplayStore)) return;
     this.frames.clear();
     this.wireFrames = [];
+    this.wireFramesBase = 0;
     this.symbolDictionary.length = 0;
     this.durableWatermarks.clear();
   }

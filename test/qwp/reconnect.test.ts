@@ -1588,6 +1588,39 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("trims the wire log as cumulative ACKs arrive", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection);
+    // The wire log is indexed by wire sequence and is not part of the public
+    // surface, but the invariant it has to hold is: it stays proportional to
+    // what is unacknowledged, never to everything ever sent on the connection.
+    const wireLog = () =>
+      (
+        session as unknown as {
+          connection: { wireFrames: readonly { payload?: Uint8Array }[] };
+        }
+      ).connection.wireFrames;
+
+    const payload = new Uint8Array(1024).fill(7);
+    for (let index = 0; index < 200; index++) {
+      const publishing = session.publishFrame(payload);
+      connection.receive(ingressResponse(QWP_STATUS.OK, BigInt(index)));
+      await publishing;
+    }
+
+    // Retaining the acknowledged prefix pinned every payload for the life of
+    // the connection and made each ACK scan it three times over.
+    expect(wireLog().length).toBeLessThanOrEqual(2);
+    expect(
+      wireLog().reduce(
+        (total, frame) => total + (frame.payload?.byteLength ?? 0),
+        0,
+      ),
+    ).toBeLessThanOrEqual(payload.byteLength * 2);
+
+    await session.close();
+  });
+
   it("keeps journal appends contiguous after a rejected append", async () => {
     const replayStore = new ContiguousReplayStore();
     const session = await QwpIngressSession.connect(
