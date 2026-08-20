@@ -1016,7 +1016,17 @@ export class QwpSender {
 
   symbol(name: string, value: unknown): QwpSender {
     if (value === null || value === undefined) return this;
-    return this.addColumn(name, QWP_COLUMN_TYPE.SYMBOL, String(value));
+    // String() runs inside the guard, not in addColumn's argument list: the
+    // value is `unknown`, so its conversion can throw (a null-prototype
+    // object, a throwing or non-callable toString, a throwing Proxy trap).
+    // Outside the guard that throw escapes before failRow() can discard the
+    // row, leaving the sender inside a half-built row that the next
+    // at()/atNow() would publish.
+    try {
+      return this.addColumn(name, QWP_COLUMN_TYPE.SYMBOL, String(value));
+    } catch (error) {
+      return this.failRow(error);
+    }
   }
 
   stringColumn(name: string, value: string | null | undefined): QwpSender {

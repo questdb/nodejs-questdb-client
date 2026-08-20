@@ -644,6 +644,51 @@ describe("QWP high-level sender", () => {
     expect(table.columns.map((item) => item.name)).toEqual(["kept"]);
   });
 
+  it("rolls back the row when a symbol value cannot be converted", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    // symbol() takes `unknown` and stringifies it, so the conversion itself can
+    // throw. A null-prototype object has no toString; querystring.parse() and
+    // several JSON parsers hand these back, so it is ordinary user data.
+    sender.table("events").longColumn("value", 1n);
+    expect(() =>
+      sender.symbol("tag", Object.create(null) as unknown),
+    ).toThrow();
+
+    // The rejected row must not survive to be published by the next close.
+    expect(() => sender.table("events")).not.toThrow();
+    await sender.longColumn("value", 2n).atNow();
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(table.rowCount).toBe(1);
+    expect(column(table, "value").values).toEqual([2n]);
+  });
+
+  it("does not merge a later row into one abandoned by a symbol failure", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    sender.table("events").longColumn("value", 1n);
+    expect(() => sender.symbol("tag", { toString: null } as unknown)).toThrow();
+
+    // Without the rollback the table stays selected, this symbol lands in the
+    // abandoned row, the duplicate `value` is dropped by the dedup guard, and
+    // one row carrying both rows' data is emitted.
+    await sender
+      .table("events")
+      .symbol("tag", "second")
+      .longColumn("value", 2n)
+      .atNow();
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(table.rowCount).toBe(1);
+    expect(column(table, "value").values).toEqual([2n]);
+    expect(column(table, "tag").values).toEqual(["second"]);
+  });
+
   it("keeps the sender usable after a failed row, without losing staged rows", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });
