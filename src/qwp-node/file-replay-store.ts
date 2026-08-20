@@ -54,6 +54,10 @@ const DEFAULT_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
 const DEFAULT_APPEND_DEADLINE_MS = 30_000;
 const TRIM_BATCH_SIZE = 8;
+// Background segment trimming retries on this cadence. A trim failure is
+// normally transient -- a briefly full or read-only filesystem, a maintenance
+// worker restart -- so it must not become permanent.
+const MAINTENANCE_RETRY_DELAY_MS = 1_000;
 const MAX_TIMER_DELAY_MS = 0x7fffffff;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
@@ -334,6 +338,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private checkpointTimer?: ReturnType<typeof setTimeout>;
   private checkpointFailure?: QwpReplayStoreCheckpointError;
   private maintenanceFailure?: QwpReplayStoreError;
+  private maintenanceRetryTimer?: ReturnType<typeof setTimeout>;
   private totalCheckpoints = 0;
   private totalCheckpointFailures = 0;
   private totalBackpressureStalls = 0;
@@ -948,6 +953,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.closing = true;
     if (this.checkpointTimer) clearTimeout(this.checkpointTimer);
     this.checkpointTimer = undefined;
+    if (this.maintenanceRetryTimer) clearTimeout(this.maintenanceRetryTimer);
+    this.maintenanceRetryTimer = undefined;
     this.rejectCapacityWaiters(this.closedError());
     this.closePromise = this.operationTail.then(async () => {
       let failure: unknown;
@@ -1287,6 +1294,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 error,
               );
         this.rejectCapacityWaiters(this.maintenanceFailure);
+        this.scheduleMaintenanceRetry();
       });
     });
   }
@@ -1313,6 +1321,26 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       await this.removeAcknowledgedThrough();
     }
     if (this.pendingTrimSegments.length > 0) this.scheduleMaintenance();
+    // The batch completed, so whatever made the previous one fail is gone.
+    // Mirrors checkpointDirty(), which clears checkpointFailure on success.
+    this.maintenanceFailure = undefined;
+  }
+
+  private scheduleMaintenanceRetry(): void {
+    if (
+      this.maintenanceRetryTimer ||
+      this.closing ||
+      this.closed ||
+      this.pendingTrimSegments.length === 0
+    ) {
+      return;
+    }
+    this.maintenanceRetryTimer = setTimeout(() => {
+      this.maintenanceRetryTimer = undefined;
+      if (this.closing || this.closed) return;
+      this.scheduleMaintenance();
+    }, MAINTENANCE_RETRY_DELAY_MS);
+    this.maintenanceRetryTimer.unref?.();
   }
 
   private async drainPendingMaintenance(): Promise<void> {

@@ -73,6 +73,7 @@ import {
   writeQwpVarint,
 } from "../../src/qwp";
 import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
+import { qwpSegmentMaintenanceWorker } from "../../src/qwp-node/segment-maintenance-worker";
 import { createQwpEgressFailoverConnectionFactory } from "../../src/qwp/internal/egress-routing";
 import {
   createQwpFailoverConnectionFactory,
@@ -3372,6 +3373,50 @@ describe("QWP Node file replay store", () => {
     );
     await recovered.close();
   });
+
+  it("recovers from a transient background maintenance failure", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    await store.load();
+    for (let sequence = 0n; sequence < 3n; sequence++) {
+      await store.append({
+        frameSequence: sequence,
+        payload: Uint8Array.of(Number(sequence)),
+      });
+    }
+
+    // Trimming an emptied segment is background work. Fail it once, the way a
+    // briefly read-only or full filesystem, or a restarted maintenance worker,
+    // would. The spy falls back to the real implementation afterwards, so the
+    // condition is genuinely transient.
+    const unlink = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "unlink")
+      .mockRejectedValueOnce(
+        Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        }),
+      );
+
+    await store.acknowledgeThrough(0n);
+    await vi.waitFor(() => expect(unlink).toHaveBeenCalled());
+
+    // The failure must not latch. Before the fix it was cleared only by
+    // close(), so every later append, acknowledgeThrough and readPayload threw
+    // the trim error for the rest of the process lifetime.
+    // waitFor surfaces the store's own error if it never recovers, so a
+    // regression reports the latched trim failure rather than a bare timeout.
+    await vi.waitFor(() => store.loadSymbolDictionary(), {
+      timeout: 4_000,
+      interval: 100,
+    });
+    await expect(
+      store.append({ frameSequence: 3n, payload: Uint8Array.of(3) }),
+    ).resolves.toBeUndefined();
+    await expect(store.acknowledgeThrough(1n)).resolves.toBeUndefined();
+
+    unlink.mockRestore();
+    await store.close();
+  }, 15_000);
 
   it("detects a replay gap immediately after a persisted ACK watermark", async () => {
     const directory = await trackedDirectory();
