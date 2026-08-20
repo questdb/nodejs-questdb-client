@@ -88,7 +88,7 @@ class QwpCatchUpCapGapError extends RangeError {
   }
 }
 
-class QwpDurableAckPersistentFailureError extends Error {
+export class QwpDurableAckPersistentFailureError extends Error {
   constructor(
     readonly attempts: number,
     readonly episodeMs: number,

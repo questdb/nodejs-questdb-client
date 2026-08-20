@@ -2,14 +2,19 @@ import { open, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   QWP_RECONNECT_EVENT_KIND,
+  QWP_UPGRADE_ERROR_KIND,
   type QwpReconnectEvent,
   QwpConnectionCloseInfo,
   QwpIngressTransportMetrics,
+  QwpUpgradeError,
 } from "../qwp/transport";
 import {
   isQwpNodeReplayQuarantineSlotName,
+  QwpReplayStoreCorruptionError,
   QwpReplayStoreLockedError,
 } from "./file-replay-store";
+import { QwpProtocolError } from "../qwp/core/errors";
+import { QwpDurableAckPersistentFailureError } from "../qwp/internal/reconnecting-ingress-connection";
 import { QwpNotificationDispatcher } from "../qwp/internal/notification-dispatcher";
 import {
   createQwpDataLossSenderError,
@@ -36,6 +41,8 @@ export const QWP_ORPHAN_DRAIN_EVENT_KIND = {
   STARTED: "started",
   DRAINED: "drained",
   LOCKED: "locked",
+  /** The attempt failed transiently; the slot is left for a later scan. */
+  RETRYING: "retrying",
   DURABLE_ACK_UNAVAILABLE: "durable-ack-unavailable",
   DURABLE_ACK_PERSISTENT_FAILURE: "durable-ack-persistent-failure",
   PRIMARY_UNAVAILABLE: "primary-unavailable",
@@ -67,6 +74,8 @@ export interface QwpNodeOrphanDrainerMetrics {
   readonly active: number;
   readonly drained: number;
   readonly locked: number;
+  /** Attempts that failed transiently and left the slot in place. */
+  readonly retrying: number;
   readonly failed: number;
   readonly scanFailures: number;
   readonly deliveredNotifications: number;
@@ -244,6 +253,7 @@ export class QwpNodeOrphanDrainer {
   private discovered = 0;
   private drained = 0;
   private locked = 0;
+  private retrying = 0;
   private failed = 0;
   private scanFailures = 0;
 
@@ -319,6 +329,7 @@ export class QwpNodeOrphanDrainer {
       active: this.active.size,
       drained: this.drained,
       locked: this.locked,
+      retrying: this.retrying,
       failed: this.failed,
       scanFailures: this.scanFailures,
       deliveredNotifications: this.eventDispatcher?.metrics.delivered ?? 0,
@@ -451,6 +462,15 @@ export class QwpNodeOrphanDrainer {
         return;
       }
       const failure = toError(error, "QWP orphan drain failed");
+      if (!isTerminalDrainFailure(failure)) {
+        // Transient: the journal is intact and a later scan can still drain
+        // it. Quarantining here would abandon accepted rows -- and report
+        // data loss -- because the process briefly ran out of descriptors or
+        // the server was unreachable.
+        this.retrying++;
+        this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING, directory, failure);
+        return;
+      }
       this.failed++;
       await markFailed(directory, failure).catch(() => undefined);
       this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED, directory, failure);
@@ -593,6 +613,24 @@ export async function retryQwpNodeOrphanSlot(directory: string): Promise<void> {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Only failures that are terminal by design quarantine a slot behind its
+ * `.failed` sentinel and report the abandoned bytes as data loss: a rejected
+ * authentication, a protocol violation (which is also how poison-frame
+ * escalation surfaces), an exhausted durable-ACK capability-gap episode, and a
+ * corrupt journal. Everything else -- an unreachable server, an ACK timeout,
+ * EMFILE, ENOSPC -- is transient, and the slot is left intact for a later scan.
+ */
+function isTerminalDrainFailure(error: Error): boolean {
+  if (error instanceof QwpReplayStoreCorruptionError) return true;
+  if (error instanceof QwpProtocolError) return true;
+  if (error instanceof QwpDurableAckPersistentFailureError) return true;
+  if (error instanceof QwpUpgradeError) {
+    return error.kind === QWP_UPGRADE_ERROR_KIND.AUTHENTICATION;
+  }
+  return false;
 }
 
 function toError(error: unknown, fallback: string): Error {

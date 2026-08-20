@@ -6,6 +6,7 @@ import {
   QWP_ORPHAN_DRAIN_EVENT_KIND,
   QWP_ORPHAN_FAILED_SENTINEL,
   QwpNodeOrphanDrainer,
+  QwpReplayStoreCorruptionError,
   QwpReplayStoreLockedError,
   retryQwpNodeOrphanSlot,
   scanQwpNodeOrphanSlots,
@@ -274,10 +275,44 @@ describe("QWP Node orphan drainer", () => {
     await drainer.close();
   });
 
+  it("leaves a slot intact when the drain attempt fails transiently", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "transient");
+    // EMFILE while opening one descriptor per segment, an unreachable server,
+    // an ACK poll timeout: the journal is intact and a later scan can drain it.
+    const transient = Object.assign(new Error("EMFILE: too many open files"), {
+      code: "EMFILE",
+    });
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        throw transient;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+
+    await vi.waitFor(() => expect(drainer.metrics.retrying).toBe(1));
+    expect(drainer.metrics.failed).toBe(0);
+    // No sentinel, no abandoned-data report, and the slot is still offered to
+    // the next scan.
+    expect(await readdir(directory)).not.toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    expect(senderErrors).toEqual([]);
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
+      directory,
+    ]);
+
+    await drainer.close();
+  });
+
   it("quarantines terminal failures until an operator explicitly retries", async () => {
     const rootDirectory = await root();
     const directory = await recordSlot(rootDirectory, "corrupt");
-    const terminal = new Error("corrupt replay record");
+    // Terminal by design: a corrupt journal cannot be replayed, so the slot is
+    // quarantined rather than retried.
+    const terminal = new QwpReplayStoreCorruptionError("corrupt replay record");
     const senderErrors: QwpSenderError[] = [];
     const events: string[] = [];
     const drainer = new QwpNodeOrphanDrainer({
