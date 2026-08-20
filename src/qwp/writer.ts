@@ -24,7 +24,17 @@ export type QwpWriterColumnKind =
   | "doubleArray"
   | "longArray";
 
-const QWP_WRITER_COLUMN = Symbol("QWP writer column");
+// Registered in the global symbol registry rather than created per module.
+// The published package emits one bundle per entry point ('.', './qwp',
+// './qwp/browser', './qwp/node'), so a module-private brand would differ
+// between the bundle that stamps a column and the bundle that validates it:
+// a schema built with the factories from './qwp' would be rejected by the
+// writer() of a sender imported from './qwp/node'. The key carries a version
+// so a future incompatible descriptor shape cannot interop with this one.
+const QWP_WRITER_COLUMN: unique symbol = Symbol.for(
+  "questdb.qwp.writer.column.v1",
+);
+// Type-level only: never stamped at runtime, so it needs no shared identity.
 const QWP_WRITER_INPUT: unique symbol = Symbol("QWP writer input");
 
 /** Maximum DECIMAL scale of each fixed-width decimal column type. */

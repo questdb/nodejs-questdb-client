@@ -5,6 +5,7 @@
   "scripts": {
     "test": "vitest",
     "test:qwp-browser-e2e": "pnpm build && vitest run --config vitest.qwp-browser.config.ts",
+    "test:dist": "pnpm build && vitest run --config vitest.dist.config.ts",
     "build": "bunchee --external fs-ext-extra-prebuilt",
     "eslint": "eslint src/**",
     "typecheck": "tsc --noEmit",

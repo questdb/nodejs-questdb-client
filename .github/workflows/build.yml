@@ -40,6 +40,13 @@ jobs:
       - name: Tests
         run: pnpm test
 
+      # Loads the built bundles through package.json `exports`, the way a
+      # consumer does. Every other suite imports from `src/`, where all four
+      # entry points share one module instance and cross-bundle defects are
+      # invisible.
+      - name: Built package tests
+        run: pnpm test:dist
+
   qwp-browser-e2e:
     name: QWP browser E2E
     runs-on: ubuntu-latest
