@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Review a GitHub pull request or local Git range against @questdb/nodejs-client TypeScript ILP client coding standards
+description: Review a GitHub pull request or local Git range against @questdb/nodejs-client TypeScript ILP/QWP client coding standards
 argument-hint: "[PR number or URL | --range=<base>..<head>] [--level=0..3]"
 allowed-tools: Bash, Read, Grep, Glob, Agent
 ---
@@ -26,9 +26,11 @@ to verify a regression test against reverted production hunks; remove it afterwa
 
 You are a senior QuestDB engineer performing a blocking code review.
 `@questdb/nodejs-client` is mission-critical software: it serializes rows into the
-QuestDB InfluxDB Line Protocol (ILP) and sends them over HTTP/HTTPS or TCP/TCPS.
-A bug can silently corrupt bytes, drop or duplicate rows, leak credentials, exhaust
-resources, or break supported Node.js consumers.
+QuestDB InfluxDB Line Protocol (ILP) over HTTP/HTTPS or TCP/TCPS, and into the QuestDB
+Wire Protocol (QWP) over WebSocket or fire-and-forget UDP, with a browser build, an
+egress query path, and a crash-safe Node store-and-forward journal. A bug can silently
+corrupt bytes, drop or duplicate rows, abandon persisted data, leak credentials,
+exhaust resources, or break supported Node.js and browser consumers.
 
 **A review that blocks on everything blocks on nothing.** Every finding costs an
 author and CI round-trip. Reserve blocking severity for defects with a real user
@@ -52,7 +54,14 @@ when the gates pass. Zero findings is a successful outcome.
 - **Think adversarially.** Exercise `null`/`undefined`, empty strings and arrays,
   `NaN`/`Infinity`, imprecise `number` integers, `bigint`, multi-byte UTF-8, all ILP
   delimiters, maximum buffer sizes, retries after uncertain sends, connection drops,
-  TLS/auth failures, and every negotiated protocol version.
+  TLS/auth failures, and every negotiated protocol version. For QWP also exercise
+  mid-frame socket loss, replay after a restart, a NACK of an already replayed frame,
+  a full or externally locked journal directory, a role-rejected or capability-gapped
+  endpoint, and a truncated or hostile server frame.
+- **Store-and-forward promises no data loss.** Once rows enter the journal, only a
+  rejection that is deterministic under byte-identical replay may abandon them, and a
+  transient outage must never end the replay loop or surface to the producer. Treat a
+  breach of the store-and-forward checklist as Critical.
 - **Demand efficient hot paths.** Per-row and per-cell work scales to millions of
   rows. Avoid allocations, repeated scans, redundant conversions, extra buffer copies,
   and suboptimal algorithms there. Bounded setup/configuration work is less severe.
@@ -77,14 +86,17 @@ to `gh`.
 | Level | What runs |
 |-------|-----------|
 | **0 (default)** | Steps 1, 2, 2.4, 2.5f, 2.6, and 4. Review inline without agent fanout. Build a compact coverage map and apply the Step 3b admission gate inline from a blank evidence form. |
-| **1** | Add Steps 2.5a and 2.5e when tests change. Run Agent 1 plus at most two applicable roles from Agents 2-7 and 9-13. Independently falsify each surviving atomic candidate. |
+| **1** | Add Steps 2.5a and 2.5e when tests change. Run Agent 1 plus at most two applicable roles from Agents 2-7, 9-13, and 14-15. Independently falsify each surviving atomic candidate. |
 | **2** | Run all of Step 2.5, restricting 2.5b to exported/public/protected symbols, transport interfaces, shared helpers, and configuration options. Run Agent 1 plus at most four change-relevant roles. Independently falsify each surviving candidate. |
-| **3** | Run the full workflow. Select at most six applicable discovery roles: Agent 1 always; Agent 8 when changed symbols have out-of-diff callers; Agents 2-7 when their domains are touched; Agents 9-13 for changed tests or a fix claim; Agent 10 only when a distinct adversarial pass is warranted. Depth comes from evidence, not agent count. |
+| **3** | Run the full workflow. Select at most six applicable discovery roles: Agent 1 always; Agent 8 when changed symbols have out-of-diff callers; Agents 2-7 and 14-15 when their domains are touched; Agents 9-13 for changed tests or a fix claim; Agent 10 only when a distinct adversarial pass is warranted. Depth comes from evidence, not agent count. |
 
 State the selected level at the start of the review. If defaulted, mention that level
-3 exists for a full mission-critical pass. Changes to `src/buffer/**`, transport/auth/
-TLS, protocol negotiation, flush semantics, or `src/index.ts` are high risk; recommend
-level 3, but honor an explicit lower level and state the limitation.
+3 exists for a full mission-critical pass. Changes to `src/buffer/**`, `src/qwp/**`,
+`src/qwp-node/**`, transport/auth/TLS, protocol negotiation, flush semantics, or any
+public entry point (`src/index.ts`, `src/qwp/index.ts`, `src/qwp/node.ts`,
+`src/qwp/browser.ts`) are high risk; recommend level 3, but honor an explicit lower
+level and state the limitation. Replay-journal, ack-watermark, drainer, and failover
+changes stay high risk regardless of how small the diff is.
 
 ## Spawning review agents
 
@@ -147,6 +159,9 @@ Check the repository conventions in `CONTRIBUTING.md` and recent accepted PRs:
 - README/TSDoc updates accompany user-visible behavior where needed.
 - New or renamed options document their defaults and deprecation path through
   `SenderOptions.resolveDeprecated`.
+- New or renamed QWP keys are wired through `src/qwp-node/client-config.ts`, validated
+  against the transports that support them, and documented in `QWP.md`.
+- A changed public QWP surface updates `test/qwp/public-api-contract.ts`.
 
 ## Step 2.4: Submodule boundaries (mandatory at every level)
 
@@ -196,13 +211,22 @@ and exports. Group results by file and include overrides and implementations.
 
 At minimum check:
 
-- `src/index.ts` and emitted public type implications.
+- All four public entry points — `src/index.ts`, `src/qwp/index.ts`, `src/qwp/node.ts`,
+  `src/qwp/browser.ts` — and emitted public type implications.
 - `SenderBufferBase` plus `SenderBufferV1`/`V2`/`V3` overrides and `createBuffer`.
 - `SenderTransport` plus Undici, stdlib HTTP, and TCP implementations.
 - `SenderOptions.resolveAuto`, `resolveDeprecated`, config parsing, `fromConfig`, and
-  `fromEnv` for option changes.
-- Unit/integration tests and test helpers.
-- `README.md` and examples for public symbols/options.
+  `fromEnv` for option changes, plus `src/qwp-node/client-config.ts` for QWP keys.
+- Changed `src/qwp/core/**` constants and codecs against both the ingress encoder and
+  the egress decoder; one cap or type byte is normally read by both sides.
+- `QwpSender` and the writer helpers, `QwpIngressSession`, `QwpEgressSession`,
+  `QwpClient`, the reconnecting connections in `src/qwp/internal/**`, and the UDP
+  sender.
+- `QwpNodeFileReplayStore`, `QwpNodeOrphanDrainer`, the advisory lock, and the segment
+  maintenance worker for any store-and-forward change.
+- Unit/integration tests and test helpers, including `test/qwp/**` and its fixtures.
+- `test/qwp/public-api-contract.ts` for any exported QWP symbol, type, or option.
+- `README.md`, `QWP.md`, and examples for public symbols/options.
 
 A changed shared symbol with no recorded `rg` command is a skill violation. Never
 assert “only used here” without the search trace.
@@ -230,14 +254,22 @@ For each changed symbol, record before versus after for every applicable contrac
 List places where the change is visible but the diff does not touch, grouped by:
 
 - Per-row/per-cell buffer-build hot path.
-- Protocol-version fanout (v1/v2/v3).
-- Transport fanout (Undici, stdlib HTTP, TCP/TCPS).
-- Flush, retry, and lazy auto-flush paths.
-- Protocol negotiation and configuration parsing.
+- Protocol-version fanout (ILP v1/v2/v3, and the QWP frame version with its negotiated
+  caps and capabilities).
+- Transport fanout (Undici, stdlib HTTP, TCP/TCPS, QWP WebSocket ingress, QWP egress,
+  Node UDP).
+- Runtime fanout (Node entry points versus the browser build, which must stay free of
+  Node built-ins, `ws`, and `qwp-node` imports).
+- Flush, commit, retry, replay, and lazy auto-flush paths.
+- Reconnect, failover, role/capability rejection, and poison-frame escalation.
+- Store-and-forward journal, orphan drainer, advisory locking, and the maintenance
+  worker thread.
+- Protocol negotiation, durable-ACK capability negotiation, and configuration parsing.
 - Auth/TLS and resource lifecycle.
-- Worker-thread use (one mutable `Sender` per worker).
-- Public ESM/CJS/type surface.
-- Tests, helpers, README, and examples.
+- Worker-thread use (one mutable `Sender` per worker) and multi-process use of a single
+  store-and-forward directory.
+- Public ESM/CJS/type surface across all four entry points.
+- Tests, helpers, README, `QWP.md`, and examples.
 
 Every listed context must be checked in Step 3.
 
@@ -259,9 +291,18 @@ Record current facts with file/line citations; do not rely on this list becoming
 - TypeScript flags from `tsconfig.json`, especially `strictNullChecks`,
   `noImplicitAny`, and `noUncheckedIndexedAccess`.
 - Node.js version floor and `@types/node` version.
-- `undici` major and the `stdlib_http` alternative.
-- Dual ESM/CJS build and `package.json` exports.
-- Protocol default/negotiation and TCP's explicit-version requirement.
+- Runtime dependencies and what each covers: `undici` (HTTP), `ws` (Node QWP
+  WebSocket), and the native `fs-ext-extra-prebuilt` advisory locks used by
+  store-and-forward. `fzstd` is a devDependency that the bundler inlines; making it an
+  external import would break installs.
+- Dual ESM/CJS build and every `package.json` exports subpath (`.`, `./qwp`,
+  `./qwp/browser`, `./qwp/node`), plus which sources each subpath is allowed to import.
+- ILP protocol default/negotiation and TCP's explicit-version requirement.
+- QWP `QWP_VERSION`, the `/write/v4` ingress and `/read/v1` egress routes, the caps in
+  `src/qwp/core/constants.ts`, and the capabilities negotiated per connection.
+- `worker_threads` use by the segment maintenance worker, and the `Date.now()` /
+  `Math.random()` dependencies in backoff, episode, and timeout accounting that
+  deterministic tests must be able to control.
 - `Buffer.write` versus `writeInt*` boundary semantics. A short `Buffer.write` can
   silently truncate, while numeric writes throw out of bounds; `writeInt8` requires
   `-128..127` and marker bytes above 127 must be sign-folded.
@@ -284,8 +325,9 @@ path, build an internal row containing:
   assertion and observation seam.
 - **Effort/fragility evidence:** concrete setup, nondeterminism, platform, or production
   seam costs; “hard to test” alone is not evidence.
-- **Dimensions:** applicable protocol, transport, happy/error, NULL, boundary,
-  concurrency, retry, and resource-cleanup dimensions.
+- **Dimensions:** applicable protocol, transport, runtime (Node/browser), happy/error,
+  NULL, boundary, concurrency, retry, reconnect/replay, crash-recovery, and
+  resource-cleanup dimensions.
 - **Disposition:** `COVERED`, `CRITICAL GAP`, `MODERATE GAP`, `ACCEPTED GAP`, or `EXEMPT`.
 
 Mark rows with no effective assertion `UNTESTED` before classification. Missing tests
@@ -396,6 +438,23 @@ assertions, and unnecessary casts. Name a real reusable alternative for each com
 hunk each test depends on. A candidate survives only if the test passes at head and
 fails when the production fix is reverted in an isolated scratch worktree.
 
+**Agent 14 — QWP wire format and protocol sessions:** Reconstruct frame headers,
+LEB128 varints, column encodings, Gorilla bit packing, zstd framing, symbol-dictionary
+IDs with their delta/reset flags, decimal scale, geohash bits, array shape, and NULL
+bitmaps against the caps in `src/qwp/core/constants.ts`. Check the ingress encoder and
+the egress decoder together because both read the same constants. Check status-byte to
+category to policy mapping, per-table transaction grouping, durable-ACK negotiation,
+ingress cap splitting, and that a truncated, oversized, or hostile server frame is
+rejected before it is allocated, copied, or trusted.
+
+**Agent 15 — Store-and-forward, replay, and failover:** Verify the durability contract
+in the checklist below. Trace the cumulative ack watermark, replay from
+`ackedFsn + 1`, segment format and checkpoints, append backpressure and deadlines,
+cross-process advisory locking, orphan-slot quarantine, poison-frame strike accounting,
+capability-gap episodes, reconnect budgets, and endpoint health/zone ranking. Any path
+that abandons accepted rows, advances the watermark past an unacknowledged frame, or
+ends the steady-state replay loop on a transient failure is a data-loss candidate.
+
 Combine outputs into a private candidate ledger. Split compound narratives into atomic
 propositions, deduplicate by proposition plus evidence, and record dependencies. Do not
 draft severity, fixes, or report prose yet.
@@ -474,7 +533,18 @@ Then independently verify Node-client specifics:
    README example, ESM/CJS output implication, and supported Node version.
 10. For test efficacy, prove the assertion reaches the change and would fail under the
     claimed regression. Recompute expected hex/bytes rather than trusting fixtures.
-11. Derive a fix only after admission, then verify it compiles and closes all admitted
+11. For QWP wire claims, reconstruct the frame bytes for encode and decode, and check
+    every length, cap, and flag against `src/qwp/core/constants.ts` rather than against
+    an assumed peer behavior.
+12. For replay, ack, reconnect, or failover claims, trace the cumulative ack watermark
+    and prove which frames a restart, NACK, or non-orderly close resends or drops.
+    Classify the failure through `qwpDefaultSenderErrorPolicy` before calling anything
+    terminal.
+13. For store-and-forward claims, execute against a real directory: fill it, hold its
+    lock from a second process, truncate or corrupt a segment, and kill the process
+    between append and checkpoint. Durability and crash-recovery claims need journal
+    artifacts, never source reading alone.
+14. Derive a fix only after admission, then verify it compiles and closes all admitted
     paths without creating a compatibility, ownership, or retry defect.
 
 ### Net user impact and ledger classification
@@ -535,6 +605,72 @@ enumerated instance independently rather than sampling and generalizing.
 - Undici and stdlib HTTP agree on auth, TLS, timeout, retry, and response handling.
 - Basic/Bearer/JWK credentials are correct and never logged or included in errors.
 - Verification is disabled only explicitly; custom CA/roots are applied.
+- QWP endpoint selection honors the health and zone ranking; a background drainer
+  publishes health observations but never resets foreground classifications.
+- Upgrade failures are classified into a `QwpUpgradeError` kind, and a browser's opaque
+  upgrade error is never reported as a specific cause.
+- WebSocket close codes carry no policy meaning; classify by status byte and upgrade
+  kind instead.
+
+### QWP wire format and sessions
+
+- Frame header magic, version, flags, table count, and payload length agree between
+  encoder and decoder, and every cap in `src/qwp/core/constants.ts` is enforced on both
+  sides.
+- Varints stay inside uint64; row, column, name-length, array-element, and dictionary
+  limits are checked on encode and on decode.
+- Symbol dictionary IDs stay dense and connection-scoped; delta and reset flags match
+  what the peer reconstructs, and a `DICTIONARY_GAP` rejection triggers catch-up rather
+  than a terminal failure.
+- Gorilla, zstd, and raw encodings round-trip; decompression respects
+  `QWP_MAX_ZSTD_DECOMPRESSED_SIZE`, and every server-supplied length is validated before
+  it is allocated or copied.
+- Decimal scale, geohash bits, long256 words, UUID, IPv4, binary, and array shape
+  validation match the documented bounds for each column and bind type.
+- Server-supplied text decodes as fatal UTF-8 into a `QwpProtocolError`, never into a
+  silently mangled value.
+- Transactions are atomic per table, not across a flush; closing publishes staged rows
+  without committing them.
+- Durable ACK is requested through the Node upgrade header or the browser subprotocol,
+  and an unconfirmed capability fails with `QwpDurableAckUnavailableError`.
+- Ingress splitting respects the negotiated cap, and a single row above the cap fails
+  with `QwpBatchTooLargeError` instead of being dropped.
+- The browser entry point stays free of Node built-ins, `ws`, and `qwp-node` symbols.
+
+### Store-and-forward and durability
+
+A breach here is Critical: the contract is that a running producer neither loses data
+nor hard-fails on a transient outage.
+
+- The steady-state replay loop does not surface transport or server errors to the
+  producer. Journal exhaustion and its append deadline are the errors a caller may see.
+- Node foreground replay is unbounded after startup. Attempt and duration budgets apply
+  to `"sync"` startup and to the browser/memory policy only; a budget that latches a
+  running sender terminal during a long outage is a data-loss defect.
+- Backoff is exponential with full jitter and a capped per-attempt delay, while the
+  store-and-forward retry loop itself stays uncapped.
+- NACK policy follows `qwpDefaultSenderErrorPolicy`: `WRITE_ERROR`, `INTERNAL_ERROR`,
+  `DICTIONARY_GAP`, and an unknown status retry from `ackedFsn + 1`; `NOT_WRITABLE`
+  retries elsewhere; only rejections that are deterministic under byte-identical replay
+  go terminal. An unrecognized status byte fails open to retry, never closed.
+- The ack watermark never advances past a NACKed or unacknowledged frame, and abandoned
+  bytes are quarantined and reported through `QwpSenderError` rather than dropped.
+- Repeated rejection escalates through the poison-frame detector, honoring
+  `maxFrameRejections` and `poisonMinEscalationWindowMs`. Normal and going-away closes,
+  `NOT_WRITABLE`, and dictionary catch-up must not consume strikes, and a transient
+  class must not consume a capability-gap episode budget.
+- Orphan-drainer terminals are the ones that are terminal by design — authentication,
+  protocol, poison frame, and an exhausted capability-gap episode — and they quarantine
+  the slot behind its `.failed` sentinel for an operator. Any other terminal is a
+  finding.
+- Segment magic, format version, and checkpoint invariants hold; a torn, truncated, or
+  foreign-version segment is quarantined instead of replayed.
+- Advisory locking is fail-closed: a directory owned by another process yields
+  `QwpReplayStoreLockedError`, a release that cannot be proved stays on the retry list,
+  and the maintenance worker is stopped on every exit path.
+- UDP ingress is fire-and-forget by contract — no acknowledgement, no replay, no
+  durability claim. Review it for datagram sizing and socket cleanup, not against the
+  guarantees above.
 
 ### Async, concurrency, and resources
 
@@ -543,6 +679,9 @@ enumerated instance independently rather than sampling and generalizing.
 - Do not invite concurrent mutation or share a Sender across workers.
 - Close owned sockets/pools/agents/timers/listeners on every path; preserve user-owned
   agents; do not retain stale buffer views.
+- Close QWP sockets, keepalive and ACK timers, reconnect timers, the maintenance worker
+  thread, and advisory locks on every path, including a failed upgrade, an aborted
+  replay, and a quarantined slot.
 
 ### Performance
 
@@ -557,9 +696,14 @@ enumerated instance independently rather than sampling and generalizing.
 
 - Export new public symbols; treat removals/renames/signature/default changes as
   compatibility changes.
+- Only the four documented entry points are public. Paths containing `internal`,
+  `qwp-node`, or `src` are implementation details even when a bundler resolves them.
+- A changed exported QWP symbol, option, constant, or error updates
+  `test/qwp/public-api-contract.ts` and `QWP.md`.
 - Keep TSDoc/types accurate and avoid casts that hide runtime null/type problems.
 - Wire renamed options through parsing, validation, `resolveDeprecated`, `resolveAuto`,
-  `fromConfig`, and `fromEnv` as applicable.
+  `fromConfig`, and `fromEnv` as applicable, and through the QWP config parser for QWP
+  keys.
 - Update README/examples for user-visible behavior.
 - Keep ESLint/Prettier clean; remove dead code/imports; follow local naming/order.
 
@@ -570,6 +714,9 @@ enumerated instance independently rather than sampling and generalizing.
 - Use byte-level assertions for serializer changes and transport-level assertions for
   network/auth changes.
 - Recompute expected hex/bytes and ensure assertions can fail and reach production code.
+- QWP changes need frame-level assertions, and behavior that depends on it needs a
+  reconnect, replay, restart, or lock-contention test. Reuse the fake sockets, fixtures,
+  and interop helpers already in `test/qwp/`.
 - A bug fix needs a regression test that fails without the fix unless the Step 2.6
   proportionality analysis admits a non-Critical gap.
 - Prefer existing helpers and deterministic synchronization; avoid brittle timing,
@@ -606,8 +753,12 @@ Severity is determined by reachable user consequence, not checklist category.
 
 **Critical** requires a supported trigger and one of:
 
-- Wrong/missing/duplicated/corrupted data or ILP wire bytes.
+- Wrong/missing/duplicated/corrupted data or ILP/QWP wire bytes.
+- Abandoned, silently dropped, or unreplayable store-and-forward data, or an ack
+  watermark advanced past an unacknowledged frame.
 - Crash, hang, outage, unbounded loop, OOM, or unbounded socket/timer/listener leak.
+- A steady-state replay loop that ends, or surfaces a transient transport failure to the
+  producer, instead of retrying.
 - Credential exposure, auth/TLS bypass, or another security failure.
 - Silent/misleading failure that makes ingestion appear successful or undiagnosable.
 - Public API, config, runtime, module-system, protocol, or rolling-version compatibility
