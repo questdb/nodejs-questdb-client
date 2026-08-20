@@ -17,6 +17,8 @@ import { qwpColumnNameKey, validateQwpColumnName } from "./core/identifiers";
 import {
   isQwpWriterColumn,
   QwpWriterRowError,
+  validateDecimalScale,
+  validateGeohashPrecision,
   type QwpTimestampUnit,
   type QwpWriterColumn,
   type QwpWriterRow,
@@ -190,6 +192,10 @@ interface CompiledQwpWriterColumn {
   readonly nameKey: string;
   readonly type: QwpColumnType;
   readonly descriptor: QwpWriterColumn<unknown, boolean>;
+  /** Fixed GEOHASH precision, mirrored onto every staged column. */
+  readonly geohashPrecision?: number;
+  /** Fixed DECIMAL scale, mirrored onto every staged column. */
+  readonly decimalScale?: number;
 }
 
 interface CompiledQwpWriterSchema {
@@ -422,6 +428,230 @@ function parseIpv4(value: string | number): number {
   return packed;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function fitsUnsigned(value: bigint, bits: number): boolean {
+  return BigInt.asUintN(bits, value) === value;
+}
+
+/** Accepts either signed or unsigned 64-bit limbs, as the egress views emit. */
+function checkedLimb64(value: unknown, name: string): bigint {
+  if (typeof value !== "bigint")
+    throw new TypeError(`${name} must be a bigint`);
+  if (!fitsSigned(value, 64) && !fitsUnsigned(value, 64)) {
+    throw new RangeError(`${name} does not fit in 64 bits`);
+  }
+  return BigInt.asUintN(64, value);
+}
+
+function uuidLimbBytes(low: bigint, high: bigint): Uint8Array {
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(0, low, true);
+  view.setBigUint64(8, high, true);
+  return bytes;
+}
+
+function writerUuidBytes(value: unknown): Uint8Array {
+  if (typeof value === "string" || value instanceof Uint8Array) {
+    return uuidBytes(value);
+  }
+  if (isRecord(value) && "low" in value && "high" in value) {
+    return uuidLimbBytes(
+      checkedLimb64(value.low, "UUID low limb"),
+      checkedLimb64(value.high, "UUID high limb"),
+    );
+  }
+  throw new TypeError(
+    "uuid accepts canonical UUID text, 16 bytes, or {low, high} limbs",
+  );
+}
+
+function long256WordBytes(words: readonly unknown[]): Uint8Array {
+  if (words.length !== 4) {
+    throw new TypeError("long256 accepts exactly four 64-bit words");
+  }
+  return littleEndianWords(
+    words.map((word, index) =>
+      BigInt.asIntN(64, checkedLimb64(word, `LONG256 word ${index}`)),
+    ),
+  );
+}
+
+function long256MagnitudeBytes(value: bigint): Uint8Array {
+  if (!fitsUnsigned(value, 256)) {
+    throw new RangeError("long256 value must be an unsigned 256-bit integer");
+  }
+  const words: bigint[] = [];
+  for (let index = 0; index < 4; index++) {
+    words.push(
+      BigInt.asIntN(64, (value >> BigInt(index * 64)) & 0xffffffffffffffffn),
+    );
+  }
+  return littleEndianWords(words);
+}
+
+function writerLong256Bytes(value: unknown): Uint8Array {
+  if (typeof value === "bigint") return long256MagnitudeBytes(value);
+  if (typeof value === "string") {
+    if (!/^0x[0-9a-f]{1,64}$/i.test(value)) {
+      throw new TypeError(
+        "long256 text must be a 0x-prefixed hex value of up to 64 digits",
+      );
+    }
+    return long256MagnitudeBytes(BigInt(value));
+  }
+  if (Array.isArray(value)) return long256WordBytes(value);
+  if (isRecord(value) && Array.isArray(value.words)) {
+    return long256WordBytes(value.words);
+  }
+  throw new TypeError(
+    "long256 accepts a bigint, 0x hex text, four words, or {words}",
+  );
+}
+
+/** QuestDB's base-32 geohash alphabet; five bits per character. */
+const GEOHASH_ALPHABET = "0123456789bcdefghjkmnpqrstuvwxyz";
+
+function geohashTextBits(text: string, precisionBits: number): bigint {
+  if (text.length * 5 !== precisionBits) {
+    throw new RangeError(
+      `geohash text of ${text.length} character(s) carries ${text.length * 5} bits, but the column is ${precisionBits} bits`,
+    );
+  }
+  let bits = 0n;
+  for (const character of text.toLowerCase()) {
+    const index = GEOHASH_ALPHABET.indexOf(character);
+    if (index < 0) {
+      throw new TypeError(`invalid geohash character '${character}'`);
+    }
+    bits = (bits << 5n) | BigInt(index);
+  }
+  return bits;
+}
+
+function writerGeohashBits(value: unknown, precisionBits: number): bigint {
+  let bits: bigint;
+  if (typeof value === "string") {
+    bits = geohashTextBits(value, precisionBits);
+  } else if (typeof value === "bigint" || typeof value === "number") {
+    bits = checkedBigInt(value, "geohash value");
+  } else if (isRecord(value) && "bits" in value) {
+    if (
+      value.precisionBits !== undefined &&
+      value.precisionBits !== precisionBits
+    ) {
+      throw new RangeError(
+        `geohash precision mismatch [column=${precisionBits}, received=${String(value.precisionBits)}]`,
+      );
+    }
+    bits = checkedBigInt(value.bits as number | bigint, "geohash value");
+  } else {
+    throw new TypeError(
+      "geohash accepts raw bits, base-32 text, or {bits, precisionBits}",
+    );
+  }
+  if (bits < 0n || bits >= 1n << BigInt(precisionBits)) {
+    throw new RangeError("geohash value does not fit the column precision");
+  }
+  return bits;
+}
+
+function rescaleDecimal(
+  unscaled: bigint,
+  fromScale: number,
+  toScale: number,
+): bigint {
+  if (fromScale === toScale) return unscaled;
+  if (fromScale < toScale) {
+    return unscaled * 10n ** BigInt(toScale - fromScale);
+  }
+  const divisor = 10n ** BigInt(fromScale - toScale);
+  if (unscaled % divisor !== 0n) {
+    throw new RangeError(
+      `decimal value is not exactly representable at scale ${toScale}`,
+    );
+  }
+  return unscaled / divisor;
+}
+
+function writerDecimalUnscaled(
+  value: unknown,
+  scale: number,
+  bits: number,
+): bigint {
+  let unscaled: bigint;
+  if (typeof value === "bigint") {
+    unscaled = value;
+  } else if (typeof value === "string" || typeof value === "number") {
+    const parsed = parseDecimal(value);
+    unscaled = rescaleDecimal(parsed.unscaled, parsed.scale, scale);
+  } else if (isRecord(value) && "unscaled" in value) {
+    if (typeof value.unscaled !== "bigint") {
+      throw new TypeError("decimal unscaled value must be a bigint");
+    }
+    if (!Number.isSafeInteger(value.scale) || (value.scale as number) < 0) {
+      throw new TypeError("decimal scale must be a non-negative safe integer");
+    }
+    unscaled = rescaleDecimal(value.unscaled, value.scale as number, scale);
+  } else {
+    throw new TypeError(
+      "decimal accepts a bigint, decimal text, a number, or {unscaled, scale}",
+    );
+  }
+  if (!fitsSigned(unscaled, bits)) {
+    throw new RangeError(`decimal value exceeds signed int${bits}`);
+  }
+  return unscaled;
+}
+
+function writerArrayValue(value: unknown, elements: "double" | "long") {
+  let array: QwpArrayValue;
+  if (Array.isArray(value)) {
+    array = flattenQwpArray(value);
+  } else if (
+    isRecord(value) &&
+    Array.isArray(value.dimensions) &&
+    Array.isArray(value.values)
+  ) {
+    const dimensions = value.dimensions.map((dimension, index) =>
+      checkedRange(
+        dimension as number,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        `array dimension ${index}`,
+      ),
+    );
+    if (dimensions.length === 0 || dimensions.length > 255) {
+      throw new RangeError("QWP array must have between 1 and 255 dimensions");
+    }
+    const expected = dimensions.reduce(
+      (total, dimension) => total * dimension,
+      1,
+    );
+    if (expected !== value.values.length) {
+      throw new RangeError(
+        `array shape ${dimensions.join("x")} needs ${expected} value(s), received ${value.values.length}`,
+      );
+    }
+    array = { dimensions, values: [...value.values] as (number | bigint)[] };
+  } else {
+    throw new TypeError(
+      `${elements}Array accepts nested arrays or {dimensions, values}`,
+    );
+  }
+  if (elements === "long") {
+    array.values = array.values.map((item) =>
+      checkedInt64(item, "long array value"),
+    );
+  } else if (array.values.some((item) => typeof item !== "number")) {
+    throw new TypeError("doubleArray accepts only number values");
+  }
+  return array;
+}
+
 function qwpWriterColumnType(
   descriptor: QwpWriterColumn<unknown, boolean>,
 ): QwpColumnType {
@@ -448,6 +678,55 @@ function qwpWriterColumnType(
       return descriptor.unit === "ns"
         ? QWP_COLUMN_TYPE.TIMESTAMP_NANOS
         : QWP_COLUMN_TYPE.TIMESTAMP;
+    case "date":
+      return QWP_COLUMN_TYPE.DATE;
+    case "char":
+      return QWP_COLUMN_TYPE.CHAR;
+    case "binary":
+      return QWP_COLUMN_TYPE.BINARY;
+    case "uuid":
+      return QWP_COLUMN_TYPE.UUID;
+    case "long256":
+      return QWP_COLUMN_TYPE.LONG256;
+    case "ipv4":
+      return QWP_COLUMN_TYPE.IPV4;
+    case "geohash":
+      return QWP_COLUMN_TYPE.GEOHASH;
+    case "decimal64":
+      return QWP_COLUMN_TYPE.DECIMAL64;
+    case "decimal128":
+      return QWP_COLUMN_TYPE.DECIMAL128;
+    case "decimal256":
+      return QWP_COLUMN_TYPE.DECIMAL256;
+    case "doubleArray":
+      return QWP_COLUMN_TYPE.DOUBLE_ARRAY;
+    case "longArray":
+      return QWP_COLUMN_TYPE.LONG_ARRAY;
+  }
+}
+
+/** Lifts the descriptor's fixed geohash precision or decimal scale, if any. */
+function qwpWriterColumnMetadata(
+  descriptor: QwpWriterColumn<unknown, boolean>,
+): Pick<StagedColumn, "geohashPrecision" | "decimalScale"> {
+  switch (descriptor.kind) {
+    case "geohash":
+      return {
+        geohashPrecision: validateGeohashPrecision(
+          descriptor.precisionBits as number,
+        ),
+      };
+    case "decimal64":
+    case "decimal128":
+    case "decimal256":
+      return {
+        decimalScale: validateDecimalScale(
+          descriptor.scale as number,
+          descriptor.kind,
+        ),
+      };
+    default:
+      return {};
   }
 }
 
@@ -499,6 +778,42 @@ function encodeQwpWriterValue(
       }
       return timestampValue(value, column.descriptor.unit ?? "us").value;
     }
+    case "date":
+      if (typeof value !== "number" && typeof value !== "bigint") {
+        throw new TypeError("date accepts only number or bigint values");
+      }
+      return checkedInt64(value, "date value");
+    case "char":
+      if (typeof value !== "string" || value.length !== 1) {
+        throw new TypeError("char accepts one UTF-16 code unit");
+      }
+      return value;
+    case "binary":
+      if (!(value instanceof Uint8Array)) {
+        throw new TypeError("binary accepts only Uint8Array values");
+      }
+      return new Uint8Array(value);
+    case "uuid":
+      return writerUuidBytes(value);
+    case "long256":
+      return writerLong256Bytes(value);
+    case "ipv4":
+      if (typeof value !== "string" && typeof value !== "number") {
+        throw new TypeError("ipv4 accepts dotted-quad text or a packed number");
+      }
+      return parseIpv4(value);
+    case "geohash":
+      return writerGeohashBits(value, column.geohashPrecision as number);
+    case "decimal64":
+      return writerDecimalUnscaled(value, column.decimalScale as number, 64);
+    case "decimal128":
+      return writerDecimalUnscaled(value, column.decimalScale as number, 128);
+    case "decimal256":
+      return writerDecimalUnscaled(value, column.decimalScale as number, 256);
+    case "doubleArray":
+      return writerArrayValue(value, "double");
+    case "longArray":
+      return writerArrayValue(value, "long");
   }
 }
 
@@ -1389,6 +1704,7 @@ export class QwpSender {
           nameKey,
           type: qwpWriterColumnType(candidate),
           descriptor: candidate,
+          ...qwpWriterColumnMetadata(candidate),
         }),
       );
     }
@@ -1460,11 +1776,18 @@ export class QwpSender {
         continue;
       }
       try {
-        columns.set(column.nameKey, {
+        const staged: StagedColumn = {
           name: column.wireName,
           type: column.type,
           value: encodeQwpWriterValue(column, value),
-        });
+        };
+        if (column.geohashPrecision !== undefined) {
+          staged.geohashPrecision = column.geohashPrecision;
+        }
+        if (column.decimalScale !== undefined) {
+          staged.decimalScale = column.decimalScale;
+        }
+        columns.set(column.nameKey, staged);
       } catch (error) {
         throw new QwpWriterRowError(
           schema.tableName,

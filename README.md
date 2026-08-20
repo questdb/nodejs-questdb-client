@@ -112,6 +112,12 @@ await trades.row({
 await trades.rows(moreTrades);
 ```
 
+The schema vocabulary covers every QuestDB column type the fluent row API can write,
+including `date()`, `char()`, `binary()`, `uuid()`, `long256()`, `ipv4()`,
+`geohash(precisionBits)`, `decimal64/128/256(scale)`, `doubleArray()`, and
+`longArray()`. See [QWP.md](QWP.md#compiled-object-row-writers) for the accepted value
+forms of each field.
+
 The regular `Sender` accepts the same unified QWP configuration vocabulary as
 the pooled Node client. Use comma-separated or repeated `addr` values for
 failover; standalone ingress validates but otherwise ignores egress- and

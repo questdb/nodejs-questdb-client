@@ -391,16 +391,52 @@ await trades.rows([
 
 `rows()` accepts `Iterable` and `AsyncIterable` sources and applies the sender's
 normal auto-flush, batch-cap, backpressure, transaction, symbol-dictionary, and ACK
-settings. The schema is validated once. `symbol()`, `varchar()`, `bool()`, `byte()`,
-`short()`, `int32()`, `int64()`, `float32()`, `float64()`, `timestamp(unit)`, and
-`designatedTimestamp(unit)` define the currently supported object fields; `long()` and
-`double()` are aliases of `int64()` and `float64()`. LONG and nanosecond timestamp
-inputs are `bigint` so they cannot silently lose precision.
+settings. The schema is validated once.
+
+The schema vocabulary covers every column type the fluent row API can write:
+
+| Field                       | QuestDB type         | Accepted row values                                                                    |
+| --------------------------- | -------------------- | -------------------------------------------------------------------------------------- |
+| `symbol()`                  | SYMBOL               | `string`                                                                               |
+| `varchar()`                 | VARCHAR              | `string`                                                                               |
+| `char()`                    | CHAR                 | `string` of one UTF-16 code unit                                                       |
+| `bool()`                    | BOOLEAN              | `boolean`                                                                              |
+| `byte()`                    | BYTE                 | `number`                                                                               |
+| `short()`                   | SHORT                | `number`                                                                               |
+| `int32()`                   | INT                  | `number`                                                                               |
+| `int64()`, `long()`         | LONG                 | `bigint`                                                                               |
+| `float32()`                 | FLOAT                | `number`                                                                               |
+| `float64()`, `double()`     | DOUBLE               | `number`                                                                               |
+| `timestamp(unit)`           | TIMESTAMP            | `number` or `bigint`; `"ns"` requires `bigint`                                         |
+| `designatedTimestamp(unit)` | designated TIMESTAMP | as above, required in every row                                                        |
+| `date()`                    | DATE                 | `number` or `bigint` milliseconds since the epoch                                      |
+| `binary()`                  | BINARY               | `Uint8Array`, copied on append                                                         |
+| `uuid()`                    | UUID                 | canonical UUID text, 16 bytes, or `{ low, high }`                                      |
+| `long256()`                 | LONG256              | unsigned 256-bit `bigint`, `0x` hex text, four little-endian words, or `{ words }`     |
+| `ipv4()`                    | IPV4                 | dotted-quad text or the packed address; `0.0.0.0` is the NULL sentinel                 |
+| `geohash(precisionBits)`    | GEOHASH              | raw bits, base-32 text of `precisionBits / 5` characters, or `{ bits, precisionBits }` |
+| `decimal64(scale)`          | DECIMAL64            | unscaled `bigint`, decimal text, `number`, or `{ unscaled, scale }`                    |
+| `decimal128(scale)`         | DECIMAL128           | as above, scale up to 38                                                               |
+| `decimal256(scale)`         | DECIMAL256           | as above, scale up to 76                                                               |
+| `doubleArray()`             | DOUBLE[]             | nested `number` arrays of uniform shape, or `{ dimensions, values }`                   |
+| `longArray()`               | LONG[]               | nested `bigint`/`number` arrays of uniform shape, or `{ dimensions, values }`          |
+
+LONG, LONG256, and nanosecond timestamp inputs are `bigint` so they cannot silently
+lose precision. The record forms are exactly what the egress result views hand back,
+so a query result value can be written straight into a row without conversion.
 
 Widths are spelled out deliberately. The fluent row API predates these names and its
 `floatColumn()` and `intColumn()` are 64-bit despite reading as 32-bit, with
 `float32Column()` and `int32Column()` as the narrow forms. Compiled writers avoid the
 ambiguity: `float32()`/`float64()` and `int32()`/`int64()` mean exactly what they say.
+
+Geohash precision and decimal scale belong to the column, not the value, so they are
+fixed when the schema is compiled and validated against the sender's staged schema on
+every append. Decimal text and `{ unscaled, scale }` values are rescaled to the
+column's scale when that is exact, and rejected when it would round: at
+`decimal64(2)`, `"1.50"` stages as `150n` and `"1.005"` raises `QwpWriterRowError`.
+Base-32 geohash text carries five bits per character, so `geohash(20)` accepts
+`"u33d"` and rejects `"u33"`.
 
 Regular fields may be absent, `null`, or `undefined`, which writes a NULL. A schema
 may contain at most one designated timestamp and, when present, that field is required

@@ -1,11 +1,23 @@
 import { Sender } from "../../src";
 import type { ExtraOptions, QwpExtraOptions } from "../../src";
 import {
+  binary,
+  char,
+  date,
+  decimal64,
+  decimal128,
+  decimal256,
   defaultQwpSenderErrorHandler,
   designatedTimestamp,
   double,
+  doubleArray,
+  geohash,
+  ipv4,
   long,
+  long256,
+  longArray,
   symbol as qwpSymbol,
+  uuid,
 } from "../../src/qwp";
 import {
   bootstrapQwpBrowserSession,
@@ -372,6 +384,57 @@ function compiledWriterContract(sender: QwpSender, rootSender: Sender): void {
   void rootWriter;
 }
 
+function compiledWriterTypeContract(sender: QwpSender): void {
+  const schema = {
+    created_date: date(),
+    letter: char(),
+    payload: binary(),
+    id: uuid(),
+    hash: long256(),
+    ip: ipv4(),
+    location: geohash(20),
+    price: decimal64(4),
+    wide_price: decimal128(2),
+    widest_price: decimal256(0),
+    samples: doubleArray(),
+    counters: longArray(),
+    timestamp: designatedTimestamp("ns"),
+  } as const;
+  const writer: QwpTableWriter<typeof schema> = sender.writer("typed", schema);
+  const row: QwpWriterRow<typeof schema> = {
+    created_date: 1_700_000_000_000n,
+    letter: "Q",
+    payload: Uint8Array.of(1, 2, 3),
+    id: "123e4567-e89b-12d3-a456-426614174000",
+    hash: "0x0102",
+    ip: "192.168.0.1",
+    location: "u33d",
+    price: "123.4500",
+    wide_price: 1_234n,
+    widest_price: { unscaled: 42n, scale: 0 },
+    samples: [
+      [1.5, 2.5],
+      [3.5, 4.5],
+    ],
+    counters: [1n, 2n, 3n],
+    timestamp: 1_723_000_000_000_000_000n,
+  };
+  // Egress-shaped values are accepted without casts.
+  const egressShaped: QwpWriterRow<typeof schema> = {
+    id: { low: 1n, high: 2n },
+    hash: { words: [1n, 2n, 3n, 4n] },
+    location: { bits: 7n, precisionBits: 20 },
+    price: { unscaled: 1_234_500n, scale: 4 },
+    samples: { dimensions: [2, 2], values: [1, 2, 3, 4] },
+    timestamp: 1_723_000_001_000_000_000n,
+  };
+  // @ts-expect-error BINARY values are bytes, not number arrays.
+  void writer.row({ payload: [1, 2, 3], timestamp: 1n });
+  // @ts-expect-error CHAR values are strings.
+  void writer.row({ letter: 7, timestamp: 1n });
+  void writer.rows([row, egressShaped]);
+}
+
 function queryViewContract(
   session: QwpEgressSession,
   lease: QwpQueryLease,
@@ -447,5 +510,6 @@ void rootExtraOptionsContract;
 void senderSequenceContract;
 void rootSenderSequenceContract;
 void compiledWriterContract;
+void compiledWriterTypeContract;
 void queryViewContract;
 void Sender;

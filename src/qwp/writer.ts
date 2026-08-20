@@ -10,10 +10,29 @@ export type QwpWriterColumnKind =
   | "int64"
   | "float32"
   | "float64"
-  | "timestamp";
+  | "timestamp"
+  | "date"
+  | "char"
+  | "binary"
+  | "uuid"
+  | "long256"
+  | "ipv4"
+  | "geohash"
+  | "decimal64"
+  | "decimal128"
+  | "decimal256"
+  | "doubleArray"
+  | "longArray";
 
 const QWP_WRITER_COLUMN = Symbol("QWP writer column");
 const QWP_WRITER_INPUT: unique symbol = Symbol("QWP writer input");
+
+/** Maximum DECIMAL scale of each fixed-width decimal column type. */
+export const QWP_DECIMAL_MAX_SCALE = {
+  decimal64: 18,
+  decimal128: 38,
+  decimal256: 76,
+} as const;
 
 /** A reusable, immutable column definition for a compiled QWP table writer. */
 export interface QwpWriterColumn<
@@ -23,6 +42,10 @@ export interface QwpWriterColumn<
   readonly kind: QwpWriterColumnKind;
   readonly designatedTimestamp: DesignatedTimestamp;
   readonly unit?: QwpTimestampUnit;
+  /** GEOHASH precision in bits, fixed for the whole column. */
+  readonly precisionBits?: number;
+  /** DECIMAL scale, fixed for the whole column. */
+  readonly scale?: number;
   /** @internal Carries the input type without adding a runtime value. */
   readonly [QWP_WRITER_INPUT]?: T;
 }
@@ -66,15 +89,89 @@ type TimestampInput<Unit extends QwpTimestampUnit> = Unit extends "ns"
   ? bigint
   : number | bigint;
 
+/** UUID input: canonical text, 16 bytes, or the egress limb pair. */
+export type QwpUuidInput =
+  | string
+  | Uint8Array
+  | { readonly low: bigint; readonly high: bigint };
+
+/** LONG256 little-endian words; word 0 is least significant. */
+export type QwpLong256Words = readonly [bigint, bigint, bigint, bigint];
+
+/**
+ * LONG256 input: an unsigned 256-bit `bigint`, a `0x`-prefixed hex string of
+ * up to 64 digits, four little-endian words, or the egress word record.
+ */
+export type QwpLong256Input =
+  | bigint
+  | string
+  | QwpLong256Words
+  | { readonly words: QwpLong256Words };
+
+/** IPV4 input: dotted-quad text or the packed 32-bit address. */
+export type QwpIpv4Input = string | number;
+
+/**
+ * GEOHASH input: the raw bits, base-32 geohash text whose length matches the
+ * column precision, or the egress bit record.
+ */
+export type QwpGeohashInput =
+  | bigint
+  | number
+  | string
+  | { readonly bits: bigint; readonly precisionBits: number };
+
+/**
+ * DECIMAL input: the unscaled `bigint` at the column's scale, decimal text (or
+ * a number) that is exactly representable at that scale, or the egress record.
+ */
+export type QwpDecimalInput =
+  | bigint
+  | number
+  | string
+  | { readonly unscaled: bigint; readonly scale: number };
+
+/** Nested DOUBLE array of uniform shape. */
+export type QwpNestedNumberArray = readonly (number | QwpNestedNumberArray)[];
+
+/** Nested LONG array of uniform shape. */
+export type QwpNestedLongArray = readonly (
+  | number
+  | bigint
+  | QwpNestedLongArray
+)[];
+
+/** DOUBLE array input: nested arrays or a flat shape-and-values record. */
+export type QwpDoubleArrayInput =
+  | QwpNestedNumberArray
+  | {
+      readonly dimensions: readonly number[];
+      readonly values: readonly number[];
+    };
+
+/** LONG array input: nested arrays or a flat shape-and-values record. */
+export type QwpLongArrayInput =
+  | QwpNestedLongArray
+  | {
+      readonly dimensions: readonly number[];
+      readonly values: readonly (number | bigint)[];
+    };
+
+interface QwpWriterColumnMetadata {
+  unit?: QwpTimestampUnit;
+  precisionBits?: number;
+  scale?: number;
+}
+
 function column<T, DesignatedTimestamp extends boolean>(
   kind: QwpWriterColumnKind,
   designatedTimestamp: DesignatedTimestamp,
-  unit?: QwpTimestampUnit,
+  metadata: QwpWriterColumnMetadata = {},
 ): QwpWriterColumn<T, DesignatedTimestamp> {
   return Object.freeze({
     kind,
     designatedTimestamp,
-    unit,
+    ...metadata,
     [QWP_WRITER_COLUMN]: true,
   }) as BrandedQwpWriterColumn<T, DesignatedTimestamp>;
 }
@@ -83,6 +180,30 @@ function validateTimestampUnit(unit: QwpTimestampUnit): void {
   if (unit !== "ns" && unit !== "us" && unit !== "ms") {
     throw new TypeError(`unsupported timestamp unit '${String(unit)}'`);
   }
+}
+
+/** @internal Shared by the writer factories and the schema compiler. */
+export function validateGeohashPrecision(precisionBits: number): number {
+  if (
+    !Number.isSafeInteger(precisionBits) ||
+    precisionBits < 1 ||
+    precisionBits > 60
+  ) {
+    throw new RangeError("geohash precision must be between 1 and 60 bits");
+  }
+  return precisionBits;
+}
+
+/** @internal Shared by the writer factories and the schema compiler. */
+export function validateDecimalScale(
+  scale: number,
+  kind: keyof typeof QWP_DECIMAL_MAX_SCALE,
+): number {
+  const maximumScale = QWP_DECIMAL_MAX_SCALE[kind];
+  if (!Number.isSafeInteger(scale) || scale < 0 || scale > maximumScale) {
+    throw new RangeError(`${kind} scale must be between 0 and ${maximumScale}`);
+  }
+  return scale;
 }
 
 /** Defines a string-valued QuestDB SYMBOL column. */
@@ -145,7 +266,7 @@ export function timestamp<const Unit extends QwpTimestampUnit = "us">(
   unit: Unit = "us" as Unit,
 ): QwpWriterColumn<TimestampInput<Unit>> {
   validateTimestampUnit(unit);
-  return column("timestamp", false, unit);
+  return column("timestamp", false, { unit });
 }
 
 /** Defines the writer's required designated timestamp field. */
@@ -153,7 +274,82 @@ export function designatedTimestamp<const Unit extends QwpTimestampUnit = "us">(
   unit: Unit = "us" as Unit,
 ): QwpWriterColumn<TimestampInput<Unit>, true> {
   validateTimestampUnit(unit);
-  return column("timestamp", true, unit);
+  return column("timestamp", true, { unit });
+}
+
+/** Defines a QuestDB DATE column. Inputs are milliseconds since the epoch. */
+export function date(): QwpWriterColumn<number | bigint> {
+  return column("date", false);
+}
+
+/** Defines a QuestDB CHAR column. Inputs are one UTF-16 code unit. */
+export function char(): QwpWriterColumn<string> {
+  return column("char", false);
+}
+
+/** Defines a QuestDB BINARY column. Inputs are copied on append. */
+export function binary(): QwpWriterColumn<Uint8Array> {
+  return column("binary", false);
+}
+
+/** Defines a QuestDB UUID column. */
+export function uuid(): QwpWriterColumn<QwpUuidInput> {
+  return column("uuid", false);
+}
+
+/** Defines a QuestDB LONG256 column. */
+export function long256(): QwpWriterColumn<QwpLong256Input> {
+  return column("long256", false);
+}
+
+/** Defines a QuestDB IPV4 column. `0.0.0.0` is the NULL sentinel. */
+export function ipv4(): QwpWriterColumn<QwpIpv4Input> {
+  return column("ipv4", false);
+}
+
+/**
+ * Defines a QuestDB GEOHASH column of fixed precision.
+ *
+ * @param precisionBits - Precision in bits, 1 through 60. Base-32 text inputs
+ * carry five bits per character, so `geohash(20)` accepts four characters.
+ */
+export function geohash(
+  precisionBits: number,
+): QwpWriterColumn<QwpGeohashInput> {
+  return column("geohash", false, {
+    precisionBits: validateGeohashPrecision(precisionBits),
+  });
+}
+
+/** Defines a QuestDB DECIMAL64 column of fixed scale, up to 18. */
+export function decimal64(scale: number): QwpWriterColumn<QwpDecimalInput> {
+  return column("decimal64", false, {
+    scale: validateDecimalScale(scale, "decimal64"),
+  });
+}
+
+/** Defines a QuestDB DECIMAL128 column of fixed scale, up to 38. */
+export function decimal128(scale: number): QwpWriterColumn<QwpDecimalInput> {
+  return column("decimal128", false, {
+    scale: validateDecimalScale(scale, "decimal128"),
+  });
+}
+
+/** Defines a QuestDB DECIMAL256 column of fixed scale, up to 76. */
+export function decimal256(scale: number): QwpWriterColumn<QwpDecimalInput> {
+  return column("decimal256", false, {
+    scale: validateDecimalScale(scale, "decimal256"),
+  });
+}
+
+/** Defines a QuestDB DOUBLE[] column of any uniform shape. */
+export function doubleArray(): QwpWriterColumn<QwpDoubleArrayInput> {
+  return column("doubleArray", false);
+}
+
+/** Defines a QuestDB LONG[] column of any uniform shape. */
+export function longArray(): QwpWriterColumn<QwpLongArrayInput> {
+  return column("longArray", false);
 }
 
 /** A complete object row failed compiled-writer validation. */

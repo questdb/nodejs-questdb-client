@@ -9,19 +9,31 @@ import {
   QwpSenderSession,
   QwpTableBuffer,
   QwpWriterRowError,
+  binary,
   bool,
   byte,
+  char,
+  date,
+  decimal64,
+  decimal128,
+  decimal256,
   designatedTimestamp,
   double,
+  doubleArray,
   encodeQwpIngressFrame,
   float32,
   float64,
+  geohash,
   int32,
   int64,
+  ipv4,
   long,
+  long256,
+  longArray,
   short,
   symbol as qwpSymbol,
   timestamp,
+  uuid,
   varchar,
 } from "../../src/qwp";
 
@@ -728,6 +740,253 @@ describe("QWP high-level sender", () => {
         1_723_000_002_000_000_000n,
       ],
     });
+  });
+
+  it("compiles the remaining QuestDB column types into object rows", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const typed = sender.writer("typed", {
+      created_date: date(),
+      letter: char(),
+      payload: binary(),
+      id: uuid(),
+      hash: long256(),
+      ip: ipv4(),
+      location: geohash(20),
+      price: decimal64(4),
+      wide_price: decimal128(2),
+      widest_price: decimal256(0),
+      samples: doubleArray(),
+      counters: longArray(),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    await typed.row({
+      created_date: 1_700_000_000_000n,
+      letter: "Q",
+      payload: Uint8Array.of(1, 2, 3),
+      id: "123e4567-e89b-12d3-a456-426614174000",
+      hash: "0x0102",
+      ip: "192.168.0.1",
+      // Base-32 geohash text carries five bits per character.
+      location: "u33d",
+      price: "123.4500",
+      wide_price: 1_234n,
+      widest_price: { unscaled: 42n, scale: 0 },
+      samples: [
+        [1.5, 2.5],
+        [3.5, 4.5],
+      ],
+      counters: [1n, 2n, 3n],
+      timestamp: 1_723_000_000_000_000_000n,
+    });
+    // The shapes the egress views hand back are valid ingress inputs.
+    await typed.row({
+      id: { low: 0x1122334455667788n, high: 0x99aabbccddeeff00n },
+      hash: { words: [1n, 2n, 3n, 4n] },
+      location: { bits: 7n, precisionBits: 20 },
+      price: { unscaled: 1_234_500n, scale: 4 },
+      samples: { dimensions: [2, 2], values: [1, 2, 3, 4] },
+      ip: 0xc0a80002,
+      timestamp: 1_723_000_001_000_000_000n,
+    });
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(table.rowCount).toBe(2);
+    expect(column(table, "created_date")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DATE,
+      values: [1_700_000_000_000n],
+      nulls: [false, true],
+    });
+    expect(column(table, "letter")).toMatchObject({
+      type: QWP_COLUMN_TYPE.CHAR,
+      values: ["Q"],
+    });
+    expect(column(table, "payload")).toMatchObject({
+      type: QWP_COLUMN_TYPE.BINARY,
+      values: [Uint8Array.of(1, 2, 3)],
+    });
+    expect(column(table, "id")).toMatchObject({
+      type: QWP_COLUMN_TYPE.UUID,
+      values: [
+        // Canonical text and {low, high} limbs both encode little-endian.
+        Uint8Array.of(
+          0x00,
+          0x40,
+          0x17,
+          0x14,
+          0x66,
+          0x42,
+          0x56,
+          0xa4,
+          0xd3,
+          0x12,
+          0x9b,
+          0xe8,
+          0x67,
+          0x45,
+          0x3e,
+          0x12,
+        ),
+        Uint8Array.of(
+          0x88,
+          0x77,
+          0x66,
+          0x55,
+          0x44,
+          0x33,
+          0x22,
+          0x11,
+          0x00,
+          0xff,
+          0xee,
+          0xdd,
+          0xcc,
+          0xbb,
+          0xaa,
+          0x99,
+        ),
+      ],
+    });
+    const hashes = column(table, "hash");
+    expect(hashes.type).toBe(QWP_COLUMN_TYPE.LONG256);
+    expect(hashes.values[0]).toEqual(
+      Uint8Array.of(0x02, 0x01, ...new Uint8Array(30)),
+    );
+    expect(
+      new DataView((hashes.values[1] as Uint8Array).buffer).getBigInt64(
+        24,
+        true,
+      ),
+    ).toBe(4n);
+    expect(column(table, "ip")).toMatchObject({
+      type: QWP_COLUMN_TYPE.IPV4,
+      values: [0xc0a80001, 0xc0a80002],
+    });
+    expect(column(table, "location")).toMatchObject({
+      type: QWP_COLUMN_TYPE.GEOHASH,
+      geohashPrecision: 20,
+      values: [855_148n, 7n],
+    });
+    expect(column(table, "price")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL64,
+      decimalScale: 4,
+      values: [1_234_500n, 1_234_500n],
+    });
+    expect(column(table, "wide_price")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL128,
+      decimalScale: 2,
+      values: [1_234n],
+    });
+    expect(column(table, "widest_price")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL256,
+      decimalScale: 0,
+      values: [42n],
+    });
+    expect(column(table, "samples")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DOUBLE_ARRAY,
+      values: [
+        { dimensions: [2, 2], values: [1.5, 2.5, 3.5, 4.5] },
+        { dimensions: [2, 2], values: [1, 2, 3, 4] },
+      ],
+    });
+    expect(column(table, "counters")).toMatchObject({
+      type: QWP_COLUMN_TYPE.LONG_ARRAY,
+      values: [{ dimensions: [3], values: [1n, 2n, 3n] }],
+    });
+    expect(() => encodeQwpIngressFrame([table])).not.toThrow();
+  });
+
+  it("validates fixed precision and scale when compiling the schema", () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    expect(() => geohash(0)).toThrow(/between 1 and 60 bits/);
+    expect(() => geohash(61)).toThrow(/between 1 and 60 bits/);
+    expect(() => decimal64(19)).toThrow(
+      /decimal64 scale must be between 0 and 18/,
+    );
+    expect(() => decimal128(39)).toThrow(/between 0 and 38/);
+    expect(() => decimal256(-1)).toThrow(/between 0 and 76/);
+    expect(() =>
+      sender.writer("typed", { location: geohash(5) }),
+    ).not.toThrow();
+  });
+
+  it("rejects values that do not fit the compiled column type", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const typed = sender.writer("typed", {
+      letter: char(),
+      payload: binary(),
+      id: uuid(),
+      hash: long256(),
+      ip: ipv4(),
+      location: geohash(20),
+      price: decimal64(2),
+      samples: doubleArray(),
+      counters: longArray(),
+      timestamp: designatedTimestamp("ns"),
+    });
+    const rejects = async (
+      row: object,
+      message: RegExp,
+      columnName: string,
+    ) => {
+      await expect(
+        typed.row({ timestamp: 1n, ...row } as never),
+      ).rejects.toMatchObject({ name: "QwpWriterRowError", columnName });
+      await expect(
+        typed.row({ timestamp: 1n, ...row } as never),
+      ).rejects.toThrow(message);
+    };
+
+    await rejects({ letter: "QQ" }, /one UTF-16 code unit/, "letter");
+    await rejects({ payload: [1, 2, 3] }, /only Uint8Array values/, "payload");
+    await rejects({ id: "not-a-uuid" }, /canonical UUID/, "id");
+    await rejects({ hash: "0102" }, /0x-prefixed hex/, "hash");
+    await rejects({ hash: [1n, 2n] }, /exactly four 64-bit words/, "hash");
+    await rejects({ ip: "0.0.0.0" }, /NULL sentinel/, "ip");
+    await rejects({ location: "u33" }, /column is 20 bits/, "location");
+    await rejects({ location: 1n << 21n }, /does not fit/, "location");
+    await rejects(
+      { location: { bits: 1n, precisionBits: 25 } },
+      /precision mismatch/,
+      "location",
+    );
+    await rejects(
+      { price: "1.005" },
+      /not exactly representable at scale 2/,
+      "price",
+    );
+    await rejects({ price: 1n << 70n }, /exceeds signed int64/, "price");
+    await rejects({ samples: [1n, 2n] }, /only number values/, "samples");
+    await rejects({ counters: [[1n], [2n, 3n]] }, /irregular/, "counters");
+    await rejects(
+      { samples: { dimensions: [2, 2], values: [1, 2, 3] } },
+      /needs 4 value\(s\), received 3/,
+      "samples",
+    );
+    expect(sender.metrics.pendingRows).toBe(0);
+
+    // Trailing zeros rescale exactly, so the same column still accepts text.
+    await typed.row({ price: "1.50", timestamp: 2n });
+    await sender.flush();
+    expect(column(session.sends[0].tables[0], "price").values).toEqual([150n]);
+  });
+
+  it("reconciles compiled precision and scale with the fluent row API", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    const typed = sender.writer("typed", { location: geohash(20) });
+
+    await sender.table("typed").geohashColumn("location", 3n, 25).atNow();
+    await expect(typed.row({ location: 7n })).rejects.toThrow(
+      /conflicts with the sender's staged schema/,
+    );
+    expect(sender.metrics.pendingRows).toBe(1);
   });
 
   it("maps width aliases onto the same column types", () => {
