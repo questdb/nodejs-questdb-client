@@ -1612,6 +1612,19 @@ export class QwpSender {
       }
     } catch (error) {
       terminalError = error;
+      if (error instanceof QwpBatchTooLargeError) {
+        // A cap rejection is a verdict on the batch's contents: no later flush
+        // can make it fit, so close() discards it and finishes shutdown rather
+        // than leaving it staged for a sender that is about to go away. Any
+        // other failure is not a verdict on the batch and leaves staging alone.
+        // This mirrors the Java client's close(), which calls
+        // resetTableBuffersAfterFlush() for exactly this exception.
+        const abandoned = this.discardStagedRows();
+        this.log(
+          "error",
+          `Discarded ${abandoned} QWP row(s) on close: ${error.message}`,
+        );
+      }
     }
 
     let closeError: unknown;
@@ -2053,26 +2066,14 @@ export class QwpSender {
   }
 
   /**
-   * Staging is normally retained when a flush fails, so a transient transport
-   * error costs no rows. A batch-cap rejection is not transient: re-encoding
-   * the same rows always exceeds the same cap, so retaining them wedges the
-   * sender -- every later flush, auto-flush and close() raises the identical
-   * error, pendingRows grows without bound, and close() finally discards the
-   * lot. Release them instead; the caller still sees the error, which names
-   * the offending size and the cap.
+   * Discards every staged row, the way the Java client's close() does with
+   * resetTableBuffersAfterFlush() when the batch cap rejects the batch.
    */
-  private releaseUnsendableRows(
-    error: unknown,
-    snapshots: readonly { table: StagedTable; rows: readonly StagedRow[] }[],
-  ): void {
-    if (!(error instanceof QwpBatchTooLargeError)) return;
-    const abandoned = this.releaseStagedRows(snapshots);
-    this.log(
-      "error",
-      `Discarded ${abandoned} QWP row(s) that cannot fit the negotiated batch cap: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
+  private discardStagedRows(): number {
+    const snapshots = this.tables
+      .filter((table) => table.rows.length > 0)
+      .map((table) => ({ table, rows: table.rows.slice() }));
+    return this.releaseStagedRows(snapshots);
   }
 
   private async tryFlush(): Promise<void> {
@@ -2126,59 +2127,56 @@ export class QwpSender {
     let publishedSequence = -1n;
     const waitForServerAck = this.awaitServerAck && !publicationOnly;
     // planIngressFrames runs synchronously here, so an unfittable row throws
-    // before anything reaches the transport.
-    try {
-      if (waitForServerAck) {
-        const trackedSender = useDelta
-          ? session.sendTablesDeltaWithPublication
-          : session.sendTablesWithPublication;
-        if (trackedSender) {
-          const sending = trackedSender.call(session, wireTables, {
-            gorilla: encode?.gorilla,
-            deferCommit,
-          });
-          response = sending.acknowledgement;
-          // Observe ACK rejection while the local-publication boundary is being
-          // awaited; it is consumed normally below after ownership transfers.
-          void response.catch(() => undefined);
-          publication = sending.publication.then(() => {
-            publishedSequence = sending.sequence;
-          });
-        } else {
-          response = useDelta
-            ? session.sendTablesDelta!(wireTables, {
-                gorilla: encode?.gorilla,
-                deferCommit,
-              })
-            : session.sendTables(wireTables, {
-                gorilla: encode?.gorilla,
-                deferCommit,
-              });
-        }
+    // before anything reaches the transport and staging is retained: the
+    // caller keeps the batch and can retry it. close() is where an over-cap
+    // batch is finally discarded.
+    if (waitForServerAck) {
+      const trackedSender = useDelta
+        ? session.sendTablesDeltaWithPublication
+        : session.sendTablesWithPublication;
+      if (trackedSender) {
+        const sending = trackedSender.call(session, wireTables, {
+          gorilla: encode?.gorilla,
+          deferCommit,
+        });
+        response = sending.acknowledgement;
+        // Observe ACK rejection while the local-publication boundary is being
+        // awaited; it is consumed normally below after ownership transfers.
+        void response.catch(() => undefined);
+        publication = sending.publication.then(() => {
+          publishedSequence = sending.sequence;
+        });
       } else {
-        const publisher = useDelta
-          ? session.publishTablesDelta
-          : session.publishTables;
-        if (!publisher) {
-          throw new Error(
-            "this QWP ingress session does not support publication-only flushes",
-          );
-        }
-        publication = publisher
-          .call(session, wireTables, {
-            gorilla: encode?.gorilla,
-            deferCommit,
-          })
-          .then(() => {
-            publishedSequence = advancedSequence(
-              beforeSequence,
-              sessionPublishedSequence(session),
-            );
-          });
+        response = useDelta
+          ? session.sendTablesDelta!(wireTables, {
+              gorilla: encode?.gorilla,
+              deferCommit,
+            })
+          : session.sendTables(wireTables, {
+              gorilla: encode?.gorilla,
+              deferCommit,
+            });
       }
-    } catch (error) {
-      this.releaseUnsendableRows(error, snapshots);
-      throw error;
+    } else {
+      const publisher = useDelta
+        ? session.publishTablesDelta
+        : session.publishTables;
+      if (!publisher) {
+        throw new Error(
+          "this QWP ingress session does not support publication-only flushes",
+        );
+      }
+      publication = publisher
+        .call(session, wireTables, {
+          gorilla: encode?.gorilla,
+          deferCommit,
+        })
+        .then(() => {
+          publishedSequence = advancedSequence(
+            beforeSequence,
+            sessionPublishedSequence(session),
+          );
+        });
     }
     publishedSequence = advancedSequence(
       beforeSequence,
@@ -2189,12 +2187,7 @@ export class QwpSender {
     // the transport. For Node store-and-forward this is the durable journal
     // boundary, independently of whether this flush also waits for an ACK.
     if (publication) {
-      try {
-        await publication;
-      } catch (error) {
-        this.releaseUnsendableRows(error, snapshots);
-        throw error;
-      }
+      await publication;
     }
     const sentRows = this.releaseStagedRows(snapshots);
     this.totalRowsPublished += sentRows;

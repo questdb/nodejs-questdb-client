@@ -787,7 +787,7 @@ describe("QWP WebSocket adapters", () => {
     await sender.close();
   });
 
-  it("stays usable after a row that cannot fit the negotiated batch cap", async () => {
+  it("retains an over-cap batch at flush and discards it on close", async () => {
     const socket = new FakeWebSocket();
     const cap = 200;
     const sender = createQwpBrowserSender(
@@ -809,18 +809,20 @@ describe("QWP WebSocket adapters", () => {
     // The splitter bisects a batch down to single rows; one row above the cap
     // is unsplittable and always re-encodes to the same oversized frame.
     await sender.table("events").stringColumn("v", "x".repeat(500)).atNow();
+
+    // A cap rejection retains the batch and invites a retry, matching the Java
+    // client, whose split throw "RETAINS the batch by design".
     await expect(sender.flush()).rejects.toBeInstanceOf(QwpBatchTooLargeError);
+    expect(sender.metrics.pendingRows).toBe(1);
+    await expect(sender.flush()).rejects.toBeInstanceOf(QwpBatchTooLargeError);
+    expect(sender.metrics.pendingRows).toBe(1);
 
-    // Retaining those rows would wedge the sender: the same error on every
-    // later flush, pendingRows growing without bound, and close() discarding
-    // everything staged after it.
+    // close() is the way out: it discards the batch the cap will never accept,
+    // surfaces the error, and still completes shutdown. Java does the same via
+    // resetTableBuffersAfterFlush().
+    await expect(sender.close()).rejects.toBeInstanceOf(QwpBatchTooLargeError);
     expect(sender.metrics.pendingRows).toBe(0);
-    await sender.table("events").stringColumn("v", "ok").atNow();
-    await expect(sender.flush()).resolves.toBe(true);
-    expect(socket.sent).toHaveLength(1);
-    expect(socket.sent[0].byteLength).toBeLessThanOrEqual(cap);
-
-    await sender.close();
+    expect(socket.sent).toHaveLength(0);
   });
 
   it("pipelines transactional browser auto-flush until an explicit commit ACK", async () => {
