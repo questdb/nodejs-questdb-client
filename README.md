@@ -65,6 +65,45 @@ async function run() {
 run().then(console.log).catch(console.error);
 ```
 
+### Null and undefined values
+
+Passing `null` or `undefined` as a column or symbol value omits that column from
+the row, and QuestDB records the omission as NULL. This is the model the QuestDB
+clients share — the Java client puts it as "to mark the value NULL, omit the
+column from the row" — with the Node client doing the omission for you, so a
+record with optional fields needs no branching:
+
+```typescript
+const trade: { side?: string; amount?: number } = { amount: 0.011 };
+
+await sender
+  .table("trades")
+  .symbol("symbol", "BTC-USD")
+  .symbol("side", trade.side) // undefined -> column omitted -> NULL
+  .floatColumn("price", 39269.98)
+  .floatColumn("amount", trade.amount)
+  .at(Date.now(), "ms");
+// wire: trades,symbol=BTC-USD price=39269.98,amount=0.011 <timestamp>
+```
+
+This applies to every column method on both the ILP (`http`/`https`/`tcp`/`tcps`)
+and QWP (`ws`/`wss`/`udp`) senders, and to the compiled QWP writers.
+
+Two consequences are worth knowing:
+
+- An omitted column is not created on a table that does not already have it. The
+  omission carries no type, so schema-on-write has nothing to infer from.
+- A row in which _every_ value is nullish behaves differently per protocol. ILP
+  has no way to encode a row with no fields, so `at()`/`atNow()` rejects it with
+  "The row must have a symbol or column set before it is closed". QWP is
+  columnar and can express it, so the row is sent with no columns — carrying
+  only its designated timestamp.
+
+**Changed in this release.** Earlier versions threw a type error for most nullish
+values, and protocol v2 encoded `arrayColumn(name, null)` as an explicit NULL
+array marker. Both now omit the column instead. If your code relied on the throw
+as a data-quality guard, validate before calling the sender.
+
 ### QWP ingress from Node.js or a browser
 
 See the [complete QWP guide](./QWP.md) for ingress and egress APIs, the combined
