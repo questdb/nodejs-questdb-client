@@ -37,6 +37,19 @@ jobs:
       - name: Type-checking
         run: pnpm typecheck
 
+      # tsconfig.qwp-browser.json is where the browser contract lives: strict,
+      # no @types/node, DOM lib, over src/qwp/** minus node.ts. `pnpm typecheck`
+      # does not cover it, so without this step nothing stops a Node built-in or
+      # a strict-null violation reaching the browser entry point.
+      - name: Type-checking (browser)
+        run: pnpm typecheck:qwp-browser
+
+      - name: Type-checking (benchmarks)
+        run: pnpm typecheck:bench
+
+      - name: Linting (benchmarks)
+        run: pnpm lint:bench
+
       - name: Tests
         run: pnpm test
 

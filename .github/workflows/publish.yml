@@ -29,16 +29,40 @@ jobs:
       - name: Type-checking
         run: pnpm typecheck
 
+      # tsconfig.qwp-browser.json is where the browser contract lives: strict,
+      # no @types/node, DOM lib, over src/qwp/** minus node.ts. `pnpm typecheck`
+      # does not cover it, so without this step nothing stops a Node built-in or
+      # a strict-null violation reaching the browser entry point.
+      - name: Type-checking (browser)
+        run: pnpm typecheck:qwp-browser
+
       - name: Tests
         run: pnpm test
 
       - name: Build
         run: pnpm build
 
+      # Every subpath in `exports`, not just the root: a publish that omits
+      # ./qwp, ./qwp/browser or ./qwp/node resolves to nothing for consumers.
       - name: Check for build artifacts
         run: |
-          [ -f dist/cjs/index.js ] || (echo "CJS build missing" && exit 1)
-          [ -f dist/es/index.mjs ] || (echo "ESM build missing" && exit 1)
+          node -e '
+            const fs = require("node:fs");
+            const { exports: map } = require("./package.json");
+            const missing = [];
+            for (const [subpath, conditions] of Object.entries(map)) {
+              for (const target of Object.values(conditions)) {
+                for (const file of Object.values(target)) {
+                  if (!fs.existsSync(file)) missing.push(subpath + " -> " + file);
+                }
+              }
+            }
+            if (missing.length > 0) {
+              console.error("missing build artifacts:\n  " + missing.join("\n  "));
+              process.exit(1);
+            }
+            console.log("all " + Object.keys(map).length + " export subpaths present");
+          '
 
       - name: Publish
         uses: JS-DevTools/npm-publish@v3
