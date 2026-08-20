@@ -719,6 +719,81 @@ describe("QWP high-level sender", () => {
     expect(column(table, "tag").values).toEqual(["second"]);
   });
 
+  it("does not let a discarded row pin the table schema", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    // 'a' only ever appeared in a row that was thrown away, so nothing about
+    // it reached QuestDB and it must not constrain the column's type.
+    sender.table("events").longColumn("a", 1n);
+    expect(() => sender.stringColumn("b", 42 as unknown as string)).toThrow();
+    await sender.table("events").stringColumn("a", "x").atNow();
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(column(table, "a").type).toBe(QWP_COLUMN_TYPE.VARCHAR);
+  });
+
+  it("does not let a cancelled row pin the table schema", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    sender.table("events").longColumn("a", 1n).cancelRow();
+    await sender.table("events").stringColumn("a", "x").atNow();
+    await sender.flush();
+
+    expect(column(session.sends[0].tables[0], "a").type).toBe(
+      QWP_COLUMN_TYPE.VARCHAR,
+    );
+  });
+
+  it("still pins the schema learned from a row that was published", () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    // The rollback must not weaken per-table type consistency: this row was
+    // completed, so its column types are real.
+    sender.table("events").longColumn("a", 1n).atNow();
+    expect(() => sender.table("events").stringColumn("a", "x")).toThrow(
+      /column type mismatch/,
+    );
+  });
+
+  it("keeps an earlier row's schema when a later row is discarded", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("events").longColumn("a", 1n).atNow();
+    // Discarding this row may only roll back what this row introduced ('b'),
+    // never what the committed row above learned ('a').
+    sender.table("events").longColumn("b", 2n);
+    expect(() => sender.stringColumn("bad", 42 as unknown as string)).toThrow();
+
+    expect(() => sender.table("events").stringColumn("a", "x")).toThrow(
+      /column type mismatch/,
+    );
+    await sender.table("events").longColumn("b", 3n).atNow();
+    await sender.flush();
+    expect(session.sends[0].tables[0].rowCount).toBe(2);
+  });
+
+  it("does not accumulate tables created by rows that were discarded", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("kept").longColumn("value", 1n).atNow();
+    for (let index = 0; index < 100; index++) {
+      sender.table(`transient-${index}`).longColumn("value", 1n);
+      expect(() =>
+        sender.stringColumn("bad", 42 as unknown as string),
+      ).toThrow();
+    }
+
+    const staged = (sender as unknown as { tables: readonly unknown[] }).tables;
+    expect(staged).toHaveLength(1);
+    expect(sender.metrics.pendingRows).toBe(1);
+  });
+
   it("keeps the sender usable after a failed row, without losing staged rows", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });

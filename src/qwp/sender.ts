@@ -879,6 +879,10 @@ export class QwpSender {
   private readonly tablesByName = new Map<string, StagedTable>();
   private current?: StagedTable;
   private currentRow = new Map<string, StagedColumn>();
+  // Schema keys the row in progress introduced. A row that is discarded must
+  // not leave its column types behind: nothing was published, so nothing was
+  // learned about the table.
+  private currentRowSchemaKeys: string[] = [];
   private pendingRowCount = 0;
   private pendingByteCount = 0;
   private lastFlushTime = Date.now();
@@ -978,6 +982,7 @@ export class QwpSender {
     this.tables.length = 0;
     this.tablesByName.clear();
     this.current = undefined;
+    this.currentRowSchemaKeys.length = 0;
     this.currentRow.clear();
     this.resetAutoFlush();
     return this;
@@ -1946,6 +1951,7 @@ export class QwpSender {
       }
       if (this.currentRow.has(nameKey)) return this;
       const canonicalName = existingSchema?.name ?? name;
+      if (!existingSchema) this.currentRowSchemaKeys.push(nameKey);
       table.schema.set(nameKey, { name: canonicalName, type, ...metadata });
       this.currentRow.set(nameKey, {
         name: canonicalName,
@@ -1963,6 +1969,7 @@ export class QwpSender {
     const table = this.requireTable();
     const estimatedBytes = stagedRowBytes(this.currentRow);
     table.rows.push({ columns: this.currentRow, estimatedBytes });
+    this.currentRowSchemaKeys.length = 0;
     this.currentRow = new Map();
     this.current = undefined;
     this.pendingRowCount++;
@@ -1987,6 +1994,19 @@ export class QwpSender {
    * row that table() then refuses to reopen.
    */
   private discardRow(): void {
+    const table = this.current;
+    if (table) {
+      for (const key of this.currentRowSchemaKeys) table.schema.delete(key);
+      // A table this row brought into being, and that nothing else has staged
+      // or learned from, goes with it. Otherwise a loop that keeps rejecting
+      // rows on fresh table names accumulates empty StagedTables forever.
+      if (table.rows.length === 0 && table.schema.size === 0) {
+        this.tablesByName.delete(table.name);
+        const index = this.tables.indexOf(table);
+        if (index >= 0) this.tables.splice(index, 1);
+      }
+    }
+    this.currentRowSchemaKeys.length = 0;
     this.currentRow.clear();
     this.current = undefined;
   }
