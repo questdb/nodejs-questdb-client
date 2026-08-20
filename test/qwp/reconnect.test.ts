@@ -2101,6 +2101,65 @@ describe("QWP ingress reconnect and replay", () => {
     expect(replayStore.closeCount).toBe(1);
   });
 
+  // The terminal set is a cross-client contract: the Java client's policy maps
+  // SCHEMA_MISMATCH, PARSE_ERROR and SECURITY_ERROR to TERMINAL ("deterministic:
+  // same bytes, same mismatch") and everything else -- including status bytes it
+  // does not recognise -- to a retriable category, failing open on a newer
+  // server. Only the retriable direction had coverage, so the whole terminal
+  // branch could be deleted with a green suite.
+  it.each([
+    ["SCHEMA_MISMATCH", QWP_STATUS.SCHEMA_MISMATCH],
+    ["PARSE_ERROR", QWP_STATUS.PARSE_ERROR],
+    ["SECURITY_ERROR", QWP_STATUS.SECURITY_ERROR],
+  ])(
+    "fails the connection on a %s NACK without replaying",
+    async (_name, status) => {
+      const first = new FakeConnection("primary");
+      const second = new FakeConnection("secondary");
+      const connections = [first, second];
+      const session = await QwpIngressSession.connect(
+        async () => connections.shift() ?? new FakeConnection("extra"),
+        { reconnect: { maxAttempts: 1, initialBackoffMs: 0, maxBackoffMs: 0 } },
+      );
+
+      const pending = session.sendFrame(Uint8Array.of(9));
+      await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+      first.receive(ingressResponse(status, 0n));
+
+      await expect(pending).rejects.toMatchObject({
+        name: "QwpIngressNackError",
+        response: { status },
+      });
+      // A deterministic rejection must not be replayed: the same bytes would be
+      // rejected again on every node in turn.
+      expect(second.sent).toEqual([]);
+      await session.close().catch(() => undefined);
+    },
+  );
+
+  it.each([
+    ["INTERNAL_ERROR", QWP_STATUS.INTERNAL_ERROR],
+    ["DICTIONARY_GAP", QWP_STATUS.DICTIONARY_GAP],
+    ["an unrecognised status", 0x7f],
+  ])("replays after a %s NACK", async (_name, status) => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpIngressSession.connect(
+      async () => connections.shift() ?? new FakeConnection("extra"),
+      { reconnect: { maxAttempts: 1, initialBackoffMs: 0, maxBackoffMs: 0 } },
+    );
+
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.receive(ingressResponse(status, 0n));
+
+    await vi.waitFor(() => expect(second.sent).toEqual([Uint8Array.of(9)]));
+    second.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(pending).resolves.toMatchObject({ status: QWP_STATUS.OK });
+    await session.close();
+  });
+
   it("reconnects and replays a transient ingress NACK without advancing", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
@@ -3448,6 +3507,48 @@ describe("QWP Node file replay store", () => {
     await expect(recovered.readPayload(1n)).resolves.toEqual(Uint8Array.of(4));
     await expect(recovered.readPayload(2n)).rejects.toThrow(
       /frame is not available/,
+    );
+    await recovered.close();
+  });
+
+  it("ignores an ack-watermark slot whose checksum does not match", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    await store.load();
+    for (let sequence = 0n; sequence < 4n; sequence++) {
+      await store.append({
+        frameSequence: sequence,
+        payload: Uint8Array.of(Number(sequence)),
+      });
+    }
+    // Two acknowledgements fill both alternating slots, the second carrying the
+    // higher generation and the live watermark.
+    await store.acknowledgeThrough(0n);
+    await store.acknowledgeThrough(1n);
+    await store.close();
+
+    // Tear the winning slot the way a crash between write and fsync would:
+    // move the watermark past every retained frame and leave its CRC32C stale.
+    // Without the checksum this record still wins on generation, and its
+    // watermark retires frames the server never acknowledged -- silent data
+    // loss on exactly the crash-recovery path store-and-forward exists for.
+    const ackPath = join(directory, ".ack-watermark");
+    const bytes = await readFile(ackPath);
+    const slotSize = 4 * 1024;
+    const winner =
+      bytes.readBigInt64LE(8) >= bytes.readBigInt64LE(slotSize + 8)
+        ? 0
+        : slotSize;
+    bytes.writeBigInt64LE(9n, winner + 16);
+    await writeFile(ackPath, bytes);
+
+    // The checksum rejects it, so recovery falls back to the intact slot, whose
+    // watermark is older than the segments on disk. That mismatch is caught and
+    // the journal is quarantined -- fail closed. Accepting the torn record
+    // instead would have resolved, silently dropping frames 2 and 3.
+    const recovered = new QwpNodeFileReplayStore({ directory });
+    await expect(recovered.load()).rejects.toBeInstanceOf(
+      QwpReplayStoreCorruptionError,
     );
     await recovered.close();
   });

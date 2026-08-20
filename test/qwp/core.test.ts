@@ -18,6 +18,11 @@ import {
   encodeQwpQueryRequest,
   encodeQwpVarint,
   QWP_COLUMN_TYPE,
+  QWP_MAX_COLUMNS_PER_TABLE,
+  QWP_MAX_ERROR_MESSAGE_LENGTH,
+  QWP_MAX_ROWS_PER_TABLE,
+  QWP_MAX_SYMBOL_DICTIONARY_SIZE,
+  decodeQwpIngressResponse,
   QWP_COMPRESSION_CODEC,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QWP_EGRESS_CAPABILITY,
@@ -499,5 +504,80 @@ describe("QWP egress codec", () => {
         encodeQwpFrame(Uint8Array.of(QWP_EGRESS_MESSAGE.QUERY_ERROR)),
       ),
     ).toThrow(/truncated/i);
+  });
+});
+
+describe("protocol caps", () => {
+  // Every one of these guards could be deleted, or its boundary flipped, with
+  // the whole suite green. They are the client's own defence against building
+  // a frame the server will reject, so each needs its boundary pinned.
+
+  it("accepts the last column and rejects the next", () => {
+    const table = new QwpTableBuffer("t");
+    for (let index = 0; index < QWP_MAX_COLUMNS_PER_TABLE; index++) {
+      expect(
+        table.getOrCreateColumn(`c${index}`, QWP_COLUMN_TYPE.LONG),
+      ).not.toBeNull();
+    }
+    expect(() =>
+      table.getOrCreateColumn("one_too_many", QWP_COLUMN_TYPE.LONG),
+    ).toThrow(`column count exceeds maximum ${QWP_MAX_COLUMNS_PER_TABLE}`);
+  });
+
+  it("accepts the last dictionary entry and rejects the next", () => {
+    for (const add of ["getOrAdd", "addRecovered"] as const) {
+      const dictionary = new QwpSymbolDictionary();
+      // Fill the backing array without materialising a million strings; the
+      // guard reads its length.
+      (dictionary as unknown as { values: string[] }).values.length =
+        QWP_MAX_SYMBOL_DICTIONARY_SIZE - 1;
+      expect(() => dictionary[add]("last")).not.toThrow();
+      expect(() => dictionary[add]("one too many")).toThrow(
+        `symbol dictionary exceeds maximum size ${QWP_MAX_SYMBOL_DICTIONARY_SIZE}`,
+      );
+    }
+  });
+
+  it("rejects a frame with more than 65535 tables", () => {
+    const table = new QwpTableBuffer("t");
+    table.getOrCreateColumn("c", QWP_COLUMN_TYPE.LONG);
+    // The guard runs before any encoding, so the same buffer can stand in for
+    // every entry.
+    expect(() => encodeQwpIngressFrame(new Array(65_536).fill(table))).toThrow(
+      "more than 65535 tables",
+    );
+    expect(() =>
+      encodeQwpIngressFrame(new Array(65_535).fill(table)),
+    ).not.toThrow("more than 65535 tables");
+  });
+
+  it("rejects a table above the row cap", () => {
+    // A million real rows would dominate the suite; the guard reads rowCount,
+    // and a column-less table clears the consistency check that precedes it.
+    const oversized = {
+      name: "t",
+      rowCount: QWP_MAX_ROWS_PER_TABLE + 1,
+      columns: [],
+    } as unknown as QwpTableBuffer;
+    expect(() => encodeQwpIngressFrame([oversized])).toThrow(
+      `maximum is ${QWP_MAX_ROWS_PER_TABLE}`,
+    );
+  });
+
+  it("rejects a NACK whose declared message length is above the cap", () => {
+    const nack = (length: number) =>
+      new QwpByteWriter()
+        .writeUint8(QWP_STATUS.WRITE_ERROR)
+        .writeBigUint64(0n)
+        .writeUint16(length)
+        .writeBytes(new Uint8Array(length))
+        .toUint8Array();
+
+    expect(() =>
+      decodeQwpIngressResponse(nack(QWP_MAX_ERROR_MESSAGE_LENGTH + 1)),
+    ).toThrow(`exceeds ${QWP_MAX_ERROR_MESSAGE_LENGTH} bytes`);
+    expect(() =>
+      decodeQwpIngressResponse(nack(QWP_MAX_ERROR_MESSAGE_LENGTH)),
+    ).not.toThrow();
   });
 });

@@ -509,6 +509,31 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("omits float columns with null or undefined value on every version", async function () {
+    // floatColumn is the one scalar setter overridden per protocol version
+    // (bufferv1 and bufferv2, the latter inherited by v3). Every other setter
+    // lives once in SenderBufferBase, so the v1 test above covers them all --
+    // but the v2/v3 override had no coverage, and v2 is what HTTP negotiates by
+    // default.
+    for (const version of ["1", "2", "3"] as const) {
+      const sender = new Sender({
+        protocol: "tcp",
+        protocol_version: version,
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      });
+      await sender
+        .table("tableName")
+        .floatColumn("skipped", null)
+        .floatColumn("alsoSkipped", undefined)
+        .intColumn("kept", 1)
+        .atNow();
+      expect(bufferContent(sender)).toBe("tableName kept=1i\n");
+      await sender.close();
+    }
+  });
+
   it("omits decimal columns with null or undefined value", async function () {
     const sender = new Sender({
       protocol: "tcp",
