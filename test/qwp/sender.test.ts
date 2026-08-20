@@ -644,7 +644,7 @@ describe("QWP high-level sender", () => {
     expect(table.columns.map((item) => item.name)).toEqual(["kept"]);
   });
 
-  it("gives DATE the same per-column encoding byte as TIMESTAMP", async () => {
+  it("encodes DATE on ingress as a raw int64, unlike TIMESTAMP", async () => {
     const frameFor = async (
       write: (sender: QwpSender) => QwpSender,
     ): Promise<number> => {
@@ -664,12 +664,14 @@ describe("QWP high-level sender", () => {
     );
     const long = await frameFor((s) => s.longColumn("c", 1_700_000_000_000n));
 
-    // The result decoder routes DATE through its timestamp reader, which
-    // consumes a per-column encoding byte whenever QWP_FLAG_GORILLA is set.
-    // Encoding DATE as a raw LONG left the decoder a byte short, so it
-    // consumed the low byte of the first value as the encoding byte.
-    expect(date).toBe(timestamp);
-    expect(date).toBe(long + 1);
+    // QWP is asymmetric for DATE and this pins the ingress half. The server
+    // parses it as a plain fixed-width int64 (QwpTableBlockCursor sends
+    // TYPE_DATE to QwpFixedWidthColumnCursor), so it carries no per-column
+    // encoding byte -- even though the egress result batch gives DATE that
+    // byte and this package's decoder reads it. Making the two directions
+    // "consistent" breaks ingest.
+    expect(date).toBe(long);
+    expect(date).toBe(timestamp - 1);
   });
 
   it("rolls back the row when a symbol value cannot be converted", async () => {

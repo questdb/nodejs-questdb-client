@@ -159,11 +159,15 @@ function columnPayloadSize(
     return size + Math.ceil(valueCount / 8);
   }
 
-  // DATE carries milliseconds since the epoch and the result decoder reads it
-  // through the same timestamp path as TIMESTAMP, so it takes the same
-  // per-column encoding byte and is Gorilla-eligible.
+  // DATE is deliberately absent here. The protocol is asymmetric for it: on
+  // ingress the server parses DATE as a plain fixed-width int64
+  // (QwpTableBlockCursor dispatches TYPE_DATE to QwpFixedWidthColumnCursor,
+  // alongside LONG and UUID), while on egress it emits DATE through
+  // emitTimestampSlice with a per-column encoding byte. The result decoder in
+  // this package matches the egress side, so the two directions genuinely
+  // differ. Adding DATE to this branch makes every ingress frame carrying a
+  // DATE column misparse server-side.
   if (
-    column.type === QWP_COLUMN_TYPE.DATE ||
     column.type === QWP_COLUMN_TYPE.TIMESTAMP ||
     column.type === QWP_COLUMN_TYPE.TIMESTAMP_NANOS
   ) {
@@ -310,17 +314,17 @@ function writeColumn(
     case QWP_COLUMN_TYPE.FLOAT:
       for (const value of column.values) writer.writeFloat32(Number(value));
       return;
+    // DATE joins LONG here: raw int64s, no per-column encoding byte.
+    // See columnPayloadSize() for why it is not a timestamp on ingress.
     case QWP_COLUMN_TYPE.LONG:
+    case QWP_COLUMN_TYPE.DATE:
       for (const value of column.values) {
         writer.writeBigInt64(BigInt(value as number | bigint));
       }
       return;
-    case QWP_COLUMN_TYPE.DATE:
     case QWP_COLUMN_TYPE.TIMESTAMP:
     case QWP_COLUMN_TYPE.TIMESTAMP_NANOS: {
-      const timestamps = column.values.map((value) =>
-        BigInt(value as number | bigint),
-      );
+      const timestamps = column.values.map((value) => BigInt(value as bigint));
       if (!options.gorilla) {
         for (const timestamp of timestamps) writer.writeBigInt64(timestamp);
         return;
