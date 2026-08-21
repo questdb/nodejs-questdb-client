@@ -52,7 +52,7 @@ function writeU16String(writer: QwpByteWriter, value: string): void {
 }
 
 function serverInfo(
-  capabilities = QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+  capabilities: number = QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
 ): Uint8Array {
   const payload = new QwpByteWriter();
   payload
@@ -233,7 +233,7 @@ function scalarResultBatch(): Uint8Array {
 function queryError(
   requestId: bigint,
   message: string,
-  status = QWP_STATUS.PARSE_ERROR,
+  status: number = QWP_STATUS.PARSE_ERROR,
 ): Uint8Array {
   const bytes = new TextEncoder().encode(message);
   const payload = new QwpByteWriter();

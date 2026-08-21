@@ -58,6 +58,7 @@ import type {
   QwpNodeUdpOptions,
   QwpNodeUdpSession,
   QwpNodeOrphanDrainEvent,
+  QwpNodeOrphanDrainSession,
   QwpNodeReplayRecoveryEvent,
   QwpNodeStoreAndForwardOptions,
   QwpNodeWebSocketOptions,
@@ -184,6 +185,14 @@ const nodeOrphanScanSignature: (
 
 const nodeOrphanRetrySignature: (directory: string) => Promise<void> =
   retryQwpNodeOrphanSlot;
+
+// QwpNodeOrphanDrainerOptions.createSession returns this, so anyone
+// implementing that interface must be able to name it.
+const nodeOrphanDrainSessionContract: (
+  session: QwpNodeOrphanDrainSession,
+) => Promise<void> = async (session) => {
+  await session.closed;
+};
 
 const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
   directory: "/tmp/qwp-public-api-contract",
@@ -499,6 +508,7 @@ void nodeClientSignature;
 void poolOptionsContract;
 void nodeOrphanScanSignature;
 void nodeOrphanRetrySignature;
+void nodeOrphanDrainSessionContract;
 void nodeStoreAndForwardContract;
 void queryOptionsContract;
 void egressSessionOptionsContract;

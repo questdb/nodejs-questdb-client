@@ -1501,10 +1501,10 @@ describe("QWP high-level sender", () => {
 
     await expect(
       trades.row({ price: 1, timestamp: 1n, prise: 2 } as never),
-    ).rejects.toMatchObject<QwpWriterRowError>({
+    ).rejects.toMatchObject({
       columnName: "prise",
       rowIndex: undefined,
-    });
+    } satisfies Partial<QwpWriterRowError>);
     expect(() =>
       sender.writer("trades", {
         timestamp: designatedTimestamp("ns"),

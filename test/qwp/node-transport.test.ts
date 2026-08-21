@@ -34,7 +34,7 @@ import {
 } from "../../src/qwp/node";
 
 function serverInfo(
-  role = QWP_SERVER_ROLE.STANDALONE,
+  role: number = QWP_SERVER_ROLE.STANDALONE,
   zone?: string,
 ): Uint8Array {
   const capabilities = zone === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE;
@@ -148,7 +148,7 @@ describe("QWP Node transport", () => {
   it("negotiates durable ACK and polls progress with a WebSocket PING", async () => {
     const table = "trades";
     const sequenceTransaction = 7n;
-    let requestedDurableAck: string | undefined;
+    let requestedDurableAck: string | string[] | undefined;
     let pingCount = 0;
 
     server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -201,7 +201,7 @@ describe("QWP Node transport", () => {
   });
 
   it("surfaces the server-clamped Zstd level from a real upgrade", async () => {
-    let acceptEncoding: string | undefined;
+    let acceptEncoding: string | string[] | undefined;
     server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     server.on("headers", (headers) => {
       headers.push("X-QWP-Version: 1");

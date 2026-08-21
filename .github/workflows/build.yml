@@ -48,6 +48,12 @@ jobs:
       - name: Type-checking (browser)
         run: pnpm typecheck:qwp-browser
 
+      # `pnpm typecheck` covers src plus a single contract file, so nothing
+      # type-checked test/** at all: a test could reference a deleted export
+      # and still pass, because vitest strips types without checking them.
+      - name: Type-checking (tests)
+        run: pnpm typecheck:test
+
       - name: Type-checking (benchmarks)
         run: pnpm typecheck:bench
 

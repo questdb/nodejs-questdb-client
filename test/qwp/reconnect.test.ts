@@ -126,9 +126,9 @@ function writeUint16String(writer: QwpByteWriter, value: string): void {
 
 function serverInfo(
   node: string,
-  role = QWP_SERVER_ROLE.STANDALONE,
+  role: number = QWP_SERVER_ROLE.STANDALONE,
   zone?: string,
-  capabilities = QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+  capabilities: number = QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
 ): Uint8Array {
   const advertisedCapabilities =
     capabilities | (zone === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE);
@@ -3321,7 +3321,7 @@ describe("QWP egress reconnect and replay", () => {
           maxBackoffMs: 0,
         },
         bufferPoolSize: 1,
-        onReplayReset: (event) => resets.push(event.requestId),
+        onReplayReset: (event) => void resets.push(event.requestId),
       },
     );
     const query = await session.query("select * from x");
@@ -3383,7 +3383,7 @@ describe("QWP egress reconnect and replay", () => {
           initialBackoffMs: 0,
           maxBackoffMs: 0,
         },
-        onReplayReset: (event) => resets.push(event.requestId),
+        onReplayReset: (event) => void resets.push(event.requestId),
       },
     );
     const query = await session.queryViews("select * from x", async () => {

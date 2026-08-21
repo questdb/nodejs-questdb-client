@@ -119,6 +119,7 @@ export type {
   QwpNodeOrphanDrainEventKind,
   QwpNodeOrphanDrainerMetrics,
   QwpNodeOrphanDrainerOptions,
+  QwpNodeOrphanDrainSession,
 } from "../qwp-node/orphan-drainer";
 
 export type { QwpWebSocketLike } from "../_qwp/_internal/websocket-connection";

@@ -40,6 +40,7 @@ import {
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QwpIngressAckTimeoutError,
   QwpIngressNackError,
+  QwpIngressResponse,
   QwpIngressSession,
   QwpIngressSessionClosedError,
   type QwpSenderError,
@@ -273,6 +274,14 @@ function ingressServerInfo(maxBatchSizeBytes: number): Uint8Array {
     .writeUint32(maxBatchSizeBytes)
     .toUint8Array();
 }
+
+/**
+ * `toMatchObject` matches nested objects partially, but `Partial<T>` only
+ * relaxes the top level, so the nested response needs relaxing too.
+ */
+type QwpIngressNackMatch = Partial<Omit<QwpIngressNackError, "response">> & {
+  response: Partial<QwpIngressResponse>;
+};
 
 describe("QWP WebSocket adapters", () => {
   it.each(["browser", "node"] as const)(
@@ -674,23 +683,27 @@ describe("QWP WebSocket adapters", () => {
     // the upgrade used to find nothing to cancel: the socket and its deadline
     // stayed alive for up to connectTimeoutMs after close() had resolved.
     const sockets: FakeWebSocket[] = [];
-    const session = await connectQwpBrowserIngress({
-      url: "ws://stalls.example/write/v4",
-      connectTimeoutMs: 30_000,
-      reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 },
-      webSocketFactory: () => {
-        const socket = new FakeWebSocket();
-        sockets.push(socket);
-        if (sockets.length === 1) {
-          queueMicrotask(() => {
-            socket.open();
-            socket.message(ingressServerInfo(128));
-          });
-        }
-        // Every replacement is left hanging mid-upgrade.
-        return asQwpSocket(socket);
+    const session = await connectQwpBrowserIngress(
+      {
+        url: "ws://stalls.example/write/v4",
+        connectTimeoutMs: 30_000,
+        webSocketFactory: () => {
+          const socket = new FakeWebSocket();
+          sockets.push(socket);
+          if (sockets.length === 1) {
+            queueMicrotask(() => {
+              socket.open();
+              socket.message(ingressServerInfo(128));
+            });
+          }
+          // Every replacement is left hanging mid-upgrade.
+          return asQwpSocket(socket);
+        },
       },
-    });
+      // Reconnection is a session policy, not a socket option; passing it in
+      // the first argument silently dropped it and left the default backoff.
+      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 } },
+    );
 
     sockets[0].close(1006, "dropped");
     await vi.waitFor(() => expect(sockets.length).toBeGreaterThan(1));
@@ -1461,7 +1474,7 @@ describe("QWP WebSocket adapters", () => {
       socket.open();
       const connection = await connecting;
       const next = connection.messages[Symbol.asyncIterator]().next();
-      socket.message(new NeverSettlingBlob());
+      socket.message(new NeverSettlingBlob([]));
       await vi.advanceTimersByTimeAsync(0);
 
       const closing = connection.close();
@@ -1831,7 +1844,7 @@ describe("QwpIngressSession", () => {
     await expect(session.waitForAcknowledged(1n, 1_000)).rejects.toMatchObject({
       name: "QwpIngressNackError",
       response: { sequence: 0n, errorMessage: "write failed" },
-    } satisfies Partial<QwpIngressNackError>);
+    } satisfies QwpIngressNackMatch);
     await expect(session.waitForAcknowledged(-1n)).resolves.toBeUndefined();
     await session.close();
   });
@@ -2341,7 +2354,7 @@ describe("QwpIngressSession", () => {
     await expect(session.sendFrame(Uint8Array.of(1))).rejects.toMatchObject({
       name: "QwpIngressNackError",
       response: { sequence: 0n, errorMessage: "write failed" },
-    } satisfies Partial<QwpIngressNackError>);
+    } satisfies QwpIngressNackMatch);
     await expect(session.sendFrame(Uint8Array.of(2))).resolves.toMatchObject({
       sequence: 1n,
       status: QWP_STATUS.OK,
