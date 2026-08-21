@@ -16,7 +16,9 @@ import { dirname, join, resolve } from "node:path";
 const SPECIFIER =
   /(?:\bfrom|\brequire\(|\bimport\()\s*["'](\.[^"']*\.(?:d\.)?[mc]?[jt]s)["']/g;
 
-const { exports: map } = JSON.parse(readFileSync("package.json", "utf8"));
+const { exports: map, typesVersions } = JSON.parse(
+  readFileSync("package.json", "utf8"),
+);
 
 const missing = [];
 const seen = new Set();
@@ -40,6 +42,16 @@ for (const [subpath, conditions] of Object.entries(map)) {
     for (const file of Object.values(target)) {
       walk(file, subpath);
     }
+  }
+}
+
+// typesVersions is what TypeScript's legacy node10 resolution reads instead of
+// `exports`, so a target missing here breaks those consumers with a TS2307 that
+// no runtime test can see.
+for (const [subpath, targets] of Object.entries(typesVersions?.["*"] ?? {})) {
+  for (const target of targets) {
+    if (!existsSync(target))
+      missing.push(`typesVersions ${subpath} -> ${target}`);
   }
 }
 

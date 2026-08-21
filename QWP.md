@@ -19,6 +19,13 @@ policy. Imports from internal source paths are never supported.
 | `@questdb/nodejs-client/qwp/node`    | Node.js            | QWP ingress and egress with upgrade headers, TLS agents, and persistent store-and-forward |
 | `@questdb/nodejs-client/qwp`         | Browser or Node.js | Shared protocol codecs and low-level session abstractions for advanced integrations       |
 
+The three QWP subpaths are declared both in `exports` and in `typesVersions`, so
+they resolve under every TypeScript `moduleResolution` setting, including the
+legacy `node10` that `module: "commonjs"` still implies by default. Keep the two
+declarations in step: `exports` alone leaves a `node10` consumer with
+`TS2307: Cannot find module '@questdb/nodejs-client/qwp/node'` at compile time
+while the same import works perfectly at runtime.
+
 Do not import the package root from browser code. It retains the existing Node.js
 transports and dependencies for backward compatibility. The browser entry point has
 no Node.js imports. Node-only features remain in `qwp/node`, so supporting browsers
@@ -370,7 +377,7 @@ Such a holder stops writing: once it can no longer vouch for its own lock, every
 append, checkpoint and acknowledgement on that journal fails with
 `QwpReplayStoreLockLostError`, and the sender falls back to whatever its durability
 policy does when the journal is unavailable. This is deliberately conservative — the
-holder fails as soon as a contender *could* have taken the slot, not only once one
+holder fails as soon as a contender _could_ have taken the slot, not only once one
 demonstrably has — because the alternative is writing at offsets the new owner now
 owns. A frame's sequence is derived from its position in the segment, so a same-width
 overwrite would otherwise reopen as a complete journal with the new owner's

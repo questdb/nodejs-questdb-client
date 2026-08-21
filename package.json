@@ -31,6 +31,19 @@
   "main": "dist/cjs/index.js",
   "module": "dist/es/index.mjs",
   "types": "dist/cjs/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "qwp": [
+        "./dist/cjs/qwp/index.d.ts"
+      ],
+      "qwp/browser": [
+        "./dist/cjs/qwp/browser.d.ts"
+      ],
+      "qwp/node": [
+        "./dist/cjs/qwp/node.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "import": {
