@@ -63,8 +63,10 @@ function closeWebSocketServer(server: WebSocketServer): Promise<void> {
   });
 }
 
+// Rooted at dist/, not dist/es/qwp: the browser bundle imports shared chunks
+// from dist/_qwp, so serving only its own directory 403s every entry import.
 function createModuleServer(): Server {
-  const moduleRoot = path.resolve(process.cwd(), "dist/es/qwp");
+  const moduleRoot = path.resolve(process.cwd(), "dist");
   return createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -171,7 +173,7 @@ describe("QWP in a real browser", () => {
     assetServer = createModuleServer();
     await listen(assetServer);
     const address = assetServer.address() as AddressInfo;
-    assetUrl = `http://127.0.0.1:${address.port}/browser.mjs`;
+    assetUrl = `http://127.0.0.1:${address.port}/es/qwp/browser.mjs`;
 
     browser = await chromium.launch({
       channel: process.env.QWP_BROWSER_CHANNEL,
@@ -302,6 +304,65 @@ describe("QWP in a real browser", () => {
     } finally {
       await page.close();
       await closeWebSocketServer(server);
+    }
+  });
+
+  it("walks failoverUrls when the preferred endpoint refuses, in a real browser", async () => {
+    // A browser never sees the HTTP response, so a refused connection surfaces
+    // as a bare error event that openQwpWebSocket classifies `opaque` with
+    // tryNextEndpoint left undefined. The fake-socket coverage in
+    // session.test.ts can only approximate that shape; this drives real
+    // Chromium at a genuinely refused port so the classification is the
+    // browser's own, which is what the previous failover coverage could not do
+    // -- it injected a factory throw carrying tryNextEndpoint: true, which no
+    // real browser WebSocket produces.
+    const healthy = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    let healthyConnections = 0;
+    healthy.on("connection", (socket) => {
+      healthyConnections++;
+      socket.send(browserIngressServerInfo(1_048_576));
+    });
+    await waitForWebSocketServer(healthy);
+    const healthyPort = (healthy.address() as AddressInfo).port;
+
+    // Bind and release a port so the preferred endpoint reliably refuses.
+    const vacated = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await waitForWebSocketServer(vacated);
+    const refusedPort = (vacated.address() as AddressInfo).port;
+    await closeWebSocketServer(vacated);
+
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const handshake = await page.evaluate(
+        async ({ moduleUrl, url, failoverUrls }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const connection = await qwp.connectQwpBrowserIngress({
+            url,
+            failoverUrls,
+          });
+          try {
+            return connection.handshake;
+          } finally {
+            await connection.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${refusedPort}/write/v4`,
+          failoverUrls: [`ws://127.0.0.1:${healthyPort}/write/v4`],
+        },
+      );
+
+      // The sweep reached the secondary rather than stopping at the refusal.
+      expect(healthyConnections).toBe(1);
+      expect(handshake).toMatchObject({ qwpVersion: 1 });
+    } finally {
+      await page.close();
+      await closeWebSocketServer(healthy);
     }
   });
 
