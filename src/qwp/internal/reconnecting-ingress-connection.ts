@@ -1565,7 +1565,17 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private async transmit(frame: ReplayFrame): Promise<void> {
+    // Loops when a reconnect completes while this frame's payload is being
+    // read; see the currency check below.
+    for (;;) {
+      if (await this.transmitOnce(frame)) return;
+    }
+  }
+
+  /** Returns false when a reconnect invalidated the captured connection. */
+  private async transmitOnce(frame: ReplayFrame): Promise<boolean> {
     const connection = await this.requireConnection();
+    const generation = this.generation;
     const cap = minimumDefined(
       connection.handshake.maxBatchSizeBytes,
       this.localMaxBatchSizeBytes,
@@ -1586,7 +1596,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         ),
         connection,
       );
-      return;
+      return true;
     }
     let payload: Uint8Array;
     try {
@@ -1606,7 +1616,18 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // resend set, exactly as the batch-cap branch above does.
       frame.transmitted = true;
       await this.requestReconnect(error, connection);
-      return;
+      return true;
+    }
+    // The journal read above yields, and with a lazy store it can park behind
+    // an fsyncing append for longer than a jittered reconnect takes. install()
+    // swaps this.wireFrames wholesale and resets wireFramesBase, while
+    // replayInto() skipped this frame because it was not transmitted yet.
+    // Pushing it now would log it against the replacement connection's wire
+    // sequence while sending it on the dead one, so the replacement's next
+    // cumulative ACK would retire a frame no server ever received and delete
+    // its journal record. Retry against the current connection instead.
+    if (this.connection !== connection || this.generation !== generation) {
+      return false;
     }
     frame.transmitted = true;
     this.wireFrames.push(frame);
@@ -1617,6 +1638,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       await this.requestReconnect(error, connection);
       if (this.lazyReplayStore) frame.payload = undefined;
     }
+    return true;
   }
 
   private async readFramePayload(frame: ReplayFrame): Promise<Uint8Array> {

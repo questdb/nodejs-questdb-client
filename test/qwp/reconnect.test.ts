@@ -1079,6 +1079,70 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("does not log a frame against a connection installed during its journal read", async () => {
+    // With a lazy store the drain always reads from disk, and that read can
+    // park behind an fsyncing append for longer than a jittered reconnect
+    // takes. install() swaps the wire log wholesale, so a frame pushed after
+    // the swap occupies the replacement's wire slot while being written to the
+    // dead socket: the replacement's next cumulative ACK then retires a frame
+    // no server ever received, and its journal record is deleted.
+    let releaseRead!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    class ParkingReadStore extends LazyTrackingReplayStore {
+      parkNextRead = false;
+
+      override async readPayload(frameSequence: bigint): Promise<Uint8Array> {
+        if (this.parkNextRead) {
+          this.parkNextRead = false;
+          await parked;
+        }
+        return super.readPayload(frameSequence);
+      }
+    }
+
+    const connections: FakeConnection[] = [];
+    const replayStore = new ParkingReadStore();
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = new FakeConnection(`node-${connections.length}`);
+        connections.push(connection);
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(1));
+
+    // Park the next drain read, then drop the connection underneath it.
+    replayStore.parkNextRead = true;
+    await session.publishFrame(Uint8Array.of(2));
+    connections[0].drop();
+    await vi.waitFor(() => expect(connections.length).toBe(2));
+    releaseRead();
+
+    // Frame 2 must reach the live connection, not the dropped one.
+    await vi.waitFor(() =>
+      expect(
+        connections[1].sent.some(
+          (payload) => payload[payload.length - 1] === 2,
+        ),
+      ).toBe(true),
+    );
+    await session.close();
+  });
+
   it("retries a transient journal read instead of latching the sender", async () => {
     // A store read can fail transiently -- a briefly full or read-only
     // filesystem parks the trim failure for about a second and the store
