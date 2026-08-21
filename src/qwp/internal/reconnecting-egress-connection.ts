@@ -72,6 +72,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   private initialServerInfo?: QwpServerInfoMessage;
   private currentServerInfo?: QwpServerInfoMessage;
   private outboundReplay: Uint8Array[] = [];
+  private protocolRecoveries = 0;
+  private protocolRecoveryStartedAt = 0;
   private generation = 0;
   private sendTail: Promise<void> = Promise.resolve();
   private reconnectTask?: Promise<void>;
@@ -495,6 +497,32 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.throwIfUnavailable();
     const connection = this.connection;
     if (!connection) throw new QwpSendClosedError();
+    // Reconnecting replays the same QUERY_REQUEST, so a response this client
+    // cannot decode reproduces on the replacement connection. Each connect
+    // SUCCEEDS, so connectLoop's own budget is never consumed and the retry
+    // would otherwise run forever, rotating the whole cluster. Charge these
+    // recoveries to the same maxAttempts/maxDurationMs budget instead, the way
+    // the Java client counts every re-submission of one execute() against
+    // failover_max_attempts and failover_max_duration.
+    if (this.protocolRecoveries === 0) {
+      this.protocolRecoveryStartedAt = Date.now();
+    }
+    this.protocolRecoveries++;
+    // `>` not `>=`: maxAttempts counts reconnects here, as it does in
+    // connectLoop, so maxAttempts=1 still permits one recovery.
+    const attemptsExhausted =
+      this.maxAttempts > 0 && this.protocolRecoveries > this.maxAttempts;
+    const durationExhausted =
+      this.maxDurationMs > 0 &&
+      Date.now() - this.protocolRecoveryStartedAt >= this.maxDurationMs;
+    if (attemptsExhausted || durationExhausted) {
+      const exhausted = new QwpReconnectExhaustedError(
+        this.protocolRecoveries,
+        error,
+      );
+      this.failTerminal(exhausted);
+      throw exhausted;
+    }
     try {
       await this.requestReconnect(
         error,
@@ -513,6 +541,10 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     switch (payload[0]) {
       case QWP_EGRESS_MESSAGE.QUERY_REQUEST:
         this.outboundReplay = [payload];
+        // A new application query is fresh progress, matching the Java
+        // client's per-execute() scoping. Replay does not come through here,
+        // so a request that keeps poisoning still exhausts its budget.
+        this.protocolRecoveries = 0;
         break;
       case QWP_EGRESS_MESSAGE.CREDIT:
       case QWP_EGRESS_MESSAGE.CANCEL:

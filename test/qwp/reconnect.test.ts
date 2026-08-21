@@ -164,6 +164,22 @@ function emptyResultBatch(requestId = 0n, batchSequence = 0): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), 0, 1);
 }
 
+/** A batch declaring a column type no QWP client build knows how to decode. */
+function undecodableResultBatch(requestId = 0n): Uint8Array {
+  const payload = new QwpByteWriter()
+    .writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH)
+    .writeBigUint64(requestId);
+  writeQwpVarint(payload, 0); // batch sequence
+  writeQwpVarint(payload, 0); // table name
+  writeQwpVarint(payload, 1); // row count
+  writeQwpVarint(payload, 1); // column count
+  writeQwpVarint(payload, 1);
+  payload.writeUint8(0x63); // column name "c"
+  payload.writeUint8(0xfe); // column type
+  payload.writeUint8(0x00); // encoding
+  return encodeQwpFrame(payload.toUint8Array(), 0, 1);
+}
+
 function resultEnd(requestId = 0n): Uint8Array {
   const payload = new QwpByteWriter()
     .writeUint8(QWP_EGRESS_MESSAGE.RESULT_END)
@@ -2931,6 +2947,56 @@ describe("QWP egress reconnect and replay", () => {
       random.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it("stops replaying a query whose response cannot be decoded", async () => {
+    // Reconnecting replays the same QUERY_REQUEST, so an undecodable response
+    // reproduces on every replacement connection. Each connect SUCCEEDS, so
+    // connectLoop's own budget is never consumed: without charging these
+    // recoveries to the failover budget the loop runs forever and the query
+    // never settles.
+    const connections: FakeConnection[] = [];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = new FakeConnection(`node-${connections.length}`);
+        connections.push(connection);
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 3,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    const query = await session.query("select 1");
+    for (const connection of connections) {
+      connection.receive(undecodableResultBatch());
+    }
+    const drain = (async () => {
+      for await (const _batch of query) void _batch;
+    })();
+    await vi.waitFor(() => expect(connections.length).toBeGreaterThan(1));
+    // Every replacement gets the same undecodable batch.
+    const feed = setInterval(() => {
+      for (const connection of connections) {
+        connection.receive(undecodableResultBatch());
+      }
+    }, 1);
+    try {
+      await expect(drain).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
+    } finally {
+      clearInterval(feed);
+    }
+    // Bounded by the failover budget rather than looping without limit.
+    expect(connections.length).toBeLessThanOrEqual(6);
+    await session.close().catch(() => undefined);
   });
 
   it("retries the initial connection until one provides SERVER_INFO", async () => {
