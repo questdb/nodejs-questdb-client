@@ -118,11 +118,54 @@ describe("QWP Node UDP sender", () => {
       socketFactory: () => socket,
     });
 
-    await expect(
-      session.sendTables([stringTable("x".repeat(256))]),
-    ).rejects.toBeInstanceOf(QwpUdpDatagramTooLargeError);
+    // Synchronously, before the returned promise exists -- QwpSender relies on
+    // that to keep the batch staged when encoding fails.
+    expect(() => session.sendTables([stringTable("x".repeat(256))])).toThrow(
+      QwpUdpDatagramTooLargeError,
+    );
+    expect(() => session.publishTables([stringTable("x".repeat(256))])).toThrow(
+      QwpUdpDatagramTooLargeError,
+    );
     expect(socket.packets).toEqual([]);
     await session.close();
+  });
+
+  it("retains a batch whose oversized row cannot be encoded", async () => {
+    // The session-level test above never reaches QwpSender, which is where row
+    // ownership transfers. An encode failure happens before any datagram is
+    // handed to the socket, so it is not the "already on the network" case the
+    // fire-and-forget contract covers: the rows that do fit must survive for
+    // the caller to retry, and none of them may be counted as published.
+    const socket = new FakeUdpSocket();
+    const sender = await connectQwpNodeUdpSender(
+      { host: "localhost", maxDatagramSize: 256, socketFactory: () => socket },
+      { autoFlush: false },
+    );
+    for (const message of ["abc", "abc", "abc"]) {
+      await sender.table("events").stringColumn("message", message).atNow();
+    }
+    await sender
+      .table("events")
+      .stringColumn("message", "x".repeat(2000))
+      .atNow();
+
+    await expect(sender.flush()).rejects.toBeInstanceOf(
+      QwpUdpDatagramTooLargeError,
+    );
+    expect(socket.packets).toEqual([]);
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 4,
+      totalRowsPublished: 0,
+    });
+
+    // Dropping the offending row lets the retry deliver the three that fit.
+    sender.reset();
+    for (const message of ["abc", "abc", "abc"]) {
+      await sender.table("events").stringColumn("message", message).atNow();
+    }
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.packets).toHaveLength(1);
+    await sender.close();
   });
 
   it("reports local send failures without retrying fire-and-forget rows", async () => {

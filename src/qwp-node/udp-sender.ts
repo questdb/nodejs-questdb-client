@@ -136,7 +136,14 @@ export class QwpNodeUdpSession implements QwpSenderSession {
     });
   }
 
-  async sendTables(
+  // Not `async`: validation and encoding must run synchronously, before the
+  // returned promise exists. The high-level sender transfers row ownership as
+  // soon as a flush reaches the transport, so a batch that cannot be encoded
+  // has to fail the flush before that transfer -- the same contract
+  // planIngressFrames gives the WebSocket path by throwing out of
+  // sendTablesWithPublication. Only the sends themselves are deferred, and a
+  // failed send is fire-and-forget by design.
+  sendTables(
     tables: readonly QwpTableBuffer[],
     options: QwpIngressEncodeOptions = {},
   ): Promise<QwpIngressResponse> {
@@ -147,15 +154,21 @@ export class QwpNodeUdpSession implements QwpSenderSession {
       );
     }
     const datagrams = encodeUdpDatagrams(tables, this.maxBatchSizeBytes);
-    for (const datagram of datagrams) await this.send(datagram);
-    return { status: 0, sequence: this.sequence, tables: [] };
+    return this.sendDatagrams(datagrams);
   }
 
-  async publishTables(
+  publishTables(
     tables: readonly QwpTableBuffer[],
     options: QwpIngressEncodeOptions = {},
   ): Promise<void> {
-    await this.sendTables(tables, options);
+    return this.sendTables(tables, options).then(() => undefined);
+  }
+
+  private async sendDatagrams(
+    datagrams: readonly Uint8Array[],
+  ): Promise<QwpIngressResponse> {
+    for (const datagram of datagrams) await this.send(datagram);
+    return { status: 0, sequence: this.sequence, tables: [] };
   }
 
   waitForAcknowledged(targetSequence: bigint): Promise<void> {
