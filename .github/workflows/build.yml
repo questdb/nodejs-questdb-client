@@ -7,6 +7,10 @@ on:
   pull_request:
   schedule:
     - cron: "15 2,10,18 * * *"
+  # GitHub disables a scheduled workflow after 60 days of repository
+  # inactivity, which stops it running on pull requests too. Dispatch is
+  # how to re-run it after that without pushing to a branch.
+  workflow_dispatch:
 
 jobs:
   test:
