@@ -42,6 +42,12 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Guards the emitted .d.ts row typing, which no runtime suite can see.
+      - name: Type-checking (built package consumer)
+        run: |
+          pnpm exec tsc --noEmit -p tsconfig.dist-types.json
+          pnpm exec tsc --noEmit -p tsconfig.dist-types.cjs.json
+
       # Every subpath in `exports`, not just the root: a publish that omits
       # ./qwp, ./qwp/browser or ./qwp/node resolves to nothing for consumers.
       - name: Check for build artifacts

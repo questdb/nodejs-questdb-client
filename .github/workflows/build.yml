@@ -60,6 +60,13 @@ jobs:
       - name: Built package tests
         run: pnpm test:dist
 
+      # test:dist asserts runtime behaviour only. The compiled writers promise
+      # per-column row typing, which lives entirely in the emitted .d.ts files
+      # and is therefore invisible to every suite that imports from `src/`,
+      # where all four entry points share one module instance.
+      - name: Type-checking (built package consumer)
+        run: pnpm typecheck:dist
+
   qwp-browser-e2e:
     name: QWP browser E2E
     runs-on: ubuntu-latest

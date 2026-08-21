@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.dist-types.json",
+  "compilerOptions": {
+    "paths": {
+      "@questdb/nodejs-client": ["./dist/cjs/index.d.ts"],
+      "@questdb/nodejs-client/qwp": ["./dist/cjs/qwp/index.d.ts"],
+      "@questdb/nodejs-client/qwp/node": ["./dist/cjs/qwp/node.d.ts"],
+      "@questdb/nodejs-client/qwp/browser": ["./dist/cjs/qwp/browser.d.ts"]
+    }
+  }
+}
