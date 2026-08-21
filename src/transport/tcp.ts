@@ -13,12 +13,28 @@ import { isBoolean } from "../utils";
 // Default number of rows that trigger auto-flush for TCP transport.
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 
-// Arbitrary public key, used to construct valid JWK tokens.
-// These are not used for actual authentication, only required for crypto API compatibility.
-const PUBLIC_KEY = {
-  x: "aultdA0PjhD_cWViqKKyL5chm6H1n-BiZBo_48T-uqc",
-  y: "__ptaol41JWSpTTL525yVEfzmY8A6Vi_QrW1FjKcHMg",
-};
+// A JWK is not a valid EC key without its public point, but QuestDB's TCP auth
+// config carries only the private scalar. Deriving the point keeps the pair
+// mathematically consistent; a fixed placeholder used to stand in here, which
+// Node accepted without validation up to v24 and rejects from v26 with
+// ERR_CRYPTO_INVALID_JWK.
+function derivePublicKey(privateKey: string): { x: string; y: string } {
+  let point: Buffer;
+  try {
+    const ecdh = crypto.createECDH("prime256v1");
+    ecdh.setPrivateKey(Buffer.from(privateKey, "base64url"));
+    point = ecdh.getPublicKey();
+  } catch (err) {
+    throw new Error(
+      `Invalid private key, the 'token' property of the 'auth' config option must be a base64url-encoded P-256 private key: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  // Uncompressed SEC1 point: an 0x04 tag followed by the 32-byte X and Y.
+  return {
+    x: point.subarray(1, 33).toString("base64url"),
+    y: point.subarray(33, 65).toString("base64url"),
+  };
+}
 
 // New Line character
 const NEWLINE = 10;
@@ -303,7 +319,7 @@ function constructJwk(options: SenderOptions): Record<string, string> {
     return {
       kid: options.auth.keyId,
       d: options.auth.token,
-      ...PUBLIC_KEY,
+      ...derivePublicKey(options.auth.token),
       kty: "EC",
       crv: "P-256",
     };
