@@ -4,5 +4,9 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // test/dist-types imports the package by its published name, which only
+  // resolves against a built dist/. Those files belong to
+  // tsconfig.dist-types*.json, which typecheck:dist runs after pnpm build.
+  "exclude": ["test/dist-types"]
 }
