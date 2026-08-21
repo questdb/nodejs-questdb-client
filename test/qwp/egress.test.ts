@@ -29,7 +29,7 @@ import {
   readQwpVarint,
   writeQwpVarint,
 } from "../../src/qwp";
-import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
+import { QwpAsyncQueue } from "../../src/_qwp/_internal/async-queue";
 
 const RESULT_FLAGS = QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_GORILLA;
 

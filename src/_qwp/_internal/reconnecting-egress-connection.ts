@@ -3,7 +3,7 @@ import {
   QWP_EGRESS_MESSAGE,
   QwpProtocolError,
   QwpServerInfoMessage,
-} from "../core";
+} from "../_core";
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,

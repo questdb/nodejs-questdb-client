@@ -17,9 +17,9 @@ import {
   QwpResultBatchView,
   QwpResultEndMessage,
   QwpServerInfoMessage,
-} from "./core";
-import { QwpAsyncQueue } from "./internal/async-queue";
-import { QwpReconnectingEgressConnection } from "./internal/reconnecting-egress-connection";
+} from "./_core";
+import { QwpAsyncQueue } from "./_internal/async-queue";
+import { QwpReconnectingEgressConnection } from "./_internal/reconnecting-egress-connection";
 import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,

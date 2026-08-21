@@ -1,4 +1,4 @@
-import { QWP_STATUS, type QwpIngressResponse } from "./core";
+import { QWP_STATUS, type QwpIngressResponse } from "./_core";
 import { log } from "../logging";
 
 export const QWP_SENDER_ERROR_CATEGORY = {

@@ -11,7 +11,7 @@ import {
   QwpProtocolError,
   qwpVarintSize,
   utf8Length,
-} from "../core";
+} from "../_core";
 import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_RECONNECT_EVENT_KIND,

@@ -10,7 +10,7 @@ import {
   QwpProtocolError,
   QwpSymbolDictionary,
   QwpTableBuffer,
-} from "./core";
+} from "./_core";
 import {
   QWP_INITIAL_CONNECT_MODE,
   QwpBinaryConnection,
@@ -22,8 +22,8 @@ import {
   QwpReconnectOptions,
   QwpReplayDictionaryPersistenceError,
 } from "./transport";
-import { QwpReconnectingIngressConnection } from "./internal/reconnecting-ingress-connection";
-import { QwpNotificationDispatcher } from "./internal/notification-dispatcher";
+import { QwpReconnectingIngressConnection } from "./_internal/reconnecting-ingress-connection";
+import { QwpNotificationDispatcher } from "./_internal/notification-dispatcher";
 import {
   createQwpSenderError,
   defaultQwpSenderErrorHandler,

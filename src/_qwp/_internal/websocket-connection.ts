@@ -1,4 +1,4 @@
-import { QwpProtocolError } from "../core";
+import { QwpProtocolError } from "../_core";
 import {
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,

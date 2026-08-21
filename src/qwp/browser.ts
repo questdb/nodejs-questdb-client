@@ -5,10 +5,10 @@ import {
   openQwpWebSocket,
   QwpWebSocketLike,
   validateQwpWebSocketTimeouts,
-} from "./internal/websocket-connection";
-import { createQwpFailoverConnectionFactory } from "./internal/failover";
-import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
-import { validateQwpMaxBatchRows } from "./internal/egress-limits";
+} from "../_qwp/_internal/websocket-connection";
+import { createQwpFailoverConnectionFactory } from "../_qwp/_internal/failover";
+import { createQwpEgressFailoverConnectionFactory } from "../_qwp/_internal/egress-routing";
+import { validateQwpMaxBatchRows } from "../_qwp/_internal/egress-limits";
 import {
   addQwpDurableAckWebSocketProtocol,
   decodeQwpIngressServerInfo,
@@ -16,7 +16,7 @@ import {
   isQwpDurableAckWebSocketProtocol,
   QwpEgressCompression,
   QWP_VERSION,
-} from "./core";
+} from "../_qwp/_core";
 import {
   QwpBinaryConnection,
   QwpConnectionFactory,
@@ -25,17 +25,20 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
-} from "./transport";
+} from "../_qwp/transport";
 import {
   QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
   QwpEgressSession,
   QwpEgressSessionOptions,
-} from "./egress-session";
-import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
-import { QwpSender, QwpSenderOptions } from "./sender";
-import { QwpClient, QwpClientPoolOptions } from "./client";
+} from "../_qwp/egress-session";
+import {
+  QwpIngressSession,
+  QwpIngressSessionOptions,
+} from "../_qwp/ingress-session";
+import { QwpSender, QwpSenderOptions } from "../_qwp/sender";
+import { QwpClient, QwpClientPoolOptions } from "../_qwp/client";
 
-export type { QwpWebSocketLike } from "./internal/websocket-connection";
+export type { QwpWebSocketLike } from "../_qwp/_internal/websocket-connection";
 
 export type QwpBrowserSessionAuthentication =
   | {

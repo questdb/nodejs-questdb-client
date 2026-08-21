@@ -2,7 +2,7 @@ import {
   decodeQwpEgressMessage,
   QWP_SERVER_ROLE,
   QwpProtocolError,
-} from "../core";
+} from "../_core";
 import {
   QwpBinaryConnection,
   QwpConnectionFactory,

@@ -91,7 +91,7 @@ to `gh`.
 | **3** | Run the full workflow. Select at most six applicable discovery roles: Agent 1 always; Agent 8 when changed symbols have out-of-diff callers; Agents 2-7 and 14-15 when their domains are touched; Agents 9-13 for changed tests or a fix claim; Agent 10 only when a distinct adversarial pass is warranted. Depth comes from evidence, not agent count. |
 
 State the selected level at the start of the review. If defaulted, mention that level
-3 exists for a full mission-critical pass. Changes to `src/buffer/**`, `src/qwp/**`,
+3 exists for a full mission-critical pass. Changes to `src/buffer/**`, `src/_qwp/**`,
 `src/qwp-node/**`, transport/auth/TLS, protocol negotiation, flush semantics, or any
 public entry point (`src/index.ts`, `src/qwp/index.ts`, `src/qwp/node.ts`,
 `src/qwp/browser.ts`) are high risk; recommend level 3, but honor an explicit lower
@@ -217,10 +217,10 @@ At minimum check:
 - `SenderTransport` plus Undici, stdlib HTTP, and TCP implementations.
 - `SenderOptions.resolveAuto`, `resolveDeprecated`, config parsing, `fromConfig`, and
   `fromEnv` for option changes, plus `src/qwp-node/client-config.ts` for QWP keys.
-- Changed `src/qwp/core/**` constants and codecs against both the ingress encoder and
+- Changed `src/_qwp/_core/**` constants and codecs against both the ingress encoder and
   the egress decoder; one cap or type byte is normally read by both sides.
 - `QwpSender` and the writer helpers, `QwpIngressSession`, `QwpEgressSession`,
-  `QwpClient`, the reconnecting connections in `src/qwp/internal/**`, and the UDP
+  `QwpClient`, the reconnecting connections in `src/_qwp/_internal/**`, and the UDP
   sender.
 - `QwpNodeFileReplayStore`, `QwpNodeOrphanDrainer`, the advisory lock, and the segment
   maintenance worker for any store-and-forward change.
@@ -304,7 +304,7 @@ Record current facts with file/line citations; do not rely on this list becoming
   `./qwp/browser`, `./qwp/node`), plus which sources each subpath is allowed to import.
 - ILP protocol default/negotiation and TCP's explicit-version requirement.
 - QWP `QWP_VERSION`, the `/write/v4` ingress and `/read/v1` egress routes, the caps in
-  `src/qwp/core/constants.ts`, and the capabilities negotiated per connection.
+  `src/_qwp/_core/constants.ts`, and the capabilities negotiated per connection.
 - `worker_threads` use by the segment maintenance worker, and the `Date.now()` /
   `Math.random()` dependencies in backoff, episode, and timeout accounting that
   deterministic tests must be able to control.
@@ -446,7 +446,7 @@ fails when the production fix is reverted in an isolated scratch worktree.
 **Agent 14 — QWP wire format and protocol sessions:** Reconstruct frame headers,
 LEB128 varints, column encodings, Gorilla bit packing, zstd framing, symbol-dictionary
 IDs with their delta/reset flags, decimal scale, geohash bits, array shape, and NULL
-bitmaps against the caps in `src/qwp/core/constants.ts`. Check the ingress encoder and
+bitmaps against the caps in `src/_qwp/_core/constants.ts`. Check the ingress encoder and
 the egress decoder together because both read the same constants. Check status-byte to
 category to policy mapping, per-table transaction grouping, durable-ACK negotiation,
 ingress cap splitting, and that a truncated, oversized, or hostile server frame is
@@ -539,7 +539,7 @@ Then independently verify Node-client specifics:
 10. For test efficacy, prove the assertion reaches the change and would fail under the
     claimed regression. Recompute expected hex/bytes rather than trusting fixtures.
 11. For QWP wire claims, reconstruct the frame bytes for encode and decode, and check
-    every length, cap, and flag against `src/qwp/core/constants.ts` rather than against
+    every length, cap, and flag against `src/_qwp/_core/constants.ts` rather than against
     an assumed peer behavior.
 12. For replay, ack, reconnect, or failover claims, trace the cumulative ack watermark
     and prove which frames a restart, NACK, or non-orderly close resends or drops.
@@ -620,7 +620,7 @@ enumerated instance independently rather than sampling and generalizing.
 ### QWP wire format and sessions
 
 - Frame header magic, version, flags, table count, and payload length agree between
-  encoder and decoder, and every cap in `src/qwp/core/constants.ts` is enforced on both
+  encoder and decoder, and every cap in `src/_qwp/_core/constants.ts` is enforced on both
   sides.
 - Varints stay inside uint64; row, column, name-length, array-element, and dictionary
   limits are checked on encode and on decode.

@@ -23,6 +23,7 @@
   "files": [
     "QWP.md",
     "THIRD_PARTY_NOTICES.md",
+    "dist/_qwp",
     "dist/cjs",
     "dist/es"
   ],

@@ -1,5 +1,5 @@
 {
-  "include": ["src/qwp/**/*.ts"],
+  "include": ["src/_qwp/**/*.ts", "src/qwp/**/*.ts"],
   "exclude": ["src/qwp/node.ts"],
   "compilerOptions": {
     "moduleResolution": "bundler",

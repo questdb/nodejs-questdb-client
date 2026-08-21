@@ -11,7 +11,7 @@ import {
   QwpByteWriter,
   QwpResultBatchDecoder,
   writeQwpVarint,
-} from "../src/qwp/core";
+} from "../src/_qwp/_core";
 
 const ROWS = 10_000;
 let sink = 0;

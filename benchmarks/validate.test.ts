@@ -4,7 +4,7 @@ import {
   QWP_COLUMN_TYPE,
   QwpSymbolDictionary,
   QwpTableBuffer,
-} from "../src/qwp/core";
+} from "../src/_qwp/_core";
 import { buildBenchmarkTable } from "./tables";
 import { BENCHMARK_WORKLOADS, type BenchmarkRow } from "./workloads";
 

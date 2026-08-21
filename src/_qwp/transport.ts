@@ -1,5 +1,5 @@
-import type { QwpNegotiatedEgressCompression } from "./core/compression";
-import type { QwpServerInfoMessage } from "./core/egress";
+import type { QwpNegotiatedEgressCompression } from "./_core/compression";
+import type { QwpServerInfoMessage } from "./_core/egress";
 
 export interface QwpConnectionCloseInfo {
   code: number;

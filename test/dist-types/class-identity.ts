@@ -1,18 +1,11 @@
-// Pins whether the classes a factory returns can be named in a type position
-// by a consumer of the published package.
+// Pins that the classes a factory returns can be named in a type position by a
+// consumer of the published package.
 //
-// Each entry point emits a self-contained bundle, so a class implemented in
-// src/qwp/** is declared once per bundle. A class carrying private members is
-// nominal, so those declarations are mutually incompatible -- and qwp/node.d.ts
-// re-exports index's QwpSender wholesale (`export * from './index'`) while
-// createQwpNodeSender returns its own local, unexported one. The importable
-// type and the returned type are therefore different declarations no matter
-// which subpath the consumer imports from.
-//
-// The @ts-expect-error directives below record that defect. When the build
-// emits src/qwp/** as one shared chunk, each class collapses to a single
-// declaration, these annotations start compiling, and tsc reports the
-// directives as unused (TS2578) -- which is the signal to delete them.
+// src/_qwp/** is emitted as shared chunks rather than inlined per entry, so
+// each class is declared exactly once across the four bundles. Were an entry to
+// start inlining them again, its declaration would be a second, nominally
+// distinct one -- every class here carries private members -- and these
+// annotations would stop compiling.
 import {
   connectQwpNodeClient,
   createQwpNodeSender,
@@ -35,12 +28,10 @@ declare const clientOptions: Parameters<typeof connectQwpNodeClient>[0];
 const inferred = createQwpNodeSender(senderOptions);
 void inferred.flush();
 
-// @ts-expect-error known gap: node's QwpSender is a separate declaration.
 const annotated: QwpSender = createQwpNodeSender(senderOptions);
 void annotated;
 
 async function annotatedClient(): Promise<void> {
-  // @ts-expect-error known gap: node's QwpClient is a separate declaration.
   const client: QwpClient = await connectQwpNodeClient(clientOptions);
   void client;
 }
@@ -48,8 +39,8 @@ void annotatedClient;
 
 const schema = { ticker: symbol(), ts: designatedTimestamp("ns") } as const;
 
-// @ts-expect-error known gap: QwpTableWriter is nominal via its private
-// appendRow, so the writer a sender returns cannot be annotated either.
+// QwpTableWriter is nominal via its private appendRow, so this only compiles
+// while the writer a sender returns comes from the same declaration.
 const writer: QwpTableWriter<typeof schema> = inferred.writer("trades", schema);
 void writer;
 

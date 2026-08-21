@@ -1,4 +1,4 @@
-import { QWP_MAX_BATCH_ROWS_UPPER_BOUND } from "../core";
+import { QWP_MAX_BATCH_ROWS_UPPER_BOUND } from "../_core";
 
 export function validateQwpMaxBatchRows(
   value: number | undefined,

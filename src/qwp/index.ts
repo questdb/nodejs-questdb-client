@@ -6,13 +6,13 @@
  *
  * @packageDocumentation
  */
-export * from "./core";
-export * from "./client";
-export * from "./egress-session";
-export * from "./ingress-session";
-export * from "./sender";
-export * from "./sender-error";
-export * from "./transport";
+export * from "../_qwp/_core";
+export * from "../_qwp/client";
+export * from "../_qwp/egress-session";
+export * from "../_qwp/ingress-session";
+export * from "../_qwp/sender";
+export * from "../_qwp/sender-error";
+export * from "../_qwp/transport";
 export {
   binary,
   bool,
@@ -41,7 +41,7 @@ export {
   varchar,
   QWP_DECIMAL_MAX_SCALE,
   QwpWriterRowError,
-} from "./writer";
+} from "../_qwp/writer";
 export type {
   QwpDecimalInput,
   QwpDoubleArrayInput,
@@ -58,4 +58,4 @@ export type {
   QwpWriterColumnKind,
   QwpWriterRow,
   QwpWriterSchema,
-} from "./writer";
+} from "../_qwp/writer";

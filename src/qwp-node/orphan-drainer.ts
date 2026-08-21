@@ -7,20 +7,20 @@ import {
   QwpConnectionCloseInfo,
   QwpIngressTransportMetrics,
   QwpUpgradeError,
-} from "../qwp/transport";
+} from "../_qwp/transport";
 import {
   isQwpNodeReplayQuarantineSlotName,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreLockedError,
 } from "./file-replay-store";
-import { QwpProtocolError } from "../qwp/core/errors";
-import { QwpDurableAckPersistentFailureError } from "../qwp/internal/reconnecting-ingress-connection";
-import { QwpNotificationDispatcher } from "../qwp/internal/notification-dispatcher";
+import { QwpProtocolError } from "../_qwp/_core/errors";
+import { QwpDurableAckPersistentFailureError } from "../_qwp/_internal/reconnecting-ingress-connection";
+import { QwpNotificationDispatcher } from "../_qwp/_internal/notification-dispatcher";
 import {
   createQwpDataLossSenderError,
   defaultQwpSenderErrorHandler,
   type QwpSenderError,
-} from "../qwp/sender-error";
+} from "../_qwp/sender-error";
 
 const SEGMENT_SUFFIX = ".sfa";
 const SEGMENT_HEADER_SIZE = 24;

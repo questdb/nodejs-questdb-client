@@ -11,19 +11,19 @@ import {
   encodeQwpAcceptEncoding,
   QWP_VERSION,
   type QwpEgressCompression,
-} from "./core";
+} from "../_qwp/_core";
 import {
   openQwpWebSocket,
   QwpWebSocketLike,
   validateQwpWebSocketTimeouts,
-} from "./internal/websocket-connection";
+} from "../_qwp/_internal/websocket-connection";
 import {
   createQwpFailoverConnectionFactory,
   createQwpFailoverHealthTracker,
   QwpFailoverHealthTracker,
-} from "./internal/failover";
-import { createQwpEgressFailoverConnectionFactory } from "./internal/egress-routing";
-import { validateQwpMaxBatchRows } from "./internal/egress-limits";
+} from "../_qwp/_internal/failover";
+import { createQwpEgressFailoverConnectionFactory } from "../_qwp/_internal/egress-routing";
+import { validateQwpMaxBatchRows } from "../_qwp/_internal/egress-limits";
 import { resolveQwpNodeClientConfig } from "../qwp-node/client-config";
 import {
   QWP_INITIAL_CONNECT_MODE,
@@ -38,24 +38,27 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
-} from "./transport";
+} from "../_qwp/transport";
 import {
   QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
   QwpEgressSession,
   QwpEgressSessionOptions,
-} from "./egress-session";
-import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
+} from "../_qwp/egress-session";
+import {
+  QwpIngressSession,
+  QwpIngressSessionOptions,
+} from "../_qwp/ingress-session";
 import {
   createQwpDataLossSenderError,
   defaultQwpSenderErrorHandler,
   type QwpSenderError,
-} from "./sender-error";
-import { QwpSender, QwpSenderOptions } from "./sender";
+} from "../_qwp/sender-error";
+import { QwpSender, QwpSenderOptions } from "../_qwp/sender";
 import {
   QwpClient,
   QwpClientPoolOptions,
   type QwpPoolSlotReservation,
-} from "./client";
+} from "../_qwp/client";
 import {
   quarantineQwpNodeReplayStore,
   QwpNodeFileReplayStore,
@@ -119,7 +122,7 @@ export type {
   QwpNodeOrphanDrainerOptions,
 } from "../qwp-node/orphan-drainer";
 
-export type { QwpWebSocketLike } from "./internal/websocket-connection";
+export type { QwpWebSocketLike } from "../_qwp/_internal/websocket-connection";
 
 export class QwpVersionMismatchError extends QwpUpgradeError {
   constructor(

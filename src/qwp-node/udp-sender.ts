@@ -4,8 +4,8 @@ import {
   type QwpIngressEncodeOptions,
   type QwpIngressResponse,
   type QwpTableBuffer,
-} from "../qwp/core";
-import type { QwpSenderSession } from "../qwp/sender";
+} from "../_qwp/_core";
+import type { QwpSenderSession } from "../_qwp/sender";
 
 const DEFAULT_QWP_UDP_PORT = 9007;
 const DEFAULT_MAX_DATAGRAM_SIZE = 1_400;

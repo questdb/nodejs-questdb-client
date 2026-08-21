@@ -73,13 +73,13 @@ import {
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../src/qwp";
-import { QwpAsyncQueue } from "../../src/qwp/internal/async-queue";
+import { QwpAsyncQueue } from "../../src/_qwp/_internal/async-queue";
 import { qwpSegmentMaintenanceWorker } from "../../src/qwp-node/segment-maintenance-worker";
-import { createQwpEgressFailoverConnectionFactory } from "../../src/qwp/internal/egress-routing";
+import { createQwpEgressFailoverConnectionFactory } from "../../src/_qwp/_internal/egress-routing";
 import {
   createQwpFailoverConnectionFactory,
   createQwpFailoverHealthTracker,
-} from "../../src/qwp/internal/failover";
+} from "../../src/_qwp/_internal/failover";
 
 function nativeFlock(fd: number, operation: "exnb" | "un"): Promise<void> {
   return new Promise((resolve, reject) => {

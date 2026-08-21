@@ -6,8 +6,8 @@ import {
   type QwpIngressEncodeOptions,
   type QwpIngressResponse,
   type QwpTableBuffer,
-} from "../src/qwp/core";
-import { QwpSender, type QwpSenderSession } from "../src/qwp/sender";
+} from "../src/_qwp/_core";
+import { QwpSender, type QwpSenderSession } from "../src/_qwp/sender";
 import { BENCHMARK_WORKLOADS, type BenchmarkRow } from "./workloads";
 
 const ROWS = 10_000;

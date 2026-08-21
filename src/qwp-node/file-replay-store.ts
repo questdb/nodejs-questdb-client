@@ -11,12 +11,12 @@ import {
 } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { QWP_MAX_SYMBOL_DICTIONARY_SIZE } from "../qwp/core";
+import { QWP_MAX_SYMBOL_DICTIONARY_SIZE } from "../_qwp/_core";
 import {
   QwpIngressReplayRecord,
   QwpIngressReplayReference,
   QwpIngressReplayStore,
-} from "../qwp/transport";
+} from "../_qwp/transport";
 import {
   QwpNodeAdvisoryLock,
   QwpNodeAdvisoryLockBusyError,

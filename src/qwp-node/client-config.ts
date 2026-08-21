@@ -7,11 +7,11 @@ import type {
   QwpNodeIngressOptions,
   QwpNodeStoreAndForwardOptions,
 } from "../qwp/node";
-import type { QwpClientPoolOptions } from "../qwp/client";
-import type { QwpEgressSessionOptions } from "../qwp/egress-session";
-import type { QwpIngressSessionOptions } from "../qwp/ingress-session";
-import type { QwpSenderOptions } from "../qwp/sender";
-import type { QwpReconnectOptions, QwpTarget } from "../qwp/transport";
+import type { QwpClientPoolOptions } from "../_qwp/client";
+import type { QwpEgressSessionOptions } from "../_qwp/egress-session";
+import type { QwpIngressSessionOptions } from "../_qwp/ingress-session";
+import type { QwpSenderOptions } from "../_qwp/sender";
+import type { QwpReconnectOptions, QwpTarget } from "../_qwp/transport";
 
 const DEFAULT_QWP_PORT = 9000;
 const MAX_BATCH_ROWS = 1_048_576;

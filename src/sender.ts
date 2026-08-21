@@ -14,14 +14,14 @@ import {
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
-import { QWP_INGRESS_PATH } from "./qwp/core";
+import { QWP_INGRESS_PATH } from "./_qwp/_core";
 import {
   createQwpNodeSender,
   createQwpNodeUdpSender,
   QwpSender,
 } from "./qwp/node";
-import type { QwpTableWriter } from "./qwp/sender";
-import type { QwpWriterSchema } from "./qwp/writer";
+import type { QwpTableWriter } from "./_qwp/sender";
+import type { QwpWriterSchema } from "./_qwp/writer";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 

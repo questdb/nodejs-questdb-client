@@ -7,14 +7,14 @@ import {
   flattenQwpArray,
   utf8Length,
   type QwpArrayValue,
-} from "./core";
+} from "./_core";
 import {
   QwpBatchTooLargeError,
   QwpIngressAckTimeoutError,
   type QwpIngressSendResult,
   type QwpIngressMetrics,
 } from "./ingress-session";
-import { qwpColumnNameKey, validateQwpColumnName } from "./core/identifiers";
+import { qwpColumnNameKey, validateQwpColumnName } from "./_core/identifiers";
 import {
   isQwpWriterColumn,
   QwpWriterRowError,

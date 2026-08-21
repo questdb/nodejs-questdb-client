@@ -10,7 +10,7 @@ import { QwpHandshakeMetadata } from "./transport";
 import type {
   QwpNegotiatedEgressCompression,
   QwpServerInfoMessage,
-} from "./core";
+} from "./_core";
 
 const DEFAULT_POOL_MIN = 1;
 const DEFAULT_POOL_MAX = 4;

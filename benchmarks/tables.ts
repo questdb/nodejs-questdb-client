@@ -1,4 +1,4 @@
-import { QWP_COLUMN_TYPE, QwpTableBuffer } from "../src/qwp/core";
+import { QWP_COLUMN_TYPE, QwpTableBuffer } from "../src/_qwp/_core";
 import type { BenchmarkRow } from "./workloads";
 
 export function buildBenchmarkTable(
