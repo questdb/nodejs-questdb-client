@@ -23,6 +23,7 @@ import {
   QwpNodeAdvisoryLockUnavailableError,
 } from "./advisory-lock";
 import { qwpSegmentMaintenanceWorker } from "./segment-maintenance-worker";
+import { log } from "../logging";
 
 const FORMAT_VERSION = 1;
 const MAX_FRAME_SEQUENCE = 0x7fffffffffffffffn;
@@ -132,6 +133,20 @@ interface PendingCapacity {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * Frames discarded while recovering a damaged journal. Emitted instead of
+ * failing recovery when the damage sits in the active segment, matching the
+ * Java client, which zeroes an active torn tail by policy and reports the
+ * residue through a WARN plus MmapSegment.tornTailBytes().
+ */
+export interface QwpNodeReplayDataLossReport {
+  readonly directory: string;
+  readonly segmentFile: string;
+  /** Bytes after the damaged record that recovery could not reach. */
+  readonly discardedBytes: number;
+  readonly reason: string;
+}
+
 export interface QwpNodeFileReplayStoreOptions {
   /** Exclusive directory used by one ingress session. */
   directory: string;
@@ -164,6 +179,11 @@ export interface QwpNodeFileReplayStoreOptions {
   backpressurePolicy?: QwpSfBackpressurePolicy;
   /** Per-append disk-capacity wait deadline. Defaults to 30 seconds. */
   appendDeadlineMs?: number;
+  /**
+   * Reports journal bytes abandoned during recovery. Defaults to logging at
+   * error level; recovery still succeeds, so this must never be silent.
+   */
+  onRecoveryDataLoss?: (report: QwpNodeReplayDataLossReport) => void;
 }
 
 export interface QwpNodeFileReplayStoreMetrics {
@@ -318,6 +338,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly checkpointIntervalMs: number;
   private readonly backpressurePolicy: QwpSfBackpressurePolicy;
   private readonly appendDeadlineMs: number;
+  private readonly onRecoveryDataLoss?: (
+    report: QwpNodeReplayDataLossReport,
+  ) => void;
   private readonly records = new Map<bigint, StoredRecord>();
   private readonly segments = new Map<string, StoredSegment>();
   private readonly segmentOrder: StoredSegment[] = [];
@@ -407,6 +430,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         "store-and-forward checkpointIntervalMs requires durability='periodic'",
       );
     }
+    this.onRecoveryDataLoss = options.onRecoveryDataLoss;
     this.appendDeadlineMs = validateTimerDelay(
       options.appendDeadlineMs ?? DEFAULT_APPEND_DEADLINE_MS,
       "store-and-forward appendDeadlineMs",
@@ -546,6 +570,24 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 name,
                 "non-active segment has a torn record tail",
               );
+            }
+            if (decoded.interiorDamage) {
+              // The active segment's residue is abandoned by policy, matching
+              // the Java client: past a mid-file tear the frames behind it are
+              // unreachable anyway, because replay requires a contiguous
+              // sequence and the tear breaks it. Recovery therefore proceeds on
+              // the valid prefix, but the loss is always reported -- discarding
+              // it silently is what made this dangerous.
+              this.reportRecoveryDataLoss({
+                directory: this.directory,
+                segmentFile: name,
+                discardedBytes: Math.max(
+                  0,
+                  decoded.size - SEGMENT_HEADER_SIZE - decoded.logicalSize,
+                ),
+                reason:
+                  "a damaged record is followed by intact records that replay can no longer reach",
+              });
             }
             await repairSegmentTail(
               path,
@@ -1825,6 +1867,26 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
   }
 
+  /**
+   * Recovery succeeded, so this must not throw: a reporting failure cannot be
+   * allowed to brick a slot that is otherwise ready to replay. Without a
+   * handler it logs, so abandoned journal bytes are never silent.
+   */
+  private reportRecoveryDataLoss(report: QwpNodeReplayDataLossReport): void {
+    const message =
+      `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
+      `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`;
+    if (!this.onRecoveryDataLoss) {
+      log("error", message);
+      return;
+    }
+    try {
+      this.onRecoveryDataLoss(report);
+    } catch {
+      log("error", message);
+    }
+  }
+
   private async removeAcknowledgedThrough(): Promise<void> {
     if (this.acknowledgedThrough < 0n) return;
     await ignoreMissing(unlink(join(this.directory, ACK_FILE)));
@@ -2033,6 +2095,12 @@ interface DecodedSegment {
   /** Bytes occupied by encoded records, excluding the fixed segment header. */
   readonly logicalSize: number;
   readonly tornTail: boolean;
+  /**
+   * Set when structurally intact data still follows the damaged record, which
+   * makes this a hole rather than an unwritten tail. Repairing it would delete
+   * records that are still on disk, so recovery quarantines instead.
+   */
+  readonly interiorDamage?: boolean;
 }
 
 function selectRecoveredActivePath(
@@ -2121,16 +2189,15 @@ async function scanSegment(
     const remaining = fileSize - offset;
     const headerBytes = Math.min(remaining, FRAME_HEADER_SIZE);
     await readFully(handle, frameHeader.subarray(0, headerBytes), offset);
-    if (
-      frameHeader[0] === 0 &&
-      isZeroFilled(frameHeader, 0, headerBytes) &&
-      (await isZeroFilledFile(
+    const zeroedHeader =
+      frameHeader[0] === 0 && isZeroFilled(frameHeader, 0, headerBytes);
+    if (zeroedHeader) {
+      const paddingToEnd = await isZeroFilledFile(
         handle,
         offset + headerBytes,
         fileSize,
         scanBuffer,
-      ))
-    ) {
+      );
       return {
         firstSequence,
         manifestRequired: (flags & MANIFEST_REQUIRED_FLAG) !== 0,
@@ -2138,7 +2205,12 @@ async function scanSegment(
         size: fileSize,
         records,
         logicalSize: offset - SEGMENT_HEADER_SIZE,
-        tornTail: false,
+        // Padding to EOF is the ordinary unwritten tail. A zeroed record with
+        // live bytes behind it is a lost block -- the shape an unordered
+        // page-cache writeback leaves after a host crash -- so the records
+        // after it are still intact and must not be truncated away.
+        tornTail: !paddingToEnd,
+        interiorDamage: !paddingToEnd,
       };
     }
     if (remaining < FRAME_HEADER_SIZE) {
@@ -2187,6 +2259,14 @@ async function scanSegment(
         records,
         logicalSize: offset - SEGMENT_HEADER_SIZE,
         tornTail: true,
+        // A record that still verifies where this one ends means the damage is
+        // bit rot in the middle of the journal, not an interrupted append.
+        interiorDamage: await hasValidRecordAt(
+          handle,
+          recordEnd,
+          fileSize,
+          scratch,
+        ),
       };
     }
     const frameSequence = firstSequence + BigInt(records.length);
@@ -2218,6 +2298,39 @@ function isZeroFilled(
     if (bytes[index] !== 0) return false;
   }
   return true;
+}
+
+/**
+ * Reports whether a complete, CRC-verified record starts at `offset`. Records
+ * are contiguous, so this is the only place the next one can begin: finding it
+ * proves the preceding damage has intact data behind it.
+ */
+async function hasValidRecordAt(
+  handle: FileHandle,
+  offset: number,
+  fileSize: number,
+  scratch: SegmentScanScratch,
+): Promise<boolean> {
+  if (offset + FRAME_HEADER_SIZE > fileSize) return false;
+  const frameHeader = scratch.frameHeader;
+  await readFully(handle, frameHeader, offset);
+  if (frameHeader[0] === 0 && isZeroFilled(frameHeader, 0, FRAME_HEADER_SIZE)) {
+    return false;
+  }
+  const payloadLength = frameHeader.readUInt32LE(4);
+  if (offset + FRAME_HEADER_SIZE + payloadLength > fileSize) return false;
+  let crc = crc32cUpdate(0xffffffff, frameHeader.subarray(4));
+  let payloadOffset = offset + FRAME_HEADER_SIZE;
+  let payloadRemaining = payloadLength;
+  while (payloadRemaining > 0) {
+    const chunkLength = Math.min(payloadRemaining, scratch.data.byteLength);
+    const chunk = scratch.data.subarray(0, chunkLength);
+    await readFully(handle, chunk, payloadOffset);
+    crc = crc32cUpdate(crc, chunk);
+    payloadOffset += chunkLength;
+    payloadRemaining -= chunkLength;
+  }
+  return frameHeader.readUInt32LE(0) === (crc ^ 0xffffffff) >>> 0;
 }
 
 async function isZeroFilledFile(

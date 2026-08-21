@@ -126,7 +126,8 @@ export function createQwpProtocolViolationSenderError(
 
 export function createQwpDataLossSenderError(
   message: string,
-  quarantinedPath: string,
+  /** Omitted when the bytes were abandoned rather than preserved on disk. */
+  quarantinedPath?: string,
 ): QwpSenderError {
   return Object.freeze({
     category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,

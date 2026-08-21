@@ -47,6 +47,7 @@ import {
 import { QwpIngressSession, QwpIngressSessionOptions } from "./ingress-session";
 import {
   createQwpDataLossSenderError,
+  defaultQwpSenderErrorHandler,
   type QwpSenderError,
 } from "./sender-error";
 import { QwpSender, QwpSenderOptions } from "./sender";
@@ -61,7 +62,10 @@ import {
   QwpReplayStoreCorruptionError,
   QwpReplayStoreQuarantinedError,
 } from "../qwp-node/file-replay-store";
-import type { QwpNodeFileReplayStoreOptions } from "../qwp-node/file-replay-store";
+import type {
+  QwpNodeFileReplayStoreOptions,
+  QwpNodeReplayDataLossReport,
+} from "../qwp-node/file-replay-store";
 import {
   QwpNodeOrphanDrainer,
   type QwpNodeOrphanDrainEvent,
@@ -88,6 +92,7 @@ export {
 export type {
   QwpNodeFileReplayStoreMetrics,
   QwpNodeFileReplayStoreOptions,
+  QwpNodeReplayDataLossReport,
   QwpSfBackpressurePolicy,
   QwpSfDurability,
 } from "../qwp-node/file-replay-store";
@@ -569,7 +574,12 @@ async function connectQwpNodeIngressInternal(
     );
   }
   let replayStore = storeAndForward
-    ? new QwpNodeFileReplayStore(storeAndForward)
+    ? new QwpNodeFileReplayStore(
+        withRecoveryDataLossReporter(
+          storeAndForward,
+          sessionOptions.onSenderError,
+        ),
+      )
     : sessionOptions.replayStore;
   const reconnect = storeAndForward
     ? (sessionOptions.reconnect ?? {})
@@ -641,7 +651,12 @@ async function connectQwpNodeIngressInternal(
       recoveryError,
       effectiveSessionOptions.onSenderError,
     );
-    replayStore = new QwpNodeFileReplayStore(storeAndForward);
+    replayStore = new QwpNodeFileReplayStore(
+      withRecoveryDataLossReporter(
+        storeAndForward,
+        effectiveSessionOptions.onSenderError,
+      ),
+    );
     session = await QwpIngressSession.connect(connectionFactory, {
       ...effectiveSessionOptions,
       replayStore,
@@ -652,6 +667,32 @@ async function connectQwpNodeIngressInternal(
     orphanDrainer.start();
   }
   return session;
+}
+
+/**
+ * Routes abandoned journal bytes into the onSenderError stream. Recovery has
+ * already succeeded by the time this runs, so it only reports; the caller's
+ * own onRecoveryDataLoss wins when supplied.
+ */
+function withRecoveryDataLossReporter(
+  options: QwpNodeStoreAndForwardOptions,
+  onSenderError?: (error: QwpSenderError) => void,
+): QwpNodeStoreAndForwardOptions {
+  if (options.onRecoveryDataLoss || !onSenderError) return options;
+  return {
+    ...options,
+    onRecoveryDataLoss: (report: QwpNodeReplayDataLossReport) => {
+      const senderError = createQwpDataLossSenderError(
+        `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
+          `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`,
+      );
+      try {
+        onSenderError(senderError);
+      } catch {
+        defaultQwpSenderErrorHandler(senderError);
+      }
+    },
+  };
 }
 
 function isQuarantinableReplayRecoveryError(error: unknown): boolean {

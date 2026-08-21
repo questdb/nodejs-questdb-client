@@ -27,6 +27,7 @@ import {
   QwpReplayStoreLockedError,
   QwpReplayStoreSegmentTooLargeError,
   QwpReplayStoreUnavailableError,
+  type QwpNodeReplayDataLossReport,
 } from "../../src/qwp/node";
 import {
   QWP_RECONNECT_EVENT_KIND,
@@ -3778,6 +3779,108 @@ describe("QWP Node file replay store", () => {
     ]);
     expect((await stat(join(directory, segment))).size).toBe(validSize);
     await recovered.close();
+  });
+
+  it.each([
+    ["a zeroed record", "hole"],
+    ["a flipped payload byte", "bitrot"],
+  ] as const)(
+    "reports the records %s strands behind it instead of dropping them silently",
+    async (_label, shape) => {
+      // Truncating here is only correct for an unwritten tail. A lost block --
+      // what an unordered page-cache writeback leaves after a host crash under
+      // the connect-string default durability -- or bit rot strands the records
+      // behind it. Replay needs a contiguous sequence, so the tear makes them
+      // unreachable whatever recovery does; the Java client abandons the
+      // active segment's residue by policy for exactly that reason. What it
+      // must never do is abandon them without saying so.
+      const directory = await trackedDirectory();
+      const first = new QwpNodeFileReplayStore({ directory });
+      await first.load();
+      for (let sequence = 0; sequence < 5; sequence++) {
+        await first.append({
+          frameSequence: BigInt(sequence),
+          payload: Uint8Array.of(sequence, sequence, sequence),
+        });
+      }
+      await first.close();
+
+      const [segment] = await assignedReplaySegments(directory);
+      const recordSize = 8 + 3;
+      const secondRecord = 24 + recordSize * 2;
+      const file = await open(join(directory, segment), "r+");
+      try {
+        await file.write(
+          shape === "hole" ? new Uint8Array(recordSize) : Uint8Array.of(0xff),
+          0,
+          shape === "hole" ? recordSize : 1,
+          shape === "hole" ? secondRecord : secondRecord + 8,
+        );
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+
+      const reports: QwpNodeReplayDataLossReport[] = [];
+      const recovered = new QwpNodeFileReplayStore({
+        directory,
+        onRecoveryDataLoss: (report) => reports.push(report),
+      });
+      // Recovery still succeeds on the valid prefix, so the producer keeps
+      // running rather than being blocked behind an operator.
+      await expect(recovered.load()).resolves.toEqual([
+        { frameSequence: 0n, payload: Uint8Array.of(0, 0, 0) },
+        { frameSequence: 1n, payload: Uint8Array.of(1, 1, 1) },
+      ]);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        directory,
+        segmentFile: segment,
+        reason: expect.stringContaining("replay can no longer reach"),
+      });
+      expect(reports[0].discardedBytes).toBeGreaterThan(0);
+      await recovered.close();
+    },
+  );
+
+  it("still fails closed when a sealed segment has a torn record", async () => {
+    // Java zeroes a sealed suffix only on proof that its frame accounting is
+    // complete; a tear that cost frames fails recovery before any mutation so
+    // every byte stays on disk for extraction.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 32,
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 6; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: Uint8Array.of(sequence, sequence, sequence),
+      });
+    }
+    await first.close();
+
+    const segments = await assignedReplaySegments(directory);
+    expect(segments.length).toBeGreaterThan(1);
+    const sealed = await open(join(directory, segments[0]), "r+");
+    try {
+      await sealed.write(Uint8Array.of(0xff), 0, 1, 24 + 8);
+      await sealed.sync();
+    } finally {
+      await sealed.close();
+    }
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    await expect(recovered.load()).rejects.toBeInstanceOf(
+      QwpReplayStoreCorruptionError,
+    );
+    expect(reports).toEqual([]);
+    await recovered.close().catch(() => undefined);
   });
 
   it.each([
