@@ -4,7 +4,7 @@
   "description": "QuestDB Node.js Client",
   "scripts": {
     "test": "vitest",
-    "test:qwp-browser-e2e": "pnpm build && vitest run --config vitest.qwp-browser.config.ts",
+    "test:qwp-browser": "pnpm build && vitest run --config vitest.qwp-browser.config.ts",
     "test:dist": "pnpm build && vitest run --config vitest.dist.config.ts",
     "typecheck:dist": "pnpm build && tsc --noEmit -p tsconfig.dist-types.json && tsc --noEmit -p tsconfig.dist-types.cjs.json",
     "build": "bunchee",

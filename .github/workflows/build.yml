@@ -71,12 +71,13 @@ jobs:
       - name: Type-checking (built package consumer)
         run: pnpm typecheck:dist
 
-  qwp-browser-e2e:
-    name: QWP browser E2E
+  # Drives the built browser bundle in real Chromium against a local mock
+  # server. Tests that need a live QuestDB belong in the server repositories,
+  # where the topology and authentication fixtures already exist.
+  qwp-browser:
+    name: QWP browser bundle
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      QWP_BROWSER_E2E_IMAGE: ${{ vars.QWP_BROWSER_E2E_IMAGE || 'questdb/questdb:nightly' }}
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -94,8 +95,8 @@ jobs:
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Authenticated ingress and egress
-        run: pnpm test:qwp-browser-e2e
+      - name: Browser bundle tests
+        run: pnpm test:qwp-browser
 
   enterprise-qwp-e2e:
     name: Dispatch Enterprise QWP E2E
