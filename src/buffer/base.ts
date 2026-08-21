@@ -156,22 +156,14 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   symbol(name: string, value: unknown): SenderBuffer {
+    this.validateSymbolCall(name);
     // A null or undefined value omits the symbol entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
     }
-    if (typeof name !== "string") {
-      throw new Error(`Symbol name must be a string, received ${typeof name}`);
-    }
-    if (!this.hasTable || this.hasColumns) {
-      throw new Error(
-        "Symbol can be added only after table name is set and before any column added",
-      );
-    }
     const valueStr = value.toString();
     this.checkCapacity([name, valueStr], 2 + name.length + valueStr.length);
     this.write(",");
-    validateColumnName(name, this.maxNameLength);
     this.writeEscaped(name);
     this.write("=");
     this.writeEscaped(valueStr);
@@ -188,6 +180,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   stringColumn(name: string, value: string | null | undefined): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -215,6 +208,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @return {SenderBuffer} Returns with a reference to this buffer.
    */
   booleanColumn(name: string, value: boolean | null | undefined): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -270,6 +264,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @throws Error if the value is not an integer
    */
   intColumn(name: string, value: number | null | undefined): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -322,6 +317,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     value: number | bigint | null | undefined,
     unit: TimestampUnit = "us",
   ): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -458,6 +454,47 @@ abstract class SenderBufferBase implements SenderBuffer {
 
   /**
    * @ignore
+   * Validates everything about a column call that does not depend on its
+   * value. Every setter runs this before testing the value for nullish, so a
+   * malformed name or a misplaced call is reported whether or not this
+   * particular row happens to carry a value for that column -- otherwise the
+   * same call site raises on some rows and stays silent on others, and a
+   * misspelled or over-long name first surfaces in production, on the row that
+   * happens to be populated.
+   *
+   * @param name - The column name to validate.
+   */
+  protected validateColumnCall(name: string): void {
+    if (typeof name !== "string") {
+      throw new Error(`Column name must be a string, received ${typeof name}`);
+    }
+    if (!this.hasTable) {
+      throw new Error("Column can be set only after table name is set");
+    }
+    validateColumnName(name, this.maxNameLength);
+  }
+
+  /**
+   * @ignore
+   * The symbol equivalent of {@link validateColumnCall}. Symbols carry an
+   * extra ordering rule: they must precede every column on the row.
+   *
+   * @param name - The symbol name to validate.
+   */
+  protected validateSymbolCall(name: string): void {
+    if (typeof name !== "string") {
+      throw new Error(`Symbol name must be a string, received ${typeof name}`);
+    }
+    if (!this.hasTable || this.hasColumns) {
+      throw new Error(
+        "Symbol can be added only after table name is set and before any column added",
+      );
+    }
+    validateColumnName(name, this.maxNameLength);
+  }
+
+  /**
+   * @ignore
    * Common logic for writing column data to the buffer.
    * @param name - Column name
    * @param value - Column value
@@ -470,20 +507,16 @@ abstract class SenderBufferBase implements SenderBuffer {
     writeValue: () => void,
     valueType?: string,
   ) {
-    if (typeof name !== "string") {
-      throw new Error(`Column name must be a string, received ${typeof name}`);
-    }
+    // The name and row-state checks ran in validateColumnCall(), which every
+    // setter calls before deciding whether the value is nullish. Repeating
+    // validateColumnName() here would rescan the name on every cell.
     if (valueType && typeof value !== valueType) {
       throw new Error(
         `Column value must be of type ${valueType}, received ${typeof value}`,
       );
     }
-    if (!this.hasTable) {
-      throw new Error("Column can be set only after table name is set");
-    }
     this.checkCapacity([name], 2 + name.length);
     this.write(this.hasColumns ? "," : " ");
-    validateColumnName(name, this.maxNameLength);
     this.writeEscaped(name);
     this.write("=");
     writeValue();
@@ -582,6 +615,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     name: string,
     value: string | number | null | undefined,
   ): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -613,6 +647,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     unscaled: bigint | Int8Array | null | undefined,
     scale: number,
   ): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(unscaled)) {
       return this;

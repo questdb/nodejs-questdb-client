@@ -28,6 +28,7 @@ class SenderBufferV1 extends SenderBufferBase {
    * @return {Sender} Returns with a reference to this sender.
    */
   floatColumn(name: string, value: number | null | undefined): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -74,6 +75,7 @@ class SenderBufferV1 extends SenderBufferBase {
    * @throws Error indicating arrays are not supported in v1
    */
   arrayColumn(name: string, value: unknown[] | null | undefined): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;

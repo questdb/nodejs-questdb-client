@@ -534,6 +534,61 @@ describe("Sender message builder test suite (anything not covered in client inte
     }
   });
 
+  it("validates the column call even when the value is nullish", async function () {
+    // Omitting the column must not take the rest of the call's validation with
+    // it. A nullish value used to return before the name, the row state and
+    // the decimal scale were ever looked at, so the same call site raised on
+    // rows that carried a value and stayed silent on rows that did not -- a
+    // misspelled or over-long name first surfaced in production.
+    const build = () =>
+      new Sender({
+        protocol: "tcp",
+        protocol_version: "3",
+        host: "host",
+        auto_flush: false,
+        max_name_len: 5,
+        init_buf_size: 1024,
+      }).table("t");
+
+    for (const value of [null, undefined] as const) {
+      expect(() => build().stringColumn("tooLongForFive", value)).toThrow(
+        "Column name is too long, max length is 5",
+      );
+      expect(() => build().intColumn("", value)).toThrow(
+        "Empty string is not allowed as column name",
+      );
+      expect(() => build().floatColumn("a.b", value)).toThrow(
+        "Invalid character in column name: .",
+      );
+      expect(() =>
+        build().booleanColumn(123 as unknown as string, value),
+      ).toThrow("Column name must be a string, received number");
+      expect(() => build().symbol(123 as unknown as string, value)).toThrow(
+        "Symbol name must be a string, received number",
+      );
+      // Symbols must still precede every column on the row.
+      expect(() => build().intColumn("i", 1).symbol("s", value)).toThrow(
+        "Symbol can be added only after table name is set and before any column added",
+      );
+      // The scale describes the column, not this row's value.
+      expect(() => build().decimalColumn("d", value, 999)).toThrow(
+        "Scale must be between 0 and 76",
+      );
+    }
+
+    // A column set before any table is still rejected.
+    const noTable = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+    expect(() => noTable.stringColumn("c", null)).toThrow(
+      "Column can be set only after table name is set",
+    );
+  });
+
   it("omits decimal columns with null or undefined value", async function () {
     const sender = new Sender({
       protocol: "tcp",

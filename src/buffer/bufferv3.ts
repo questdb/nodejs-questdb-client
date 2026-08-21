@@ -46,6 +46,7 @@ class SenderBufferV3 extends SenderBufferV2 {
     name: string,
     value: string | number | null | undefined,
   ): SenderBuffer {
+    this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -91,12 +92,16 @@ class SenderBufferV3 extends SenderBufferV2 {
     unscaled: bigint | Int8Array | null | undefined,
     scale: number,
   ): SenderBuffer {
+    this.validateColumnCall(name);
+    // The scale describes the column, not this row's value, so it is checked
+    // before the value is: otherwise a bad constant is reported only on rows
+    // that happen to carry a value.
+    if (scale < 0 || scale > 76) {
+      throw new RangeError("Scale must be between 0 and 76");
+    }
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(unscaled)) {
       return this;
-    }
-    if (scale < 0 || scale > 76) {
-      throw new RangeError("Scale must be between 0 and 76");
     }
     let arr: number[];
     if (typeof unscaled === "bigint") {
