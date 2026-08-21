@@ -9,6 +9,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -42,6 +43,13 @@ let stealCounter = 0;
 interface OwnerRecord {
   readonly pid: number;
   readonly host: string;
+  /**
+   * Identifies one acquisition, not one pathname. Ownership is otherwise a
+   * path plus an mtime, and both are reused the moment a lock changes hands,
+   * so a holder that removed a directory by path alone could remove whichever
+   * acquisition happens to occupy that path now.
+   */
+  readonly token?: string;
 }
 
 /** @internal Advisory-lock contention with Java-compatible diagnostics. */
@@ -92,6 +100,7 @@ export class QwpNodeAdvisoryLock {
     readonly pidPath: string,
     private readonly ownerPath: string,
     private ownerMtimeMs: number,
+    private readonly token: string,
   ) {
     this.startHeartbeat();
   }
@@ -146,7 +155,7 @@ export class QwpNodeAdvisoryLock {
     // leaves no metadata behind for a slot this process does not own.
     let claimed = await claimOwnerDirectory(ownerPath);
     if (!claimed) {
-      if (await reclaimIfStale(ownerPath, pidPath)) {
+      if (await reclaimIfStale(ownerPath)) {
         claimed = await claimOwnerDirectory(ownerPath);
       }
       if (!claimed) {
@@ -157,11 +166,12 @@ export class QwpNodeAdvisoryLock {
       }
     }
 
+    const token = newOwnerToken();
     let ownerMtimeMs: number;
     try {
       await writeFile(
         join(ownerPath, OWNER_FILE),
-        JSON.stringify({ pid: process.pid, host: hostname() }),
+        JSON.stringify({ pid: process.pid, host: hostname(), token }),
         { encoding: "utf8", mode: 0o600 },
       );
       ownerMtimeMs = await touchOwnerDirectory(ownerPath);
@@ -189,7 +199,13 @@ export class QwpNodeAdvisoryLock {
       flag: "w",
       mode: 0o600,
     }).catch(() => undefined);
-    return new QwpNodeAdvisoryLock(lockPath, pidPath, ownerPath, ownerMtimeMs);
+    return new QwpNodeAdvisoryLock(
+      lockPath,
+      pidPath,
+      ownerPath,
+      ownerMtimeMs,
+      token,
+    );
   }
 
   async release(): Promise<void> {
@@ -205,6 +221,14 @@ export class QwpNodeAdvisoryLock {
         this.lockPath,
       );
     }
+    // A release can be retried long after the fact, by which time the pathname
+    // may hold somebody else's acquisition. Removing it then would strip a
+    // live lock, so prove the directory is still the one this object created.
+    if (!(await this.ownsOwnerDirectory())) {
+      this.released = true;
+      pendingReleases.delete(this);
+      return;
+    }
     try {
       await removeOwnerDirectory(this.ownerPath);
     } catch (error) {
@@ -219,6 +243,16 @@ export class QwpNodeAdvisoryLock {
     }
     this.released = true;
     pendingReleases.delete(this);
+  }
+
+  /**
+   * Whether the owner directory still carries this acquisition's token. A
+   * missing directory, an unreadable record, or a different token all mean
+   * this object no longer owns the pathname.
+   */
+  private async ownsOwnerDirectory(): Promise<boolean> {
+    const owner = await readOwnerFile(this.ownerPath);
+    return owner?.token !== undefined && owner.token === this.token;
   }
 
   private startHeartbeat(): void {
@@ -291,10 +325,7 @@ async function touchOwnerDirectory(ownerPath: string): Promise<number> {
  * aside first: `rename` lets exactly one contender win, so a lock can never be
  * removed twice and handed to two acquirers.
  */
-async function reclaimIfStale(
-  ownerPath: string,
-  pidPath: string,
-): Promise<boolean> {
+async function reclaimIfStale(ownerPath: string): Promise<boolean> {
   let mtimeMs: number;
   try {
     mtimeMs = (await stat(ownerPath)).mtimeMs;
@@ -302,7 +333,7 @@ async function reclaimIfStale(
     // Already gone; the caller's next mkdir decides the winner.
     return true;
   }
-  if (!(await isStale(ownerPath, pidPath, mtimeMs))) return false;
+  if (!(await isStale(ownerPath, mtimeMs))) return false;
 
   const abandoned = `${ownerPath}.stale-${process.pid}-${stealCounter++}`;
   try {
@@ -315,42 +346,54 @@ async function reclaimIfStale(
   return true;
 }
 
-async function isStale(
-  ownerPath: string,
-  pidPath: string,
-  mtimeMs: number,
-): Promise<boolean> {
+async function isStale(ownerPath: string, mtimeMs: number): Promise<boolean> {
   if (Date.now() - mtimeMs > STALE_AFTER_MS) return true;
   // Fast path for a crash on this host: a heartbeat that can never resume is
   // stale immediately. A PID is meaningless on another host, so this is only
-  // consulted when the recorded host matches.
-  const owner = await readOwnerRecord(ownerPath, pidPath);
+  // consulted when the record itself names this host.
+  //
+  // A directory with no readable record expires by mtime alone. It used to
+  // fall back to the `.lock.pid` sidecar, which deliberately outlives its
+  // holder for Java parity and therefore always names a process that has
+  // already exited -- and the fallback stamped that dead PID with the local
+  // hostname, so the host check below could not reject it. Every acquisition
+  // is briefly recordless, between its mkdir and its record write, so a
+  // contender arriving in that window declared a directory that had just been
+  // created stale and took it away from its live owner.
+  const owner = await readOwnerFile(ownerPath);
   return (
     owner !== undefined && owner.host === hostname() && !isPidAlive(owner.pid)
   );
 }
 
-async function readOwnerRecord(
+async function readOwnerFile(
   ownerPath: string,
-  pidPath: string,
 ): Promise<OwnerRecord | undefined> {
   try {
     const parsed: unknown = JSON.parse(
       await readFile(join(ownerPath, OWNER_FILE), "utf8"),
     );
     if (parsed && typeof parsed === "object") {
-      const { pid, host } = parsed as Partial<OwnerRecord>;
+      const { pid, host, token } = parsed as Partial<OwnerRecord>;
       if (typeof pid === "number" && typeof host === "string") {
-        return { pid, host };
+        return {
+          pid,
+          host,
+          token: typeof token === "string" ? token : undefined,
+        };
       }
     }
   } catch {
-    // Fall through: a lock written by an older client, or a torn write.
+    // A record written by an older client, a torn write, or an acquisition
+    // that has not written its record yet. None of them prove a holder is
+    // gone, so the caller falls back to the mtime heartbeat.
   }
-  // A slot locked before the owner record existed still has the PID sidecar,
-  // but nothing proves which host wrote it, so it can only expire by mtime.
-  const pid = await readHolderPid(pidPath);
-  return pid === undefined ? undefined : { pid, host: hostname() };
+  return undefined;
+}
+
+/** Identifies one acquisition, so a release can prove what it is removing. */
+function newOwnerToken(): string {
+  return `${process.pid}-${randomUUID()}`;
 }
 
 function isPidAlive(pid: number): boolean {

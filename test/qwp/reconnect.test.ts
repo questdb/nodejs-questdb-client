@@ -72,6 +72,7 @@ import {
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../src/qwp";
+import { QwpNodeAdvisoryLock } from "../../src/qwp-node/advisory-lock";
 import { QwpAsyncQueue } from "../../src/_qwp/_internal/async-queue";
 import { qwpSegmentMaintenanceWorker } from "../../src/qwp-node/segment-maintenance-worker";
 import { createQwpEgressFailoverConnectionFactory } from "../../src/_qwp/_internal/egress-routing";
@@ -4097,6 +4098,53 @@ describe("QWP Node file replay store", () => {
     await expect(stores[loser].load()).resolves.toEqual([]);
     await stores[loser].close();
     await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("treats an owner directory with no record yet as held", async () => {
+    // The state every acquisition passes through between its mkdir and its
+    // owner-record write. Staleness used to fall back to the `.lock.pid`
+    // sidecar, which outlives its holder for Java parity and so always names a
+    // process that has exited -- and it stamped that dead PID with the local
+    // hostname, so the same-host guard could not reject it. A contender
+    // arriving in that window declared a just-created directory stale and
+    // renamed it away from its live owner.
+    const directory = await trackedDirectory();
+    await mkdir(join(directory, ".lock.owner"));
+    await writeFile(join(directory, ".lock"), "");
+    await writeFile(join(directory, ".lock.pid"), "2147483647\n");
+    const ownerInode = (await stat(join(directory, ".lock.owner"))).ino;
+
+    const store = new QwpNodeFileReplayStore({ directory });
+    await expect(store.load()).rejects.toMatchObject({
+      name: "QwpReplayStoreLockedError",
+    });
+    expect((await stat(join(directory, ".lock.owner"))).ino).toBe(ownerInode);
+  });
+
+  it("does not remove an owner directory a later acquisition owns", async () => {
+    // A release can be retried long after the fact, and the pathname it holds
+    // is reused the moment the lock changes hands. Removing by path alone
+    // stripped whichever acquisition occupied the path at that point.
+    const directory = await trackedDirectory();
+    const lock = await QwpNodeAdvisoryLock.acquire(directory);
+    const ownerFile = join(directory, ".lock.owner", "owner");
+
+    // Stand in for the pathname having been handed to another acquisition.
+    await writeFile(
+      ownerFile,
+      JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        token: "someone-else",
+      }),
+    );
+
+    await lock.release();
+    await expect(stat(join(directory, ".lock.owner"))).resolves.toBeDefined();
+    expect(JSON.parse(await readFile(ownerFile, "utf8")).token).toBe(
+      "someone-else",
+    );
+    await rm(join(directory, ".lock.owner"), { recursive: true, force: true });
   });
 
   it("reclaims a slot whose owner heartbeat stopped", async () => {
