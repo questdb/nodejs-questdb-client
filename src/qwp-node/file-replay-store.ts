@@ -234,6 +234,27 @@ export class QwpReplayStoreQuarantinedError extends QwpReplayStoreError {
   }
 }
 
+/**
+ * The advisory lock guarding this journal was taken over by another process
+ * while it was open, so this store may no longer write to it.
+ *
+ * A holder whose heartbeat lapses -- a long synchronous section, a paused
+ * process, a stalled filesystem -- can have its slot reclaimed while it still
+ * believes it holds it. Whatever this store does next must not be an append:
+ * the new owner appends at offsets this store still believes are free, and
+ * because a frame's sequence is derived from its position, an overwrite of the
+ * same width leaves a journal that reopens as intact with the new owner's
+ * frames gone. Failing the append is what keeps that loss impossible.
+ */
+export class QwpReplayStoreLockLostError extends QwpReplayStoreError {
+  constructor(readonly directory: string) {
+    super(
+      `QWP store-and-forward journal lock was taken over by another process while it was open; this journal is no longer writable [directory=${directory}]`,
+    );
+    this.name = "QwpReplayStoreLockLostError";
+  }
+}
+
 export class QwpReplayStoreFullError extends QwpReplayStoreError {
   constructor(
     readonly maxBytes: number,
@@ -2036,6 +2057,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       throw new QwpReplayStoreError(
         "QWP store-and-forward journal must be loaded before use",
       );
+    }
+    // Every mutating path routes through here, so this is the one place that
+    // has to notice the slot was taken over. Writing on would corrupt the new
+    // owner's journal rather than this store's own.
+    if (this.slotLock?.lost) {
+      throw new QwpReplayStoreLockLostError(this.directory);
     }
     if (this.checkpointFailure) throw this.checkpointFailure;
     if (this.maintenanceFailure) throw this.maintenanceFailure;

@@ -93,6 +93,8 @@ export class QwpNodeAdvisoryLockError extends Error {
 export class QwpNodeAdvisoryLock {
   private released = false;
   private compromised = false;
+  /** When this object last proved it still owned the directory. */
+  private provenAtMs = Date.now();
   private heartbeat?: NodeJS.Timeout;
 
   private constructor(
@@ -275,15 +277,45 @@ export class QwpNodeAdvisoryLock {
       if (Math.trunc(current.mtimeMs) !== Math.trunc(this.ownerMtimeMs)) {
         // Someone judged this lock stale and took it. Stop refreshing so the
         // new owner's heartbeat is the only one advancing the mtime.
-        this.compromised = true;
-        this.stopHeartbeat();
+        this.markCompromised();
+        return;
+      }
+      // The mtime alone cannot separate our directory from a replacement that
+      // landed inside the same clock tick, and some filesystems report whole
+      // seconds. The token settles it.
+      if (!(await this.ownsOwnerDirectory())) {
+        this.markCompromised();
         return;
       }
       this.ownerMtimeMs = await touchOwnerDirectory(this.ownerPath);
-    } catch {
-      // A transient stat/utimes failure is not proof of loss. The next beat
-      // retries; a genuinely removed directory surfaces as a drifted mtime.
+      this.provenAtMs = Date.now();
+    } catch (error) {
+      // A directory that is gone is proof of loss: it cannot later reappear
+      // with a drifted mtime, so waiting for one means never noticing at all.
+      // Any other failure may be transient, and the next beat retries.
+      if (nodeErrorCode(error) === "ENOENT") this.markCompromised();
     }
+  }
+
+  /**
+   * Whether this lock is known to have been taken over. Callers that mutate
+   * the resource it guards must stop when it is true: the pathname now belongs
+   * to another acquisition, and writing on is what turns a lost lock into lost
+   * data.
+   */
+  get lost(): boolean {
+    if (this.compromised) return true;
+    // The heartbeat is a timer, so a section that blocks the event loop past
+    // the staleness window resumes with the flag still unset -- yet by then
+    // any contender was already entitled to reclaim the slot, and the first
+    // write after resuming lands before the timer can run. Ownership this
+    // object cannot still vouch for counts as lost.
+    return Date.now() - this.provenAtMs > STALE_AFTER_MS;
+  }
+
+  private markCompromised(): void {
+    this.compromised = true;
+    this.stopHeartbeat();
   }
 }
 

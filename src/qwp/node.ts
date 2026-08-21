@@ -88,6 +88,7 @@ export {
   QwpReplayStoreError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
+  QwpReplayStoreLockLostError,
   QwpReplayStoreQuarantinedError,
   QwpReplayStoreSegmentTooLargeError,
 } from "../qwp-node/file-replay-store";

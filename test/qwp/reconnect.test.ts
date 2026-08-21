@@ -4100,6 +4100,33 @@ describe("QWP Node file replay store", () => {
     await expectOnlyJavaSlotLockMetadata(directory);
   });
 
+  it("refuses to append once its slot lock can no longer be vouched for", async () => {
+    // A holder paused past the staleness window -- a long synchronous section,
+    // a suspended VM, a stalled filesystem -- can have its slot reclaimed while
+    // it still believes it holds it. It used to keep appending: the writes
+    // resolved, and because a frame's sequence comes from its position in the
+    // segment, an overwrite of the same width reopened as a complete journal
+    // with the new owner's frames silently gone.
+    //
+    // Only Date is faked here: the heartbeat is what must *not* get a chance to
+    // run, which is exactly the window the first write after resuming lands in.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 20_000);
+      await expect(
+        store.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+      ).rejects.toMatchObject({ name: "QwpReplayStoreLockLostError" });
+    } finally {
+      vi.useRealTimers();
+    }
+    await store.close().catch(() => undefined);
+  });
+
   it("treats an owner directory with no record yet as held", async () => {
     // The state every acquisition passes through between its mkdir and its
     // owner-record write. Staleness used to fall back to the `.lock.pid`
