@@ -143,7 +143,15 @@ export interface QwpSenderSession {
   close(code?: number, reason?: string): Promise<void>;
 }
 
-export type QwpSenderSessionFactory = () => Promise<QwpSenderSession>;
+/**
+ * Opens the sender's session. The signal is aborted by close(), so a connect
+ * still negotiating can be torn down instead of outliving the sender by up to
+ * its connect/auth deadline. Factories that ignore the parameter remain
+ * assignable, matching QwpConnectionFactory.
+ */
+export type QwpSenderSessionFactory = (
+  signal?: AbortSignal,
+) => Promise<QwpSenderSession>;
 
 /** Immutable high-level sender counters plus the active ingress snapshot. */
 export interface QwpSenderMetrics {
@@ -961,6 +969,8 @@ export class QwpSender {
   private readonly maxNameLength: number;
   private readonly log: QwpSenderLogger;
 
+  private readonly connectAbort = new AbortController();
+
   constructor(
     private readonly sessionFactory: QwpSenderSessionFactory,
     private readonly options: QwpSenderOptions = {},
@@ -1717,7 +1727,10 @@ export class QwpSender {
       }
     } else if (this.sessionPromise) {
       // A close deadline can expire while the connection factory is still in
-      // flight. Attach cleanup so a late connection cannot leak its socket.
+      // flight. Abort it so the socket and its deadline go away now rather
+      // than keeping the event loop alive until the connect timeout fires,
+      // and still attach cleanup in case it had already connected.
+      this.connectAbort.abort();
       void this.sessionPromise
         .then((connected) => connected.close())
         .catch(() => undefined);
@@ -2366,7 +2379,18 @@ export class QwpSender {
 
   private getSession(): Promise<QwpSenderSession> {
     if (!this.sessionPromise) {
-      const connecting = this.sessionFactory();
+      // close() bounds its own flush with a deadline but cannot cancel it, so
+      // an abandoned close flush stays runnable. Without this it could reach a
+      // cleared sessionPromise, dial the database again, and write rows after
+      // close() had already returned to the caller.
+      //
+      // Keyed on `closed`, not `closing`: close() is documented to publish
+      // completed rows, and doing that legitimately needs a session even when
+      // none was opened yet.
+      if (this.closed) {
+        return Promise.reject(this.unavailableError());
+      }
+      const connecting = this.sessionFactory(this.connectAbort.signal);
       const tracked = connecting
         .then((session) => {
           this.activeSession = session;
@@ -2395,6 +2419,12 @@ export class QwpSender {
     }
     const safeServerBudget = Math.max(1, Math.floor((cap * 9) / 10));
     return Math.min(this.autoFlushBytes, safeServerBudget);
+  }
+
+  private unavailableError(): Error {
+    return new Error(
+      this.closed ? "QWP sender is closed" : "QWP sender is closing",
+    );
   }
 
   private throwIfClosed(): void {

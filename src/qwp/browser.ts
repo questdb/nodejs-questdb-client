@@ -659,6 +659,8 @@ function connectQwpBrowserEgressEndpoint(
 export async function connectQwpBrowserIngress(
   options: QwpBrowserWebSocketOptions,
   sessionOptions: QwpIngressSessionOptions = {},
+  /** Cancels a first connect still negotiating; see QwpIngressSession.connect. */
+  signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
   const effectiveSessionOptions: QwpIngressSessionOptions = {
     ...sessionOptions,
@@ -669,6 +671,7 @@ export async function connectQwpBrowserIngress(
   return QwpIngressSession.connect(
     createQwpBrowserConnectionFactory(options),
     effectiveSessionOptions,
+    signal,
   );
 }
 
@@ -682,7 +685,7 @@ export function createQwpBrowserSender(
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
   return new QwpSender(
-    () =>
+    (signal) =>
       connectQwpBrowserIngress(
         {
           ...options,
@@ -690,6 +693,7 @@ export function createQwpBrowserSender(
             options.requestDurableAck ?? senderOptions.awaitDurableAck,
         },
         sessionOptions,
+        signal,
       ),
     senderOptions,
   );

@@ -1321,6 +1321,72 @@ describe("QWP high-level sender", () => {
     }
   });
 
+  it("aborts a first connect still negotiating when close() is called", async () => {
+    // The reconnect loop owns an AbortController, but the first connect
+    // bypasses it, so close() could only attach cleanup to the pending promise.
+    // The socket and its deadline then outlived close() by the whole
+    // connect/auth timeout, and a CLI or serverless process that closed and
+    // expected to exit hung for that long.
+    let received: AbortSignal | undefined;
+    let settleConnect!: (session: QwpSenderSession) => void;
+    const sender = new QwpSender(
+      (signal) => {
+        received = signal;
+        return new Promise<QwpSenderSession>((resolve) => {
+          settleConnect = resolve;
+        });
+      },
+      { autoFlush: false, closeFlushTimeoutMs: 20 },
+    );
+
+    sender.connect().catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(received).toBeDefined();
+    expect(received!.aborted).toBe(false);
+
+    await sender.close().catch(() => undefined);
+    expect(received!.aborted).toBe(true);
+
+    // Let the abandoned connect settle so it cannot leak into another test.
+    settleConnect(new RecordingSession());
+  });
+
+  it("does not open a new session once close() has returned", async () => {
+    // close() bounds its flush with a deadline but cannot cancel it, so an
+    // abandoned close flush stays runnable. getSession() clears sessionPromise
+    // when a connect fails, so that leftover flush could dial the database
+    // again and write rows after close() had already returned to the caller --
+    // an application that closed a sender to stop writing kept writing.
+    let sessions = 0;
+    let failFirstConnect!: (error: Error) => void;
+    // The first connect must still be pending when close() gives up, and fail
+    // only afterwards: that is what clears sessionPromise while an abandoned
+    // close flush is still runnable.
+    const firstConnect = new Promise<QwpSenderSession>((_, reject) => {
+      failFirstConnect = reject;
+    });
+    const sender = new QwpSender(
+      async () => {
+        sessions++;
+        return sessions === 1 ? firstConnect : new RecordingSession();
+      },
+      { autoFlush: false, closeFlushTimeoutMs: 20 },
+    );
+
+    await sender.table("t").intColumn("a", 1).atNow();
+    sender.flush().catch(() => undefined);
+    await sender.close().catch(() => undefined);
+    expect(sessions).toBe(1);
+
+    failFirstConnect(new Error("first connect failed"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(sessions).toBe(1);
+
+    // And a fresh acquisition is refused outright rather than dialling.
+    await expect(sender.flush()).rejects.toThrow("QWP sender is closed");
+    expect(sessions).toBe(1);
+  });
+
   it("loses no rows across back-to-back flushes", async () => {
     // The enqueue still has to run synchronously on the call, so two flushes
     // issued without awaiting cannot drop or duplicate staged rows.

@@ -560,8 +560,16 @@ function connectQwpNodeEndpoint(
 export async function connectQwpNodeIngress(
   options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions = {},
+  /** Cancels a first connect still negotiating; see QwpIngressSession.connect. */
+  signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
-  return connectQwpNodeIngressInternal(options, sessionOptions, true);
+  return connectQwpNodeIngressInternal(
+    options,
+    sessionOptions,
+    true,
+    undefined,
+    signal,
+  );
 }
 
 async function connectQwpNodeIngressInternal(
@@ -569,6 +577,7 @@ async function connectQwpNodeIngressInternal(
   sessionOptions: QwpIngressSessionOptions,
   startOrphanDrainer: boolean,
   sharedHealthTracker?: QwpFailoverHealthTracker,
+  signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
   const healthTracker =
     sharedHealthTracker ??
@@ -639,6 +648,7 @@ async function connectQwpNodeIngressInternal(
     session = await QwpIngressSession.connect(
       connectionFactory,
       effectiveSessionOptions,
+      signal,
     );
   } catch (error) {
     if (
@@ -663,10 +673,11 @@ async function connectQwpNodeIngressInternal(
         effectiveSessionOptions.onSenderError,
       ),
     );
-    session = await QwpIngressSession.connect(connectionFactory, {
-      ...effectiveSessionOptions,
-      replayStore,
-    });
+    session = await QwpIngressSession.connect(
+      connectionFactory,
+      { ...effectiveSessionOptions, replayStore },
+      signal,
+    );
   }
   if (orphanDrainer) {
     session.registerCloseHook(() => orphanDrainer.close());
@@ -756,7 +767,7 @@ export function createQwpNodeSender(
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
   return new QwpSender(
-    () =>
+    (signal) =>
       connectQwpNodeIngress(
         {
           ...options,
@@ -764,6 +775,7 @@ export function createQwpNodeSender(
             options.requestDurableAck ?? senderOptions.awaitDurableAck,
         },
         sessionOptions,
+        signal,
       ),
     senderOptions,
   );

@@ -580,6 +580,14 @@ export class QwpIngressSession {
   static async connect(
     factory: QwpConnectionFactory,
     options: QwpIngressSessionOptions = {},
+    /**
+     * Cancels a first connect that is still negotiating. The reconnect loop
+     * owns its own controller, but the initial attempt bypasses it -- it is
+     * either handed in as `initialConnection` or awaited directly below -- so
+     * without this a close() during the first connect left the socket and its
+     * deadline alive for the full connect/auth timeout.
+     */
+    signal?: AbortSignal,
   ): Promise<QwpIngressSession> {
     validateIngressSessionOptions(options);
     if (options.replayStore && options.reconnect === false) {
@@ -603,7 +611,7 @@ export class QwpIngressSession {
       options.reconnect === undefined &&
       !options.replayStore &&
       !options.backgroundStoreAndForward
-        ? factory()
+        ? factory(signal)
         : undefined;
     const connection = reconnectOptions
       ? await QwpReconnectingIngressConnection.connect(
@@ -624,7 +632,7 @@ export class QwpIngressSession {
           options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
           options.onSenderError,
         )
-      : await factory();
+      : await factory(signal);
     try {
       return new QwpIngressSession(connection, options);
     } catch (error) {
