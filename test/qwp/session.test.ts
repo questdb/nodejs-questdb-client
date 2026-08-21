@@ -51,6 +51,7 @@ import {
   QwpSymbolDictionary,
   readQwpVarintNumber,
 } from "../../src/qwp";
+import { openQwpWebSocket } from "../../src/_qwp/_internal/websocket-connection";
 
 type Listener = (event: unknown) => void;
 
@@ -62,7 +63,7 @@ class FakeWebSocket {
   readonly sent: Uint8Array[] = [];
   readonly closeCalls: { code?: number; reason?: string }[] = [];
   onSend?: (payload: Uint8Array) => void;
-  private readonly listeners = new Map<string, Listener[]>();
+  protected readonly listeners = new Map<string, Listener[]>();
 
   addEventListener(type: string, listener: Listener): void {
     const listeners = this.listeners.get(type) ?? [];
@@ -113,8 +114,34 @@ class FakeWebSocket {
     this.emit("error", {});
   }
 
-  private emit(type: string, event: unknown): void {
+  protected emit(type: string, event: unknown): void {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+
+  protected listenerCountFor(type: string): number {
+    return (this.listeners.get(type) ?? []).length;
+  }
+}
+
+/**
+ * Records whether an `error` listener existed each time close() was called.
+ *
+ * Closing a socket that is still CONNECTING makes `ws` emit `error`, and it
+ * does so on a later tick, so a synchronous throw here would only be swallowed
+ * by closeSocket()'s own try/catch and prove nothing. `ws` is an EventEmitter
+ * rather than an EventTarget, so that deferred `error` is rethrown into the
+ * process when nothing is subscribed. The observable invariant this client has
+ * to hold is therefore the ordering itself: never close a connecting socket
+ * before its error listener is attached.
+ */
+class FakeNodeWebSocket extends FakeWebSocket {
+  readonly errorListenerAtClose: boolean[] = [];
+
+  close(code?: number, reason?: string): void {
+    if (this.readyState !== 3) {
+      this.errorListenerAtClose.push(this.listenerCountFor("error") > 0);
+    }
+    super.close(code, reason);
   }
 }
 
@@ -713,6 +740,34 @@ describe("QWP WebSocket adapters", () => {
     await session.close();
     // Closed by close(), not left to the 30s connect deadline.
     expect(pending.closeCalls.length).toBeGreaterThan(0);
+  });
+
+  it("attaches the socket error listener before an aborted signal closes it", async () => {
+    // A failover sweep hands one AbortSignal to every endpoint in turn, so
+    // after close() aborts it the next endpoint enters openQwpWebSocket with
+    // the signal already aborted. Acting on it before the listeners were
+    // attached closed a CONNECTING socket nothing was subscribed to, and `ws`
+    // rethrew the resulting 'error' out of the process instead of rejecting.
+    const socket = new FakeNodeWebSocket();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      openQwpWebSocket(asQwpSocket(socket), {
+        url: "ws://aborted.example/write/v4",
+        signal: controller.signal,
+        // Never reached: the abort settles the opening before any upgrade.
+        completeHandshake: () => ({ qwpVersion: 1, maxBatchSizeBytes: 128 }),
+        connectTimeoutMs: 50,
+        authTimeoutMs: 50,
+        sendTimeoutMs: 50,
+        closeTimeoutMs: 50,
+      }),
+    ).rejects.toBeInstanceOf(QwpSendClosedError);
+
+    // The socket is still closed; only the ordering changed.
+    expect(socket.closeCalls.length).toBeGreaterThan(0);
+    expect(socket.errorListenerAtClose).not.toContain(false);
   });
 
   it("uses the browser-selected ingress batch cap automatically", async () => {

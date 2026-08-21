@@ -131,6 +131,9 @@ async function normalizeBinaryMessage(data: unknown): Promise<Uint8Array> {
 }
 
 /** Wraps a WHATWG-style WebSocket and resolves once its opening handshake succeeds. */
+/** Absorbs a socket `error` raised before the real listeners are attached. */
+const ignoreSocketError = (): void => undefined;
+
 export function openQwpWebSocket(
   socket: QwpWebSocketLike,
   options: QwpWebSocketOpenOptions,
@@ -139,6 +142,10 @@ export function openQwpWebSocket(
     validateQwpWebSocketTimeouts(options);
   } catch (error) {
     try {
+      // Tearing down a CONNECTING socket makes `ws` emit `error`, and nothing
+      // has subscribed to this one yet. Absorb it rather than let an
+      // EventEmitter with no listener rethrow it into the process.
+      socket.addEventListener("error", ignoreSocketError);
       if (socket.terminate) socket.terminate();
       else if (socket.readyState !== WEBSOCKET_CLOSED) socket.close();
     } catch {
@@ -401,12 +408,20 @@ export function openQwpWebSocket(
         "QWP connection closed while connecting",
       );
     };
+    // Aborting closes the socket, and closing a CONNECTING `ws` socket makes it
+    // emit `error` on the next tick. This executor attaches the socket's
+    // listeners last, so acting on an already-aborted signal here would leave
+    // that event unhandled and terminate the process. A failover sweep hands
+    // the same signal to every remaining endpoint after close() aborts it, so
+    // this is the ordinary shape for a multi-address client, not a rare race.
+    // Record the abort and apply it once the listeners are in place.
+    let abortedBeforeListening = false;
     if (options.signal) {
       if (options.signal.aborted) {
-        abortOpening();
-        return;
+        abortedBeforeListening = true;
+      } else {
+        options.signal.addEventListener("abort", abortOpening, { once: true });
       }
-      options.signal.addEventListener("abort", abortOpening, { once: true });
     }
 
     armOpeningTimeout(
@@ -591,5 +606,9 @@ export function openQwpWebSocket(
           : new Error("failed to configure QWP WebSocket listeners"),
       );
     }
+    // Safe now: `onError` is attached, so the close this triggers has a
+    // subscriber. A failed attachment above already settled the opening, and
+    // failOpening() is idempotent, so this is a no-op in that case.
+    if (abortedBeforeListening) abortOpening();
   });
 }
