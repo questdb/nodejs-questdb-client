@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { QwpSender, type QwpSenderSession } from "../../src/qwp";
 import { QWP_SUPPORTED_CONFIG_KEYS } from "../../src/qwp-node/client-config";
 
 const ROOT = path.resolve(
@@ -44,5 +45,64 @@ describe("QWP configuration-string reference", () => {
     expect(unknown).toEqual([]);
     // Guard against the extraction silently matching nothing.
     expect(listed.size).toBeGreaterThan(50);
+  });
+
+  it("documents the auto-flush defaults the sender actually applies", async () => {
+    // These two rows read "—" while every sibling gave a number, so a reader
+    // had no way to learn that ws:: batches 75x smaller and flushes 10x more
+    // often than http::. Pin the documented values to real behavior.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = (key: string): number => {
+      const row = new RegExp(
+        `^\\| \`${key}\`\\s*\\|[^|]*\\|\\s*\`?(\\d+)\`?\\s*\\|`,
+        "m",
+      ).exec(doc);
+      if (!row) throw new Error(`no numeric default documented for ${key}`);
+      return Number(row[1]);
+    };
+    const rows = documented("auto_flush_rows");
+    const intervalMs = documented("auto_flush_interval");
+
+    const sends: number[] = [];
+    const session = {
+      publishedFrameSequence: -1n,
+      acknowledgedFrameSequence: -1n,
+      async publishTables(tables: readonly { rowCount: number }[]) {
+        sends.push(tables[0].rowCount);
+      },
+      async publishTablesDelta(tables: readonly { rowCount: number }[]) {
+        sends.push(tables[0].rowCount);
+      },
+      async sendTables() {
+        return { status: 0, sequence: 0n, tables: [] };
+      },
+      async waitForDurable() {},
+      async close() {},
+    } as unknown as QwpSenderSession;
+
+    const byRows = new QwpSender(async () => session);
+    for (let row = 0; row < rows - 1; row++) {
+      await byRows.table("t").intColumn("a", row).atNow();
+    }
+    expect(sends).toEqual([]);
+    await byRows.table("t").intColumn("a", rows).atNow();
+    expect(sends).toEqual([rows]);
+    await byRows.close();
+
+    sends.length = 0;
+    vi.useFakeTimers();
+    try {
+      const byInterval = new QwpSender(async () => session);
+      await byInterval.table("t").intColumn("a", 1).atNow();
+      vi.advanceTimersByTime(intervalMs - 1);
+      await byInterval.table("t").intColumn("a", 2).atNow();
+      expect(sends).toEqual([]);
+      vi.advanceTimersByTime(1);
+      await byInterval.table("t").intColumn("a", 3).atNow();
+      expect(sends).toEqual([3]);
+      await byInterval.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -99,9 +99,9 @@ connect string is the portable spelling.
 | Key                                             | Value            | Default   | Meaning                                                                  |
 | ----------------------------------------------- | ---------------- | --------- | ------------------------------------------------------------------------ |
 | `auto_flush`                                    | `on`, `off`      | on        | Master switch for all auto-flush triggers.                               |
-| `auto_flush_rows`                               | integer          | —         | Flush after this many staged rows.                                       |
+| `auto_flush_rows`                               | integer          | `1000`    | Flush after this many staged rows.                                       |
 | `auto_flush_bytes`                              | integer or `off` | off       | Flush once staged rows reach this estimated size.                        |
-| `auto_flush_interval`                           | integer ms       | —         | Flush when this long has passed. Checked as rows are added.              |
+| `auto_flush_interval`                           | integer ms       | `100`     | Flush when this long has passed. Checked as rows are added.              |
 | `close_flush_timeout_millis`                    | integer ms       | `5000`    | Bound on `close()`'s ACK drain. `0` or negative is a fast close.         |
 | `transaction`                                   | `on`, `off`      | off       | Group each flush into a per-table transaction.                           |
 | `request_durable_ack`                           | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.           |
@@ -1366,6 +1366,12 @@ Review these behavioral differences before rollout:
 - HTTP/TCP-only keys do not carry over to `ws::`; use the unified QWP connect-string
   vocabulary. Programmatic callbacks, custom agents, and other non-string hooks remain
   available under `extraOptions.qwp`.
+- Auto-flush defaults differ from the ILP transports, matching the Java client's
+  separate WebSocket defaults: `auto_flush_rows` is `1000` where `http::` uses
+  `75000` and `tcp::` uses `600`, and `auto_flush_interval` is `100` ms where both
+  use `1000` ms. A workload migrated on the one-line change above therefore sends
+  smaller batches far more often; set both keys explicitly to keep its previous
+  batching.
 
 Roll out `ws::` per sender instance so the existing protocols can remain in service
 during migration.

@@ -161,9 +161,11 @@ type DeprecatedOptions = {
  * <li> auto_flush_rows: <i>integer</i> - The number of rows that will trigger a flush. When set to 0, row-based flushing is disabled. <br>
  * The Sender will default this parameter to 75000 rows when HTTP protocol is used, and to 600 in case of TCP protocol.
  * </li>
- * <li> auto_flush_bytes: <i>integer or off</i> - Buffered-byte threshold. Defaults to off. <br>
+ * <li> auto_flush_bytes: <i>integer or off</i> - Buffered-byte threshold. <br>
  * Reaching the threshold flushes after the completed row. This option is supported by udp only;
- * on ws/wss it belongs to the QWP configuration schema.
+ * on ws/wss it belongs to the QWP configuration schema. <br>
+ * Defaults to <i>max_datagram_size</i>, so datagrams are flushed before they outgrow the
+ * configured limit. Set it to <i>off</i> to disable the byte trigger.
  * </li>
  * <li> auto_flush_interval: <i>integer</i> - The number of milliseconds that will trigger a flush, default value is 1000.
  * When set to 0, interval-based flushing is disabled. <br>
