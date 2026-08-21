@@ -1196,6 +1196,80 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("locks a decimal column's scale on its first value and rescales onto it", async () => {
+    // A QWP column carries one scale per frame. The Java client's ColumnBuffer
+    // locks it on the first value and rescales later ones onto it, so do the
+    // same rather than rejecting every row after the first.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("fx").decimalColumnText("mid", "1.500").atNow();
+    await sender.table("fx").decimalColumnText("mid", "2.25").atNow();
+    await sender.table("fx").decimalColumnText("mid", "3").atNow();
+    await sender.flush();
+
+    const mid = column(session.sends[0].tables[0], "mid");
+    expect(session.sends[0].tables[0].rowCount).toBe(3);
+    expect(mid.decimalScale).toBe(3);
+    expect(mid.values).toEqual([1_500n, 2_250n, 3_000n]);
+    await sender.close();
+  });
+
+  it("rejects a decimal the column's locked scale cannot represent", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("fx").decimalColumnText("mid", "1.5").atNow();
+    // Scale 1 cannot carry 2.25 without dropping a digit, which is the one
+    // case the Java client reports instead of rescaling.
+    expect(() => sender.table("fx").decimalColumnText("mid", "2.25")).toThrow(
+      /column 'mid' cannot rescale decimal from scale 2 to 1 without precision loss/,
+    );
+    await sender.flush();
+    expect(column(session.sends[0].tables[0], "mid").values).toEqual([15n]);
+    await sender.close();
+  });
+
+  it("keeps a decimal column's width stable across magnitudes", async () => {
+    // The width came from each value's magnitude, so a larger second value
+    // changed the column type and the row was discarded. Java takes the width
+    // from the overload; the untyped setter therefore pins the widest.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("fx").decimalColumn("mid", 12_345n, 2).atNow();
+    await sender
+      .table("fx")
+      .decimalColumn("mid", 10n ** 25n, 2)
+      .atNow();
+    await sender.flush();
+
+    const mid = column(session.sends[0].tables[0], "mid");
+    expect(mid.type).toBe(QWP_COLUMN_TYPE.DECIMAL256);
+    expect(mid.decimalScale).toBe(2);
+    expect(mid.values).toEqual([12_345n, 10n ** 25n]);
+    await sender.close();
+  });
+
+  it("rejects mixed timestamp units within one column", async () => {
+    // TIMESTAMP and TIMESTAMP_NANOS are distinct column types; the Java client
+    // rejects the second unit rather than promoting the column.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("t").timestampColumn("seen", 5n, "us").atNow();
+    expect(() =>
+      sender.table("t").timestampColumn("seen", 7_000n, "ns"),
+    ).toThrow(/column type mismatch for 'seen'/);
+    await sender.close();
+  });
+
+  it("still rejects a genuine column family change", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("t").longColumn("v", 1n).atNow();
+    expect(() => sender.table("t").stringColumn("v", "two")).toThrow(
+      /column type mismatch for 'v'/,
+    );
+    await sender.close();
+  });
+
   it("validates fixed precision and scale when compiling the schema", () => {
     const sender = new QwpSender(async () => new RecordingSession(), {
       autoFlush: false,

@@ -358,11 +358,45 @@ function stagedRowBytes(columns: ReadonlyMap<string, StagedColumn>): number {
   return bytes;
 }
 
-function decimalType(value: bigint, scale: number): QwpColumnType {
-  if (scale <= 18 && fitsSigned(value, 64)) return QWP_COLUMN_TYPE.DECIMAL64;
-  if (scale <= 38 && fitsSigned(value, 128)) return QWP_COLUMN_TYPE.DECIMAL128;
-  if (scale <= 76 && fitsSigned(value, 256)) return QWP_COLUMN_TYPE.DECIMAL256;
-  throw new RangeError("decimal value or scale exceeds DECIMAL256 capacity");
+const DECIMAL_WIDTH = new Map<QwpColumnType, number>([
+  [QWP_COLUMN_TYPE.DECIMAL64, 64],
+  [QWP_COLUMN_TYPE.DECIMAL128, 128],
+  [QWP_COLUMN_TYPE.DECIMAL256, 256],
+]);
+
+function isDecimalType(type: QwpColumnType): boolean {
+  return DECIMAL_WIDTH.has(type);
+}
+
+/**
+ * Rescales a decimal onto the scale its column locked on its first value,
+ * matching the Java client's QwpTableBuffer.ColumnBuffer.addDecimal* path. A
+ * QWP column carries one scale for the whole frame, so the alternative to
+ * rescaling is rejecting the row; both clients rescale where it is exact and
+ * report the two cases where it is not.
+ */
+function rescaleToColumnScale(
+  name: string,
+  value: bigint,
+  fromScale: number,
+  toScale: number,
+  type: QwpColumnType,
+): bigint {
+  let rescaled: bigint;
+  try {
+    rescaled = rescaleDecimal(value, fromScale, toScale);
+  } catch {
+    throw new RangeError(
+      `column '${name}' cannot rescale decimal from scale ${fromScale} to ${toScale} without precision loss`,
+    );
+  }
+  const bits = DECIMAL_WIDTH.get(type);
+  if (bits !== undefined && !fitsSigned(rescaled, bits)) {
+    throw new RangeError(
+      `Decimal${bits} overflow: rescaling from scale ${fromScale} to ${toScale} exceeds ${bits}-bit capacity`,
+    );
+  }
+  return rescaled;
 }
 
 function parseDecimal(value: string | number): {
@@ -1327,7 +1361,15 @@ export class QwpSender {
         typeof unscaled === "bigint"
           ? unscaled
           : signedBigEndianToBigInt(unscaled);
-      return this.addColumn(name, decimalType(value, scale), value, {
+      if (!fitsSigned(value, 256)) {
+        throw new RangeError("decimal value exceeds DECIMAL256 capacity");
+      }
+      // Widest type, not one derived from this value's magnitude: the column
+      // carries one type per frame, so deriving it per value would reject the
+      // next row whose magnitude needs a different width. The Java client takes
+      // the width from the overload for the same reason; decimal64Column,
+      // decimal128Column and decimal256Column are the narrower equivalents.
+      return this.addColumn(name, QWP_COLUMN_TYPE.DECIMAL256, value, {
         decimalScale: scale,
       });
     } catch (error) {
@@ -1983,10 +2025,28 @@ export class QwpSender {
       if (
         existingSchema &&
         (existingSchema.type !== type ||
-          existingSchema.geohashPrecision !== metadata.geohashPrecision ||
-          existingSchema.decimalScale !== metadata.decimalScale)
+          existingSchema.geohashPrecision !== metadata.geohashPrecision)
       ) {
-        throw new Error(`column type mismatch for '${name}'`);
+        throw new Error(
+          `column type mismatch for '${name}' [existing=${existingSchema.type}, received=${type}]`,
+        );
+      }
+      if (
+        existingSchema &&
+        existingSchema.decimalScale !== metadata.decimalScale &&
+        isDecimalType(type)
+      ) {
+        // The column locked its scale on its first value, as the Java client's
+        // ColumnBuffer does; later values are rescaled onto it rather than
+        // changing a scale the frame can only carry once.
+        value = rescaleToColumnScale(
+          name,
+          value as bigint,
+          metadata.decimalScale ?? 0,
+          existingSchema.decimalScale ?? 0,
+          type,
+        );
+        metadata = { ...metadata, decimalScale: existingSchema.decimalScale };
       }
       if (this.currentRow.has(nameKey)) return this;
       const canonicalName = existingSchema?.name ?? name;
@@ -2059,7 +2119,9 @@ export class QwpSender {
   private releaseStagedRows(
     snapshots: readonly { table: StagedTable; rows: readonly StagedRow[] }[],
   ): number {
-    for (const { table, rows } of snapshots) table.rows.splice(0, rows.length);
+    for (const { table, rows } of snapshots) {
+      table.rows.splice(0, rows.length);
+    }
     const rowCount = snapshots.reduce(
       (count, item) => count + item.rows.length,
       0,
