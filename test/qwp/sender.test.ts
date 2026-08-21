@@ -1270,6 +1270,50 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("rejects rather than throwing when flushed after close", async () => {
+    // The signature promises a Promise, so `sender.flush().catch(handler)` has
+    // to catch this. A synchronous throw escapes that handler entirely and
+    // becomes an uncaught exception when the caller is a timer or an event
+    // handler -- the shape a periodic flush racing shutdown actually has.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("t").intColumn("a", 1).atNow();
+    await sender.close();
+
+    for (const call of [
+      () => sender.flush(),
+      () => sender.flushAndGetSequence(),
+      () => sender.commit(),
+    ]) {
+      let caught: unknown;
+      // Deliberately not inside try/catch: a synchronous throw would escape.
+      const settled = call().catch((error: unknown) => {
+        caught = error;
+      });
+      await settled;
+      expect(String(caught)).toContain("QWP sender is closed");
+    }
+  });
+
+  it("loses no rows across back-to-back flushes", async () => {
+    // The enqueue still has to run synchronously on the call, so two flushes
+    // issued without awaiting cannot drop or duplicate staged rows.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("t").intColumn("a", 1).atNow();
+    const first = sender.flush();
+    await sender.table("t").intColumn("a", 2).atNow();
+    const second = sender.flush();
+    await Promise.all([first, second]);
+    const delivered = session.sends.reduce(
+      (total, send) => total + send.tables[0].rowCount,
+      0,
+    );
+    expect(delivered).toBe(2);
+    expect(sender.metrics.pendingRows).toBe(0);
+    await sender.close();
+  });
+
   it("validates fixed precision and scale when compiling the schema", () => {
     const sender = new QwpSender(async () => new RecordingSession(), {
       autoFlush: false,

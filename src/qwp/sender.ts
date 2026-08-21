@@ -1478,7 +1478,12 @@ export class QwpSender {
    * Publishes completed rows to the local ingress/replay boundary. This does
    * not wait for a server ACK unless awaitServerAck or awaitDurableAck is set.
    */
-  flush(): Promise<boolean> {
+  // `async` so a closed or closing sender rejects rather than throwing out of
+  // a method the signature says returns a Promise: a caller written as
+  // `sender.flush().catch(...)` would not catch a synchronous throw, and from a
+  // timer or event handler it becomes an uncaught exception. The enqueue itself
+  // still runs synchronously, so flush ordering is unchanged.
+  async flush(): Promise<boolean> {
     return this.enqueueFlush(false);
   }
 
@@ -1488,7 +1493,7 @@ export class QwpSender {
    * Pass the result to waitForAcknowledged() when an explicit delivery
    * barrier is needed.
    */
-  flushAndGetSequence(): Promise<bigint> {
+  async flushAndGetSequence(): Promise<bigint> {
     return this.enqueueSequenceFlush(false);
   }
 
@@ -1541,7 +1546,7 @@ export class QwpSender {
    * ergonomic alias for flush(); pending local rows are included in the same
    * group-closing frame.
    */
-  commit(): Promise<boolean> {
+  async commit(): Promise<boolean> {
     return this.flush();
   }
 
