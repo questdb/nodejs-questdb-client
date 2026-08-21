@@ -24,11 +24,6 @@ import type { QwpTableWriter } from "./qwp/sender";
 import type { QwpWriterSchema } from "./qwp/writer";
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
-const RESOLVED_QWP_SENDER = Symbol("resolvedQwpSender");
-
-type ResolvedQwpSenderOptions = SenderOptions & {
-  readonly [RESOLVED_QWP_SENDER]: QwpSender;
-};
 
 /**
  * The QuestDB client's API provides methods to connect to the database, ingest data, and close the connection. <br>
@@ -133,17 +128,6 @@ class Sender {
    */
   constructor(options: SenderOptions) {
     this.log = options && typeof options.log === "function" ? options.log : log;
-    const resolvedQwpSender = options
-      ? (options as Partial<ResolvedQwpSenderOptions>)[RESOLVED_QWP_SENDER]
-      : undefined;
-    if (resolvedQwpSender) {
-      this.qwpSender = resolvedQwpSender;
-      this.autoFlush = false;
-      this.autoFlushRows = 0;
-      this.autoFlushInterval = 0;
-      this.resetAutoFlush();
-      return;
-    }
     if (
       options?.protocol === WS ||
       options?.protocol === WSS ||
