@@ -83,6 +83,13 @@ export interface QwpWebSocketOpenOptions {
   openingFailure?: Promise<never>;
   /** Browsers hide the HTTP response behind a generic WebSocket error event. */
   opaqueErrors?: boolean;
+  /**
+   * Tears the pending upgrade down immediately. Without it a close() issued
+   * while the peer has accepted the TCP connection but not answered the
+   * upgrade leaves the socket and its deadline alive until that deadline
+   * fires, which keeps the Node event loop open long after close() resolved.
+   */
+  signal?: AbortSignal;
 }
 
 const WEBSOCKET_OPEN = 1;
@@ -382,9 +389,25 @@ export function openQwpWebSocket(
       if (openingSettled) return;
       openingSettled = true;
       if (timeout) clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abortOpening);
       void closeSocket(closeCode, closeReason);
       reject(error);
     };
+
+    const abortOpening = (): void => {
+      failOpening(
+        new QwpSendClosedError(),
+        1000,
+        "QWP connection closed while connecting",
+      );
+    };
+    if (options.signal) {
+      if (options.signal.aborted) {
+        abortOpening();
+        return;
+      }
+      options.signal.addEventListener("abort", abortOpening, { once: true });
+    }
 
     armOpeningTimeout(
       connectTimeoutMs,
@@ -434,6 +457,7 @@ export function openQwpWebSocket(
       openingSettled = true;
       opened = true;
       if (timeout) clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abortOpening);
       const connection: QwpBinaryConnection = {
         messages,
         closed,

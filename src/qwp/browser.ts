@@ -400,7 +400,8 @@ export function connectQwpBrowserWebSocket(
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
-    (endpoint) => connectQwpBrowserRawEndpoint(options, endpoint),
+    (endpoint, signal) =>
+      connectQwpBrowserRawEndpoint(options, endpoint, signal),
   )();
 }
 
@@ -411,7 +412,8 @@ export function createQwpBrowserConnectionFactory(
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
-    (endpoint) => connectQwpBrowserIngressEndpoint(options, endpoint),
+    (endpoint, signal) =>
+      connectQwpBrowserIngressEndpoint(options, endpoint, signal),
   );
 }
 
@@ -420,6 +422,7 @@ async function connectQwpBrowserEndpoint(
   endpoint: string | URL,
   requestEndpoint: string | URL,
   protocols: string | string[] | undefined,
+  signal: AbortSignal | undefined,
   completeHandshake: (
     selectedProtocol: string | undefined,
   ) => QwpBinaryConnection["handshake"],
@@ -449,6 +452,7 @@ async function connectQwpBrowserEndpoint(
     });
   const socket = factory(requestEndpoint, protocols);
   return openQwpWebSocket(socket, {
+    signal,
     url: endpoint,
     connectTimeoutMs: options.connectTimeoutMs,
     sendTimeoutMs: options.sendTimeoutMs,
@@ -474,6 +478,7 @@ function browserNegotiationUrl(
 function connectQwpBrowserRawEndpoint(
   options: QwpBrowserWebSocketOptions,
   endpoint: string | URL,
+  signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
   const protocols = options.requestDurableAck
     ? addQwpDurableAckWebSocketProtocol(options.protocols)
@@ -483,6 +488,7 @@ function connectQwpBrowserRawEndpoint(
     endpoint,
     endpoint,
     protocols,
+    signal,
     (selectedProtocol) => {
       const durableAckEnabled =
         isQwpDurableAckWebSocketProtocol(selectedProtocol);
@@ -570,6 +576,7 @@ async function applyQwpBrowserIngressHandshake(
 async function connectQwpBrowserIngressEndpoint(
   options: QwpBrowserWebSocketOptions,
   endpoint: string | URL,
+  signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
   const timeoutMs = options.ingressNegotiationTimeoutMs ?? 250;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
@@ -584,6 +591,7 @@ async function connectQwpBrowserIngressEndpoint(
     options.requestDurableAck
       ? addQwpDurableAckWebSocketProtocol(options.protocols)
       : options.protocols,
+    signal,
     (selectedProtocol) => {
       const durableAckEnabled =
         isQwpDurableAckWebSocketProtocol(selectedProtocol);
@@ -608,6 +616,7 @@ async function connectQwpBrowserIngressEndpoint(
 function connectQwpBrowserEgressEndpoint(
   options: QwpBrowserEgressOptions,
   endpoint: string | URL,
+  signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
   const compression = options.compression ?? "raw";
   const acceptEncoding = encodeQwpAcceptEncoding(
@@ -635,6 +644,7 @@ function connectQwpBrowserEgressEndpoint(
     endpoint,
     requestEndpoint,
     options.protocols,
+    signal,
     () => ({
       qwpVersion: QWP_VERSION,
       negotiatedCompression: { codec: "raw", level: 0 },
@@ -702,7 +712,8 @@ export async function connectQwpBrowserEgress(
     createQwpEgressFailoverConnectionFactory(
       options.url,
       options.failoverUrls,
-      (endpoint) => connectQwpBrowserEgressEndpoint(options, endpoint),
+      (endpoint, signal) =>
+        connectQwpBrowserEgressEndpoint(options, endpoint, signal),
       { target: options.target, zone: options.zone },
       sessionOptions.serverInfoTimeoutMs ??
         QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,

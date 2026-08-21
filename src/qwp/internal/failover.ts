@@ -219,7 +219,10 @@ export function createQwpFailoverHealthTracker(
 export function createQwpFailoverConnectionFactory(
   preferredUrl: string | URL,
   failoverUrls: readonly (string | URL)[] | undefined,
-  connect: (endpoint: string | URL) => Promise<QwpBinaryConnection>,
+  connect: (
+    endpoint: string | URL,
+    signal?: AbortSignal,
+  ) => Promise<QwpBinaryConnection>,
   options: QwpFailoverSelectionOptions = {},
 ): QwpConnectionFactory {
   const endpoints = [preferredUrl, ...(failoverUrls ?? [])];
@@ -244,7 +247,7 @@ export function createQwpFailoverConnectionFactory(
   let deferredEndpoint: number | undefined;
   let resetClassificationsBeforeSweep = false;
 
-  return async (): Promise<QwpBinaryConnection> => {
+  return async (signal?: AbortSignal): Promise<QwpBinaryConnection> => {
     if (
       resetClassificationsBeforeSweep &&
       resetClassificationsAfterExhaustion
@@ -263,7 +266,7 @@ export function createQwpFailoverConnectionFactory(
       const endpoint = endpoints[index];
       let candidate: QwpBinaryConnection | undefined;
       try {
-        candidate = await connect(endpoint);
+        candidate = await connect(endpoint, signal);
         let validated: QwpValidatedConnection = {
           connection: candidate,
           serverRole: candidate.handshake.serverRole,

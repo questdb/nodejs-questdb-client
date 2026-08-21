@@ -22,7 +22,10 @@ import {
 export function createQwpEgressFailoverConnectionFactory(
   preferredUrl: string | URL,
   failoverUrls: readonly (string | URL)[] | undefined,
-  connect: (endpoint: string | URL) => Promise<QwpBinaryConnection>,
+  connect: (
+    endpoint: string | URL,
+    signal?: AbortSignal,
+  ) => Promise<QwpBinaryConnection>,
   routing: QwpFailoverSelectionOptions,
   serverInfoTimeoutMs: number,
 ): QwpConnectionFactory {

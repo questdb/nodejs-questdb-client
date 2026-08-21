@@ -339,6 +339,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   private connection?: QwpBinaryConnection;
   private connectingCandidate?: QwpBinaryConnection;
+  private connectAbort?: AbortController;
   private lastHandshake?: QwpHandshakeMetadata;
   private lastEndpoint?: string | URL;
   // Wire log for the current connection, indexed by wire sequence minus
@@ -765,6 +766,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.cancelBackoff?.();
     this.messagesQueue.end();
     const connection = this.connection;
+    // Tears down a connect that is still negotiating. Without this the socket
+    // and its deadline outlive close(), keeping the event loop open for up to
+    // connectTimeoutMs/authTimeoutMs after close() has already resolved.
+    this.connectAbort?.abort();
     const connectingCandidate = this.connectingCandidate;
     this.connection = undefined;
     this.connectingCandidate = undefined;
@@ -837,10 +842,17 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (reconnecting) this.totalReconnectAttempts++;
       let candidate: QwpBinaryConnection | undefined;
       try {
-        candidate =
-          attempt === 1 && initialConnection
-            ? await initialConnection
-            : await this.factory();
+        if (attempt === 1 && initialConnection) {
+          candidate = await initialConnection;
+        } else {
+          const abort = new AbortController();
+          this.connectAbort = abort;
+          try {
+            candidate = await this.factory(abort.signal);
+          } finally {
+            if (this.connectAbort === abort) this.connectAbort = undefined;
+          }
+        }
         this.hasEverConnected = true;
         this.connectingCandidate = candidate;
         if (this.closing) {

@@ -403,7 +403,7 @@ function createQwpNodeConnectionFactoryInternal(
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
-    (endpoint) => connectQwpNodeEndpoint(options, endpoint),
+    (endpoint, signal) => connectQwpNodeEndpoint(options, endpoint, signal),
     { healthTracker, resetClassificationsAfterExhaustion },
   );
 }
@@ -411,6 +411,7 @@ function createQwpNodeConnectionFactoryInternal(
 function connectQwpNodeEndpoint(
   options: QwpNodeWebSocketOptions,
   endpoint: string | URL,
+  signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
   const clientMaxVersion = options.maxVersion ?? QWP_VERSION;
@@ -511,6 +512,7 @@ function connectQwpNodeEndpoint(
   });
   return openQwpWebSocket(socket, {
     url: endpoint,
+    signal,
     connectTimeoutMs: options.connectTimeoutMs,
     authTimeoutMs: options.authTimeoutMs,
     transportConnected,
@@ -835,7 +837,7 @@ export async function connectQwpNodeEgress(
     createQwpEgressFailoverConnectionFactory(
       transport.url,
       transport.failoverUrls,
-      (endpoint) => connectQwpNodeEndpoint(transport, endpoint),
+      (endpoint, signal) => connectQwpNodeEndpoint(transport, endpoint, signal),
       { target: options.target, zone: options.zone },
       sessionOptions.serverInfoTimeoutMs ??
         QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,

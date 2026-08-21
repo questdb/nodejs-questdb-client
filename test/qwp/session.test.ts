@@ -668,6 +668,40 @@ describe("QWP WebSocket adapters", () => {
     expect(attempted).toEqual([]);
   });
 
+  it("tears down a reconnect still negotiating when close() is called", async () => {
+    // connectingCandidate is assigned only after the factory resolves, so a
+    // close() issued while the peer has accepted the socket but not answered
+    // the upgrade used to find nothing to cancel: the socket and its deadline
+    // stayed alive for up to connectTimeoutMs after close() had resolved.
+    const sockets: FakeWebSocket[] = [];
+    const session = await connectQwpBrowserIngress({
+      url: "ws://stalls.example/write/v4",
+      connectTimeoutMs: 30_000,
+      reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 },
+      webSocketFactory: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        if (sockets.length === 1) {
+          queueMicrotask(() => {
+            socket.open();
+            socket.message(ingressServerInfo(128));
+          });
+        }
+        // Every replacement is left hanging mid-upgrade.
+        return asQwpSocket(socket);
+      },
+    });
+
+    sockets[0].close(1006, "dropped");
+    await vi.waitFor(() => expect(sockets.length).toBeGreaterThan(1));
+    const pending = sockets[sockets.length - 1];
+    expect(pending.closeCalls).toEqual([]);
+
+    await session.close();
+    // Closed by close(), not left to the 30s connect deadline.
+    expect(pending.closeCalls.length).toBeGreaterThan(0);
+  });
+
   it("uses the browser-selected ingress batch cap automatically", async () => {
     const socket = new FakeWebSocket();
     let capturedUrl: string | URL | undefined;

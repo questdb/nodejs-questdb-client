@@ -549,4 +549,12 @@ export interface QwpWebSocketConnectOptions {
   closeTimeoutMs?: number;
 }
 
-export type QwpConnectionFactory = () => Promise<QwpBinaryConnection>;
+/**
+ * Opens one connection. The optional signal is aborted when the owning session
+ * closes, so a factory that is still negotiating can tear its socket down
+ * instead of leaving it alive until its own deadline expires. Factories that
+ * ignore the parameter remain assignable.
+ */
+export type QwpConnectionFactory = (
+  signal?: AbortSignal,
+) => Promise<QwpBinaryConnection>;
