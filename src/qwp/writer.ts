@@ -34,8 +34,6 @@ export type QwpWriterColumnKind =
 const QWP_WRITER_COLUMN: unique symbol = Symbol.for(
   "questdb.qwp.writer.column.v1",
 );
-// Type-level only: never stamped at runtime, so it needs no shared identity.
-const QWP_WRITER_INPUT: unique symbol = Symbol("QWP writer input");
 
 /** Maximum DECIMAL scale of each fixed-width decimal column type. */
 export const QWP_DECIMAL_MAX_SCALE = {
@@ -56,8 +54,18 @@ export interface QwpWriterColumn<
   readonly precisionBits?: number;
   /** DECIMAL scale, fixed for the whole column. */
   readonly scale?: number;
-  /** @internal Carries the input type without adding a runtime value. */
-  readonly [QWP_WRITER_INPUT]?: T;
+  /**
+   * @internal Carries the input type without adding a runtime value. Never
+   * assigned, and deliberately a plain property rather than a `unique symbol`:
+   * each emitted bundle would declare its own symbol, making the key nominally
+   * distinct per entry point. A column built by './qwp' would then satisfy
+   * './qwp/node''s QwpWriterColumn without ever matching its phantom key, so
+   * QwpWriterColumnInput would infer `unknown` and every row field would
+   * silently accept anything. A shared property name resolves structurally
+   * across bundles, which is what keeps row typing alive for consumers of the
+   * published package.
+   */
+  readonly __qwpWriterInput?: T;
 }
 
 interface BrandedQwpWriterColumn<T, DesignatedTimestamp extends boolean>
