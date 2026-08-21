@@ -4,9 +4,8 @@ import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_FLAG_GORILLA,
   QWP_FLAG_ZSTD,
-  QWP_MAX_COLUMN_NAME_LENGTH,
   QWP_MAX_COLUMNS_PER_TABLE,
-  QWP_MAX_TABLE_NAME_LENGTH,
+  QWP_MAX_IDENTIFIER_BYTES,
   QWP_RESET_MASK_DICTIONARY,
   QwpColumnType,
 } from "./constants";
@@ -1363,7 +1362,7 @@ export class QwpResultBatchDecoder {
 
     const tableNameLength = readCount(
       reader,
-      QWP_MAX_TABLE_NAME_LENGTH,
+      QWP_MAX_IDENTIFIER_BYTES,
       "table name length",
     );
     const tableName = reader.readUtf8(tableNameLength, "table name");
@@ -1378,7 +1377,7 @@ export class QwpResultBatchDecoder {
       this.schema = Array.from({ length: columnCount }, () => {
         const nameLength = readCount(
           reader,
-          QWP_MAX_COLUMN_NAME_LENGTH,
+          QWP_MAX_IDENTIFIER_BYTES,
           "column name length",
         );
         const name = reader.readUtf8(nameLength, "column name");

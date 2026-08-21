@@ -106,7 +106,7 @@ connect string is the portable spelling.
 | `transaction`                                   | `on`, `off`      | off       | Group each flush into a per-table transaction.                           |
 | `request_durable_ack`                           | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.           |
 | `durable_ack_keepalive_interval_millis`         | integer ms       | —         | Poll interval for durable-ACK progress.                                  |
-| `max_name_len`                                  | integer          | `127`     | Maximum table and column name length.                                    |
+| `max_name_len`                                  | integer          | `127`     | Maximum table and column name length, in UTF-16 code units.              |
 | `sender_id`                                     | string           | `default` | Identifies this producer to the server and in the journal.               |
 | `max_frame_rejections`                          | integer          | —         | Rejections of one frame before the poison-frame detector escalates.      |
 | `poison_min_escalation_window_millis`           | integer ms       | —         | Minimum dwell before a poison frame may escalate.                        |

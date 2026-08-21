@@ -91,8 +91,23 @@ export const QWP_SERVER_ROLE = {
 } as const;
 
 export const QWP_MAX_COLUMNS_PER_TABLE = 2048;
+/**
+ * Identifier length limits, in UTF-16 code units -- the unit Java's
+ * `TableUtils` measures in, which `identifiers.ts` mirrors on the ingress side.
+ */
 export const QWP_MAX_COLUMN_NAME_LENGTH = 127;
 export const QWP_MAX_TABLE_NAME_LENGTH = 127;
+/**
+ * The same limits as a wire byte count, for bounding a decode allocation.
+ *
+ * A UTF-16 code unit takes at most three UTF-8 bytes (a surrogate pair is two
+ * units and four bytes, so two bytes per unit). Bounding the wire length by the
+ * code-unit limit directly would reject identifiers this client itself encodes:
+ * 64 accented characters are 64 code units but 128 bytes, so at the default
+ * limit a name that passed ingress validation could not be read back out of a
+ * result set.
+ */
+export const QWP_MAX_IDENTIFIER_BYTES = QWP_MAX_TABLE_NAME_LENGTH * 3;
 export const QWP_MAX_ROWS_PER_TABLE = 1_000_000;
 export const QWP_MAX_SYMBOL_DICTIONARY_SIZE = 1_000_000;
 export const QWP_MAX_ERROR_MESSAGE_LENGTH = 1024;

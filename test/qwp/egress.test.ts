@@ -24,6 +24,7 @@ import {
   QwpEgressQueryTimeoutError,
   QwpEgressSession,
   QwpResultBatchDecoder,
+  QwpTableBuffer,
   QwpResultBatchView,
   QwpResultRowView,
   readQwpVarint,
@@ -306,6 +307,42 @@ describe("QWP result batch decoder", () => {
       [null, "bb", "beta", 200n],
       [9, "", "alpha", 300n],
     ]);
+  });
+
+  it("decodes identifiers this client is allowed to ingest", () => {
+    // Ingress validates identifiers in UTF-16 code units, mirroring Java's
+    // TableUtils. The decoder bounded the wire field with the same number, but
+    // that field is a UTF-8 byte count, so a name that passed ingress could not
+    // be read back: 64 accented characters are 64 code units and 128 bytes.
+    for (const name of ["a".repeat(127), "é".repeat(127), "あ".repeat(127)]) {
+      // Ingress accepts it at the default limit.
+      expect(() => new QwpTableBuffer(name)).not.toThrow();
+
+      const payload = new QwpByteWriter();
+      payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
+      writeQwpVarint(payload, 0); // batch sequence
+      writeQwpVarint(payload, 0); // empty dictionary delta start
+      writeQwpVarint(payload, 0); // empty dictionary delta count
+      writeString(payload, name); // table name
+      writeQwpVarint(payload, 0); // rows
+      writeQwpVarint(payload, 1); // columns
+      writeString(payload, name); // column name
+      payload.writeUint8(QWP_COLUMN_TYPE.INT);
+      payload.writeUint8(0); // null flag, still present for a zero-row column
+
+      const message = decodeQwpEgressMessage(
+        encodeQwpFrame(
+          payload.toUint8Array(),
+          QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+          1,
+        ),
+      );
+      if (message.kind !== "result-batch")
+        throw new Error("unexpected message");
+      const batch = new QwpResultBatchDecoder().decode(message);
+      expect(batch.tableName).toBe(name);
+      expect(batch.columns.map((column) => column.name)).toEqual([name]);
+    }
   });
 
   it("exposes bounded zero-copy column views without value arrays", () => {
