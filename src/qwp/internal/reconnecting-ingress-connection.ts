@@ -1588,7 +1588,26 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       );
       return;
     }
-    const payload = await this.readFramePayload(frame);
+    let payload: Uint8Array;
+    try {
+      payload = await this.readFramePayload(frame);
+    } catch (error) {
+      // A journal read can fail transiently: a briefly full or read-only
+      // filesystem parks maintenanceFailure for about a second, and the store
+      // clears it on the next successful batch. enqueueDrain's only handler is
+      // failTerminal, so letting this escape would brick a running producer for
+      // the rest of the process lifetime -- the very outcome the store-level
+      // retry was added to prevent. replayInto() makes the identical read and
+      // connectLoop retries its failures, so route this one the same way.
+      // Deterministic corruption still escapes and stays terminal.
+      if (!isRetryableReconnectError(error)) throw error;
+      // Nothing reached the wire, so the frame is deliberately kept off the
+      // wire log; marking it transmitted is what puts it in replayInto()'s
+      // resend set, exactly as the batch-cap branch above does.
+      frame.transmitted = true;
+      await this.requestReconnect(error, connection);
+      return;
+    }
     frame.transmitted = true;
     this.wireFrames.push(frame);
     try {

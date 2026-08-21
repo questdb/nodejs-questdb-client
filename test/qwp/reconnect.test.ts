@@ -1079,6 +1079,65 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("retries a transient journal read instead of latching the sender", async () => {
+    // A store read can fail transiently -- a briefly full or read-only
+    // filesystem parks the trim failure for about a second and the store
+    // clears it on the next successful batch. enqueueDrain's only handler is
+    // failTerminal, so before the fix that transient condition ended the
+    // producer for the rest of the process lifetime with its frames stranded
+    // on disk, which is exactly what the store-level retry exists to prevent.
+    class FlakyReadStore extends LazyTrackingReplayStore {
+      failNextRead = true;
+
+      override async readPayload(frameSequence: bigint): Promise<Uint8Array> {
+        if (this.failNextRead) {
+          this.failNextRead = false;
+          throw new QwpReplayStoreError(
+            "could not trim QWP store-and-forward segment [firstSequence=0]",
+          );
+        }
+        return super.readPayload(frameSequence);
+      }
+    }
+
+    const connections: FakeConnection[] = [];
+    const replayStore = new FlakyReadStore();
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = new FakeConnection(`node-${connections.length}`);
+        connections.push(connection);
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(1));
+
+    // The frame is still journalled, so a reconnect replays it once the store
+    // recovers rather than the sender going terminal.
+    await vi.waitFor(() =>
+      expect(
+        connections.some((connection) =>
+          connection.sent.some((payload) => payload[payload.length - 1] === 1),
+        ),
+      ).toBe(true),
+    );
+    // The producer never sees the transient failure.
+    await expect(
+      session.publishFrame(Uint8Array.of(2)),
+    ).resolves.toBeUndefined();
+    await session.close();
+  });
+
   it("keeps an asynchronous initial authentication rejection terminal", async () => {
     const replayStore = new TrackingReplayStore();
     let factoryCalls = 0;
