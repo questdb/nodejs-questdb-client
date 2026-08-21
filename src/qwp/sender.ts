@@ -392,7 +392,20 @@ function uuidBytes(value: string | Uint8Array): Uint8Array {
     if (value.length !== 16) {
       throw new RangeError("UUID byte value must contain exactly 16 bytes");
     }
-    return new Uint8Array(value);
+    // The 16 bytes are canonical (RFC 4122) big-endian order, the form
+    // uuid.parse() and java.util.UUID produce: bytes 0-7 are the high limb,
+    // bytes 8-15 the low limb. QWP carries the two limbs little-endian, low
+    // first, so read each limb big-endian and re-emit it through the same
+    // path the text and {low, high} forms use.
+    const source = new DataView(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength,
+    );
+    return uuidLimbBytes(
+      source.getBigUint64(8, false),
+      source.getBigUint64(0, false),
+    );
   }
   const match =
     /^([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/i.exec(

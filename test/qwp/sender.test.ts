@@ -1158,6 +1158,44 @@ describe("QWP high-level sender", () => {
     expect(() => encodeQwpIngressFrame([table])).not.toThrow();
   });
 
+  it("encodes a UUID identically from text, canonical bytes, and limbs", async () => {
+    // The 16-byte form is canonical RFC 4122 order -- what uuid.parse() and
+    // java.util.UUID hand back. Passing those bytes through verbatim would
+    // store the UUID byte-reversed, silently, because 16 bytes is a valid
+    // UUID whichever way round it is.
+    const text = "123e4567-e89b-12d3-a456-426614174000";
+    const canonical = Uint8Array.from([
+      0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66,
+      0x14, 0x17, 0x40, 0x00,
+    ]);
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("t").uuidColumn("id", text).atNow();
+    await sender.table("t").uuidColumn("id", canonical).atNow();
+    const rows = sender.writer("t", { id: uuid() });
+    await rows.row({ id: text });
+    await rows.row({ id: canonical });
+    await rows.row({
+      id: { low: 0xa456426614174000n, high: 0x123e4567e89b12d3n },
+    });
+    await sender.flush();
+
+    const values = column(session.sends[0].tables[0], "id").values;
+    expect(values).toHaveLength(5);
+    for (const encoded of values) {
+      expect(encoded).toEqual(values[0]);
+    }
+    // Little-endian low limb first, matching the egress decoder.
+    expect(values[0]).toEqual(
+      Uint8Array.from([
+        0x00, 0x40, 0x17, 0x14, 0x66, 0x42, 0x56, 0xa4, 0xd3, 0x12, 0x9b, 0xe8,
+        0x67, 0x45, 0x3e, 0x12,
+      ]),
+    );
+    await sender.close();
+  });
+
   it("validates fixed precision and scale when compiling the schema", () => {
     const sender = new QwpSender(async () => new RecordingSession(), {
       autoFlush: false,

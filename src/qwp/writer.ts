@@ -99,7 +99,11 @@ type TimestampInput<Unit extends QwpTimestampUnit> = Unit extends "ns"
   ? bigint
   : number | bigint;
 
-/** UUID input: canonical text, 16 bytes, or the egress limb pair. */
+/**
+ * UUID input: canonical text, 16 canonical (RFC 4122) big-endian bytes, or the
+ * egress limb pair. All three forms describe the same UUID; the byte form is
+ * what `uuid.parse()` and `java.util.UUID` produce, not pre-encoded wire bytes.
+ */
 export type QwpUuidInput =
   | string
   | Uint8Array
