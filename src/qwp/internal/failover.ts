@@ -305,7 +305,16 @@ export function createQwpFailoverConnectionFactory(
         healthTracker.recordFailure(index, error);
         attempts.push({ endpoint, error });
         if (candidate) await candidate.close().catch(() => undefined);
-        if (error instanceof QwpUpgradeError && !error.tryNextEndpoint) {
+        // tryNextEndpoint is a tri-state: only an explicit false short-circuits
+        // the sweep. A browser cannot see the HTTP response, so every refused,
+        // reset, or non-101 upgrade it reports is `undefined`; treating that as
+        // "stop" would make failoverUrls unreachable in browsers. This matches
+        // isRetryableReconnectError(), which reads the sibling `retryable` flag
+        // of the same tri-state as `!== false`.
+        if (
+          error instanceof QwpUpgradeError &&
+          error.tryNextEndpoint === false
+        ) {
           throw error;
         }
       }

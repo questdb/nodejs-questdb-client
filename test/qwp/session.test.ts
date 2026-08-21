@@ -616,6 +616,58 @@ describe("QWP WebSocket adapters", () => {
     await sender.close();
   });
 
+  it("walks browser failover endpoints when the upgrade error is opaque", async () => {
+    // A browser never learns the HTTP response, so every refused, reset, or
+    // non-101 upgrade arrives as a bare `error` event and is classified
+    // `opaque` with tryNextEndpoint left undefined. The existing failover
+    // coverage injects a factory throw carrying tryNextEndpoint: true, a shape
+    // a real browser WebSocket cannot produce, so it cannot observe this.
+    const attempted: string[] = [];
+    const session = await connectQwpBrowserIngress({
+      url: "ws://node-a.example/write/v4",
+      failoverUrls: ["ws://node-b.example/write/v4"],
+      webSocketFactory: (url) => {
+        const requestUrl = new URL(url);
+        attempted.push(requestUrl.hostname);
+        const socket = new FakeWebSocket();
+        queueMicrotask(() => {
+          if (requestUrl.hostname === "node-a.example") {
+            socket.error();
+            socket.close(1006, "");
+            return;
+          }
+          socket.open();
+          socket.message(ingressServerInfo(128));
+        });
+        return asQwpSocket(socket);
+      },
+    });
+
+    expect(attempted).toEqual(["node-a.example", "node-b.example"]);
+    await session.close();
+  });
+
+  it("stops the browser failover sweep on an authentication rejection", async () => {
+    // Only an explicit tryNextEndpoint: false short-circuits, so a 401 must
+    // still fail fast instead of walking the rest of the cluster.
+    const attempted: string[] = [];
+    await expect(
+      connectQwpBrowserIngress({
+        url: "ws://node-a.example/write/v4",
+        failoverUrls: ["ws://node-b.example/write/v4"],
+        sessionBootstrap: {
+          authentication: { type: "bearer", token: "token" },
+          fetch: async () => new Response("nope", { status: 401 }),
+        },
+        webSocketFactory: (url) => {
+          attempted.push(new URL(url).hostname);
+          return asQwpSocket(new FakeWebSocket());
+        },
+      }),
+    ).rejects.toBeInstanceOf(QwpBrowserSessionBootstrapError);
+    expect(attempted).toEqual([]);
+  });
+
   it("uses the browser-selected ingress batch cap automatically", async () => {
     const socket = new FakeWebSocket();
     let capturedUrl: string | URL | undefined;
