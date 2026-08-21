@@ -7,7 +7,7 @@
     "test:qwp-browser-e2e": "pnpm build && vitest run --config vitest.qwp-browser.config.ts",
     "test:dist": "pnpm build && vitest run --config vitest.dist.config.ts",
     "typecheck:dist": "pnpm build && tsc --noEmit -p tsconfig.dist-types.json && tsc --noEmit -p tsconfig.dist-types.cjs.json",
-    "build": "bunchee --external fs-ext-extra-prebuilt",
+    "build": "bunchee",
     "eslint": "eslint src/**",
     "typecheck": "tsc --noEmit",
     "typecheck:qwp-browser": "tsc --noEmit -p tsconfig.qwp-browser.json",
@@ -102,8 +102,5 @@
   "dependencies": {
     "undici": "^7.8.0",
     "ws": "^8.21.3"
-  },
-  "optionalDependencies": {
-    "fs-ext-extra-prebuilt": "2.2.11"
   }
 }

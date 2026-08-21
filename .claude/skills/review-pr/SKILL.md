@@ -291,15 +291,14 @@ Record current facts with file/line citations; do not rely on this list becoming
 - TypeScript flags from `tsconfig.json`, especially `strictNullChecks`,
   `noImplicitAny`, and `noUncheckedIndexedAccess`.
 - Node.js version floor and `@types/node` version.
-- Runtime dependencies and what each covers: `undici` (HTTP), `ws` (Node QWP
-  WebSocket), and the native `fs-ext-extra-prebuilt` advisory locks used by
-  store-and-forward. That last one is an `optionalDependency` that `advisory-lock.ts`
-  reaches through a lazy `import()`; a static top-level import would restore an eager
-  native load for every ILP consumer. bunchee externalizes only `dependencies` and
-  `peerDependencies`, so `--external fs-ext-extra-prebuilt` in the `build` script is
-  load-bearing — without it the module is inlined and its native binary lookup
-  breaks at runtime. `fzstd` is a devDependency that the bundler inlines; making it an
-  external import would break installs.
+- Runtime dependencies and what each covers: `undici` (HTTP) and `ws` (Node QWP
+  WebSocket). There is no native dependency: store-and-forward locking is pure
+  JavaScript in `advisory-lock.ts`, using a `.lock.owner` directory as the mutex with
+  an mtime heartbeat for stale recovery. Reintroducing a native addon would break
+  every consumer on a platform or Node major it has no binary for, so treat a new
+  `optionalDependencies` entry or a compiled binary in the bundle as a finding.
+  `fzstd` is a devDependency that the bundler inlines; making it an external import
+  would break installs.
 - Dual ESM/CJS build and every `package.json` exports subpath (`.`, `./qwp`,
   `./qwp/browser`, `./qwp/node`), plus which sources each subpath is allowed to import.
 - ILP protocol default/negotiation and TCP's explicit-version requirement.

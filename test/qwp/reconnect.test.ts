@@ -8,11 +8,11 @@ import {
   stat,
   truncate,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { flock } from "fs-ext-extra-prebuilt";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeIngress,
@@ -26,7 +26,6 @@ import {
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
   QwpReplayStoreSegmentTooLargeError,
-  QwpReplayStoreUnavailableError,
   type QwpNodeReplayDataLossReport,
 } from "../../src/qwp/node";
 import {
@@ -80,15 +79,6 @@ import {
   createQwpFailoverConnectionFactory,
   createQwpFailoverHealthTracker,
 } from "../../src/_qwp/_internal/failover";
-
-function nativeFlock(fd: number, operation: "exnb" | "un"): Promise<void> {
-  return new Promise((resolve, reject) => {
-    flock(fd, operation, (error) => {
-      if (error) reject(error);
-      else resolve();
-    });
-  });
-}
 
 async function expectOnlyJavaSlotLockMetadata(
   directory: string,
@@ -4082,33 +4072,6 @@ describe("QWP Node file replay store", () => {
     await second.close();
   });
 
-  it("fails closed when the native locking module cannot be loaded", async () => {
-    const directory = await trackedDirectory();
-    vi.resetModules();
-    // Reproduces the module-scope throw the optional dependency raises when no
-    // prebuilt binding matches the platform, and MODULE_NOT_FOUND when an
-    // install omitted it.
-    vi.doMock("fs-ext-extra-prebuilt", () => {
-      throw new Error("Failed to load fs-ext native module.");
-    });
-    try {
-      const { QwpNodeFileReplayStore: UnavailableStore } = await import(
-        "../../src/qwp-node/file-replay-store"
-      );
-      const store = new UnavailableStore({ directory });
-      await expect(store.load()).rejects.toMatchObject({
-        name: "QwpReplayStoreUnavailableError",
-        directory,
-      } satisfies Partial<QwpReplayStoreUnavailableError>);
-      // The binding resolves before the lock file is opened, so a slot that
-      // cannot be owned is never given Java-visible lock metadata.
-      await expect(readdir(directory)).resolves.toEqual([]);
-    } finally {
-      vi.doUnmock("fs-ext-extra-prebuilt");
-      vi.resetModules();
-    }
-  });
-
   it("arbitrates acquisition over stale Java lock metadata", async () => {
     const directory = await trackedDirectory();
     await writeFile(join(directory, ".lock"), "");
@@ -4136,11 +4099,55 @@ describe("QWP Node file replay store", () => {
     await expectOnlyJavaSlotLockMetadata(directory);
   });
 
-  it("contends with a Java-compatible native advisory lock", async () => {
+  it("reclaims a slot whose owner heartbeat stopped", async () => {
     const directory = await trackedDirectory();
-    const lockPath = join(directory, ".lock");
-    const lockHandle = await open(lockPath, "a+");
-    await nativeFlock(lockHandle.fd, "exnb");
+    const ownerPath = join(directory, ".lock.owner");
+    await mkdir(ownerPath);
+    // A live PID with an mtime far beyond the staleness window: only the
+    // stopped heartbeat marks this owner as gone.
+    await writeFile(
+      join(ownerPath, "owner"),
+      JSON.stringify({ pid: process.pid, host: hostname() }),
+    );
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(ownerPath, longAgo, longAgo);
+
+    const store = new QwpNodeFileReplayStore({ directory });
+    await expect(store.load()).resolves.toEqual([]);
+    expect(await readFile(join(directory, ".lock.pid"), "utf8")).toBe(
+      `${process.pid}\n`,
+    );
+    await store.close();
+    await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("reclaims a slot whose owner process is gone from this host", async () => {
+    const directory = await trackedDirectory();
+    const ownerPath = join(directory, ".lock.owner");
+    await mkdir(ownerPath);
+    // Fresh mtime, so only the dead PID can justify reclaiming the slot. The
+    // kernel used to do this for us by releasing the flock on process exit.
+    await writeFile(
+      join(ownerPath, "owner"),
+      JSON.stringify({ pid: 2147483647, host: hostname() }),
+    );
+
+    const store = new QwpNodeFileReplayStore({ directory });
+    await expect(store.load()).resolves.toEqual([]);
+    await store.close();
+    await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("leaves a slot owned by a live heartbeat alone", async () => {
+    const directory = await trackedDirectory();
+    const ownerPath = join(directory, ".lock.owner");
+    await mkdir(ownerPath);
+    // A PID on another host can never be probed for liveness, so a fresh
+    // heartbeat is the only thing keeping this slot held.
+    await writeFile(
+      join(ownerPath, "owner"),
+      JSON.stringify({ pid: 4242, host: `${hostname()}-elsewhere` }),
+    );
     await writeFile(join(directory, ".lock.pid"), "4242\n");
 
     const store = new QwpNodeFileReplayStore({ directory });
@@ -4149,38 +4156,6 @@ describe("QWP Node file replay store", () => {
       directory,
       holderPid: 4242,
     } satisfies Partial<QwpReplayStoreLockedError>);
-
-    await nativeFlock(lockHandle.fd, "un");
-    await lockHandle.close();
-    await expect(store.load()).resolves.toEqual([]);
-    expect(await readFile(join(directory, ".lock.pid"), "utf8")).toBe(
-      `${process.pid}\n`,
-    );
-    await store.close();
-  });
-
-  it("contends with Java's parent-anchored logical slot lock", async () => {
-    const rootDirectory = await trackedDirectory();
-    const directory = join(rootDirectory, "sender-0");
-    const logicalLockDirectory = join(rootDirectory, ".slot-locks");
-    await mkdir(directory);
-    await mkdir(logicalLockDirectory);
-    const lockPath = join(logicalLockDirectory, "sender-0.lock");
-    const lockHandle = await open(lockPath, "a+");
-    await nativeFlock(lockHandle.fd, "exnb");
-    await writeFile(join(logicalLockDirectory, "sender-0.lock.pid"), "9090\n");
-
-    const store = new QwpNodeFileReplayStore({ directory });
-    await expect(store.load()).rejects.toMatchObject({
-      name: "QwpReplayStoreLockedError",
-      directory,
-      holderPid: 9090,
-    } satisfies Partial<QwpReplayStoreLockedError>);
-
-    await nativeFlock(lockHandle.fd, "un");
-    await lockHandle.close();
-    await expect(store.load()).resolves.toEqual([]);
-    await store.close();
   });
 
   it("retires logical lock files after a slot is fully drained", async () => {
@@ -4235,8 +4210,15 @@ describe("QWP Node file replay store", () => {
     await expect(
       store.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) }),
     ).rejects.toBeInstanceOf(QwpReplayStoreFullError);
-    await expectOnlyJavaSlotLockMetadata(directory);
+    // Asserted while the store still holds the slot, so the owner directory is
+    // expected here; nothing journal-shaped may exist alongside it.
+    expect((await readdir(directory)).sort()).toEqual([
+      ".lock",
+      ".lock.owner",
+      ".lock.pid",
+    ]);
     await store.close();
+    await expectOnlyJavaSlotLockMetadata(directory);
   });
 
   it("checkpoints periodic frame and dictionary writes", async () => {
@@ -4318,10 +4300,12 @@ describe("QWP Node file replay store", () => {
     await expect(store.close()).rejects.toBeInstanceOf(
       QwpReplayStoreCheckpointError,
     );
-    const lockHandle = await open(join(directory, ".lock"), "r+");
-    await nativeFlock(lockHandle.fd, "exnb");
-    await nativeFlock(lockHandle.fd, "un");
-    await lockHandle.close();
+    // The slot lock is released even though close() rejected: no owner
+    // directory remains, so another store can take the slot.
+    await expect(readdir(directory)).resolves.not.toContain(".lock.owner");
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    await reopened.load();
+    await reopened.close();
   });
 
   it("waits for ACK trimming without blocking the acknowledgement queue", async () => {

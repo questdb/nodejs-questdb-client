@@ -332,26 +332,35 @@ fresh symbol-ID space. A partially drained close retains the dictionary required
 the surviving frames.
 
 The journal takes an exclusive lock when it is loaded and holds it until the sender
-or session closes. A second live process using the same directory fails with
+or session closes. A second live Node.js process using the same directory fails with
 `QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents.
-The stable `.lock` file is protected by `flock` on Unix and `LockFileEx` on Windows,
-with the holder PID recorded in `.lock.pid` for diagnostics. These are the same files
-and native lock primitives used by the Java client, so Java and Node processes cannot
-simultaneously own one slot. The kernel releases the lock when a process terminates;
-the lock and PID files deliberately remain so their inode is never replaced beneath a
-live owner, and the next holder refreshes the PID sidecar. Short-lived locks under the
-shared parent directory's `.slot-locks` child also match Java and serialize orphan
+Ownership is held by a `.lock.owner` directory created next to the slot: `mkdir` is
+the only exclusive-by-construction filesystem operation available on every supported
+platform without a native addon, so exactly one process can create it. The holder PID
+is recorded in `.lock.pid` for diagnostics, and the stable `.lock` file is created and
+left in place so a slot keeps the on-disk shape a Java client expects. Short-lived
+locks under the shared parent directory's `.slot-locks` child serialize orphan
 adoption with close/rename/recreate quarantine transitions.
 
-Those native primitives come from `fs-ext-extra-prebuilt`, an optional dependency that
-ships prebuilt binaries for macOS, Linux, and Windows on x64 and arm64. It is
-installed by default and imported on the first lock, so ILP-only senders and QWP
-sessions without store-and-forward never load it. An install that skipped it, or a
-platform with no matching prebuilt binary and no build toolchain, therefore leaves the
-rest of the client fully usable and fails only when a store-and-forward journal is
-loaded, raising `QwpReplayStoreUnavailableError`. Store-and-forward never falls back
-to lock-free operation, because the lock is what keeps a second process, Java or Node,
-off the same slot.
+**A Node.js client and a Java client must not use one persistence directory at the
+same time.** The Java client locks `.lock` with `flock` on Unix and `LockFileEx` on
+Windows. The Node.js client does not participate in those kernel locks, so the two
+runtimes will not see each other's lock and can both open the same slot, corrupting
+the journal. The persistence format itself remains cross-client: a directory written
+by one runtime can be handed to the other once the first has closed it. Only
+concurrent access is unsupported, and only between runtimes — two Node.js processes
+still exclude each other correctly.
+
+A kernel lock disappears the instant its holder dies; a directory does not. The holder
+therefore refreshes the owner directory's mtime every 5 seconds, and a contender
+reclaims a slot whose mtime has not advanced for 15 seconds. A contender also reclaims
+immediately when the owner record names a process that no longer exists on the same
+host, which is the common case after a crash. A stale owner directory is renamed aside
+before removal, so two contenders racing to reclaim one slot cannot both win it. If a
+holder is paused long enough for its heartbeat to lapse — `SIGSTOP`, a suspended VM,
+or a stalled filesystem — its lock can be reclaimed while it still believes it holds
+it; the original holder detects the reclaim at its next heartbeat and stops refreshing
+so that only the new owner advances the mtime.
 
 New journals use the cross-client SFA persistence layout. Fixed-size
 `sf-<generation>.sfa` files have the Java/Rust 24-byte `SF01` header and
@@ -1324,7 +1333,6 @@ The public error classes preserve enough context for policy decisions:
 | `QwpReplayStoreAppendTimeoutError` | The Node.js replay journal did not regain capacity before the configured append deadline                    |
 | `QwpReplayStoreCheckpointError`    | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
 | `QwpReplayStoreLockedError`        | Another process owns the configured Node.js replay directory                                                |
-| `QwpReplayStoreUnavailableError`   | Store-and-forward's optional native locking module is missing or unusable here                              |
 | `QwpEgressQueryError`              | QuestDB returned a terminal query error                                                                     |
 | `QwpEgressQueryAbandonedError`     | Result iteration ended before the server completed the query                                                |
 | `QwpEgressQueryTimeoutError`       | The client deadline expired and cancellation began                                                          |

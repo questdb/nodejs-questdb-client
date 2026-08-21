@@ -144,17 +144,7 @@ describe.each(["import", "require"] as const)(
   },
 );
 
-describe("optional native locking module", () => {
-  // `fs-ext-extra-prebuilt` ships prebuilt bindings only for
-  // darwin/linux/win32 x arm64/x64 on a bounded range of Node majors, and
-  // throws from its own module scope when none matches - so on musl (Alpine),
-  // a future Node major, or an exotic arch it is unloadable. Spoofing
-  // `process.platform` is what its loader keys off, so it reproduces exactly
-  // that state. Only store-and-forward needs the addon; ILP-only consumers of
-  // the package root must never pay for it.
-  const unloadable = (body: string) =>
-    `Object.defineProperty(process,'platform',{value:'sunos'});${body}`;
-
+describe("store-and-forward locking", () => {
   const runNode = (script: string) =>
     new Promise<{ code: number | null; stdout: string; stderr: string }>(
       (resolve) => {
@@ -175,7 +165,7 @@ describe("optional native locking module", () => {
     );
 
   it.each(["import", "require"] as const)(
-    "the package root loads (%s) when the addon cannot be loaded",
+    "the package root loads (%s) on a platform no addon would support",
     async (format) => {
       const target = resolveExport(".", format);
       const load_ =
@@ -183,35 +173,51 @@ describe("optional native locking module", () => {
           ? `console.log(typeof require(${JSON.stringify(target)}).Sender)`
           : `import(${JSON.stringify(pathToFileURL(target).href)}).then(m => console.log(typeof m.Sender))`;
 
-      const { code, stdout, stderr } = await runNode(unloadable(load_));
+      // Spoofing an exotic platform is what a native addon's loader keys off.
+      // The slot lock is pure JavaScript now, so this must stay boring - it
+      // guards against a native dependency creeping back onto the root entry's
+      // module graph, where it would break every HTTP/TCP user on musl, a
+      // future Node major, or an unusual architecture.
+      const { code, stdout, stderr } = await runNode(
+        `Object.defineProperty(process,'platform',{value:'sunos'});${load_}`,
+      );
 
-      // A static top-level import of the addon anywhere on the root entry's
-      // module graph makes this throw for every HTTP/TCP user on such a
-      // platform - the addon must stay behind a lazy import().
-      expect(stderr).not.toMatch(/fs-ext/);
+      expect(stderr).toBe("");
       expect(code).toBe(0);
       expect(stdout.trim()).toBe("function");
     },
   );
 
-  it("keeps the addon an external specifier rather than inlining it", async () => {
-    // bunchee externalizes `dependencies` and `peerDependencies` only. The
-    // addon is an optionalDependency, so `--external fs-ext-extra-prebuilt` in
-    // the build script is load-bearing: without it the module is inlined and
-    // its __dirname-relative binary lookup resolves into dist/ and breaks at
-    // runtime, which the import test above cannot observe.
+  it("ships the slot lock in the bundle with no native addon", async () => {
     for (const format of ["import", "require"] as const) {
       const bundle = await readFile(
         resolveExport("./qwp/node", format),
         "utf8",
       );
 
-      // The bare specifier survives, and it is reached through a dynamic
-      // import() rather than a top-level one.
-      expect(bundle).toMatch(/\bimport\(['"]fs-ext-extra-prebuilt['"]\)/);
-      // `findPrebuiltBinary` is the addon's own loader; seeing it here would
-      // mean the module was inlined into our bundle.
-      expect(bundle).not.toMatch(/findPrebuiltBinary/);
+      // The `.lock.owner` mutex is the whole locking implementation, so it must
+      // be inlined rather than reached through any external specifier.
+      expect(bundle).toContain('".owner"');
+      expect(bundle).toContain('".slot-locks"');
+      // Nothing may pull in a compiled binary: a prebuilt addon is exactly the
+      // per-Node-major breakage this lock exists to avoid.
+      expect(bundle).not.toMatch(/fs-ext/);
+      expect(bundle).not.toMatch(/['"][^'"]*\.node['"]\s*\)/);
     }
+  });
+
+  it("declares no optional or native dependencies", async () => {
+    const manifest: {
+      dependencies?: Record<string, string>;
+      optionalDependencies?: Record<string, string>;
+    } = JSON.parse(
+      await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+    );
+
+    expect(manifest.optionalDependencies).toBeUndefined();
+    expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual([
+      "undici",
+      "ws",
+    ]);
   });
 });

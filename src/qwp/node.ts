@@ -90,7 +90,6 @@ export {
   QwpReplayStoreLockedError,
   QwpReplayStoreQuarantinedError,
   QwpReplayStoreSegmentTooLargeError,
-  QwpReplayStoreUnavailableError,
 } from "../qwp-node/file-replay-store";
 export type {
   QwpNodeFileReplayStoreMetrics,
