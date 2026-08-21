@@ -1286,17 +1286,37 @@ export class QwpSender {
 
   long256Column(
     name: string,
-    word0: bigint,
-    word1: bigint,
-    word2: bigint,
-    word3: bigint,
+    word0: bigint | null | undefined,
+    word1: bigint | null | undefined,
+    word2: bigint | null | undefined,
+    word3: bigint | null | undefined,
   ): QwpSender {
+    const given = [word0, word1, word2, word3];
+    const absent = given.filter(
+      (word) => word === null || word === undefined,
+    ).length;
+    // A LONG256 is one value spread over four words, so "no value" means all
+    // four are absent -- that omits the column, like every other setter. A
+    // partial set is a caller mistake rather than a NULL, and saying so beats
+    // letting BigInt.asIntN() raise "Cannot convert null to a BigInt".
+    if (absent === given.length) return this;
+    if (absent > 0) {
+      return this.failRow(
+        new TypeError(
+          "long256Column needs all four words, or none of them for a NULL value",
+        ),
+      );
+    }
     try {
-      const words = [word0, word1, word2, word3];
-      for (const [index, word] of words.entries()) {
+      const words: bigint[] = [];
+      for (const [index, word] of given.entries()) {
+        if (typeof word !== "bigint") {
+          throw new TypeError(`LONG256 word ${index} must be a bigint`);
+        }
         if (BigInt.asIntN(64, word) !== word) {
           throw new RangeError(`LONG256 word ${index} exceeds signed int64`);
         }
+        words.push(word);
       }
       return this.addColumn(
         name,

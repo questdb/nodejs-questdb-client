@@ -87,7 +87,10 @@ await sender
 ```
 
 This applies to every column method on both the ILP (`http`/`https`/`tcp`/`tcps`)
-and QWP (`ws`/`wss`/`udp`) senders, and to the compiled QWP writers.
+and QWP (`ws`/`wss`/`udp`) senders, and to the compiled QWP writers. The one
+method that spreads a single value over several arguments, `long256Column`,
+omits its column when _all four_ words are nullish; a partial set is rejected
+rather than treated as NULL.
 
 Two consequences are worth knowing:
 

@@ -494,8 +494,11 @@ class Sender {
    * @param {string} name - Column name.
    * @param {Int8Array | bigint | null | undefined} unscaled - The unscaled value of the decimal in two's
    * complement representation and big-endian byte order.
-   * An empty array represents the NULL value.
    * A null or undefined value omits the column entirely (stored as NULL).
+   * An empty array also represents NULL, but the two are not encoded alike:
+   * on the ILP transports an empty array writes an explicit NULL decimal
+   * field, while the QWP transports omit the column exactly as they do for
+   * null. QuestDB records NULL either way for a column that already exists.
    * @param {number} scale - The scale of the decimal value.
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:

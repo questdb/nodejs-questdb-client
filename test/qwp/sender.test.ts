@@ -628,6 +628,32 @@ describe("QWP high-level sender", () => {
     expect(() => encodeQwpIngressFrame([table])).not.toThrow();
   });
 
+  it("omits a long256 column when all four words are nullish", async () => {
+    // long256Column was the only column method whose value parameters did not
+    // accept null or undefined, so the nullish rule README states for "every
+    // column method" did not hold for it: a plain-JavaScript caller mapping an
+    // optional field onto it got "Cannot convert null to a BigInt" and a
+    // silently discarded row.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender
+      .table("hashes")
+      .long256Column("absent", null, null, null, null)
+      .long256Column("alsoAbsent", undefined, undefined, undefined, undefined)
+      .longColumn("kept", 7n)
+      .atNow();
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(table.columns.map((c) => c.name)).toEqual(["kept"]);
+
+    // A partial set is a caller mistake, not a NULL, and says so.
+    expect(() =>
+      sender.table("hashes").long256Column("partial", 1n, null, 3n, 4n),
+    ).toThrow(/all four words, or none of them/);
+  });
+
   it("rolls back the whole current row when a setter fails", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });
