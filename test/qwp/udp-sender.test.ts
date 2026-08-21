@@ -18,8 +18,16 @@ class FakeUdpSocket implements QwpNodeUdpSocketLike {
   closed = false;
   private errorListener?: (error: Error) => void;
 
+  bindError?: Error;
+
   bind(_port: number, _address: string, callback: () => void): void {
-    queueMicrotask(callback);
+    queueMicrotask(() => {
+      if (this.bindError) {
+        this.errorListener?.(this.bindError);
+        return;
+      }
+      callback();
+    });
   }
 
   send(
@@ -166,6 +174,25 @@ describe("QWP Node UDP sender", () => {
     await expect(sender.flush()).resolves.toBe(true);
     expect(socket.packets).toHaveLength(1);
     await sender.close();
+  });
+
+  it("closes the socket when bind fails", async () => {
+    // node:dgram keeps the handle open after a bind error, so a connect() that
+    // fails on EACCES/EMFILE/EADDRNOTAVAIL used to leak one descriptor -- and a
+    // reconnect loop retrying after EMFILE compounds the exhaustion it is
+    // retrying from.
+    const socket = new FakeUdpSocket();
+    socket.bindError = Object.assign(new Error("EACCES: permission denied"), {
+      code: "EACCES",
+    });
+
+    await expect(
+      connectQwpNodeUdp({
+        host: "localhost",
+        socketFactory: () => socket,
+      }),
+    ).rejects.toThrow(/EACCES/);
+    expect(socket.closed).toBe(true);
   });
 
   it("reports local send failures without retrying fire-and-forget rows", async () => {

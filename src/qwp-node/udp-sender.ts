@@ -193,16 +193,22 @@ export class QwpNodeUdpSession implements QwpSenderSession {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = new Promise<void>((resolve) => {
-      if (!this.bound) {
-        this.closed = true;
-        resolve();
-        return;
-      }
-      this.socket.close(() => {
+      // `bound` is set only by a successful bind, but node:dgram keeps the
+      // handle open after a bind error, so skipping close() here leaked one
+      // descriptor per failed connect(). Close unconditionally and treat an
+      // already-closed socket as done, the way the Java client's close()
+      // closes its channel without consulting bind state.
+      try {
+        this.socket.close(() => {
+          this.bound = false;
+          this.closed = true;
+          resolve();
+        });
+      } catch {
         this.bound = false;
         this.closed = true;
         resolve();
-      });
+      }
     });
     return this.closePromise;
   }
