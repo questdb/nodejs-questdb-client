@@ -77,6 +77,12 @@ jobs:
       - name: Type-checking (built package consumer)
         run: pnpm typecheck:dist
 
+      # The same gate publish.yml runs. Keeping it here too means a chunk that
+      # escapes `files`, or a regression in the check itself, fails a pull
+      # request instead of first being discovered during a release.
+      - name: Check for build artifacts
+        run: node scripts/check-build-artifacts.mjs
+
   # Drives the built browser bundle in real Chromium against a local mock
   # server. Tests that need a live QuestDB belong in the server repositories,
   # where the topology and authentication fixtures already exist.

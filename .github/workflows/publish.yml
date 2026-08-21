@@ -54,36 +54,7 @@ jobs:
       # so the walk follows relative imports: a chunk left out of `files`
       # publishes a package whose every entry resolves to a missing file.
       - name: Check for build artifacts
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            const { exports: map } = require("./package.json");
-            const missing = [];
-            const path = require("node:path");
-            const seen = new Set();
-            const walk = (file, from) => {
-              if (!fs.existsSync(file)) { missing.push(from + " -> " + file); return; }
-              const key = path.resolve(file);
-              if (seen.has(key)) return;
-              seen.add(key);
-              const source = fs.readFileSync(file, "utf8");
-              for (const [, spec] of source.matchAll(/(?:from|require\()\s*['\"](\.[^'\"]+)['\"]/g)) {
-                walk(path.join(path.dirname(file), spec), file);
-              }
-            };
-            for (const [subpath, conditions] of Object.entries(map)) {
-              for (const target of Object.values(conditions)) {
-                for (const file of Object.values(target)) {
-                  walk(file, subpath);
-                }
-              }
-            }
-            if (missing.length > 0) {
-              console.error("missing build artifacts:\n  " + missing.join("\n  "));
-              process.exit(1);
-            }
-            console.log("all " + Object.keys(map).length + " export subpaths present");
-          '
+        run: node scripts/check-build-artifacts.mjs
 
       - name: Publish
         uses: JS-DevTools/npm-publish@v3
