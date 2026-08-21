@@ -580,3 +580,31 @@ describe("protocol caps", () => {
     ).not.toThrow();
   });
 });
+
+describe("QWP ingress symbol encoding", () => {
+  it("rejects a bare symbol ID when no dictionary gives it meaning", () => {
+    // The delta encoder resolves a numeric SYMBOL value against the dictionary
+    // it is handed. The non-delta encoder builds its inline dictionary out of
+    // the values' text, and reading `.text` off a number gives undefined --
+    // which TextEncoder encodes as zero bytes. Two distinct symbols used to
+    // collapse into a single empty-string entry and be acknowledged OK.
+    const dictionary = new QwpSymbolDictionary();
+    const eth = dictionary.getOrAdd("ETH-USD");
+    const btc = dictionary.getOrAdd("BTC-USD");
+
+    const table = new QwpTableBuffer("trades");
+    for (const id of [eth, btc, eth]) {
+      table
+        .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+        .values.push(id);
+      table.nextRow();
+    }
+
+    expect(() =>
+      encodeQwpIngressFrame([table], { dictionary, confirmedMaxSymbolId: -1 }),
+    ).not.toThrow();
+    expect(() => encodeQwpIngressFrame([table])).toThrow(
+      /needs a symbol dictionary/,
+    );
+  });
+});

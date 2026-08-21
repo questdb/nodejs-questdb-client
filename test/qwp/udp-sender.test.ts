@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Sender } from "../../src";
 import {
+  QwpSymbolDictionary,
   connectQwpNodeUdp,
   connectQwpNodeUdpSender,
   createQwpNodeUdpSender,
@@ -84,6 +85,30 @@ function stringTable(value: string): QwpTableBuffer {
 }
 
 describe("QWP Node UDP sender", () => {
+  it("rejects encode options a self-contained datagram cannot honour", async () => {
+    // sendTables() accepts QwpIngressEncodeOptions but encodeUdpDatagrams
+    // discarded them, so a caller who correctly passed a delta dictionary got
+    // it silently ignored -- and the non-delta encoder then wrote every symbol
+    // in the frame as the empty string.
+    const socket = new FakeUdpSocket();
+    const session = await connectQwpNodeUdp({
+      host: "127.0.0.1",
+      socketFactory: () => socket,
+    });
+
+    expect(() =>
+      session.sendTables([longTable(1)], {
+        dictionary: new QwpSymbolDictionary(),
+      }),
+    ).toThrow(/cannot use a delta symbol dictionary/);
+    expect(() =>
+      session.sendTables([longTable(1)], { confirmedMaxSymbolId: 0 }),
+    ).toThrow(/no connection to track confirmed symbol IDs/);
+    expect(socket.packets).toHaveLength(0);
+
+    await session.close();
+  });
+
   it("splits at row boundaries into self-contained one-table datagrams", async () => {
     const socket = new FakeUdpSocket();
     const session = await connectQwpNodeUdp({

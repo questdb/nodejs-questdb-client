@@ -73,7 +73,27 @@ export function decodeQwpIngressServerInfo(
 }
 
 function symbolText(value: unknown): string {
-  return typeof value === "string" ? value : (value as QwpSymbolValue).text;
+  if (typeof value === "string") return value;
+  // A bare dictionary ID carries no text, and this encoder builds its inline
+  // dictionary out of the texts, so there is nothing to resolve it against.
+  // Reading `.text` off a number yields undefined, which TextEncoder happily
+  // encodes as zero bytes -- every symbol in the frame would collapse into one
+  // empty-string entry and be acknowledged as if it were correct. Say so
+  // instead. symbolId() accepts the numeric form because the delta encoder is
+  // given the dictionary that gives it meaning.
+  if (typeof value === "number") {
+    throw new Error(
+      `QWP symbol ID ${value} needs a symbol dictionary; pass one to encode a delta frame, or supply the symbol as a string or {id, text}`,
+    );
+  }
+  const text = (value as QwpSymbolValue)?.text;
+  if (typeof text !== "string") {
+    throw new Error(
+      "QWP symbol value must be a string or a {id, text} pair, received " +
+        (value === null ? "null" : typeof value),
+    );
+  }
+  return text;
 }
 
 function symbolId(value: unknown, dictionary: QwpSymbolDictionary): number {

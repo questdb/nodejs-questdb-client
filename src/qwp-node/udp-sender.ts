@@ -153,7 +153,25 @@ export class QwpNodeUdpSession implements QwpSenderSession {
         "QWP UDP does not support transactions or deferred commit",
       );
     }
-    const datagrams = encodeUdpDatagrams(tables, this.maxBatchSizeBytes);
+    // Every datagram has to decode on its own, so there is no connection over
+    // which a delta dictionary could be reconstructed. Accepting one and
+    // encoding without it used to write every symbol in the frame as the empty
+    // string, acknowledged as though it were correct.
+    if (options.dictionary !== undefined) {
+      throw new Error(
+        "QWP UDP datagrams are self-contained and cannot use a delta symbol dictionary; supply symbol values as strings",
+      );
+    }
+    if (options.confirmedMaxSymbolId !== undefined) {
+      throw new Error(
+        "QWP UDP has no connection to track confirmed symbol IDs against",
+      );
+    }
+    const datagrams = encodeUdpDatagrams(
+      tables,
+      this.maxBatchSizeBytes,
+      options.gorilla ?? false,
+    );
     return this.sendDatagrams(datagrams);
   }
 
@@ -283,6 +301,7 @@ export class QwpNodeUdpSession implements QwpSenderSession {
 function encodeUdpDatagrams(
   tables: readonly QwpTableBuffer[],
   maxDatagramSize: number,
+  gorilla = false,
 ): Uint8Array[] {
   const result: Uint8Array[] = [];
   for (const table of tables) {
@@ -296,7 +315,7 @@ function encodeUdpDatagrams(
       while (low <= high) {
         const end = Math.floor((low + high) / 2);
         const encoded = encodeQwpIngressFrame([table.sliceRows(start, end)], {
-          gorilla: false,
+          gorilla,
         });
         if (encoded.byteLength <= maxDatagramSize) {
           acceptedEnd = end;
@@ -310,7 +329,7 @@ function encodeUdpDatagrams(
       if (!accepted) {
         const oneRow = encodeQwpIngressFrame(
           [table.sliceRows(start, start + 1)],
-          { gorilla: false },
+          { gorilla },
         );
         throw new QwpUdpDatagramTooLargeError(
           maxDatagramSize,
