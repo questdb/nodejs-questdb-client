@@ -942,6 +942,11 @@ export class QwpSender {
   private currentRowSchemaKeys: string[] = [];
   private pendingRowCount = 0;
   private pendingByteCount = 0;
+  /**
+   * Bumped by reset(), so a flush that snapshotted the previous staging can
+   * tell its rows are already gone rather than retiring them a second time.
+   */
+  private stagingGeneration = 0;
   private lastFlushTime = Date.now();
   private sessionPromise?: Promise<QwpSenderSession>;
   private activeSession?: QwpSenderSession;
@@ -1043,6 +1048,10 @@ export class QwpSender {
     this.current = undefined;
     this.currentRowSchemaKeys.length = 0;
     this.currentRow.clear();
+    // A flush already in flight holds snapshots of the tables just dropped.
+    // Retiring them against the counters this call zeroes would subtract the
+    // same rows twice, so mark the staging they belong to as gone.
+    this.stagingGeneration++;
     this.resetAutoFlush();
     return this;
   }
@@ -2179,7 +2188,16 @@ export class QwpSender {
   /** Removes a flush's staged rows from the pending buffers. */
   private releaseStagedRows(
     snapshots: readonly { table: StagedTable; rows: readonly StagedRow[] }[],
+    generation: number,
   ): number {
+    if (generation !== this.stagingGeneration) {
+      // reset() dropped this staging and already zeroed the counters. The
+      // tables these snapshots hold are detached from `tables`, so there is
+      // nothing left to retire and subtracting would drive pendingRows
+      // negative -- permanently, which delays every later row- and
+      // byte-triggered auto-flush by that offset.
+      return 0;
+    }
     for (const { table, rows } of snapshots) {
       table.rows.splice(0, rows.length);
     }
@@ -2209,7 +2227,7 @@ export class QwpSender {
     const snapshots = this.tables
       .filter((table) => table.rows.length > 0)
       .map((table) => ({ table, rows: table.rows.slice() }));
-    return this.releaseStagedRows(snapshots);
+    return this.releaseStagedRows(snapshots, this.stagingGeneration);
   }
 
   private async tryFlush(): Promise<void> {
@@ -2240,6 +2258,7 @@ export class QwpSender {
       return { flushed: false, sequence: -1n };
     }
     const session = await this.getSession();
+    const generation = this.stagingGeneration;
     const snapshots = this.tables
       .filter((table) => table.rows.length > 0)
       .map((table) => ({ table, rows: table.rows.slice() }));
@@ -2325,7 +2344,7 @@ export class QwpSender {
     if (publication) {
       await publication;
     }
-    const sentRows = this.releaseStagedRows(snapshots);
+    const sentRows = this.releaseStagedRows(snapshots, generation);
     this.totalRowsPublished += sentRows;
     this.lastFlushTime = Date.now();
     this.log(

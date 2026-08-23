@@ -1553,6 +1553,72 @@ describe("QWP high-level sender", () => {
     expect(column(table, "d").values).toEqual([12_345n]);
   });
 
+  it("keeps auto-flush accurate when reset() lands during a flush", async () => {
+    // reset() zeroes the pending counters synchronously, while a flush already
+    // in flight subtracts its own snapshot after its await. Both ran against
+    // the same counters, so the rows were retired twice: pendingRows went
+    // negative and stayed there, delaying every later row- and byte-triggered
+    // auto-flush by that offset for the sender's life.
+    let releaseSend!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let entered!: () => void;
+    const inSend = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let armed = true;
+    let frames = 0;
+
+    // flush() publishes locally by default, so park that rather than sendTables.
+    class ParkingSession extends RecordingSession {
+      override async publishTables(
+        tables: readonly QwpTableBuffer[],
+        options?: QwpIngressEncodeOptions,
+      ): Promise<void> {
+        if (armed) {
+          armed = false;
+          entered();
+          await parked;
+        }
+        frames++;
+        return super.publishTables(tables, options);
+      }
+    }
+
+    const sender = new QwpSender(async () => new ParkingSession(), {
+      autoFlush: true,
+      autoFlushRows: 3,
+      closeFlushTimeoutMs: 0,
+    });
+
+    for (const value of [1n, 2n]) {
+      sender.table("t").longColumn("v", value);
+      await sender.at(1_000n);
+    }
+    expect(sender.metrics.pendingRows).toBe(2);
+
+    const flushing = sender.flush();
+    await inSend;
+    sender.reset();
+    expect(sender.metrics.pendingRows).toBe(0);
+
+    releaseSend();
+    await flushing;
+    // The parked flush must not retire rows the reset already dropped.
+    expect(sender.metrics.pendingRows).toBe(0);
+    expect(sender.metrics.pendingBytes).toBe(0);
+
+    // Row-triggered auto-flush still fires on the row it was configured for.
+    const before = frames;
+    for (const value of [3n, 4n, 5n]) {
+      sender.table("t").longColumn("v", value);
+      await sender.at(2_000n);
+    }
+    expect(frames - before).toBe(1);
+    await sender.close();
+  });
+
   it("maps width aliases onto the same column types", () => {
     expect(double()).toEqual(float64());
     expect(long()).toEqual(int64());
