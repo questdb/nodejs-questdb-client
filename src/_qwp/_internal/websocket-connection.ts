@@ -154,7 +154,16 @@ export function openQwpWebSocket(
     return Promise.reject(error);
   }
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const authTimeoutMs = options.authTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Opening a connection is two deadlines: connectTimeoutMs covers the TCP/TLS
+  // transport, and authTimeoutMs takes over for the upgrade and authentication
+  // exchange the moment transportConnected resolves. A caller who narrows only
+  // the first is bounding how long establishing one connection may take, and
+  // the upgrade is part of that -- inheriting keeps an explicit 200 ms from
+  // being exceeded 75x by a default nobody chose, which is what a peer that
+  // accepts TCP and never answers the upgrade used to cost. Setting
+  // authTimeoutMs restores an independent budget for the slower phase.
+  const authTimeoutMs =
+    options.authTimeoutMs ?? options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const sendTimeoutMs = options.sendTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_TIMEOUT_MS;
 

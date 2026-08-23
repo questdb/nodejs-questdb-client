@@ -145,6 +145,46 @@ describe("QWP Node transport", () => {
     }
   });
 
+  it("lets an explicit connect timeout bound the upgrade too", async () => {
+    // Opening a connection is two deadlines, and the upgrade runs under the
+    // second one. A caller who set only connectTimeoutMs was therefore held
+    // for the undocumented 15s authTimeoutMs default -- 75x the bound they
+    // asked for -- whenever a peer accepted TCP and never answered.
+    const sockets = new Set<Socket>();
+    const tcpServer = createTcpServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      socket.resume();
+    });
+    await new Promise<void>((resolve, reject) => {
+      tcpServer.once("error", reject);
+      tcpServer.listen(0, "127.0.0.1", resolve);
+    });
+
+    try {
+      const address = tcpServer.address() as AddressInfo;
+      const started = Date.now();
+      await expect(
+        connectQwpNodeWebSocket({
+          url: `ws://127.0.0.1:${address.port}/write/v4`,
+          connectTimeoutMs: 40,
+          closeTimeoutMs: 25,
+        }),
+      ).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        timeoutPhase: QWP_UPGRADE_TIMEOUT_PHASE.AUTHENTICATION,
+        message: "QWP authentication/WebSocket upgrade timed out after 40ms",
+      } satisfies Partial<QwpUpgradeError>);
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) => {
+        tcpServer.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
   it("negotiates durable ACK and polls progress with a WebSocket PING", async () => {
     const table = "trades";
     const sequenceTransaction = 7n;

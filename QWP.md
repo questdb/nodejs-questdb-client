@@ -89,17 +89,17 @@ connect string is the portable spelling.
 
 ### Connection
 
-| Key                  | Value              | Default   | Meaning                                                            |
-| -------------------- | ------------------ | --------- | ------------------------------------------------------------------ |
-| `addr`               | `host[:port]`      | port 9000 | Endpoint. Repeat the key, or comma-separate, for ordered failover. |
-| `username`, `user`   | string             | —         | HTTP Basic user for the WebSocket upgrade.                         |
-| `password`, `pass`   | string             | —         | HTTP Basic password.                                               |
-| `token`              | string             | —         | Bearer token; alternative to Basic.                                |
-| `tls_verify`         | `on`, `unsafe_off` | on        | Certificate verification. `unsafe_off` disables it.                |
-| `tls_roots`          | path               | —         | PEM or PKCS#12 trust store for a private CA.                       |
-| `tls_roots_password` | string             | —         | Password for `tls_roots`.                                          |
-| `auth_timeout_ms`    | integer ms         | —         | Deadline for the authentication exchange.                          |
-| `connect_timeout`    | integer ms         | —         | Deadline for establishing one connection.                          |
+| Key                  | Value              | Default   | Meaning                                                                                  |
+| -------------------- | ------------------ | --------- | ---------------------------------------------------------------------------------------- |
+| `addr`               | `host[:port]`      | port 9000 | Endpoint. Repeat the key, or comma-separate, for ordered failover.                       |
+| `username`, `user`   | string             | —         | HTTP Basic user for the WebSocket upgrade.                                               |
+| `password`, `pass`   | string             | —         | HTTP Basic password.                                                                     |
+| `token`              | string             | —         | Bearer token; alternative to Basic.                                                      |
+| `tls_verify`         | `on`, `unsafe_off` | on        | Certificate verification. `unsafe_off` disables it.                                      |
+| `tls_roots`          | path               | —         | PEM or PKCS#12 trust store for a private CA.                                             |
+| `tls_roots_password` | string             | —         | Password for `tls_roots`.                                                                |
+| `auth_timeout_ms`    | integer ms         | `15000`   | Deadline for the upgrade and authentication exchange.                                    |
+| `connect_timeout`    | integer ms         | `15000`   | Deadline for the TCP/TLS transport, and for the upgrade unless `auth_timeout_ms` is set. |
 
 ### Ingress
 
@@ -1120,6 +1120,15 @@ without this bound a few kilobytes of RLE-compressed bitmap declares a result no
 heap can hold. The bound is checked before any column is read, and 32Mi cells sits
 far above any plausible result -- the widest supported table at 16k rows, or a full
 1,048,576-row batch at 32 columns. Lower `maxBatchRows` for genuinely wide tables.
+
+Opening a connection runs under two deadlines. `connect_timeout` covers the TCP/TLS
+transport, and `auth_timeout_ms` takes over for the WebSocket upgrade and the
+authentication exchange as soon as the transport connects; both default to 15
+seconds. Setting only `connect_timeout` bounds both phases with that value, so an
+endpoint that accepts TCP and never answers the upgrade -- a stalled proxy or load
+balancer -- fails inside the budget you asked for rather than 15 seconds later. Set
+`auth_timeout_ms` as well when the upgrade legitimately needs longer than the
+transport.
 
 Egress failover is enabled by default in Node.js and browsers. A transport failure or
 invalid protocol response closes and deprioritizes that endpoint, reconnects, resets
