@@ -650,6 +650,27 @@ describe("QWP result batch decoder", () => {
     expect(batch.get(99, 0)).toBe(42);
   });
 
+  it("decodes a Zstd frame that carries a content checksum", () => {
+    // Nothing verifies the four trailing bytes -- neither the frame walk nor
+    // fzstd looks at them -- but they sit past the last block, so a decoder
+    // that mistakes them for one more block, or appends after them, gets a
+    // frame that no longer decodes.
+    const size = COMPRESSED_INT_RESULT_BODY.byteLength;
+    const checksummed = new Uint8Array(size + 4);
+    checksummed.set(COMPRESSED_INT_RESULT_BODY);
+    checksummed[4] |= 0x04; // content checksum flag
+    checksummed.set(Uint8Array.of(9, 9, 9, 9), size);
+
+    const message = decodeQwpEgressMessage(compressedIntResultBatch());
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode({
+      ...message,
+      body: checksummed,
+    });
+    expect(batch.rowCount).toBe(100);
+    expect(batch.get(99, 0)).toBe(42);
+  });
+
   it("exposes a reusable view over a Zstd RESULT_BATCH", () => {
     const message = decodeQwpEgressMessage(compressedIntResultBatch(7n));
     if (message.kind !== "result-batch") throw new Error("unexpected message");

@@ -1,4 +1,4 @@
-import { Decompress } from "fzstd";
+import { decompress } from "fzstd";
 import { QwpProtocolError } from "./errors";
 
 /** Matches the Java client's per-connection decompression safety cap. */
@@ -7,10 +7,27 @@ export const QWP_MAX_ZSTD_DECOMPRESSED_SIZE = 64 * 1024 * 1024;
 const ZSTD_MAGIC = 0xfd2fb528;
 const ZSTD_MAX_BLOCK_SIZE = 128 * 1024;
 
+/**
+ * Bytes of marker appended after the declared content, and the value they
+ * carry. fzstd decodes into the output buffer without reporting how far it
+ * got, so the marker is how the decoded length is observed: a run this long
+ * cannot be faked by a frame that stops early, because everything past what
+ * the frame wrote is the untouched zero tail of the buffer.
+ */
+const ZSTD_SIZE_MARKER_BYTES = 8;
+const ZSTD_SIZE_MARKER = 0xa5;
+
 interface ZstdFrameInfo {
   readonly contentSize: number;
   readonly dataOffset: number;
   readonly checksum: boolean;
+}
+
+interface ZstdBlockLayout {
+  /** Offset of the header of the block flagged last. */
+  readonly lastBlockOffset: number;
+  /** First byte after the last block, so before any content checksum. */
+  readonly blocksEnd: number;
 }
 
 function requireAvailable(
@@ -100,13 +117,18 @@ function inspectZstdFrame(frame: Uint8Array): ZstdFrameInfo {
   return { contentSize: Number(contentSize), dataOffset: offset, checksum };
 }
 
-function validateSingleZstdFrame(frame: Uint8Array, info: ZstdFrameInfo): void {
+function validateSingleZstdFrame(
+  frame: Uint8Array,
+  info: ZstdFrameInfo,
+): ZstdBlockLayout {
   let offset = info.dataOffset;
+  let lastBlockOffset = info.dataOffset;
   let lastBlock = false;
   while (!lastBlock) {
     requireAvailable(frame, offset, 3, "block header");
     const header =
       frame[offset] | (frame[offset + 1] << 8) | (frame[offset + 2] << 16);
+    lastBlockOffset = offset;
     offset += 3;
     lastBlock = (header & 1) !== 0;
     const blockType = (header >>> 1) & 0x03;
@@ -123,6 +145,7 @@ function validateSingleZstdFrame(frame: Uint8Array, info: ZstdFrameInfo): void {
     requireAvailable(frame, offset, encodedSize, "block body");
     offset += encodedSize;
   }
+  const blocksEnd = offset;
   if (info.checksum) {
     requireAvailable(frame, offset, 4, "content checksum");
     offset += 4;
@@ -132,58 +155,106 @@ function validateSingleZstdFrame(frame: Uint8Array, info: ZstdFrameInfo): void {
       `zstd body must contain exactly one frame [frameBytes=${offset}, actual=${frame.byteLength}]`,
     );
   }
+  return { lastBlockOffset, blocksEnd };
 }
 
-function frameWithProbeContentSize(
+/**
+ * Reframes the blocks with a single-segment header, an eight-byte size marker
+ * appended as a final RLE block, and the content size that marker needs.
+ *
+ * fzstd sizes its output from the declared content size and never reports how
+ * far it actually got, so the marker is what makes the decoded length
+ * observable: it lands wherever the frame's own output ends, which is the
+ * declared content size and nowhere else for a frame that means what its
+ * header says. Those bytes are also the headroom that lets an over-long frame
+ * write past the declared size instead of being silently truncated into it.
+ *
+ * A single-segment window of the output's size is sufficient for all valid
+ * frames because no match can refer before the decoded content, and it is what
+ * makes fzstd decode in place: given a window that spans the whole output, it
+ * resolves matches against the output itself instead of shifting a separate
+ * window buffer down after every block, which is quadratic in the content
+ * size. That shift cost a 4 KB frame declaring 64 MiB about 1.5 seconds.
+ */
+function frameWithSizeMarker(
   frame: Uint8Array,
   info: ZstdFrameInfo,
+  layout: ZstdBlockLayout,
 ): Uint8Array {
-  // fzstd uses the frame content size as its output allocation and otherwise
-  // truncates a corrupt frame whose real output is larger. Reframe the same
-  // blocks with one extra byte of capacity so our callback can detect that
-  // overflow. A single-segment window of expected size + 1 is sufficient for
-  // all valid frames because no match can refer before the decoded content.
+  // Magic, then a single-segment descriptor with an 8-byte content size. The
+  // checksum flag is dropped along with the trailing checksum bytes: nothing
+  // verifies them, and the marker has to be the frame's last block.
   const headerSize = 4 + 1 + 8;
-  const blocks = frame.subarray(info.dataOffset);
-  const probe = new Uint8Array(headerSize + blocks.byteLength);
-  probe.set(frame.subarray(0, 4));
-  probe[4] = 0xe0 | (info.checksum ? 0x04 : 0);
-  let size = BigInt(info.contentSize + 1);
+  const markerSize = 3 + 1;
+  const blocks = frame.subarray(info.dataOffset, layout.blocksEnd);
+  const reframed = new Uint8Array(headerSize + blocks.byteLength + markerSize);
+  reframed.set(frame.subarray(0, 4));
+  reframed[4] = 0xe0;
+  let size = BigInt(info.contentSize + ZSTD_SIZE_MARKER_BYTES);
   for (let index = 0; index < 8; index++) {
-    probe[5 + index] = Number(size & 0xffn);
+    reframed[5 + index] = Number(size & 0xffn);
     size >>= 8n;
   }
-  probe.set(blocks, headerSize);
-  return probe;
+  reframed.set(blocks, headerSize);
+  // The marker block is the last one now, so the block that was carries the
+  // flag no longer.
+  reframed[headerSize + (layout.lastBlockOffset - info.dataOffset)] &= ~1;
+  const marker = headerSize + blocks.byteLength;
+  const header = 1 | (1 << 1) | (ZSTD_SIZE_MARKER_BYTES << 3);
+  reframed[marker] = header & 0xff;
+  reframed[marker + 1] = (header >>> 8) & 0xff;
+  reframed[marker + 2] = (header >>> 16) & 0xff;
+  reframed[marker + 3] = ZSTD_SIZE_MARKER;
+  return reframed;
+}
+
+function hasSizeMarkerAt(output: Uint8Array, offset: number): boolean {
+  if (offset < 0 || offset + ZSTD_SIZE_MARKER_BYTES > output.byteLength) {
+    return false;
+  }
+  for (let index = 0; index < ZSTD_SIZE_MARKER_BYTES; index++) {
+    if (output[offset + index] !== ZSTD_SIZE_MARKER) return false;
+  }
+  return true;
+}
+
+/** Rejects a frame whose output did not end where its header said it would. */
+function requireDeclaredSize(output: Uint8Array, contentSize: number): void {
+  if (hasSizeMarkerAt(output, contentSize)) return;
+  // The marker is the last thing a short frame writes and the tail beyond it
+  // was never touched, so its offset -- eight bytes before the last non-zero
+  // byte -- is that frame's real output size. A frame that ran long instead
+  // pushed the marker past the buffer or overwrote it with its own bytes.
+  let end = output.byteLength;
+  while (end > 0 && output[end - 1] === 0) end--;
+  const decoded = end - ZSTD_SIZE_MARKER_BYTES;
+  if (decoded < contentSize && hasSizeMarkerAt(output, decoded)) {
+    throw new QwpProtocolError(
+      `zstd decompressed size ${decoded} does not match frame content size ${contentSize}`,
+    );
+  }
+  throw new QwpProtocolError(
+    `zstd output exceeds declared content size ${contentSize}`,
+  );
 }
 
 /** Decompresses the single bounded Zstd frame carried by a RESULT_BATCH. */
 export function decompressQwpZstdFrame(frame: Uint8Array): Uint8Array {
   const info = inspectZstdFrame(frame);
-  validateSingleZstdFrame(frame, info);
-  const probeFrame = frameWithProbeContentSize(frame, info);
-  const output = new Uint8Array(info.contentSize);
-  let written = 0;
+  const layout = validateSingleZstdFrame(frame, info);
+  let output: Uint8Array;
   try {
-    const decoder = new Decompress((chunk) => {
-      if (written + chunk.byteLength > output.byteLength) {
-        throw new QwpProtocolError(
-          `zstd output exceeds declared content size ${info.contentSize}`,
-        );
-      }
-      output.set(chunk, written);
-      written += chunk.byteLength;
-    });
-    decoder.push(probeFrame, true);
+    // fzstd allocates the output itself, from the declared content size the
+    // marker is accounted for in. Handing it a buffer of our own instead costs
+    // more than the decompression does: it compares that argument against a
+    // sentinel with `!=`, and coercing a 64 MiB Uint8Array to a string for
+    // that comparison took 840 ms where the whole decode takes 8 ms.
+    output = decompress(frameWithSizeMarker(frame, info, layout));
   } catch (error) {
     if (error instanceof QwpProtocolError) throw error;
     const detail = error instanceof Error ? `: ${error.message}` : "";
     throw new QwpProtocolError(`zstd decompression failed${detail}`);
   }
-  if (written !== info.contentSize) {
-    throw new QwpProtocolError(
-      `zstd decompressed size ${written} does not match frame content size ${info.contentSize}`,
-    );
-  }
-  return output;
+  requireDeclaredSize(output, info.contentSize);
+  return output.subarray(0, info.contentSize);
 }
