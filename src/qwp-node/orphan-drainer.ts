@@ -6,6 +6,7 @@ import {
   type QwpReconnectEvent,
   QwpConnectionCloseInfo,
   QwpIngressTransportMetrics,
+  QwpReplayRejectedError,
   QwpUpgradeError,
 } from "../_qwp/transport";
 import {
@@ -618,14 +619,23 @@ function delay(milliseconds: number): Promise<void> {
 /**
  * Only failures that are terminal by design quarantine a slot behind its
  * `.failed` sentinel and report the abandoned bytes as data loss: a rejected
- * authentication, a protocol violation (which is also how poison-frame
- * escalation surfaces), an exhausted durable-ACK capability-gap episode, and a
- * corrupt journal. Everything else -- an unreachable server, an ACK timeout,
- * EMFILE, ENOSPC -- is transient, and the slot is left intact for a later scan.
+ * authentication, a protocol violation, a head the server will not accept, an
+ * exhausted durable-ACK capability-gap episode, and a corrupt journal.
+ * Everything else -- an unreachable server, an ACK timeout, EMFILE, ENOSPC --
+ * is transient, and the slot is left intact for a later scan.
+ *
+ * QwpReplayRejectedError covers both ways the connection gives up on a head
+ * frame: a deterministically terminal status, and a retriable status repeated
+ * until the poison detector escalated it. Re-adopting either restarts the same
+ * frame against the same server with the strike count reset, which is the hot
+ * retry loop the `.failed` sentinel exists to prevent. Poison escalation
+ * driven by connection loss rather than a NACK arrives as a QwpProtocolError
+ * and is already covered above.
  */
 function isTerminalDrainFailure(error: Error): boolean {
   if (error instanceof QwpReplayStoreCorruptionError) return true;
   if (error instanceof QwpProtocolError) return true;
+  if (error instanceof QwpReplayRejectedError) return true;
   if (error instanceof QwpDurableAckPersistentFailureError) return true;
   if (error instanceof QwpUpgradeError) {
     return error.kind === QWP_UPGRADE_ERROR_KIND.AUTHENTICATION;

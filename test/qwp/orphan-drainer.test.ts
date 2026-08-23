@@ -16,6 +16,8 @@ import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
+  QWP_STATUS,
+  QwpReplayRejectedError,
   type QwpSenderError,
 } from "../../src/qwp";
 
@@ -303,6 +305,49 @@ describe("QWP Node orphan drainer", () => {
     await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
       directory,
     ]);
+
+    await drainer.close();
+  });
+
+  it("quarantines a head the server will not accept", async () => {
+    // QWP.md promises `.failed` "so a corrupt or permanently rejected head
+    // cannot cause a hot retry loop". A rejected head arrives as
+    // QwpReplayRejectedError, which the classifier did not recognise, so the
+    // slot was re-adopted on every scan and the same frame re-sent forever
+    // with the poison strike count reset each time.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "rejected");
+    const rejected = new QwpReplayRejectedError(
+      0n,
+      QWP_STATUS.SCHEMA_MISMATCH,
+      "column type mismatch",
+    );
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        const session = new FakeDrainSession();
+        // The realistic route: the connection gives up on the head frame and
+        // fails the session while its replay frames are still pending.
+        queueMicrotask(() => session.fail(rejected));
+        return session;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(drainer.metrics.retrying).toBe(0);
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+    });
+    // The sentinel takes the slot out of the scan, so nothing re-sends it.
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
 
     await drainer.close();
   });
