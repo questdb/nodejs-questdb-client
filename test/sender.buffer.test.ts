@@ -589,6 +589,60 @@ describe("Sender message builder test suite (anything not covered in client inte
     );
   });
 
+  it("discards a row that cannot be closed instead of wedging the sender", async function () {
+    // A rejected close used to leave hasTable set and position past
+    // endOfLastRow, so every later table() raised "Table name has already been
+    // set" -- including after a successful flush(), because compact() moves
+    // bytes without touching the row flags. Only reset() recovered, and it
+    // discards whatever was already staged.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+
+    await sender.table("t").stringColumn("kept", "first").atNow();
+
+    // Every value nullish: nothing to encode, so the row cannot be closed.
+    await expect(
+      async () => await sender.table("t").arrayColumn("a", null).atNow(),
+    ).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+
+    // The sender carries on, and the good row is untouched.
+    await sender.table("t").stringColumn("kept", "second").atNow();
+    expect(bufferContent(sender)).toBe('t kept="first"\nt kept="second"\n');
+    await sender.close();
+  });
+
+  it("discards a row whose designated timestamp is rejected", async function () {
+    // The unit is only checked inside writeTimestamp, which runs after the
+    // separator has been written, so retrying at() used to append a second
+    // separator and corrupt the line.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+
+    await expect(
+      async () =>
+        await sender
+          .table("t")
+          .stringColumn("c", "x")
+          .at(1000, "weeks" as "us"),
+    ).rejects.toThrow("Unknown timestamp unit: weeks");
+
+    await sender.table("t").stringColumn("c", "y").at(1000, "us");
+    expect(bufferContent(sender)).toBe('t c="y" 1000t\n');
+    await sender.close();
+  });
+
   it("omits decimal columns with null or undefined value", async function () {
     const sender = new Sender({
       protocol: "tcp",

@@ -96,6 +96,25 @@ abstract class SenderBufferBase implements SenderBuffer {
     return this;
   }
 
+  /**
+   * @ignore
+   * Drops the row being built, so a row that cannot be closed leaves the
+   * buffer exactly as it was before table() -- the same contract the QWP
+   * sender's cancelRow() offers.
+   *
+   * Without this, a rejected close left `hasTable` set and `position` past
+   * `endOfLastRow`: every later table() raised "Table name has already been
+   * set", including after a successful flush(), because compact() moves bytes
+   * without touching the row flags. reset() was the only way out and it
+   * discards whatever was already staged. A throw from writeTimestamp() also
+   * left the separator it had already written, so retrying at() produced a
+   * second one and corrupted the line.
+   */
+  private discardIncompleteRow() {
+    this.position = this.endOfLastRow;
+    this.startNewRow();
+  }
+
   private startNewRow() {
     this.endOfLastRow = this.position;
     this.hasTable = false;
@@ -361,26 +380,31 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
    */
   at(timestamp: number | bigint, unit: TimestampUnit = "us") {
-    if (!this.hasSymbols && !this.hasColumns) {
-      throw new Error(
-        "The row must have a symbol or column set before it is closed",
-      );
+    try {
+      if (!this.hasSymbols && !this.hasColumns) {
+        throw new Error(
+          "The row must have a symbol or column set before it is closed",
+        );
+      }
+      if (typeof timestamp !== "bigint" && !Number.isInteger(timestamp)) {
+        throw new Error(
+          `Designated timestamp must be an integer or BigInt, received ${timestamp}`,
+        );
+      }
+      if (unit == "ns" && typeof timestamp !== "bigint") {
+        throw new Error(
+          `Designated timestamp must be a BigInt if it is set in nanoseconds`,
+        );
+      }
+      this.checkCapacity([], 1);
+      this.write(" ");
+      this.writeTimestamp(timestamp, unit, true);
+      this.write("\n");
+      this.startNewRow();
+    } catch (error) {
+      this.discardIncompleteRow();
+      throw error;
     }
-    if (typeof timestamp !== "bigint" && !Number.isInteger(timestamp)) {
-      throw new Error(
-        `Designated timestamp must be an integer or BigInt, received ${timestamp}`,
-      );
-    }
-    if (unit == "ns" && typeof timestamp !== "bigint") {
-      throw new Error(
-        `Designated timestamp must be a BigInt if it is set in nanoseconds`,
-      );
-    }
-    this.checkCapacity([], 1);
-    this.write(" ");
-    this.writeTimestamp(timestamp, unit, true);
-    this.write("\n");
-    this.startNewRow();
   }
 
   /**
@@ -388,14 +412,19 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Designated timestamp will be populated by the server on this record.
    */
   atNow() {
-    if (!this.hasSymbols && !this.hasColumns) {
-      throw new Error(
-        "The row must have a symbol or column set before it is closed",
-      );
+    try {
+      if (!this.hasSymbols && !this.hasColumns) {
+        throw new Error(
+          "The row must have a symbol or column set before it is closed",
+        );
+      }
+      this.checkCapacity([], 1);
+      this.write("\n");
+      this.startNewRow();
+    } catch (error) {
+      this.discardIncompleteRow();
+      throw error;
     }
-    this.checkCapacity([], 1);
-    this.write("\n");
-    this.startNewRow();
   }
 
   /**
