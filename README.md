@@ -28,12 +28,12 @@ Use the <i>stdlib_http</i> option to switch to the standard HTTP/HTTPS modules.
 ## Configuration options
 
 Detailed description of the client's configuration options can be found in
-the {@link SenderOptions} documentation.
+the {@link index.SenderOptions | SenderOptions} documentation.
 
 ## Examples
 
 The examples below demonstrate how to use the client. <br>
-For more details, please, check the {@link Sender}'s documentation.
+For more details, please, check the {@link index.Sender | Sender}'s documentation.
 
 ### Basic API usage
 
@@ -101,6 +101,10 @@ Two consequences are worth knowing:
   "The row must have a symbol or column set before it is closed". QWP is
   columnar and can express it, so the row is sent with no columns — carrying
   only its designated timestamp.
+- A rejected `at()`/`atNow()` on ILP discards the row it could not close,
+  including its table name, and leaves rows already in the buffer alone. Catch
+  the error and start the next row from `table()`; there is no need to `reset()`
+  and nothing already buffered is lost.
 
 **Changed in this release.** Earlier versions threw a type error for most nullish
 values, and protocol v2 encoded `arrayColumn(name, null)` as an explicit NULL

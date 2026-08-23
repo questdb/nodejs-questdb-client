@@ -18,7 +18,7 @@
     "lint:bench": "eslint 'benchmarks/**/*.ts' vitest.bench-e2e.config.ts",
     "format:bench": "prettier --write 'benchmarks/**/*.{ts,md}' tsconfig.bench.json vitest.bench-e2e.config.ts",
     "format": "prettier --write '{src,test}/**/*.{ts,js,json}'",
-    "docs": "typedoc --out docs src/index.ts",
+    "docs": "typedoc",
     "preview:docs": "serve docs"
   },
   "files": [
