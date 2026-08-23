@@ -1497,6 +1497,62 @@ describe("QWP high-level sender", () => {
     expect(sender.metrics.pendingRows).toBe(1);
   });
 
+  it("rejects a wrong-typed geohash or decimal value at the call site", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    // None of these was rejected by the BigInt range guard: a non-numeric
+    // string makes both comparisons undefined, and everything else compares
+    // numerically. They reached BigInt() inside the frame encoder instead,
+    // where they either stored a different number than a compiled writer
+    // stores for the same input -- "12" is 34 as base-32 geohash text, not 12
+    // -- or threw long after the row had been staged, leaving a sender that
+    // could never flush or close.
+    for (const value of [
+      "12",
+      "u33d",
+      "",
+      true,
+      1.5,
+      Number.NaN,
+      [3],
+      { bits: 3n },
+    ]) {
+      expect(() =>
+        sender.table("geo").geohashColumn("g", value as unknown as bigint, 20),
+      ).toThrow(/geohashColumn accepts only bigint raw bits/);
+      // The rejected row takes its table selection with it.
+      expect(sender.metrics.pendingRows).toBe(0);
+    }
+
+    // signedBigEndianToBigInt() iterates its argument and a string is
+    // iterable, so "12345" coerced character by character into 0x0102030405
+    // and "x" stored 0 -- both silently, with no error anywhere.
+    for (const value of ["12345", "x", 12_345, true]) {
+      expect(() =>
+        sender.table("fx").decimalColumn("d", value as unknown as bigint, 2),
+      ).toThrow(/decimalColumn accepts only bigint or Int8Array values/);
+      expect(sender.metrics.pendingRows).toBe(0);
+    }
+
+    // The rejections leave the sender usable and the accepted forms alone.
+    await sender
+      .table("geo")
+      .geohashColumn("g", 34n, 20)
+      .decimalColumn("d", 12_345n, 2)
+      .decimalColumn("absent", new Int8Array(0), 2)
+      .atNow();
+    await sender.flush();
+
+    const [table] = session.sends[0].tables;
+    expect(table.columns.map((candidate) => candidate.name)).toEqual([
+      "g",
+      "d",
+    ]);
+    expect(column(table, "g").values).toEqual([34n]);
+    expect(column(table, "d").values).toEqual([12_345n]);
+  });
+
   it("maps width aliases onto the same column types", () => {
     expect(double()).toEqual(float64());
     expect(long()).toEqual(int64());

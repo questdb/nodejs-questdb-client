@@ -1383,6 +1383,15 @@ export class QwpSender {
       if (!Number.isSafeInteger(scale) || scale < 0 || scale > 76) {
         throw new RangeError("decimal scale must be between 0 and 76");
       }
+      if (typeof unscaled !== "bigint" && !(unscaled instanceof Int8Array)) {
+        // signedBigEndianToBigInt() iterates its argument, and a string is
+        // iterable: "12345" would coerce character by character into
+        // 0x0102030405 and store silently, while "x" would store 0. Every
+        // other setter rejects a wrong-typed value at the call site.
+        throw new TypeError(
+          "decimalColumn accepts only bigint or Int8Array values",
+        );
+      }
       if (unscaled instanceof Int8Array && unscaled.length === 0) return this;
       if (unscaled instanceof Int8Array && unscaled.length > 32) {
         throw new RangeError("decimal unscaled value cannot exceed 32 bytes");
@@ -1458,6 +1467,20 @@ export class QwpSender {
     precision: number,
   ): QwpSender {
     if (value === null || value === undefined) return this;
+    if (typeof value !== "bigint") {
+      // The range check below compares against BigInts, and neither branch of
+      // it rejects a wrong-typed value: a non-numeric string makes both
+      // comparisons undefined, while a numeric string, a boolean or an array
+      // makes them numeric. Such a value would reach BigInt() in the frame
+      // encoder instead, where it either stores a different number than the
+      // compiled writer stores for the same input or throws long after the
+      // row was staged.
+      return this.failRow(
+        new TypeError(
+          "geohashColumn accepts only bigint raw bits; base-32 text is accepted by a compiled writer's geohash() column",
+        ),
+      );
+    }
     if (!Number.isSafeInteger(precision) || precision < 1 || precision > 60) {
       return this.failRow(
         new RangeError("geohash precision must be between 1 and 60"),
