@@ -4,6 +4,7 @@ import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_FLAG_GORILLA,
   QWP_FLAG_ZSTD,
+  QWP_MAX_CELLS_PER_BATCH,
   QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_IDENTIFIER_BYTES,
   QWP_RESET_MASK_DICTIONARY,
@@ -1392,6 +1393,15 @@ export class QwpResultBatchDecoder {
     } else if (!this.schema) {
       throw new QwpProtocolError(
         "continuation RESULT_BATCH arrived before its schema-bearing batch",
+      );
+    }
+    // Each dimension passed its own cap; the grid they describe still has to
+    // be one this client will allocate. Checked before any column is read,
+    // because reading one is what allocates.
+    const cells = rowCount * this.schema.length;
+    if (cells > QWP_MAX_CELLS_PER_BATCH) {
+      throw new QwpProtocolError(
+        `RESULT_BATCH declares ${cells} cells, above the client cap ${QWP_MAX_CELLS_PER_BATCH} [rows=${rowCount}, columns=${this.schema.length}]`,
       );
     }
     return { reader, tableName, rowCount, deltaMode };

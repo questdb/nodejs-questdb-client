@@ -113,6 +113,23 @@ export const QWP_MAX_SYMBOL_DICTIONARY_SIZE = 1_000_000;
 export const QWP_MAX_ERROR_MESSAGE_LENGTH = 1024;
 /** Largest client-requested egress RESULT_BATCH row cap. */
 export const QWP_MAX_BATCH_ROWS_UPPER_BOUND = 1_048_576;
+/**
+ * Largest `rowCount * columnCount` a single RESULT_BATCH may declare.
+ *
+ * The row and column caps above bound each dimension on its own, and their
+ * product does not have to be reachable: 1,048,576 rows of 2,048 columns is
+ * 2.1 billion cells. Decoding materializes two `rowCount`-length arrays per
+ * column, measured at 16 bytes per cell, so the product is what decides how
+ * much memory a response can cost. It is also the dimension a compressed body
+ * detaches from the wire: an all-NULL column is one bit per cell before zstd,
+ * so without this bound a few kilobytes of RLE-compressed bitmap declares a
+ * grid no heap can hold.
+ *
+ * 32Mi cells is roughly 512 MB decoded. That is far above any plausible
+ * result -- the widest supported table at 16k rows, or a full 1,048,576-row
+ * batch at 32 columns -- and far below what the caps alone would permit.
+ */
+export const QWP_MAX_CELLS_PER_BATCH = 33_554_432;
 
 export const QWP_INGRESS_PATH = "/write/v4";
 export const QWP_EGRESS_PATH = "/read/v1";

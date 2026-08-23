@@ -11,6 +11,8 @@ import {
   QWP_FLAG_ZSTD,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
   QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
+  QWP_MAX_CELLS_PER_BATCH,
+  QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_STATUS,
@@ -146,6 +148,66 @@ function compressedIntResultBatch(requestId = 0n): Uint8Array {
     QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_ZSTD,
     1,
   );
+}
+
+/**
+ * A Zstd frame of RAW and RLE blocks. RLE is what detaches a declared grid
+ * from the bytes on the wire: one byte encodes a whole run, so an all-NULL
+ * bitmap of any size compresses to almost nothing.
+ */
+function rleZstdFrame(
+  blocks: readonly (
+    | { raw: number[] }
+    | { rle: [byte: number, size: number] }
+  )[],
+  contentSize: number,
+): Uint8Array {
+  // Magic, then a single-segment descriptor with an 8-byte content size.
+  const out = [0x28, 0xb5, 0x2f, 0xfd, 0xe0];
+  let size = BigInt(contentSize);
+  for (let index = 0; index < 8; index++) {
+    out.push(Number(size & 0xffn));
+    size >>= 8n;
+  }
+  blocks.forEach((block, index) => {
+    const last = index === blocks.length - 1 ? 1 : 0;
+    const [kind, length] =
+      "raw" in block ? [0, block.raw.length] : [1, block.rle[1]];
+    const header = last | (kind << 1) | (length << 3);
+    out.push(header & 0xff, (header >>> 8) & 0xff, (header >>> 16) & 0xff);
+    out.push(...("raw" in block ? block.raw : [block.rle[0]]));
+  });
+  return Uint8Array.from(out);
+}
+
+/** A compressed RESULT_BATCH declaring an all-NULL grid of the given shape. */
+function compressedAllNullBatch(rows: number, columns: number): Uint8Array {
+  const schema = new QwpByteWriter();
+  writeQwpVarint(schema, 0); // table name
+  writeQwpVarint(schema, rows);
+  writeQwpVarint(schema, columns);
+  for (let index = 0; index < columns; index++) {
+    writeString(schema, `c${index}`);
+    schema.writeUint8(QWP_COLUMN_TYPE.BOOLEAN);
+  }
+  const schemaBytes = Array.from(schema.toUint8Array());
+  const bitmapBytes = Math.ceil(rows / 8);
+  const blocks: ({ raw: number[] } | { rle: [number, number] })[] = [
+    { raw: schemaBytes },
+  ];
+  for (let index = 0; index < columns; index++) {
+    blocks.push({ raw: [1] }); // null flag
+    blocks.push({ rle: [0xff, bitmapBytes] }); // every row NULL
+  }
+  const body = rleZstdFrame(
+    blocks,
+    schemaBytes.length + columns * (1 + bitmapBytes),
+  );
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(1n);
+  writeQwpVarint(payload, 0);
+  payload.writeBytes(body);
+  return encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_ZSTD, 1);
 }
 
 function scalarResultBatch(): Uint8Array {
@@ -597,6 +659,45 @@ describe("QWP result batch decoder", () => {
     expect(batch.rowCount).toBe(100);
     expect(batch.column(0).valuesBytes()).toHaveLength(400);
     expect(batch.column(0).getInt(99)).toBe(42);
+  });
+
+  it("bounds the grid a RESULT_BATCH declares, not only each dimension", () => {
+    // The row and column caps are independent, so their product -- 1,048,576
+    // rows of 2,048 columns -- is 2.1 billion cells. Decoding materializes
+    // two rowCount-length arrays per column, and an all-NULL column is one
+    // bit per cell before Zstd, so a few kilobytes of RLE-compressed bitmap
+    // used to declare a grid no heap could hold: 1,727 wire bytes exhausted a
+    // 1 GB heap and 6,655 aborted the process outright.
+    for (const columns of [128, 480, 511]) {
+      const wire = compressedAllNullBatch(1_048_576, columns);
+      expect(wire.byteLength).toBeLessThan(8_000);
+      const message = decodeQwpEgressMessage(wire);
+      if (message.kind !== "result-batch")
+        throw new Error("unexpected message");
+
+      const before = process.memoryUsage().heapUsed;
+      expect(() => new QwpResultBatchDecoder().decode(message)).toThrow(
+        /above the client cap/,
+      );
+      // Rejected in prepare(), before a column is read -- reading one is what
+      // allocates.
+      expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+    }
+  });
+
+  it("still decodes a legitimate batch at the grid cap", () => {
+    // The widest supported table, at the row count that exactly reaches the
+    // cap: this must keep working.
+    const rows = QWP_MAX_CELLS_PER_BATCH / QWP_MAX_COLUMNS_PER_TABLE;
+    const message = decodeQwpEgressMessage(
+      compressedAllNullBatch(rows, QWP_MAX_COLUMNS_PER_TABLE),
+    );
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const batch = new QwpResultBatchDecoder().decode(message);
+    expect(batch.rowCount).toBe(rows);
+    expect(batch.columns).toHaveLength(QWP_MAX_COLUMNS_PER_TABLE);
+    expect(batch.get(0, 0)).toBeNull();
   });
 
   it("requires a bounded, single Zstd frame", () => {

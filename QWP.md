@@ -1112,6 +1112,15 @@ sends `X-QWP-Max-Batch-Rows`; browsers use the `qwp_max_batch_rows` URL paramete
 which requires a server that supports browser QWP negotiation. Older servers ignore
 the browser parameter and keep their configured batch size.
 
+A single `RESULT_BATCH` may declare at most `QWP_MAX_CELLS_PER_BATCH` cells --
+32Mi, its rows multiplied by its columns. The row and column caps bound each
+dimension on its own, and a compressed body detaches the grid they describe from
+the bytes on the wire: an all-NULL column is one bit per cell before Zstd, so
+without this bound a few kilobytes of RLE-compressed bitmap declares a result no
+heap can hold. The bound is checked before any column is read, and 32Mi cells sits
+far above any plausible result -- the widest supported table at 16k rows, or a full
+1,048,576-row batch at 32 columns. Lower `maxBatchRows` for genuinely wide tables.
+
 Egress failover is enabled by default in Node.js and browsers. A transport failure or
 invalid protocol response closes and deprioritizes that endpoint, reconnects, resets
 connection-scoped decoding state, and re-executes the active query. The default policy
