@@ -3937,6 +3937,52 @@ describe("QWP Node file replay store", () => {
     await store.close().catch(() => undefined);
   }, 20_000);
 
+  it("closes segment handles even when the hot spare cannot be discarded", async () => {
+    // discardHotSpare() rethrows anything but ENOENT from the spare's unlink
+    // or the directory fsync. It shared a try with closeSegmentHandles(), so a
+    // read-only or full volume skipped the second and stranded one descriptor
+    // per live segment -- unreachable afterwards, because close() memoizes
+    // closePromise and marks the store closed regardless.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    const internals = store as unknown as {
+      segments: Map<unknown, { handle?: unknown }>;
+      hotSpare?: { path: string };
+    };
+    const openHandles = () =>
+      [...internals.segments.values()].filter(
+        (segment) => segment.handle !== undefined,
+      ).length;
+    // The spare is provisioned in the background after the first append.
+    await vi.waitFor(() => expect(internals.hotSpare).toBeDefined());
+    const sparePath = internals.hotSpare!.path;
+    expect(openHandles()).toBeGreaterThan(0);
+
+    // Only the spare's own unlink fails; every other maintenance path is
+    // left alone so the failure is unambiguously discardHotSpare()'s.
+    const realUnlink = qwpSegmentMaintenanceWorker.unlink.bind(
+      qwpSegmentMaintenanceWorker,
+    );
+    const unlink = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "unlink")
+      .mockImplementation(async (path: string) => {
+        if (path !== sparePath) return realUnlink(path);
+        throw Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        });
+      });
+
+    // The failure is still reported rather than swallowed...
+    await expect(store.close()).rejects.toThrow(/could not discard/);
+    // ...and the segment handles are released anyway.
+    expect(openHandles()).toBe(0);
+
+    unlink.mockRestore();
+  });
+
   it("detects a replay gap immediately after a persisted ACK watermark", async () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({

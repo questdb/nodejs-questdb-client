@@ -1036,6 +1036,16 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           failure ??= error;
         });
         await this.discardHotSpare();
+      } catch (error) {
+        failure ??= error;
+      }
+      // Its own try: discardHotSpare() rethrows anything but ENOENT from the
+      // spare's unlink or the directory fsync, and sharing one block let a
+      // read-only or full volume skip this and strand one descriptor per live
+      // segment. close() memoizes closePromise and sets `closed` below, so
+      // nothing would reopen them. load()'s failure path already separates
+      // the two for the same reason.
+      try {
         await this.closeSegmentHandles();
       } catch (error) {
         failure ??= error;
