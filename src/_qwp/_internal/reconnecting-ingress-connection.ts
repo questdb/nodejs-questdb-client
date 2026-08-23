@@ -1145,6 +1145,23 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           // The wire payload decoded successfully. Failures from this point
           // are local replay-store/bookkeeping failures, not evidence that
           // the server rejected the head frame.
+          if (isRetryableResponseFailure(error)) {
+            // A journal fault here is usually transient: a briefly full or
+            // read-only filesystem parks maintenanceFailure for about a
+            // second and the store clears it on the next successful batch.
+            // failTerminal() is permanent, so latching would brick a running
+            // producer for the rest of the process lifetime -- the outcome
+            // the store-level retry exists to prevent. transmitOnce() routes
+            // the identical class to requestReconnect() for that reason and
+            // this path has to agree. acknowledgeThrough() persists its
+            // cursor before it mutates anything, so a failure here leaves
+            // exactly the state a crash at this instant would leave, and
+            // replay resumes from the persisted watermark.
+            await this.requestReconnect(error, connection).catch(
+              (reconnectError) => this.failTerminal(reconnectError),
+            );
+            return;
+          }
           this.failTerminal(error);
           await connection
             .close(1011, "QWP ingress response processing failed")
@@ -2133,6 +2150,21 @@ function isRetryableReconnectError(error: unknown): boolean {
   }
   return !(
     error instanceof QwpReplayRejectedError || error instanceof QwpProtocolError
+  );
+}
+
+/**
+ * Whether a failure raised while applying a server response should be retried
+ * through a reconnect rather than latching the connection terminal.
+ *
+ * Replay-store errors are declared in the Node-only layer, so the journal's own
+ * verdict -- structural corruption, or a slot lock another process took over --
+ * is read structurally through the `retryable` flag those classes carry.
+ */
+function isRetryableResponseFailure(error: unknown): boolean {
+  if (!isRetryableReconnectError(error)) return false;
+  return (
+    (error as { retryable?: unknown } | null | undefined)?.retryable !== false
   );
 }
 

@@ -204,6 +204,18 @@ export interface QwpNodeFileReplayStoreMetrics {
 export class QwpReplayStoreError extends Error {
   readonly cause?: unknown;
 
+  /**
+   * Whether reconnecting and replaying can plausibly clear this failure.
+   *
+   * Background maintenance and checkpoint faults are parked and cleared on the
+   * next successful batch, so a briefly full, read-only or descriptor-starved
+   * filesystem is retryable. Structural corruption and a slot lock taken over
+   * by another process are verdicts on the journal itself and are not. The
+   * ingress connection lives in the browser-safe layer and cannot reference
+   * these classes, so it reads this flag structurally.
+   */
+  readonly retryable: boolean = true;
+
   constructor(message: string, cause?: unknown) {
     super(message);
     this.name = "QwpReplayStoreError";
@@ -213,6 +225,9 @@ export class QwpReplayStoreError extends Error {
 
 /** Durable journal bytes are structurally corrupt and cannot be replayed. */
 export class QwpReplayStoreCorruptionError extends QwpReplayStoreError {
+  /** Corrupt bytes read the same way on every attempt. */
+  override readonly retryable = false;
+
   constructor(message: string, cause?: unknown) {
     super(message, cause);
     this.name = "QwpReplayStoreCorruptionError";
@@ -247,6 +262,12 @@ export class QwpReplayStoreQuarantinedError extends QwpReplayStoreError {
  * frames gone. Failing the append is what keeps that loss impossible.
  */
 export class QwpReplayStoreLockLostError extends QwpReplayStoreError {
+  /**
+   * Retrying is precisely what must not happen: the slot belongs to another
+   * process now, so replaying out of it would race that owner's appends.
+   */
+  override readonly retryable = false;
+
   constructor(readonly directory: string) {
     super(
       `QWP store-and-forward journal lock was taken over by another process while it was open; this journal is no longer writable [directory=${directory}]`,

@@ -960,6 +960,109 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("reconnects instead of latching when an ACK meets a transient journal fault", async () => {
+    // A parked maintenance or checkpoint failure surfaces out of the store on
+    // the next call and clears itself on the next successful batch. Reaching
+    // it while applying a server ACK used to run failTerminal(), which is
+    // permanent -- so a filesystem hiccup of about a second ended a healthy
+    // producer for the rest of the process lifetime. transmitOnce() already
+    // routed the identical class to a reconnect for that reason.
+    class AckFaultStore extends TrackingReplayStore {
+      failNextAck = false;
+      ackFailures = 0;
+
+      override async acknowledgeThrough(frameSequence: bigint): Promise<void> {
+        if (this.failNextAck) {
+          this.failNextAck = false;
+          this.ackFailures++;
+          throw new QwpReplayStoreError(
+            "could not trim QWP store-and-forward segment [firstSequence=0]",
+          );
+        }
+        return super.acknowledgeThrough(frameSequence);
+      }
+    }
+
+    const connections = [
+      new FakeConnection("primary"),
+      new FakeConnection("replacement"),
+    ];
+    let factoryCalls = 0;
+    const replayStore = new AckFaultStore();
+    const session = await QwpIngressSession.connect(
+      async () => connections[Math.min(factoryCalls++, connections.length - 1)],
+      {
+        replayStore,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(1));
+    expect(connections[0].sent).toEqual([Uint8Array.of(1)]);
+
+    replayStore.failNextAck = true;
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await vi.waitFor(() => expect(factoryCalls).toBe(2));
+    expect(replayStore.ackFailures).toBe(1);
+    // acknowledgeThrough() threw before it could retire the frame, so the
+    // journal still holds it and the replacement connection replays it. The
+    // real store persists its cursor before mutating anything, so this is the
+    // same state a crash at this instant would leave.
+    expect(Array.from(replayStore.records.keys())).toEqual([0n]);
+    await vi.waitFor(() =>
+      expect(connections[1].sent).toEqual([Uint8Array.of(1)]),
+    );
+
+    // The producer survives. Before the fix every later publish rejected with
+    // the journal error for the lifetime of the process.
+    connections[1].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(
+      session.publishFrame(Uint8Array.of(2)),
+    ).resolves.toBeUndefined();
+    await session.close();
+  });
+
+  it("stays terminal when an ACK meets a journal verdict rather than a fault", async () => {
+    // Corrupt bytes read the same way on every attempt, so reconnecting would
+    // spin. The store marks such failures non-retryable and this path honours
+    // that rather than retrying everything that is not a server rejection.
+    class CorruptOnAckStore extends TrackingReplayStore {
+      override async acknowledgeThrough(): Promise<void> {
+        throw new QwpReplayStoreCorruptionError(
+          "QWP store-and-forward segment is corrupt",
+        );
+      }
+    }
+
+    const connection = new FakeConnection("primary");
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        return connection;
+      },
+      { replayStore: new CorruptOnAckStore() },
+    );
+
+    await session.publishFrame(Uint8Array.of(1));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(session.closed).resolves.toMatchObject({ code: 1011 });
+
+    // A failed session rejects synchronously, so go through a thunk.
+    await expect(async () =>
+      session.publishFrame(Uint8Array.of(2)),
+    ).rejects.toThrow(/corrupt/);
+    // No replacement was sought: retrying corrupt bytes only spins.
+    expect(factoryCalls).toBe(1);
+    await session.close().catch(() => undefined);
+  });
+
   it("publishes while initially offline and drains after a background connection", async () => {
     const connection = new FakeConnection("primary");
     const replayStore = new TrackingReplayStore();
@@ -3777,6 +3880,62 @@ describe("QWP Node file replay store", () => {
     unlink.mockRestore();
     await store.close();
   }, 15_000);
+
+  it("keeps the producer alive when that failure surfaces while applying an ACK", async () => {
+    // The test above proves the store self-heals. Nothing connected that to
+    // the connection, which reached the parked failure through
+    // assertReady() on the next ACK and ran failTerminal() -- permanent, so a
+    // filesystem hiccup of about a second ended a healthy producer for the
+    // rest of the process lifetime.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    const connections: FakeConnection[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        // A fresh connection per attempt; handing back a closed one makes the
+        // transport look like it keeps dying and trips poison escalation.
+        const next = new FakeConnection(`endpoint-${connections.length}`);
+        connections.push(next);
+        return next;
+      },
+      { replayStore: store, reconnect: { maxAttempts: 0, maxDurationMs: 0 } },
+    );
+
+    for (let sequence = 0; sequence < 3; sequence++) {
+      await session.publishFrame(Uint8Array.of(sequence));
+    }
+
+    const unlink = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "unlink")
+      .mockRejectedValueOnce(
+        Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        }),
+      );
+
+    // The first ACK schedules the trim that fails; the parked failure then
+    // surfaces out of the store on the next one.
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(unlink).toHaveBeenCalled());
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 1n));
+
+    // A reconnect, not a terminal latch. Default backoff bounds the attempts
+    // to the second or so the store needs to clear the failure.
+    await vi.waitFor(() => expect(connections.length).toBeGreaterThan(1), {
+      timeout: 5_000,
+    });
+    unlink.mockRestore();
+    await vi.waitFor(() => store.loadSymbolDictionary(), {
+      timeout: 5_000,
+      interval: 100,
+    });
+
+    await expect(
+      session.publishFrame(Uint8Array.of(9)),
+    ).resolves.toBeUndefined();
+    await session.close().catch(() => undefined);
+    await store.close().catch(() => undefined);
+  }, 20_000);
 
   it("detects a replay gap immediately after a persisted ACK watermark", async () => {
     const directory = await trackedDirectory();

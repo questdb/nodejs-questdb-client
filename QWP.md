@@ -400,6 +400,17 @@ durable manifest head before handing removal to that worker and runs in bounded
 background batches. Frame append uses a vectored header-plus-payload write, avoiding
 an additional payload-sized journal buffer.
 
+A background provisioning, checkpoint or trim failure is parked on the store and
+raised from the next journal call, then cleared by the next successful batch. Because
+such a fault is transient — a briefly full, read-only or descriptor-starved volume —
+reaching one while applying a server acknowledgement reconnects and replays rather
+than ending the sender: a filesystem hiccup must not cost a running producer. Failures
+that are verdicts on the journal itself carry `retryable: false` and stay terminal;
+today those are `QwpReplayStoreCorruptionError` and `QwpReplayStoreLockLostError`. The
+store persists its acknowledgement cursor before it mutates anything, so a fault at
+that moment leaves exactly the state a crash at that moment would leave, and replay
+resumes from the persisted watermark.
+
 Recovery validates segment CRCs with a reusable 64 KiB scanner and indexes only frame
 sequence, file offset, and payload length. The reconnect loop reads one payload from
 its retained segment handle when it is ready to send it; it does not materialize the
