@@ -32,6 +32,7 @@ import {
   readQwpVarint,
   writeQwpVarint,
 } from "../../src/qwp";
+import { decompressQwpZstdFrame } from "../../src/_qwp/_core/zstd";
 import { QwpAsyncQueue } from "../../src/_qwp/_internal/async-queue";
 
 const RESULT_FLAGS = QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_GORILLA;
@@ -776,6 +777,64 @@ describe("QWP result batch decoder", () => {
     const reservedBlock = COMPRESSED_INT_RESULT_BODY.slice();
     reservedBlock[7] = (reservedBlock[7] & ~0x06) | 0x06;
     expect(() => decodeBody(reservedBlock)).toThrow(/reserved block type/i);
+  });
+
+  it("rejects an over-long Zstd frame whatever its output ends with", () => {
+    // The over-run guard used to look for a run of one byte at the declared
+    // size. A frame that ran long pushed that marker further out and left its
+    // own bytes in front of it, so the run still matched whenever those bytes
+    // happened to be the marker byte -- only min(overshoot, 8) of them had to,
+    // making a one-byte overshoot a 1-in-256 bypass, and 0xa5 is a legal UTF-8
+    // continuation byte, so a VARCHAR ending in one collided by accident. The
+    // test above only passed because its fixture happens to decode to a 0x00.
+    //
+    // The bypass is not neutral: truncating the output to the declared size
+    // also hides the "unexpected trailing byte(s)" the same bytes would raise
+    // if they were declared honestly, so the client reports a complete,
+    // successful result for a frame it is supposed to reject.
+    const singleSegmentFrame = (
+      declared: number,
+      rleByte: number,
+      emit: number,
+    ) =>
+      Uint8Array.from([
+        0x28,
+        0xb5,
+        0x2f,
+        0xfd, // magic
+        0xe0, // single segment, 8-byte content size, no checksum
+        declared,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        // One RLE block, flagged last, emitting `emit` copies of `rleByte`.
+        1 | (1 << 1) | (emit << 3),
+        ((1 | (1 << 1) | (emit << 3)) >>> 8) & 0xff,
+        ((1 | (1 << 1) | (emit << 3)) >>> 16) & 0xff,
+        rleByte,
+      ]);
+
+    // Exactly the shape that used to be accepted: declares 8, emits 16, and
+    // the eight bytes past the declared size are the old marker byte.
+    expect(() =>
+      decompressQwpZstdFrame(singleSegmentFrame(8, 0xa5, 16)),
+    ).toThrow(/exceeds declared content size/i);
+    // Overshooting by one needed a single lucky byte.
+    expect(() =>
+      decompressQwpZstdFrame(singleSegmentFrame(8, 0xa5, 9)),
+    ).toThrow(/exceeds declared content size/i);
+    // Any other filler was always caught, and still is.
+    expect(() =>
+      decompressQwpZstdFrame(singleSegmentFrame(8, 0x5a, 16)),
+    ).toThrow(/exceeds declared content size/i);
+    // A frame that means what it says still round-trips.
+    expect(decompressQwpZstdFrame(singleSegmentFrame(8, 0x42, 8))).toEqual(
+      new Uint8Array(8).fill(0x42),
+    );
   });
 });
 
