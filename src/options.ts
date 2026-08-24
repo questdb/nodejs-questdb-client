@@ -42,7 +42,14 @@ function resolveQwpConfig(
   return resolveQwpNodeClientConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,
-    sender: { ...options.qwp?.sender, log: options.log ?? undefined },
+    // The top-level logger still wins, but falling back to the QWP one rather
+    // than to undefined matters: resolveQwpNodeClientConfig() spreads this
+    // object last, so an explicit undefined overwrote a logger the caller had
+    // configured and left the sender with a no-op sink.
+    sender: {
+      ...options.qwp?.sender,
+      log: options.log ?? options.qwp?.sender?.log,
+    },
     ingressSession: options.qwp?.session,
   });
 }

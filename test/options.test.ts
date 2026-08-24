@@ -4,6 +4,7 @@ import { Agent } from "undici";
 
 import { Sender } from "../src/sender";
 import { SenderOptions } from "../src";
+import { qwpConfig } from "../src/options";
 import { MockHttp } from "./util/mockhttp";
 import { readFileSync } from "fs";
 
@@ -1266,6 +1267,28 @@ describe("Configuration string parser suite", function () {
           },
         ),
     ).rejects.toThrow("Invalid logging function");
+  });
+
+  it("keeps a QWP logger supplied without a top-level one", async function () {
+    // resolveQwpConfig() set `log` after spreading qwp.sender, and the QWP
+    // config resolver spreads that object last, so an explicit undefined beat
+    // the caller's logger and QwpSender fell back to its no-op sink. Every
+    // sender-level message was lost, including the warn that completed rows
+    // are being discarded at close. Sibling fields of the same documented
+    // object always took effect, which is what made this a slip rather than a
+    // precedence rule.
+    const senderLog = () => undefined;
+    const qwpOnly = await SenderOptions.fromConfig("ws::addr=host:9000;", {
+      qwp: { sender: { log: senderLog } },
+    });
+    expect(qwpConfig(qwpOnly)?.sender?.log).toBe(senderLog);
+
+    // The top-level logger still wins when both are given.
+    const both = await SenderOptions.fromConfig("ws::addr=host:9000;", {
+      log: console.log,
+      qwp: { sender: { log: senderLog } },
+    });
+    expect(qwpConfig(both)?.sender?.log).toBe(console.log);
   });
 
   it("can take a custom agent", async function () {
