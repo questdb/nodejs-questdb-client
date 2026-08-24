@@ -136,7 +136,7 @@ jobs:
 
           ORG_URL="https://dev.azure.com/questdb/"
           PROJECT="questdb-enterprise"
-          PIPELINE_NAME="build-and-test-e2e-typescript-client"
+          PIPELINE_NAME="build-and-test-e2e-javascript-client"
           PIPELINES=$(curl -fsS -u ":${ENT_DISPATCH_PAT}" \
             "${ORG_URL}${PROJECT}/_apis/pipelines?api-version=7.0")
           PIPELINE_ID=$(echo "$PIPELINES" | jq -r --arg name "$PIPELINE_NAME" \
@@ -152,8 +152,8 @@ jobs:
             --arg branch "$CLIENT_BRANCH" \
             '{
               templateParameters: {
-                typescriptClientCommit: $commit,
-                typescriptClientPrNumber: $pr,
+                javascriptClientCommit: $commit,
+                javascriptClientPrNumber: $pr,
                 clientBranch: $branch
               }
             }')
