@@ -1088,8 +1088,39 @@ export class QwpSender {
     return this;
   }
 
+  /**
+   * Whether a nullish value omits this column -- and, when it does, that the
+   * call was still a valid one.
+   *
+   * Omitting a column must not take the rest of the call's validation with it.
+   * The sender's availability, the row state and the column name describe the
+   * call site, not this row's value, so a call site that is wrong is wrong on
+   * every row. Returning early on nullish meant a misspelled or over-long name
+   * raised only on the rows that happened to carry a value, and stayed silent
+   * on the rest -- which is how a typo reaches production. The ILP senders had
+   * the same bug and fix it in validateColumnCall(); README.md documents the
+   * nullish rule as shared by both, so these must agree.
+   */
+  private omitsNullish(
+    name: string,
+    value: unknown,
+  ): value is null | undefined {
+    if (value !== null && value !== undefined) return false;
+    try {
+      this.throwIfUnavailable();
+      this.requireTable();
+      if (typeof name !== "string") {
+        throw new TypeError("column name must be a string");
+      }
+      validateQwpColumnName(name, this.maxNameLength);
+    } catch (error) {
+      this.failRow(error);
+    }
+    return true;
+  }
+
   symbol(name: string, value: unknown): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     // String() runs inside the guard, not in addColumn's argument list: the
     // value is `unknown`, so its conversion can throw (a null-prototype
     // object, a throwing or non-callable toString, a throwing Proxy trap).
@@ -1104,7 +1135,7 @@ export class QwpSender {
   }
 
   stringColumn(name: string, value: string | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     if (typeof value !== "string") {
       return this.failRow(new TypeError("stringColumn accepts only strings"));
     }
@@ -1112,7 +1143,7 @@ export class QwpSender {
   }
 
   booleanColumn(name: string, value: boolean | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     if (typeof value !== "boolean") {
       return this.failRow(new TypeError("booleanColumn accepts only booleans"));
     }
@@ -1120,7 +1151,7 @@ export class QwpSender {
   }
 
   floatColumn(name: string, value: number | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     if (typeof value !== "number") {
       return this.failRow(new TypeError("floatColumn accepts only numbers"));
     }
@@ -1132,7 +1163,7 @@ export class QwpSender {
   }
 
   float32Column(name: string, value: number | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     if (typeof value !== "number") {
       return this.failRow(new TypeError("float32Column accepts only numbers"));
     }
@@ -1140,7 +1171,7 @@ export class QwpSender {
   }
 
   byteColumn(name: string, value: number | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(
         name,
@@ -1153,7 +1184,7 @@ export class QwpSender {
   }
 
   shortColumn(name: string, value: number | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(
         name,
@@ -1166,7 +1197,7 @@ export class QwpSender {
   }
 
   int32Column(name: string, value: number | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(
         name,
@@ -1179,7 +1210,7 @@ export class QwpSender {
   }
 
   intColumn(name: string, value: number | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(
         name,
@@ -1195,7 +1226,7 @@ export class QwpSender {
     name: string,
     value: number | bigint | null | undefined,
   ): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(
         name,
@@ -1208,7 +1239,7 @@ export class QwpSender {
   }
 
   arrayColumn(name: string, value: unknown[] | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       const array = flattenQwpArray(value);
       if (array.values.some((item) => typeof item !== "number")) {
@@ -1224,7 +1255,7 @@ export class QwpSender {
     name: string,
     value: unknown[] | null | undefined,
   ): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       const array = flattenQwpArray(value);
       array.values = array.values.map((item) =>
@@ -1241,7 +1272,7 @@ export class QwpSender {
     value: number | bigint | null | undefined,
     unit: QwpTimestampUnit = "us",
   ): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       const timestamp = timestampValue(value, unit);
       return this.addColumn(name, timestamp.type, timestamp.value);
@@ -1272,7 +1303,7 @@ export class QwpSender {
   }
 
   binaryColumn(name: string, value: Uint8Array | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     if (!(value instanceof Uint8Array)) {
       return this.failRow(
         new TypeError("binaryColumn accepts only Uint8Array values"),
@@ -1282,7 +1313,7 @@ export class QwpSender {
   }
 
   charColumn(name: string, value: string | null | undefined): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     if (typeof value !== "string" || value.length !== 1) {
       return this.failRow(
         new TypeError("charColumn accepts one UTF-16 code unit"),
@@ -1295,7 +1326,7 @@ export class QwpSender {
     name: string,
     value: string | Uint8Array | null | undefined,
   ): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(name, QWP_COLUMN_TYPE.UUID, uuidBytes(value));
     } catch (error) {
@@ -1318,7 +1349,11 @@ export class QwpSender {
     // four are absent -- that omits the column, like every other setter. A
     // partial set is a caller mistake rather than a NULL, and saying so beats
     // letting BigInt.asIntN() raise "Cannot convert null to a BigInt".
-    if (absent === given.length) return this;
+    if (absent === given.length) {
+      // Still a column call, so it is still checked like one.
+      this.omitsNullish(name, null);
+      return this;
+    }
     if (absent > 0) {
       return this.failRow(
         new TypeError(
@@ -1351,7 +1386,7 @@ export class QwpSender {
     name: string,
     value: string | number | null | undefined,
   ): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(name, QWP_COLUMN_TYPE.IPV4, parseIpv4(value));
     } catch (error) {
@@ -1363,7 +1398,7 @@ export class QwpSender {
     name: string,
     value: string | number | null | undefined,
   ): QwpSender {
-    if (value === null || value === undefined) return this;
+    if (this.omitsNullish(name, value)) return this;
     try {
       const decimal = parseDecimal(value);
       if (decimal.scale > 76 || !fitsSigned(decimal.unscaled, 256)) {
@@ -1387,11 +1422,15 @@ export class QwpSender {
     unscaled: Int8Array | bigint | null | undefined,
     scale: number,
   ): QwpSender {
-    if (unscaled === null || unscaled === undefined) return this;
+    // The scale describes the column, not this row's value, so a bad constant
+    // is reported whether or not this row happens to carry a decimal.
+    if (!Number.isSafeInteger(scale) || scale < 0 || scale > 76) {
+      return this.failRow(
+        new RangeError("decimal scale must be between 0 and 76"),
+      );
+    }
+    if (this.omitsNullish(name, unscaled)) return this;
     try {
-      if (!Number.isSafeInteger(scale) || scale < 0 || scale > 76) {
-        throw new RangeError("decimal scale must be between 0 and 76");
-      }
       if (typeof unscaled !== "bigint" && !(unscaled instanceof Int8Array)) {
         // signedBigEndianToBigInt() iterates its argument, and a string is
         // iterable: "12345" would coerce character by character into
@@ -1475,7 +1514,14 @@ export class QwpSender {
     value: bigint | null | undefined,
     precision: number,
   ): QwpSender {
-    if (value === null || value === undefined) return this;
+    // The precision describes the column, not this row's value, so a bad
+    // constant is reported whether or not this row happens to carry a geohash.
+    if (!Number.isSafeInteger(precision) || precision < 1 || precision > 60) {
+      return this.failRow(
+        new RangeError("geohash precision must be between 1 and 60"),
+      );
+    }
+    if (this.omitsNullish(name, value)) return this;
     if (typeof value !== "bigint") {
       // The range check below compares against BigInts, and neither branch of
       // it rejects a wrong-typed value: a non-numeric string makes both

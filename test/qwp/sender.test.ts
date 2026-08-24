@@ -220,6 +220,63 @@ function column(table: QwpTableBuffer, name: string) {
 }
 
 describe("QWP high-level sender", () => {
+  it("validates a column call even when its value is nullish", async () => {
+    // Omitting the column must not take the rest of the call's validation with
+    // it. A nullish value used to return before the sender state, the row
+    // state and the name were ever looked at, so the same call site raised on
+    // rows that carried a value and stayed silent on rows that did not -- a
+    // misspelled or over-long name first surfaced in production, on the row
+    // that happened to be populated. The ILP senders fix this in
+    // validateColumnCall(), and README.md documents the nullish rule as shared
+    // by both, so the two must agree.
+    const build = () =>
+      new QwpSender(async () => new PublishingSession(), {
+        autoFlush: false,
+        maxNameLength: 16,
+      });
+
+    for (const value of [null, undefined] as const) {
+      // No table yet.
+      expect(() => build().stringColumn("c", value)).toThrow(
+        /table name must be set/i,
+      );
+      const table = () => build().table("t");
+      expect(() => table().stringColumn("a".repeat(20), value)).toThrow(
+        /too long/i,
+      );
+      expect(() => table().longColumn("bad.name", value)).toThrow(
+        /illegal characters/i,
+      );
+      expect(() => table().symbol("bad-name", value)).toThrow(
+        /illegal characters/i,
+      );
+      expect(() =>
+        table().booleanColumn(123 as unknown as string, value),
+      ).toThrow(/must be a string/i);
+      // A constant that describes the column, not this row's value.
+      expect(() => table().decimalColumn("d", value, 999)).toThrow(
+        /decimal scale/i,
+      );
+      expect(() => table().geohashColumn("g", value, 0)).toThrow(
+        /geohash precision/i,
+      );
+      // All four words absent is the LONG256 way of spelling a NULL.
+      expect(() =>
+        table().long256Column("bad.name", value, value, value, value),
+      ).toThrow(/illegal characters/i);
+    }
+
+    // A valid nullish call is still simply omitted.
+    const sender = build();
+    await sender
+      .table("t")
+      .stringColumn("skipped", null)
+      .longColumn("kept", 1n)
+      .atNow();
+    expect(sender.metrics.pendingRows).toBe(1);
+    await sender.close();
+  });
+
   it("uses the Java-compatible local-publication flush boundary by default", async () => {
     const session = new PublishingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });
