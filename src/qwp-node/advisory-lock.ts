@@ -226,10 +226,21 @@ export class QwpNodeAdvisoryLock {
     // A release can be retried long after the fact, by which time the pathname
     // may hold somebody else's acquisition. Removing it then would strip a
     // live lock, so prove the directory is still the one this object created.
-    if (!(await this.ownsOwnerDirectory())) {
+    const ownership = await this.ownershipState();
+    if (ownership === "foreign") {
       this.released = true;
       pendingReleases.delete(this);
       return;
+    }
+    if (ownership === "unknown") {
+      // Neither "ours to remove" nor "somebody else's to leave alone". Keep it
+      // on the retry list so a later acquisition settles it, rather than
+      // reporting a release that never happened and stranding the directory.
+      pendingReleases.add(this);
+      throw new QwpNodeAdvisoryLockError(
+        "could not confirm QWP advisory lock ownership before release",
+        this.lockPath,
+      );
     }
     try {
       await removeOwnerDirectory(this.ownerPath);
@@ -248,13 +259,20 @@ export class QwpNodeAdvisoryLock {
   }
 
   /**
-   * Whether the owner directory still carries this acquisition's token. A
-   * missing directory, an unreadable record, or a different token all mean
-   * this object no longer owns the pathname.
+   * Whether the owner directory still carries this acquisition's token.
+   *
+   * `"unknown"` is deliberately distinct from `"foreign"`: a read that failed
+   * says nothing about who owns the pathname, and callers that latch on it
+   * turn a transient descriptor shortage into a permanently dead journal.
+   * Staleness of {@link provenAtMs} is what keeps `"unknown"` fail-closed.
    */
-  private async ownsOwnerDirectory(): Promise<boolean> {
+  private async ownershipState(): Promise<"owned" | "foreign" | "unknown"> {
     const owner = await readOwnerFile(this.ownerPath);
-    return owner?.token !== undefined && owner.token === this.token;
+    if (owner.state === "unreadable") return "unknown";
+    if (owner.state === "absent") return "foreign";
+    return owner.record.token !== undefined && owner.record.token === this.token
+      ? "owned"
+      : "foreign";
   }
 
   private startHeartbeat(): void {
@@ -283,8 +301,17 @@ export class QwpNodeAdvisoryLock {
       // The mtime alone cannot separate our directory from a replacement that
       // landed inside the same clock tick, and some filesystems report whole
       // seconds. The token settles it.
-      if (!(await this.ownsOwnerDirectory())) {
+      const ownership = await this.ownershipState();
+      if (ownership === "foreign") {
         this.markCompromised();
+        return;
+      }
+      if (ownership === "unknown") {
+        // Refreshing an mtime we cannot vouch for would extend a lock that may
+        // no longer be ours, so skip the beat entirely and let the next one
+        // retry -- the same treatment the catch below gives a failed stat().
+        // If the fault persists, `provenAtMs` goes stale and `lost` fails
+        // closed on its own, which is recoverable; latching here is not.
         return;
       }
       this.ownerMtimeMs = await touchOwnerDirectory(this.ownerPath);
@@ -394,33 +421,63 @@ async function isStale(ownerPath: string, mtimeMs: number): Promise<boolean> {
   // created stale and took it away from its live owner.
   const owner = await readOwnerFile(ownerPath);
   return (
-    owner !== undefined && owner.host === hostname() && !isPidAlive(owner.pid)
+    owner.state === "present" &&
+    owner.record.host === hostname() &&
+    !isPidAlive(owner.record.pid)
   );
 }
 
-async function readOwnerFile(
-  ownerPath: string,
-): Promise<OwnerRecord | undefined> {
+/**
+ * Outcome of reading an owner record.
+ *
+ * `unreadable` carries no information about ownership and must never be read
+ * as one. `stat()` and `utimes()` need no file descriptor while this read must
+ * `open(2)`, so process-wide descriptor pressure -- from anywhere in the host
+ * application -- fails precisely this call while every other step of the
+ * heartbeat still succeeds. `EIO` and NFS `ESTALE` land the same way. Treating
+ * that as a takeover latches a lock nobody took, which is unrecoverable
+ * because the latch also stops the heartbeat.
+ */
+type OwnerRead =
+  | { readonly state: "absent" }
+  | { readonly state: "present"; readonly record: OwnerRecord }
+  | { readonly state: "unreadable" };
+
+async function readOwnerFile(ownerPath: string): Promise<OwnerRead> {
+  let contents: string;
   try {
-    const parsed: unknown = JSON.parse(
-      await readFile(join(ownerPath, OWNER_FILE), "utf8"),
-    );
+    contents = await readFile(join(ownerPath, OWNER_FILE), "utf8");
+  } catch (error) {
+    // A record that is gone is positive evidence: this acquisition wrote one
+    // and it is no longer there. Every other failure is a fault in the read
+    // itself and proves nothing.
+    return nodeErrorCode(error) === "ENOENT"
+      ? { state: "absent" }
+      : { state: "unreadable" };
+  }
+  try {
+    const parsed: unknown = JSON.parse(contents);
     if (parsed && typeof parsed === "object") {
       const { pid, host, token } = parsed as Partial<OwnerRecord>;
       if (typeof pid === "number" && typeof host === "string") {
         return {
-          pid,
-          host,
-          token: typeof token === "string" ? token : undefined,
+          state: "present",
+          record: {
+            pid,
+            host,
+            token: typeof token === "string" ? token : undefined,
+          },
         };
       }
     }
+    // A record written by an older client: it parsed, and it carries no token
+    // of ours, so it is somebody else's acquisition.
+    return { state: "absent" };
   } catch {
-    // A record written by an older client, a torn write, or an acquisition
-    // that has not written its record yet. None of them prove a holder is
-    // gone, so the caller falls back to the mtime heartbeat.
+    // A torn write, caught mid-`writeFile` by a contender that is still
+    // establishing itself. Not proof that this acquisition lost anything.
+    return { state: "unreadable" };
   }
-  return undefined;
 }
 
 /** Identifies one acquisition, so a release can prove what it is removing. */

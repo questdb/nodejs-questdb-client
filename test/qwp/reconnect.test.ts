@@ -4379,6 +4379,48 @@ describe("QWP Node file replay store", () => {
     await rm(join(directory, ".lock.owner"), { recursive: true, force: true });
   });
 
+  it("survives a transient failure to read its own owner record", async () => {
+    // Reading the record needs a descriptor; stat() and utimes() do not. So
+    // process-wide descriptor pressure -- from anywhere in the host app -- and
+    // EIO or NFS ESTALE fail precisely this one call while the rest of the
+    // heartbeat still succeeds. Treating that as a takeover latched the lock
+    // permanently, because the same step also stops the heartbeat that would
+    // clear it: every later append then failed with "taken over by another
+    // process" for a slot nobody took, and release() threw. Staleness of
+    // provenAtMs is what keeps an unprovable beat fail-closed, and unlike a
+    // latch it recovers.
+    const directory = await trackedDirectory();
+    const lock = await QwpNodeAdvisoryLock.acquire(directory);
+    const beat = () =>
+      (lock as unknown as { beat(): Promise<void> }).beat.call(lock);
+    const ownerPath = join(directory, ".lock.owner");
+    const recordPath = join(ownerPath, "owner");
+    const record = await readFile(recordPath, "utf8");
+    const untouched = await stat(ownerPath);
+
+    // A directory where the record belongs yields EISDIR for every user, root
+    // included, so this stands in for a transient fault without a mock.
+    await unlink(recordPath);
+    await mkdir(recordPath);
+    // Adding and removing an entry moves the parent's mtime. Put it back, so
+    // the beat's staleness check sees exactly the value it last wrote and the
+    // read is the only thing that fails.
+    await utimes(ownerPath, untouched.atime, untouched.mtime);
+
+    await beat();
+    expect(lock.lost).toBe(false);
+
+    // The fault clears, and the lock is still usable rather than latched.
+    await rm(recordPath, { recursive: true });
+    await writeFile(recordPath, record);
+    await utimes(ownerPath, untouched.atime, untouched.mtime);
+
+    await beat();
+    expect(lock.lost).toBe(false);
+    await expect(lock.release()).resolves.toBeUndefined();
+    await expect(stat(ownerPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("reclaims a slot whose owner heartbeat stopped", async () => {
     const directory = await trackedDirectory();
     const ownerPath = join(directory, ".lock.owner");
