@@ -306,9 +306,26 @@ function encodeUdpDatagrams(
   const result: Uint8Array[] = [];
   for (const table of tables) {
     let start = 0;
+    // Rows accepted by the previous datagram, used to seed the next search
+    // window. Datagrams of one table hold a similar number of rows, so the
+    // previous run is a good guess at the next one.
+    let window = 0;
     while (start < table.rowCount) {
       let low = start + 1;
-      let high = table.rowCount;
+      // Gallop the upper bound outward from `start` rather than searching to
+      // `table.rowCount`. Bounding by the whole batch makes the first probe of
+      // every datagram encode half the remaining rows, so a flush costs
+      // O(rows^2 / rowsPerDatagram) row-encodes and a large batch stalls the
+      // event loop for seconds. Doubling from the last accepted run keeps the
+      // probes proportional to one datagram and yields the same split.
+      let high = Math.min(table.rowCount, start + Math.max(2 * window, 2));
+      while (high < table.rowCount) {
+        const probe = encodeQwpIngressFrame([table.sliceRows(start, high)], {
+          gorilla,
+        });
+        if (probe.byteLength > maxDatagramSize) break;
+        high = Math.min(table.rowCount, start + (high - start) * 2);
+      }
       let acceptedEnd = start;
       let accepted: Uint8Array | undefined;
       let smallestRejectedSize = 0;
@@ -339,6 +356,7 @@ function encodeUdpDatagrams(
         );
       }
       result.push(accepted);
+      window = acceptedEnd - start;
       start = acceptedEnd;
     }
   }

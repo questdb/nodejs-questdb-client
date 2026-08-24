@@ -283,6 +283,37 @@ describe("QWP ingress codec", () => {
     expect(() => table.sliceRows(-1, 2)).toThrow(/invalid.*row range/i);
   });
 
+  it("slices a null-free column without walking the rows before it", () => {
+    // `values` holds non-null entries only, so a row index becomes a value
+    // index by counting the nulls before it. Doing that by scanning from row
+    // zero costs O(start) per column on every slice, which makes any caller
+    // that walks a table in ascending slices -- the UDP datagram splitter, the
+    // ingress batch-cap bisector -- quadratic in the row count. A column with
+    // no nulls needs no scan at all, and that is the common case.
+    const table = new QwpTableBuffer("events");
+    const rows = 5_000;
+    for (let row = 0; row < rows; row++) {
+      table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(1n);
+      table.nextRow();
+    }
+    const column = table.columns[0];
+    let indexReads = 0;
+    column.nulls = new Proxy(column.nulls, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/.test(key)) indexReads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+
+    const sliced = table.sliceRows(rows - 10, rows);
+
+    expect(sliced.rowCount).toBe(10);
+    expect(sliced.columns[0].values).toHaveLength(10);
+    // Scanning would touch every row before the slice; the shortcut touches
+    // none of them.
+    expect(indexReads).toBeLessThan(rows / 10);
+  });
+
   it("encodes a compacted LONG column with an LSB-first null bitmap", () => {
     const table = new QwpTableBuffer("t");
     table.getOrCreateColumn("a", QWP_COLUMN_TYPE.LONG)!.values.push(1n);

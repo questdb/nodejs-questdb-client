@@ -195,13 +195,25 @@ export class QwpTableBuffer {
     const result = new QwpTableBuffer(this.name, this.maxNameLength);
     result.rows = end - start;
     for (const column of this.columnList) {
-      let valueStart = 0;
-      for (let row = 0; row < start; row++) {
-        if (!column.nulls[row]) valueStart++;
-      }
-      let valueEnd = valueStart;
-      for (let row = start; row < end; row++) {
-        if (!column.nulls[row]) valueEnd++;
+      // `values` holds non-null entries only, so a row index becomes a value
+      // index by skipping the nulls before it. A column with no nulls at all
+      // needs no scan, and that is the common case -- without this shortcut
+      // every slice costs O(start) per column, which makes a caller that walks
+      // a table in ascending slices quadratic in its row count all over again.
+      let valueStart: number;
+      let valueEnd: number;
+      if (column.values.length === column.size) {
+        valueStart = start;
+        valueEnd = end;
+      } else {
+        valueStart = 0;
+        for (let row = 0; row < start; row++) {
+          if (!column.nulls[row]) valueStart++;
+        }
+        valueEnd = valueStart;
+        for (let row = start; row < end; row++) {
+          if (!column.nulls[row]) valueEnd++;
+        }
       }
       const sliced: QwpColumnBuffer = {
         name: column.name,

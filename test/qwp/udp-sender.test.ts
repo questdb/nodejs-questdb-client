@@ -143,6 +143,56 @@ describe("QWP Node UDP sender", () => {
     expect(socket.closed).toBe(true);
   });
 
+  it("splits a large batch without re-encoding it once per datagram", async () => {
+    // The search for each datagram's last row used to run to table.rowCount,
+    // so the first probe of every datagram encoded half the rows still left.
+    // That is O(rows^2 / rowsPerDatagram) row-encodes: a 40k-row flush blocked
+    // the event loop for seconds and the cost quadrupled every time the batch
+    // doubled. What matters is rows encoded, not probes -- the probe count was
+    // always logarithmic; each one just encoded half of everything left. Every
+    // probe slices exactly once, so summing the slice widths measures the work
+    // exactly, and unlike wall-clock it cannot flake on a loaded machine.
+    const slicedRows: number[] = [];
+    for (const rows of [2000, 4000]) {
+      const socket = new FakeUdpSocket();
+      const session = await connectQwpNodeUdp({
+        host: "localhost",
+        port: 9007,
+        maxDatagramSize: 200,
+        socketFactory: () => socket,
+      });
+      const table = longTable(rows);
+      const sliceRows = table.sliceRows.bind(table);
+      let encoded = 0;
+      table.sliceRows = (from: number, to: number) => {
+        encoded += to - from;
+        return sliceRows(from, to);
+      };
+
+      await session.sendTables([table]);
+
+      slicedRows.push(encoded);
+      // The split still has to hold: many self-contained frames, none over cap.
+      expect(socket.packets.length).toBeGreaterThan(1);
+      for (const packet of socket.packets) {
+        expect(packet.byteLength).toBeLessThanOrEqual(200);
+        expect(decodeQwpFrame(packet)).toMatchObject({
+          flags: 0,
+          tableCount: 1,
+        });
+      }
+      await session.close();
+    }
+
+    // Doubling the rows must roughly double the work. The quadratic version
+    // quadrupled it.
+    const [small, large] = slicedRows;
+    expect(large).toBeLessThan(small * 3);
+    // And the work stays a small multiple of the batch, not a multiple of its
+    // square: the quadratic version sliced hundreds of thousands of rows here.
+    expect(large).toBeLessThan(4000 * 12);
+  });
+
   it("rejects one oversized row before sending any datagram", async () => {
     const socket = new FakeUdpSocket();
     const session = await connectQwpNodeUdp({
