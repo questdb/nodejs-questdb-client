@@ -666,26 +666,51 @@ async function connectQwpNodeIngressInternal(
     ) {
       throw error;
     }
-    const recoveryError = await quarantineQwpNodeReplayStore(
-      storeAndForward.directory,
-      error,
-    );
-    emitReplayRecoveryQuarantine(
-      storeAndForward,
-      recoveryError,
-      effectiveSessionOptions.onSenderError,
-    );
-    replayStore = new QwpNodeFileReplayStore(
+    // Retry the same directory once before giving up on it. A failed load
+    // closes its store, and that close drains pending maintenance and drops a
+    // watermark left stranded by a torn checkpoint -- so the very condition
+    // that rejected the journal is usually repaired by the time we get here,
+    // and the frames are intact. Quarantining on the first failure abandons
+    // recoverable data.
+    const retryStore = new QwpNodeFileReplayStore(
       withRecoveryDataLossReporter(
         storeAndForward,
         effectiveSessionOptions.onSenderError,
       ),
     );
-    session = await QwpIngressSession.connect(
-      connectionFactory,
-      { ...effectiveSessionOptions, replayStore },
-      signal,
-    );
+    try {
+      replayStore = retryStore;
+      session = await QwpIngressSession.connect(
+        connectionFactory,
+        { ...effectiveSessionOptions, replayStore: retryStore },
+        signal,
+      );
+    } catch (retryError) {
+      // Only a second recovery failure proves the journal is unreadable.
+      // Anything else -- a transport fault, an aborted connect -- says nothing
+      // about it, so leave the directory alone and report it as-is.
+      if (!isQuarantinableReplayRecoveryError(retryError)) throw retryError;
+      const recoveryError = await quarantineQwpNodeReplayStore(
+        storeAndForward.directory,
+        retryError,
+      );
+      emitReplayRecoveryQuarantine(
+        storeAndForward,
+        recoveryError,
+        effectiveSessionOptions.onSenderError,
+      );
+      replayStore = new QwpNodeFileReplayStore(
+        withRecoveryDataLossReporter(
+          storeAndForward,
+          effectiveSessionOptions.onSenderError,
+        ),
+      );
+      session = await QwpIngressSession.connect(
+        connectionFactory,
+        { ...effectiveSessionOptions, replayStore },
+        signal,
+      );
+    }
   }
   if (orphanDrainer) {
     session.registerCloseHook(() => orphanDrainer.close());

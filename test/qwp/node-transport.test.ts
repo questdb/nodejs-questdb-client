@@ -1,6 +1,6 @@
 import type { AddressInfo, Socket } from "node:net";
 import { createServer as createTcpServer } from "node:net";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -605,6 +605,87 @@ describe("QWP Node transport", () => {
         expect.arrayContaining([record, ".failed"]),
       );
       expect(await assignedReplaySegments(directory)).toEqual([]);
+    } finally {
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("retries a recoverable slot instead of quarantining it on the first failure", async () => {
+    // A power loss between an ACK and the checkpoint that trims the segment it
+    // emptied can leave a durable manifest head above the durable watermark,
+    // which recovery rejects. Quarantining on the first failure abandoned the
+    // whole journal -- yet the failed load's own close() drops the stranded
+    // watermark, so a second attempt recovers every frame. The bytes were
+    // never lost; only the decision to stop after one try lost them.
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+    });
+    const delivered: number[] = [];
+    server.on("connection", (socket) => {
+      socket.on("message", (data: Buffer) => {
+        delivered.push(data.byteLength);
+        socket.send(okResponse(BigInt(delivered.length - 1), "trades", 1n));
+      });
+    });
+    await listen(server);
+
+    const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-retry-"));
+    const directory = join(rootDirectory, "sender-0");
+    const payload = (value: number) => new Uint8Array(2048).fill(value & 0xff);
+    const seed = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 8192,
+    });
+    await seed.load();
+    for (let sequence = 0n; sequence < 10n; sequence++) {
+      await seed.append({ frameSequence: sequence, payload: payload(0) });
+    }
+    await seed.acknowledgeThrough(1n);
+    await vi.waitFor(async () =>
+      expect(await readFile(join(directory, ".ack-watermark"))).toBeDefined(),
+    );
+    // The watermark as it stood before the trim below advanced the manifest.
+    const stranded = await readFile(join(directory, ".ack-watermark"));
+    for (let sequence = 10n; sequence < 24n; sequence++) {
+      await seed.append({ frameSequence: sequence, payload: payload(1) });
+    }
+    await seed.acknowledgeThrough(17n);
+    await vi.waitFor(async () =>
+      expect(await assignedReplaySegments(directory)).toHaveLength(2),
+    );
+    await seed.close();
+    // Model the lost page: the manifest and the unlinks reached disk, the
+    // watermark that justified them did not.
+    await writeFile(join(directory, ".ack-watermark"), stranded);
+
+    const quarantined: QwpReplayStoreQuarantinedError[] = [];
+    const senderErrors: QwpSenderError[] = [];
+    const address = server.address() as AddressInfo;
+    try {
+      const session = await connectQwpNodeIngress(
+        {
+          url: `ws://127.0.0.1:${address.port}/write/v4`,
+          storeAndForward: {
+            directory,
+            initialConnectMode: "sync",
+            onRecoveryQuarantine: (event) => quarantined.push(event.error),
+          },
+        },
+        { onSenderError: (error) => senderErrors.push(error) },
+      );
+      await session.close();
+
+      expect(quarantined).toEqual([]);
+      expect(senderErrors).toEqual([]);
+      // The slot keeps its name: nothing was moved aside for an operator.
+      const siblings = await readdir(rootDirectory);
+      expect(siblings).toContain("sender-0");
+      expect(siblings.filter((name) => name.startsWith("sender-0."))).toEqual(
+        [],
+      );
+      // And the six frames the journal still held were replayed, not dropped.
+      expect(delivered.length).toBeGreaterThanOrEqual(6);
     } finally {
       await rm(rootDirectory, { recursive: true, force: true });
     }
