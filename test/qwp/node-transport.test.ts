@@ -610,6 +610,77 @@ describe("QWP Node transport", () => {
     }
   });
 
+  it("skips an ingress endpoint whose role the target excludes", async () => {
+    // target and zone reached the egress connection factory only, so ingress
+    // matched every role and ranked every endpoint as same-zone: writes landed
+    // on whichever endpoint came first in the configuration, replica included.
+    const roleServer = async (role: string) => {
+      const instance = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+      instance.on("headers", (headers) => {
+        headers.push("X-QWP-Version: 1");
+        headers.push(`X-QuestDB-Role: ${role}`);
+      });
+      instance.on("connection", (socket) => {
+        socket.on("message", () => socket.send(okResponse(0n, "trades", 1n)));
+      });
+      await listen(instance);
+      return instance;
+    };
+    const replica = await roleServer("REPLICA");
+    server = await roleServer("PRIMARY");
+    const replicaPort = (replica.address() as AddressInfo).port;
+    const primaryPort = (server.address() as AddressInfo).port;
+
+    try {
+      // The replica is preferred by configuration order, so only the role
+      // check can move the write off it.
+      const session = await connectQwpNodeIngress({
+        url: `ws://127.0.0.1:${replicaPort}/write/v4`,
+        failoverUrls: [`ws://127.0.0.1:${primaryPort}/write/v4`],
+        target: "primary",
+      });
+      try {
+        expect(session.handshake.serverRole?.toUpperCase()).toBe("PRIMARY");
+        await expect(
+          session.sendFrame(Uint8Array.of(1)),
+        ).resolves.toMatchObject({ sequence: 0n });
+      } finally {
+        await session.close();
+      }
+    } finally {
+      await new Promise<void>((resolve) => replica.close(() => resolve()));
+    }
+  });
+
+  it("accepts an ingress endpoint that declares no role at all", async () => {
+    // Ingress reads the role from an upgrade response header, which an older
+    // server may not send and a proxy may strip. Egress always learns one from
+    // SERVER_INFO, so applying the egress rule unchanged would refuse to write
+    // to a node purely for staying silent. A server that does know its role
+    // still rejects a misdirected write itself, with a 421.
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+    });
+    server.on("connection", (socket) => {
+      socket.on("message", () => socket.send(okResponse(0n, "trades", 1n)));
+    });
+    await listen(server);
+
+    const address = server.address() as AddressInfo;
+    const session = await connectQwpNodeIngress({
+      url: `ws://127.0.0.1:${address.port}/write/v4`,
+      target: "primary",
+    });
+    try {
+      await expect(session.sendFrame(Uint8Array.of(1))).resolves.toMatchObject({
+        sequence: 0n,
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
   it("retries a recoverable slot instead of quarantining it on the first failure", async () => {
     // A power loss between an ACK and the checkpoint that trims the segment it
     // emptied can leave a durable manifest head above the durable watermark,

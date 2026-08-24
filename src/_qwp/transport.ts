@@ -378,6 +378,11 @@ export const QWP_TARGET = {
 export type QwpTarget = (typeof QWP_TARGET)[keyof typeof QWP_TARGET];
 
 /** Browser-safe endpoint-routing controls used by QWP egress clients. */
+/**
+ * Endpoint routing preferences. Named for egress, where they landed first, but
+ * ingress ranks and validates its endpoints with the same machinery and honours
+ * the same two keys.
+ */
 export interface QwpEgressRoutingOptions {
   /** Selects any readable node, a primary/standalone node, or a replica. */
   target?: QwpTarget;

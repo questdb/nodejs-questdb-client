@@ -133,8 +133,8 @@ connect string is the portable spelling.
 | `failover_backoff_initial_ms`      | integer ms                  | —       | First failover delay.                                                                  |
 | `failover_backoff_max_ms`          | integer ms                  | —       | Ceiling for one failover delay.                                                        |
 | `failover_max_duration_ms`         | integer ms                  | —       | Budget for a failover episode.                                                         |
-| `target`                           | `any`, `primary`, `replica` | —       | Server role this client will accept.                                                   |
-| `zone`                             | string                      | —       | Preferred topology zone when ranking endpoints.                                        |
+| `target`                           | `any`, `primary`, `replica` | —       | Server role this client will accept, on both ingress and egress.                       |
+| `zone`                             | string                      | —       | Preferred topology zone when ranking endpoints, on both ingress and egress.            |
 
 ### Store-and-forward (Node only)
 
@@ -1041,7 +1041,7 @@ credit window bounds server read-ahead while application work is in progress.
 
 `target` accepts `any` (the default), `primary`, or `replica`. Primary routing also
 accepts standalone servers and a primary completing catch-up, matching the Java
-client. `zone` is an opaque, case-insensitive preference for `any` and `replica`;
+client. Both keys apply to ingress and egress alike. `zone` is an opaque, case-insensitive preference for `any` and `replica`;
 cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
 followed across zones. The client validates the authoritative role and zone from the
 first QWP `SERVER_INFO` frame before accepting an endpoint, so the same guarantees

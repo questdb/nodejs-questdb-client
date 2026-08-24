@@ -291,12 +291,24 @@ export function resolveQwpNodeClientConfig(
   };
   validatePool(pool);
 
+  const target = optionalEnum(value("target"), "target", [
+    "any",
+    "primary",
+    "replica",
+  ] as const) as QwpTarget | undefined;
+  const zone = value("zone");
   const ingress: QwpNodeIngressOptions = {
     ...common,
     url: withPath(endpoints[0], "/write/v4"),
     failoverUrls: endpoints
       .slice(1)
       .map((endpoint) => withPath(endpoint, "/write/v4")),
+    // `target` and `zone` are one cluster-routing pair, and QWP.md documents
+    // them under "Reconnect and failover" and promises the ingress endpoint
+    // ranking uses zone affinity. Reaching only the egress factory left both
+    // silently inert for writes.
+    target,
+    zone,
     requestDurableAck:
       extraOptions.webSocket?.requestDurableAck ??
       optionalBoolean(value("request_durable_ack"), "request_durable_ack"),
@@ -309,12 +321,8 @@ export function resolveQwpNodeClientConfig(
     failoverUrls: endpoints
       .slice(1)
       .map((endpoint) => withPath(endpoint, "/read/v1")),
-    target: optionalEnum(value("target"), "target", [
-      "any",
-      "primary",
-      "replica",
-    ] as const) as QwpTarget | undefined,
-    zone: value("zone"),
+    target,
+    zone,
     compression: optionalEnum(value("compression"), "compression", [
       "raw",
       "zstd",

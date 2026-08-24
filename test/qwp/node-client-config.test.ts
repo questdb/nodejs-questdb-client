@@ -390,6 +390,27 @@ describe("QWP unified Node client configuration", () => {
     }
   });
 
+  it("routes ingress by target and zone, not only egress", () => {
+    // Both keys were parsed, validated and then applied to the egress factory
+    // alone. On the ingress side target degenerated to "accept any role" and
+    // the health tracker ran zone-blind, so every endpoint ranked as same-zone
+    // and configuration order alone decided where writes went. Through
+    // Sender.fromConfig it was total: that path uses only options.ingress, so
+    // a bogus target still threw while a valid one did nothing at all.
+    const options = parseQwpNodeClientConfig(
+      "ws::addr=db-a.example:9000,db-b.example:9000;target=primary;zone=eu-west-1a;",
+    );
+
+    expect(options.ingress).toMatchObject({
+      target: "primary",
+      zone: "eu-west-1a",
+    });
+    expect(options.egress).toMatchObject({
+      target: "primary",
+      zone: "eu-west-1a",
+    });
+  });
+
   it("validates cluster authorities and supports bracketed IPv6", () => {
     const options = parseQwpNodeClientConfig(
       "ws::addr=[::1],[2001:db8::2]:9443;sender_pool_min=0;query_pool_min=0;",

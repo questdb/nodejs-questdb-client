@@ -243,7 +243,9 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   ) => QwpWebSocketLike;
 }
 
-export interface QwpNodeIngressOptions extends QwpNodeWebSocketOptions {
+export interface QwpNodeIngressOptions
+  extends QwpNodeWebSocketOptions,
+    QwpEgressRoutingOptions {
   /**
    * Upgrades the default in-memory ingress replay to persistent Node
    * store-and-forward. Use a directory owned exclusively by this session.
@@ -412,11 +414,20 @@ function createQwpNodeConnectionFactoryInternal(
   healthTracker?: QwpFailoverHealthTracker,
   resetClassificationsAfterExhaustion = true,
 ): QwpConnectionFactory {
+  const routing = options as QwpEgressRoutingOptions;
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
     (endpoint, signal) => connectQwpNodeEndpoint(options, endpoint, signal),
-    { healthTracker, resetClassificationsAfterExhaustion },
+    {
+      // Ingress used to drop these, so `target` degenerated to "accept any
+      // role" and every endpoint ranked as same-zone however the caller had
+      // configured the cluster.
+      target: routing.target,
+      zone: routing.zone,
+      healthTracker,
+      resetClassificationsAfterExhaustion,
+    },
   );
 }
 
@@ -589,7 +600,10 @@ async function connectQwpNodeIngressInternal(
 ): Promise<QwpIngressSession> {
   const healthTracker =
     sharedHealthTracker ??
-    createQwpFailoverHealthTracker(options.url, options.failoverUrls);
+    createQwpFailoverHealthTracker(options.url, options.failoverUrls, {
+      target: options.target,
+      zone: options.zone,
+    });
   const storeAndForward = resolveNodeStoreAndForwardOptions(options);
   if (storeAndForward && sessionOptions.replayStore) {
     throw new RangeError(

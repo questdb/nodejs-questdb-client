@@ -353,6 +353,14 @@ function normalizeRole(role: string | undefined): string | undefined {
 function matchesTarget(role: string | undefined, target: QwpTarget): boolean {
   if (target === QWP_TARGET.ANY) return true;
   const normalized = normalizeRole(role);
+  // An endpoint that declares no role is accepted whatever the target. Egress
+  // always learns one from SERVER_INFO, but ingress reads it from an upgrade
+  // response header that an older server may not send and a proxy may strip,
+  // and refusing to write to a node purely because it stayed silent would take
+  // a working deployment offline. A server that does know its role still
+  // rejects a misdirected write itself, with the 421 this client classifies as
+  // ROLE_REJECTED.
+  if (normalized === undefined) return true;
   if (target === QWP_TARGET.REPLICA) return normalized === "REPLICA";
   return (
     normalized === "PRIMARY" ||
