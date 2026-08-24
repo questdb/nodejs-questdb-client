@@ -4379,6 +4379,49 @@ describe("QWP Node file replay store", () => {
     await rm(join(directory, ".lock.owner"), { recursive: true, force: true });
   });
 
+  it("makes the ACK watermark durable before the manifest that trimming advanced", async () => {
+    // writeManifest() fsyncs the manifest and the directory whatever the
+    // durability mode, while the watermark write skips its fsync outside
+    // "append". A trim runs straight after the ACK that emptied the segment,
+    // so a power loss could leave a durable head above a watermark still in
+    // the page cache -- and recovery rejects that pair for the whole journal
+    // rather than losing the checkpoint window "periodic" promises.
+    //
+    // The ordering is not observable from outside without a real power cut, so
+    // assert the flag that drives it: after a trim nothing may be left
+    // unsynced. Dropping the syncAcknowledgement() call from writeManifest()
+    // leaves it true.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 8192,
+      durability: "periodic",
+      checkpointIntervalMs: 3_600_000,
+    });
+    const internals = store as unknown as { acknowledgementUnsynced: boolean };
+    await store.load();
+    for (let sequence = 0n; sequence < 10n; sequence++) {
+      await store.append({
+        frameSequence: sequence,
+        payload: new Uint8Array(2048),
+      });
+    }
+
+    // An ACK that empties no segment leaves the watermark for the checkpoint,
+    // which is an hour away here -- so the flag is meaningful.
+    await store.acknowledgeThrough(0n);
+    expect(internals.acknowledgementUnsynced).toBe(true);
+
+    // This one trims, so the manifest advances and the watermark must overtake
+    // it on disk first.
+    await store.acknowledgeThrough(5n);
+    await vi.waitFor(async () =>
+      expect(await assignedReplaySegments(directory)).not.toHaveLength(4),
+    );
+    expect(internals.acknowledgementUnsynced).toBe(false);
+    await store.close();
+  });
+
   it("survives a transient failure to read its own owner record", async () => {
     // Reading the record needs a descriptor; stat() and utimes() do not. So
     // process-wide descriptor pressure -- from anywhere in the host app -- and

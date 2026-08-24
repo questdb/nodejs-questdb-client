@@ -377,6 +377,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private acknowledgedThrough = -1n;
   private dictionaryDirty = false;
   private acknowledgementDirty = false;
+  /**
+   * Set whenever the ACK watermark has been written but not yet fsynced, in
+   * every durability mode -- unlike {@link acknowledgementDirty}, which only
+   * schedules the periodic checkpoint.
+   *
+   * `writeManifest` fsyncs the manifest and the directory unconditionally, and
+   * a trim writes the manifest right after an ACK advances the watermark. Left
+   * unsynced, a power loss can make the manifest head durable while the
+   * watermark that justifies it is not, and recovery rejects that pair for the
+   * whole journal rather than losing the checkpoint window `periodic` promises.
+   */
+  private acknowledgementUnsynced = false;
   private directoryDirty = false;
   private capacityGeneration = 0;
   private checkpointTimer?: ReturnType<typeof setTimeout>;
@@ -1603,6 +1615,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       this.dirtyRecordPaths.clear();
       this.dictionaryDirty = false;
       this.acknowledgementDirty = false;
+      this.acknowledgementUnsynced = false;
       this.directoryDirty = false;
       this.checkpointFailure = undefined;
       this.totalCheckpoints++;
@@ -1791,6 +1804,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         `invalid QWP store-and-forward manifest boundaries [headBase=${headBase}, activeBase=${activeBase}]`,
       );
     }
+    // The manifest below is fsynced unconditionally, so a watermark still
+    // sitting in the page cache would be overtaken by the head that trimming it
+    // justified. Make the watermark durable first: recovery reads the pair.
+    await this.syncAcknowledgement();
     const path = join(this.directory, MANIFEST_FILE);
     const nextGeneration = this.manifestGeneration + 1n;
     const file = await openMetadataFile(path);
@@ -1881,7 +1898,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           record,
           Number((nextGeneration & 1n) * BigInt(RECORD_SLOT_SIZE)),
         );
-        if (this.durability === QWP_SF_DURABILITY.APPEND) await file.sync();
+        if (this.durability === QWP_SF_DURABILITY.APPEND) {
+          await file.sync();
+          this.acknowledgementUnsynced = false;
+        } else {
+          this.acknowledgementUnsynced = true;
+        }
       } finally {
         await file.close();
       }
@@ -1918,12 +1940,30 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
   }
 
+  /**
+   * Makes a written-but-unsynced ACK watermark durable. Called before any
+   * manifest write, which is fsynced unconditionally, so the two records can
+   * never reach disk out of order.
+   */
+  private async syncAcknowledgement(): Promise<void> {
+    if (!this.acknowledgementUnsynced) return;
+    const file = await openMetadataFile(join(this.directory, ACK_FILE));
+    try {
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    this.acknowledgementUnsynced = false;
+    this.acknowledgementDirty = false;
+  }
+
   private async removeAcknowledgedThrough(): Promise<void> {
     if (this.acknowledgedThrough < 0n) return;
     await ignoreMissing(unlink(join(this.directory, ACK_FILE)));
     this.acknowledgedThrough = -1n;
     this.ackGeneration = 0n;
     this.acknowledgementDirty = false;
+    this.acknowledgementUnsynced = false;
     if (this.durability === QWP_SF_DURABILITY.APPEND) {
       await syncDirectory(this.directory);
     } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
