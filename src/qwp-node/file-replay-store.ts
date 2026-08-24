@@ -1062,7 +1062,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       } catch (error) {
         failure ??= error;
       }
-      if (!failure && this.loaded && this.records.size === 0) {
+      if (
+        !failure &&
+        this.loaded &&
+        this.records.size === 0 &&
+        this.ownsDirectory
+      ) {
         // Java retires the parent-anchored pair once the slot is permanently
         // drained. Keep the local slot lock held throughout this best-effort
         // cleanup so a racing drainer cannot adopt the old directory.
@@ -1386,6 +1391,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   private async runMaintenanceBatch(): Promise<void> {
     this.maintenanceScheduled = false;
+    if (!this.ownsDirectory) {
+      this.pendingTrimSegments.length = 0;
+      return;
+    }
     let trimmed = 0;
     while (trimmed < TRIM_BATCH_SIZE && this.pendingTrimSegments.length > 0) {
       const segment = this.pendingTrimSegments[0];
@@ -1430,6 +1439,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   private async drainPendingMaintenance(): Promise<void> {
     this.maintenanceFailure = undefined;
+    if (!this.ownsDirectory) {
+      // Nothing here is ours to trim any more. Drop the queue so close() can
+      // finish instead of retrying against the new owner's files.
+      this.pendingTrimSegments.length = 0;
+      return;
+    }
     while (this.pendingTrimSegments.length > 0) {
       await this.runMaintenanceBatch();
     }
@@ -1503,6 +1518,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.hotSpare = undefined;
     try {
       await spare.handle.close();
+      // The descriptor is ours either way, but the file is not once the slot
+      // has been reclaimed: the successor may have re-created that name.
+      if (!this.ownsDirectory) return;
       await qwpSegmentMaintenanceWorker.unlink(spare.path);
       this.totalBytes -= spare.size;
       if (this.durability !== QWP_SF_DURABILITY.MEMORY) {
@@ -1804,6 +1822,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         `invalid QWP store-and-forward manifest boundaries [headBase=${headBase}, activeBase=${activeBase}]`,
       );
     }
+    if (!this.ownsDirectory) return;
     // The manifest below is fsynced unconditionally, so a watermark still
     // sitting in the page cache would be overtaken by the head that trimming it
     // justified. Make the watermark durable first: recovery reads the pair.
@@ -1835,6 +1854,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   }
 
   private async removeManifest(): Promise<void> {
+    if (!this.ownsDirectory) return;
     await ignoreMissing(unlink(join(this.directory, MANIFEST_FILE)));
     await syncDirectory(this.directory);
     this.manifestGeneration = 0n;
@@ -1959,6 +1979,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   private async removeAcknowledgedThrough(): Promise<void> {
     if (this.acknowledgedThrough < 0n) return;
+    if (!this.ownsDirectory) return;
     await ignoreMissing(unlink(join(this.directory, ACK_FILE)));
     this.acknowledgedThrough = -1n;
     this.ackGeneration = 0n;
@@ -1981,7 +2002,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     if (
       !this.loaded ||
       this.records.size !== 0 ||
-      this.dictionaryFileSize === 0
+      this.dictionaryFileSize === 0 ||
+      !this.ownsDirectory
     ) {
       return;
     }
@@ -2120,6 +2142,24 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     // reclaim them while the store remains open. A fully drained close retires
     // the generation. Loading a valid journal above the target is therefore
     // safe; frame appends retain the bounded liveness floor until then.
+  }
+
+  /**
+   * Whether this store may still mutate its own directory.
+   *
+   * {@link assertReady} fences the public mutators by throwing, but background
+   * maintenance and every teardown step run outside it -- and `close()` is
+   * reached precisely by the terminal path a lost lock triggers. Once the slot
+   * has been reclaimed the pathname belongs to another acquisition, so an
+   * unlink or a manifest rewrite there destroys the live owner's journal
+   * rather than this store's: its segments, its `sf-manifest.bin` (the
+   * dual-slot record can even be overwritten by a lower generation of the same
+   * parity), its `.ack-watermark` -- which resurrects acknowledged frames for
+   * re-send -- or its `.symbol-dict`. These paths therefore skip the directory
+   * and release in-memory state only.
+   */
+  private get ownsDirectory(): boolean {
+    return !this.slotLock?.lost;
   }
 
   private assertReady(): void {

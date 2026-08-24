@@ -4422,6 +4422,66 @@ describe("QWP Node file replay store", () => {
     await store.close();
   });
 
+  it("leaves the directory alone once its slot lock was reclaimed", async () => {
+    // assertReady() fences the public mutators, but background maintenance and
+    // every teardown step ran outside it -- and close() is reached by exactly
+    // the terminal path a lost lock triggers, so losing the slot was what set
+    // the deletions going. They unlinked the successor's segments, its
+    // sf-manifest.bin and its .symbol-dict, and dropped its .ack-watermark,
+    // which resurrects acknowledged frames for re-send.
+    const directory = await trackedDirectory();
+    const evicted = new QwpNodeFileReplayStore({ directory });
+    await evicted.load();
+    await evicted.appendSymbolDictionary(0, ["evicted"]);
+    await evicted.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    // Fully drained, so close() takes the teardown paths that delete: the
+    // watermark, the dictionary, and the parent-anchored orphan pair.
+    await evicted.acknowledgeThrough(0n);
+
+    // Stand in for a holder paused past the staleness window: the slot is
+    // reclaimed while this store still has it open.
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(join(directory, ".lock.owner"), longAgo, longAgo);
+    const successor = new QwpNodeFileReplayStore({ directory });
+    await expect(successor.load()).resolves.toBeDefined();
+    const inherited = await successor.loadSymbolDictionary();
+    await successor.appendSymbolDictionary(inherited.length, ["successor"]);
+    await successor.append({ frameSequence: 1n, payload: Uint8Array.of(9) });
+    await successor.acknowledgeThrough(1n);
+    await successor.append({ frameSequence: 2n, payload: Uint8Array.of(10) });
+    // A hot spare is provisioned in the background under a .tmp- name, so it
+    // can appear between the two listings. It is scratch space, not journal
+    // state, and it is not what this test is about.
+    const durableEntries = async () =>
+      (await readdir(directory))
+        .filter((name) => !name.includes(".tmp-"))
+        .sort();
+    const before = await durableEntries();
+    const successorDictionary = await readFile(join(directory, ".symbol-dict"));
+
+    // The evicted store notices on its next mutating call, then shuts down --
+    // which is the moment it used to start deleting. Only Date is faked, so
+    // the heartbeat cannot run: this is the window a paused holder resumes in.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 20_000);
+      await expect(
+        evicted.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+      ).rejects.toMatchObject({ name: "QwpReplayStoreLockLostError" });
+      await evicted.close().catch(() => undefined);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(await durableEntries()).toEqual(before);
+    expect(await readFile(join(directory, ".symbol-dict"))).toEqual(
+      successorDictionary,
+    );
+    // The successor is still healthy, and still owns the lock it took.
+    await successor.append({ frameSequence: 3n, payload: Uint8Array.of(11) });
+    await successor.close();
+  });
+
   it("survives a transient failure to read its own owner record", async () => {
     // Reading the record needs a descriptor; stat() and utimes() do not. So
     // process-wide descriptor pressure -- from anywhere in the host app -- and
