@@ -500,6 +500,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     connectionListenerInboxCapacity = 64,
     errorInboxCapacity = 256,
     onSenderError?: (error: QwpSenderError) => void,
+    signal?: AbortSignal,
   ): Promise<QwpReconnectingIngressConnection> {
     const store: QwpIngressReplayStore =
       replayStore ??
@@ -508,6 +509,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         memoryReplayAppendDeadlineMs,
       );
     let connection: QwpReconnectingIngressConnection | undefined;
+    // close() aborts this while a connect is still negotiating. Without it the
+    // caller returns from close() and this keeps going: a persistent store
+    // takes its slot lock after the sender is gone and holds it for the rest
+    // of the connect budget, and the abandoned session goes on to send frames
+    // and even quarantine directories.
+    const abortError = () =>
+      signal?.reason ?? new Error("QWP connect was aborted");
+    if (signal?.aborted) throw abortError();
     try {
       const lazyStore = isLazyReplayStore(store) ? store : undefined;
       const records: readonly LoadedReplayRecord[] = lazyStore
@@ -565,38 +574,32 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         errorInboxCapacity,
         onSenderError,
       );
-      await connection.retireRecoveredDiscardTailIfReady();
-      if (
-        backgroundStoreAndForward &&
-        initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC
-      ) {
-        connection.startBackgroundConnect();
-      } else {
-        try {
-          await connection.connectLoop(
-            undefined,
-            false,
-            initialConnectMode === QWP_INITIAL_CONNECT_MODE.OFF
-              ? "single"
-              : "configured",
+      // The store's lock is held from here on, so an abort has something to
+      // release and must reach the connect that is about to run.
+      if (signal?.aborted) throw abortError();
+      const onAbort = () => {
+        void connection?.close().catch(() => undefined);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        await connection.retireRecoveredDiscardTailIfReady();
+        if (
+          backgroundStoreAndForward &&
+          initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC
+        ) {
+          connection.startBackgroundConnect();
+        } else {
+          await connection.connectLoopOrCatchUp(
+            initialConnectMode,
             initialConnection,
+            backgroundStoreAndForward,
+            orphanStoreAndForward,
           );
-        } catch (error) {
-          if (
-            backgroundStoreAndForward &&
-            !orphanStoreAndForward &&
-            error instanceof QwpCatchUpCapGapError
-          ) {
-            // Java returns the foreground sender once the wire has connected,
-            // then moves recovered-dictionary catch-up to its unbounded I/O
-            // loop. Do the same instead of making OFF/SYNC construction wait
-            // forever for a larger-cap node.
-            connection.startBackgroundConnect();
-          } else {
-            throw error;
-          }
         }
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
       }
+      if (signal?.aborted) throw abortError();
       return connection;
     } catch (error) {
       await connection?.close().catch(() => undefined);
@@ -606,6 +609,39 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         await store.close().catch(() => undefined);
       }
       throw error;
+    }
+  }
+
+  /** The foreground connect, with Java's catch-up fallback around it. */
+  private async connectLoopOrCatchUp(
+    initialConnectMode: QwpInitialConnectMode,
+    initialConnection: Promise<QwpBinaryConnection> | undefined,
+    backgroundStoreAndForward: boolean,
+    orphanStoreAndForward: boolean,
+  ): Promise<void> {
+    try {
+      await this.connectLoop(
+        undefined,
+        false,
+        initialConnectMode === QWP_INITIAL_CONNECT_MODE.OFF
+          ? "single"
+          : "configured",
+        initialConnection,
+      );
+    } catch (error) {
+      if (
+        backgroundStoreAndForward &&
+        !orphanStoreAndForward &&
+        error instanceof QwpCatchUpCapGapError
+      ) {
+        // Java returns the foreground sender once the wire has connected,
+        // then moves recovered-dictionary catch-up to its unbounded I/O
+        // loop. Do the same instead of making OFF/SYNC construction wait
+        // forever for a larger-cap node.
+        this.startBackgroundConnect();
+      } else {
+        throw error;
+      }
     }
   }
 

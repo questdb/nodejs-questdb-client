@@ -1,5 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import type { AddressInfo } from "node:net";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import type { AddressInfo, Socket } from "node:net";
+import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -10,6 +11,7 @@ import {
   QWP_MAGIC,
   QWP_STATUS,
   QwpByteWriter,
+  QwpNodeFileReplayStore,
   decodeQwpIngressSymbolDictionaryDelta,
 } from "../../src/qwp/node";
 
@@ -246,6 +248,73 @@ describe("Sender QWP integration", () => {
     expect(ackSent).toBe(true);
     expect(sender.acknowledgedSequence).toBe(0n);
   });
+
+  it("releases the store-and-forward slot before close() returns", async () => {
+    // close() aborts a connect that is still negotiating, but the signal only
+    // ever reached the eager initial connection -- which is skipped for
+    // precisely the configurations that own a replay store. So close()
+    // returned and resolved while the abandoned connect went on holding the
+    // slot lock for the rest of its connect budget: a second sender on the
+    // same directory failed with QwpReplayStoreLockedError naming its own
+    // process, and the session kept doing real work after shutdown.
+    //
+    // The peer accepts TCP and never answers the upgrade -- a stalled proxy or
+    // load balancer -- so the attempt hangs for the whole connect timeout
+    // rather than failing fast the way a refused port would.
+    const sockets = new Set<Socket>();
+    const stalled = createTcpServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      socket.resume();
+    });
+    await new Promise<void>((resolve, reject) => {
+      stalled.once("error", reject);
+      stalled.listen(0, "127.0.0.1", resolve);
+    });
+    const port = (stalled.address() as AddressInfo).port;
+    const directory = await mkdtemp(join(tmpdir(), "qwp-close-lock-"));
+    let connecting: Promise<unknown> = Promise.resolve();
+    try {
+      const sender = await Sender.fromConfig(
+        `ws::addr=127.0.0.1:${port};` +
+          `sf_dir=${directory};auto_flush=off;` +
+          "connect_timeout=30000;reconnect_max_duration_millis=30000;",
+      );
+      connecting = sender.connect().catch(() => undefined);
+      // Let the connect reach the upgrade, so the store is loaded and its lock
+      // taken before close() runs.
+      await vi.waitFor(() => expect(sockets.size).toBe(1));
+      await sender.close();
+
+      // The lock may outlive close() by an in-flight load, but not by the
+      // connect budget -- three seconds is an order of magnitude under the 30s
+      // configured here and far above a load.
+      const deadline = Date.now() + 3_000;
+      let reopened = false;
+      let lastError: unknown;
+      while (!reopened && Date.now() < deadline) {
+        const probe = new QwpNodeFileReplayStore({
+          directory: join(directory, "default"),
+        });
+        try {
+          await probe.load();
+          await probe.close();
+          reopened = true;
+        } catch (error) {
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      expect(reopened, `slot still locked: ${lastError}`).toBe(true);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => stalled.close(() => resolve()));
+      await connecting;
+      await rm(directory, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
+  }, 40_000);
 
   it("closes the socket and reports a bounded close-drain timeout", async () => {
     const frames: Uint8Array[] = [];

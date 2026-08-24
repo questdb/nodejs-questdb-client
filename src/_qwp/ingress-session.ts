@@ -631,6 +631,11 @@ export class QwpIngressSession {
             DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY,
           options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
           options.onSenderError,
+          // Without this the signal reached only the eager initialConnection
+          // above, which is skipped for exactly the configurations that own a
+          // replay store -- so close() could not tear down the one connect
+          // that holds a lock.
+          signal,
         )
       : await factory(signal);
     try {
