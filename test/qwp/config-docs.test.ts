@@ -80,14 +80,25 @@ describe("QWP configuration-string reference", () => {
       async close() {},
     } as unknown as QwpSenderSession;
 
-    const byRows = new QwpSender(async () => session);
-    for (let row = 0; row < rows - 1; row++) {
-      await byRows.table("t").intColumn("a", row).atNow();
+    // Freeze the clock while the row trigger is under test, so the interval
+    // trigger cannot fire instead. Staging 999 rows is ~2ms of work but 999
+    // awaits, and on a loaded CI runner the event loop can take longer than
+    // the 100ms interval to get through them -- which flushed mid-loop and
+    // failed this assertion with a partial row count. Only Date is faked, so
+    // the flush machinery's own timers keep working.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const byRows = new QwpSender(async () => session);
+      for (let row = 0; row < rows - 1; row++) {
+        await byRows.table("t").intColumn("a", row).atNow();
+      }
+      expect(sends).toEqual([]);
+      await byRows.table("t").intColumn("a", rows).atNow();
+      expect(sends).toEqual([rows]);
+      await byRows.close();
+    } finally {
+      vi.useRealTimers();
     }
-    expect(sends).toEqual([]);
-    await byRows.table("t").intColumn("a", rows).atNow();
-    expect(sends).toEqual([rows]);
-    await byRows.close();
 
     sends.length = 0;
     vi.useFakeTimers();
