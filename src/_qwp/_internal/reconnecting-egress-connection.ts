@@ -21,6 +21,7 @@ import {
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
+import { safelyInvoke } from "./safe-callback";
 
 type ReplayResetHandler = (
   event: QwpEgressReplayResetEvent,
@@ -623,11 +624,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   }
 
   private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {
-    try {
-      this.reconnectOptions.onEvent?.({ ...event, timestampMs: Date.now() });
-    } catch {
-      // Connection observers must not interfere with replay progress.
-    }
+    // Contain synchronous throws and rejected promises alike: a failing
+    // observer, sync or async, must never interfere with replay progress.
+    safelyInvoke(this.reconnectOptions.onEvent, {
+      ...event,
+      timestampMs: Date.now(),
+    });
   }
 
   private throwIfUnavailable(): void {

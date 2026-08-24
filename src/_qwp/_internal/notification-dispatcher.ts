@@ -1,3 +1,5 @@
+import { isPromiseLike } from "./safe-callback";
+
 export interface QwpNotificationDispatcherMetrics {
   readonly pending: number;
   readonly delivered: number;
@@ -111,7 +113,7 @@ export class QwpNotificationDispatcher<T> {
     this.delivered++;
     try {
       const result = this.handler(notification);
-      if (isPromiseLike(result)) void result.catch(() => undefined);
+      if (isPromiseLike(result)) void result.then(undefined, () => undefined);
     } catch {
       // Observability callbacks never participate in protocol progress.
     } finally {
@@ -134,19 +136,6 @@ export class QwpNotificationDispatcher<T> {
     this.resolveClose?.();
     this.resolveClose = undefined;
   }
-}
-
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> & {
-  catch(onRejected: (reason: unknown) => unknown): unknown;
-} {
-  return (
-    value !== null &&
-    (typeof value === "object" || typeof value === "function") &&
-    "then" in value &&
-    typeof value.then === "function" &&
-    "catch" in value &&
-    typeof value.catch === "function"
-  );
 }
 
 function unrefTimer(timer: ReturnType<typeof setTimeout>): void {

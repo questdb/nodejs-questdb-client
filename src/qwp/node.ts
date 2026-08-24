@@ -24,6 +24,7 @@ import {
 } from "../_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../_qwp/_internal/egress-routing";
 import { validateQwpMaxBatchRows } from "../_qwp/_internal/egress-limits";
+import { safelyInvoke } from "../_qwp/_internal/safe-callback";
 import { resolveQwpNodeClientConfig } from "../qwp-node/client-config";
 import {
   QWP_INITIAL_CONNECT_MODE,
@@ -750,11 +751,11 @@ function withRecoveryDataLossReporter(
         `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
           `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`,
       );
-      try {
-        onSenderError(senderError);
-      } catch {
-        defaultQwpSenderErrorHandler(senderError);
-      }
+      // A rejected promise from an async onSenderError must fall back to the
+      // default handler, exactly as a synchronous throw does.
+      safelyInvoke(onSenderError, senderError, () =>
+        defaultQwpSenderErrorHandler(senderError),
+      );
     },
   };
 }
@@ -786,22 +787,17 @@ function emitReplayRecoveryQuarantine(
     log("error", error);
     return;
   }
-  let callbackFailed = false;
-  try {
-    options.onRecoveryQuarantine?.(event);
-  } catch {
-    callbackFailed = true;
-  }
-  try {
-    onSenderError?.(senderError);
-  } catch {
-    callbackFailed = true;
-  }
-  if (callbackFailed) {
+  let loggedFallback = false;
+  const reportCallbackFailure = (): void => {
+    if (loggedFallback) return;
+    loggedFallback = true;
     // Recovery already succeeded. Notification callbacks must not brick the
-    // fresh producer slot; fall back to the default logger instead.
+    // fresh producer slot; fall back to the default logger instead. A failure
+    // may surface asynchronously (a rejected promise), so log at most once.
     log("error", error);
-  }
+  };
+  safelyInvoke(options.onRecoveryQuarantine, event, reportCallbackFailure);
+  safelyInvoke(onSenderError, senderError, reportCallbackFailure);
 }
 
 /**
@@ -1266,16 +1262,12 @@ function orphanIngressSessionOptions(
       maxAttempts: 0,
       maxDurationMs: 0,
       onEvent: (event) => {
-        try {
-          configuredOnEvent?.(event);
-        } catch {
-          // Reconnect observers cannot interrupt orphan recovery.
-        }
-        try {
-          onReconnectEvent?.(event);
-        } catch {
-          // Orphan lifecycle observers use their own bounded dispatcher.
-        }
+        // This wrapper is the dispatcher's handler, so a rejected promise it
+        // returned would orphan through the very inbox meant to contain it.
+        // Contain both observers here: a reconnect observer cannot interrupt
+        // orphan recovery, and the orphan lifecycle observer stays bounded.
+        safelyInvoke(configuredOnEvent, event);
+        safelyInvoke(onReconnectEvent, event);
       },
     },
     replayStore: undefined,

@@ -24,6 +24,7 @@ import {
 } from "./transport";
 import { QwpReconnectingIngressConnection } from "./_internal/reconnecting-ingress-connection";
 import { QwpNotificationDispatcher } from "./_internal/notification-dispatcher";
+import { safelyInvoke } from "./_internal/safe-callback";
 import {
   createQwpSenderError,
   defaultQwpSenderErrorHandler,
@@ -1649,26 +1650,6 @@ export class QwpIngressSession {
       pending.reject(error);
     }
     this.acknowledgedSequenceWaiters.clear();
-  }
-}
-
-function safelyInvoke<T>(
-  callback: ((event: T) => void) | undefined,
-  event: T,
-): void {
-  if (!callback) return;
-  try {
-    const result = (callback as (value: T) => unknown)(event);
-    if (
-      result !== null &&
-      (typeof result === "object" || typeof result === "function") &&
-      "catch" in result &&
-      typeof result.catch === "function"
-    ) {
-      void result.catch(() => undefined);
-    }
-  } catch {
-    // Observability callbacks must not break protocol progress.
   }
 }
 

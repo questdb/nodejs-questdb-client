@@ -23,6 +23,7 @@ import {
 } from "./advisory-lock";
 import { qwpSegmentMaintenanceWorker } from "./segment-maintenance-worker";
 import { log } from "../logging";
+import { safelyInvoke } from "../_qwp/_internal/safe-callback";
 
 const FORMAT_VERSION = 1;
 const MAX_FRAME_SEQUENCE = 0x7fffffffffffffffn;
@@ -1953,11 +1954,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       log("error", message);
       return;
     }
-    try {
-      this.onRecoveryDataLoss(report);
-    } catch {
-      log("error", message);
-    }
+    // A rejected promise from an async handler must log the abandoned bytes,
+    // exactly as a synchronous throw does; neither may escape.
+    safelyInvoke(this.onRecoveryDataLoss, report, () => log("error", message));
   }
 
   /**

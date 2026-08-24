@@ -6,6 +6,7 @@ import {
   type QwpTableBuffer,
 } from "../_qwp/_core";
 import type { QwpSenderSession } from "../_qwp/sender";
+import { safelyInvoke } from "../_qwp/_internal/safe-callback";
 
 const DEFAULT_QWP_UDP_PORT = 9007;
 const DEFAULT_MAX_DATAGRAM_SIZE = 1_400;
@@ -285,11 +286,9 @@ export class QwpNodeUdpSession implements QwpSenderSession {
 
   private reportError(error: Error): void {
     this.totalSendErrors++;
-    try {
-      this.onError?.(error);
-    } catch {
-      // UDP error observers cannot participate in sender progress.
-    }
+    // Contain synchronous throws and rejected promises alike: a UDP error
+    // observer must never participate in sender progress or crash the host.
+    safelyInvoke(this.onError, error);
   }
 
   private assertOpen(): void {
