@@ -7,7 +7,7 @@
     "./src/qwp/node.ts"
   ],
   "out": "docs",
-  "name": "QuestDB Node.js Client",
+  "name": "QuestDB JavaScript Client",
   "readme": "./README.md",
   "tsconfig": "./tsconfig.json",
   "exclude": ["**/test/**/*", "**/examples/**/*", "**/node_modules/**/*"],

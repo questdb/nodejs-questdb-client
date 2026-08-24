@@ -109,7 +109,7 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "sender_id",
   "sf_max_segment_bytes",
   // Reserved by the shared QWP configuration vocabulary. They are accepted
-  // as intentional no-ops until the TypeScript client exposes these policies.
+  // as intentional no-ops until the JavaScript client exposes these policies.
   "on_internal_error",
   "on_parse_error",
   "on_schema_error",

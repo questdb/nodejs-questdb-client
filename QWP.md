@@ -1205,7 +1205,7 @@ sizes may be passed as the second argument. The whole string is still validated
 before overrides are applied, matching the Java builder's fail-fast behavior.
 
 Set `lazy_connect=on` to tolerate an unavailable cluster during startup. In the
-TypeScript client ingress uses memory replay by default, or persistent replay when
+JavaScript client, ingress uses memory replay by default, or persistent replay when
 `sf_dir` is present, with `initial_connect_retry=async`; egress uses
 `query_pool_min=0` and connects on the first query. Explicit
 `initial_connect_retry=off|sync` or a positive `query_pool_min` conflicts with

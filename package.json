@@ -1,7 +1,7 @@
 {
   "name": "@questdb/nodejs-client",
   "version": "4.2.0",
-  "description": "QuestDB Node.js Client",
+  "description": "QuestDB JavaScript Client",
   "scripts": {
     "test": "vitest",
     "test:qwp-browser": "pnpm build && vitest run --config vitest.qwp-browser.config.ts",

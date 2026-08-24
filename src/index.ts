@@ -1,5 +1,7 @@
 /**
- * A Node.js client for QuestDB.
+ * The QuestDB JavaScript client.
+ *
+ * This entry point targets Node.js. See `./qwp/browser` for the browser build.
  * @packageDocumentation
  */
 

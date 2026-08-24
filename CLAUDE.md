@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the QuestDB Node.js client library (@questdb/nodejs-client) that provides data ingestion capabilities to QuestDB databases. The client supports multiple transport protocols (HTTP/HTTPS, TCP/TCPS) and authentication methods.
+This is the QuestDB JavaScript client library (@questdb/nodejs-client) that provides data ingestion capabilities to QuestDB databases. The client supports multiple transport protocols (HTTP/HTTPS, TCP/TCPS) and authentication methods.
 
 ## Development Commands
 

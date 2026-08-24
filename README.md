@@ -70,7 +70,7 @@ run().then(console.log).catch(console.error);
 Passing `null` or `undefined` as a column or symbol value omits that column from
 the row, and QuestDB records the omission as NULL. This is the model the QuestDB
 clients share — the Java client puts it as "to mark the value NULL, omit the
-column from the row" — with the Node client doing the omission for you, so a
+column from the row" — with the JavaScript client doing the omission for you, so a
 record with optional fields needs no branching:
 
 ```typescript
