@@ -1298,8 +1298,36 @@ describe("QWP WebSocket adapters", () => {
       tryNextEndpoint: true,
     },
     {
+      // A rolling restart behind a proxy answers 503 for a few seconds. The
+      // reconnect loop must keep sweeping instead of latching terminal.
       statusCode: 503,
       statusMessage: "Service Unavailable",
+      headers: {},
+      kind: QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED,
+      retryable: true,
+      tryNextEndpoint: true,
+    },
+    {
+      statusCode: 502,
+      statusMessage: "Bad Gateway",
+      headers: {},
+      kind: QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED,
+      retryable: true,
+      tryNextEndpoint: true,
+    },
+    {
+      statusCode: 429,
+      statusMessage: "Too Many Requests",
+      headers: {},
+      kind: QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED,
+      retryable: true,
+      tryNextEndpoint: true,
+    },
+    {
+      // A 4xx that is not 401/403/421/429 is a client-side mistake, so
+      // byte-identical replay cannot fix it and the sweep must not retry it.
+      statusCode: 404,
+      statusMessage: "Not Found",
       headers: {},
       kind: QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED,
       retryable: false,

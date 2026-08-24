@@ -168,7 +168,15 @@ function classifyUpgradeRejection(
     `QWP WebSocket upgrade rejected with HTTP ${statusCode}${suffix}`,
     {
       kind,
-      retryable: statusCode === 421,
+      // A 5xx or a 429 is what a proxy, a load balancer, or a rolling restart
+      // answers with while a backend is coming back, so it must not end the
+      // reconnect loop: connectLoop rethrows a non-retryable error before it
+      // ever reaches the attempt/duration budget, which latches the sender
+      // terminal on the first blip. This matches the browser bootstrap
+      // (`statusCode >= 500`) and the ILP HTTP transport's retriable set.
+      // 401/403 stay terminal, and a 4xx other than 429 is a client-side
+      // mistake that byte-identical replay cannot fix.
+      retryable: statusCode === 421 || statusCode === 429 || statusCode >= 500,
       tryNextEndpoint: statusCode !== 401 && statusCode !== 403,
       url,
       statusCode,
