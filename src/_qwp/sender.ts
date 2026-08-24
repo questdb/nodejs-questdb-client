@@ -1285,12 +1285,7 @@ export class QwpSender {
     name: string,
     millisecondsSinceEpoch: number | bigint | null | undefined,
   ): QwpSender {
-    if (
-      millisecondsSinceEpoch === null ||
-      millisecondsSinceEpoch === undefined
-    ) {
-      return this;
-    }
+    if (this.omitsNullish(name, millisecondsSinceEpoch)) return this;
     try {
       return this.addColumn(
         name,
@@ -2104,13 +2099,15 @@ export class QwpSender {
     bits: number,
     maximumScale: number,
   ): QwpSender {
-    if (unscaled === null || unscaled === undefined) return this;
+    // The scale describes the column, not this row's value, so a bad constant
+    // is reported whether or not this row happens to carry a decimal.
+    if (!Number.isSafeInteger(scale) || scale < 0 || scale > maximumScale) {
+      return this.failRow(
+        new RangeError(`decimal scale must be between 0 and ${maximumScale}`),
+      );
+    }
+    if (this.omitsNullish(name, unscaled)) return this;
     try {
-      if (!Number.isSafeInteger(scale) || scale < 0 || scale > maximumScale) {
-        throw new RangeError(
-          `decimal scale must be between 0 and ${maximumScale}`,
-        );
-      }
       if (!fitsSigned(unscaled, bits)) {
         throw new RangeError(`decimal value exceeds signed int${bits}`);
       }

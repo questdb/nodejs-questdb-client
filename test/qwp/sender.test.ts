@@ -264,6 +264,26 @@ describe("QWP high-level sender", () => {
       expect(() =>
         table().long256Column("bad.name", value, value, value, value),
       ).toThrow(/illegal characters/i);
+      // dateColumn and the three fixed-width decimal setters returned on a
+      // nullish value before validating anything -- commit 266438f fixed this
+      // class and missed exactly these four.
+      expect(() => table().dateColumn("bad.name", value)).toThrow(
+        /illegal characters/i,
+      );
+      expect(() => table().decimal64Column("a".repeat(20), value, 2)).toThrow(
+        /too long/i,
+      );
+      // The scale constant describes the column, not this row's value, so it is
+      // checked whether or not the value is present.
+      expect(() => table().decimal64Column("d", value, 999)).toThrow(
+        /decimal scale/i,
+      );
+      expect(() => table().decimal128Column("d", value, 999)).toThrow(
+        /decimal scale/i,
+      );
+      expect(() => table().decimal256Column("d", value, 999)).toThrow(
+        /decimal scale/i,
+      );
     }
 
     // A valid nullish call is still simply omitted.
@@ -271,6 +291,8 @@ describe("QWP high-level sender", () => {
     await sender
       .table("t")
       .stringColumn("skipped", null)
+      .dateColumn("dateval", null)
+      .decimal64Column("decval", null, 2)
       .longColumn("kept", 1n)
       .atNow();
     expect(sender.metrics.pendingRows).toBe(1);
