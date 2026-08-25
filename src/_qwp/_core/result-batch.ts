@@ -1359,7 +1359,7 @@ export class QwpResultBatchDecoder {
         : message.body;
     const reader = new QwpByteReader(body);
     const deltaMode = (message.flags & QWP_FLAG_DELTA_SYMBOL_DICTIONARY) !== 0;
-    if (deltaMode) this.readDeltaDictionary(reader);
+    if (deltaMode) this.readDeltaDictionary(reader, message.body.length);
 
     const tableNameLength = readCount(
       reader,
@@ -1859,7 +1859,10 @@ export class QwpResultBatchDecoder {
     };
   }
 
-  private readDeltaDictionary(reader: QwpByteReader): void {
+  private readDeltaDictionary(
+    reader: QwpByteReader,
+    framePayloadBytes: number,
+  ): void {
     const start = readCount(
       reader,
       MAX_CONNECTION_SYMBOLS,
@@ -1878,6 +1881,19 @@ export class QwpResultBatchDecoder {
     if (start + count > MAX_CONNECTION_SYMBOLS) {
       throw new QwpProtocolError(
         `symbol dictionary exceeds ${MAX_CONNECTION_SYMBOLS} entries`,
+      );
+    }
+    // Each declared entry occupies at least one byte in the frame that carried
+    // it, so a count above the frame's payload length was manufactured by Zstd
+    // decompression rather than transmitted: a few hundred wire bytes could
+    // otherwise declare millions of zero-length entries and allocate them all
+    // here, before any column is read. Bound the entry count to the wire, as
+    // the grid cell cap does, and as the local dictionary is bounded by its row
+    // count. Checked before the loop, because reading an entry is what
+    // allocates.
+    if (count > framePayloadBytes) {
+      throw new QwpProtocolError(
+        `delta symbol dictionary declares ${count} entries, above the ${framePayloadBytes}-byte frame payload`,
       );
     }
     for (let index = 0; index < count; index++) {

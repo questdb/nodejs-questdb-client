@@ -211,6 +211,50 @@ function compressedAllNullBatch(rows: number, columns: number): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_ZSTD, 1);
 }
 
+/**
+ * A compressed RESULT_BATCH declaring `count` zero-length delta dictionary
+ * entries. Each costs one decompressed byte, so Zstd RLE packs millions of
+ * them into a few hundred wire bytes -- the delta-dictionary analogue of the
+ * all-NULL grid flood above.
+ */
+function deltaDictionaryFloodBatch(count: number): Uint8Array {
+  const header = new QwpByteWriter();
+  writeQwpVarint(header, 0); // delta dictionary start
+  writeQwpVarint(header, count); // delta dictionary count
+  const headerBytes = Array.from(header.toUint8Array());
+
+  const grid = new QwpByteWriter();
+  writeQwpVarint(grid, 0); // table name
+  writeQwpVarint(grid, 0); // rows
+  writeQwpVarint(grid, 0); // columns -- an empty, in-cap grid
+  const gridBytes = Array.from(grid.toUint8Array());
+
+  const ZSTD_BLOCK_MAX = 131072;
+  const blocks: ({ raw: number[] } | { rle: [number, number] })[] = [
+    { raw: headerBytes },
+  ];
+  for (let remaining = count; remaining > 0; ) {
+    const run = Math.min(remaining, ZSTD_BLOCK_MAX);
+    blocks.push({ rle: [0x00, run] }); // `run` zero-length symbol entries
+    remaining -= run;
+  }
+  blocks.push({ raw: gridBytes });
+
+  const body = rleZstdFrame(
+    blocks,
+    headerBytes.length + count + gridBytes.length,
+  );
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(1n);
+  writeQwpVarint(payload, 0); // batch sequence
+  payload.writeBytes(body);
+  return encodeQwpFrame(
+    payload.toUint8Array(),
+    QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_ZSTD,
+    1,
+  );
+}
+
 function scalarResultBatch(): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
@@ -720,6 +764,35 @@ describe("QWP result batch decoder", () => {
     expect(batch.rowCount).toBe(rows);
     expect(batch.columns).toHaveLength(QWP_MAX_COLUMNS_PER_TABLE);
     expect(batch.get(0, 0)).toBeNull();
+  });
+
+  it("bounds the delta symbol dictionary a RESULT_BATCH declares", () => {
+    // readDeltaDictionary ran before the grid cell cap and was bounded only by
+    // MAX_CONNECTION_SYMBOLS, never by the wire. A zero-length entry costs one
+    // decompressed byte, so a few hundred Zstd-compressed bytes declared 8.4M
+    // of them and allocated 8.4M empty strings -- ~140 MB and ~0.9 s of blocked
+    // event loop -- before any column was read.
+    const wire = deltaDictionaryFloodBatch(8_388_608);
+    expect(wire.byteLength).toBeLessThan(2_000);
+    const message = decodeQwpEgressMessage(wire);
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const before = process.memoryUsage().heapUsed;
+    expect(() => new QwpResultBatchDecoder().decode(message)).toThrow(
+      /above the \d+-byte frame payload/,
+    );
+    // Rejected before the entry loop -- reading one is what allocates.
+    expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+  });
+
+  it("still decodes a delta dictionary that fits its frame", () => {
+    // A real delta carries actual symbols, so its entry count never exceeds the
+    // bytes that transmitted it: the bound only rejects counts Zstd manufactured.
+    const message = decodeQwpEgressMessage(firstResultBatch());
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(message);
+    expect(batch.get(0, 2)).toBe("alpha");
+    expect(batch.get(1, 2)).toBe("beta");
   });
 
   it("requires a bounded, single Zstd frame", () => {
