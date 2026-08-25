@@ -57,11 +57,12 @@ function resolveQwpConfig(
   configString: string,
 ): QwpNodeClientOptions {
   const configuredWebSocket = options.qwp?.webSocket;
-  const { storeAndForward, ...webSocketOverrides } = configuredWebSocket ?? {};
+  const { storeAndForward, failoverUrls, ...webSocketOverrides } =
+    configuredWebSocket ?? {};
   const agent =
     webSocketOverrides.agent ??
     selectQwpSchemeAgent(options.agent, options.protocol === WSS);
-  return resolveQwpNodeClientConfig(configString, {
+  const resolved = resolveQwpNodeClientConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,
     // The top-level logger wins, then the QWP-specific one, then the default
@@ -76,6 +77,14 @@ function resolveQwpConfig(
     },
     ingressSession: options.qwp?.session,
   });
+  if (failoverUrls === undefined) return resolved;
+  return {
+    ...resolved,
+    ingress: {
+      ...resolved.ingress,
+      failoverUrls,
+    },
+  };
 }
 
 const HTTP_PORT = 9000;

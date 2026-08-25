@@ -186,6 +186,64 @@ describe("Sender QWP integration", () => {
     }
   });
 
+  it("uses typed root failoverUrls after the primary upgrade is rejected", async () => {
+    let primaryAttempts = 0;
+    let secondaryAttempts = 0;
+    let requestPath: string | undefined;
+    const primary = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+      verifyClient: (_info, accept) => {
+        primaryAttempts++;
+        accept(false, 503, "Unavailable");
+      },
+    });
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Max-Batch-Size: 1048576");
+    });
+    server.on("connection", (_socket, request) => {
+      secondaryAttempts++;
+      requestPath = request.url;
+    });
+    await Promise.all([
+      new Promise<void>((resolve, reject) => {
+        primary.once("listening", resolve);
+        primary.once("error", reject);
+      }),
+      new Promise<void>((resolve, reject) => {
+        server!.once("listening", resolve);
+        server!.once("error", reject);
+      }),
+    ]);
+    const primaryPort = (primary.address() as AddressInfo).port;
+    const secondaryPort = (server.address() as AddressInfo).port;
+
+    let sender: Sender | undefined;
+    try {
+      sender = await Sender.fromConfig(
+        `ws::addr=127.0.0.1:${primaryPort};connect_timeout=250;auto_flush=off;`,
+        {
+          qwp: {
+            webSocket: {
+              failoverUrls: [`ws://127.0.0.1:${secondaryPort}/write/v4`],
+            },
+          },
+        },
+      );
+      await sender.connect();
+      expect(primaryAttempts).toBe(1);
+      expect(secondaryAttempts).toBe(1);
+      expect(requestPath).toBe("/write/v4");
+    } finally {
+      await sender?.close().catch(() => undefined);
+      await new Promise<void>((resolve, reject) =>
+        primary.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
   it("honors auto_flush_bytes from the ws:: configuration string", async () => {
     const frames: Uint8Array[] = [];
     server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
