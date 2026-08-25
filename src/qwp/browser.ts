@@ -101,7 +101,8 @@ export class QwpBrowserSessionBootstrapError extends QwpUpgradeError {
         kind: authenticationFailure
           ? QWP_UPGRADE_ERROR_KIND.AUTHENTICATION
           : QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED,
-        retryable: !authenticationFailure && statusCode >= 500,
+        retryable:
+          !authenticationFailure && (statusCode === 429 || statusCode >= 500),
         tryNextEndpoint: !authenticationFailure,
         url,
         statusCode,
