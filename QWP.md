@@ -209,12 +209,13 @@ await sender
 await sender.close();
 ```
 
-The default port is 9007, maximum datagram size is 1400 bytes, and multicast TTL
-is zero. Each datagram is self-contained, contains exactly one table, and uses an
-inline schema plus table-local symbol dictionaries. Batches are split at row
-boundaries; `QwpUdpDatagramTooLargeError` is raised before transmission when one
-row cannot fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the
-same transport from `qwp/node`.
+The default port is 9007, the maximum datagram size (`max_datagram_size`) is 1400
+bytes, and the multicast TTL (`multicast_ttl`) is zero. Each datagram is
+self-contained, contains exactly one table, and uses an inline schema plus
+table-local symbol dictionaries. Batches are split at row boundaries;
+`QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
+fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the same
+transport from `qwp/node`.
 
 UDP provides no authentication, TLS, server or durable ACK, transactions,
 reconnection, compression, or store-and-forward. Local socket errors are delivered

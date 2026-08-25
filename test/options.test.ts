@@ -848,12 +848,18 @@ describe("Configuration string parser suite", function () {
     await expect(
       SenderOptions.fromConfig("udp::addr=host;tls_verify=on;"),
     ).rejects.toThrow("TLS is not supported for QWP UDP transport");
-    // On ws/wss these are legacy keys, rejected by the QWP schema with the
-    // Java client's relocation hint.
+    // On ws/wss these are legacy keys, rejected by the QWP schema with a
+    // relocation hint. max_datagram_size and multicast_ttl are UDP-only -- http
+    // and tcp reject them too -- so the hint must name only udp, not all three.
     await expect(
       SenderOptions.fromConfig("ws::addr=host;max_datagram_size=1400;"),
     ).rejects.toThrow(
-      "unknown configuration key: max_datagram_size (applies to legacy http/tcp/udp transports only)",
+      "unknown configuration key: max_datagram_size (applies to the legacy udp transport only)",
+    );
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host;multicast_ttl=2;"),
+    ).rejects.toThrow(
+      "unknown configuration key: multicast_ttl (applies to the legacy udp transport only)",
     );
   });
 

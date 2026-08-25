@@ -212,6 +212,17 @@ type DeprecatedOptions = {
  * Recommended to use the same setting as the server, which also uses 127 by default.
  * </li>
  * </ul>
+ * <br>
+ * UDP specific options
+ * <ul>
+ * <li> max_datagram_size: <i>integer</i> - Maximum encoded datagram size in bytes, defaults to 1400. <br>
+ * A row that cannot fit a single datagram is rejected before transmission. It is also the default for
+ * <i>auto_flush_bytes</i>. Supported by the udp transport only; http, tcp and ws/wss reject it.
+ * </li>
+ * <li> multicast_ttl: <i>integer</i> - Multicast time-to-live for outgoing datagrams, from 0 to 255, defaults to 0. <br>
+ * Supported by the udp transport only; http, tcp and ws/wss reject it.
+ * </li>
+ * </ul>
  */
 class SenderOptions {
   protocol: string;

@@ -38,8 +38,8 @@ const RELOCATED_HINTS = new Map([
     "request_min_throughput",
     "(applies to legacy http/tcp/udp transports only)",
   ],
-  ["max_datagram_size", "(applies to legacy http/tcp/udp transports only)"],
-  ["multicast_ttl", "(applies to legacy http/tcp/udp transports only)"],
+  ["max_datagram_size", "(applies to the legacy udp transport only)"],
+  ["multicast_ttl", "(applies to the legacy udp transport only)"],
 ]);
 
 /**
