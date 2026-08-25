@@ -4548,6 +4548,40 @@ describe("QWP Node file replay store", () => {
     await expect(stat(ownerPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("does not re-prove a slot lock that has already gone stale", async () => {
+    // A holder paused past the staleness window is already `lost` by its own
+    // rule, and a contender is entitled to reclaim its slot the moment the
+    // mtime is that old. The owner-record read and the mtime touch inside a
+    // beat are separate syscalls, so a reclaim landing between them let a
+    // resuming beat stamp the new owner's directory and reset provenAtMs --
+    // clearing the fence and un-fencing a lock this process had already lost.
+    // One beat later the rightful owner saw a drifted mtime and fenced itself
+    // off its own slot. A stale holder must not beat at all.
+    const directory = await trackedDirectory();
+    const lock = await QwpNodeAdvisoryLock.acquire(directory);
+    const beat = () =>
+      (lock as unknown as { beat(): Promise<void> }).beat.call(lock);
+    const ownerPath = join(directory, ".lock.owner");
+    const stampedMtimeMs = (await stat(ownerPath)).mtimeMs;
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 20_000);
+      expect(lock.lost).toBe(true);
+
+      await beat();
+
+      // The beat must not have re-proven ownership: the fence stays raised and
+      // the directory mtime is untouched, so it cannot have stamped a
+      // successor's directory either.
+      expect(lock.lost).toBe(true);
+      expect((await stat(ownerPath)).mtimeMs).toBe(stampedMtimeMs);
+    } finally {
+      vi.useRealTimers();
+    }
+    await lock.release().catch(() => undefined);
+  });
+
   it("reclaims a slot whose owner heartbeat stopped", async () => {
     const directory = await trackedDirectory();
     const ownerPath = join(directory, ".lock.owner");

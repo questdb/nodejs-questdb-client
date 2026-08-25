@@ -289,7 +289,16 @@ export class QwpNodeAdvisoryLock {
   }
 
   private async beat(): Promise<void> {
-    if (this.released || this.compromised) return;
+    // A holder that has already gone stale must not re-prove itself. A
+    // contender reclaims a slot only once its mtime is stale, which is the same
+    // instant this object's own `lost` rule fires (both use STALE_AFTER_MS, and
+    // provenAtMs is stamped with the mtime). So a beat that resumes past the
+    // window may be racing a reclaim: the owner-record read and the mtime touch
+    // below are separate syscalls, and a reclaim landing between them would let
+    // this stamp the new owner's directory and reset the fence -- un-fencing a
+    // lock this process has already lost. Staying out once `lost` keeps that
+    // window closed; the mtime it declined to refresh keeps `lost` latched.
+    if (this.released || this.compromised || this.lost) return;
     try {
       const current = await stat(this.ownerPath);
       if (Math.trunc(current.mtimeMs) !== Math.trunc(this.ownerMtimeMs)) {
