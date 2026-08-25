@@ -328,6 +328,8 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    *
+   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'` (checked
+   * even when `value` is null or undefined).
    * @throws {Error} If `value` is not an integer or `BigInt`.
    * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
    */
@@ -337,6 +339,14 @@ abstract class SenderBufferBase implements SenderBuffer {
     unit: TimestampUnit = "us",
   ): SenderBuffer {
     this.validateColumnCall(name);
+    // The unit describes how to read the timestamp, not this row's value, so a
+    // bad unit is rejected before the value is: otherwise it is only reported
+    // on rows that carry a value and stays silent on the ones that omit it.
+    // (Same principle as the scale check in SenderBufferV3.decimalColumn; the
+    // ns/BigInt rule below stays value-dependent, as null omits the column.)
+    if (unit !== "ns" && unit !== "us" && unit !== "ms") {
+      throw new Error(`Unknown timestamp unit: ${unit}`);
+    }
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -631,14 +641,18 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * Use it to insert into DECIMAL database columns.
    *
+   * Decimals are not supported by protocol v1/v2, so this base implementation
+   * rejects any actual value. A null or undefined value omits the column
+   * entirely (stored as NULL), consistent with the other column methods.
+   * Protocol v3 overrides this with a validating implementation.
+   *
    * @param {string} name - Column name.
-   * @param {string | number} value - The decimal value to write.
-   *   - Accepts either a `number` or a `string` containing a valid decimal representation.
-   *   - String values should follow standard decimal notation (e.g., `"123.45"` or `"-0.001"`).
-   * @returns {Sender} Returns with a reference to this buffer.
-   * @throws Error If decimals are not supported by the buffer implementation, or validation fails.
-   * Possible validation errors:
-   * - The provided string is not a valid decimal representation.
+   * @param {string | number | null | undefined} value - The decimal value to
+   * write. Only null or undefined is accepted here (which skips the column);
+   * any actual value throws.
+   * @returns {SenderBuffer} Returns with a reference to this buffer.
+   * @throws {Error} Indicating decimals are not supported in protocol v1/v2,
+   * unless the value is null or undefined.
    */
   decimalColumnText(
     name: string,
@@ -657,19 +671,19 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * Use it to insert into DECIMAL database columns.
    *
+   * Decimals are not supported by protocol v1/v2, so this base implementation
+   * rejects any actual value. A null or undefined value omits the column
+   * entirely (stored as NULL), consistent with the other column methods.
+   * Protocol v3 overrides this with a validating implementation.
+   *
    * @param {string} name - Column name.
-   * @param {bigint | Int8Array} unscaled - The unscaled integer portion of the decimal value.
-   *   - If a `bigint` is provided, it will be converted automatically.
-   *   - If an `Int8Array` is provided, it must contain the two’s complement representation
-   *     of the unscaled value in **big-endian** byte order.
-   *   - An empty `Int8Array` represents a `NULL` value.
+   * @param {bigint | Int8Array | null | undefined} unscaled - The unscaled
+   * integer portion of the decimal value. Only null or undefined is accepted
+   * here (which skips the column); any actual value throws.
    * @param {number} scale - The number of fractional digits (the scale) of the decimal value.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
-   * @throws {Error} If decimals are not supported by the buffer implementation, or validation fails.
-   * Possible validation errors:
-   * - `unscaled` length is not between 0 and 32 bytes.
-   * - `scale` is not between 0 and 76.
-   * - `unscaled` contains invalid bytes.
+   * @throws {Error} Indicating decimals are not supported in protocol v1/v2,
+   * unless the value is null or undefined.
    */
   decimalColumn(
     name: string,

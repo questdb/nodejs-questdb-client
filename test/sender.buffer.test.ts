@@ -574,6 +574,11 @@ describe("Sender message builder test suite (anything not covered in client inte
       expect(() => build().decimalColumn("d", value, 999)).toThrow(
         "Scale must be between 0 and 76",
       );
+      // Nor does the timestamp unit: a bad unit is reported even when the
+      // value is omitted, rather than only on rows that carry one.
+      expect(() => build().timestampColumn("ts", value, "s" as "us")).toThrow(
+        "Unknown timestamp unit: s",
+      );
     }
 
     // A column set before any table is still rejected.
@@ -706,6 +711,41 @@ describe("Sender message builder test suite (anything not covered in client inte
           .atNow(),
     ).rejects.toThrow("Unknown timestamp unit: foobar");
     await sender.close();
+  });
+
+  it("rejects a bad timestamp unit even when the value is nullish, on every version", async function () {
+    for (const version of ["1", "2", "3"] as const) {
+      const build = () =>
+        new Sender({
+          protocol: "tcp",
+          protocol_version: version,
+          host: "host",
+          auto_flush: false,
+          init_buf_size: 1024,
+        });
+
+      // A bad unit used to be reported only inside writeTimestamp, which never
+      // runs for an omitted value, so it stayed silent on nullish rows.
+      for (const value of [null, undefined] as const) {
+        expect(() =>
+          build()
+            .table("t")
+            .timestampColumn("ts", value, "weeks" as "us"),
+        ).toThrow("Unknown timestamp unit: weeks");
+      }
+
+      // A valid unit still omits a null value (issue #28); `ns` with a null
+      // value is likewise omitted, not rejected for not being a BigInt.
+      const sender = build();
+      await sender
+        .table("t")
+        .timestampColumn("skippedNs", null, "ns")
+        .timestampColumn("skippedMs", undefined, "ms")
+        .intColumn("kept", 1)
+        .atNow();
+      expect(bufferContent(sender)).toBe("t kept=1i\n");
+      await sender.close();
+    }
   });
 
   it("supports timestamp field as number for 'us' and 'ms' units with protocol v1", async function () {
