@@ -142,16 +142,47 @@ async function simulateLapsedHeartbeat(directory: string): Promise<void> {
   await utimes(owner, when, when);
 }
 
+// The store's on-disk segment layout, mirrored from
+// src/qwp-node/file-replay-store.ts. A fixed 24-byte segment header precedes a
+// run of frames, each an 8-byte header -- a CRC32C followed by a uint32
+// little-endian payload length -- then the payload. The rest of the fixed-size
+// file is zero padding, so a frame whose header reads back as all zeroes marks
+// the end of the written frames.
+const SEGMENT_HEADER_SIZE = 24;
+const FRAME_HEADER_SIZE = 8;
+
+/**
+ * Tallies the marker bytes across every frame *payload* in the slot's segments.
+ *
+ * It walks the frame framing rather than scanning the raw file, because the
+ * markers are only meaningful inside payloads: the segment header ends in a
+ * microsecond wall-clock timestamp and every frame header carries a CRC, and a
+ * whole-file byte scan would also count whichever of those framing bytes happen
+ * to land on a marker's ASCII code on a given run -- about a 1.5% chance per
+ * segment for 'A'/'B' -- turning this durability assertion flaky. Payload bytes
+ * are pure marker fill by construction, so counting only them is exact.
+ */
 async function markerCounts(
   directory: string,
 ): Promise<Record<string, number>> {
   const counts: Record<string, number> = {};
   for (const file of await readdir(directory)) {
     if (!file.endsWith(".sfa")) continue;
-    for (const byte of await readFile(path.join(directory, file))) {
-      if (byte < 0x41 || byte > 0x5a) continue;
-      const marker = String.fromCharCode(byte);
-      counts[marker] = (counts[marker] ?? 0) + 1;
+    const bytes = await readFile(path.join(directory, file));
+    let offset = SEGMENT_HEADER_SIZE;
+    while (offset + FRAME_HEADER_SIZE <= bytes.length) {
+      const payloadLength = bytes.readUInt32LE(offset + 4);
+      if (payloadLength === 0) break; // zero-filled tail: no more frames
+      const start = offset + FRAME_HEADER_SIZE;
+      const end = start + payloadLength;
+      if (end > bytes.length) break;
+      for (let index = start; index < end; index++) {
+        const byte = bytes[index];
+        if (byte < 0x41 || byte > 0x5a) continue;
+        const marker = String.fromCharCode(byte);
+        counts[marker] = (counts[marker] ?? 0) + 1;
+      }
+      offset = end;
     }
   }
   return counts;
