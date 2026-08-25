@@ -334,6 +334,71 @@ describe("QWP ingress codec", () => {
     expect(indexReads).toBeLessThan(rows / 10);
   });
 
+  it("slices a sparse column incrementally across an ascending walk", () => {
+    // A column with nulls cannot use the dense shortcut, so its value offset
+    // was recounted from row zero on every slice -- O(start) per call, and
+    // O(rows^2) across a bisector that walks the table in ascending slices. The
+    // offset is now memoized and advanced only over newly covered rows, so each
+    // null flag is read a bounded number of times over the whole walk.
+    const table = new QwpTableBuffer("events");
+    const rows = 4_000;
+    for (let row = 0; row < rows; row++) {
+      const column = table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!;
+      if (row % 3 === 0) column.nulls[row] = true;
+      else column.values.push(BigInt(row));
+      table.nextRow();
+    }
+    const column = table.columns[0];
+    let indexReads = 0;
+    column.nulls = new Proxy(column.nulls, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/.test(key)) indexReads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+
+    const step = 50;
+    for (let start = 0; start < rows; start += step) {
+      table.sliceRows(start, Math.min(rows, start + step));
+    }
+
+    // Amortized O(1) reads per row (advance the offset, count the slice, copy
+    // the bitmap), so the walk is linear. The from-zero rescan was ~rows^2/step
+    // -- about 160k reads here -- so this bound only holds with the memo.
+    expect(indexReads).toBeLessThan(rows * 4);
+  });
+
+  it("slices identically whether or not the offset memo is warm", () => {
+    // The memo must never change what a slice returns: an ascending walk warms
+    // it, a later out-of-order slice falls back to a from-zero recount, and
+    // both must match a fresh table's slice byte for byte.
+    const build = () => {
+      const table = new QwpTableBuffer("events");
+      for (let row = 0; row < 40; row++) {
+        const column = table.getOrCreateColumn("v", QWP_COLUMN_TYPE.LONG)!;
+        if (row % 4 === 0) column.nulls[row] = true;
+        else column.values.push(BigInt(row));
+        table.nextRow();
+      }
+      return table;
+    };
+    const warmed = build();
+    for (let start = 0; start < 40; start += 10)
+      warmed.sliceRows(start, start + 10);
+
+    for (const [start, end] of [
+      [12, 27],
+      [0, 40],
+      [5, 6],
+      [30, 40],
+    ] as const) {
+      const fromWarm = warmed.sliceRows(start, end).columns[0];
+      const fromFresh = build().sliceRows(start, end).columns[0];
+      expect(fromWarm.values).toEqual(fromFresh.values);
+      expect(fromWarm.nulls).toEqual(fromFresh.nulls);
+    }
+  });
+
   it("encodes a compacted LONG column with an LSB-first null bitmap", () => {
     const table = new QwpTableBuffer("t");
     table.getOrCreateColumn("a", QWP_COLUMN_TYPE.LONG)!.values.push(1n);

@@ -40,6 +40,13 @@ export class QwpTableBuffer {
   private readonly columnList: QwpColumnBuffer[] = [];
   private readonly columnsByName = new Map<string, QwpColumnBuffer>();
   private rows = 0;
+  // Memoizes the non-null value offset each column's slice starts from, reused
+  // while a caller walks the table in ascending `start` slices. See sliceRows().
+  private sliceValueOffsets?: {
+    rows: number;
+    start: number;
+    offsets: number[];
+  };
 
   constructor(name: string, maxNameLength = QWP_MAX_TABLE_NAME_LENGTH) {
     if (!Number.isSafeInteger(maxNameLength) || maxNameLength < 1) {
@@ -200,22 +207,21 @@ export class QwpTableBuffer {
 
     const result = new QwpTableBuffer(this.name, this.maxNameLength);
     result.rows = end - start;
-    for (const column of this.columnList) {
-      // `values` holds non-null entries only, so a row index becomes a value
-      // index by skipping the nulls before it. A column with no nulls at all
-      // needs no scan, and that is the common case -- without this shortcut
-      // every slice costs O(start) per column, which makes a caller that walks
-      // a table in ascending slices quadratic in its row count all over again.
-      let valueStart: number;
+    // `values` holds non-null entries only, so a row index becomes a value
+    // index by skipping the nulls before it. A column with no nulls at all
+    // needs no scan (the common case), and for a sparse one the offset before
+    // `start` is memoized and advanced across slices rather than recounted from
+    // row 0 -- otherwise a caller walking the table in ascending slices
+    // (encodeUdpDatagrams, the ingress batch-cap search) is quadratic in its
+    // row count all over again.
+    const valueStarts = this.nonNullValueOffsets(start);
+    for (let index = 0; index < this.columnList.length; index++) {
+      const column = this.columnList[index];
+      const valueStart = valueStarts[index];
       let valueEnd: number;
       if (column.values.length === column.size) {
-        valueStart = start;
         valueEnd = end;
       } else {
-        valueStart = 0;
-        for (let row = 0; row < start; row++) {
-          if (!column.nulls[row]) valueStart++;
-        }
         valueEnd = valueStart;
         for (let row = start; row < end; row++) {
           if (!column.nulls[row]) valueEnd++;
@@ -236,10 +242,46 @@ export class QwpTableBuffer {
     return result;
   }
 
+  /**
+   * The non-null value count in rows `[0, start)` for each column -- the value
+   * index at which a slice starting at `start` begins. Recomputing this from
+   * row 0 on every call makes sliceRows() O(start), so the previous result is
+   * reused and advanced only over the newly covered rows when `start` moves
+   * forward, keeping an ascending walk linear. A dense column needs no scan;
+   * its value index equals the row index.
+   */
+  private nonNullValueOffsets(start: number): number[] {
+    const columns = this.columnList;
+    const cache = this.sliceValueOffsets;
+    const reuse =
+      cache !== undefined &&
+      cache.rows === this.rows &&
+      cache.offsets.length === columns.length &&
+      cache.start <= start;
+    const from = reuse ? cache.start : 0;
+    const offsets = reuse ? cache.offsets : new Array<number>(columns.length);
+    for (let index = 0; index < columns.length; index++) {
+      const column = columns[index];
+      if (column.values.length === column.size) {
+        offsets[index] = start;
+        continue;
+      }
+      const nulls = column.nulls;
+      let offset = reuse ? offsets[index] : 0;
+      for (let row = from; row < start; row++) {
+        if (!nulls[row]) offset++;
+      }
+      offsets[index] = offset;
+    }
+    this.sliceValueOffsets = { rows: this.rows, start, offsets };
+    return offsets;
+  }
+
   reset(): void {
     this.columnList.length = 0;
     this.columnsByName.clear();
     this.rows = 0;
+    this.sliceValueOffsets = undefined;
   }
 }
 
