@@ -188,6 +188,39 @@ describe("store-and-forward locking", () => {
     },
   );
 
+  it.each(["import", "require"] as const)(
+    "loads the QWP Node subsystem only when a ws/wss/udp sender is built (%s)",
+    async (format) => {
+      // The root entry must not eagerly pull ws, node:dgram and node:os onto
+      // the module graph: http/tcp consumers -- the bulk of callers -- would
+      // pay for the whole QWP Node subsystem and hard-depend on ws resolving.
+      // It must still load lazily and work on the first ws/wss/udp sender.
+      const target = resolveExport(".", format);
+      const probe =
+        '({ ws: !!require.cache[require.resolve("ws")],' +
+        " dgram: process.moduleLoadList.some((m) => /dgram/.test(m)) })";
+      const body =
+        `const before = ${probe};` +
+        ' const sender = new Sender({ protocol: "udp", host: "127.0.0.1", port: 9007 });' +
+        ` const after = ${probe};` +
+        " console.log(JSON.stringify({ before, after, table: typeof sender.table }));";
+      const load_ =
+        format === "require"
+          ? `const { Sender } = require(${JSON.stringify(target)}); ${body}`
+          : `import(${JSON.stringify(pathToFileURL(target).href)}).then(({ Sender }) => { ${body} });`;
+
+      const { code, stdout, stderr } = await runNode(load_);
+      expect(stderr).toBe("");
+      expect(code).toBe(0);
+      const result = JSON.parse(stdout.trim());
+      // Root load alone leaves the QWP Node subsystem off the graph.
+      expect(result.before).toEqual({ ws: false, dgram: false });
+      // The first ws/wss/udp sender lazily loads it, and is functional.
+      expect(result.after).toEqual({ ws: true, dgram: true });
+      expect(result.table).toBe("function");
+    },
+  );
+
   it("ships the slot lock in the bundle with no native addon", async () => {
     for (const format of ["import", "require"] as const) {
       const bundle = await readFile(

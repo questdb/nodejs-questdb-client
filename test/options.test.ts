@@ -2,10 +2,15 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Agent } from "undici";
 
-import { Sender } from "../src/sender";
+import { Sender, preloadQwpNode } from "../src/sender";
 import { SenderOptions } from "../src";
 import { qwpConfig } from "../src/options";
 import { log } from "../src/logging";
+
+// The root Sender lazy-loads the QWP Node subsystem through the package's own
+// subpath (the built artifact); against source, warm its cache with the source
+// module so ws/wss/udp senders built here run the code under test.
+beforeAll(preloadQwpNode);
 import { MockHttp } from "./util/mockhttp";
 import { readFileSync } from "fs";
 

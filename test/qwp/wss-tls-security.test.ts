@@ -4,10 +4,16 @@ import * as http from "node:http";
 import * as https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as qwpNode from "../../src/qwp/node";
-import { Sender } from "../../src/sender";
+import { Sender, preloadQwpNode } from "../../src/sender";
 import { SenderOptions, qwpConfig } from "../../src/options";
+
+// The root Sender lazy-loads the QWP Node subsystem through the package's own
+// subpath, which resolves to the built artifact. Running against source, warm
+// its cache with the source module first so the createQwpNodeSender spies below
+// apply to the same instance the Sender calls.
+beforeAll(preloadQwpNode);
 
 /**
  * A wss:// producer must verify the server certificate, and its authorization

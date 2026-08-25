@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { Sender } from "../../src";
+import { preloadQwpNode } from "../../src/sender";
+
+// The root Sender lazy-loads the QWP Node subsystem through the package's own
+// subpath (the built artifact); against source, warm its cache with the source
+// module so the Sender.fromConfig("udp::...") below runs the code under test.
+beforeAll(preloadQwpNode);
 import {
   QwpSymbolDictionary,
   connectQwpNodeUdp,

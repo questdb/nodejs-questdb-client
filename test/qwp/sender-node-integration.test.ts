@@ -4,8 +4,14 @@ import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { Sender } from "../../src";
+import { preloadQwpNode } from "../../src/sender";
+
+// The root Sender lazy-loads the QWP Node subsystem through the package's own
+// subpath (the built artifact); against source, warm its cache with the source
+// module so the ws:: senders built here run the code under test.
+beforeAll(preloadQwpNode);
 import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_MAGIC,
