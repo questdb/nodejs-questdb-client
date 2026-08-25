@@ -1384,7 +1384,14 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 `QWP store-and-forward background maintenance failed [directory=${this.directory}]`,
                 error,
               );
-        this.rejectCapacityWaiters(this.maintenanceFailure);
+        // Leave parked appenders waiting: maintenance self-heals on the retry
+        // scheduled below, whose signalCapacity() releases them, and each keeps
+        // its own append deadline. Rejecting here surfaced a retryable trim
+        // fault as the flush error even though the identical append succeeds a
+        // moment later -- the one error an sf_dir producer should see is the
+        // journal ceiling, i.e. its append deadline elapsing. A released
+        // appender re-runs appendOnce() through enqueue(), serialized behind
+        // this batch, so it never observes the not-yet-cleared failure.
         this.scheduleMaintenanceRetry();
       });
     });
