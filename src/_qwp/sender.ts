@@ -2383,12 +2383,22 @@ export class QwpSender {
     if (publication) {
       await publication;
     }
-    const sentRows = this.releaseStagedRows(snapshots, generation);
-    this.totalRowsPublished += sentRows;
+    // These snapshot rows are exactly the ones whose frames entered the ingress
+    // session, so they count as published even when a concurrent reset() has
+    // since bumped the staging generation. releaseStagedRows() retires them from
+    // the pending counters, returning early across that reset so pendingRows is
+    // not driven negative -- how many rows were retired is a separate question
+    // from how many were sent, and only the latter feeds the published metrics.
+    const publishedRows = snapshots.reduce(
+      (count, snapshot) => count + snapshot.rows.length,
+      0,
+    );
+    this.releaseStagedRows(snapshots, generation);
+    this.totalRowsPublished += publishedRows;
     this.lastFlushTime = Date.now();
     this.log(
       "debug",
-      `${deferCommit ? "Auto-flushing" : "Flushing"} ${sentRows} QWP row(s)${deferCommit ? " with commit deferred" : ""}`,
+      `${deferCommit ? "Auto-flushing" : "Flushing"} ${publishedRows} QWP row(s)${deferCommit ? " with commit deferred" : ""}`,
     );
     if (!deferCommit && publishedSequence >= 0n) {
       this.lastCommitBoundarySequence = publishedSequence;
@@ -2396,7 +2406,7 @@ export class QwpSender {
 
     if (deferCommit) {
       this.hasDeferredMessages = true;
-      this.deferredRowCount += sentRows;
+      this.deferredRowCount += publishedRows;
       if (response) {
         this.deferredAcks.push(response);
         // The server intentionally withholds this ACK until a later commit.
@@ -2430,7 +2440,10 @@ export class QwpSender {
     if (!publicationOnly && deferredAcks.length > 0) {
       await Promise.all(deferredAcks);
     }
-    if (this.transactional && (closesDeferredTransaction || sentRows > 0)) {
+    if (
+      this.transactional &&
+      (closesDeferredTransaction || publishedRows > 0)
+    ) {
       this.totalTransactionsCommitted++;
     }
     if (this.options.awaitDurableAck && ack) {

@@ -213,6 +213,59 @@ class DeferredWatermarkSession extends PublishingSession {
   }
 }
 
+/**
+ * Holds a flush at its publication boundary: the frame is recorded and counted
+ * as sent, then the awaited promise stays pending until unblock(). This lets a
+ * test drop a reset() between "frame entered the session" and "rows retired".
+ */
+class HeldPublicationSession extends RecordingSession {
+  publishedRowCount = 0;
+  readonly publishCalled: Promise<void>;
+  private signalPublishCalled!: () => void;
+  private release?: () => void;
+
+  constructor() {
+    super();
+    this.publishCalled = new Promise((resolve) => {
+      this.signalPublishCalled = resolve;
+    });
+  }
+
+  private hold(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): Promise<void> {
+    this.sends.push({ tables, options });
+    for (const table of tables) this.publishedRowCount += table.rowCount;
+    const sequence = ++this.publishedFrameSequence;
+    if (!options?.deferCommit) this.acknowledgedFrameSequence = sequence;
+    this.signalPublishCalled();
+    return new Promise((resolve) => {
+      this.release = resolve;
+    });
+  }
+
+  override publishTables(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ): Promise<void> {
+    return this.hold(tables, options);
+  }
+
+  override publishTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): Promise<void> {
+    return this.hold(tables, options);
+  }
+
+  /** Lets the awaited publication boundary resolve. */
+  unblock(): void {
+    this.release?.();
+    this.release = undefined;
+  }
+}
+
 function column(table: QwpTableBuffer, name: string) {
   const result = table.columns.find((candidate) => candidate.name === name);
   if (!result) throw new Error(`missing column '${name}'`);
@@ -326,6 +379,32 @@ describe("QWP high-level sender", () => {
     expect(session.deltaSendCount).toBe(1);
     expect(session.publicationCount).toBe(0);
     expect(sender.acknowledgedSequence).toBe(0n);
+    await sender.close();
+  });
+
+  it("counts rows a reset-interrupted flush already published", async () => {
+    // reset() bumps the staging generation so a flush in flight will not retire
+    // its rows from the pending counters twice. That same early return also fed
+    // totalRowsPublished, so rows whose frames had already entered the session
+    // went uncounted forever -- the counter skewed permanently low.
+    const session = new HeldPublicationSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    for (let value = 0; value < 5; value++) {
+      await sender.table("t").intColumn("v", value).atNow();
+    }
+    expect(sender.metrics.totalRowsStaged).toBe(5);
+
+    const flushing = sender.flush();
+    await session.publishCalled; // the frame has entered the session
+    sender.reset(); // lands while the flush awaits its publication boundary
+    session.unblock();
+    await flushing;
+
+    expect(session.publishedRowCount).toBe(5); // all five reached the wire
+    expect(sender.metrics.totalRowsPublished).toBe(5);
+    expect(sender.metrics.totalRowsStaged).toBe(5);
+    // reset() zeroed the pending counter; the flush must not re-subtract it.
+    expect(sender.metrics.pendingRows).toBe(0);
     await sender.close();
   });
 
