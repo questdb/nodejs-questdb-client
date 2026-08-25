@@ -1109,6 +1109,10 @@ function createPooledOrphanDrainer(
   const healthTracker = createQwpFailoverHealthTracker(
     options.ingress.url,
     options.ingress.failoverUrls,
+    {
+      target: options.ingress.target,
+      zone: options.ingress.zone,
+    },
   );
   return createNodeOrphanDrainer(
     options.ingress,

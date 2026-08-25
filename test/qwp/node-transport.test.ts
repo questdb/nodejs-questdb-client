@@ -402,6 +402,8 @@ describe("QWP Node transport", () => {
     endpoint.on("headers", (headers) => {
       headers.push("X-QWP-Version: 1");
       headers.push("X-QWP-Durable-Ack: enabled");
+      headers.push("X-QuestDB-Role: PRIMARY");
+      headers.push("X-QuestDB-Zone: eu-west-1");
     });
     const received: Uint8Array[] = [];
     let pingCount = 0;
@@ -434,6 +436,8 @@ describe("QWP Node transport", () => {
     const client = await connectQwpNodeClient({
       ingress: {
         url: `ws://127.0.0.1:${address.port}/write/v4`,
+        target: "primary",
+        zone: "eu-west-1",
         requestDurableAck: true,
         storeAndForward: {
           directory: rootDirectory,
