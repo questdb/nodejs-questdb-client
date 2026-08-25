@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   QWP_COLUMN_TYPE,
+  QWP_EGRESS_MESSAGE,
+  QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_STATUS,
   QwpIngressEncodeOptions,
   QwpIngressResponse,
+  QwpByteWriter,
+  QwpResultBatchDecoder,
   QwpSender,
   QwpSenderCloseTimeoutError,
   QwpSenderSession,
@@ -14,12 +18,14 @@ import {
   byte,
   char,
   date,
+  decodeQwpEgressMessage,
   decimal64,
   decimal128,
   decimal256,
   designatedTimestamp,
   double,
   doubleArray,
+  encodeQwpFrame,
   encodeQwpIngressFrame,
   float32,
   float64,
@@ -35,6 +41,7 @@ import {
   timestamp,
   uuid,
   varchar,
+  writeQwpVarint,
 } from "../../src/qwp";
 
 class RecordingSession implements QwpSenderSession {
@@ -270,6 +277,25 @@ function column(table: QwpTableBuffer, name: string) {
   const result = table.columns.find((candidate) => candidate.name === name);
   if (!result) throw new Error(`missing column '${name}'`);
   return result;
+}
+
+function ipv4ResultBatch(value: number): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
+  writeQwpVarint(payload, 0); // batch sequence
+  writeQwpVarint(payload, 0); // empty dictionary delta start
+  writeQwpVarint(payload, 0); // empty dictionary delta count
+  writeQwpVarint(payload, 0); // table name
+  writeQwpVarint(payload, 1); // rows
+  writeQwpVarint(payload, 1); // columns
+  writeQwpVarint(payload, 2);
+  payload.writeUtf8("ip").writeUint8(QWP_COLUMN_TYPE.IPV4);
+  payload.writeUint8(0).writeInt32(value);
+  return encodeQwpFrame(
+    payload.toUint8Array(),
+    QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+    1,
+  );
 }
 
 describe("QWP high-level sender", () => {
@@ -752,6 +778,7 @@ describe("QWP high-level sender", () => {
       .uuidColumn("id", "123e4567-e89b-12d3-a456-426614174000")
       .long256Column("hash", 1n, 2n, 3n, 4n)
       .ipv4Column("ip", "192.168.0.1")
+      .ipv4Column("signed_ip", -1_062_731_775)
       .atNow();
     await sender.flush();
 
@@ -789,7 +816,57 @@ describe("QWP high-level sender", () => {
       type: QWP_COLUMN_TYPE.IPV4,
       values: [0xc0a80001],
     });
+    expect(column(table, "signed_ip")).toMatchObject({
+      type: QWP_COLUMN_TYPE.IPV4,
+      values: [0xc0a80001],
+    });
     expect(() => encodeQwpIngressFrame([table])).not.toThrow();
+  });
+
+  it("round-trips signed packed IPv4 values from egress", async () => {
+    const message = decodeQwpEgressMessage(ipv4ResultBatch(-1_062_731_775));
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const materialized = new QwpResultBatchDecoder().decode(message).get(0, 0);
+    const viewBatch = new QwpResultBatchDecoder().decodeView(message);
+    const viewed = viewBatch.column(0).get(0);
+    expect(materialized).toBe(-1_062_731_775);
+    expect(viewed).toBe(-1_062_731_775);
+    if (typeof materialized !== "number" || typeof viewed !== "number") {
+      throw new Error("expected packed IPv4 numbers");
+    }
+
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.writer("compiled", { ip: ipv4() }).row({ ip: materialized });
+    await sender.table("fluent").ipv4Column("ip", viewed).atNow();
+    await sender.flush();
+
+    const tables = session.sends[0].tables;
+    const compiled = tables.find((table) => table.name === "compiled");
+    const fluent = tables.find((table) => table.name === "fluent");
+    if (!compiled || !fluent) throw new Error("missing round-trip table");
+    expect(column(compiled, "ip").values).toEqual([0xc0a80001]);
+    expect(column(fluent, "ip").values).toEqual([0xc0a80001]);
+    viewBatch.release();
+  });
+
+  it("accepts signed and unsigned packed IPv4 boundaries", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender
+      .table("bounds")
+      .ipv4Column("signed_min", -0x80000000)
+      .ipv4Column("signed_max", -1)
+      .ipv4Column("unsigned_min", 0x80000000)
+      .ipv4Column("unsigned_max", 0xffffffff)
+      .atNow();
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(column(table, "signed_min").values).toEqual([0x80000000]);
+    expect(column(table, "signed_max").values).toEqual([0xffffffff]);
+    expect(column(table, "unsigned_min").values).toEqual([0x80000000]);
+    expect(column(table, "unsigned_max").values).toEqual([0xffffffff]);
   });
 
   it("omits a long256 column when all four words are nullish", async () => {
@@ -1620,6 +1697,10 @@ describe("QWP high-level sender", () => {
     await rejects({ hash: "0102" }, /0x-prefixed hex/, "hash");
     await rejects({ hash: [1n, 2n] }, /exactly four 64-bit words/, "hash");
     await rejects({ ip: "0.0.0.0" }, /NULL sentinel/, "ip");
+    await rejects({ ip: 0 }, /NULL sentinel/, "ip");
+    await rejects({ ip: -0x80000001 }, /signed int32 or unsigned uint32/, "ip");
+    await rejects({ ip: 0x100000000 }, /signed int32 or unsigned uint32/, "ip");
+    await rejects({ ip: 1.5 }, /signed int32 or unsigned uint32/, "ip");
     await rejects({ location: "u33" }, /column is 20 bits/, "location");
     await rejects({ location: 1n << 21n }, /does not fit/, "location");
     await rejects(

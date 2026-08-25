@@ -608,7 +608,7 @@ The schema vocabulary covers every column type the fluent row API can write:
 | `binary()`                  | BINARY               | `Uint8Array`, copied on append                                                         |
 | `uuid()`                    | UUID                 | canonical UUID text, 16 canonical big-endian bytes, or `{ low, high }`                 |
 | `long256()`                 | LONG256              | unsigned 256-bit `bigint`, `0x` hex text, four little-endian words, or `{ words }`     |
-| `ipv4()`                    | IPV4                 | dotted-quad text or the packed address; `0.0.0.0` is the NULL sentinel                 |
+| `ipv4()`                    | IPV4                 | dotted-quad text or signed/unsigned packed address; `0.0.0.0` is the NULL sentinel     |
 | `geohash(precisionBits)`    | GEOHASH              | raw bits, base-32 text of `precisionBits / 5` characters, or `{ bits, precisionBits }` |
 | `decimal64(scale)`          | DECIMAL64            | unscaled `bigint`, decimal text, `number`, or `{ unscaled, scale }`                    |
 | `decimal128(scale)`         | DECIMAL128           | as above, scale up to 38                                                               |

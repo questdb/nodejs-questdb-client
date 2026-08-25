@@ -130,7 +130,7 @@ export type QwpLong256Input =
   | QwpLong256Words
   | { readonly words: QwpLong256Words };
 
-/** IPV4 input: dotted-quad text or the packed 32-bit address. */
+/** IPV4 input: dotted-quad text or a signed/unsigned packed 32-bit address. */
 export type QwpIpv4Input = string | number;
 
 /**

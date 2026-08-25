@@ -466,7 +466,17 @@ function uuidBytes(value: string | Uint8Array): Uint8Array {
 
 function parseIpv4(value: string | number): number {
   if (typeof value === "number") {
-    return checkedRange(value, 1, 0xffffffff, "IPv4 value");
+    if (!Number.isInteger(value) || value < -0x80000000 || value > 0xffffffff) {
+      throw new RangeError(
+        "IPv4 value must be a signed int32 or unsigned uint32",
+      );
+    }
+    if (value === 0) {
+      throw new RangeError("0.0.0.0 is QuestDB's IPv4 NULL sentinel");
+    }
+    // Java and QuestDB expose packed IPv4 values as signed int32s, while
+    // JavaScript callers often use uint32s. Both forms carry the same bits.
+    return value >>> 0;
   }
   const parts = value.split(".");
   if (parts.length !== 4)
