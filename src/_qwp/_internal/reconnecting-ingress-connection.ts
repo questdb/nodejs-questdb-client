@@ -1291,11 +1291,19 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       );
     }
     const highestWireIndex = this.wireFramesBase + this.wireFrames.length - 1;
-    const wireIndex = Number(
-      response.sequence > BigInt(highestWireIndex)
-        ? BigInt(highestWireIndex)
-        : response.sequence,
-    );
+    if (response.sequence > BigInt(highestWireIndex)) {
+      // Reject an over-range sequence rather than clamping it, matching the null
+      // and negative guards above. A frame is logged here before it is sent, so
+      // a conforming server can only acknowledge a sequence it has received,
+      // never one beyond the last frame sent. Clamping a bogus over-range value
+      // onto the newest in-flight frame would retire every unacknowledged frame
+      // below it and delete journal records the server never confirmed -- the
+      // watermark must never advance past an unacknowledged frame.
+      throw new QwpProtocolError(
+        `QWP response sequence is beyond the last frame sent: ${response.sequence} > ${highestWireIndex}`,
+      );
+    }
+    const wireIndex = Number(response.sequence);
     const localIndex = wireIndex - this.wireFramesBase;
     const frame = localIndex >= 0 ? this.wireFrames[localIndex] : undefined;
     if (!frame) {

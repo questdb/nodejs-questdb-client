@@ -1837,14 +1837,16 @@ describe("QWP ingress reconnect and replay", () => {
 
     const payload = new Uint8Array(1024).fill(7);
     for (let index = 0; index < 200; index++) {
-      const publishing = session.publishFrame(payload);
+      // Await the send before delivering its ACK: a frame is logged before it
+      // is sent, so a real server never acknowledges a sequence beyond the last
+      // frame sent, and an over-range ACK is now rejected rather than clamped.
+      await session.publishFrame(payload);
       connection.receive(ingressResponse(QWP_STATUS.OK, BigInt(index)));
-      await publishing;
     }
 
     // Retaining the acknowledged prefix pinned every payload for the life of
     // the connection and made each ACK scan it three times over.
-    expect(wireLog().length).toBeLessThanOrEqual(2);
+    await vi.waitFor(() => expect(wireLog().length).toBeLessThanOrEqual(2));
     expect(
       wireLog().reduce(
         (total, frame) => total + (frame.payload?.byteLength ?? 0),
@@ -2641,19 +2643,41 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
-  it("clamps an ingress ACK to the highest wire sequence sent", async () => {
+  it("rejects an over-range ingress ACK instead of clamping it onto in-flight frames", async () => {
     const connection = new FakeConnection("primary");
     const session = await QwpIngressSession.connect(async () => connection, {
       reconnect: { maxAttempts: 1 },
     });
-    const pending = session.sendFrame(Uint8Array.of(9));
-    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+    const first = session.sendFrame(Uint8Array.of(9));
+    const second = session.sendFrame(Uint8Array.of(8));
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    // Only wire sequences 0 and 1 were sent. Clamping 999 onto the newest
+    // in-flight frame would retire both frames and delete journal records the
+    // server never acknowledged, so an over-range ACK must be rejected.
     connection.receive(ingressResponse(QWP_STATUS.OK, 999n));
 
-    await expect(pending).resolves.toMatchObject({
-      status: QWP_STATUS.OK,
-      sequence: 0n,
+    await expect(first).rejects.toBeInstanceOf(QwpProtocolError);
+    await expect(second).rejects.toBeInstanceOf(QwpProtocolError);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
+    await session.close();
+  });
+
+  it("rejects an over-range ingress NACK instead of charging the wrong frame", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
     });
+    const first = session.sendFrame(Uint8Array.of(9));
+    const second = session.sendFrame(Uint8Array.of(8));
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    // Clamping this WRITE_ERROR onto the newest in-flight frame would charge the
+    // poison strike to the tail frame instead of the head. An over-range NACK is
+    // a protocol violation, so it must terminate rather than drive a retry.
+    connection.receive(ingressResponse(QWP_STATUS.WRITE_ERROR, 999n));
+
+    await expect(first).rejects.toBeInstanceOf(QwpProtocolError);
+    await expect(second).rejects.toBeInstanceOf(QwpProtocolError);
+    expect(session.metrics.totalNacks).toBe(0);
     await session.close();
   });
 
