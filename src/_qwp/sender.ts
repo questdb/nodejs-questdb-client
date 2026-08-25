@@ -50,7 +50,7 @@ export interface QwpSenderOptions {
    */
   autoFlushBytes?: number;
   autoFlushIntervalMs?: number;
-  /** Maximum UTF-16 length of table and column names. Defaults to 127. */
+  /** Maximum UTF-8 byte length of table and column names. Defaults to 127. */
   maxNameLength?: number;
   /**
    * Keep auto-flushed rows in an open server-side transaction. An explicit

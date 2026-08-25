@@ -1,3 +1,5 @@
+import { utf8Length } from "./bytes";
+
 function isIllegalCommonIdentifierCharacter(
   character: string,
   codeUnit: number,
@@ -25,13 +27,13 @@ function isIllegalCommonIdentifierCharacter(
   }
 }
 
-/** @internal Applies Java TableUtils table-name rules and UTF-16 length. */
+/** @internal Applies Java TableUtils rules and the QWP UTF-8 byte limit. */
 export function validateQwpTableName(
   name: string,
   maxNameLength: number,
 ): void {
   if (name.length === 0) throw new Error("table name cannot be empty");
-  if (name.length > maxNameLength) {
+  if (utf8Length(name) > maxNameLength) {
     throw new Error(`table name too long [maxLength=${maxNameLength}]`);
   }
   if (name.charAt(0) === " " || name.charAt(name.length - 1) === " ") {
@@ -51,13 +53,13 @@ export function validateQwpTableName(
   }
 }
 
-/** @internal Applies Java TableUtils column-name rules and UTF-16 length. */
+/** @internal Applies Java TableUtils rules and the QWP UTF-8 byte limit. */
 export function validateQwpColumnName(
   name: string,
   maxNameLength: number,
 ): void {
   if (name.length === 0) throw new Error("column name cannot be empty");
-  if (name.length > maxNameLength) {
+  if (utf8Length(name) > maxNameLength) {
     throw new Error(`column name too long [maxLength=${maxNameLength}]`);
   }
   for (let index = 0; index < name.length; index++) {

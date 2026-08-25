@@ -440,7 +440,7 @@ describe("QWP high-level sender", () => {
     ).toThrow(/closeFlushTimeoutMs must be a non-negative safe integer/);
   });
 
-  it("applies a configurable Java-compatible identifier length", async () => {
+  it("applies a configurable UTF-8 identifier byte length", async () => {
     const session = new RecordingSession();
     expect(
       () => new QwpSender(async () => session, { maxNameLength: 15 }),
@@ -450,6 +450,12 @@ describe("QWP high-level sender", () => {
     expect(() => defaultSender.table("t".repeat(128))).toThrow(
       /table name too long.*maxLength=127/,
     );
+    expect(() => defaultSender.table("é".repeat(64))).toThrow(
+      /table name too long.*maxLength=127/,
+    );
+    expect(() =>
+      defaultSender.table("events").longColumn("é".repeat(64), 42n),
+    ).toThrow(/column name too long.*maxLength=127/);
     await defaultSender.close();
 
     const sender = new QwpSender(async () => session, {

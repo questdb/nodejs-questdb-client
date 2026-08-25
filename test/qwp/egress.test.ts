@@ -465,15 +465,11 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
-  it("decodes identifiers this client is allowed to ingest", () => {
-    // Ingress validates identifiers in UTF-16 code units, mirroring Java's
-    // TableUtils. The decoder bounded the wire field with the same number, but
-    // that field is a UTF-8 byte count, so a name that passed ingress could not
-    // be read back: 64 accented characters are 64 code units and 128 bytes.
+  it("decodes identifiers at the defensive egress byte bound", () => {
+    // Query results may expose existing Java metadata created through another
+    // protocol. Keep accepting up to 127 UTF-16 code units on egress, while
+    // QWP ingress separately applies its 127-byte wire limit.
     for (const name of ["a".repeat(127), "é".repeat(127), "あ".repeat(127)]) {
-      // Ingress accepts it at the default limit.
-      expect(() => new QwpTableBuffer(name)).not.toThrow();
-
       const payload = new QwpByteWriter();
       payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
       writeQwpVarint(payload, 0); // batch sequence

@@ -250,14 +250,24 @@ describe("QWP ingress codec", () => {
       );
     }
 
-    expect(() => new QwpTableBuffer("😀", 2)).not.toThrow();
-    expect(() => new QwpTableBuffer("😀", 1)).toThrow(
-      /table name too long.*maxLength=1/,
+    const atByteLimit = `${"é".repeat(63)}a`;
+    const overByteLimit = "é".repeat(64);
+    expect(() => new QwpTableBuffer(atByteLimit)).not.toThrow();
+    expect(() => new QwpTableBuffer(overByteLimit)).toThrow(
+      /table name too long.*maxLength=127/,
     );
-    const unicode = new QwpTableBuffer("t", 2);
+    const unicode = new QwpTableBuffer("t");
     expect(() =>
-      unicode.getOrCreateColumn("😀", QWP_COLUMN_TYPE.LONG),
+      unicode.getOrCreateColumn(atByteLimit, QWP_COLUMN_TYPE.LONG),
     ).not.toThrow();
+    expect(() =>
+      unicode.getOrCreateColumn(overByteLimit, QWP_COLUMN_TYPE.LONG),
+    ).toThrow(/column name too long.*maxLength=127/);
+
+    expect(() => new QwpTableBuffer("😀", 4)).not.toThrow();
+    expect(() => new QwpTableBuffer("😀", 3)).toThrow(
+      /table name too long.*maxLength=3/,
+    );
   });
 
   it("tracks columns case-insensitively and preserves first spelling", () => {
