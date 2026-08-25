@@ -78,8 +78,21 @@ export function validateQwpColumnName(
  * expanding lowercase mapping (U+0130) and gives the same simple mapping.
  */
 export function qwpColumnNameKey(name: string): string {
-  let key = "";
-  for (let index = 0; index < name.length; index++) {
+  // Fast path: a name of only lower-case-stable code units -- ASCII other than
+  // A-Z -- already equals its key, so it is returned without rebuilding. The
+  // first upper-case ASCII letter or non-ASCII code unit (which may lower-case
+  // or expand) drops to the per-code-unit mapping below, resuming from the
+  // stable prefix. This runs once per cell on the ingest path, so the common
+  // all-lower-case name skips the character-by-character rebuild entirely.
+  let index = 0;
+  for (; index < name.length; index++) {
+    const code = name.charCodeAt(index);
+    if (code >= 0x80 || (code >= 0x41 && code <= 0x5a)) break;
+  }
+  if (index === name.length) return name;
+
+  let key = name.slice(0, index);
+  for (; index < name.length; index++) {
     const character = name.charAt(index);
     key += character.toLowerCase().charAt(0);
   }

@@ -2446,8 +2446,14 @@ export class QwpSender {
   private buildTable(name: string, rows: readonly StagedRow[]): QwpTableBuffer {
     const result = new QwpTableBuffer(name, this.maxNameLength);
     for (const row of rows) {
-      for (const column of row.columns.values()) {
-        const target = result.getOrCreateColumn(column.name, column.type);
+      // row.columns is already keyed by qwpColumnNameKey(column.name); passing
+      // that key through avoids getOrCreateColumn recomputing it per cell.
+      for (const [nameKey, column] of row.columns) {
+        const target = result.getOrCreateColumn(
+          column.name,
+          column.type,
+          nameKey,
+        );
         if (!target) continue;
         if (column.geohashPrecision !== undefined) {
           result.setGeohashPrecision(target, column.geohashPrecision);

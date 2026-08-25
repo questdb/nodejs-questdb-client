@@ -62,7 +62,14 @@ export class QwpTableBuffer {
    * Returns null when the current row already contains this column. The first
    * value wins, matching the existing Sender API.
    */
-  getOrCreateColumn(name: string, type: QwpColumnType): QwpColumnBuffer | null {
+  getOrCreateColumn(
+    name: string,
+    type: QwpColumnType,
+    // The caller may pass the key it already holds -- the flush path iterates a
+    // Map already keyed by it -- to skip a per-cell rebuild. It must equal
+    // qwpColumnNameKey(name); it defaults to it when omitted.
+    nameKey: string = qwpColumnNameKey(name),
+  ): QwpColumnBuffer | null {
     const designatedTimestamp =
       name.length === 0 &&
       (type === QWP_COLUMN_TYPE.TIMESTAMP ||
@@ -71,7 +78,6 @@ export class QwpTableBuffer {
       throw new Error("column name cannot be empty");
     }
 
-    const nameKey = qwpColumnNameKey(name);
     const existing = this.columnsByName.get(nameKey);
     if (existing) {
       if (existing.type !== type) {
