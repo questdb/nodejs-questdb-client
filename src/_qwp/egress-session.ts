@@ -1031,6 +1031,15 @@ export class QwpEgressSession implements QwpEgressQueryControl {
               this.resolveServerInfo(message);
               break;
             case "cache-reset":
+              // Delta-mode views alias the decoder's symbol dictionary and
+              // resolve their cells lazily inside the view callback, so
+              // clearing it in place mid-callback turns live SYMBOL cells into
+              // undefined. Drain in-flight views first -- delivering them
+              // against the dictionary they were decoded with -- exactly as the
+              // client-initiated reset does through resetForReplay().
+              if (this.active?.usesViews) {
+                await this.active.waitForViewDrain();
+              }
               this.decoder.applyCacheReset(message.resetMask);
               break;
             case "result-batch": {

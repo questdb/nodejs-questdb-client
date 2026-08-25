@@ -991,6 +991,33 @@ function fixedTypeWidth(type: QwpColumnType): number {
   }
 }
 
+// The scale the server sends is a single byte, so it must be bounded like the
+// encoder bounds it (QwpTableBuffer.setDecimalScale) and QWP_DECIMAL_MAX_SCALE
+// exports it. An unchecked 255 decodes to a value off by up to 10^237.
+function decimalMaxScale(type: QwpColumnType): number {
+  switch (type) {
+    case QWP_COLUMN_TYPE.DECIMAL64:
+      return 18;
+    case QWP_COLUMN_TYPE.DECIMAL128:
+      return 38;
+    case QWP_COLUMN_TYPE.DECIMAL256:
+      return 76;
+    default:
+      throw new TypeError(`QWP type 0x${type.toString(16)} is not decimal`);
+  }
+}
+
+function readDecimalScale(reader: QwpByteReader, type: QwpColumnType): number {
+  const scale = reader.readUint8("decimal scale");
+  const maximum = decimalMaxScale(type);
+  if (scale > maximum) {
+    throw new QwpProtocolError(
+      `decimal scale out of range: ${scale} (max ${maximum})`,
+    );
+  }
+  return scale;
+}
+
 function unsignedLittleEndianValue(
   bytes: Uint8Array,
   offset = 0,
@@ -1459,7 +1486,7 @@ export class QwpResultBatchDecoder {
       case QWP_COLUMN_TYPE.DECIMAL64:
       case QWP_COLUMN_TYPE.DECIMAL128:
       case QWP_COLUMN_TYPE.DECIMAL256: {
-        layout.scale = reader.readUint8("decimal scale");
+        layout.scale = readDecimalScale(reader, type);
         this.readFixedView(
           reader,
           layout,
@@ -1808,7 +1835,7 @@ export class QwpResultBatchDecoder {
       case QWP_COLUMN_TYPE.DECIMAL64:
       case QWP_COLUMN_TYPE.DECIMAL128:
       case QWP_COLUMN_TYPE.DECIMAL256: {
-        scale = reader.readUint8("decimal scale");
+        scale = readDecimalScale(reader, schema.type);
         const bytes =
           schema.type === QWP_COLUMN_TYPE.DECIMAL64
             ? 8

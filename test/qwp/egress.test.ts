@@ -15,6 +15,7 @@ import {
   QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
+  QWP_RESET_MASK_DICTIONARY,
   QWP_STATUS,
   QwpBinaryConnection,
   QwpByteReader,
@@ -137,6 +138,34 @@ function resultEnd(requestId = 0n, totalRows = 3n): Uint8Array {
   writeQwpVarint(payload, 1);
   writeQwpVarint(payload, totalRows);
   return encodeQwpFrame(payload.toUint8Array());
+}
+
+function cacheReset(mask: number): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.CACHE_RESET).writeUint8(mask);
+  return encodeQwpFrame(payload.toUint8Array());
+}
+
+/** A one-row RESULT_BATCH of a single DECIMAL column carrying `scale`. */
+function decimalBatch(type: number, scale: number, words: number): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
+  writeQwpVarint(payload, 0); // batch sequence
+  writeQwpVarint(payload, 0); // empty delta dictionary start
+  writeQwpVarint(payload, 0); // empty delta dictionary count
+  writeQwpVarint(payload, 0); // table name
+  writeQwpVarint(payload, 1); // rows
+  writeQwpVarint(payload, 1); // columns
+  writeString(payload, "d");
+  payload.writeUint8(type);
+  payload.writeUint8(0); // no nulls
+  payload.writeUint8(scale); // scale byte, unvalidated on the wire
+  for (let word = 0; word < words; word++) payload.writeBigInt64(0n);
+  return encodeQwpFrame(
+    payload.toUint8Array(),
+    QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+    1,
+  );
 }
 
 function compressedIntResultBatch(requestId = 0n): Uint8Array {
@@ -795,6 +824,36 @@ describe("QWP result batch decoder", () => {
     expect(batch.get(1, 2)).toBe("beta");
   });
 
+  it("rejects a decimal scale byte the encoder would never send", () => {
+    // The scale is a single wire byte; unchecked, a 255 decodes to a value off
+    // by up to 10^237. Bound it like the adjacent GEOHASH precision and the
+    // encoder (QWP_DECIMAL_MAX_SCALE: 18/38/76), on both decode paths.
+    for (const [type, words, max] of [
+      [QWP_COLUMN_TYPE.DECIMAL64, 1, 18],
+      [QWP_COLUMN_TYPE.DECIMAL128, 2, 38],
+      [QWP_COLUMN_TYPE.DECIMAL256, 4, 76],
+    ] as const) {
+      const decodeAt = (scale: number) => {
+        const message = decodeQwpEgressMessage(
+          decimalBatch(type, scale, words),
+        );
+        if (message.kind !== "result-batch") throw new Error("unexpected");
+        return message;
+      };
+      expect(() =>
+        new QwpResultBatchDecoder().decode(decodeAt(max + 1)),
+      ).toThrow(/decimal scale out of range/);
+      // The zero-copy view path reads the same byte.
+      expect(() =>
+        new QwpResultBatchDecoder().decodeView(decodeAt(255)),
+      ).toThrow(/decimal scale out of range/);
+      // The maximum the encoder allows still decodes.
+      expect(() =>
+        new QwpResultBatchDecoder().decode(decodeAt(max)),
+      ).not.toThrow();
+    }
+  });
+
   it("requires a bounded, single Zstd frame", () => {
     const decodeBody = (body: Uint8Array) => {
       const bytes = compressedIntResultBatch();
@@ -1301,6 +1360,52 @@ describe("QwpEgressSession", () => {
     const next = await session.query("select 2");
     connection.receive(resultEnd(next.requestId, 0n));
     await next.completion;
+    await session.close();
+  });
+
+  it("does not clear the delta symbol dictionary under a live view callback", async () => {
+    // A server-initiated CACHE_RESET cleared the connection symbol dictionary
+    // in place immediately. Delta-mode views alias that array and resolve their
+    // cells lazily, so a reset arriving mid-callback turned live SYMBOL cells to
+    // undefined. The reset must drain in-flight views first, as its
+    // client-initiated sibling does.
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+
+    let enterHandler!: () => void;
+    const handlerEntered = new Promise<void>((resolve) => {
+      enterHandler = resolve;
+    });
+    let releaseHandler!: () => void;
+    const handlerReleased = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    const before: unknown[] = [];
+    const after: unknown[] = [];
+    const query = await session.queryViews("select * from x", async (batch) => {
+      // Column 2 is the delta SYMBOL column [alpha, beta] with ids [0, 1, 0].
+      for (let row = 0; row < 3; row++)
+        before.push(batch.row(row).getSymbol(2));
+      enterHandler();
+      await handlerReleased;
+      for (let row = 0; row < 3; row++) after.push(batch.row(row).getSymbol(2));
+    });
+
+    connection.receive(firstResultBatch(query.requestId));
+    await handlerEntered;
+
+    // Inject the reset while the callback is parked reading the aliased dict.
+    connection.receive(cacheReset(QWP_RESET_MASK_DICTIONARY));
+    connection.receive(resultEnd(query.requestId, 3n));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    releaseHandler();
+    await query.completion;
+
+    expect(before).toEqual(["alpha", "beta", "alpha"]);
+    expect(after).toEqual(["alpha", "beta", "alpha"]);
     await session.close();
   });
 
