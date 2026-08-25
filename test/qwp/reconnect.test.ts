@@ -4461,6 +4461,17 @@ describe("QWP Node file replay store", () => {
     // Fully drained, so close() takes the teardown paths that delete: the
     // watermark, the dictionary, and the parent-anchored orphan pair.
     await evicted.acknowledgeThrough(0n);
+    // acknowledgeThrough() schedules segment trimming in the background. Let
+    // that work settle before manufacturing a stale lease: otherwise the test
+    // can make the successor scan a segment that this still-live store is
+    // concurrently removing, which is not the paused-holder scenario below.
+    await vi.waitFor(
+      async () => {
+        expect(evicted.metrics.pendingSegments).toBe(0);
+        expect(await readdir(directory)).not.toContain(".ack-watermark");
+      },
+      { timeout: 5_000 },
+    );
 
     // Stand in for a holder paused past the staleness window: the slot is
     // reclaimed while this store still has it open.
