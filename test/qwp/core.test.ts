@@ -40,6 +40,7 @@ import {
   readQwpVarint,
   writeQwpVarint,
 } from "../../src/qwp";
+import { encodeUtf8, utf8Length } from "../../src/_qwp/_core/bytes";
 
 function dataView(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -86,6 +87,25 @@ describe("QWP browser-safe byte core", () => {
         ]),
       ),
     ).toThrow(/uint64/i);
+  });
+
+  it("measures UTF-8 byte length identically to encoding it", () => {
+    // utf8Length feeds frame sizing, so it must count exactly what encodeUtf8()
+    // writes -- including the 3-byte replacement for an unpaired surrogate --
+    // rather than diverge and mis-size a VARCHAR column.
+    for (const value of [
+      "",
+      "order_12345",
+      "héllo",
+      "€uro",
+      "smile 😀 mix",
+      "\uD800", // lone high surrogate
+      "\uDC00", // lone low surrogate
+      "a\uD800b", // high surrogate not followed by a low one
+      "😀", // a valid surrogate pair
+    ]) {
+      expect(utf8Length(value)).toBe(encodeUtf8(value).length);
+    }
   });
 });
 
@@ -393,6 +413,38 @@ describe("QWP ingress codec", () => {
       "BTC-USD",
       "SOL-USD",
     ]);
+  });
+
+  it("encodes a full inline symbol dictionary with dense first-seen IDs", () => {
+    // Without a connection dictionary the encoder emits a per-column dictionary
+    // and one ID per row. Resolving each row used to be O(rows x distinct) via
+    // Array.indexOf; a Map keyed by text makes it linear without changing the
+    // bytes -- the dictionary stays in first-seen order and IDs index into it.
+    const table = new QwpTableBuffer("t");
+    for (const symbol of ["a", "b", "a", "c", "b"]) {
+      table.getOrCreateColumn("s", QWP_COLUMN_TYPE.SYMBOL)!.values.push(symbol);
+      table.nextRow();
+    }
+    const frame = decodeQwpFrame(encodeQwpIngressFrame([table]));
+    const reader = new QwpByteReader(frame.payload);
+    expect(reader.readUtf8(Number(readQwpVarint(reader)))).toBe("t");
+    expect(readQwpVarint(reader)).toBe(5n); // rows
+    expect(readQwpVarint(reader)).toBe(1n); // columns
+    expect(reader.readUtf8(Number(readQwpVarint(reader)))).toBe("s");
+    expect(reader.readUint8()).toBe(QWP_COLUMN_TYPE.SYMBOL);
+    expect(reader.readUint8()).toBe(0); // no nulls
+
+    const entries: string[] = [];
+    const dictSize = Number(readQwpVarint(reader));
+    for (let index = 0; index < dictSize; index++) {
+      entries.push(reader.readUtf8(Number(readQwpVarint(reader))));
+    }
+    expect(entries).toEqual(["a", "b", "c"]);
+
+    const ids: number[] = [];
+    for (let row = 0; row < 5; row++) ids.push(Number(readQwpVarint(reader)));
+    expect(ids).toEqual([0, 1, 0, 2, 1]);
+    reader.expectEnd();
   });
 
   it("rolls back tentative symbols when frame encoding fails", () => {

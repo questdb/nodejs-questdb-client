@@ -113,6 +113,39 @@ function symbolId(value: unknown, dictionary: QwpSymbolDictionary): number {
   return id;
 }
 
+interface InlineSymbolDictionary {
+  /** Distinct symbol texts in first-seen order, matching Set iteration. */
+  readonly entries: readonly string[];
+  /** The dictionary index of each row's value, in row order. */
+  readonly rowIds: readonly number[];
+}
+
+// A non-delta ("full") symbol column carries its own inline dictionary.
+// Resolving each row against it with Array.prototype.indexOf is O(rows x
+// distinct) -- measured quadratic, 67x slower than delta mode at 32k rows. A
+// Map keyed by text makes each lookup O(1), the same fix
+// QwpSymbolDictionary.getOrAdd already applies in delta mode. symbolText() runs
+// once per value here, so measureColumn and writeColumn no longer resolve each
+// value twice.
+function inlineSymbolDictionary(
+  values: readonly unknown[],
+): InlineSymbolDictionary {
+  const entries: string[] = [];
+  const indexByText = new Map<string, number>();
+  const rowIds = new Array<number>(values.length);
+  for (let row = 0; row < values.length; row++) {
+    const text = symbolText(values[row]);
+    let id = indexByText.get(text);
+    if (id === undefined) {
+      id = entries.length;
+      indexByText.set(text, id);
+      entries.push(text);
+    }
+    rowIds[row] = id;
+  }
+  return { entries, rowIds };
+}
+
 function nullCount(column: QwpColumnBuffer): number {
   let count = 0;
   for (const value of column.nulls) if (value) count++;
@@ -207,14 +240,10 @@ function columnPayloadSize(
       }
       return size;
     }
-    const dictionary = [
-      ...new Set(column.values.map((value) => symbolText(value))),
-    ];
-    size += qwpVarintSize(dictionary.length);
-    for (const value of dictionary) size += qwpStringSize(value);
-    for (const value of column.values) {
-      size += qwpVarintSize(dictionary.indexOf(symbolText(value)));
-    }
+    const { entries, rowIds } = inlineSymbolDictionary(column.values);
+    size += qwpVarintSize(entries.length);
+    for (const entry of entries) size += qwpStringSize(entry);
+    for (const id of rowIds) size += qwpVarintSize(id);
     return size;
   }
 
@@ -380,14 +409,10 @@ function writeColumn(
         }
         return;
       }
-      const dictionary = [
-        ...new Set(column.values.map((value) => symbolText(value))),
-      ];
-      writeQwpVarint(writer, dictionary.length);
-      for (const value of dictionary) writeQwpString(writer, value);
-      for (const value of column.values) {
-        writeQwpVarint(writer, dictionary.indexOf(symbolText(value)));
-      }
+      const { entries, rowIds } = inlineSymbolDictionary(column.values);
+      writeQwpVarint(writer, entries.length);
+      for (const entry of entries) writeQwpString(writer, entry);
+      for (const id of rowIds) writeQwpVarint(writer, id);
       return;
     }
     case QWP_COLUMN_TYPE.VARCHAR:
