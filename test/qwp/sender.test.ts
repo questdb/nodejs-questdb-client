@@ -1563,6 +1563,53 @@ describe("QWP high-level sender", () => {
     expect(column(session.sends[0].tables[0], "price").values).toEqual([150n]);
   });
 
+  it("sends an all-nullish writer row for a schema without a designated timestamp", async () => {
+    // README and QWP.md say a QWP row whose every value is nullish is sent with
+    // no columns, and the fluent table().atNow() analogue does exactly that. The
+    // compiled writer used to reject it with "row must contain at least one
+    // non-null value" -- an error documented nowhere; the two APIs must agree.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const events = sender.writer("events", {
+      side: qwpSymbol(),
+      price: float64(),
+    });
+
+    await expect(
+      events.row({ side: null, price: undefined }),
+    ).resolves.toBeUndefined();
+    await expect(events.row({})).resolves.toBeUndefined(); // absent keys, too
+    expect(sender.metrics.pendingRows).toBe(2);
+
+    await sender.flush();
+    const table = session.sends[0].tables[0];
+    expect(table.name).toBe("events");
+    expect(table.columns).toHaveLength(0);
+    expect(table.rowCount).toBe(2);
+    // The columnar frame really encodes -- the point of sending it at all.
+    expect(encodeQwpIngressFrame([table]).byteLength).toBeGreaterThan(0);
+
+    await sender.close();
+  });
+
+  it("still requires a designated timestamp in every writer row", async () => {
+    // Dropping the all-nullish guard must not weaken the one field QWP.md says
+    // is required in every row when the schema declares it.
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    const trades = sender.writer("trades", {
+      price: float64(),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    await expect(trades.row({ price: null, timestamp: null })).rejects.toThrow(
+      /designated timestamp is required/,
+    );
+    expect(sender.metrics.pendingRows).toBe(0);
+    await sender.close();
+  });
+
   it("reconciles compiled precision and scale with the fluent row API", async () => {
     const sender = new QwpSender(async () => new RecordingSession(), {
       autoFlush: false,

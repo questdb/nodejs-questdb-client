@@ -2010,14 +2010,10 @@ export class QwpSender {
       }
     }
 
-    if (columns.size === 0) {
-      throw new QwpWriterRowError(
-        schema.tableName,
-        undefined,
-        rowIndex,
-        new TypeError("row must contain at least one non-null value"),
-      );
-    }
+    // An all-nullish row is legal: QWP is columnar, so it is sent with no
+    // columns, exactly as the fluent table().atNow() analogue and as README and
+    // QWP.md document. A designated timestamp, when the schema has one, is
+    // required above, so an empty row reaches here only for a schema with none.
     return { columns, estimatedBytes: stagedRowBytes(columns) };
   }
 
