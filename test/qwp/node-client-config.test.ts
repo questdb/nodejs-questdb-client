@@ -344,50 +344,44 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/unknown configuration key: made_up/);
   });
 
-  it("accepts and validates the remaining Java QWP configuration keys", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "qwp-tls-roots-"));
-    const trustStore = join(directory, "roots.p12");
-    await writeFile(trustStore, Uint8Array.of(1, 2, 3));
-    try {
-      const options = parseQwpNodeClientConfig(
-        `wss::addr=localhost;tls_roots=${trustStore};tls_roots_password=secret;` +
-          "connection_listener_inbox_capacity=7;error_inbox_capacity=32;" +
-          "max_name_len=512;sender_id=producer_1;sf_max_segment_bytes=8m;" +
-          "sf_max_total_bytes=64m;sf_append_deadline_millis=1234;",
-      );
-      expect(options.ingress.agent).toBeDefined();
-      expect(options.sender?.maxNameLength).toBe(512);
-      expect(options.ingress.senderId).toBe("producer_1");
-      expect(options.ingressSession).toMatchObject({
-        maxBatchSizeBytes: 8 * 1024 * 1024,
-        memoryReplayMaxBytes: 64 * 1024 * 1024,
-        memoryReplayAppendDeadlineMs: 1234,
-        connectionListenerInboxCapacity: 7,
-        errorInboxCapacity: 32,
-      });
+  it("accepts and validates the remaining Java QWP configuration keys", () => {
+    const trustStore = "test/certs/ca/ca.crt";
+    const options = parseQwpNodeClientConfig(
+      `wss::addr=localhost;tls_roots=${trustStore};` +
+        "connection_listener_inbox_capacity=7;error_inbox_capacity=32;" +
+        "max_name_len=512;sender_id=producer_1;sf_max_segment_bytes=8m;" +
+        "sf_max_total_bytes=64m;sf_append_deadline_millis=1234;",
+    );
+    expect(options.ingress.agent).toBeDefined();
+    expect(options.sender?.maxNameLength).toBe(512);
+    expect(options.ingress.senderId).toBe("producer_1");
+    expect(options.ingressSession).toMatchObject({
+      maxBatchSizeBytes: 8 * 1024 * 1024,
+      memoryReplayMaxBytes: 64 * 1024 * 1024,
+      memoryReplayAppendDeadlineMs: 1234,
+      connectionListenerInboxCapacity: 7,
+      errorInboxCapacity: 32,
+    });
 
-      expect(() =>
-        parseQwpNodeClientConfig(
-          "wss::addr=localhost;tls_roots_password=secret;",
-        ),
-      ).toThrow(/requires tls_roots/);
-      expect(() =>
-        parseQwpNodeClientConfig(
-          `wss::addr=localhost;tls_roots=${trustStore};tls_verify=unsafe_off;`,
-        ),
-      ).toThrow(/cannot be combined/);
-      expect(() =>
-        parseQwpNodeClientConfig("ws::addr=localhost;max_name_len=15;"),
-      ).toThrow(/max_name_len/);
-      expect(() =>
-        parseQwpNodeClientConfig("ws::addr=localhost;sender_id=bad.name;"),
-      ).toThrow(/sender_id/);
-      expect(() =>
-        parseQwpNodeClientConfig("ws::addr=localhost;error_inbox_capacity=15;"),
-      ).toThrow(/error_inbox_capacity/);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    expect(() =>
+      parseQwpNodeClientConfig(
+        `wss::addr=localhost;tls_roots=${trustStore};tls_roots_password=secret;`,
+      ),
+    ).toThrow(/tls_roots_password.*PEM-encoded CA certificates/);
+    expect(() =>
+      parseQwpNodeClientConfig(
+        `wss::addr=localhost;tls_roots=${trustStore};tls_verify=unsafe_off;`,
+      ),
+    ).toThrow(/cannot be combined/);
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;max_name_len=15;"),
+    ).toThrow(/max_name_len/);
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;sender_id=bad.name;"),
+    ).toThrow(/sender_id/);
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;error_inbox_capacity=15;"),
+    ).toThrow(/error_inbox_capacity/);
   });
 
   it("routes ingress by target and zone, not only egress", () => {

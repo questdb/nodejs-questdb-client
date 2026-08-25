@@ -96,8 +96,8 @@ connect string is the portable spelling.
 | `password`, `pass`   | string             | —         | HTTP Basic password.                                                                     |
 | `token`              | string             | —         | Bearer token; alternative to Basic.                                                      |
 | `tls_verify`         | `on`, `unsafe_off` | on        | Certificate verification. `unsafe_off` disables it.                                      |
-| `tls_roots`          | path               | —         | PEM or PKCS#12 trust store for a private CA.                                             |
-| `tls_roots_password` | string             | —         | Password for `tls_roots`.                                                                |
+| `tls_roots`          | path               | —         | PEM file containing trusted private-CA certificates. PKCS#12 is not supported.           |
+| `tls_roots_password` | string             | —         | Unsupported by Node; convert PKCS#12 roots to PEM and omit this key.                     |
 | `auth_timeout_ms`    | integer ms         | `15000`   | Deadline for the upgrade and authentication exchange.                                    |
 | `connect_timeout`    | integer ms         | `15000`   | Deadline for the TCP/TLS transport, and for the upgrade unless `auth_timeout_ms` is set. |
 
@@ -1212,6 +1212,12 @@ rejected rather than silently dropping either. Configure verification on the
 agent instead, and pass an `https.Agent` for `wss` (a plain `http.Agent` is for
 `ws`).
 
+The Node client accepts `tls_roots` only as valid PEM-encoded CA certificates.
+Password-protected PKCS#12 trust stores and `tls_roots_password` are rejected:
+Node's `pfx` option represents client private-key/certificate identity, not
+additional trusted roots. Export the CA certificates to PEM and omit the
+password key.
+
 Set `lazy_connect=on` to tolerate an unavailable cluster during startup. In the
 JavaScript client, ingress uses memory replay by default, or persistent replay when
 `sf_dir` is present, with `initial_connect_retry=async`; egress uses
@@ -1231,9 +1237,9 @@ capacity wait, a 60-second close drain, and fail-fast initial connection. Set
 `sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
 Without `sf_dir`, `sf_max_total_bytes` and `sf_append_deadline_millis` tune the
 built-in memory replay queue instead.
-The parser also supports `max_name_len`, password-protected `tls_roots`, and the
-Java listener/error inbox capacity keys. Those capacities actively bound asynchronous
-connection and typed-error delivery and are reflected in ingress drop counters.
+The parser also supports `max_name_len` and the Java listener/error inbox
+capacity keys. Those capacities actively bound asynchronous connection and
+typed-error delivery and are reflected in ingress drop counters.
 
 The object form remains available for cases where constructing the two sides
 separately is useful:

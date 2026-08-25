@@ -1,9 +1,6 @@
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as http from "node:http";
 import * as https from "node:https";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as qwpNode from "../../src/qwp/node";
 import { Sender, preloadQwpNode } from "../../src/sender";
@@ -35,7 +32,6 @@ interface AgentTlsOptions {
   rejectUnauthorized?: boolean;
   ca?: Buffer | string;
   pfx?: Buffer | string;
-  passphrase?: string;
 }
 
 /** node's http(s).Agent stores its constructor options on `.options`. */
@@ -64,23 +60,20 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     expect(tls.pfx).toBeUndefined();
   });
 
-  it("loads a PFX trust store with its passphrase", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "qwp-pfx-roots-"));
-    const store = join(dir, "roots.p12");
-    const bytes = Uint8Array.of(1, 2, 3, 4);
-    await writeFile(store, bytes);
-    try {
-      const options = qwpNode.parseQwpNodeClientConfig(
-        `wss::addr=localhost;tls_roots=${store};tls_roots_password=secret;`,
-      );
-      const tls = agentTlsOptions(options.ingress.agent);
-      expect(tls.rejectUnauthorized).toBe(true);
-      expect(tls.pfx).toEqual(Buffer.from(bytes));
-      expect(tls.passphrase).toBe("secret");
-      expect(tls.ca).toBeUndefined();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+  it("rejects password-protected PKCS#12 trust stores with PEM guidance", () => {
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig(
+        "wss::addr=localhost;tls_roots=roots.p12;tls_roots_password=secret;",
+      ),
+    ).toThrow(/tls_roots_password.*PEM-encoded CA certificates.*PKCS#12/);
+  });
+
+  it("rejects non-PEM tls_roots before opening a connection", () => {
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig(
+        "wss::addr=localhost;tls_roots=package.json;",
+      ),
+    ).toThrow(/valid PEM-encoded CA certificates.*PKCS#12/);
   });
 
   it("disables verification only when tls_verify=unsafe_off is explicit", () => {
