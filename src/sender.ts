@@ -1,12 +1,12 @@
 // @ts-check
 import { readFileSync } from "node:fs";
-import * as http from "node:http";
 import * as https from "node:https";
 import { log, Logger } from "./logging";
 import {
   SenderOptions,
   ExtraOptions,
   qwpConfig,
+  selectQwpSchemeAgent,
   UDP,
   WS,
   WSS,
@@ -589,9 +589,23 @@ function createConfiguredQwpSender(
   }
   const configuredWebSocket = options.qwp?.webSocket ?? {};
   const configuredSender = options.qwp?.sender ?? {};
-  let agent = configuredWebSocket.agent;
-  if (!agent && options.agent instanceof http.Agent) agent = options.agent;
-  if (!agent && options.protocol === WSS) {
+  const secure = options.protocol === WSS;
+  let agent =
+    configuredWebSocket.agent ?? selectQwpSchemeAgent(options.agent, secure);
+  if (agent) {
+    // A caller-supplied agent is the WebSocket upgrade's sole TLS channel.
+    // Applying tls_verify/tls_ca would silently override the agent the caller
+    // built; dropping them silently discards the verification they asked for.
+    // Reject the ambiguous combination rather than doing either quietly.
+    if (
+      secure &&
+      (options.tls_ca !== undefined || options.tls_verify !== undefined)
+    ) {
+      throw new Error(
+        "a custom QWP WebSocket agent cannot be combined with tls_verify or tls_ca; configure TLS on the agent itself",
+      );
+    }
+  } else if (secure) {
     agent = new https.Agent({
       ca: options.tls_ca ? readFileSync(options.tls_ca) : undefined,
       rejectUnauthorized: options.tls_verify ?? true,

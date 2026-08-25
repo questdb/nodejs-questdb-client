@@ -1205,6 +1205,13 @@ callbacks, custom agents, store-and-forward, sender/session settings, and pool
 sizes may be passed as the second argument. The whole string is still validated
 before overrides are applied, matching the Java builder's fail-fast behavior.
 
+A custom `wss://` agent is the WebSocket upgrade's sole TLS channel, so it
+carries its own certificate verification and cannot be combined with
+`tls_verify`, `tls_roots`, or `tls_roots_password` — that combination is
+rejected rather than silently dropping either. Configure verification on the
+agent instead, and pass an `https.Agent` for `wss` (a plain `http.Agent` is for
+`ws`).
+
 Set `lazy_connect=on` to tolerate an unavailable cluster during startup. In the
 JavaScript client, ingress uses memory replay by default, or persistent replay when
 `sf_dir` is present, with `initial_connect_retry=async`; egress uses

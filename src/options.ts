@@ -31,14 +31,36 @@ function qwpConfig(options: SenderOptions): QwpNodeClientOptions | undefined {
   return qwpConfigs.get(options);
 }
 
+/**
+ * @ignore
+ * Selects a caller-supplied ILP-style agent for a QWP WebSocket upgrade only
+ * when it matches the scheme: an https.Agent for wss, a plain http.Agent (not
+ * an https.Agent, which extends it) for ws. A bare http.Agent would fail a wss
+ * upgrade with ERR_INVALID_PROTOCOL and an https.Agent would attempt TLS on a
+ * plain ws socket, so a mismatch -- or a non-http agent such as an undici Agent
+ * -- yields undefined and the caller falls back to the scheme's default.
+ */
+export function selectQwpSchemeAgent(
+  agent: unknown,
+  secure: boolean,
+): http.Agent | undefined {
+  if (secure) {
+    return agent instanceof https.Agent ? agent : undefined;
+  }
+  return agent instanceof http.Agent && !(agent instanceof https.Agent)
+    ? agent
+    : undefined;
+}
+
 function resolveQwpConfig(
   options: SenderOptions,
   configString: string,
 ): QwpNodeClientOptions {
   const configuredWebSocket = options.qwp?.webSocket;
   const { storeAndForward, ...webSocketOverrides } = configuredWebSocket ?? {};
-  let agent = webSocketOverrides.agent;
-  if (!agent && options.agent instanceof http.Agent) agent = options.agent;
+  const agent =
+    webSocketOverrides.agent ??
+    selectQwpSchemeAgent(options.agent, options.protocol === WSS);
   return resolveQwpNodeClientConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,

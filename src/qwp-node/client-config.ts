@@ -144,6 +144,16 @@ export function resolveQwpNodeClientConfig(
 
   const authorization = createAuthorization(parsed.values);
   const configuredAgent = createTlsAgent(parsed);
+  const callerAgent = extraOptions.webSocket?.agent;
+  if (callerAgent && configuredAgent) {
+    // configuredAgent is built only when tls_verify/tls_roots were set, and a
+    // caller agent is the WebSocket upgrade's sole TLS channel. Preferring the
+    // caller agent here silently dropped the verification those keys asked for.
+    // Reject the ambiguous combination rather than quietly discarding either.
+    throw new Error(
+      "a custom QWP WebSocket agent cannot be combined with tls_verify, tls_roots, or tls_roots_password; configure TLS on the agent itself",
+    );
+  }
 
   const common = {
     ...extraOptions.webSocket,
@@ -155,7 +165,7 @@ export function resolveQwpNodeClientConfig(
       optionalPositiveInteger(value("auth_timeout_ms"), "auth_timeout_ms"),
     clientId: extraOptions.webSocket?.clientId ?? value("client_id"),
     authorization: extraOptions.webSocket?.authorization ?? authorization,
-    agent: extraOptions.webSocket?.agent ?? configuredAgent,
+    agent: callerAgent ?? configuredAgent,
   };
 
   const ingressReconnect = parseIngressReconnect(parsed.values);

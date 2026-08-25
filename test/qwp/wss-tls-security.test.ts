@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import * as http from "node:http";
+import * as https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as qwpNode from "../../src/qwp/node";
 import { Sender } from "../../src/sender";
+import { SenderOptions, qwpConfig } from "../../src/options";
 
 /**
  * A wss:// producer must verify the server certificate, and its authorization
@@ -89,6 +92,53 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;");
     expect(options.ingress.agent).toBeUndefined();
   });
+
+  it("rejects a caller agent combined with tls_verify", () => {
+    // The agent is the upgrade's sole TLS channel, so preferring it silently
+    // dropped the verification tls_verify asked for. Reject, don't drop.
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;tls_verify=on;", {
+        webSocket: { agent: new https.Agent() },
+      }),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined/);
+  });
+
+  it("rejects a caller agent combined with tls_roots", () => {
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig(
+        `wss::addr=localhost;tls_roots=${CA_PATH};`,
+        { webSocket: { agent: new https.Agent() } },
+      ),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined/);
+  });
+
+  it("keeps a caller agent when no TLS keys are set", () => {
+    // Without tls_verify/tls_roots the caller owns TLS through their agent, so
+    // it passes through unchanged rather than being rejected.
+    const agent = new https.Agent();
+    const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;", {
+      webSocket: { agent },
+    });
+    expect(options.ingress.agent).toBe(agent);
+  });
+
+  it("promotes a top-level https agent onto the wss connect string", async () => {
+    const agent = new https.Agent();
+    const options = await SenderOptions.fromConfig("wss::addr=localhost;", {
+      agent,
+    });
+    expect(qwpConfig(options)?.ingress.agent).toBe(agent);
+  });
+
+  it("does not promote a plain http agent onto wss", async () => {
+    // https.Agent extends http.Agent, so the old instanceof http.Agent test
+    // admitted a bare http.Agent that fails a wss upgrade with
+    // ERR_INVALID_PROTOCOL. It is ignored now, leaving node's verifying default.
+    const options = await SenderOptions.fromConfig("wss::addr=localhost;", {
+      agent: new http.Agent(),
+    });
+    expect(qwpConfig(options)?.ingress.agent).toBeUndefined();
+  });
 });
 
 describe("QWP programmatic wss sender applies TLS and authorization", () => {
@@ -116,6 +166,22 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
     return spy.mock.calls[0][0];
   }
 
+  /**
+   * Constructs a wss Sender, stubbing createQwpNodeSender so a construction
+   * that fails to reject does not open a real socket. For the throwing cases.
+   */
+  function constructWss(options: Record<string, unknown>): void {
+    vi.spyOn(qwpNode, "createQwpNodeSender").mockReturnValue({
+      reset() {},
+    } as unknown as qwpNode.QwpSender);
+    new Sender({
+      protocol: "wss",
+      host: "localhost",
+      port: 9000,
+      ...options,
+    } as never);
+  }
+
   it("builds a verifying https agent with the configured root CA", () => {
     const tls = agentTlsOptions(ingressFor({ tls_ca: CA_PATH }).agent);
     expect(tls.rejectUnauthorized).toBe(true);
@@ -131,6 +197,34 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
       agentTlsOptions(ingressFor({ tls_verify: false }).agent)
         .rejectUnauthorized,
     ).toBe(false);
+  });
+
+  it("keeps a caller https agent for the wss upgrade", () => {
+    const agent = new https.Agent();
+    expect(ingressFor({ agent }).agent).toBe(agent);
+  });
+
+  it("does not admit a plain http agent to a wss upgrade", () => {
+    // A bare http.Agent would fail the wss upgrade with ERR_INVALID_PROTOCOL
+    // after at()/atNow() already accepted rows. It is ignored, leaving the
+    // verifying default agent in place instead.
+    const ingress = ingressFor({ agent: new http.Agent() });
+    expect(ingress.agent).toBeInstanceOf(https.Agent);
+    expect(agentTlsOptions(ingress.agent).rejectUnauthorized).toBe(true);
+  });
+
+  it("rejects a caller agent combined with tls_verify", () => {
+    // Passing an agent alongside tls_verify used to silently drop tls_verify,
+    // letting an insecure agent connect with verification requested on.
+    expect(() =>
+      constructWss({ agent: new https.Agent(), tls_verify: false }),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined/);
+  });
+
+  it("rejects a caller agent combined with tls_ca", () => {
+    expect(() =>
+      constructWss({ agent: new https.Agent(), tls_ca: CA_PATH }),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined/);
   });
 
   it("encodes Basic credentials as username:password, in that order", () => {
