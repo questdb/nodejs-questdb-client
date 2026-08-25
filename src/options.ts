@@ -4,7 +4,7 @@ import { Agent } from "undici";
 import * as http from "http";
 import * as https from "https";
 
-import { Logger } from "./logging";
+import { log, Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
@@ -64,13 +64,15 @@ function resolveQwpConfig(
   return resolveQwpNodeClientConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,
-    // The top-level logger still wins, but falling back to the QWP one rather
-    // than to undefined matters: resolveQwpNodeClientConfig() spreads this
-    // object last, so an explicit undefined overwrote a logger the caller had
-    // configured and left the sender with a no-op sink.
+    // The top-level logger wins, then the QWP-specific one, then the default
+    // console logger -- never undefined. resolveQwpNodeClientConfig() spreads
+    // this object last, so an explicit `log: undefined` overwrote a configured
+    // logger, and with no logger anywhere the QWP sender falls back to a no-op
+    // sink: a ws::/wss:: connect string then silenced every warning and error
+    // the other transports emit.
     sender: {
       ...options.qwp?.sender,
-      log: options.log ?? options.qwp?.sender?.log,
+      log: options.log ?? options.qwp?.sender?.log ?? log,
     },
     ingressSession: options.qwp?.session,
   });

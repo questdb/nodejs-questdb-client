@@ -5,6 +5,7 @@ import { Agent } from "undici";
 import { Sender } from "../src/sender";
 import { SenderOptions } from "../src";
 import { qwpConfig } from "../src/options";
+import { log } from "../src/logging";
 import { MockHttp } from "./util/mockhttp";
 import { readFileSync } from "fs";
 
@@ -1295,6 +1296,14 @@ describe("Configuration string parser suite", function () {
       qwp: { sender: { log: senderLog } },
     });
     expect(qwpConfig(both)?.sender?.log).toBe(console.log);
+
+    // With no logger anywhere -- a bare ws::/wss:: connect string and no
+    // extraOptions -- the default console logger is installed, not the no-op
+    // sink, so it emits the same warnings and errors the other transports do.
+    const neither = await SenderOptions.fromConfig("ws::addr=host:9000;");
+    expect(qwpConfig(neither)?.sender?.log).toBe(log);
+    const secure = await SenderOptions.fromConfig("wss::addr=host:9000;");
+    expect(qwpConfig(secure)?.sender?.log).toBe(log);
   });
 
   it("can take a custom agent", async function () {
