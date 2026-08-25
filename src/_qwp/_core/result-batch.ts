@@ -17,7 +17,8 @@ import { decompressQwpZstdFrame } from "./zstd";
 
 const MAX_ARRAY_DIMENSION_LENGTH = (1 << 28) - 1;
 const MAX_ARRAY_ELEMENTS = 268_435_327;
-const MAX_CONNECTION_SYMBOLS = 8_388_608;
+// Matches QuestDB's connection-scoped symbol dictionary limit.
+const MAX_CONNECTION_SYMBOLS = 2_000_000;
 const MAX_ROWS_PER_BATCH = 1_048_576;
 
 export interface QwpDecimalValue {
@@ -1386,7 +1387,7 @@ export class QwpResultBatchDecoder {
         : message.body;
     const reader = new QwpByteReader(body);
     const deltaMode = (message.flags & QWP_FLAG_DELTA_SYMBOL_DICTIONARY) !== 0;
-    if (deltaMode) this.readDeltaDictionary(reader, message.body.length);
+    if (deltaMode) this.readDeltaDictionary(reader, body.length);
 
     const tableNameLength = readCount(
       reader,
@@ -1888,7 +1889,7 @@ export class QwpResultBatchDecoder {
 
   private readDeltaDictionary(
     reader: QwpByteReader,
-    framePayloadBytes: number,
+    decompressedPayloadBytes: number,
   ): void {
     const start = readCount(
       reader,
@@ -1910,17 +1911,14 @@ export class QwpResultBatchDecoder {
         `symbol dictionary exceeds ${MAX_CONNECTION_SYMBOLS} entries`,
       );
     }
-    // Each declared entry occupies at least one byte in the frame that carried
-    // it, so a count above the frame's payload length was manufactured by Zstd
-    // decompression rather than transmitted: a few hundred wire bytes could
-    // otherwise declare millions of zero-length entries and allocate them all
-    // here, before any column is read. Bound the entry count to the wire, as
-    // the grid cell cap does, and as the local dictionary is bounded by its row
-    // count. Checked before the loop, because reading an entry is what
-    // allocates.
-    if (count > framePayloadBytes) {
+    // Each declared entry occupies at least one length byte in the decompressed
+    // body. Check that structural lower bound before the loop, because reading
+    // an entry is what allocates. The compressed length is not a valid bound:
+    // a legitimate dictionary with repetitive symbols may compress below its
+    // entry count.
+    if (count > decompressedPayloadBytes) {
       throw new QwpProtocolError(
-        `delta symbol dictionary declares ${count} entries, above the ${framePayloadBytes}-byte frame payload`,
+        `delta symbol dictionary declares ${count} entries, above the ${decompressedPayloadBytes}-byte decompressed payload`,
       );
     }
     for (let index = 0; index < count; index++) {

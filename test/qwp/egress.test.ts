@@ -45,6 +45,14 @@ const COMPRESSED_INT_RESULT_BODY = Uint8Array.from([
   42, 0, 0, 1, 0, 138, 171, 46, 9,
 ]);
 
+// A 37,006-byte RESULT_BATCH body containing 1,000 distinct, repetitive
+// symbols, compressed by Zstd to 659 bytes. Its dictionary count legitimately
+// exceeds the compressed payload length.
+const COMPRESSED_LARGE_DELTA_RESULT_BODY = Buffer.from(
+  "KLUv/WSOjzUUAMY/dBewpZAODMMwDENOQ5WTlDKllE4PJAcqEmsAYABzANu2bdu2bdu2bdu2bdu2bZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZL0kXA5hX8kXE5hPhIupyAfCZdTiI+Eyyn4I+FyCv1IuJwCPxIup7CPhMsp6CPhcgoDAAQCAgQBbdu2bdu2bdu2bdu2bdu2bdu2bdu2bdu2bdu2bdu2bdu2bduWJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJLdt27Zt27Zt27Zt27Zt27Zt27Zt27YtIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIhERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERtm3btm3btm3btm3btm3btm3btm3btm3btm3btm3btm3btm3btt22DUEQ/P////////////////////////////////////////////////8/MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMyMiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiISg+moIvBbA/LX2A0SQBD4/xUERvAH////8/////7//+v//3/9///f//9/+///t/////f//3f////u/////f//3v//3/v//7///9/3//99////7////f7/v9/////7/7+////39///f///9+//f//+///f/3///f/vv/////f/73////7v/////v/93//f//3/Ee/8/3f39aLfF31f1Pui74u+XeT7ou+LfvctogsAoJ2KWwFDNyrb",
+  "base64",
+);
+
 function writeString(writer: QwpByteWriter, value: string): void {
   const bytes = new TextEncoder().encode(value);
   writeQwpVarint(writer, bytes.length);
@@ -173,6 +181,18 @@ function compressedIntResultBatch(requestId = 0n): Uint8Array {
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
   writeQwpVarint(payload, 0);
   payload.writeBytes(COMPRESSED_INT_RESULT_BODY);
+  return encodeQwpFrame(
+    payload.toUint8Array(),
+    QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_ZSTD,
+    1,
+  );
+}
+
+function compressedLargeDeltaResultBatch(requestId = 0n): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
+  writeQwpVarint(payload, 0);
+  payload.writeBytes(COMPRESSED_LARGE_DELTA_RESULT_BODY);
   return encodeQwpFrame(
     payload.toUint8Array(),
     QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_ZSTD,
@@ -796,19 +816,17 @@ describe("QWP result batch decoder", () => {
   });
 
   it("bounds the delta symbol dictionary a RESULT_BATCH declares", () => {
-    // readDeltaDictionary ran before the grid cell cap and was bounded only by
-    // MAX_CONNECTION_SYMBOLS, never by the wire. A zero-length entry costs one
-    // decompressed byte, so a few hundred Zstd-compressed bytes declared 8.4M
-    // of them and allocated 8.4M empty strings -- ~140 MB and ~0.9 s of blocked
-    // event loop -- before any column was read.
-    const wire = deltaDictionaryFloodBatch(8_388_608);
+    // A zero-length entry costs one decompressed byte, so a few hundred
+    // Zstd-compressed bytes can declare millions of them. Reject beyond the
+    // server's connection dictionary cap before entering the allocation loop.
+    const wire = deltaDictionaryFloodBatch(2_000_001);
     expect(wire.byteLength).toBeLessThan(2_000);
     const message = decodeQwpEgressMessage(wire);
     if (message.kind !== "result-batch") throw new Error("unexpected message");
 
     const before = process.memoryUsage().heapUsed;
     expect(() => new QwpResultBatchDecoder().decode(message)).toThrow(
-      /above the \d+-byte frame payload/,
+      /delta dictionary count out of range: 2000001/,
     );
     // Rejected before the entry loop -- reading one is what allocates.
     expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
@@ -822,6 +840,13 @@ describe("QWP result batch decoder", () => {
     const batch = new QwpResultBatchDecoder().decode(message);
     expect(batch.get(0, 2)).toBe("alpha");
     expect(batch.get(1, 2)).toBe("beta");
+  });
+
+  it("decodes a compressed delta larger than its wire payload", () => {
+    const message = decodeQwpEgressMessage(compressedLargeDeltaResultBatch());
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    expect(message.body.byteLength).toBeLessThan(1_000);
+    expect(() => new QwpResultBatchDecoder().decode(message)).not.toThrow();
   });
 
   it("rejects a decimal scale byte the encoder would never send", () => {
