@@ -1099,10 +1099,23 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         await this.enqueue(() => this.appendOnce(record, bytes));
         return;
       } catch (error) {
-        if (!(error instanceof QwpReplayStoreFullError)) throw error;
+        const full = error instanceof QwpReplayStoreFullError;
+        // A background segment trim that transiently failed self-heals on its
+        // scheduled retry, whose signalCapacity() releases parked appenders. A
+        // fresh append hits that parked failure at assertReady() -- but it must
+        // not surface as the flush error either, so wait it out within the same
+        // append deadline as the journal ceiling. A permanent fault still ends
+        // in the typed append timeout. (checkpointFailure is not released by
+        // signalCapacity, so it still propagates; see scheduleMaintenance.)
+        const healingTrim = error === this.maintenanceFailure;
+        if (!full && !healingTrim) throw error;
         if (this.backpressurePolicy === QWP_SF_BACKPRESSURE_POLICY.ERROR) {
           throw error;
         }
+        const requiredBytes =
+          error instanceof QwpReplayStoreFullError
+            ? error.requiredBytes
+            : bytes.byteLength;
         if (!stalled) {
           stalled = true;
           deadline = Date.now() + this.appendDeadlineMs;
@@ -1113,11 +1126,15 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           this.totalAppendTimeouts++;
           throw new QwpReplayStoreAppendTimeoutError(
             this.maxBytes,
-            error.requiredBytes,
+            requiredBytes,
             this.appendDeadlineMs,
           );
         }
-        await this.waitForCapacity(capacityGeneration, remainingMs, error);
+        await this.waitForCapacity(
+          capacityGeneration,
+          remainingMs,
+          requiredBytes,
+        );
       }
     }
   }
@@ -1545,14 +1562,15 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private waitForCapacity(
     capacityGeneration: number,
     timeoutMs: number,
-    full: QwpReplayStoreFullError,
+    requiredBytes: number,
   ): Promise<void> {
     if (this.checkpointFailure) {
       return Promise.reject(this.checkpointFailure);
     }
-    if (this.maintenanceFailure) {
-      return Promise.reject(this.maintenanceFailure);
-    }
+    // maintenanceFailure is deliberately not rejected here: it self-heals on
+    // its scheduled retry, whose signalCapacity() releases this waiter, exactly
+    // as scheduleMaintenance() leaves the already-parked appender waiting. A
+    // permanent fault is bounded by the append deadline below.
     if (capacityGeneration !== this.capacityGeneration) {
       return Promise.resolve();
     }
@@ -1564,7 +1582,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         reject(
           new QwpReplayStoreAppendTimeoutError(
             this.maxBytes,
-            full.requiredBytes,
+            requiredBytes,
             this.appendDeadlineMs,
           ),
         );

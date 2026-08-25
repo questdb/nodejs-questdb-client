@@ -4840,6 +4840,54 @@ describe("QWP Node file replay store", () => {
     await store.close();
   }, 15_000);
 
+  it("waits out a self-healing trim fault met by a fresh append, not only a parked one", async () => {
+    // 687913b keeps an already-parked append waiting through a transient trim
+    // fault. An append that arrives while the fault is parked meets it at
+    // assertReady() instead of in the capacity wait, and used to reject the
+    // flush with the retryable trim error there -- it must wait it out too.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 66,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 5_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+
+    // Fail the next trim once, then acknowledge to drive it: the maintenance
+    // failure is parked and a retry is scheduled ~1 s later with the real
+    // unlink. No append is waiting yet, so nothing is parked in the capacity
+    // queue.
+    const unlink = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "unlink")
+      .mockRejectedValueOnce(
+        Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        }),
+      );
+    await store.acknowledgeThrough(0n);
+    await vi.waitFor(() => expect(unlink).toHaveBeenCalled());
+
+    // Issued only now, the append meets the parked failure at assertReady().
+    // It must still resolve when the retry frees space, never reaching its
+    // deadline nor surfacing the retryable trim error.
+    const fresh = store.append({
+      frameSequence: 2n,
+      payload: Uint8Array.of(3),
+    });
+    await expect(fresh).resolves.toBeUndefined();
+    expect(store.metrics).toMatchObject({
+      waitingAppends: 0,
+      totalAppendTimeouts: 0,
+    });
+
+    unlink.mockRestore();
+    await store.close();
+  }, 15_000);
+
   it("waits for ACK trimming without blocking the acknowledgement queue", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
