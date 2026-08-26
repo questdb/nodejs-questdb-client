@@ -15,7 +15,10 @@ import {
   QwpReplayStoreLockedError,
 } from "./file-replay-store";
 import { QwpProtocolError } from "../_qwp/_core/errors";
-import { QwpDurableAckPersistentFailureError } from "../_qwp/_internal/reconnecting-ingress-connection";
+import {
+  QwpCatchUpCapGapError,
+  QwpDurableAckPersistentFailureError,
+} from "../_qwp/_internal/reconnecting-ingress-connection";
 import { QwpNotificationDispatcher } from "../_qwp/_internal/notification-dispatcher";
 import {
   createQwpDataLossSenderError,
@@ -620,7 +623,8 @@ function delay(milliseconds: number): Promise<void> {
  * Only failures that are terminal by design quarantine a slot behind its
  * `.failed` sentinel and report the abandoned bytes as data loss: a rejected
  * authentication, a protocol violation, a head the server will not accept, an
- * exhausted durable-ACK capability-gap episode, and a corrupt journal.
+ * exhausted durable-ACK or symbol catch-up capability-gap episode, and a
+ * corrupt journal.
  * Everything else -- an unreachable server, an ACK timeout, EMFILE, ENOSPC --
  * is transient, and the slot is left intact for a later scan.
  *
@@ -636,6 +640,7 @@ function isTerminalDrainFailure(error: Error): boolean {
   if (error instanceof QwpReplayStoreCorruptionError) return true;
   if (error instanceof QwpProtocolError) return true;
   if (error instanceof QwpReplayRejectedError) return true;
+  if (error instanceof QwpCatchUpCapGapError) return true;
   if (error instanceof QwpDurableAckPersistentFailureError) return true;
   if (error instanceof QwpUpgradeError) {
     return error.kind === QWP_UPGRADE_ERROR_KIND.AUTHENTICATION;

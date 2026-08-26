@@ -16,15 +16,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeIngress,
+  QWP_ORPHAN_FAILED_SENTINEL,
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
+  QwpNodeOrphanDrainer,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreCheckpointError,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreError,
   QwpReplayStoreFullError,
   QwpReplayStoreLockedError,
+  QwpReplayStoreLockLostError,
   QwpReplayStoreSegmentTooLargeError,
   type QwpNodeReplayDataLossReport,
 } from "../../src/qwp/node";
@@ -1296,6 +1299,41 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("stays terminal when a replay read reports that the journal lock was lost", async () => {
+    const lockLost = new QwpReplayStoreLockLostError("/qwp/sender-0");
+    class LockLostReadStore extends LazyTrackingReplayStore {
+      override async readPayload(): Promise<Uint8Array> {
+        throw lockLost;
+      }
+    }
+
+    const replayStore = new LockLostReadStore();
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        return new FakeConnection(`node-${factoryCalls}`);
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(1));
+    await expect(session.closed).resolves.toMatchObject({ code: 1011 });
+    expect(session.metrics.lastError).toBe(lockLost);
+    expect(factoryCalls).toBe(1);
+    await vi.waitFor(() => expect(replayStore.closeCount).toBe(1));
+    await session.close().catch(() => undefined);
+  });
+
   it("keeps an asynchronous initial authentication rejection terminal", async () => {
     const replayStore = new TrackingReplayStore();
     let factoryCalls = 0;
@@ -1745,38 +1783,68 @@ describe("QWP ingress reconnect and replay", () => {
     expect(foreground.metrics.lastError).toBeUndefined();
     await foreground.close();
 
+    const rootDirectory = await createTemporaryDirectory();
+    const orphanDirectory = join(rootDirectory, "orphan");
+    await mkdir(orphanDirectory);
+    const segment = Buffer.alloc(32);
+    segment.write("SF01", 0, "ascii");
+    segment.writeUInt8(1, 4);
+    segment.writeUInt8(1, 24);
+    await writeFile(join(orphanDirectory, "sf-0000000000000000.sfa"), segment);
+
     const orphanStore = new FailOnceDictionaryReplayStore();
     orphanStore.symbols.push("x".repeat(64));
     orphanStore.records.set(0n, Uint8Array.of(1));
+    const senderErrors: QwpSenderError[] = [];
     let orphanCalls = 0;
-    const orphan = await QwpIngressSession.connect(
-      async () => {
-        orphanCalls++;
-        return new FakeConnection("primary", {
-          qwpVersion: 1,
-          maxBatchSizeBytes: 16,
-        });
-      },
-      {
-        backgroundStoreAndForward: true,
-        initialConnectMode: "async",
-        orphanStoreAndForward: true,
-        catchUpCapGapMinEscalationWindowMs: 0,
-        reconnect: {
-          initialBackoffMs: 0,
-          maxBackoffMs: 0,
-        },
-        replayStore: orphanStore,
-      },
-    );
-    await orphan.closed;
-    await vi.waitFor(() =>
-      expect(orphan.metrics.lastError?.message).toMatch(
-        /attempt=16\/16.*data must be resent/,
-      ),
-    );
-    expect(orphanCalls).toBe(16);
-    await orphan.close();
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 0,
+      createSession: async () =>
+        QwpIngressSession.connect(
+          async () => {
+            orphanCalls++;
+            return new FakeConnection("primary", {
+              qwpVersion: 1,
+              maxBatchSizeBytes: 16,
+            });
+          },
+          {
+            backgroundStoreAndForward: true,
+            initialConnectMode: "async",
+            orphanStoreAndForward: true,
+            catchUpCapGapMinEscalationWindowMs: 0,
+            reconnect: {
+              initialBackoffMs: 0,
+              maxBackoffMs: 0,
+            },
+            replayStore: orphanStore,
+          },
+        ),
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    try {
+      drainer.start();
+      await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+      expect(drainer.metrics.retrying).toBe(0);
+      expect(orphanCalls).toBe(16);
+      expect(await readdir(orphanDirectory)).toContain(
+        QWP_ORPHAN_FAILED_SENTINEL,
+      );
+      await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+      expect(senderErrors[0]).toMatchObject({
+        category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+        appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+        quarantinedPath: orphanDirectory,
+        serverMessage: expect.stringMatching(
+          /attempt=16\/16.*data must be resent/,
+        ),
+      });
+    } finally {
+      await drainer.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
   });
 
   it("preserves durable dictionary IDs after frame journal backpressure", async () => {
