@@ -1,13 +1,14 @@
-// Verifies that every package `exports` target exists, and that the shared
-// chunks those entries import were published too. Entry bundles import chunks
-// that no `exports` entry names, so a chunk left out of `files` would publish a
-// package whose every entry resolves to a missing file.
+// Verifies that every package `exports` target exists and is included by
+// `npm pack`, along with every shared chunk those entries import. Entry bundles
+// import chunks that no `exports` entry names, so checking only the untarred
+// tree would miss a chunk left out of `files` and publish broken entry points.
 //
 // This lives in a file rather than inline in the workflow because the pattern
 // below needs both quote characters, which cannot survive a single-quoted
 // `node -e` argument in a YAML block scalar.
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 // Only specifiers that name an emitted file. Matching every `from "./x"` in the
 // raw text would also match prose inside a comment the bundler preserved -- a
@@ -50,8 +51,43 @@ for (const [subpath, conditions] of Object.entries(map)) {
 // no runtime test can see.
 for (const [subpath, targets] of Object.entries(typesVersions?.["*"] ?? {})) {
   for (const target of targets) {
-    if (!existsSync(target))
-      missing.push(`typesVersions ${subpath} -> ${target}`);
+    walk(target, `typesVersions ${subpath}`);
+  }
+}
+
+if (missing.length > 0) {
+  console.error(`missing build artifacts:\n  ${missing.join("\n  ")}`);
+  process.exit(1);
+}
+
+let pack;
+try {
+  [pack] = JSON.parse(
+    execFileSync(
+      process.platform === "win32" ? "npm.cmd" : "npm",
+      ["pack", "--dry-run", "--json"],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    ),
+  );
+} catch (error) {
+  const stderr = error?.stderr?.toString().trim();
+  console.error(`npm pack --dry-run failed${stderr ? `:\n${stderr}` : ""}`);
+  process.exit(1);
+}
+
+if (!Array.isArray(pack?.files)) {
+  console.error("npm pack --dry-run returned no package file manifest");
+  process.exit(1);
+}
+
+const packedFiles = new Set(pack.files.map(({ path }) => path));
+for (const file of seen) {
+  const packagePath = relative(process.cwd(), file).split(sep).join("/");
+  if (!packedFiles.has(packagePath)) {
+    missing.push(`npm pack omits ${packagePath}`);
   }
 }
 
@@ -61,5 +97,5 @@ if (missing.length > 0) {
 }
 
 console.log(
-  `all ${Object.keys(map).length} export subpaths present, ${seen.size} files walked`,
+  `all ${Object.keys(map).length} export subpaths present, ${seen.size} files walked and packed`,
 );
