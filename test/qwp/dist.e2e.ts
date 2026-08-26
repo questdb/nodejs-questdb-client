@@ -109,12 +109,14 @@ describe.each(["import", "require"] as const)(
     it("keeps package-root writer and error identity across QWP entries", async () => {
       const root: any = await load(".", format);
       const qwp: any = await load("./qwp", format);
-      const node: any = await load("./qwp/node", format);
 
       const sender = await root.Sender.fromConfig(
         "ws::addr=127.0.0.1:9;auto_flush=off;",
         { log: () => {} },
       );
+      // Loading the public Node entry after the root has lazily initialized
+      // QWP proves the registry selected this same-format module instance.
+      const node: any = await load("./qwp/node", format);
       const trades = sender.writer("trades", schemaFrom(qwp));
       await stageTwoRows(trades);
 
@@ -184,6 +186,41 @@ describe("store-and-forward locking", () => {
         );
       },
     );
+
+  it.each(["import", "require"] as const)(
+    "loads QWP only when a ws/wss/udp root sender is built (%s)",
+    async (format) => {
+      const target = resolveExport(".", format);
+      const probe =
+        '({ ws: !!require.cache[require.resolve("ws")],' +
+        " dgram: process.moduleLoadList.some((m) => /dgram/.test(m)) })";
+      const body =
+        `const before = ${probe};` +
+        ' const http = await Sender.fromConfig("http::addr=127.0.0.1:9000;protocol_version=1;");' +
+        ` const afterHttp = ${probe};` +
+        " await http.close();" +
+        ' const sender = await Sender.fromConfig("udp::addr=127.0.0.1:9007;");' +
+        ` const afterQwp = ${probe};` +
+        " await sender.close();" +
+        " console.log(JSON.stringify({ before, afterHttp, afterQwp, table: typeof sender.table }));";
+      const load_ =
+        format === "require"
+          ? `(async () => { const { Sender } = require(${JSON.stringify(target)}); ${body} })();`
+          : `import(${JSON.stringify(pathToFileURL(target).href)}).then(async ({ Sender }) => { ${body} });`;
+
+      const { code, stdout, stderr } = await runNode(load_);
+      expect(stderr).toBe("");
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout.trim())).toEqual({
+        before: { ws: false, dgram: false },
+        afterHttp: { ws: false, dgram: false },
+        // ESM-loaded CommonJS dependencies are not exposed through
+        // require.cache; dgram is the format-independent QWP graph probe.
+        afterQwp: { ws: format === "require", dgram: true },
+        table: "function",
+      });
+    },
+  );
 
   it.each(["import", "require"] as const)(
     "the package root loads (%s) on a platform no addon would support",

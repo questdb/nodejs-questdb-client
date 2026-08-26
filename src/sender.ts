@@ -14,25 +14,22 @@ import {
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
-import { QWP_INGRESS_PATH } from "./_qwp/_core";
-import * as qwpNodeModule from "./qwp/node";
+import {
+  getQwpNodeModule,
+  preloadQwpNodeModule,
+} from "./qwp-node/module-registry";
 import type { QwpSender } from "./qwp/node";
 import type { QwpTableWriter } from "./_qwp/sender";
 import type { QwpWriterSchema } from "./_qwp/writer";
 
-// Import the package's QWP Node entry so each root build stays in its own
-// module universe: Bunchee rewrites this entry import to qwp/node.mjs for ESM
-// and qwp/node.js for CommonJS. Loading the CommonJS condition from the ESM
-// root would duplicate every QWP class and break instanceof across the
-// documented root and /qwp/node entry points.
+const QWP_INGRESS_PATH = "/write/v4";
 
 /**
- * @internal Retained for source-level suites that preload QWP before installing
- * spies. The production root already imports the matching-format entry.
+ * @internal Preloads the matching-format QWP Node entry into the root module's
+ * registry. The async configuration factories call this automatically; it is
+ * exposed for source-level suites and synchronous programmatic construction.
  */
-export function preloadQwpNode(): Promise<void> {
-  return Promise.resolve();
-}
+export const preloadQwpNode = preloadQwpNodeModule;
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
@@ -149,7 +146,7 @@ class Sender {
         ? // SenderOptions already parsed the ws/wss connect string with the
           // QWP schema, so there is one vocabulary and one parser however the
           // sender was constructed.
-          qwpNodeModule.createQwpNodeSender(
+          getQwpNodeModule().createQwpNodeSender(
             resolved.ingress,
             resolved.sender,
             resolved.ingressSession,
@@ -628,7 +625,7 @@ function createConfiguredQwpSender(
   // resolveQwpNodeClientConfig(). This path builds a sender from a
   // programmatic options object, so it reads options.qwp.* directly.
   const storeAndForward = configuredWebSocket.storeAndForward;
-  return qwpNodeModule.createQwpNodeSender(
+  return getQwpNodeModule().createQwpNodeSender(
     {
       ...configuredWebSocket,
       storeAndForward,
@@ -669,7 +666,7 @@ function createConfiguredQwpUdpSender(
   const configuredSender = options.qwp?.sender ?? {};
   const maxDatagramSize =
     options.max_datagram_size ?? configuredUdp.maxDatagramSize ?? 1_400;
-  return qwpNodeModule.createQwpNodeUdpSender(
+  return getQwpNodeModule().createQwpNodeUdpSender(
     {
       ...configuredUdp,
       host: options.host,
