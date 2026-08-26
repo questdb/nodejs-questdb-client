@@ -1425,6 +1425,88 @@ describe("QWP high-level sender", () => {
     expect(() => encodeQwpIngressFrame([table])).not.toThrow();
   });
 
+  it("accepts exact number decimals rendered in exponent notation", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const typed = sender.writer("typed_decimals", {
+      fraction: decimal128(20),
+      whole128: decimal128(0),
+      whole256: decimal256(0),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    // Both values stringify with an exponent even though they are exactly
+    // representable at their declared decimal scales.
+    await typed.row({
+      fraction: 2 ** -20,
+      whole128: 1e21,
+      whole256: 1e21,
+      timestamp: 1n,
+    });
+    await sender
+      .table("fluent_decimals")
+      .decimalColumnText("fraction", 2 ** -20)
+      .decimalColumnText("whole", 1e21)
+      .atNow();
+    await sender.flush();
+
+    const typedTable = session.sends[0].tables.find(
+      (table) => table.name === "typed_decimals",
+    )!;
+    expect(column(typedTable, "fraction")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL128,
+      decimalScale: 20,
+      values: [95_367_431_640_625n],
+    });
+    expect(column(typedTable, "whole128")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL128,
+      decimalScale: 0,
+      values: [1_000_000_000_000_000_000_000n],
+    });
+    expect(column(typedTable, "whole256")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL256,
+      decimalScale: 0,
+      values: [1_000_000_000_000_000_000_000n],
+    });
+
+    const fluentTable = session.sends[0].tables.find(
+      (table) => table.name === "fluent_decimals",
+    )!;
+    expect(column(fluentTable, "fraction")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL256,
+      decimalScale: 20,
+      values: [95_367_431_640_625n],
+    });
+    expect(column(fluentTable, "whole")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL256,
+      decimalScale: 0,
+      values: [1_000_000_000_000_000_000_000n],
+    });
+    await sender.close();
+  });
+
+  it("still enforces decimal scale and width after expanding exponents", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    const typed = sender.writer("typed_decimals", {
+      fraction: decimal128(19),
+      whole128: decimal128(0),
+      whole256: decimal256(0),
+    });
+
+    await expect(typed.row({ fraction: 2 ** -20 })).rejects.toThrow(
+      /not exactly representable at scale 19/,
+    );
+    await expect(typed.row({ whole128: 2e38 })).rejects.toThrow(
+      /exceeds signed int128/,
+    );
+    await expect(typed.row({ whole256: 6e76 })).rejects.toThrow(
+      /exceeds signed int256/,
+    );
+    await sender.close();
+  });
+
   it("encodes a UUID identically from text, canonical bytes, and limbs", async () => {
     // The 16-byte form is canonical RFC 4122 order -- what uuid.parse() and
     // java.util.UUID hand back. Passing those bytes through verbatim would

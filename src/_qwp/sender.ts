@@ -412,13 +412,23 @@ function parseDecimal(value: string | number): {
   scale: number;
 } {
   const text = String(value);
-  const match = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(text);
+  const match =
+    typeof value === "number"
+      ? /^([+-]?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text)
+      : /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(text);
   if (!match) throw new TypeError(`invalid decimal value '${text}'`);
   const fraction = match[3] ?? "";
-  const magnitude = BigInt(`${match[2]}${fraction}`);
+  const exponent = match[4] === undefined ? 0 : Number(match[4]);
+  let digits = `${match[2]}${fraction}`;
+  let scale = fraction.length - exponent;
+  if (scale < 0) {
+    digits += "0".repeat(-scale);
+    scale = 0;
+  }
+  const magnitude = BigInt(digits);
   return {
     unscaled: match[1] === "-" ? -magnitude : magnitude,
-    scale: fraction.length,
+    scale,
   };
 }
 
