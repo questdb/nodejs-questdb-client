@@ -246,7 +246,9 @@ class Sender {
   }
 
   /**
-   * Creates a TCP connection to the database.
+   * Establishes the transport connection for TCP, TCPS, WS, WSS, and UDP.
+   * HTTP and HTTPS connect per request and reject this call because no explicit
+   * connection step is required.
    *
    * @return {Promise<boolean>} Resolves to true if the client is connected.
    */
@@ -529,6 +531,10 @@ class Sender {
 
   /**
    * Closes the row after writing the designated timestamp into the buffer of the sender.
+   * If validation or encoding rejects the row before it is completed, the
+   * incomplete row and its table selection are discarded; rows completed
+   * earlier remain staged. Start the next row with {@link table} again. A later
+   * auto-flush failure does not discard the row that was successfully closed.
    *
    * **Precision rules**:
    * - **Protocol v2 and higher:**
@@ -544,10 +550,10 @@ class Sender {
    *   - `'us'` — microseconds *(default)*
    *   - `'ms'` — milliseconds
    *
-   * @returns {SenderBuffer} Returns with a reference to this buffer.
+   * @returns {Promise<void>} Resolves after the row is closed and any triggered auto-flush completes.
    *
-   * @throws {Error} If `value` is not an integer or `BigInt`.
-   * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
+   * @throws {Error} If `timestamp` is not an integer or `BigInt`.
+   * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
    */
   async at(
     timestamp: number | bigint,
@@ -563,6 +569,12 @@ class Sender {
   /**
    * Closes the row without writing designated timestamp into the buffer of the sender. <br>
    * Designated timestamp will be populated by the server on this record.
+   * If validation or encoding rejects the row before it is completed, the
+   * incomplete row and its table selection are discarded; rows completed
+   * earlier remain staged. Start the next row with {@link table} again. A later
+   * auto-flush failure does not discard the row that was successfully closed.
+   *
+   * @returns {Promise<void>} Resolves after the row is closed and any triggered auto-flush completes.
    */
   async atNow(): Promise<void> {
     if (this.qwpSender) return this.qwpSender.atNow();
