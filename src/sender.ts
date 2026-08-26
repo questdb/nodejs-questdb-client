@@ -8,6 +8,7 @@ import {
   qwpConfig,
   selectQwpSchemeAgent,
   UDP,
+  validateUdpSecurityOptions,
   WS,
   WSS,
 } from "./options";
@@ -622,8 +623,9 @@ function createConfiguredQwpSender(
       rejectUnauthorized: options.tls_verify ?? true,
     });
   }
+  const configuredAuthorization = qwpAuthorization(options);
   const authorization =
-    configuredWebSocket.authorization ?? qwpAuthorization(options);
+    configuredWebSocket.authorization ?? configuredAuthorization;
   // ws/wss connect-string keys are the QWP schema's, parsed only by
   // resolveQwpNodeClientConfig(). This path builds a sender from a
   // programmatic options object, so it reads options.qwp.* directly.
@@ -662,6 +664,7 @@ function createConfiguredQwpUdpSender(
   options: SenderOptions,
   logger: Logger,
 ): QwpSender {
+  validateUdpSecurityOptions(options);
   if (!options.host || !options.port) {
     throw new Error("The 'host' and 'port' options are mandatory for QWP UDP");
   }
@@ -701,13 +704,28 @@ function createConfiguredQwpUdpSender(
 }
 
 function qwpAuthorization(options: SenderOptions): string | undefined {
-  if (options.token) return `Bearer ${options.token}`;
-  if (options.username !== undefined || options.password !== undefined) {
-    if (!options.username || options.password === undefined) {
+  const hasUsername = options.username !== undefined;
+  const hasPassword = options.password !== undefined;
+  const hasToken = options.token !== undefined;
+  if (hasUsername !== hasPassword || !options.username || !options.password) {
+    if (hasUsername || hasPassword) {
       throw new Error(
         "QWP Basic authentication requires both 'username' and 'password'",
       );
     }
+  }
+  if (hasToken && hasUsername) {
+    throw new Error(
+      "QWP 'token' authentication cannot be combined with 'username'/'password'",
+    );
+  }
+  if (hasToken) {
+    if (!options.token) {
+      throw new Error("QWP Bearer authentication requires a non-empty 'token'");
+    }
+    return `Bearer ${options.token}`;
+  }
+  if (hasUsername) {
     return `Basic ${Buffer.from(`${options.username}:${options.password}`, "utf8").toString("base64")}`;
   }
   return undefined;

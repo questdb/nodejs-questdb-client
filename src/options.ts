@@ -771,12 +771,7 @@ function parseAutoFlushOptions(options: SenderOptions) {
 function parseTlsOptions(options: SenderOptions) {
   parseBoolean(options, "tls_verify", "TLS verify", UNSAFE_OFF);
 
-  if (
-    options.protocol === UDP &&
-    (options.tls_verify !== undefined || options.tls_ca !== undefined)
-  ) {
-    throw new Error("TLS is not supported for QWP UDP transport");
-  }
+  validateUdpSecurityOptions(options);
 
   if (options.tls_roots || options.tls_roots_password) {
     throw new Error(
@@ -810,9 +805,18 @@ function parseUdpOptions(options: SenderOptions) {
       "max_datagram_size and multicast_ttl are only supported for QWP UDP transport",
     );
   }
+}
+
+/** @ignore Rejects security options that the fire-and-forget UDP wire cannot honor. */
+function validateUdpSecurityOptions(options: SenderOptions): void {
+  if (options.protocol !== UDP) return;
+  if (options.tls_verify !== undefined || options.tls_ca !== undefined) {
+    throw new Error("TLS is not supported for QWP UDP transport");
+  }
   if (
-    options.protocol === UDP &&
-    (options.username || options.password || options.token)
+    options.username !== undefined ||
+    options.password !== undefined ||
+    options.token !== undefined
   ) {
     throw new Error("authentication is not supported for QWP UDP transport");
   }
@@ -878,6 +882,7 @@ export {
   WS,
   WSS,
   UDP,
+  validateUdpSecurityOptions,
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,

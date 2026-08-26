@@ -337,4 +337,25 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
       "Bearer tok-123",
     );
   });
+
+  it("rejects Bearer authentication combined with Basic credentials", () => {
+    expect(() =>
+      constructWss({
+        username: "alice",
+        password: "s3cret",
+        token: "tok-123",
+      }),
+    ).toThrow(
+      "QWP 'token' authentication cannot be combined with 'username'/'password'",
+    );
+  });
+
+  it("rejects empty programmatic authentication secrets", () => {
+    expect(() => constructWss({ username: "alice", password: "" })).toThrow(
+      "QWP Basic authentication requires both 'username' and 'password'",
+    );
+    expect(() => constructWss({ token: "" })).toThrow(
+      "QWP Bearer authentication requires a non-empty 'token'",
+    );
+  });
 });
