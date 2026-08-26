@@ -87,6 +87,13 @@ string can configure a sender, a query client, or the pooled facade. Every key
 also has a programmatic equivalent on the corresponding options object; the
 connect string is the portable spelling.
 
+The complete connect string is parsed and validated before typed overrides are
+applied. When both forms set the same option, the typed value wins. In
+particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls`,
+`target`, `zone`, and `senderId` after URL parsing. The primary ingress URL
+continues to come from `addr`, because the typed object intentionally omits
+`url`.
+
 ### Connection
 
 | Key                  | Value              | Default   | Meaning                                                                                  |
@@ -235,6 +242,9 @@ const sender = await Sender.fromConfig(
         connectTimeoutMs: 5_000,
         authTimeoutMs: 15_000,
         failoverUrls: ["wss://questdb-dr.example:9000/write/v4"],
+        target: "any",
+        zone: "eu-west-1a",
+        senderId: "producer-a",
         storeAndForward: {
           directory: "/var/lib/my-service/qwp-replay/producer-a",
           maxBytes: 512 * 1024 * 1024,

@@ -904,6 +904,49 @@ describe("Configuration string parser suite", function () {
     }
   });
 
+  it("applies typed QWP ingress overrides after URL parsing", async function () {
+    const options = await SenderOptions.fromConfig(
+      "ws::addr=url-primary:9000,url-secondary:9001;" +
+        "target=primary;zone=url-zone;sender_id=url-sender;",
+      {
+        qwp: {
+          webSocket: {
+            failoverUrls: ["ws://typed-secondary:9100/custom-write"],
+            target: "replica",
+            zone: "typed-zone",
+            senderId: "typed-sender",
+          },
+        },
+      },
+    );
+    const resolved = qwpConfig(options);
+
+    expect(String(resolved?.ingress.url)).toBe(
+      "ws://url-primary:9000/write/v4",
+    );
+    expect(resolved?.ingress.failoverUrls?.map(String)).toEqual([
+      "ws://typed-secondary:9100/custom-write",
+    ]);
+    expect(resolved?.ingress).toMatchObject({
+      target: "replica",
+      zone: "typed-zone",
+      senderId: "typed-sender",
+    });
+    expect(resolved?.egress.failoverUrls?.map(String)).toEqual([
+      "ws://url-secondary:9001/read/v1",
+    ]);
+    expect(resolved?.egress).toMatchObject({
+      target: "primary",
+      zone: "url-zone",
+    });
+
+    await expect(
+      SenderOptions.fromConfig("ws::addr=url-primary:9000;target=not-a-role;", {
+        qwp: { webSocket: { target: "replica" } },
+      }),
+    ).rejects.toThrow(/target/);
+  });
+
   it("leaves QWP-only keys to the QWP schema", async function () {
     // close_flush_timeout_millis, initial_connect_retry and
     // catch_up_cap_gap_min_escalation_window_millis are QWP vocabulary. This

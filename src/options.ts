@@ -57,8 +57,14 @@ function resolveQwpConfig(
   configString: string,
 ): QwpNodeClientOptions {
   const configuredWebSocket = options.qwp?.webSocket;
-  const { storeAndForward, failoverUrls, ...webSocketOverrides } =
-    configuredWebSocket ?? {};
+  const {
+    storeAndForward,
+    failoverUrls,
+    target,
+    zone,
+    senderId,
+    ...webSocketOverrides
+  } = configuredWebSocket ?? {};
   const agent =
     webSocketOverrides.agent ??
     selectQwpSchemeAgent(options.agent, options.protocol === WSS);
@@ -77,12 +83,19 @@ function resolveQwpConfig(
     },
     ingressSession: options.qwp?.session,
   });
-  if (failoverUrls === undefined) return resolved;
+
+  // The primary URL remains derived from `addr`, which the typed options do
+  // not expose. Fields available in both forms are applied only after the
+  // complete connect string has been parsed and validated, so typed ingress
+  // routing and producer identity cannot be overwritten by URL defaults.
   return {
     ...resolved,
     ingress: {
       ...resolved.ingress,
-      failoverUrls,
+      ...(failoverUrls === undefined ? {} : { failoverUrls }),
+      ...(target === undefined ? {} : { target }),
+      ...(zone === undefined ? {} : { zone }),
+      ...(senderId === undefined ? {} : { senderId }),
     },
   };
 }
@@ -111,7 +124,11 @@ const PROTOCOL_VERSION_V3 = "3";
 const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
 
 type QwpExtraOptions = {
-  /** Node WebSocket and persistent store-and-forward options. */
+  /**
+   * Node ingress overrides. Values are applied after the connect string has
+   * been fully parsed and validated; typed values win when both forms set the
+   * same option.
+   */
   webSocket?: Omit<QwpNodeIngressOptions, "url">;
   /** Ingress ACK, durable-ACK, and reconnect options. */
   session?: QwpIngressSessionOptions;
