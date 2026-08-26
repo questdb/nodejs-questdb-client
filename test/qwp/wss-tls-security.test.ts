@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
 import type { AddressInfo } from "node:net";
+import { Agent as UndiciAgent } from "undici";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as qwpNode from "../../src/qwp/node";
 import { Sender, preloadQwpNode } from "../../src/sender";
@@ -176,10 +177,36 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     // https.Agent extends http.Agent, so the old instanceof http.Agent test
     // admitted a bare http.Agent that fails a wss upgrade with
     // ERR_INVALID_PROTOCOL. It is ignored now, leaving node's verifying default.
+    const logger = vi.fn();
     const options = await SenderOptions.fromConfig("wss::addr=localhost;", {
       agent: new http.Agent(),
+      log: logger,
     });
     expect(qwpConfig(options)?.ingress.agent).toBeUndefined();
+    expect(logger).toHaveBeenCalledWith(
+      "warn",
+      expect.stringMatching(
+        /Ignoring Node\.js http\.Agent.*QWP wss.*https\.Agent/,
+      ),
+    );
+  });
+
+  it("warns when an undici agent cannot be promoted onto wss", async () => {
+    const agent = new UndiciAgent();
+    const logger = vi.fn();
+    try {
+      const options = await SenderOptions.fromConfig("wss::addr=localhost;", {
+        agent,
+        log: logger,
+      });
+      expect(qwpConfig(options)?.ingress.agent).toBeUndefined();
+      expect(logger).toHaveBeenCalledWith(
+        "warn",
+        expect.stringMatching(/Ignoring undici\.Agent.*QWP wss.*https\.Agent/),
+      );
+    } finally {
+      await agent.close();
+    }
   });
 });
 
@@ -250,9 +277,31 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
     // A bare http.Agent would fail the wss upgrade with ERR_INVALID_PROTOCOL
     // after at()/atNow() already accepted rows. It is ignored, leaving the
     // verifying default agent in place instead.
-    const ingress = ingressFor({ agent: new http.Agent() });
+    const logger = vi.fn();
+    const ingress = ingressFor({ agent: new http.Agent(), log: logger });
     expect(ingress.agent).toBeInstanceOf(https.Agent);
     expect(agentTlsOptions(ingress.agent).rejectUnauthorized).toBe(true);
+    expect(logger).toHaveBeenCalledWith(
+      "warn",
+      expect.stringMatching(
+        /Ignoring Node\.js http\.Agent.*QWP wss.*https\.Agent/,
+      ),
+    );
+  });
+
+  it("warns before replacing an undici agent with the wss default", async () => {
+    const agent = new UndiciAgent();
+    const logger = vi.fn();
+    try {
+      const ingress = ingressFor({ agent, log: logger });
+      expect(ingress.agent).toBeInstanceOf(https.Agent);
+      expect(logger).toHaveBeenCalledWith(
+        "warn",
+        expect.stringMatching(/Ignoring undici\.Agent.*QWP wss.*https\.Agent/),
+      );
+    } finally {
+      await agent.close();
+    }
   });
 
   it("rejects a caller agent combined with tls_verify", () => {

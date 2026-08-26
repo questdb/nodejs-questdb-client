@@ -46,13 +46,33 @@ function qwpConfig(options: SenderOptions): QwpNodeClientOptions | undefined {
 export function selectQwpSchemeAgent(
   agent: unknown,
   secure: boolean,
+  logger?: Logger,
 ): http.Agent | undefined {
   if (secure) {
-    return agent instanceof https.Agent ? agent : undefined;
+    if (agent instanceof https.Agent) return agent;
+  } else if (agent instanceof http.Agent && !(agent instanceof https.Agent)) {
+    return agent;
   }
-  return agent instanceof http.Agent && !(agent instanceof https.Agent)
-    ? agent
-    : undefined;
+  if (agent !== undefined) {
+    const scheme = secure ? WSS : WS;
+    const expected = secure
+      ? "a Node.js https.Agent"
+      : "a plain Node.js http.Agent";
+    const received =
+      agent instanceof Agent
+        ? "undici.Agent"
+        : agent instanceof https.Agent
+          ? "Node.js https.Agent"
+          : agent instanceof http.Agent
+            ? "Node.js http.Agent"
+            : ((agent as { constructor?: { name?: string } } | null)
+                ?.constructor?.name ?? typeof agent);
+    logger?.(
+      "warn",
+      `Ignoring ${received} supplied through 'agent' for QWP ${scheme}: the ws WebSocket transport requires ${expected}; configure a compatible agent through 'qwp.webSocket.agent'`,
+    );
+  }
+  return undefined;
 }
 
 function resolveQwpConfig(
@@ -68,9 +88,10 @@ function resolveQwpConfig(
     senderId,
     ...webSocketOverrides
   } = configuredWebSocket ?? {};
+  const logger = options.log ?? options.qwp?.sender?.log ?? log;
   const agent =
     webSocketOverrides.agent ??
-    selectQwpSchemeAgent(options.agent, options.protocol === WSS);
+    selectQwpSchemeAgent(options.agent, options.protocol === WSS, logger);
   const resolved = getQwpNodeModule().parseQwpNodeClientConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,
@@ -82,7 +103,7 @@ function resolveQwpConfig(
     // the other transports emit.
     sender: {
       ...options.qwp?.sender,
-      log: options.log ?? options.qwp?.sender?.log ?? log,
+      log: logger,
     },
     ingressSession: options.qwp?.session,
   });
@@ -143,6 +164,10 @@ type QwpExtraOptions = {
 
 type ExtraOptions = {
   log?: Logger;
+  /**
+   * Transport-specific connection agent. Undici agents apply to the default
+   * HTTP(S) transport; QWP ws/wss requires a Node http/https agent.
+   */
   agent?: Agent | http.Agent | https.Agent;
   qwp?: QwpExtraOptions;
 };

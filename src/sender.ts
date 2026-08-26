@@ -109,6 +109,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * HTTP(S) connections. A popular setting would be disabling persistent connections, in this case an agent can be
  * passed to the Sender with <i>keepAlive</i> set to <i>false</i>. <br>
  * For example: <i>Sender.fromConfig(`http::addr=host:port`, { agent: new undici.Agent({ connect: { keepAlive: false } })})</i> <br>
+ * An <i>undici.Agent</i> applies only to the default HTTP(S) transport. QWP WS/WSS uses the <i>ws</i> package and requires
+ * a Node.js <i>http.Agent</i>/<i>https.Agent</i>; an incompatible top-level agent is ignored with a warning. <br>
  * If no custom agent is configured, the Sender will use its own agent which overrides some default values
  * of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
  * </p>
@@ -599,7 +601,8 @@ function createConfiguredQwpSender(
   const configuredSender = options.qwp?.sender ?? {};
   const secure = options.protocol === WSS;
   let agent =
-    configuredWebSocket.agent ?? selectQwpSchemeAgent(options.agent, secure);
+    configuredWebSocket.agent ??
+    selectQwpSchemeAgent(options.agent, secure, logger);
   if (agent) {
     // A caller-supplied agent is the WebSocket upgrade's sole TLS channel.
     // Applying tls_verify/tls_ca would silently override the agent the caller
