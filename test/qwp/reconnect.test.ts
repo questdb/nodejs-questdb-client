@@ -4192,6 +4192,52 @@ describe("QWP Node file replay store", () => {
     await recovered.close();
   });
 
+  it("reports a CRC-failing record at the active segment tail", async () => {
+    // A zero-filled active tail may be an append that never completed, but a
+    // complete record whose payload no longer matches its CRC proves that
+    // journal bytes were abandoned. This is especially important for memory
+    // durability, where page-cache writeback can persist those pieces out of
+    // order after append already returned to the producer.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      durability: QWP_SF_DURABILITY.MEMORY,
+    });
+    await first.load();
+    await first.append({ frameSequence: 0n, payload: Uint8Array.of(1, 1, 1) });
+    await first.append({ frameSequence: 1n, payload: Uint8Array.of(2, 2, 2) });
+    await first.close();
+
+    const [segment] = await assignedReplaySegments(directory);
+    const recordSize = 8 + 3;
+    const secondPayload = 24 + recordSize + 8;
+    const file = await open(join(directory, segment), "r+");
+    try {
+      await file.write(Uint8Array.of(0xff), 0, 1, secondPayload);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    await expect(recovered.loadReferences()).resolves.toEqual([
+      { frameSequence: 0n, payloadLength: 3 },
+    ]);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      directory,
+      segmentFile: segment,
+      reason: expect.stringContaining("CRC32C"),
+    });
+    expect(reports[0].discardedBytes).toBeGreaterThanOrEqual(recordSize);
+    await recovered.close();
+  });
+
   it.each([
     ["a zeroed record", "hole"],
     ["a flipped payload byte", "bitrot"],

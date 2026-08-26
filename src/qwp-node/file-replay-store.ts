@@ -142,7 +142,7 @@ interface PendingCapacity {
 export interface QwpNodeReplayDataLossReport {
   readonly directory: string;
   readonly segmentFile: string;
-  /** Bytes after the damaged record that recovery could not reach. */
+  /** Bytes at and after the damaged record that recovery could not retain. */
   readonly discardedBytes: number;
   readonly reason: string;
 }
@@ -605,13 +605,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 "non-active segment has a torn record tail",
               );
             }
-            if (decoded.interiorDamage) {
-              // The active segment's residue is abandoned by policy, matching
-              // the Java client: past a mid-file tear the frames behind it are
-              // unreachable anyway, because replay requires a contiguous
-              // sequence and the tear breaks it. Recovery therefore proceeds on
-              // the valid prefix, but the loss is always reported -- discarding
-              // it silently is what made this dangerous.
+            if (decoded.interiorDamage || decoded.crcMismatch) {
+              // The active segment's damaged suffix is abandoned by policy,
+              // matching the Java client. An interior tear strands the frames
+              // behind it because replay requires a contiguous sequence; a
+              // tail CRC mismatch proves the complete final record itself was
+              // lost. Recovery proceeds on the valid prefix, but provable loss
+              // is always reported -- discarding it silently is dangerous.
               this.reportRecoveryDataLoss({
                 directory: this.directory,
                 segmentFile: name,
@@ -619,8 +619,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                   0,
                   decoded.size - SEGMENT_HEADER_SIZE - decoded.logicalSize,
                 ),
-                reason:
-                  "a damaged record is followed by intact records that replay can no longer reach",
+                reason: decoded.interiorDamage
+                  ? "a damaged record is followed by intact records that replay can no longer reach"
+                  : "the active segment tail contains a complete record whose CRC32C does not match",
               });
             }
             await repairSegmentTail(
@@ -2234,6 +2235,8 @@ interface DecodedSegment {
   /** Bytes occupied by encoded records, excluding the fixed segment header. */
   readonly logicalSize: number;
   readonly tornTail: boolean;
+  /** A structurally complete record was present, but its CRC32C did not match. */
+  readonly crcMismatch?: boolean;
   /**
    * Set when structurally intact data still follows the damaged record, which
    * makes this a hole rather than an unwritten tail. Repairing it would delete
@@ -2398,6 +2401,7 @@ async function scanSegment(
         records,
         logicalSize: offset - SEGMENT_HEADER_SIZE,
         tornTail: true,
+        crcMismatch: true,
         // A record that still verifies where this one ends means the damage is
         // bit rot in the middle of the journal, not an interrupted append.
         interiorDamage: await hasValidRecordAt(
