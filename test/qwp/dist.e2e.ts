@@ -106,9 +106,10 @@ describe.each(["import", "require"] as const)(
       },
     );
 
-    it("compiles a writer on the package-root Sender", async () => {
+    it("keeps package-root writer and error identity across QWP entries", async () => {
       const root: any = await load(".", format);
       const qwp: any = await load("./qwp", format);
+      const node: any = await load("./qwp/node", format);
 
       const sender = await root.Sender.fromConfig(
         "ws::addr=127.0.0.1:9;auto_flush=off;",
@@ -118,6 +119,26 @@ describe.each(["import", "require"] as const)(
       await stageTwoRows(trades);
 
       expect(sender.publishedSequence).toBe(-1n);
+      expect(trades).toBeInstanceOf(qwp.QwpTableWriter);
+      expect(trades).toBeInstanceOf(node.QwpTableWriter);
+
+      let rowError: unknown;
+      try {
+        await trades.row({
+          symbol: "SOL-USD",
+          price: "not-a-number",
+          timestamp: 3n,
+        });
+      } catch (error) {
+        rowError = error;
+      }
+      expect(rowError).toBeInstanceOf(qwp.QwpWriterRowError);
+      expect(rowError).toBeInstanceOf(node.QwpWriterRowError);
+
+      const otherFormat = format === "import" ? "require" : "import";
+      const otherNode: any = await load("./qwp/node", otherFormat);
+      expect(trades).not.toBeInstanceOf(otherNode.QwpTableWriter);
+      expect(rowError).not.toBeInstanceOf(otherNode.QwpWriterRowError);
     });
 
     it("re-exported factories keep the identity of their defining bundle", async () => {
@@ -185,39 +206,6 @@ describe("store-and-forward locking", () => {
       expect(stderr).toBe("");
       expect(code).toBe(0);
       expect(stdout.trim()).toBe("function");
-    },
-  );
-
-  it.each(["import", "require"] as const)(
-    "loads the QWP Node subsystem only when a ws/wss/udp sender is built (%s)",
-    async (format) => {
-      // The root entry must not eagerly pull ws, node:dgram and node:os onto
-      // the module graph: http/tcp consumers -- the bulk of callers -- would
-      // pay for the whole QWP Node subsystem and hard-depend on ws resolving.
-      // It must still load lazily and work on the first ws/wss/udp sender.
-      const target = resolveExport(".", format);
-      const probe =
-        '({ ws: !!require.cache[require.resolve("ws")],' +
-        " dgram: process.moduleLoadList.some((m) => /dgram/.test(m)) })";
-      const body =
-        `const before = ${probe};` +
-        ' const sender = new Sender({ protocol: "udp", host: "127.0.0.1", port: 9007 });' +
-        ` const after = ${probe};` +
-        " console.log(JSON.stringify({ before, after, table: typeof sender.table }));";
-      const load_ =
-        format === "require"
-          ? `const { Sender } = require(${JSON.stringify(target)}); ${body}`
-          : `import(${JSON.stringify(pathToFileURL(target).href)}).then(({ Sender }) => { ${body} });`;
-
-      const { code, stdout, stderr } = await runNode(load_);
-      expect(stderr).toBe("");
-      expect(code).toBe(0);
-      const result = JSON.parse(stdout.trim());
-      // Root load alone leaves the QWP Node subsystem off the graph.
-      expect(result.before).toEqual({ ws: false, dgram: false });
-      // The first ws/wss/udp sender lazily loads it, and is functional.
-      expect(result.after).toEqual({ ws: true, dgram: true });
-      expect(result.table).toBe("function");
     },
   );
 

@@ -14,39 +14,24 @@ import {
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
-import { createRequire } from "node:module";
 import { QWP_INGRESS_PATH } from "./_qwp/_core";
+import * as qwpNodeModule from "./qwp/node";
 import type { QwpSender } from "./qwp/node";
 import type { QwpTableWriter } from "./_qwp/sender";
 import type { QwpWriterSchema } from "./_qwp/writer";
 
-// The QWP Node subsystem statically pulls in ws, node:dgram and node:os. Load
-// it lazily -- only when a ws/wss/udp Sender is actually built -- so the http
-// and tcp consumers that make up the bulk of the root entry's callers keep a
-// lean module graph and do not hard-depend on ws being resolvable. The
-// package's own subpath is used so both the ESM and CJS builds resolve the
-// matching qwp/node artifact through the "exports" condition.
-type QwpNodeModule = typeof import("./qwp/node");
-let qwpNodeModule: QwpNodeModule | undefined;
-function loadQwpNode(): QwpNodeModule {
-  if (!qwpNodeModule) {
-    qwpNodeModule = createRequire(import.meta.url)(
-      "@questdb/nodejs-client/qwp/node",
-    ) as QwpNodeModule;
-  }
-  return qwpNodeModule;
-}
+// Import the package's QWP Node entry so each root build stays in its own
+// module universe: Bunchee rewrites this entry import to qwp/node.mjs for ESM
+// and qwp/node.js for CommonJS. Loading the CommonJS condition from the ESM
+// root would duplicate every QWP class and break instanceof across the
+// documented root and /qwp/node entry points.
 
 /**
- * @internal Warms the cache through a dynamic import rather than the
- * synchronous require above. The require resolves the published qwp/node
- * artifact through the package `exports`; a suite running against `src/` has no
- * such artifact for its live source, so it preloads first to share the very
- * module instance it imported -- keeping spies and source edits effective. The
- * built entry never calls this: the synchronous fallback covers it.
+ * @internal Retained for source-level suites that preload QWP before installing
+ * spies. The production root already imports the matching-format entry.
  */
-export async function preloadQwpNode(): Promise<void> {
-  qwpNodeModule ??= await import("./qwp/node");
+export function preloadQwpNode(): Promise<void> {
+  return Promise.resolve();
 }
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
@@ -164,7 +149,7 @@ class Sender {
         ? // SenderOptions already parsed the ws/wss connect string with the
           // QWP schema, so there is one vocabulary and one parser however the
           // sender was constructed.
-          loadQwpNode().createQwpNodeSender(
+          qwpNodeModule.createQwpNodeSender(
             resolved.ingress,
             resolved.sender,
             resolved.ingressSession,
@@ -643,7 +628,7 @@ function createConfiguredQwpSender(
   // resolveQwpNodeClientConfig(). This path builds a sender from a
   // programmatic options object, so it reads options.qwp.* directly.
   const storeAndForward = configuredWebSocket.storeAndForward;
-  return loadQwpNode().createQwpNodeSender(
+  return qwpNodeModule.createQwpNodeSender(
     {
       ...configuredWebSocket,
       storeAndForward,
@@ -684,7 +669,7 @@ function createConfiguredQwpUdpSender(
   const configuredSender = options.qwp?.sender ?? {};
   const maxDatagramSize =
     options.max_datagram_size ?? configuredUdp.maxDatagramSize ?? 1_400;
-  return loadQwpNode().createQwpNodeUdpSender(
+  return qwpNodeModule.createQwpNodeUdpSender(
     {
       ...configuredUdp,
       host: options.host,
