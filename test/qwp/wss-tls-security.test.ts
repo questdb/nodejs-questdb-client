@@ -29,6 +29,7 @@ beforeAll(preloadQwpNode);
  */
 
 const CA_PATH = "test/certs/ca/ca.crt";
+const TRUSTED_CA_PATH = "test/certs/ca/ca-trusted.crt";
 
 interface AgentTlsOptions {
   rejectUnauthorized?: boolean;
@@ -62,7 +63,10 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     expect(tls.pfx).toBeUndefined();
   });
 
-  it("trusts a server signed by the configured PEM root", async () => {
+  it.each([
+    ["CERTIFICATE", CA_PATH],
+    ["TRUSTED CERTIFICATE", TRUSTED_CA_PATH],
+  ])("trusts a server signed by a %s PEM root", async (_label, rootsPath) => {
     const server = https.createServer(
       {
         key: readFileSync("test/certs/server/server.key"),
@@ -80,7 +84,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     try {
       const port = (server.address() as AddressInfo).port;
       const options = qwpNode.parseQwpNodeClientConfig(
-        `wss::addr=127.0.0.1:${port};tls_roots=${CA_PATH};`,
+        `wss::addr=127.0.0.1:${port};tls_roots=${rootsPath};`,
       );
       await new Promise<void>((resolve, reject) => {
         const request = https.get(
@@ -117,7 +121,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
       qwpNode.parseQwpNodeClientConfig(
         "wss::addr=localhost;tls_roots=package.json;",
       ),
-    ).toThrow(/valid PEM-encoded CA certificates.*PKCS#12/);
+    ).toThrow(/PEM-encoded CA certificates.*PKCS#12/);
   });
 
   it("disables verification only when tls_verify=unsafe_off is explicit", () => {

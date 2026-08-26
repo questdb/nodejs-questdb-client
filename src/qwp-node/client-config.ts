@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { Agent as HttpsAgent } from "node:https";
-import { createSecureContext } from "node:tls";
 import type {
   QwpNodeClientConfigOptions,
   QwpNodeClientOptions,
@@ -597,22 +596,14 @@ function createTlsAgent(parsed: ParsedConfig): HttpsAgent | undefined {
 
 function readPemTlsRoots(path: string): Buffer {
   const roots = readFileSync(path);
-  if (
-    !roots.includes("-----BEGIN CERTIFICATE-----") ||
-    !roots.includes("-----END CERTIFICATE-----")
-  ) {
+  const containsCertificate =
+    (roots.includes("-----BEGIN CERTIFICATE-----") &&
+      roots.includes("-----END CERTIFICATE-----")) ||
+    (roots.includes("-----BEGIN TRUSTED CERTIFICATE-----") &&
+      roots.includes("-----END TRUSTED CERTIFICATE-----"));
+  if (!containsCertificate) {
     throw new Error(
-      "tls_roots must contain valid PEM-encoded CA certificates; PKCS#12 trust stores are not supported by the Node.js QWP client",
-    );
-  }
-  try {
-    // Parse the configured roots now so PKCS#12 or malformed files fail while
-    // resolving the connect string, before a sender accepts rows or connects.
-    createSecureContext({ ca: roots });
-  } catch (cause) {
-    throw new Error(
-      "tls_roots must contain valid PEM-encoded CA certificates; PKCS#12 trust stores are not supported by the Node.js QWP client",
-      { cause },
+      "tls_roots must contain PEM-encoded CA certificates (CERTIFICATE or TRUSTED CERTIFICATE); PKCS#12 trust stores are not supported by the Node.js QWP client",
     );
   }
   return roots;
