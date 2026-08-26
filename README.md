@@ -384,7 +384,9 @@ Browsers can request durable ingress acknowledgements without custom HTTP
 headers. The client offers a QWP WebSocket subprotocol and verifies that the
 server selected it before sending data. Browser keepalives use side-effect-free,
 table-less QWP poll frames because the WebSocket API does not expose
-protocol-level PING frames.
+protocol-level PING frames. A poll completes once published: durable progress
+arrives independently, and an open deferred transaction may intentionally
+prevent the server from sending a cumulative OK for that poll.
 
 ```typescript
 const sender = await connectQwpBrowserSender(

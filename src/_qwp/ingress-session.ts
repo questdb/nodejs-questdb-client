@@ -202,7 +202,7 @@ export interface QwpIngressSessionOptions {
   /**
    * Enables durable-ACK tracking. While committed table transactions await
    * durable upload, Node transports send WebSocket PING frames and browser
-   * transports send table-less QWP commit frames. Zero keeps tracking enabled
+   * transports send table-less QWP poll frames. Zero keeps tracking enabled
    * but disables automatic polling.
    */
   durableAckKeepaliveMs?: number;
@@ -1044,6 +1044,7 @@ export class QwpIngressSession {
   private startFrameWithPublication(
     frame: Uint8Array,
     publicationBarrier: Promise<void> = this.sendTail,
+    ackTimeoutEnabled = true,
   ): QwpIngressSendResult {
     this.throwIfUnavailable();
     const ackDeferredUntilCommit =
@@ -1105,7 +1106,7 @@ export class QwpIngressSession {
         // group-closing frame has its own deadline and cumulatively resolves
         // this waiter, so starting a per-frame timer here would make valid
         // transactions fail merely because they stayed open for ackTimeoutMs.
-        if (ackDeferredUntilCommit) return;
+        if (ackDeferredUntilCommit || !ackTimeoutEnabled) return;
         pending.timer = setTimeout(() => {
           if (!this.pending.delete(sequence)) return;
           const error = new Error(
@@ -1271,13 +1272,36 @@ export class QwpIngressSession {
   /**
    * Prompts the server to publish its latest durable-ingress watermarks.
    * Node transports use a WebSocket PING; browsers send the protocol-level
-   * table-less durable-ACK poll frame.
+   * table-less durable-ACK poll frame. Browser completion means the control
+   * frame was published; durable progress arrives independently because the
+   * server may withhold its cumulative OK while a transaction remains open.
    */
   pollDurableAck(): Promise<void> {
     this.throwIfUnavailable();
     return this.connection.ping
       ? this.connection.ping()
-      : this.sendFrame(encodeQwpDurableAckPollFrame()).then(() => undefined);
+      : this.publishBrowserDurableAckPoll();
+  }
+
+  /**
+   * Publishes a browser control poll without an ordinary ACK deadline.
+   *
+   * QuestDB can answer this frame with durable progress but deliberately defer
+   * its cumulative OK while an earlier transaction is still open. Retaining an
+   * untimed internal waiter preserves NACK handling and lets a later cumulative
+   * OK retire the poll sequence; callers only wait for local publication.
+   */
+  private publishBrowserDurableAckPoll(): Promise<void> {
+    const poll = this.startFrameWithPublication(
+      encodeQwpDurableAckPollFrame(),
+      this.sendTail,
+      false,
+    );
+    void poll.acknowledgement.catch((error: unknown) => {
+      if (this.closing || this.failure) return;
+      this.fail(error);
+    });
+    return poll.publication;
   }
 
   /** @internal Registers runtime-specific cleanup owned by this session. */
@@ -1605,7 +1629,7 @@ export class QwpIngressSession {
       }
       const poll = this.connection.ping
         ? this.connection.ping()
-        : this.sendFrame(encodeQwpDurableAckPollFrame()).then(() => undefined);
+        : this.publishBrowserDurableAckPoll();
       void poll
         .then(() => this.scheduleDurablePoll())
         .catch((error: unknown) => this.fail(error));

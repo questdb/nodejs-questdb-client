@@ -2466,6 +2466,113 @@ describe("QwpIngressSession", () => {
     }
   });
 
+  it("does not ACK-timeout a browser durable poll behind a deferred frame", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+      const connecting = connectQwpBrowserIngress(
+        {
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: true,
+          ingressNegotiationTimeoutMs: 0,
+          webSocketFactory: () => asQwpSocket(socket),
+        },
+        {
+          ackTimeoutMs: 20,
+          durableAckKeepaliveMs: 5,
+        },
+      );
+      socket.open();
+      const session = await connecting;
+      socket.onSend = () => {
+        if (socket.sent.length === 1) {
+          socket.message(
+            ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+          );
+        } else if (socket.sent.length === 3) {
+          // The tandem server reports durable progress for the poll but does
+          // not cumulatively OK it while sequence 1 remains deferred.
+          socket.message(durableResponse([["trades", 42n]]));
+        } else if (socket.sent.length === 4) {
+          socket.message(
+            ingressResponse(QWP_STATUS.OK, 3n, undefined, [["trades", 43n]]),
+          );
+        }
+      };
+
+      const committed = await session.sendFrame(
+        encodeQwpIngressFrame([longTable("trades", [1n])]),
+      );
+      const durable = session.waitForDurable(committed);
+      const deferred = session.sendFrameWithPublication(
+        encodeQwpIngressFrame([longTable("trades", [2n])], {
+          deferCommit: true,
+        }),
+      );
+      await deferred.publication;
+      let deferredState: "pending" | "resolved" | "rejected" = "pending";
+      void deferred.acknowledgement.then(
+        () => {
+          deferredState = "resolved";
+        },
+        () => {
+          deferredState = "rejected";
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(5);
+      await expect(durable).resolves.toBeUndefined();
+      expect(socket.sent[2]).toEqual(encodeQwpDurableAckPollFrame());
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(deferredState).toBe("pending");
+      expect(session.metrics.lastError).toBeUndefined();
+
+      const commit = session.sendFrame(encodeQwpIngressFrame([]));
+      await expect(commit).resolves.toMatchObject({ sequence: 3n });
+      await expect(deferred.acknowledgement).resolves.toMatchObject({
+        sequence: 3n,
+      });
+      expect(session.metrics.pendingResponses).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still terminates a browser session when a durable poll is NACKed", async () => {
+    const socket = new FakeWebSocket();
+    socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+    const connecting = connectQwpBrowserIngress(
+      {
+        url: "ws://localhost:9000/write/v4",
+        requestDurableAck: true,
+        ingressNegotiationTimeoutMs: 0,
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      {
+        onError: () => undefined,
+        onSenderError: () => undefined,
+      },
+    );
+    socket.open();
+    const session = await connecting;
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.PARSE_ERROR, 0n, "invalid durable poll"),
+      );
+    };
+
+    await expect(session.pollDurableAck()).resolves.toBeUndefined();
+    await vi.waitFor(() => {
+      expect(() => session.publishFrame(Uint8Array.of(1))).toThrow(
+        "invalid durable poll",
+      );
+    });
+    await session.close();
+  });
+
   it("rejects the matching frame on NACK without breaking later ACKs", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
