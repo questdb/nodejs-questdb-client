@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
+import type { AddressInfo } from "node:net";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as qwpNode from "../../src/qwp/node";
 import { Sender, preloadQwpNode } from "../../src/sender";
@@ -58,6 +59,48 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     expect(tls.rejectUnauthorized).toBe(true);
     expect(tls.ca).toEqual(readFileSync(CA_PATH));
     expect(tls.pfx).toBeUndefined();
+  });
+
+  it("trusts a server signed by the configured PEM root", async () => {
+    const server = https.createServer(
+      {
+        key: readFileSync("test/certs/server/server.key"),
+        cert: readFileSync("test/certs/server/server.crt"),
+      },
+      (_request, response) => {
+        response.end("ok");
+      },
+    );
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const options = qwpNode.parseQwpNodeClientConfig(
+        `wss::addr=127.0.0.1:${port};tls_roots=${CA_PATH};`,
+      );
+      await new Promise<void>((resolve, reject) => {
+        const request = https.get(
+          {
+            hostname: "127.0.0.1",
+            port,
+            agent: options.ingress.agent as https.Agent,
+          },
+          (response) => {
+            response.resume();
+            response.once("end", resolve);
+            response.once("error", reject);
+          },
+        );
+        request.once("error", reject);
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it("rejects password-protected PKCS#12 trust stores with PEM guidance", () => {
