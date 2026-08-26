@@ -203,7 +203,8 @@ export interface QwpIngressSessionOptions {
    * Enables durable-ACK tracking. While committed table transactions await
    * durable upload, Node transports send WebSocket PING frames and browser
    * transports send table-less QWP poll frames. Zero keeps tracking enabled
-   * but disables automatic polling.
+   * but disables automatic polling. Factory-created browser sessions require
+   * requestDurableAck=true when this option is supplied.
    */
   durableAckKeepaliveMs?: number;
   /**
@@ -1242,6 +1243,11 @@ export class QwpIngressSession {
         new Error("durable ACK tracking is not enabled for this session"),
       );
     }
+    if (!this.connection.handshake.durableAckEnabled) {
+      return Promise.reject(
+        new Error("durable ACK was not negotiated for this session"),
+      );
+    }
     if (response.status !== QWP_STATUS.OK) {
       return Promise.reject(
         new Error("only a successful QWP ACK can be awaited for durability"),
@@ -1278,6 +1284,11 @@ export class QwpIngressSession {
    */
   pollDurableAck(): Promise<void> {
     this.throwIfUnavailable();
+    if (!this.connection.handshake.durableAckEnabled) {
+      return Promise.reject(
+        new Error("durable ACK was not negotiated for this session"),
+      );
+    }
     return this.connection.ping
       ? this.connection.ping()
       : this.publishBrowserDurableAckPoll();
@@ -1499,7 +1510,12 @@ export class QwpIngressSession {
   }
 
   private trackDurableTargets(response: QwpIngressResponse): void {
-    if (this.options.durableAckKeepaliveMs === undefined) return;
+    if (
+      this.options.durableAckKeepaliveMs === undefined ||
+      !this.connection.handshake.durableAckEnabled
+    ) {
+      return;
+    }
     for (const table of response.tables) {
       const durable = this.durableWatermarks.get(table.name);
       if (durable !== undefined && durable >= table.sequenceTransaction) {
@@ -1613,6 +1629,7 @@ export class QwpIngressSession {
     if (
       interval === undefined ||
       interval === 0 ||
+      !this.connection.handshake.durableAckEnabled ||
       this.pendingDurableTargets.size === 0 ||
       this.durablePollTimer
     ) {

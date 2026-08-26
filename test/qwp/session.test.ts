@@ -1998,6 +1998,23 @@ describe("QwpIngressSession", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it("rejects browser durable keepalives without requesting negotiation", async () => {
+    let factoryCalls = 0;
+    await expect(
+      connectQwpBrowserIngress(
+        {
+          url: "ws://localhost:9000/write/v4",
+          webSocketFactory: () => {
+            factoryCalls++;
+            return asQwpSocket(new FakeWebSocket());
+          },
+        },
+        { durableAckKeepaliveMs: 5 },
+      ),
+    ).rejects.toThrow("durableAckKeepaliveMs requires requestDurableAck=true");
+    expect(factoryCalls).toBe(0);
+  });
+
   it("close aborts a send blocked by browser backpressure", async () => {
     vi.useFakeTimers();
     try {
@@ -2385,8 +2402,10 @@ describe("QwpIngressSession", () => {
     vi.useFakeTimers();
     try {
       const socket = new FakePingWebSocket();
+      socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
       const connecting = connectQwpBrowserWebSocket({
         url: "ws://localhost:9000/write/v4",
+        requestDurableAck: true,
         webSocketFactory: () => asQwpSocket(socket),
       });
       socket.open();
@@ -2415,6 +2434,41 @@ describe("QwpIngressSession", () => {
 
       await vi.advanceTimersByTimeAsync(100);
       expect(socket.pingCalls).toBe(2);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not poll when durable ACK was not negotiated", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const session = new QwpIngressSession(await connecting, {
+        durableAckKeepaliveMs: 5,
+      });
+      socket.onSend = () => {
+        socket.message(
+          ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+        );
+      };
+
+      const ack = await session.sendFrame(Uint8Array.of(1));
+      await vi.advanceTimersByTimeAsync(20);
+      expect(socket.sent).toHaveLength(1);
+      expect(session.metrics.pendingDurableTables).toBe(0);
+      await expect(session.waitForDurable(ack)).rejects.toThrow(
+        "durable ACK was not negotiated",
+      );
+      await expect(session.pollDurableAck()).rejects.toThrow(
+        "durable ACK was not negotiated",
+      );
+      expect(socket.sent).toHaveLength(1);
       await session.close();
     } finally {
       vi.useRealTimers();

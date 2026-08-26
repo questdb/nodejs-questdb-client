@@ -663,6 +663,14 @@ export async function connectQwpBrowserIngress(
   /** Cancels a first connect still negotiating; see QwpIngressSession.connect. */
   signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
+  if (
+    sessionOptions.durableAckKeepaliveMs !== undefined &&
+    options.requestDurableAck !== true
+  ) {
+    throw new RangeError(
+      "durableAckKeepaliveMs requires requestDurableAck=true for browser ingress",
+    );
+  }
   const effectiveSessionOptions: QwpIngressSessionOptions = {
     ...sessionOptions,
     durableAckKeepaliveMs: options.requestDurableAck

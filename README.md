@@ -386,7 +386,10 @@ server selected it before sending data. Browser keepalives use side-effect-free,
 table-less QWP poll frames because the WebSocket API does not expose
 protocol-level PING frames. A poll completes once published: durable progress
 arrives independently, and an open deferred transaction may intentionally
-prevent the server from sending a cumulative OK for that poll.
+prevent the server from sending a cumulative OK for that poll. Supplying
+`durableAckKeepaliveMs` requires durable negotiation (`requestDurableAck: true`,
+either explicit or implied by `awaitDurableAck`); manual polls and durable waits
+reject locally when the capability was not negotiated.
 
 ```typescript
 const sender = await connectQwpBrowserSender(
