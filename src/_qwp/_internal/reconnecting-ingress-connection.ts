@@ -924,6 +924,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         }
         return;
       } catch (error) {
+        // A poison frame is meant to identify a connection that repeatedly
+        // accepts the same replay head and then rejects it or disappears. A
+        // failed connection/replay attempt breaks that sequence: the server
+        // is unavailable independently of the frame, so old strikes must not
+        // survive while the outage supplies the escalation dwell time.
+        this.resetPoisonEpisode();
         if (reconnecting) this.totalReconnectErrors++;
         lastError = error;
         if (this.connectingCandidate === candidate) {
@@ -1386,6 +1392,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       const exempt =
         frame.dictionaryCatchup || response.status === QWP_STATUS.NOT_WRITABLE;
       if (exempt) {
+        this.resetPoisonEpisode();
         throw new RetriableIngressNackError(
           frame.frameSequence,
           response.status,
@@ -1469,6 +1476,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     ) {
       return;
     }
+    this.resetPoisonEpisode();
+  }
+
+  private resetPoisonEpisode(): void {
     this.poisonFrameSequence = undefined;
     this.poisonFirstStrikeMs = 0;
     this.poisonStrikes = 0;
@@ -1493,8 +1504,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     cause: unknown,
     closeInfo?: QwpConnectionCloseInfo,
   ): Error {
-    const orderly = closeInfo?.code === 1000 || closeInfo?.code === 1001;
-    const head = orderly ? undefined : this.currentPoisonHead();
+    const exempt =
+      closeInfo?.code === 1000 ||
+      closeInfo?.code === 1001 ||
+      closeInfo?.code === 1012 ||
+      closeInfo?.code === 1013;
+    if (exempt) this.resetPoisonEpisode();
+    const head = exempt ? undefined : this.currentPoisonHead();
     if (!head) {
       return new RetriableIngressConnectionError(
         this.nextExemptRecycleDelay(),

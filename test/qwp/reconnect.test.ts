@@ -238,8 +238,12 @@ class FakeConnection implements QwpBinaryConnection {
     this.incoming.push(payload);
   }
 
-  drop(): void {
-    this.finish({ code: 1006, reason: "connection lost", wasClean: false });
+  drop(code = 1006, reason = "connection lost"): void {
+    this.finish({ code, reason, wasClean: false });
+  }
+
+  transportError(): void {
+    this.incoming.fail(new Error("WebSocket transport error"));
   }
 
   private finish(info: QwpConnectionCloseInfo): void {
@@ -2618,21 +2622,119 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
-  it("stops replaying a head frame that repeatedly causes non-orderly closes", async () => {
-    const first = new FakeConnection("primary");
-    const second = new FakeConnection("secondary");
-    const connections = [first, second];
-    const replayStore = new TrackingReplayStore();
+  it.each([
+    ["close code 1006", (connection: FakeConnection) => connection.drop()],
+    [
+      "close code 1011",
+      (connection: FakeConnection) =>
+        connection.drop(1011, "internal server error"),
+    ],
+    [
+      "no close information",
+      (connection: FakeConnection) => connection.transportError(),
+    ],
+  ] as const)(
+    "stops replaying a head frame that repeatedly causes %s",
+    async (_failure, fail) => {
+      const first = new FakeConnection("primary");
+      const second = new FakeConnection("secondary");
+      const connections = [first, second];
+      const replayStore = new TrackingReplayStore();
+      const session = await QwpIngressSession.connect(
+        async () => {
+          const connection = connections.shift();
+          if (!connection) throw new Error("no connection available");
+          return connection;
+        },
+        {
+          replayStore,
+          reconnect: {
+            maxAttempts: 1,
+            maxFrameRejections: 2,
+            poisonMinEscalationWindowMs: 0,
+            initialBackoffMs: 0,
+            maxBackoffMs: 0,
+          },
+        },
+      );
+      const pending = session.sendFrame(Uint8Array.of(9));
+      await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+      fail(first);
+      await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+      fail(second);
+
+      await expect(pending).rejects.toThrow(/frameSequence=0, strikes=2/);
+      await expect(pending).rejects.toBeInstanceOf(QwpProtocolError);
+      expect(connections).toHaveLength(0);
+      expect(Array.from(replayStore.records.keys())).toEqual([0n]);
+      await session.close();
+    },
+  );
+
+  it.each([
+    [1000, "normal closure"],
+    [1001, "going away"],
+    [1012, "service restart"],
+    [1013, "try again later"],
+  ] as const)(
+    "close code %i breaks a poison-frame strike episode",
+    async (code, reason) => {
+      const firstSuspect = new FakeConnection("suspect-1");
+      const exempt = new FakeConnection("restarting");
+      const secondSuspect = new FakeConnection("suspect-2");
+      const healthy = new FakeConnection("healthy");
+      const connections = [firstSuspect, exempt, secondSuspect, healthy];
+      const session = await QwpIngressSession.connect(
+        async () => {
+          const connection = connections.shift();
+          if (!connection) throw new Error("no connection available");
+          return connection;
+        },
+        {
+          reconnect: {
+            maxAttempts: 1,
+            maxFrameRejections: 2,
+            poisonMinEscalationWindowMs: 0,
+            initialBackoffMs: 0,
+            maxBackoffMs: 0,
+          },
+        },
+      );
+      const pending = session.sendFrame(Uint8Array.of(9));
+      await vi.waitFor(() => expect(firstSuspect.sent).toHaveLength(1));
+      firstSuspect.drop();
+      await vi.waitFor(() => expect(exempt.sent).toHaveLength(1));
+      exempt.drop(code, reason);
+      await vi.waitFor(() => expect(secondSuspect.sent).toHaveLength(1));
+      secondSuspect.drop();
+      await vi.waitFor(() => expect(healthy.sent).toHaveLength(1));
+      healthy.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+      await expect(pending).resolves.toMatchObject({
+        status: QWP_STATUS.OK,
+        sequence: 0n,
+      });
+      await session.close();
+    },
+  );
+
+  it("resets poison strikes when connection establishment fails", async () => {
+    const first = new FakeConnection("terminating-1");
+    const second = new FakeConnection("terminating-2");
+    const healthy = new FakeConnection("healthy");
+    let factoryCalls = 0;
     const session = await QwpIngressSession.connect(
       async () => {
-        const connection = connections.shift();
-        if (!connection) throw new Error("no connection available");
-        return connection;
+        factoryCalls++;
+        if (factoryCalls === 1) return first;
+        if (factoryCalls === 2) throw new Error("connection refused");
+        if (factoryCalls === 3) return second;
+        if (factoryCalls === 4) return healthy;
+        throw new Error("no connection available");
       },
       {
-        replayStore,
         reconnect: {
-          maxAttempts: 1,
+          maxAttempts: 2,
           maxFrameRejections: 2,
           poisonMinEscalationWindowMs: 0,
           initialBackoffMs: 0,
@@ -2645,44 +2747,14 @@ describe("QWP ingress reconnect and replay", () => {
     first.drop();
     await vi.waitFor(() => expect(second.sent).toHaveLength(1));
     second.drop();
-
-    await expect(pending).rejects.toThrow(/frameSequence=0, strikes=2/);
-    await expect(pending).rejects.toBeInstanceOf(QwpProtocolError);
-    expect(connections).toHaveLength(0);
-    expect(Array.from(replayStore.records.keys())).toEqual([0n]);
-    await session.close();
-  });
-
-  it("does not count orderly ingress closes as poison-frame strikes", async () => {
-    const first = new FakeConnection("primary");
-    const second = new FakeConnection("secondary");
-    const connections = [first, second];
-    const session = await QwpIngressSession.connect(
-      async () => {
-        const connection = connections.shift();
-        if (!connection) throw new Error("no connection available");
-        return connection;
-      },
-      {
-        reconnect: {
-          maxAttempts: 1,
-          maxFrameRejections: 1,
-          poisonMinEscalationWindowMs: 0,
-          initialBackoffMs: 0,
-          maxBackoffMs: 0,
-        },
-      },
-    );
-    const pending = session.sendFrame(Uint8Array.of(9));
-    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
-    await first.close(1001, "rolling restart");
-    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
-    second.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(healthy.sent).toHaveLength(1));
+    healthy.receive(ingressResponse(QWP_STATUS.OK, 0n));
 
     await expect(pending).resolves.toMatchObject({
       status: QWP_STATUS.OK,
       sequence: 0n,
     });
+    expect(factoryCalls).toBe(4);
     await session.close();
   });
 
