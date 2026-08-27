@@ -253,12 +253,20 @@ export function short(): QwpWriterColumn<number> {
   return column("short", false);
 }
 
-/** Defines a signed 32-bit QuestDB INT column. */
+/**
+ * Defines a signed 32-bit QuestDB INT column.
+ * `-2_147_483_648` is QuestDB's INT NULL sentinel: it is stored as NULL and
+ * cannot be stored as an ordinary INT value.
+ */
 export function int32(): QwpWriterColumn<number> {
   return column("int32", false);
 }
 
-/** Defines a signed 64-bit QuestDB LONG column. Inputs must be bigint. */
+/**
+ * Defines a signed 64-bit QuestDB LONG column. Inputs must be bigint.
+ * `-9_223_372_036_854_775_808n` is QuestDB's LONG NULL sentinel: it is stored
+ * as NULL and cannot be stored as an ordinary LONG value.
+ */
 export function int64(): QwpWriterColumn<bigint> {
   return column("int64", false);
 }
@@ -299,7 +307,11 @@ export function designatedTimestamp<const Unit extends QwpTimestampUnit = "us">(
   return column("timestamp", true, { unit });
 }
 
-/** Defines a QuestDB DATE column. Inputs are milliseconds since the epoch. */
+/**
+ * Defines a QuestDB DATE column. Inputs are milliseconds since the epoch.
+ * `-9_223_372_036_854_775_808n` is QuestDB's DATE NULL sentinel: it is stored
+ * as NULL and cannot be stored as an ordinary DATE value.
+ */
 export function date(): QwpWriterColumn<number | bigint> {
   return column("date", false);
 }

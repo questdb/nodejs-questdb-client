@@ -611,13 +611,13 @@ The schema vocabulary covers every column type the fluent row API can write:
 | `bool()`                    | BOOLEAN              | `boolean`                                                                              |
 | `byte()`                    | BYTE                 | `number`                                                                               |
 | `short()`                   | SHORT                | `number`                                                                               |
-| `int32()`                   | INT                  | `number`                                                                               |
-| `int64()`, `long()`         | LONG                 | `bigint`                                                                               |
+| `int32()`                   | INT                  | `number`; `-2_147_483_648` is the NULL sentinel                                        |
+| `int64()`, `long()`         | LONG                 | `bigint`; `-9_223_372_036_854_775_808n` is the NULL sentinel                           |
 | `float32()`                 | FLOAT                | `number`                                                                               |
 | `float64()`, `double()`     | DOUBLE               | `number`                                                                               |
 | `timestamp(unit)`           | TIMESTAMP            | `number` or `bigint`; `"ns"` requires `bigint`                                         |
 | `designatedTimestamp(unit)` | designated TIMESTAMP | as above, required in every row                                                        |
-| `date()`                    | DATE                 | `number` or `bigint` milliseconds since the epoch                                      |
+| `date()`                    | DATE                 | epoch milliseconds; `-9_223_372_036_854_775_808n` is the NULL sentinel                 |
 | `binary()`                  | BINARY               | `Uint8Array`, copied on append                                                         |
 | `uuid()`                    | UUID                 | canonical UUID text, 16 canonical big-endian bytes, or `{ low, high }`                 |
 | `long256()`                 | LONG256              | unsigned 256-bit `bigint`, `0x` hex text, four little-endian words, or `{ words }`     |
@@ -632,6 +632,13 @@ The schema vocabulary covers every column type the fluent row API can write:
 LONG, LONG256, and nanosecond timestamp inputs are `bigint` so they cannot silently
 lose precision. The record forms are exactly what the egress result views hand back,
 so a query result value can be written straight into a row without conversion.
+
+QuestDB reserves the minimum signed value as NULL for INT, LONG, and DATE. Both the
+fluent setters (`int32Column()`, `longColumn()`, and `dateColumn()`) and the compiled
+writer fields above follow the Java QWP client and server convention: passing
+`-2_147_483_648` to INT, or `-9_223_372_036_854_775_808n` to LONG or DATE, stores
+NULL. These sentinel values cannot be stored as ordinary numeric values. Passing
+`null` or `undefined`, or omitting a compiled-writer field, also writes NULL.
 
 Widths are spelled out deliberately. The fluent row API predates these names and its
 `floatColumn()` and `intColumn()` are 64-bit despite reading as 32-bit, with

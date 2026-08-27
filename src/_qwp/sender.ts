@@ -1216,6 +1216,10 @@ export class QwpSender {
     }
   }
 
+  /**
+   * Adds a QuestDB INT column value. `-2_147_483_648` is QuestDB's INT NULL
+   * sentinel: it is stored as NULL and cannot be stored as an ordinary value.
+   */
   int32Column(name: string, value: number | null | undefined): QwpSender {
     if (this.omitsNullish(name, value)) return this;
     try {
@@ -1242,6 +1246,11 @@ export class QwpSender {
     }
   }
 
+  /**
+   * Adds a QuestDB LONG column value. `-9_223_372_036_854_775_808n` is
+   * QuestDB's LONG NULL sentinel: it is stored as NULL and cannot be stored as
+   * an ordinary value.
+   */
   longColumn(
     name: string,
     value: number | bigint | null | undefined,
@@ -1301,6 +1310,11 @@ export class QwpSender {
     }
   }
 
+  /**
+   * Adds a QuestDB DATE column value in milliseconds since the epoch.
+   * `-9_223_372_036_854_775_808n` is QuestDB's DATE NULL sentinel: it is
+   * stored as NULL and cannot be stored as an ordinary value.
+   */
   dateColumn(
     name: string,
     millisecondsSinceEpoch: number | bigint | null | undefined,
