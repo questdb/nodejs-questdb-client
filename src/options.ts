@@ -7,12 +7,9 @@ import * as https from "https";
 import { log, Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
-import {
-  getQwpNodeModule,
-  preloadQwpNodeModule,
-} from "./qwp-node/module-registry";
-import type { QwpNodeClientOptions } from "./qwp/node";
+import * as qwpNode from "./qwp/node";
 import type {
+  QwpNodeClientOptions,
   QwpNodeIngressOptions,
   QwpNodeUdpOptions,
   QwpIngressSessionOptions,
@@ -92,7 +89,7 @@ function resolveQwpConfig(
   const agent =
     webSocketOverrides.agent ??
     selectQwpSchemeAgent(options.agent, options.protocol === WSS, logger);
-  const resolved = getQwpNodeModule().parseQwpNodeClientConfig(configString, {
+  const resolved = qwpNode.parseQwpNodeClientConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,
     // The top-level logger wins, then the QWP-specific one, then the default
@@ -494,9 +491,6 @@ class SenderOptions {
     configurationString: string,
     extraOptions?: ExtraOptions,
   ): Promise<SenderOptions> {
-    if (isQwpConfigurationString(configurationString)) {
-      await preloadQwpNodeModule();
-    }
     const options = new SenderOptions(configurationString, extraOptions);
     await SenderOptions.resolveAuto(options);
     return options;
@@ -519,13 +513,6 @@ class SenderOptions {
       extraOptions,
     );
   }
-}
-
-function isQwpConfigurationString(configurationString: string): boolean {
-  const separator = configurationString?.indexOf("::") ?? -1;
-  if (separator < 0) return false;
-  const protocol = configurationString.slice(0, separator);
-  return protocol === WS || protocol === WSS || protocol === UDP;
 }
 
 function parseConfigurationString(

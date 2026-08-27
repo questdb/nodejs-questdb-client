@@ -15,22 +15,12 @@ import {
 import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
-import {
-  getQwpNodeModule,
-  preloadQwpNodeModule,
-} from "./qwp-node/module-registry";
+import * as qwpNode from "./qwp/node";
 import type { QwpSender } from "./qwp/node";
 import type { QwpTableWriter } from "./_qwp/sender";
 import type { QwpWriterSchema } from "./_qwp/writer";
 
 const QWP_INGRESS_PATH = "/write/v4";
-
-/**
- * @internal Preloads the matching-format QWP Node entry into the root module's
- * registry. The async configuration factories call this automatically; it is
- * exposed for source-level suites and synchronous programmatic construction.
- */
-export const preloadQwpNode = preloadQwpNodeModule;
 
 const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
 
@@ -149,7 +139,7 @@ class Sender {
         ? // SenderOptions already parsed the ws/wss connect string with the
           // QWP schema, so there is one vocabulary and one parser however the
           // sender was constructed.
-          getQwpNodeModule().createQwpNodeSender(
+          qwpNode.createQwpNodeSender(
             resolved.ingress,
             resolved.sender,
             resolved.ingressSession,
@@ -642,7 +632,7 @@ function createConfiguredQwpSender(
   // resolveQwpNodeClientConfig(). This path builds a sender from a
   // programmatic options object, so it reads options.qwp.* directly.
   const storeAndForward = configuredWebSocket.storeAndForward;
-  return getQwpNodeModule().createQwpNodeSender(
+  return qwpNode.createQwpNodeSender(
     {
       ...configuredWebSocket,
       storeAndForward,
@@ -684,7 +674,7 @@ function createConfiguredQwpUdpSender(
   const configuredSender = options.qwp?.sender ?? {};
   const maxDatagramSize =
     options.max_datagram_size ?? configuredUdp.maxDatagramSize ?? 1_400;
-  return getQwpNodeModule().createQwpNodeUdpSender(
+  return qwpNode.createQwpNodeUdpSender(
     {
       ...configuredUdp,
       host: options.host,

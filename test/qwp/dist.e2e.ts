@@ -69,6 +69,25 @@ const load = (subpath: Subpath, format: Format) =>
     ? Promise.resolve(require_(resolveExport(subpath, format)))
     : import(pathToFileURL(resolveExport(subpath, format)).href);
 
+const runNode = (script: string) =>
+  new Promise<{ code: number | null; stdout: string; stderr: string }>(
+    (resolve) => {
+      const child = execFile(
+        process.execPath,
+        ["-e", script],
+        (error, stdout, stderr) =>
+          resolve({
+            code: error ? ((error as { code?: number }).code ?? 1) : 0,
+            stdout,
+            stderr,
+          }),
+      );
+      child.on("error", () =>
+        resolve({ code: 1, stdout: "", stderr: "spawn failed" }),
+      );
+    },
+  );
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const schemaFrom = (factories: any) => ({
   symbol: factories.symbol(),
@@ -114,8 +133,8 @@ describe.each(["import", "require"] as const)(
         "ws::addr=127.0.0.1:9;auto_flush=off;",
         { log: () => {} },
       );
-      // Loading the public Node entry after the root has lazily initialized
-      // QWP proves the registry selected this same-format module instance.
+      // Loading the public Node entry after the root proves its static import
+      // selected this same-format module instance.
       const node: any = await load("./qwp/node", format);
       const trades = sender.writer("trades", schemaFrom(qwp));
       await stageTwoRows(trades);
@@ -143,6 +162,31 @@ describe.each(["import", "require"] as const)(
       expect(rowError).not.toBeInstanceOf(otherNode.QwpWriterRowError);
     });
 
+    it("keeps synchronous package-root identity", async () => {
+      const root: any = await load(".", format);
+      const sender = new root.Sender(
+        new root.SenderOptions("ws::addr=127.0.0.1:9;auto_flush=off;", {
+          log: () => {},
+        }),
+      );
+      const node: any = await load("./qwp/node", format);
+      const trades = sender.writer("trades", schemaFrom(node));
+
+      expect(trades).toBeInstanceOf(node.QwpTableWriter);
+
+      let rowError: unknown;
+      try {
+        await trades.row({
+          symbol: "SOL-USD",
+          price: "not-a-number",
+          timestamp: 3n,
+        });
+      } catch (error) {
+        rowError = error;
+      }
+      expect(rowError).toBeInstanceOf(node.QwpWriterRowError);
+    });
+
     it("re-exported factories keep the identity of their defining bundle", async () => {
       const qwp: any = await load("./qwp", format);
       const node: any = await load("./qwp/node", format);
@@ -167,28 +211,53 @@ describe.each(["import", "require"] as const)(
   },
 );
 
-describe("store-and-forward locking", () => {
-  const runNode = (script: string) =>
-    new Promise<{ code: number | null; stdout: string; stderr: string }>(
-      (resolve) => {
-        const child = execFile(
-          process.execPath,
-          ["-e", script],
-          (error, stdout, stderr) =>
-            resolve({
-              code: error ? ((error as { code?: number }).code ?? 1) : 0,
-              stdout,
-              stderr,
-            }),
+describe("package-root static QWP import", () => {
+  it("uses the ESM QWP entry for synchronous ESM construction", async () => {
+    const rootUrl = pathToFileURL(resolveExport(".", "import")).href;
+    const nodeUrl = pathToFileURL(resolveExport("./qwp/node", "import")).href;
+    const commonJsNode = resolveExport("./qwp/node", "require");
+    const configuration = "ws::addr=127.0.0.1:9;auto_flush=off;";
+    const script = `
+      (async () => {
+        const root = await import(${JSON.stringify(rootUrl)});
+        const commonJsLoaded = Boolean(require.cache[require.resolve(${JSON.stringify(commonJsNode)})]);
+        const node = await import(${JSON.stringify(nodeUrl)});
+        const sender = new root.Sender(
+          new root.SenderOptions(${JSON.stringify(configuration)}, { log: () => {} }),
         );
-        child.on("error", () =>
-          resolve({ code: 1, stdout: "", stderr: "spawn failed" }),
-        );
-      },
-    );
+        const writer = sender.writer("trades", (${schemaFrom.toString()})(node));
+        let rowError;
+        try {
+          await writer.row({ symbol: "SOL-USD", price: "not-a-number", timestamp: 3n });
+        } catch (error) {
+          rowError = error;
+        }
 
+        console.log(JSON.stringify({
+          commonJsLoaded,
+          writerIdentity: writer instanceof node.QwpTableWriter,
+          errorIdentity: rowError instanceof node.QwpWriterRowError,
+        }));
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `;
+
+    const { code, stdout, stderr } = await runNode(script);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual({
+      commonJsLoaded: false,
+      writerIdentity: true,
+      errorIdentity: true,
+    });
+  });
+});
+
+describe("store-and-forward locking", () => {
   it.each(["import", "require"] as const)(
-    "loads QWP only when a ws/wss/udp root sender is built (%s)",
+    "loads QWP with the package root (%s)",
     async (format) => {
       const target = resolveExport(".", format);
       const probe =
@@ -212,8 +281,8 @@ describe("store-and-forward locking", () => {
       expect(stderr).toBe("");
       expect(code).toBe(0);
       expect(JSON.parse(stdout.trim())).toEqual({
-        before: { ws: false, dgram: false },
-        afterHttp: { ws: false, dgram: false },
+        before: { ws: format === "require", dgram: true },
+        afterHttp: { ws: format === "require", dgram: true },
         // ESM-loaded CommonJS dependencies are not exposed through
         // require.cache; dgram is the format-independent QWP graph probe.
         afterQwp: { ws: format === "require", dgram: true },
