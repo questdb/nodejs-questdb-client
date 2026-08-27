@@ -325,11 +325,27 @@ describe("QWP Node UDP sender", () => {
   });
 
   it("rejects security options supplied through programmatic UDP options", () => {
-    const options = { protocol: "udp", host: "localhost", port: 9007 };
+    let socketCreations = 0;
+    const options = {
+      protocol: "udp",
+      host: "localhost",
+      port: 9007,
+      qwp: {
+        udp: {
+          socketFactory: () => {
+            socketCreations++;
+            return new FakeUdpSocket();
+          },
+        },
+      },
+    };
     for (const credentials of [
       { username: "admin" },
       { password: "secret" },
       { token: "bearer" },
+      { auth: { username: "admin", password: "secret" } },
+      { auth: { keyId: "admin", token: "private-key" } },
+      { jwk: { kty: "EC", crv: "P-256", d: "private-key" } },
     ]) {
       expect(() => new Sender({ ...options, ...credentials } as never)).toThrow(
         "authentication is not supported for QWP UDP transport",
@@ -344,6 +360,7 @@ describe("QWP Node UDP sender", () => {
         "TLS is not supported for QWP UDP transport",
       );
     }
+    expect(socketCreations).toBe(0);
   });
 
   it("rejects acknowledgement and transaction options that UDP cannot honor", () => {

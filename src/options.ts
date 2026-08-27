@@ -803,7 +803,9 @@ function validateUdpSecurityOptions(options: SenderOptions): void {
   if (
     options.username !== undefined ||
     options.password !== undefined ||
-    options.token !== undefined
+    options.token !== undefined ||
+    options.auth !== undefined ||
+    options.jwk !== undefined
   ) {
     throw new Error("authentication is not supported for QWP UDP transport");
   }
