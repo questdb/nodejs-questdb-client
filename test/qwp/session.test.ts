@@ -461,6 +461,79 @@ describe("QWP WebSocket adapters", () => {
     await connection.close();
   });
 
+  it("includes a stalled browser bootstrap in the connection deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let bootstrapSignal: AbortSignal | null | undefined;
+      let webSocketFactoryCalls = 0;
+      const connecting = connectQwpBrowserWebSocket({
+        url: "wss://questdb.example/write/v4",
+        connectTimeoutMs: 25,
+        sessionBootstrap: {
+          authentication: { type: "bearer", token: "rest-token" },
+          fetch: async (_input, init) => {
+            bootstrapSignal = init?.signal;
+            return new Promise<Response>((_resolve, reject) => {
+              bootstrapSignal?.addEventListener(
+                "abort",
+                () => reject(new Error("bootstrap aborted")),
+                { once: true },
+              );
+            });
+          },
+        },
+        webSocketFactory: () => {
+          webSocketFactoryCalls++;
+          return asQwpSocket(new FakeWebSocket());
+        },
+      });
+      const rejected = expect(connecting).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        retryable: true,
+        tryNextEndpoint: true,
+        message: "QWP WebSocket connection timed out after 25ms",
+      } satisfies Partial<QwpUpgradeError>);
+
+      await vi.advanceTimersByTimeAsync(25);
+      await rejected;
+      expect(bootstrapSignal?.aborted).toBe(true);
+      expect(webSocketFactoryCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("includes browser ingress negotiation in the connection deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserIngress(
+        {
+          url: "wss://questdb.example/write/v4",
+          connectTimeoutMs: 25,
+          ingressNegotiationTimeoutMs: 1_000,
+          webSocketFactory: () => {
+            queueMicrotask(() => socket.open());
+            return asQwpSocket(socket);
+          },
+        },
+        { reconnect: false },
+      );
+      const rejected = expect(connecting).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        message: "QWP WebSocket connection timed out after 25ms",
+      } satisfies Partial<QwpUpgradeError>);
+
+      await vi.advanceTimersByTimeAsync(25);
+      await rejected;
+      expect(socket.closeCalls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses one browser cluster for authenticated ingress, egress, and failover", async () => {
     const webSocketUrls: URL[] = [];
     const bootstrapUrls: URL[] = [];
@@ -740,6 +813,52 @@ describe("QWP WebSocket adapters", () => {
     await session.close();
     // Closed by close(), not left to the 30s connect deadline.
     expect(pending.closeCalls.length).toBeGreaterThan(0);
+  });
+
+  it("aborts a browser bootstrap still pending when its session closes", async () => {
+    const socket = new FakeWebSocket();
+    let bootstrapCalls = 0;
+    let reconnectBootstrapSignal: AbortSignal | null | undefined;
+    let rejectReconnectBootstrap: ((error: Error) => void) | undefined;
+    const session = await connectQwpBrowserIngress(
+      {
+        url: "ws://stalls.example/write/v4",
+        connectTimeoutMs: 30_000,
+        sessionBootstrap: {
+          authentication: { type: "bearer", token: "rest-token" },
+          fetch: async (_input, init) => {
+            bootstrapCalls++;
+            if (bootstrapCalls === 1) {
+              return new Response("{}", { status: 200 });
+            }
+            reconnectBootstrapSignal = init?.signal;
+            return new Promise<Response>((_resolve, reject) => {
+              rejectReconnectBootstrap = reject;
+              reconnectBootstrapSignal?.addEventListener(
+                "abort",
+                () => reject(new Error("bootstrap aborted")),
+                { once: true },
+              );
+            });
+          },
+        },
+        webSocketFactory: () => {
+          queueMicrotask(() => {
+            socket.open();
+            socket.message(ingressServerInfo(128));
+          });
+          return asQwpSocket(socket);
+        },
+      },
+      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 } },
+    );
+
+    socket.close(1006, "dropped");
+    await vi.waitFor(() => expect(bootstrapCalls).toBe(2));
+    await session.close();
+
+    expect(reconnectBootstrapSignal?.aborted).toBe(true);
+    expect(rejectReconnectBootstrap).toBeDefined();
   });
 
   it("attaches the socket error listener before an aborted signal closes it", async () => {

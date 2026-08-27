@@ -22,6 +22,7 @@ import {
   QwpConnectionFactory,
   QwpDurableAckUnavailableError,
   QwpEgressRoutingOptions,
+  QwpSendClosedError,
   QWP_UPGRADE_ERROR_KIND,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
@@ -389,6 +390,33 @@ interface QwpResolvedBrowserClientOptions extends QwpBrowserClientBaseOptions {
   egress: QwpBrowserEgressOptions;
 }
 
+const DEFAULT_BROWSER_CONNECT_TIMEOUT_MS = 15_000;
+
+function composeBrowserAbortSignals(
+  signals: readonly (AbortSignal | undefined)[],
+): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const listeners: { signal: AbortSignal; listener: () => void }[] = [];
+  for (const signal of signals) {
+    if (!signal) continue;
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    const listener = (): void => controller.abort();
+    signal.addEventListener("abort", listener, { once: true });
+    listeners.push({ signal, listener });
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const entry of listeners) {
+        entry.signal.removeEventListener("abort", entry.listener);
+      }
+    },
+  };
+}
+
 /**
  * Opens a QWP-capable browser WebSocket.
  *
@@ -430,40 +458,108 @@ async function connectQwpBrowserEndpoint(
   completeHandshake: (
     selectedProtocol: string | undefined,
   ) => QwpBinaryConnection["handshake"],
+  finishOpening: (
+    connection: QwpBinaryConnection,
+  ) => Promise<QwpBinaryConnection> = async (connection) => connection,
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
-  if (options.sessionBootstrap) {
-    await bootstrapQwpBrowserSession({
-      ...options.sessionBootstrap,
-      url: options.sessionBootstrap.url ?? defaultBootstrapUrl(endpoint),
-    });
-  }
-  const factory =
-    options.webSocketFactory ??
-    ((url: string | URL, protocols?: string | string[]) => {
-      const WebSocketConstructor = (
-        globalThis as unknown as {
-          WebSocket?: new (
-            url: string | URL,
-            protocols?: string | string[],
-          ) => QwpWebSocketLike;
-        }
-      ).WebSocket;
-      if (!WebSocketConstructor) {
-        throw new Error("WebSocket is not available in this browser runtime");
-      }
-      return new WebSocketConstructor(url, protocols);
-    });
-  const socket = factory(requestEndpoint, protocols);
-  return openQwpWebSocket(socket, {
-    signal,
-    url: endpoint,
-    connectTimeoutMs: options.connectTimeoutMs,
-    sendTimeoutMs: options.sendTimeoutMs,
-    closeTimeoutMs: options.closeTimeoutMs,
-    completeHandshake: () => completeHandshake(socket.protocol),
-    opaqueErrors: true,
+  const connectTimeoutMs =
+    options.connectTimeoutMs ?? DEFAULT_BROWSER_CONNECT_TIMEOUT_MS;
+  const openingAbort = new AbortController();
+  let openedConnection: QwpBinaryConnection | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let rejectBoundary!: (error: Error) => void;
+  let boundarySettled = false;
+  const failBoundary = (error: Error, reason: string): void => {
+    if (boundarySettled) return;
+    boundarySettled = true;
+    rejectBoundary(error);
+    openingAbort.abort();
+    void openedConnection?.close(1000, reason).catch(() => undefined);
+  };
+  const boundary = new Promise<never>((_resolve, reject) => {
+    rejectBoundary = reject;
   });
+  const abortOpening = (): void => {
+    failBoundary(
+      new QwpSendClosedError(),
+      "QWP connection closed while connecting",
+    );
+  };
+  if (signal?.aborted) abortOpening();
+  else signal?.addEventListener("abort", abortOpening, { once: true });
+  if (!boundarySettled) {
+    deadlineTimer = setTimeout(() => {
+      failBoundary(
+        new QwpUpgradeError(
+          `QWP WebSocket connection timed out after ${connectTimeoutMs}ms`,
+          {
+            kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+            retryable: true,
+            tryNextEndpoint: true,
+            url: endpoint,
+          },
+        ),
+        "QWP connection timeout",
+      );
+    }, connectTimeoutMs);
+  }
+
+  const opening = (async (): Promise<QwpBinaryConnection> => {
+    if (options.sessionBootstrap) {
+      const bootstrapAbort = composeBrowserAbortSignals([
+        openingAbort.signal,
+        options.sessionBootstrap.signal,
+      ]);
+      try {
+        await bootstrapQwpBrowserSession({
+          ...options.sessionBootstrap,
+          url: options.sessionBootstrap.url ?? defaultBootstrapUrl(endpoint),
+          signal: bootstrapAbort.signal,
+        });
+      } finally {
+        bootstrapAbort.dispose();
+      }
+    }
+    if (openingAbort.signal.aborted) throw new QwpSendClosedError();
+    const factory =
+      options.webSocketFactory ??
+      ((url: string | URL, protocols?: string | string[]) => {
+        const WebSocketConstructor = (
+          globalThis as unknown as {
+            WebSocket?: new (
+              url: string | URL,
+              protocols?: string | string[],
+            ) => QwpWebSocketLike;
+          }
+        ).WebSocket;
+        if (!WebSocketConstructor) {
+          throw new Error("WebSocket is not available in this browser runtime");
+        }
+        return new WebSocketConstructor(url, protocols);
+      });
+    const socket = factory(requestEndpoint, protocols);
+    openedConnection = await openQwpWebSocket(socket, {
+      signal: openingAbort.signal,
+      url: endpoint,
+      connectTimeoutMs,
+      sendTimeoutMs: options.sendTimeoutMs,
+      closeTimeoutMs: options.closeTimeoutMs,
+      completeHandshake: () => completeHandshake(socket.protocol),
+      opaqueErrors: true,
+    });
+    return finishOpening(openedConnection);
+  })();
+
+  try {
+    const connection = await Promise.race([opening, boundary]);
+    boundarySettled = true;
+    return connection;
+  } finally {
+    boundarySettled = true;
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    signal?.removeEventListener("abort", abortOpening);
+  }
 }
 
 function browserNegotiationUrl(
@@ -588,7 +684,7 @@ async function connectQwpBrowserIngressEndpoint(
       "ingressNegotiationTimeoutMs must be a non-negative finite number",
     );
   }
-  const connection = await connectQwpBrowserEndpoint(
+  return connectQwpBrowserEndpoint(
     options,
     endpoint,
     browserNegotiationUrl(endpoint, "qwp_browser_handshake", "v1"),
@@ -606,15 +702,17 @@ async function connectQwpBrowserIngressEndpoint(
         ? { qwpVersion: QWP_VERSION, durableAckEnabled: true }
         : { qwpVersion: QWP_VERSION };
     },
+    async (connection) => {
+      try {
+        return await applyQwpBrowserIngressHandshake(connection, timeoutMs);
+      } catch (error) {
+        await connection
+          .close(1002, "invalid QWP ingress SERVER_INFO")
+          .catch(() => undefined);
+        throw error;
+      }
+    },
   );
-  try {
-    return await applyQwpBrowserIngressHandshake(connection, timeoutMs);
-  } catch (error) {
-    await connection
-      .close(1002, "invalid QWP ingress SERVER_INFO")
-      .catch(() => undefined);
-    throw error;
-  }
 }
 
 function connectQwpBrowserEgressEndpoint(
