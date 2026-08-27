@@ -1,5 +1,6 @@
 import {
   QWP_COLUMN_TYPE,
+  QWP_MAX_ARRAY_DIMENSIONS,
   QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_TABLE_NAME_LENGTH,
   QwpColumnType,
@@ -292,8 +293,10 @@ export function flattenQwpArray(value: unknown[]): QwpArrayValue {
     dimensions.push(level.length);
     level = level[0];
   }
-  if (dimensions.length === 0 || dimensions.length > 255) {
-    throw new Error("QWP array must have between 1 and 255 dimensions");
+  if (dimensions.length === 0 || dimensions.length > QWP_MAX_ARRAY_DIMENSIONS) {
+    throw new Error(
+      `QWP array must have between 1 and ${QWP_MAX_ARRAY_DIMENSIONS} dimensions`,
+    );
   }
 
   const values: (number | bigint)[] = [];

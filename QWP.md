@@ -626,7 +626,7 @@ The schema vocabulary covers every column type the fluent row API can write:
 | `decimal64(scale)`          | DECIMAL64            | unscaled `bigint`, decimal text, `number`, or `{ unscaled, scale }`                    |
 | `decimal128(scale)`         | DECIMAL128           | as above, scale up to 38                                                               |
 | `decimal256(scale)`         | DECIMAL256           | as above, scale up to 76                                                               |
-| `doubleArray()`             | DOUBLE[]             | nested `number` arrays of uniform shape, or `{ dimensions, values }`                   |
+| `doubleArray()`             | DOUBLE[]             | uniform nested arrays or `{ dimensions, values }`; 1 to 32 dimensions                  |
 | `longArray()`               | LONG[]               | encodes the protocol type, but current QuestDB servers reject ingestion                |
 
 LONG, LONG256, and nanosecond timestamp inputs are `bigint` so they cannot silently
@@ -637,7 +637,8 @@ Current QuestDB servers accept only DOUBLE arrays for ingestion. `longArrayColum
 and `longArray()` remain available for Java-client and protocol parity and encode the
 QWP LONG_ARRAY type, but flushing one is rejected by the server with `long arrays are
 not supported, only double arrays`. Decoding LONG_ARRAY values in query results remains
-supported.
+supported. QWP arrays may have between 1 and 32 dimensions; the client rejects a larger
+rank before encoding a frame.
 
 QuestDB reserves the minimum signed value as NULL for INT, LONG, and DATE. Both the
 fluent setters (`int32Column()`, `longColumn()`, and `dateColumn()`) and the compiled

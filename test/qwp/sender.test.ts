@@ -3,6 +3,7 @@ import {
   QWP_COLUMN_TYPE,
   QWP_EGRESS_MESSAGE,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+  QWP_MAX_ARRAY_DIMENSIONS,
   QWP_STATUS,
   QwpIngressEncodeOptions,
   QwpIngressResponse,
@@ -1809,6 +1810,64 @@ describe("QWP high-level sender", () => {
     await typed.row({ price: "1.50", timestamp: 2n });
     await sender.flush();
     expect(column(session.sends[0].tables[0], "price").values).toEqual([150n]);
+  });
+
+  it("caps array dimensionality at the server's 32-dimension limit", async () => {
+    const nestedArray = (rank: number): unknown[] => {
+      let value: unknown = 1;
+      for (let dimension = 0; dimension < rank; dimension++) value = [value];
+      return value as unknown[];
+    };
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const rank32 = new Array(QWP_MAX_ARRAY_DIMENSIONS).fill(1);
+    const rank33 = new Array(QWP_MAX_ARRAY_DIMENSIONS + 1).fill(1);
+
+    await sender
+      .table("fluent")
+      .arrayColumn("samples", nestedArray(QWP_MAX_ARRAY_DIMENSIONS))
+      .atNow();
+    expect(() =>
+      sender
+        .table("too_deep")
+        .arrayColumn("samples", nestedArray(QWP_MAX_ARRAY_DIMENSIONS + 1)),
+    ).toThrow(/between 1 and 32 dimensions/);
+
+    const typed = sender.writer("typed", { samples: doubleArray() });
+    await typed.row({ samples: { dimensions: rank32, values: [1] } });
+    await expect(
+      typed.row({ samples: { dimensions: rank33, values: [1] } }),
+    ).rejects.toThrow(/between 1 and 32 dimensions/);
+    expect(sender.metrics.pendingRows).toBe(2);
+
+    await sender.flush();
+    const fluent = session.sends[0].tables.find(
+      (table) => table.name === "fluent",
+    );
+    const compiled = session.sends[0].tables.find(
+      (table) => table.name === "typed",
+    );
+    expect(
+      (column(fluent!, "samples").values[0] as { dimensions: number[] })
+        .dimensions,
+    ).toHaveLength(QWP_MAX_ARRAY_DIMENSIONS);
+    expect(
+      (column(compiled!, "samples").values[0] as { dimensions: number[] })
+        .dimensions,
+    ).toHaveLength(QWP_MAX_ARRAY_DIMENSIONS);
+
+    // Keep the low-level encoder fail-closed even when a caller constructs a
+    // QwpTableBuffer directly and bypasses both high-level validators.
+    const raw = new QwpTableBuffer("raw");
+    const rawColumn = raw.getOrCreateColumn(
+      "samples",
+      QWP_COLUMN_TYPE.DOUBLE_ARRAY,
+    )!;
+    rawColumn.values.push({ dimensions: rank33, values: [1] });
+    raw.nextRow();
+    expect(() => encodeQwpIngressFrame([raw])).toThrow(
+      /between 1 and 32 dimensions/,
+    );
   });
 
   it("sends an all-nullish writer row for a schema without a designated timestamp", async () => {

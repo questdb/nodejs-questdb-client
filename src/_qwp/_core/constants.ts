@@ -91,6 +91,8 @@ export const QWP_SERVER_ROLE = {
 } as const;
 
 export const QWP_MAX_COLUMNS_PER_TABLE = 2048;
+/** Maximum array rank accepted by QuestDB's QWP ingress decoder. */
+export const QWP_MAX_ARRAY_DIMENSIONS = 32;
 /** Default QWP ingress identifier limits, in UTF-8 wire bytes. */
 export const QWP_MAX_COLUMN_NAME_LENGTH = 127;
 export const QWP_MAX_TABLE_NAME_LENGTH = 127;

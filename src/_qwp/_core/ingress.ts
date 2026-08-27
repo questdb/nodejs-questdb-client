@@ -8,6 +8,7 @@ import {
   QWP_FLAG_DURABLE_ACK_POLL,
   QWP_FLAG_GORILLA,
   QWP_HEADER_SIZE,
+  QWP_MAX_ARRAY_DIMENSIONS,
   QWP_MAX_ERROR_MESSAGE_LENGTH,
   QWP_MAX_ROWS_PER_TABLE,
   QWP_MAX_SYMBOL_DICTIONARY_SIZE,
@@ -267,6 +268,14 @@ function columnPayloadSize(
   ) {
     for (const value of column.values) {
       const array = value as QwpArrayValue;
+      if (
+        array.dimensions.length === 0 ||
+        array.dimensions.length > QWP_MAX_ARRAY_DIMENSIONS
+      ) {
+        throw new RangeError(
+          `QWP array must have between 1 and ${QWP_MAX_ARRAY_DIMENSIONS} dimensions`,
+        );
+      }
       size += 1 + array.dimensions.length * 4 + array.values.length * 8;
     }
     return size;

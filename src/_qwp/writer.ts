@@ -376,13 +376,13 @@ export function decimal256(scale: number): QwpWriterColumn<QwpDecimalInput> {
   });
 }
 
-/** Defines a QuestDB DOUBLE[] column of any uniform shape. */
+/** Defines a QuestDB DOUBLE[] column with between 1 and 32 dimensions. */
 export function doubleArray(): QwpWriterColumn<QwpDoubleArrayInput> {
   return column("doubleArray", false);
 }
 
 /**
- * Defines a protocol LONG[] column of any uniform shape.
+ * Defines a protocol LONG[] column with between 1 and 32 dimensions.
  *
  * Current QuestDB servers reject LONG-array ingestion with `long arrays are
  * not supported, only double arrays`. This descriptor remains available for

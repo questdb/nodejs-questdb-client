@@ -1,5 +1,6 @@
 import {
   QWP_COLUMN_TYPE,
+  QWP_MAX_ARRAY_DIMENSIONS,
   QwpColumnType,
   QwpIngressEncodeOptions,
   QwpIngressResponse,
@@ -702,8 +703,13 @@ function writerArrayValue(value: unknown, elements: "double" | "long") {
         `array dimension ${index}`,
       ),
     );
-    if (dimensions.length === 0 || dimensions.length > 255) {
-      throw new RangeError("QWP array must have between 1 and 255 dimensions");
+    if (
+      dimensions.length === 0 ||
+      dimensions.length > QWP_MAX_ARRAY_DIMENSIONS
+    ) {
+      throw new RangeError(
+        `QWP array must have between 1 and ${QWP_MAX_ARRAY_DIMENSIONS} dimensions`,
+      );
     }
     const expected = dimensions.reduce(
       (total, dimension) => total * dimension,
@@ -1267,6 +1273,7 @@ export class QwpSender {
     }
   }
 
+  /** Adds a QuestDB DOUBLE[] value with between 1 and 32 dimensions. */
   arrayColumn(name: string, value: unknown[] | null | undefined): QwpSender {
     if (this.omitsNullish(name, value)) return this;
     try {
@@ -1281,7 +1288,7 @@ export class QwpSender {
   }
 
   /**
-   * Adds a protocol LONG[] column value.
+   * Adds a protocol LONG[] column value with between 1 and 32 dimensions.
    *
    * Current QuestDB servers reject LONG-array ingestion with `long arrays are
    * not supported, only double arrays`. This method remains available for
