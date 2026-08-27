@@ -1440,11 +1440,26 @@ export class QwpIngressSession {
     const dictionaryGap =
       this.deltaSymbolsPublished &&
       response.status === QWP_STATUS.DICTIONARY_GAP;
-    this.recordError(error, dictionaryGap, response, senderError);
-    if (dictionaryGap) {
-      // This wire cannot repair a missing prefix without reconnect catch-up.
+    const directPipelineBroken =
+      this.connection.managesIngressSenderErrors !== true;
+    this.recordError(
+      error,
+      dictionaryGap || directPipelineBroken,
+      response,
+      senderError,
+    );
+    if (dictionaryGap || directPipelineBroken) {
+      // QuestDB stops processing later frames on a connection after any NACK
+      // so its cumulative ACK cannot skip the rejected sequence. Reconnecting
+      // transports recycle and replay below their last ACK; a fixed/direct
+      // session has no such recovery path and must fail closed immediately.
       this.fail(error, true);
-      void this.connection.close(1002, "QWP symbol dictionary gap");
+      void this.connection.close(
+        1002,
+        dictionaryGap
+          ? "QWP symbol dictionary gap"
+          : "QWP ingress pipeline rejected",
+      );
     }
   }
 

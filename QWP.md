@@ -872,6 +872,12 @@ five-minute per-outage deadline; the initial connection remains fail-fast. Set
 bounds, emits lifecycle events through `onEvent`, and retains the earlier opt-in
 behavior of retrying initial connection establishment.
 
+QuestDB stops processing a connection's later frames after any ingress NACK so a
+cumulative ACK cannot advance across the rejected sequence. Reconnecting sessions
+recycle that connection and replay from their last ACK. A fixed `reconnect: false`
+session instead becomes terminal and closes immediately after reporting the NACK;
+create a new session before sending more rows.
+
 Each retry delay is selected between zero and the current exponential ceiling,
 preventing clients disconnected together from retrying in lockstep. Configured attempt
 and duration bounds apply to browser/memory reconnect and Node `"sync"` startup. A

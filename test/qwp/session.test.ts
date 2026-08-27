@@ -2082,7 +2082,7 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
-  it("latches publication-only NACKs for later ACK watermark waits", async () => {
+  it("fails a fixed session and its ACK waiters after a publication-only NACK", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
       url: "ws://localhost:9000/write/v4",
@@ -2092,14 +2092,20 @@ describe("QwpIngressSession", () => {
     const session = new QwpIngressSession(await connecting);
     await session.publishFrame(Uint8Array.of(1));
     await session.publishFrame(Uint8Array.of(2));
+    const acknowledged = session.waitForAcknowledged(1n, 1_000);
     socket.message(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n, "write failed"));
-    await vi.waitFor(() => expect(session.metrics.totalNacks).toBe(1));
 
-    await expect(session.waitForAcknowledged(1n, 1_000)).rejects.toMatchObject({
+    await expect(acknowledged).rejects.toMatchObject({
       name: "QwpIngressNackError",
       response: { sequence: 0n, errorMessage: "write failed" },
     } satisfies QwpIngressNackMatch);
-    await expect(session.waitForAcknowledged(-1n)).resolves.toBeUndefined();
+    expect(() => session.publishFrame(Uint8Array.of(3))).toThrow(
+      "write failed",
+    );
+    expect(socket.closeCalls).toContainEqual({
+      code: 1002,
+      reason: "QWP ingress pipeline rejected",
+    });
     await session.close();
   });
 
@@ -2424,7 +2430,7 @@ describe("QwpIngressSession", () => {
       QWP_INGRESS_PROGRESS_KIND.DURABLE_ACKNOWLEDGED,
       QWP_INGRESS_PROGRESS_KIND.PUBLISHED,
     ]);
-    expect(errors).toEqual([{ terminal: false, message: "write failed" }]);
+    expect(errors).toEqual([{ terminal: true, message: "write failed" }]);
     expect(senderErrors[0]).toMatchObject({
       category: QWP_SENDER_ERROR_CATEGORY.WRITE_ERROR,
       appliedPolicy: QWP_SENDER_ERROR_POLICY.TERMINAL,
@@ -2452,6 +2458,13 @@ describe("QwpIngressSession", () => {
       lastError: expect.objectContaining({ name: "QwpIngressNackError" }),
     });
     expect(Object.isFrozen(session.metrics)).toBe(true);
+    expect(() => session.publishFrame(Uint8Array.of(3))).toThrow(
+      "write failed",
+    );
+    expect(socket.closeCalls).toContainEqual({
+      code: 1002,
+      reason: "QWP ingress pipeline rejected",
+    });
     await session.close();
   });
 
@@ -2746,7 +2759,7 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
-  it("rejects the matching frame on NACK without breaking later ACKs", async () => {
+  it("fails all pipelined frames and closes a fixed session after a NACK", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
       url: "ws://localhost:9000/write/v4",
@@ -2754,25 +2767,31 @@ describe("QwpIngressSession", () => {
     });
     socket.open();
     const session = new QwpIngressSession(await connecting);
-    let sequence = 0n;
+    let sent = 0;
     socket.onSend = () => {
-      const current = sequence++;
-      socket.message(
-        ingressResponse(
-          current === 0n ? QWP_STATUS.WRITE_ERROR : QWP_STATUS.OK,
-          current,
-          "write failed",
-        ),
-      );
+      sent++;
+      if (sent === 2) {
+        socket.message(
+          ingressResponse(QWP_STATUS.WRITE_ERROR, 0n, "write failed"),
+        );
+      }
     };
 
-    await expect(session.sendFrame(Uint8Array.of(1))).rejects.toMatchObject({
+    const first = session.sendFrame(Uint8Array.of(1));
+    const second = session.sendFrame(Uint8Array.of(2));
+    await expect(first).rejects.toMatchObject({
       name: "QwpIngressNackError",
       response: { sequence: 0n, errorMessage: "write failed" },
     } satisfies QwpIngressNackMatch);
-    await expect(session.sendFrame(Uint8Array.of(2))).resolves.toMatchObject({
-      sequence: 1n,
-      status: QWP_STATUS.OK,
+    await expect(second).rejects.toMatchObject({
+      name: "QwpIngressNackError",
+      response: { sequence: 0n, errorMessage: "write failed" },
+    } satisfies QwpIngressNackMatch);
+    expect(socket.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+    expect(() => session.sendFrame(Uint8Array.of(3))).toThrow("write failed");
+    expect(socket.closeCalls).toContainEqual({
+      code: 1002,
+      reason: "QWP ingress pipeline rejected",
     });
     await session.close();
   });
