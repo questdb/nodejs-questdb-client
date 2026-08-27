@@ -104,7 +104,11 @@ Two consequences are worth knowing:
 - A rejected `at()`/`atNow()` on ILP discards the row it could not close,
   including its table name, and leaves rows already in the buffer alone. Catch
   the error and start the next row from `table()`; there is no need to `reset()`
-  and nothing already buffered is lost.
+  and nothing already buffered is lost. This applies to validation and encoding
+  failures before the row closes. If an ILP auto-flush send fails, the completed
+  batch has already been removed from the sender buffer; applications that need
+  to retry must retain and resubmit those rows. QWP keeps successfully closed
+  rows for its retry and replay path.
 
 **Changed in this release.** Earlier versions threw a type error for most nullish
 values, and protocol v2 encoded `arrayColumn(name, null)` as an explicit NULL

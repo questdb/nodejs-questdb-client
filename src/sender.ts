@@ -520,11 +520,14 @@ class Sender {
   }
 
   /**
-   * Closes the row after writing the designated timestamp into the buffer of the sender.
+   * Closes the row after writing the designated timestamp.
    * If validation or encoding rejects the row before it is completed, the
    * incomplete row and its table selection are discarded; rows completed
-   * earlier remain staged. Start the next row with {@link table} again. A later
-   * auto-flush failure does not discard the row that was successfully closed.
+   * earlier remain staged. Start the next row with {@link table} again. If this
+   * call triggers an auto-flush that fails, ILP transports have already removed
+   * the entire staged batch from the sender buffer. Applications that need to
+   * retry ILP rows must retain and resubmit them. QWP retains successfully
+   * closed rows for its retry and replay path.
    *
    * **Precision rules**:
    * - **Protocol v2 and higher:**
@@ -557,12 +560,15 @@ class Sender {
   }
 
   /**
-   * Closes the row without writing designated timestamp into the buffer of the sender. <br>
+   * Closes the row without writing a designated timestamp.
    * Designated timestamp will be populated by the server on this record.
    * If validation or encoding rejects the row before it is completed, the
    * incomplete row and its table selection are discarded; rows completed
-   * earlier remain staged. Start the next row with {@link table} again. A later
-   * auto-flush failure does not discard the row that was successfully closed.
+   * earlier remain staged. Start the next row with {@link table} again. If this
+   * call triggers an auto-flush that fails, ILP transports have already removed
+   * the entire staged batch from the sender buffer. Applications that need to
+   * retry ILP rows must retain and resubmit them. QWP retains successfully
+   * closed rows for its retry and replay path.
    *
    * @returns {Promise<void>} Resolves after the row is closed and any triggered auto-flush completes.
    */
