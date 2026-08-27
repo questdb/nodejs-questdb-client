@@ -86,11 +86,13 @@ await sender
 // wire: trades,symbol=BTC-USD price=39269.98,amount=0.011 <timestamp>
 ```
 
-This applies to every column method on both the ILP (`http`/`https`/`tcp`/`tcps`)
-and QWP (`ws`/`wss`/`udp`) senders, and to the compiled QWP writers. The one
-method that spreads a single value over several arguments, `long256Column`,
-omits its column when _all four_ words are nullish; a partial set is rejected
-rather than treated as NULL.
+This applies to every column method supported by the selected protocol on both
+the ILP (`http`/`https`/`tcp`/`tcps`) and QWP (`ws`/`wss`/`udp`) senders, and to
+the compiled QWP writers. Capability checks still run for nullish values: ILP
+v1 always rejects `arrayColumn`, and ILP v1/v2 always reject the decimal column
+methods. The one method that spreads a single value over several arguments,
+`long256Column`, omits its column when _all four_ words are nullish; a partial
+set is rejected rather than treated as NULL.
 
 Two consequences are worth knowing:
 
@@ -104,16 +106,18 @@ Two consequences are worth knowing:
 - A rejected `at()`/`atNow()` on ILP discards the row it could not close,
   including its table name, and leaves rows already in the buffer alone. Catch
   the error and start the next row from `table()`; there is no need to `reset()`
-  and nothing already buffered is lost. This applies to validation and encoding
-  failures before the row closes. If an ILP auto-flush send fails, the completed
-  batch has already been removed from the sender buffer; applications that need
-  to retry must retain and resubmit those rows. QWP keeps successfully closed
-  rows for its retry and replay path.
+  and nothing already buffered is lost. The exception is an invalid designated
+  timestamp unit: it is rejected before closing begins, leaving the row open so
+  `at()` can be retried with a valid unit. If an ILP auto-flush send fails, the
+  completed batch has already been removed from the sender buffer; applications
+  that need to retry must retain and resubmit those rows. QWP keeps successfully
+  closed rows for its retry and replay path.
 
-**Changed in this release.** Earlier versions threw a type error for most nullish
-values, and protocol v2 encoded `arrayColumn(name, null)` as an explicit NULL
-array marker. Both now omit the column instead. If your code relied on the throw
-as a data-quality guard, validate before calling the sender.
+**Changed in this release.** Earlier versions threw a type error for most
+nullish values, and protocol v2 encoded `arrayColumn(name, null)` as an explicit
+NULL array marker. Supported column methods now omit the column instead. If your
+code relied on the throw as a data-quality guard, validate before calling the
+sender.
 
 ### QWP ingress from Node.js or a browser
 

@@ -406,7 +406,7 @@ class Sender {
    * Writes an array column with its values into the buffer of the sender.
    *
    * @param {string} name - Column name
-   * @param {unknown[] | null | undefined} value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely, storing NULL.
+   * @param {unknown[] | null | undefined} value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely when arrays are supported; protocol v1 rejects the call for every value.
    * @returns {Sender} Returns with a reference to this sender.
    * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
    * - value is not an array
@@ -475,7 +475,7 @@ class Sender {
    * Use it to insert into DECIMAL database columns.
    *
    * @param {string} name - Column name.
-   * @param {string | number | null | undefined} value - Column value, accepts only number/string values. A null or undefined value omits the column entirely (stored as NULL).
+   * @param {string | number | null | undefined} value - Column value, accepts only number/string values. A null or undefined value omits the column entirely when decimals are supported; ILP protocol v1/v2 reject the call for every value.
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
    * - string value is not a valid decimal representation
@@ -497,7 +497,8 @@ class Sender {
    * @param {string} name - Column name.
    * @param {Int8Array | bigint | null | undefined} unscaled - The unscaled value of the decimal in two's
    * complement representation and big-endian byte order.
-   * A null or undefined value omits the column entirely (stored as NULL).
+   * A null or undefined value omits the column entirely when decimals are
+   * supported; ILP protocol v1/v2 reject the call for every value.
    * An empty array also represents NULL, but the two are not encoded alike:
    * on the ILP transports an empty array writes an explicit NULL decimal
    * field, while the QWP transports omit the column exactly as they do for
@@ -521,13 +522,15 @@ class Sender {
 
   /**
    * Closes the row after writing the designated timestamp.
-   * If validation or encoding rejects the row before it is completed, the
-   * incomplete row and its table selection are discarded; rows completed
-   * earlier remain staged. Start the next row with {@link table} again. If this
-   * call triggers an auto-flush that fails, ILP transports have already removed
-   * the entire staged batch from the sender buffer. Applications that need to
-   * retry ILP rows must retain and resubmit them. QWP retains successfully
-   * closed rows for its retry and replay path.
+   * On ILP, an invalid timestamp unit is rejected before closing begins and
+   * leaves the row open so this method can be retried. If other validation or
+   * encoding rejects the row before it is completed, the incomplete row and its
+   * table selection are discarded; rows completed earlier remain staged. Start
+   * the next row with {@link table} again. If this call triggers an auto-flush
+   * that fails, ILP transports have already removed the entire staged batch from
+   * the sender buffer. Applications that need to retry ILP rows must retain and
+   * resubmit them. QWP retains successfully closed rows for its retry and replay
+   * path.
    *
    * **Precision rules**:
    * - **Protocol v2 and higher:**
@@ -547,6 +550,7 @@ class Sender {
    *
    * @throws {Error} If `timestamp` is not an integer or `BigInt`.
    * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
+   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`.
    */
   async at(
     timestamp: number | bigint,

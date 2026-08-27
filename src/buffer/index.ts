@@ -124,7 +124,7 @@ interface SenderBuffer {
   /**
    * Writes an array column with its values into the buffer.
    * @param name - Column name
-   * @param value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely, storing NULL.
+   * @param value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely when arrays are supported; protocol v1 rejects the call for every value.
    * @returns Returns with a reference to this buffer.
    * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
    * - value is not an array
@@ -167,6 +167,8 @@ interface SenderBuffer {
    *
    * @throws {Error} If `value` is not an integer or `BigInt`.
    * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
+   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`. This
+   * validation runs even when `value` is null or undefined.
    */
   timestampColumn(
     name: string,
@@ -183,7 +185,8 @@ interface SenderBuffer {
    * @param {string | number | null | undefined} value - The decimal value to write.
    *   - Accepts either a `number` or a `string` containing a valid decimal representation.
    *   - String values should follow standard decimal notation (e.g., `"123.45"` or `"-0.001"`).
-   *   - A null or undefined value omits the column entirely (stored as NULL).
+   *   - A null or undefined value omits the column entirely (stored as NULL)
+   *     when decimals are supported; protocol v1/v2 reject the call for every value.
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error If decimals are not supported by the buffer implementation, or validation fails.
    * Possible validation errors:
@@ -205,7 +208,8 @@ interface SenderBuffer {
    *   - If an `Int8Array` is provided, it must contain the two’s complement representation
    *     of the unscaled value in **big-endian** byte order.
    *   - An empty `Int8Array` represents a `NULL` value.
-   *   - A null or undefined value omits the column entirely (stored as NULL).
+   *   - A null or undefined value omits the column entirely (stored as NULL)
+   *     when decimals are supported; protocol v1/v2 reject the call for every value.
    * @param {number} scale - The number of fractional digits (the scale) of the decimal value.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    * @throws {Error} If decimals are not supported by the buffer implementation, or validation fails.
@@ -239,8 +243,10 @@ interface SenderBuffer {
    *
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    *
-   * @throws {Error} If `value` is not an integer or `BigInt`.
-   * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
+   * @throws {Error} If `timestamp` is not an integer or `BigInt`.
+   * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
+   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`. This
+   * validation leaves the open row unchanged so the call can be retried.
    */
   at(timestamp: number | bigint, unit: TimestampUnit): void;
 

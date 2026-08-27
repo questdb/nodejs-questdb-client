@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 
-import { Sender, SenderOptions } from "../src";
+import { createBuffer, Sender, SenderOptions } from "../src";
 import { PROTOCOL_VERSION_V3 } from "../src/options";
 
 type Column = { name: string } & (
@@ -181,17 +181,28 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("does not support arrays with protocol v1", async function () {
-    const sender = new Sender({
+  it("rejects arrays with protocol v1 regardless of value", async function () {
+    const options = {
       protocol: "tcp",
       protocol_version: "1",
       host: "host",
+      auto_flush: false,
       init_buf_size: 1024,
-    });
-    expect(() =>
-      sender.table("tableName").arrayColumn("arrayCol", [12.3, 23.4]),
-    ).toThrow("Arrays are not supported in protocol v1");
-    await sender.close();
+    };
+
+    // Cover both the public buffer factory and the Sender delegation path.
+    for (const target of [createBuffer(options), new Sender(options)]) {
+      for (const value of [[12.3, 23.4], null, undefined]) {
+        target.reset();
+        expect(() =>
+          target.table("tableName").arrayColumn("arrayCol", value),
+        ).toThrow("Arrays are not supported in protocol v1");
+      }
+      if (target instanceof Sender) {
+        target.reset();
+        await target.close();
+      }
+    }
   });
 
   it("supports arrays with protocol v2", async function () {
@@ -623,10 +634,9 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("discards a row whose designated timestamp is rejected", async function () {
-    // The unit is only checked inside writeTimestamp, which runs after the
-    // separator has been written, so retrying at() used to append a second
-    // separator and corrupt the line.
+  it("keeps a row open when its designated timestamp unit is rejected", async function () {
+    // Unit validation happens before the close attempt mutates the row, so the
+    // caller can correct a bad constant and retry at() directly.
     const sender = new Sender({
       protocol: "http",
       protocol_version: "2",
@@ -643,8 +653,8 @@ describe("Sender message builder test suite (anything not covered in client inte
           .at(1000, "weeks" as "us"),
     ).rejects.toThrow("Unknown timestamp unit: weeks");
 
-    await sender.table("t").stringColumn("c", "y").at(1000, "us");
-    expect(bufferContent(sender)).toBe('t c="y" 1000t\n');
+    await sender.at(1000, "us");
+    expect(bufferContent(sender)).toBe('t c="x" 1000t\n');
     await sender.close();
   });
 
@@ -666,30 +676,44 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("skips null/undefined array columns regardless of protocol version", async function () {
-    // v1 does not support arrays, but a null or undefined value is a no-op skip
-    // (consistent with every other column type) rather than an error.
-    const sender = new Sender({
-      protocol: "tcp",
-      protocol_version: "1",
-      host: "host",
-      auto_flush: false,
-      init_buf_size: 1024,
-    });
-    await sender
-      .table("tableName")
-      .arrayColumn("skippedArr1", null)
-      .arrayColumn("skippedArr2", undefined)
-      .intColumn("keptInt", 1)
-      .atNow();
-    expect(bufferContent(sender)).toBe("tableName keptInt=1i\n");
+  it("rejects decimals with protocol v1/v2 regardless of value", async function () {
+    for (const version of ["1", "2"] as const) {
+      const options = {
+        protocol: "tcp",
+        protocol_version: version,
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      };
 
-    // An actual array value still throws on v1.
-    sender.reset();
-    expect(() =>
-      sender.table("tableName").arrayColumn("arr", [1, 2, 3]),
-    ).toThrow("Arrays are not supported in protocol v1");
-    await sender.close();
+      // Cover both the public buffer factory and the Sender delegation path.
+      for (const target of [createBuffer(options), new Sender(options)]) {
+        for (const value of ["1.5", null, undefined] as const) {
+          target.reset();
+          expect(() => target.table("t").decimalColumnText("d", value)).toThrow(
+            "Decimals are not supported in protocol v1/v2",
+          );
+        }
+
+        for (const value of [15n, null, undefined] as const) {
+          target.reset();
+          expect(() => target.table("t").decimalColumn("d", value, 2)).toThrow(
+            "Decimals are not supported in protocol v1/v2",
+          );
+
+          for (const scale of [-1, 77]) {
+            target.reset();
+            expect(() =>
+              target.table("t").decimalColumn("d", value, scale),
+            ).toThrow("Scale must be between 0 and 76");
+          }
+        }
+        if (target instanceof Sender) {
+          target.reset();
+          await target.close();
+        }
+      }
+    }
   });
 
   it("throws on invalid timestamp unit", async function () {

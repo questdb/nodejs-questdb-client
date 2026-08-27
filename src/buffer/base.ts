@@ -106,13 +106,19 @@ abstract class SenderBufferBase implements SenderBuffer {
    * `endOfLastRow`: every later table() raised "Table name has already been
    * set", including after a successful flush(), because compact() moves bytes
    * without touching the row flags. reset() was the only way out and it
-   * discards whatever was already staged. A throw from writeTimestamp() also
-   * left the separator it had already written, so retrying at() produced a
-   * second one and corrupted the line.
+   * discards whatever was already staged. An invalid timestamp unit also used
+   * to reach writeTimestamp() after the separator was written, so retrying at()
+   * produced a second one and corrupted the line.
    */
   private discardIncompleteRow() {
     this.position = this.endOfLastRow;
     this.startNewRow();
+  }
+
+  private validateTimestampUnit(unit: TimestampUnit): void {
+    if (unit !== "ns" && unit !== "us" && unit !== "ms") {
+      throw new Error(`Unknown timestamp unit: ${unit}`);
+    }
   }
 
   private startNewRow() {
@@ -261,7 +267,7 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Writes an array column with its values into the buffer.
    *
    * @param {string} name - Column name
-   * @param {unknown[] | null | undefined} value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely, storing NULL.
+   * @param {unknown[] | null | undefined} value - Array values to write (currently supports double arrays). A null or undefined value omits the column entirely when arrays are supported; protocol v1 rejects the call for every value.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    * @throws Error if arrays are not supported by the buffer implementation, or array validation fails:
    * - value is not an array
@@ -344,9 +350,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     // on rows that carry a value and stays silent on the ones that omit it.
     // (Same principle as the scale check in SenderBufferV3.decimalColumn; the
     // ns/BigInt rule below stays value-dependent, as null omits the column.)
-    if (unit !== "ns" && unit !== "us" && unit !== "ms") {
-      throw new Error(`Unknown timestamp unit: ${unit}`);
-    }
+    this.validateTimestampUnit(unit);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this;
@@ -386,10 +390,16 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    *
-   * @throws {Error} If `value` is not an integer or `BigInt`.
-   * @throws {Error} If `unit` is `'ns'` but `value` is not a `BigInt`.
+   * @throws {Error} If `timestamp` is not an integer or `BigInt`.
+   * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
+   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`. This
+   * validation leaves the open row unchanged so the call can be retried.
    */
   at(timestamp: number | bigint, unit: TimestampUnit = "us") {
+    // The unit is a call-site parameter, so reject it before attempting to
+    // close (and potentially discard) the row. This also avoids writing the
+    // timestamp separator before discovering that the unit is invalid.
+    this.validateTimestampUnit(unit);
     try {
       if (!this.hasSymbols && !this.hasColumns) {
         throw new Error(
@@ -642,27 +652,20 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Use it to insert into DECIMAL database columns.
    *
    * Decimals are not supported by protocol v1/v2, so this base implementation
-   * rejects any actual value. A null or undefined value omits the column
-   * entirely (stored as NULL), consistent with the other column methods.
-   * Protocol v3 overrides this with a validating implementation.
+   * rejects the call even when the value is null or undefined. Protocol v3
+   * overrides this with a validating implementation.
    *
    * @param {string} name - Column name.
    * @param {string | number | null | undefined} value - The decimal value to
-   * write. Only null or undefined is accepted here (which skips the column);
-   * any actual value throws.
+   * write.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
-   * @throws {Error} Indicating decimals are not supported in protocol v1/v2,
-   * unless the value is null or undefined.
+   * @throws {Error} Indicating decimals are not supported in protocol v1/v2.
    */
   decimalColumnText(
     name: string,
     value: string | number | null | undefined,
   ): SenderBuffer {
     this.validateColumnCall(name);
-    // A null or undefined value omits the column entirely (see issue #28).
-    if (this.isNullOrUndefined(value)) {
-      return this;
-    }
     throw new Error("Decimals are not supported in protocol v1/v2");
   }
 
@@ -672,18 +675,17 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Use it to insert into DECIMAL database columns.
    *
    * Decimals are not supported by protocol v1/v2, so this base implementation
-   * rejects any actual value. A null or undefined value omits the column
-   * entirely (stored as NULL), consistent with the other column methods.
-   * Protocol v3 overrides this with a validating implementation.
+   * rejects the call even when the value is null or undefined. Protocol v3
+   * overrides this with a validating implementation.
    *
    * @param {string} name - Column name.
    * @param {bigint | Int8Array | null | undefined} unscaled - The unscaled
-   * integer portion of the decimal value. Only null or undefined is accepted
-   * here (which skips the column); any actual value throws.
+   * integer portion of the decimal value.
    * @param {number} scale - The number of fractional digits (the scale) of the decimal value.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
-   * @throws {Error} Indicating decimals are not supported in protocol v1/v2,
-   * unless the value is null or undefined.
+   * @throws {RangeError} If `scale` is not between 0 and 76. Scale validation
+   * runs even when `unscaled` is null or undefined.
+   * @throws {Error} Indicating decimals are not supported in protocol v1/v2.
    */
   decimalColumn(
     name: string,
@@ -691,9 +693,10 @@ abstract class SenderBufferBase implements SenderBuffer {
     scale: number,
   ): SenderBuffer {
     this.validateColumnCall(name);
-    // A null or undefined value omits the column entirely (see issue #28).
-    if (this.isNullOrUndefined(unscaled)) {
-      return this;
+    // The scale describes the column, not this row's value. Keep its validation
+    // consistent with protocol v3 even though v1/v2 reject the decimal API.
+    if (scale < 0 || scale > 76) {
+      throw new RangeError("Scale must be between 0 and 76");
     }
     throw new Error("Decimals are not supported in protocol v1/v2");
   }

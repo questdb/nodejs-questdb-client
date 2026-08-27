@@ -63,25 +63,21 @@ class SenderBufferV1 extends SenderBufferBase {
     }
   }
 
+  /* eslint-disable @typescript-eslint/no-unused-vars */
   /**
    * Array columns are not supported in protocol v1. <br>
-   * A null or undefined value omits the column entirely (stored as NULL),
-   * consistent with the other column methods; any actual array throws.
+   * The capability check applies even when the value is null or undefined.
    *
    * @param {string} name - Column name.
-   * @param {unknown[] | null | undefined} value - Array values. Only null or
-   * undefined is accepted in v1 (which skips the column).
+   * @param {unknown[] | null | undefined} value - Array values.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
    * @throws Error indicating arrays are not supported in v1
    */
   arrayColumn(name: string, value: unknown[] | null | undefined): SenderBuffer {
     this.validateColumnCall(name);
-    // A null or undefined value omits the column entirely (see issue #28).
-    if (this.isNullOrUndefined(value)) {
-      return this;
-    }
     throw new Error("Arrays are not supported in protocol v1");
   }
+  /* eslint-enable @typescript-eslint/no-unused-vars */
 }
 
 export { SenderBufferV1 };
