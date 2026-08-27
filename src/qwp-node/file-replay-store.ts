@@ -55,10 +55,10 @@ const DEFAULT_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
 const DEFAULT_APPEND_DEADLINE_MS = 30_000;
 const TRIM_BATCH_SIZE = 8;
-// Background segment trimming retries on this cadence. A trim failure is
-// normally transient -- a briefly full or read-only filesystem, a maintenance
-// worker restart -- so it must not become permanent.
-const MAINTENANCE_RETRY_DELAY_MS = 1_000;
+// Retry transient store faults on this cadence. Filesystem recovery does not
+// emit a capacity signal, so foreground appends poll at the same deliberately
+// slow rate as background segment maintenance.
+const TRANSIENT_STORE_RETRY_DELAY_MS = 1_000;
 const MAX_TIMER_DELAY_MS = 0x7fffffff;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
@@ -177,7 +177,7 @@ export interface QwpNodeFileReplayStoreOptions {
    * Defaults to `error` for backwards compatibility.
    */
   backpressurePolicy?: QwpSfBackpressurePolicy;
-  /** Per-append disk-capacity wait deadline. Defaults to 30 seconds. */
+  /** Per-append capacity or retryable store-fault deadline. Defaults to 30 seconds. */
   appendDeadlineMs?: number;
   /**
    * Reports journal bytes abandoned during recovery. Defaults to logging at
@@ -222,6 +222,11 @@ export class QwpReplayStoreError extends Error {
     this.name = "QwpReplayStoreError";
     this.cause = cause;
   }
+}
+
+/** An in-memory journal invariant cannot become true by retrying the same call. */
+class QwpReplayStoreInvariantError extends QwpReplayStoreError {
+  override readonly retryable = false;
 }
 
 /** Durable journal bytes are structurally corrupt and cannot be replayed. */
@@ -1100,16 +1105,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         await this.enqueue(() => this.appendOnce(record, bytes));
         return;
       } catch (error) {
-        const full = error instanceof QwpReplayStoreFullError;
-        // A background segment trim that transiently failed self-heals on its
-        // scheduled retry, whose signalCapacity() releases parked appenders. A
-        // fresh append hits that parked failure at assertReady() -- but it must
-        // not surface as the flush error either, so wait it out within the same
-        // append deadline as the journal ceiling. A permanent fault still ends
-        // in the typed append timeout. (checkpointFailure is not released by
-        // signalCapacity, so it still propagates; see scheduleMaintenance.)
-        const healingTrim = error === this.maintenanceFailure;
-        if (!full && !healingTrim) throw error;
+        if (this.closing || this.closed) throw this.closedError();
+        if (!(error instanceof QwpReplayStoreError) || !error.retryable) {
+          throw error;
+        }
         if (this.backpressurePolicy === QWP_SF_BACKPRESSURE_POLICY.ERROR) {
           throw error;
         }
@@ -1135,6 +1134,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           capacityGeneration,
           remainingMs,
           requiredBytes,
+          // Capacity exhaustion has an explicit ACK/trim wake-up. A generic
+          // retryable store fault (for example EACCES while activating a hot
+          // spare) has no event when the filesystem heals, so retry it on a
+          // bounded cadence until the same append deadline expires.
+          error instanceof QwpReplayStoreFullError
+            ? undefined
+            : TRANSIENT_STORE_RETRY_DELAY_MS,
         );
       }
     }
@@ -1147,7 +1153,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.assertReady();
     validateFrameSequence(record.frameSequence);
     if (this.records.has(record.frameSequence)) {
-      throw new QwpReplayStoreError(
+      throw new QwpReplayStoreInvariantError(
         `QWP store-and-forward sequence already exists [frameSequence=${record.frameSequence}]`,
       );
     }
@@ -1158,7 +1164,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       lastSequence !== undefined &&
       record.frameSequence !== lastSequence + 1n
     ) {
-      throw new QwpReplayStoreError(
+      throw new QwpReplayStoreInvariantError(
         `QWP store-and-forward sequence must be contiguous [previous=${lastSequence}, received=${record.frameSequence}]`,
       );
     }
@@ -1168,13 +1174,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     const expectedSequence = segment.firstSequence + BigInt(segment.frameCount);
     if (record.frameSequence !== expectedSequence) {
-      throw new QwpReplayStoreError(
+      throw new QwpReplayStoreInvariantError(
         `QWP store-and-forward segment sequence must be contiguous [expected=${expectedSequence}, received=${record.frameSequence}]`,
       );
     }
     const handle = segment.handle;
     if (!handle) {
-      throw new QwpReplayStoreError(
+      throw new QwpReplayStoreInvariantError(
         `active QWP store-and-forward segment is not open [file=${segment.path}]`,
       );
     }
@@ -1459,7 +1465,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       this.maintenanceRetryTimer = undefined;
       if (this.closing || this.closed) return;
       this.scheduleMaintenance();
-    }, MAINTENANCE_RETRY_DELAY_MS);
+    }, TRANSIENT_STORE_RETRY_DELAY_MS);
     this.maintenanceRetryTimer.unref?.();
   }
 
@@ -1564,21 +1570,23 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     capacityGeneration: number,
     timeoutMs: number,
     requiredBytes: number,
+    retryIntervalMs?: number,
   ): Promise<void> {
-    if (this.checkpointFailure) {
-      return Promise.reject(this.checkpointFailure);
-    }
-    // maintenanceFailure is deliberately not rejected here: it self-heals on
-    // its scheduled retry, whose signalCapacity() releases this waiter, exactly
-    // as scheduleMaintenance() leaves the already-parked appender waiting. A
-    // permanent fault is bounded by the append deadline below.
     if (capacityGeneration !== this.capacityGeneration) {
       return Promise.resolve();
     }
     return new Promise<void>((resolve, reject) => {
       const pending: PendingCapacity = { resolve, reject };
+      const timerMs =
+        retryIntervalMs === undefined
+          ? timeoutMs
+          : Math.min(timeoutMs, retryIntervalMs);
       pending.timer = setTimeout(() => {
         if (!this.capacityWaiters.delete(pending)) return;
+        if (retryIntervalMs !== undefined) {
+          resolve();
+          return;
+        }
         this.totalAppendTimeouts++;
         reject(
           new QwpReplayStoreAppendTimeoutError(
@@ -1587,7 +1595,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             this.appendDeadlineMs,
           ),
         );
-      }, timeoutMs);
+      }, timerMs);
       this.capacityWaiters.add(pending);
       if (capacityGeneration !== this.capacityGeneration) {
         this.capacityWaiters.delete(pending);
@@ -1646,6 +1654,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       return;
     }
     try {
+      const recovering = this.checkpointFailure !== undefined;
       const paths = [...this.dirtyRecordPaths];
       if (this.dictionaryDirty) {
         paths.push(join(this.directory, DICTIONARY_FILE));
@@ -1664,11 +1673,11 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       this.directoryDirty = false;
       this.checkpointFailure = undefined;
       this.totalCheckpoints++;
+      if (recovering) this.signalCapacity();
     } catch (cause) {
       const error = new QwpReplayStoreCheckpointError(this.directory, cause);
       this.checkpointFailure = error;
       this.totalCheckpointFailures++;
-      this.rejectCapacityWaiters(error);
       throw error;
     }
   }
@@ -2190,7 +2199,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private assertReady(): void {
     this.assertOpen();
     if (!this.loaded) {
-      throw new QwpReplayStoreError(
+      throw new QwpReplayStoreInvariantError(
         "QWP store-and-forward journal must be loaded before use",
       );
     }

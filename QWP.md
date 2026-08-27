@@ -156,7 +156,7 @@ session that consumes it.
 | `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.    |
 | `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file.                                         |
 | `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                |
-| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space before failing.                |
+| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.  |
 | `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`. |
 | `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.               |
 | `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                       |
@@ -328,11 +328,14 @@ The connect-string key
 `QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
 ACK advances the checksummed cursor, then a bounded background trimmer deletes fully
 drained segments.
-`appendDeadlineMs` bounds each such pause (30 seconds by
-default) and expiry raises `QwpReplayStoreAppendTimeoutError`. Waiting appenders do
-not hold the journal mutation queue, so ACK cleanup can continue. Direct users of
-`QwpNodeFileReplayStore` can inspect `metrics` for pending records and segments,
-checkpoint work, checkpoint failures, active waiters, stalls, and timeouts.
+`appendDeadlineMs` bounds each such pause and retries of transient journal faults
+such as a briefly read-only, full, or descriptor-starved filesystem (30 seconds
+by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. Waiting appenders
+do not hold the journal mutation queue, so ACK cleanup and checkpoint recovery
+can continue. Corruption and loss of the journal lock remain immediate failures.
+Direct users of `QwpNodeFileReplayStore` can inspect `metrics` for pending records
+and segments, checkpoint work, checkpoint failures, active waiters, stalls, and
+timeouts.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
 cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target together

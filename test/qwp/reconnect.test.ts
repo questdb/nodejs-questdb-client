@@ -4526,7 +4526,11 @@ describe("QWP Node file replay store", () => {
     // Only Date is faked here: the heartbeat is what must *not* get a chance to
     // run, which is exactly the window the first write after resuming lands in.
     const directory = await trackedDirectory();
-    const store = new QwpNodeFileReplayStore({ directory });
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 100,
+    });
     await store.load();
     await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
 
@@ -4901,6 +4905,32 @@ describe("QWP Node file replay store", () => {
     await expectOnlyJavaSlotLockMetadata(directory);
   });
 
+  it("does not wait on a non-retryable append invariant", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 1_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    await expect(
+      store.append({ frameSequence: 0n, payload: Uint8Array.of(1) }),
+    ).rejects.toMatchObject({
+      name: "QwpReplayStoreError",
+      retryable: false,
+      message:
+        "QWP store-and-forward sequence already exists [frameSequence=0]",
+    });
+    expect(store.metrics).toMatchObject({
+      waitingAppends: 0,
+      totalBackpressureStalls: 0,
+      totalAppendTimeouts: 0,
+    });
+    await store.close();
+  });
+
   it("checkpoints periodic frame and dictionary writes", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
@@ -4949,16 +4979,16 @@ describe("QWP Node file replay store", () => {
     await store.close();
   });
 
-  it("fails waiting appends closed when a periodic checkpoint fails", async () => {
+  it("bounds waiting appends when a periodic checkpoint cannot recover", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,
       maxBytes: 66,
       maxSegmentBytes: 1,
       durability: QWP_SF_DURABILITY.PERIODIC,
-      checkpointIntervalMs: 250,
+      checkpointIntervalMs: 100,
       backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
-      appendDeadlineMs: 2_000,
+      appendDeadlineMs: 500,
     });
     await store.load();
     await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
@@ -4970,12 +5000,17 @@ describe("QWP Node file replay store", () => {
       frameSequence: 2n,
       payload: Uint8Array.of(3),
     });
+    const rejection = expect(blocked).rejects.toBeInstanceOf(
+      QwpReplayStoreAppendTimeoutError,
+    );
     await vi.waitFor(() => expect(store.metrics.waitingAppends).toBe(1));
-    await expect(blocked).rejects.toBeInstanceOf(QwpReplayStoreCheckpointError);
+    await vi.waitFor(() =>
+      expect(store.metrics.totalCheckpointFailures).toBeGreaterThan(0),
+    );
+    await rejection;
     expect(store.metrics).toMatchObject({
       waitingAppends: 0,
-      totalCheckpointFailures: 1,
-      totalAppendTimeouts: 0,
+      totalAppendTimeouts: 1,
     });
     await expect(store.close()).rejects.toBeInstanceOf(
       QwpReplayStoreCheckpointError,
@@ -4988,12 +5023,59 @@ describe("QWP Node file replay store", () => {
     await reopened.close();
   });
 
+  it("waits out a transient hot-spare write fault", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 3_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    // Let the first append replenish its hot spare before injecting faults. The
+    // first failure then hits background replenishment after frame 1; the second
+    // hits frame 2's required provisioning path and reaches appendWithBackpressure
+    // as a plain, retryable QwpReplayStoreError. The next retry uses the real
+    // worker and succeeds.
+    const internals = store as unknown as { hotSpare?: unknown };
+    await vi.waitFor(() => expect(internals.hotSpare).toBeDefined());
+    const transient = Object.assign(new Error("EACCES: permission denied"), {
+      code: "EACCES",
+    });
+    const provision = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "provision")
+      .mockRejectedValueOnce(transient)
+      .mockRejectedValueOnce(transient);
+
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+    await vi.waitFor(() => expect(provision).toHaveBeenCalledTimes(1));
+    const recovering = store.append({
+      frameSequence: 2n,
+      payload: Uint8Array.of(3),
+    });
+    await vi.waitFor(() =>
+      expect(store.metrics.totalBackpressureStalls).toBe(1),
+    );
+    await expect(recovering).resolves.toBeUndefined();
+    expect(provision.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(store.metrics).toMatchObject({
+      pendingRecords: 3,
+      waitingAppends: 0,
+      totalBackpressureStalls: 1,
+      totalAppendTimeouts: 0,
+    });
+
+    provision.mockRestore();
+    await store.close();
+  }, 10_000);
+
   it("keeps a parked append waiting across a transient trim fault", async () => {
-    // The sibling checkpoint failure above rejects waiting appends because that
-    // class has no retry. Maintenance does retry, so a parked append must stay
-    // parked and be released when the retry frees capacity -- never rejected
-    // with the retryable trim error, which is not the deadline error a producer
-    // watches for.
+    // The permanent checkpoint failure above reaches the append deadline.
+    // Maintenance retries and self-heals, so a parked append must instead be
+    // released when that retry frees capacity -- never rejected with the
+    // retryable trim error, which is not the deadline error a producer watches.
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,

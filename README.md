@@ -86,15 +86,17 @@ await sender
 // wire: trades,symbol=BTC-USD price=39269.98,amount=0.011 <timestamp>
 ```
 
-This applies to every column method supported by the selected protocol on both
-the ILP (`http`/`https`/`tcp`/`tcps`) and QWP (`ws`/`wss`/`udp`) senders, and to
-the compiled QWP writers. Capability checks still run for nullish values: ILP
-v1 always rejects `arrayColumn`, and ILP v1/v2 always reject the decimal column
-methods. The one method that spreads a single value over several arguments,
-`long256Column`, omits its column when _all four_ words are nullish; a partial
-set is rejected rather than treated as NULL.
+The eight column methods on `Sender` follow this rule for both ILP
+(`http`/`https`/`tcp`/`tcps`) and QWP (`ws`/`wss`/`udp`) transports, subject to
+protocol support. The broader direct `QwpSender` API and compiled QWP writers
+follow the same omission rule for their additional column types. Capability
+checks still run for nullish values: ILP v1 always rejects `arrayColumn`, and ILP
+v1/v2 always reject the decimal column methods. The QWP-only
+`QwpSender.long256Column` method spreads one value over four arguments; it omits
+the column when _all four_ words are nullish and rejects a partial set rather
+than treating it as NULL.
 
-Two consequences are worth knowing:
+Three consequences are worth knowing:
 
 - An omitted column is not created on a table that does not already have it. The
   omission carries no type, so schema-on-write has nothing to infer from.
