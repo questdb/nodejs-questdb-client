@@ -1395,7 +1395,7 @@ describe("QWP ingress reconnect and replay", () => {
     }
   });
 
-  it("preserves durable-ACK mismatch priority across a mixed endpoint sweep", async () => {
+  it("keeps a mixed durable-ACK and transport failure sweep retryable", async () => {
     let factoryCalls = 0;
     await expect(
       QwpIngressSession.connect(
@@ -1425,8 +1425,8 @@ describe("QWP ingress reconnect and replay", () => {
           replayStore: new TrackingReplayStore(),
         },
       ),
-    ).rejects.toBeInstanceOf(QwpDurableAckUnavailableError);
-    expect(factoryCalls).toBe(1);
+    ).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
+    expect(factoryCalls).toBe(5);
   });
 
   it("retries durable-ACK mismatch during asynchronous foreground startup", async () => {
@@ -1524,6 +1524,59 @@ describe("QWP ingress reconnect and replay", () => {
       name: "QwpDurableAckPersistentFailureError",
       attempts: 16,
     });
+    await session.close();
+  });
+
+  it("does not count mixed endpoint sweeps as orphan durable-ACK mismatches", async () => {
+    const connection = new FakeConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    const events: QwpReconnectEvent[] = [];
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls <= 16) {
+          throw new QwpFailoverError([
+            {
+              endpoint: "ws://old-primary/write/v4",
+              error: new QwpDurableAckUnavailableError(
+                "ws://old-primary/write/v4",
+              ),
+            },
+            {
+              endpoint: "ws://offline/write/v4",
+              error: new Error("connection refused"),
+            },
+          ]);
+        }
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        orphanStoreAndForward: true,
+        orphanDurableAckMismatchMaxDurationMs: 0,
+        reconnect: {
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          onEvent: (event) => events.push(event),
+        },
+        replayStore: new TrackingReplayStore(),
+      },
+    );
+
+    await vi.waitFor(() => expect(factoryCalls).toBe(17));
+    expect(
+      events.some(
+        (event) =>
+          event.kind === QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE ||
+          event.kind ===
+            QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+      ),
+    ).toBe(false);
+    expect(session.metrics.lastError).toBeUndefined();
     await session.close();
   });
 

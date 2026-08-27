@@ -2231,7 +2231,7 @@ function isEndpointPolicyFailure(error: unknown): boolean {
   );
 }
 
-/** Returns the typed capability gap retained anywhere in a failed endpoint sweep. */
+/** Returns a durable-ACK gap only when it accounts for the whole failure. */
 function durableAckUnavailableCause(
   error: unknown,
 ): QwpDurableAckUnavailableError | undefined {
@@ -2239,11 +2239,13 @@ function durableAckUnavailableCause(
   if (!(error instanceof QwpFailoverError) || error.attempts.length === 0) {
     return undefined;
   }
+  let cause: QwpDurableAckUnavailableError | undefined;
   for (const attempt of error.attempts) {
-    const cause = durableAckUnavailableCause(attempt.error);
-    if (cause) return cause;
+    const attemptCause = durableAckUnavailableCause(attempt.error);
+    if (!attemptCause) return undefined;
+    cause ??= attemptCause;
   }
-  return undefined;
+  return cause;
 }
 
 function isPrimaryUnavailableError(error: unknown): boolean {
