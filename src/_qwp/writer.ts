@@ -381,7 +381,13 @@ export function doubleArray(): QwpWriterColumn<QwpDoubleArrayInput> {
   return column("doubleArray", false);
 }
 
-/** Defines a QuestDB LONG[] column of any uniform shape. */
+/**
+ * Defines a protocol LONG[] column of any uniform shape.
+ *
+ * Current QuestDB servers reject LONG-array ingestion with `long arrays are
+ * not supported, only double arrays`. This descriptor remains available for
+ * Java-client and protocol parity.
+ */
 export function longArray(): QwpWriterColumn<QwpLongArrayInput> {
   return column("longArray", false);
 }

@@ -1280,6 +1280,13 @@ export class QwpSender {
     }
   }
 
+  /**
+   * Adds a protocol LONG[] column value.
+   *
+   * Current QuestDB servers reject LONG-array ingestion with `long arrays are
+   * not supported, only double arrays`. This method remains available for
+   * Java-client and protocol parity.
+   */
   longArrayColumn(
     name: string,
     value: unknown[] | null | undefined,
