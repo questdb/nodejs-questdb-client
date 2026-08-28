@@ -2521,6 +2521,49 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("keeps retrying repeated unrecognised statuses", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const third = new FakeConnection("primary");
+    const connections = [first, second, third];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          maxFrameRejections: 2,
+          poisonMinEscalationWindowMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.receive(ingressResponse(0x7f, 0n));
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    second.receive(ingressResponse(0x7f, 0n));
+    await vi.waitFor(() => expect(third.sent).toHaveLength(1));
+    third.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    expect(session.metrics).toMatchObject({
+      totalNacks: 2,
+      totalFramesSent: 3,
+      totalFramesReplayed: 2,
+      totalReconnectsSucceeded: 2,
+    });
+    await session.close();
+  });
+
   it("reconnects and replays a transient ingress NACK without advancing", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");

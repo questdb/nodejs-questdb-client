@@ -46,6 +46,8 @@ import {
   createQwpProtocolViolationSenderError,
   createQwpSenderError,
   defaultQwpSenderErrorHandler,
+  qwpSenderErrorCategory,
+  QWP_SENDER_ERROR_CATEGORY,
   type QwpSenderError,
 } from "../sender-error";
 
@@ -1390,7 +1392,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     if (isRetriableIngressStatus(response.status)) {
       const exempt =
-        frame.dictionaryCatchup || response.status === QWP_STATUS.NOT_WRITABLE;
+        frame.dictionaryCatchup ||
+        response.status === QWP_STATUS.NOT_WRITABLE ||
+        qwpSenderErrorCategory(response.status) ===
+          QWP_SENDER_ERROR_CATEGORY.UNKNOWN;
       if (exempt) {
         this.resetPoisonEpisode();
         throw new RetriableIngressNackError(
