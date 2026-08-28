@@ -8,6 +8,7 @@ import {
   QWP_FLAG_DURABLE_ACK_POLL,
   QWP_FLAG_GORILLA,
   QWP_HEADER_SIZE,
+  QWP_MAX_ARRAY_DIMENSION_LENGTH,
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_MAX_ERROR_MESSAGE_LENGTH,
   QWP_MAX_ROWS_PER_TABLE,
@@ -275,6 +276,17 @@ function columnPayloadSize(
         throw new RangeError(
           `QWP array must have between 1 and ${QWP_MAX_ARRAY_DIMENSIONS} dimensions`,
         );
+      }
+      for (const [index, dimension] of array.dimensions.entries()) {
+        if (
+          !Number.isSafeInteger(dimension) ||
+          dimension < 0 ||
+          dimension > QWP_MAX_ARRAY_DIMENSION_LENGTH
+        ) {
+          throw new RangeError(
+            `array dimension ${index} must be between 0 and ${QWP_MAX_ARRAY_DIMENSION_LENGTH}`,
+          );
+        }
       }
       size += 1 + array.dimensions.length * 4 + array.values.length * 8;
     }

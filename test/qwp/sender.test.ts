@@ -3,6 +3,7 @@ import {
   QWP_COLUMN_TYPE,
   QWP_EGRESS_MESSAGE,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+  QWP_MAX_ARRAY_DIMENSION_LENGTH,
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_STATUS,
   QwpIngressEncodeOptions,
@@ -1867,6 +1868,47 @@ describe("QWP high-level sender", () => {
     raw.nextRow();
     expect(() => encodeQwpIngressFrame([raw])).toThrow(
       /between 1 and 32 dimensions/,
+    );
+  });
+
+  it("caps each compiled array dimension at the server's int32 limit", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const typed = sender.writer("typed", { samples: doubleArray() });
+
+    await typed.row({
+      samples: {
+        dimensions: [0, QWP_MAX_ARRAY_DIMENSION_LENGTH],
+        values: [],
+      },
+    });
+    for (const dimension of [
+      QWP_MAX_ARRAY_DIMENSION_LENGTH + 1,
+      2 ** 32,
+    ]) {
+      await expect(
+        typed.row({
+          samples: { dimensions: [0, dimension], values: [] },
+        }),
+      ).rejects.toThrow(/array dimension 1 must be between 0 and 2147483647/);
+    }
+
+    await sender.flush();
+    expect(
+      (column(session.sends[0].tables[0], "samples").values[0] as {
+        dimensions: number[];
+      }).dimensions,
+    ).toEqual([0, QWP_MAX_ARRAY_DIMENSION_LENGTH]);
+
+    const raw = new QwpTableBuffer("raw");
+    const rawColumn = raw.getOrCreateColumn(
+      "samples",
+      QWP_COLUMN_TYPE.DOUBLE_ARRAY,
+    )!;
+    rawColumn.values.push({ dimensions: [0, 2 ** 32], values: [] });
+    raw.nextRow();
+    expect(() => encodeQwpIngressFrame([raw])).toThrow(
+      /array dimension 1 must be between 0 and 2147483647/,
     );
   });
 

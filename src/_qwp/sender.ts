@@ -1,5 +1,6 @@
 import {
   QWP_COLUMN_TYPE,
+  QWP_MAX_ARRAY_DIMENSION_LENGTH,
   QWP_MAX_ARRAY_DIMENSIONS,
   QwpColumnType,
   QwpIngressEncodeOptions,
@@ -699,7 +700,7 @@ function writerArrayValue(value: unknown, elements: "double" | "long") {
       checkedRange(
         dimension as number,
         0,
-        Number.MAX_SAFE_INTEGER,
+        QWP_MAX_ARRAY_DIMENSION_LENGTH,
         `array dimension ${index}`,
       ),
     );
