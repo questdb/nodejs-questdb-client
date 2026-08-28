@@ -27,6 +27,7 @@ import {
   QwpEgressReplayResetEvent,
   QwpHandshakeMetadata,
   QwpReconnectOptions,
+  QwpSendClosedError,
 } from "./transport";
 
 export interface QwpEgressSessionOptions {
@@ -707,6 +708,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   static async connect(
     factory: QwpConnectionFactory,
     options: QwpEgressSessionOptions = {},
+    /** Cancels a connection or SERVER_INFO handshake still in progress. */
+    signal?: AbortSignal,
   ): Promise<QwpEgressSession> {
     const validated = validateEgressSessionOptions(options);
     const state: { session?: QwpEgressSession } = {};
@@ -735,13 +738,28 @@ export class QwpEgressSession implements QwpEgressQueryControl {
               }
             : undefined,
           options.reconnect !== undefined,
+          signal,
         )
-      : await factory();
-    let session: QwpEgressSession;
+      : await factory(signal);
+    let session: QwpEgressSession | undefined;
+    const abortOpening = (): void => {
+      if (session) {
+        void session
+          .close(1000, "QWP client closed while connecting")
+          .catch(() => undefined);
+      } else {
+        void connection
+          .close(1000, "QWP client closed while connecting")
+          .catch(() => undefined);
+      }
+    };
     try {
+      if (signal?.aborted) throw new QwpSendClosedError();
       session = new QwpEgressSession(connection, options);
       state.session = session;
+      signal?.addEventListener("abort", abortOpening, { once: true });
       await session.ready;
+      if (signal?.aborted) throw new QwpSendClosedError();
       return session;
     } catch (error) {
       if (state.session) {
@@ -754,6 +772,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
           .catch(() => undefined);
       }
       throw error;
+    } finally {
+      signal?.removeEventListener("abort", abortOpening);
     }
   }
 

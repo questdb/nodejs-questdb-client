@@ -120,6 +120,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     encodeQueryRequest: QueryRequestEncoder,
     onReplayReset?: ReplayResetHandler,
     retryInitialConnection = true,
+    signal?: AbortSignal,
   ): Promise<QwpReconnectingEgressConnection> {
     const reconnecting = new QwpReconnectingEgressConnection(
       factory,
@@ -130,12 +131,20 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       onReplayReset,
       retryInitialConnection,
     );
+    const abortOpening = (): void => {
+      void reconnecting.close().catch(() => undefined);
+    };
     try {
+      if (signal?.aborted) throw new QwpSendClosedError();
+      signal?.addEventListener("abort", abortOpening, { once: true });
       await reconnecting.connectLoop(undefined, false);
+      if (signal?.aborted) throw new QwpSendClosedError();
       return reconnecting;
     } catch (error) {
       await reconnecting.close().catch(() => undefined);
       throw error;
+    } finally {
+      signal?.removeEventListener("abort", abortOpening);
     }
   }
 

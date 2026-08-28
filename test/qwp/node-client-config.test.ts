@@ -42,6 +42,36 @@ class RejectingWebSocket {
   }
 }
 
+class PendingWebSocket {
+  binaryType = "";
+  readyState = 0;
+  closeCount = 0;
+  private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+  send(): void {}
+
+  close(code = 1000, reason = ""): void {
+    if (this.readyState === 3) return;
+    this.closeCount++;
+    this.readyState = 3;
+    this.emit("close", { code, reason, wasClean: code === 1000 });
+  }
+
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    let listeners = this.listeners.get(type);
+    if (!listeners) this.listeners.set(type, (listeners = new Set()));
+    listeners.add(listener);
+  }
+
+  removeEventListener(type: string, listener: (event: unknown) => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  private emit(type: string, event: unknown): void {
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+}
+
 describe("QWP unified Node client configuration", () => {
   it("uses one ordered cluster and authentication configuration for both sides", () => {
     const options = parseQwpNodeClientConfig(
@@ -172,6 +202,48 @@ describe("QWP unified Node client configuration", () => {
       await client.close();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("cancels an in-flight query prewarm connection during close", async () => {
+    let resolveSocket!: (socket: PendingWebSocket) => void;
+    const socketCreated = new Promise<PendingWebSocket>((resolve) => {
+      resolveSocket = resolve;
+    });
+    const client = createQwpNodeClient({
+      ingress: { url: "ws://localhost:9000/write/v4" },
+      egress: {
+        url: "ws://localhost:9000/read/v1",
+        authTimeoutMs: 30_000,
+        webSocketFactory: (_url, { onConnected }) => {
+          const socket = new PendingWebSocket();
+          resolveSocket(socket);
+          onConnected();
+          return socket as unknown as QwpWebSocketLike;
+        },
+      },
+      pool: {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 1,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 1_000,
+      },
+    });
+
+    const connecting = client.connect();
+    const socket = await socketCreated;
+    expect(client.metrics.queries.creating).toBe(1);
+
+    await client.close();
+
+    expect(socket.closeCount).toBe(1);
+    expect(socket.readyState).toBe(3);
+    expect(client.metrics).toMatchObject({
+      closing: true,
+      closed: true,
+      queries: { total: 0, creating: 0 },
+    });
+    await expect(connecting).rejects.toThrow();
   });
 
   it("starts lazy persistent ingress without prewarming egress", async () => {

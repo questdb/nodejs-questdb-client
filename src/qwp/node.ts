@@ -36,6 +36,7 @@ import {
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
   type QwpReconnectEvent,
+  QwpSendClosedError,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   QwpWebSocketConnectOptions,
@@ -890,6 +891,8 @@ function validateUdpSenderOptions(options: QwpSenderOptions): void {
 export async function connectQwpNodeEgress(
   options: QwpNodeEgressOptions,
   sessionOptions: QwpEgressSessionOptions = {},
+  /** Cancels an opening connection during pooled-client shutdown. */
+  signal?: AbortSignal,
 ): Promise<QwpEgressSession> {
   const transport = egressTransportOptions(options);
   return QwpEgressSession.connect(
@@ -902,6 +905,7 @@ export async function connectQwpNodeEgress(
         QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
     ),
     sessionOptions,
+    signal,
   );
 }
 
@@ -934,23 +938,31 @@ export function createQwpNodeClient(
   let unsubscribeRecoveryScan: (() => void) | undefined;
   return new QwpClient(
     {
-      createSender: async (slot) => {
+      createSender: async (slot, signal) => {
         const ingress = pooledNodeIngressOptions(options.ingress, slot);
         const sender = createQwpNodeSender(
           ingress,
           options.sender,
           options.ingressSession,
         );
+        const abortOpening = (): void => {
+          void sender.close().catch(() => undefined);
+        };
         try {
+          if (signal?.aborted) throw new QwpSendClosedError();
+          signal?.addEventListener("abort", abortOpening, { once: true });
           await sender.connect();
+          if (signal?.aborted) throw new QwpSendClosedError();
           return sender;
         } catch (error) {
           await sender.close().catch(() => undefined);
           throw error;
+        } finally {
+          signal?.removeEventListener("abort", abortOpening);
         }
       },
-      createQuerySession: () =>
-        connectQwpNodeEgress(options.egress, options.egressSession),
+      createQuerySession: (_slot, signal) =>
+        connectQwpNodeEgress(options.egress, options.egressSession, signal),
       senderSlotReservation: slotCoordinator,
       start: () => {
         if (orphanDrainer && slotCoordinator) {

@@ -45,8 +45,11 @@ export interface QwpClientPoolOptions {
 }
 
 export interface QwpClientFactories {
-  createSender(slot: number): Promise<QwpSender>;
-  createQuerySession(slot: number): Promise<QwpEgressSession>;
+  createSender(slot: number, signal?: AbortSignal): Promise<QwpSender>;
+  createQuerySession(
+    slot: number,
+    signal?: AbortSignal,
+  ): Promise<QwpEgressSession>;
   /** @internal Coordinates stable persistent sender slots with recovery. */
   senderSlotReservation?: QwpPoolSlotReservation;
   /** @internal Starts runtime-specific background services on first use. */
@@ -155,6 +158,7 @@ class QwpResourcePool<T> {
   private readonly creatingSlots = new Set<number>();
   private readonly destroyingSlots = new Set<number>();
   private readonly creationOperations = new Set<Promise<void>>();
+  private readonly creationAbortControllers = new Set<AbortController>();
   private readonly waiters = new Set<PoolWaiter>();
   private readonly closeWaiters = new Set<PoolCloseWaiter>();
   private readonly reservedSlots = new Set<number>();
@@ -170,7 +174,10 @@ class QwpResourcePool<T> {
     private readonly acquireTimeoutMs: number,
     private readonly idleTimeoutMs: number,
     private readonly maxLifetimeMs: number,
-    private readonly createResource: (slot: number) => Promise<T>,
+    private readonly createResource: (
+      slot: number,
+      signal: AbortSignal,
+    ) => Promise<T>,
     private readonly destroyResource: (resource: T) => Promise<void>,
     private readonly closeLeasedOnShutdown = false,
     private readonly slotReservation?: QwpPoolSlotReservation,
@@ -295,6 +302,7 @@ class QwpResourcePool<T> {
       waiter.reject(new QwpClientClosedError());
     }
     this.waiters.clear();
+    for (const controller of this.creationAbortControllers) controller.abort();
     // Idle entries always belong to the closing thread. Borrowed senders remain
     // owner-managed, while borrowed query sessions are retired with them below.
     const entries = this.available.splice(0);
@@ -372,11 +380,13 @@ class QwpResourcePool<T> {
       finishCreation = resolve;
     });
     this.creationOperations.add(operation);
+    const controller = new AbortController();
+    this.creationAbortControllers.add(controller);
     let retained = false;
     try {
       let value: T;
       try {
-        value = await this.createResource(slot);
+        value = await this.createResource(slot, controller.signal);
       } catch (error) {
         throw new QwpPoolResourceError(this.resource, error);
       }
@@ -396,6 +406,7 @@ class QwpResourcePool<T> {
       retained = true;
       return entry;
     } finally {
+      this.creationAbortControllers.delete(controller);
       this.creatingSlots.delete(slot);
       if (!retained) this.releaseSlotReservation(slot);
       finishCreation();

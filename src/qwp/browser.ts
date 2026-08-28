@@ -821,6 +821,8 @@ export async function connectQwpBrowserSender(
 export async function connectQwpBrowserEgress(
   options: QwpBrowserEgressOptions,
   sessionOptions: QwpEgressSessionOptions = {},
+  /** Cancels an opening connection during pooled-client shutdown. */
+  signal?: AbortSignal,
 ): Promise<QwpEgressSession> {
   return QwpEgressSession.connect(
     createQwpEgressFailoverConnectionFactory(
@@ -833,6 +835,7 @@ export async function connectQwpBrowserEgress(
         QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
     ),
     sessionOptions,
+    signal,
   );
 }
 
@@ -936,22 +939,34 @@ export function createQwpBrowserClient(
   const resolved = resolveQwpBrowserClientOptions(options);
   return new QwpClient(
     {
-      createSender: async () => {
+      createSender: async (_slot, signal) => {
         const sender = createQwpBrowserSender(
           resolved.ingress,
           resolved.sender,
           resolved.ingressSession,
         );
+        const abortOpening = (): void => {
+          void sender.close().catch(() => undefined);
+        };
         try {
+          if (signal?.aborted) throw new QwpSendClosedError();
+          signal?.addEventListener("abort", abortOpening, { once: true });
           await sender.connect();
+          if (signal?.aborted) throw new QwpSendClosedError();
           return sender;
         } catch (error) {
           await sender.close().catch(() => undefined);
           throw error;
+        } finally {
+          signal?.removeEventListener("abort", abortOpening);
         }
       },
-      createQuerySession: () =>
-        connectQwpBrowserEgress(resolved.egress, resolved.egressSession),
+      createQuerySession: (_slot, signal) =>
+        connectQwpBrowserEgress(
+          resolved.egress,
+          resolved.egressSession,
+          signal,
+        ),
     },
     resolved.pool,
   );
