@@ -310,6 +310,12 @@ function timestampValue(
   }
 }
 
+function validateTimestampUnit(unit: QwpTimestampUnit): void {
+  if (unit !== "ns" && unit !== "us" && unit !== "ms") {
+    throw new TypeError(`unsupported timestamp unit '${String(unit)}'`);
+  }
+}
+
 function signedBigEndianToBigInt(bytes: Int8Array): bigint {
   if (bytes.length === 0) return 0n;
   let result = 0n;
@@ -1316,8 +1322,10 @@ export class QwpSender {
     value: number | bigint | null | undefined,
     unit: QwpTimestampUnit = "us",
   ): QwpSender {
-    if (this.omitsNullish(name, value)) return this;
+    const omitted = this.omitsNullish(name, value);
     try {
+      validateTimestampUnit(unit);
+      if (omitted) return this;
       const timestamp = timestampValue(value, unit);
       return this.addColumn(name, timestamp.type, timestamp.value);
     } catch (error) {

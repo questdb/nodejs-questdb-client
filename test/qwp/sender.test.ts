@@ -341,6 +341,9 @@ describe("QWP high-level sender", () => {
       expect(() => table().geohashColumn("g", value, 0)).toThrow(
         /geohash precision/i,
       );
+      expect(() =>
+        table().timestampColumn("ts", value, "fortnights" as "us"),
+      ).toThrow(/unsupported timestamp unit 'fortnights'/i);
       // All four words absent is the LONG256 way of spelling a NULL.
       expect(() =>
         table().long256Column("bad.name", value, value, value, value),
