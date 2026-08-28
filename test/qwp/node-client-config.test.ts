@@ -158,6 +158,11 @@ describe("QWP unified Node client configuration", () => {
       closeFlushTimeoutMs: 5_000,
       maxNameLength: 127,
     });
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;close_flush_timeout_millis=-1;",
+      ).sender?.closeFlushTimeoutMs,
+    ).toBe(-1);
 
     const tuned = parseQwpNodeClientConfig(
       "ws::addr=localhost;sf_dir=/tmp/qwp-unified-test;reconnect_max_duration_millis=1234;",

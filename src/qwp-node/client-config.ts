@@ -202,7 +202,7 @@ export function resolveQwpNodeClientConfig(
       optionalInteger(
         value("close_flush_timeout_millis"),
         "close_flush_timeout_millis",
-        0,
+        Number.MIN_SAFE_INTEGER,
       ) ?? DEFAULT_CLOSE_FLUSH_TIMEOUT_MS,
     maxNameLength:
       optionalInteger(value("max_name_len"), "max_name_len", 16) ?? 127,
@@ -883,7 +883,7 @@ function optionalInteger(
   maximum = Number.MAX_SAFE_INTEGER,
 ): number | undefined {
   if (value === undefined) return undefined;
-  if (!/^\d+$/.test(value)) throw new Error(`Invalid ${key}: '${value}'`);
+  if (!/^-?\d+$/.test(value)) throw new Error(`Invalid ${key}: '${value}'`);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
     throw new RangeError(

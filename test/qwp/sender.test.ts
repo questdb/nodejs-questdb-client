@@ -462,13 +462,13 @@ describe("QWP high-level sender", () => {
         new QwpSender(async () => session, {
           closeFlushTimeoutMs: -1,
         }),
-    ).toThrow(/closeFlushTimeoutMs must be a non-negative safe integer/);
+    ).not.toThrow();
     expect(
       () =>
         new QwpSender(async () => session, {
           closeFlushTimeoutMs: 1.5,
         }),
-    ).toThrow(/closeFlushTimeoutMs must be a non-negative safe integer/);
+    ).toThrow(/closeFlushTimeoutMs must be a safe integer/);
   });
 
   it("applies a configurable UTF-8 identifier byte length", async () => {

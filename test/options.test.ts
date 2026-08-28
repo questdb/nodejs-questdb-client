@@ -872,6 +872,7 @@ describe("Configuration string parser suite", function () {
     const cases = [
       ["sf_dir=/tmp/qwp-parity", true],
       ["transaction=on", true],
+      ["close_flush_timeout_millis=-1", true],
       ["tls_ca=/tmp/nope.pem", false],
       ["init_buf_size=1024", false],
       ["max_buf_size=99999", false],

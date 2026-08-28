@@ -75,7 +75,8 @@ export interface QwpSenderOptions {
   durableAckTimeoutMs?: number;
   /**
    * Maximum time close() spends publishing queued rows and waiting for the
-   * server ACK watermark. Zero skips the drain. Defaults to 60 seconds.
+   * server ACK watermark. Zero or a negative value skips the drain. Defaults
+   * to 5 seconds.
    */
   closeFlushTimeoutMs?: number;
   /** QWP frame encoding options supported by the high-level sender. */
@@ -1027,7 +1028,9 @@ export class QwpSender {
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
     validateNonNegativeInteger(this.autoFlushBytes, "autoFlushBytes");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
-    validateNonNegativeInteger(this.closeFlushTimeoutMs, "closeFlushTimeoutMs");
+    if (!Number.isSafeInteger(this.closeFlushTimeoutMs)) {
+      throw new RangeError("closeFlushTimeoutMs must be a safe integer");
+    }
     if (!Number.isSafeInteger(this.maxNameLength) || this.maxNameLength < 16) {
       throw new RangeError(
         "maxNameLength must be a safe integer of at least 16",
