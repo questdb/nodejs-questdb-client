@@ -299,11 +299,14 @@ class Sender {
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
-   * @param {number} value - Column value, accepts only number values.
+   * @param {number | bigint} value - Column value, accepts integer or `BigInt`
+   * values. QuestDB's LONG is a 64-bit signed integer, which is wider than the
+   * safe integer range of `number`, so use a `BigInt` beyond
+   * `Number.MAX_SAFE_INTEGER` to avoid losing precision.
    * @return {Sender} Returns with a reference to this sender.
-   * @throws Error if the value is not an integer
+   * @throws Error if the value is not an integer or a `BigInt`
    */
-  intColumn(name: string, value: number): Sender {
+  intColumn(name: string, value: number | bigint): Sender {
     this.buffer.intColumn(name, value);
     return this;
   }
