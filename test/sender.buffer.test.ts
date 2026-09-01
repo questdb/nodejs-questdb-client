@@ -986,7 +986,44 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     expect(() =>
       sender.table("tableName").intColumn("intField", 123.222),
-    ).toThrow("Value must be an integer, received 123.222");
+    ).toThrow("Value must be an integer or BigInt, received 123.222");
+    await sender.close();
+  });
+
+  it("supports BigInt values in integer fields", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .intColumn("small", 42n)
+      .intColumn("negative", -42n)
+      .at(1658484769000000, "us");
+    expect(bufferContent(sender)).toBe(
+      "tableName small=42i,negative=-42i 1658484769000000000\n",
+    );
+    await sender.close();
+  });
+
+  it("keeps full LONG precision above Number.MAX_SAFE_INTEGER", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    // 2^63-1, the largest QuestDB LONG. As a `number` this rounds to
+    // 9223372036854775808, which is out of range for the column.
+    await sender
+      .table("tableName")
+      .intColumn("maxLong", 9223372036854775807n)
+      .at(1658484769000000, "us");
+    expect(bufferContent(sender)).toBe(
+      "tableName maxLong=9223372036854775807i 1658484769000000000\n",
+    );
     await sender.close();
   });
 

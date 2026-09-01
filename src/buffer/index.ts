@@ -137,11 +137,12 @@ interface SenderBuffer {
    * Writes a 64-bit signed integer into the buffer.
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    * @param name - Column name.
-   * @param value - Column value, accepts only number values.
+   * @param value - Column value, accepts integer or `BigInt` values. Use a
+   * `BigInt` for LONG values outside the safe integer range of `number`.
    * @returns Returns with a reference to this buffer.
-   * @throws Error if the value is not an integer
+   * @throws Error if the value is not an integer or a `BigInt`
    */
-  intColumn(name: string, value: number): SenderBuffer;
+  intColumn(name: string, value: number | bigint): SenderBuffer;
 
   /**
    * Writes a timestamp column and its value into the buffer.

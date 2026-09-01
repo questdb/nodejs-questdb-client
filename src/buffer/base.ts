@@ -251,9 +251,9 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @return {SenderBuffer} Returns with a reference to this buffer.
    * @throws Error if the value is not an integer
    */
-  intColumn(name: string, value: number): SenderBuffer {
-    if (!Number.isInteger(value)) {
-      throw new Error(`Value must be an integer, received ${value}`);
+  intColumn(name: string, value: number | bigint): SenderBuffer {
+    if (typeof value !== "bigint" && !Number.isInteger(value)) {
+      throw new Error(`Value must be an integer or BigInt, received ${value}`);
     }
     this.writeColumn(name, value, () => {
       const valueStr = value.toString();
