@@ -482,6 +482,33 @@ describe("QWP unified Node client configuration", () => {
     });
   });
 
+  it("keeps requestDurableAck on ingress when it is set as a shared override", () => {
+    // Durable ACK is negotiated on /write/v4 only. The typed webSocket block
+    // is spread into both sides, so this override also reached egress, whose
+    // upgrade then demanded an x-qwp-durable-ack response header that
+    // /read/v1 never sends -- every pooled query session failed to connect
+    // with QwpDurableAckUnavailableError while ingress worked fine.
+    const overridden = parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
+      webSocket: { requestDurableAck: true },
+    });
+    expect(overridden.ingress.requestDurableAck).toBe(true);
+    expect(overridden.egress.requestDurableAck).toBeUndefined();
+
+    // The connect-string key has always been ingress-only; the two agree now.
+    const fromString = parseQwpNodeClientConfig(
+      "ws::addr=localhost:9000;request_durable_ack=on;",
+    );
+    expect(fromString.ingress.requestDurableAck).toBe(true);
+    expect(fromString.egress.requestDurableAck).toBeUndefined();
+
+    // Other shared webSocket overrides still reach both sides.
+    const shared = parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
+      webSocket: { requestDurableAck: true, clientId: "probe" },
+    });
+    expect(shared.ingress.clientId).toBe("probe");
+    expect(shared.egress.clientId).toBe("probe");
+  });
+
   it("validates cluster authorities and supports bracketed IPv6", () => {
     const options = parseQwpNodeClientConfig(
       "ws::addr=[::1],[2001:db8::2]:9443;sender_pool_min=0;query_pool_min=0;",

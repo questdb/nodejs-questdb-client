@@ -229,6 +229,11 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   authorization?: string;
   clientId?: string;
   maxVersion?: number;
+  /**
+   * Ingress-only. Durable ACK is negotiated on `/write/v4`; egress ignores it
+   * and egressTransportOptions() strips it, because sending the header on
+   * `/read/v1` makes every query session fail the capability check.
+   */
   requestDurableAck?: boolean;
   /** Test hook; defaults to the Node-only `ws` implementation. */
   webSocketFactory?: (
@@ -374,6 +379,10 @@ function egressTransportOptions(
   delete transport.maxBatchRows;
   delete transport.target;
   delete transport.zone;
+  // Ingress-only: /read/v1 never answers with x-qwp-durable-ack, so leaving it
+  // set would make connectQwpNodeEndpoint() reject every query session with
+  // QwpDurableAckUnavailableError.
+  delete transport.requestDurableAck;
   const preference = compression ?? "raw";
   const acceptEncoding = encodeQwpAcceptEncoding(preference, compressionLevel);
 

@@ -158,8 +158,14 @@ export function resolveQwpNodeClientConfig(
     );
   }
 
+  // requestDurableAck is ingress-only and the ingress block below sets it
+  // explicitly. Leaving it in the shared block spread it into `egress` too,
+  // so a typed `webSocket: { requestDurableAck: true }` override made every
+  // pooled query session fail its /read/v1 capability check.
+  const sharedWebSocket = { ...extraOptions.webSocket };
+  delete sharedWebSocket.requestDurableAck;
   const common = {
-    ...extraOptions.webSocket,
+    ...sharedWebSocket,
     connectTimeoutMs:
       extraOptions.webSocket?.connectTimeoutMs ??
       optionalPositiveInteger(value("connect_timeout"), "connect_timeout"),
