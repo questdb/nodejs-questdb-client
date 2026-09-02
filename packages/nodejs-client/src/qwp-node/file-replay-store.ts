@@ -610,12 +610,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 "non-active segment has a torn record tail",
               );
             }
-            if (decoded.interiorDamage || decoded.crcMismatch) {
+            if (
+              decoded.interiorDamage ||
+              decoded.crcMismatch ||
+              decoded.framingOverrun
+            ) {
               // The active segment's damaged suffix is abandoned by policy,
               // matching the Java client. An interior tear strands the frames
               // behind it because replay requires a contiguous sequence; a
               // tail CRC mismatch proves the complete final record itself was
-              // lost. Recovery proceeds on the valid prefix, but provable loss
+              // lost; framing that overshoots EOF cannot have come from an
+              // interrupted append at all, so it too abandons journalled
+              // bytes. Recovery proceeds on the valid prefix, but provable loss
               // is always reported -- discarding it silently is dangerous.
               this.reportRecoveryDataLoss({
                 directory: this.directory,
@@ -626,7 +632,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 discardedBytes: Math.max(0, decoded.discardedBytes ?? 0),
                 reason: decoded.interiorDamage
                   ? "a damaged record is followed by intact records that replay can no longer reach"
-                  : "the active segment tail contains a complete record whose CRC32C does not match",
+                  : decoded.crcMismatch
+                    ? "the active segment tail contains a complete record whose CRC32C does not match"
+                    : "a record's framing runs past the end of the segment, so its length field is damaged or the file was truncated",
               });
             }
             await repairSegmentTail(
@@ -2253,6 +2261,20 @@ interface DecodedSegment {
    */
   readonly interiorDamage?: boolean;
   /**
+   * A record's framing runs past the end of the segment: either its declared
+   * payload length overshoots EOF, or fewer than {@link FRAME_HEADER_SIZE}
+   * non-zero bytes remain to hold a header.
+   *
+   * Segments are preallocated to their full configured size and an append is
+   * only started for a record that fits, so an interrupted append always
+   * declares a length that still fits the file -- a partially written payload
+   * fails its CRC32C instead, and unwritten space reads as zero padding.
+   * Framing that overshoots EOF therefore never comes from an interrupted
+   * append: it is a damaged length field, or a file truncated below the size
+   * it reserved. Both abandon bytes that were journalled, so both are reported.
+   */
+  readonly framingOverrun?: boolean;
+  /**
    * Written bytes abandoned beyond the valid prefix, excluding the segment's
    * unwritten zero padding. Set only when the segment is damaged.
    */
@@ -2382,6 +2404,9 @@ async function scanSegment(
         records,
         logicalSize: offset - SEGMENT_HEADER_SIZE,
         tornTail: true,
+        framingOverrun: true,
+        discardedBytes:
+          (await findWrittenEnd(handle, offset, fileSize, scanBuffer)) - offset,
       };
     }
     const payloadLength = frameHeader.readUInt32LE(4);
@@ -2395,6 +2420,14 @@ async function scanSegment(
         records,
         logicalSize: offset - SEGMENT_HEADER_SIZE,
         tornTail: true,
+        // The length field is read before the CRC32C that would have covered
+        // it, so a damaged length escapes the integrity check entirely and the
+        // records behind it are still intact on disk. Repair abandons them
+        // either way, by the same policy the CRC branch follows; what must not
+        // happen is abandoning them without saying so.
+        framingOverrun: true,
+        discardedBytes:
+          (await findWrittenEnd(handle, offset, fileSize, scanBuffer)) - offset,
       };
     }
     const storedCrc = frameHeader.readUInt32LE(0);

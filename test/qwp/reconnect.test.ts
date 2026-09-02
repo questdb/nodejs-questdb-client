@@ -4605,6 +4605,66 @@ describe("QWP Node file replay store", () => {
     },
   );
 
+  it("reports the records a damaged length field strands behind it", async () => {
+    // The length field is read before the CRC32C that would have covered it,
+    // so corrupting it is the one damage shape that reaches repair without any
+    // integrity check firing. Recovery still abandons the suffix by the same
+    // policy as a CRC tear, but it used to do it in silence: no report, no
+    // sentinel, nothing an operator could act on, while the intact records
+    // behind the damaged one were zeroed off the disk.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({ directory });
+    await first.load();
+    for (let sequence = 0; sequence < 5; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: Uint8Array.of(sequence, sequence, sequence),
+      });
+    }
+    await first.close();
+
+    const [segment] = await assignedReplaySegments(directory);
+    const recordSize = 8 + 3;
+    const secondRecord = 24 + recordSize * 2;
+    const path = join(directory, segment);
+    const thirdRecordPayload = Uint8Array.of(3, 3, 3);
+    expect(await payloadOffsetIn(path, thirdRecordPayload)).toBeGreaterThan(0);
+
+    // Overshoot EOF by the declared payload length alone, leaving every other
+    // header byte -- including the record's own CRC32C -- untouched.
+    const damagedLength = Buffer.alloc(4);
+    damagedLength.writeUInt32LE(0xf0000000, 0);
+    const file = await open(path, "r+");
+    try {
+      await file.write(damagedLength, 0, 4, secondRecord + 4);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    await expect(recovered.load()).resolves.toEqual([
+      { frameSequence: 0n, payload: Uint8Array.of(0, 0, 0) },
+      { frameSequence: 1n, payload: Uint8Array.of(1, 1, 1) },
+    ]);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      directory,
+      segmentFile: segment,
+      reason: expect.stringContaining("runs past the end of the segment"),
+    });
+    // The records behind the tear are gone, so the report has to account for
+    // them rather than for the preallocated padding.
+    expect(reports[0].discardedBytes).toBeGreaterThan(0);
+    expect(reports[0].discardedBytes).toBeLessThan(1024);
+    expect(await payloadOffsetIn(path, thirdRecordPayload)).toBe(-1);
+    await recovered.close();
+  });
+
   it("still fails closed when a sealed segment has a torn record", async () => {
     // Java zeroes a sealed suffix only on proof that its frame accounting is
     // complete; a tear that cost frames fails recovery before any mutation so
@@ -5536,4 +5596,16 @@ async function createTemporaryDirectory(): Promise<string> {
 
 async function assignedReplaySegments(directory: string): Promise<string[]> {
   return (await readdir(directory)).filter((name) => name.endsWith(".sfa"));
+}
+
+/**
+ * Offset of `payload` inside a segment file, or -1 once repair has zeroed it
+ * away. Distinguishes records still on disk from records the tail repair
+ * removed, which the recovered frame list alone cannot show.
+ */
+async function payloadOffsetIn(
+  segmentPath: string,
+  payload: Uint8Array,
+): Promise<number> {
+  return (await readFile(segmentPath)).indexOf(Buffer.from(payload));
 }
