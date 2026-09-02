@@ -18,6 +18,7 @@ import {
   QWP_SENDER_ERROR_POLICY,
   QWP_STATUS,
   QwpReplayRejectedError,
+  QwpUnrecoverableReplayDictionaryError,
   type QwpSenderError,
 } from "../../packages/client-core/src/qwp";
 
@@ -394,6 +395,44 @@ describe("QWP Node orphan drainer", () => {
     await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
       directory,
     ]);
+    await drainer.close();
+  });
+
+  it("quarantines an orphan whose symbol dictionary cannot be reconstructed", async () => {
+    // The foreground path classifies this with QwpReplayStoreCorruptionError,
+    // through isQuarantinableReplayRecoveryError(): both are journal verdicts,
+    // and frames referencing symbol IDs no replay can resolve are as final as
+    // a torn segment. isTerminalDrainFailure() omitted it, so the drainer
+    // re-adopted the slot on every scan for good -- taking its lock and
+    // re-reading every segment each time -- while the operator got no sentinel
+    // and no data-loss notification.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "dictionary");
+    const terminal = new QwpUnrecoverableReplayDictionaryError(
+      "recovered delta frames reference unreconstructable symbol IDs",
+    );
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        throw terminal;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+      serverMessage: terminal.message,
+    });
+    // Quarantined, so a later scan leaves it for the operator instead of
+    // adopting it again.
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
     await drainer.close();
   });
 

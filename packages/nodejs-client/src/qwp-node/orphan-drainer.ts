@@ -7,6 +7,7 @@ import {
   QwpConnectionCloseInfo,
   QwpIngressTransportMetrics,
   QwpReplayRejectedError,
+  QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../../../client-core/src/_qwp/transport";
 import {
@@ -635,9 +636,18 @@ function delay(milliseconds: number): Promise<void> {
  * retry loop the `.failed` sentinel exists to prevent. Poison escalation
  * driven by connection loss rather than a NACK arrives as a QwpProtocolError
  * and is already covered above.
+ *
+ * "A corrupt journal" is both journal verdicts, which is why the two are
+ * classified together by isQuarantinableReplayRecoveryError() on the
+ * foreground path. A dictionary that cannot be reconstructed is as final as a
+ * torn segment -- the frames reference symbol IDs no replay can resolve -- so
+ * omitting it here left the drainer re-adopting the slot every scan for good:
+ * taking its lock, re-reading every segment, and never writing the sentinel
+ * that retryQwpNodeOrphanSlot() exists to clear.
  */
 function isTerminalDrainFailure(error: Error): boolean {
   if (error instanceof QwpReplayStoreCorruptionError) return true;
+  if (error instanceof QwpUnrecoverableReplayDictionaryError) return true;
   if (error instanceof QwpProtocolError) return true;
   if (error instanceof QwpReplayRejectedError) return true;
   if (error instanceof QwpCatchUpCapGapError) return true;
