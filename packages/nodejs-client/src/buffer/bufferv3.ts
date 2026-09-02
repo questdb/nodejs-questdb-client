@@ -49,7 +49,7 @@ class SenderBufferV3 extends SenderBufferV2 {
     this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
-      return this;
+      return this.omitColumn();
     }
     let str = "";
     if (typeof value === "string") {
@@ -101,7 +101,7 @@ class SenderBufferV3 extends SenderBufferV2 {
     }
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(unscaled)) {
-      return this;
+      return this.omitColumn();
     }
     let arr: number[];
     if (typeof unscaled === "bigint") {

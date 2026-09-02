@@ -193,6 +193,8 @@ abstract class SenderBufferBase implements SenderBuffer {
   symbol(name: string, value: unknown): SenderBuffer {
     this.validateSymbolCall(name);
     // A null or undefined value omits the symbol entirely (see issue #28).
+    // A symbol never closes the symbol section, so this does not mark a
+    // column call the way the omitting column setters do.
     if (this.isNullOrUndefined(value)) {
       return this;
     }
@@ -218,7 +220,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
-      return this;
+      return this.omitColumn();
     }
     this.writeColumn(
       name,
@@ -246,7 +248,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
-      return this;
+      return this.omitColumn();
     }
     this.writeColumn(
       name,
@@ -302,7 +304,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
-      return this;
+      return this.omitColumn();
     }
     if (!Number.isInteger(value)) {
       throw new Error(`Value must be an integer, received ${value}`);
@@ -363,7 +365,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.validateTimestampUnit(unit);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
-      return this;
+      return this.omitColumn();
     }
     if (typeof value !== "bigint" && !Number.isInteger(value)) {
       throw new Error(
@@ -521,6 +523,11 @@ abstract class SenderBufferBase implements SenderBuffer {
    * misspelled or over-long name first surfaces in production, on the row that
    * happens to be populated.
    *
+   * It deliberately does not mark {@link hasColumnCall}: a call that throws
+   * contributed nothing to the row, so it must not close the symbol section.
+   * See {@link omitColumn} and {@link writeColumn}, which mark it once the
+   * call is known to write or to deliberately omit.
+   *
    * @param name - The column name to validate.
    */
   protected validateColumnCall(name: string): void {
@@ -531,7 +538,24 @@ abstract class SenderBufferBase implements SenderBuffer {
       throw new Error("Column can be set only after table name is set");
     }
     validateColumnName(name, this.maxNameLength);
+  }
+
+  /**
+   * @ignore
+   * Records a column call that deliberately wrote nothing, and returns the
+   * buffer so setters can `return this.omitColumn()`.
+   *
+   * A nullish value omits the column but still moves the caller past the
+   * symbol section, so the ordering rule has to count it. A call that *threw*
+   * did not, which is why the flag is set here rather than in
+   * {@link validateColumnCall}: marking it up front closed the symbol section
+   * on rejected calls too, so a caller that caught the error and fell back to
+   * symbol() -- probing arrayColumn() on protocol v1, say -- got a second,
+   * unrelated "Symbol can be added only after table name is set" failure.
+   */
+  protected omitColumn(): SenderBuffer {
     this.hasColumnCall = true;
+    return this;
   }
 
   /**
@@ -581,6 +605,8 @@ abstract class SenderBufferBase implements SenderBuffer {
         `Column value must be of type ${valueType}, received ${typeof value}`,
       );
     }
+    // Past every check that can reject the call: this one writes.
+    this.hasColumnCall = true;
     this.checkCapacity([name], 2 + name.length);
     this.write(this.hasColumns ? "," : " ");
     this.writeEscaped(name);

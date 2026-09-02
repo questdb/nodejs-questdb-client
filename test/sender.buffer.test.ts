@@ -615,6 +615,60 @@ describe("Sender message builder test suite (anything not covered in client inte
     );
   });
 
+  it("keeps the symbol section open when a column call is rejected", async function () {
+    // hasColumnCall was set inside validateColumnCall(), before every check
+    // that can still reject the call, so a caught column error closed the
+    // row's symbol section as well. A capability probe -- try arrayColumn(),
+    // fall back to a symbol -- then hit a second, unrelated "Symbol can be
+    // added only after table name is set" failure. Only a call that writes,
+    // or that deliberately omits a nullish value, moves past the symbols.
+    const build = () =>
+      new Sender({
+        protocol: "tcp",
+        protocol_version: "1",
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      }).table("t");
+
+    const rejected: [string, (sender: Sender) => unknown][] = [
+      ["arrays on v1", (sender) => sender.arrayColumn("a", [1.0])],
+      ["decimals on v1", (sender) => sender.decimalColumnText("d", "1.5")],
+      ["a non-integer int", (sender) => sender.intColumn("i", 1.5)],
+      [
+        "a wrongly typed value",
+        (sender) => sender.stringColumn("c", 42 as unknown as string),
+      ],
+    ];
+
+    for (const [label, reject] of rejected) {
+      const sender = build();
+      expect(() => reject(sender), label).toThrow();
+      // The failed call contributed nothing, so symbols are still legal.
+      await sender.symbol("s", "v").intColumn("v", 1).atNow();
+      expect(bufferContent(sender), label).toBe("t,s=v v=1i\n");
+      await sender.close();
+    }
+
+    // A column that omitted a nullish value did contribute a call, so it does
+    // close the section -- the rule the flag exists for.
+    const omitted = build();
+    expect(() => omitted.intColumn("i", null).symbol("s", "v")).toThrow(
+      "Symbol can be added only after table name is set and before any column added",
+    );
+    await omitted.close();
+
+    // A nullish symbol is still a symbol, and never closes the section.
+    const nullishSymbol = build();
+    await nullishSymbol
+      .symbol("a", null)
+      .symbol("b", "v")
+      .intColumn("v", 1)
+      .atNow();
+    expect(bufferContent(nullishSymbol)).toBe("t,b=v v=1i\n");
+    await nullishSymbol.close();
+  });
+
   it("discards a row that cannot be closed instead of wedging the sender", async function () {
     // A rejected close used to leave hasTable set and position past
     // endOfLastRow, so every later table() raised "Table name has already been

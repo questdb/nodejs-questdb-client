@@ -31,7 +31,7 @@ class SenderBufferV1 extends SenderBufferBase {
     this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
-      return this;
+      return this.omitColumn();
     }
     this.writeColumn(
       name,
