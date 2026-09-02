@@ -901,6 +901,27 @@ an opaque upgrade error because their WebSocket API hides the HTTP response. Avo
 placing ingress replica endpoints in a browser endpoint list unless the proxy routes
 writers to a primary.
 
+On Node.js a `401` or `403` on the upgrade is classified as an authentication
+failure, and it is the one endpoint verdict that is terminal for the entire endpoint
+set rather than for the endpoint that returned it. It short-circuits the sweep: the
+endpoints ranked after it are never tried, and the reconnect loop rethrows before the
+attempt and duration budgets are consulted, so no reconnect setting extends it. A
+credential is cluster-wide, so a node rejecting it reports a configuration error that
+walking on to a peer would only mask; the Java client applies the same rule. Every
+other rejected status keeps the sweep walking, including `404`, which one node can
+return mid-deploy while its peers are healthy, and a sweep mixing such attempts stays
+retryable if any one of them was.
+
+Note how this composes with health ranking. A non-orderly close demotes the endpoint
+it happened on, so a peer that answers `401` can rank ahead of the endpoint that just
+dropped; that sweep then ends without the dropped endpoint being retried at all, and
+the sender stays terminal even after it recovers. Two cases are exempt. A Node
+foreground store-and-forward sender that has already connected once retries these
+failures indefinitely, so a credential can rotate under a running producer without
+losing journaled rows. A browser cannot distinguish them at all, because its upgrade
+error carries no status; browser authentication failures surface from the REST
+session bootstrap instead.
+
 ### Observability
 
 Use immutable metrics snapshots for polling and callbacks for event-driven telemetry:
