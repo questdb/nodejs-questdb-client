@@ -7,6 +7,8 @@ import {
   type QwpSenderSession,
 } from "../../packages/client-core/src/qwp";
 import { QWP_SUPPORTED_CONFIG_KEYS } from "../../packages/nodejs-client/src/qwp-node/client-config";
+import * as nodeClient from "../../packages/nodejs-client/src";
+import * as browserClient from "../../packages/browser-client/src";
 
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -14,6 +16,29 @@ const ROOT = path.resolve(
 );
 
 describe("QWP configuration-string reference", () => {
+  it("only names entry points the package actually exports", async () => {
+    // config-docs checked key names but never function names, so QWP.md could
+    // -- and did -- point readers at a connectQwpNodeQuery() that has never
+    // existed. Every backticked connect/create entry point it names has to
+    // resolve against the Node package's public surface.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const named = new Set(
+      [...doc.matchAll(/`((?:connect|create)Qwp[A-Za-z0-9]*)\(\)`/g)].map(
+        (match) => match[1],
+      ),
+    );
+    expect(named.size).toBeGreaterThan(3);
+
+    // QWP.md documents both distributions, so an entry point may live in
+    // either package root.
+    const exported = new Set([
+      ...Object.keys(nodeClient),
+      ...Object.keys(browserClient),
+    ]);
+    const missing = [...named].filter((name) => !exported.has(name)).sort();
+    expect(missing).toEqual([]);
+  });
+
   it("documents every key the parser accepts", async () => {
     // A key the parser takes but QWP.md never names is undiscoverable: the
     // connect string is the portable spelling shared with the other QuestDB

@@ -259,8 +259,12 @@ export interface QwpNodeIngressOptions
    */
   storeAndForward?: QwpNodeStoreAndForwardOptions;
   /**
-   * Slot name below storeAndForward.directory. Unified configurations default
-   * to `default`; pooled clients derive `<senderId>-<slot>` names.
+   * Slot name below storeAndForward.directory.
+   *
+   * A connect string defaults it to `default`. Through the typed API it has no
+   * default: a standalone sender writes straight into `directory`, and a
+   * pooled client derives `sender-<slot>` names, or `<senderId>-<slot>` when
+   * this is set.
    */
   senderId?: string;
 }

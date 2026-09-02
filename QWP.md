@@ -69,7 +69,7 @@ keys owned only by egress or the pooled facade are accepted as intentional no-op
 Every `ws::`/`wss::` connect string is parsed by one schema, shared with the
 other QuestDB clients, whichever entry point builds the client —
 `Sender.fromConfig()`, `SenderOptions.fromConfig()`, `connectQwpNodeClient()`,
-or `connectQwpNodeQuery()`. An unrecognised key is rejected with
+or `connectQwpNodeEgress()`. An unrecognised key is rejected with
 `unknown configuration key: <key>`; a legacy ILP key adds a hint pointing at
 where it applies instead.
 
@@ -141,17 +141,17 @@ Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
 shown as a dash is applied downstream of the connect string, by the sender or
 session that consumes it.
 
-| Key                         | Value                          | Default       | Meaning                                                           |
-| --------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------- |
-| `sf_dir`                    | path                           | —             | Journal directory. Enables store-and-forward.                     |
-| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.              |
-| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.    |
-| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file.                                         |
-| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                |
-| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.  |
-| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`. |
-| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.               |
-| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                       |
+| Key                         | Value                          | Default       | Meaning                                                                                                              |
+| --------------------------- | ------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `sf_dir`                    | path                           | —             | Journal directory. Enables store-and-forward.                                                                        |
+| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                 |
+| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.                                                       |
+| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file. Also caps one ingress frame, including without `sf_dir`, since a frame must fit a segment. |
+| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                   |
+| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                     |
+| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`.                                                    |
+| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                  |
+| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                                                                          |
 
 ### Egress
 
@@ -166,20 +166,21 @@ session that consumes it.
 
 ### Pool
 
-Applied by the pooled facade; a standalone sender or query client ignores them.
+Applied by the pooled facade. A standalone sender or query client ignores
+them, with one exception noted in the table.
 
-| Key                       | Value       | Default | Meaning                                       |
-| ------------------------- | ----------- | ------- | --------------------------------------------- |
-| `sender_pool_min`         | integer     | —       | Senders kept warm.                            |
-| `sender_pool_max`         | integer     | —       | Sender ceiling.                               |
-| `query_pool_min`          | integer     | —       | Query sessions kept warm.                     |
-| `query_pool_max`          | integer     | —       | Query-session ceiling.                        |
-| `acquire_timeout_ms`      | integer ms  | —       | How long `acquire()` waits for a free entry.  |
-| `query_close_timeout_ms`  | integer ms  | —       | Bound on closing a borrowed query session.    |
-| `idle_timeout_ms`         | integer ms  | —       | Idle time before a pooled entry is reaped.    |
-| `max_lifetime_ms`         | integer ms  | —       | Absolute lifetime of a pooled entry.          |
-| `housekeeper_interval_ms` | integer ms  | —       | How often the pool reaps aged entries.        |
-| `lazy_connect`            | `on`, `off` | off     | Start without blocking on a first connection. |
+| Key                       | Value       | Default | Meaning                                                                                                                         |
+| ------------------------- | ----------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `sender_pool_min`         | integer     | —       | Senders kept warm.                                                                                                              |
+| `sender_pool_max`         | integer     | —       | Sender ceiling.                                                                                                                 |
+| `query_pool_min`          | integer     | —       | Query sessions kept warm.                                                                                                       |
+| `query_pool_max`          | integer     | —       | Query-session ceiling.                                                                                                          |
+| `acquire_timeout_ms`      | integer ms  | —       | How long `acquire()` waits for a free entry.                                                                                    |
+| `query_close_timeout_ms`  | integer ms  | —       | Bound on the CANCEL drain when a query session closes. Also honoured by a standalone egress session built from `egressSession`. |
+| `idle_timeout_ms`         | integer ms  | —       | Idle time before a pooled entry is reaped.                                                                                      |
+| `max_lifetime_ms`         | integer ms  | —       | Absolute lifetime of a pooled entry.                                                                                            |
+| `housekeeper_interval_ms` | integer ms  | —       | How often the pool reaps aged entries.                                                                                          |
+| `lazy_connect`            | `on`, `off` | off     | Start without blocking on a first connection.                                                                                   |
 
 ### Reserved
 
@@ -1077,7 +1078,10 @@ credit window bounds server read-ahead while application work is in progress.
 
 `target` accepts `any` (the default), `primary`, or `replica`. Primary routing also
 accepts standalone servers and a primary completing catch-up, matching the Java
-client. Both keys apply to ingress and egress alike. `zone` is an opaque, case-insensitive preference for `any` and `replica`;
+client. Both keys apply to ingress and egress on Node.js. In browsers they apply
+to egress only: ingress cannot learn a server's role or zone there, because the
+WebSocket API hides the upgrade response that carries them. `zone` is an opaque,
+case-insensitive preference for `any` and `replica`;
 cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
 followed across zones. The client validates the authoritative role and zone from the
 first QWP `SERVER_INFO` frame before accepting an endpoint, so the same guarantees
@@ -1267,11 +1271,14 @@ const db = await connectQwpNodeClient(
 ```
 
 For unified strings with `sf_dir`, Java-compatible defaults apply: memory
-durability, a 10 GiB total journal cap, 4 MiB frame/segment batches, a 30-second
-capacity wait, a 60-second close drain, and fail-fast initial connection. Set
+durability, a 10 GiB total journal cap, 4 MiB journal segments, a 30-second
+capacity wait, a 5-second close drain, and fail-fast initial connection. Set
 `sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
+The 4 MiB default sizes journal segments only; it does not install an ingress
+frame cap. Set `sf_max_segment_bytes` explicitly, or `qwp.session.maxBatchSizeBytes`,
+to bound frames before the first publication tells the client the server's cap.
 Without `sf_dir`, `sf_max_total_bytes` and `sf_append_deadline_millis` tune the
-built-in memory replay queue instead.
+built-in memory replay queue instead, and `sf_max_segment_bytes` still caps a frame.
 The parser also supports `max_name_len` and the Java listener/error inbox
 capacity keys. Those capacities actively bound asynchronous connection and
 typed-error delivery and are reflected in ingress drop counters.
