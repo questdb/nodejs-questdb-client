@@ -9,6 +9,8 @@ export const QWP_SENDER_ERROR_CATEGORY = {
   WRITE_ERROR: "write-error",
   NOT_WRITABLE: "not-writable",
   DICTIONARY_GAP: "dictionary-gap",
+  CANCELLED: "cancelled",
+  LIMIT_EXCEEDED: "limit-exceeded",
   PROTOCOL_VIOLATION: "protocol-violation",
   DATA_LOSS: "data-loss",
   UNKNOWN: "unknown",
@@ -154,7 +156,17 @@ export function qwpSenderErrorCategory(status: number): QwpSenderErrorCategory {
       return QWP_SENDER_ERROR_CATEGORY.NOT_WRITABLE;
     case QWP_STATUS.DICTIONARY_GAP:
       return QWP_SENDER_ERROR_CATEGORY.DICTIONARY_GAP;
+    case QWP_STATUS.CANCELLED:
+      return QWP_SENDER_ERROR_CATEGORY.CANCELLED;
+    case QWP_STATUS.LIMIT_EXCEEDED:
+      return QWP_SENDER_ERROR_CATEGORY.LIMIT_EXCEEDED;
     default:
+      // UNKNOWN is reserved for status bytes this client has no definition
+      // for, because the replay transport treats that category as
+      // poison-strike exempt: an unrecognised future status must retry
+      // forever rather than be blamed on the frame. A status the protocol
+      // does define must never land here, or a rejection it can never
+      // satisfy would replay without bound.
       return QWP_SENDER_ERROR_CATEGORY.UNKNOWN;
   }
 }
@@ -163,9 +175,16 @@ export function qwpDefaultSenderErrorPolicy(
   category: QwpSenderErrorCategory,
 ): QwpSenderErrorPolicy {
   switch (category) {
+    // LIMIT_EXCEEDED is deterministic under byte-identical replay, so it can
+    // never be retried into success. It stays RETRIABLE rather than TERMINAL
+    // so the poison detector ends it through the quarantine path, which
+    // preserves the rows for retryQwpNodeOrphanSlot() instead of failing the
+    // producer outright.
     case QWP_SENDER_ERROR_CATEGORY.WRITE_ERROR:
     case QWP_SENDER_ERROR_CATEGORY.INTERNAL_ERROR:
     case QWP_SENDER_ERROR_CATEGORY.DICTIONARY_GAP:
+    case QWP_SENDER_ERROR_CATEGORY.CANCELLED:
+    case QWP_SENDER_ERROR_CATEGORY.LIMIT_EXCEEDED:
     case QWP_SENDER_ERROR_CATEGORY.UNKNOWN:
       return QWP_SENDER_ERROR_POLICY.RETRIABLE;
     case QWP_SENDER_ERROR_CATEGORY.NOT_WRITABLE:
