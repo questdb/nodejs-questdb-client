@@ -1166,7 +1166,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     } catch (error) {
       this.fail(error);
       if (error instanceof QwpProtocolError) {
-        void this.connection.close(1002, "invalid QWP egress message");
+        // Matches the ingress session: a connection close() that rejects must
+        // not become an unhandled rejection on an error-handling path.
+        void this.connection
+          .close(1002, "invalid QWP egress message")
+          .catch(() => undefined);
       }
     }
   }

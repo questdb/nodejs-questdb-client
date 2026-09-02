@@ -1369,7 +1369,13 @@ export class QwpIngressSession {
     } catch (error) {
       this.fail(error);
       if (error instanceof QwpProtocolError) {
-        void this.connection.close(1002, "invalid QWP response");
+        // A reconnecting transport's close() awaits the replay store, and a
+        // persistent store rethrows a checkpoint, segment-handle or lock
+        // release failure. Discarding that rejection would surface it as an
+        // unhandled rejection, which terminates the process by default.
+        void this.connection
+          .close(1002, "invalid QWP response")
+          .catch(() => undefined);
       }
     }
   }
@@ -1454,12 +1460,15 @@ export class QwpIngressSession {
       // transports recycle and replay below their last ACK; a fixed/direct
       // session has no such recovery path and must fail closed immediately.
       this.fail(error, true);
-      void this.connection.close(
-        1002,
-        dictionaryGap
-          ? "QWP symbol dictionary gap"
-          : "QWP ingress pipeline rejected",
-      );
+      // See consumeMessages(): a rejecting store close must not escape here.
+      void this.connection
+        .close(
+          1002,
+          dictionaryGap
+            ? "QWP symbol dictionary gap"
+            : "QWP ingress pipeline rejected",
+        )
+        .catch(() => undefined);
     }
   }
 

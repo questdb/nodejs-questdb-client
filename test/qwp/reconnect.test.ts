@@ -280,6 +280,16 @@ class TrackingReplayStore implements QwpIngressReplayStore {
   }
 }
 
+/** Mirrors QwpNodeFileReplayStore.close() rethrowing a teardown failure. */
+class CloseFaultStore extends TrackingReplayStore {
+  closeAttempts = 0;
+
+  override async close(): Promise<void> {
+    this.closeAttempts++;
+    throw new Error("could not release QWP advisory lock");
+  }
+}
+
 class LazyTrackingReplayStore extends TrackingReplayStore {
   readonly reads: bigint[] = [];
   loadCalls = 0;
@@ -2896,6 +2906,43 @@ describe("QWP ingress reconnect and replay", () => {
     await expect(second).rejects.toBeInstanceOf(QwpProtocolError);
     expect(session.acknowledgedFrameSequence).toBe(-1n);
     await session.close();
+  });
+
+  it("does not leak an unhandled rejection when a store close fails on the protocol-error path", async () => {
+    // The protocol-error branch closes the connection for its side effect. A
+    // reconnecting transport's close() awaits the replay store, and
+    // QwpNodeFileReplayStore rethrows a checkpoint, segment-handle or lock
+    // release failure -- so discarding that promise made a read-only or full
+    // journal volume terminate the host process with an unhandled rejection.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const connection = new FakeConnection("primary");
+      const replayStore = new CloseFaultStore();
+      const session = await QwpIngressSession.connect(async () => connection, {
+        replayStore,
+        reconnect: { maxAttempts: 1 },
+      });
+      const pending = session.sendFrame(Uint8Array.of(9));
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+      // A one-byte payload cannot carry an ingress response, so decoding it
+      // raises QwpProtocolError inside consumeMessages().
+      connection.receive(Uint8Array.of(QWP_STATUS.OK));
+
+      await expect(pending).rejects.toBeInstanceOf(QwpProtocolError);
+      await vi.waitFor(() => expect(replayStore.closeAttempts).toBe(1));
+      // Give any escaping rejection a turn of the microtask and macrotask
+      // queues to reach the process handler.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toEqual([]);
+
+      // The protocol error itself still reaches the caller through the
+      // rejected send above; only the secondary teardown failure is absorbed.
+      await session.close().catch(() => undefined);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("rejects an over-range ingress NACK instead of charging the wrong frame", async () => {
