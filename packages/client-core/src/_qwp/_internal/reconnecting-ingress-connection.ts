@@ -43,6 +43,7 @@ import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 import {
+  createQwpDataLossSenderError,
   createQwpProtocolViolationSenderError,
   createQwpSenderError,
   defaultQwpSenderErrorHandler,
@@ -1658,8 +1659,23 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     ) {
       return;
     }
+    const frameCount = tail.tipSequence - tail.startSequence + 1n;
     await this.acknowledgeStoredFramesThrough(tail.tipSequence);
     this.recoveredDiscardTail = undefined;
+    // Retiring the tail is correct: it belongs to a transaction the producer
+    // never committed, the server rolled it back on disconnect, and replaying
+    // it would rebuild half a transaction. Doing it silently is not. This is
+    // the one path that empties journalled frames with no NACK, no quarantine
+    // and no recovery report, so it must reach the same channel as every other
+    // abandonment -- otherwise a crash discards the tail with nothing for an
+    // operator to see. The Java client logs the same fact on this path.
+    this.emitSenderError(
+      createQwpDataLossSenderError(
+        `recovered store-and-forward journal ends with ${frameCount} deferred frame(s) ` +
+          `whose transaction was never committed [fsn=${tail.startSequence}..${tail.tipSequence}]; ` +
+          `the tail was retired without being transmitted`,
+      ),
+    );
   }
 
   private async persistSymbolDictionaryDelta(

@@ -3340,14 +3340,27 @@ describe("QWP ingress reconnect and replay", () => {
     await seed.close();
 
     const connection = new FakeConnection("primary");
+    const senderErrors: QwpSenderError[] = [];
     const session = await QwpIngressSession.connect(async () => connection, {
       reconnect: { maxAttempts: 1 },
       replayStore: new QwpNodeFileReplayStore({ directory }),
+      onSenderError: (error) => senderErrors.push(error),
     });
     expect(connection.sent).toEqual([]);
     await vi.waitFor(async () =>
       expect(await assignedReplaySegments(directory)).toEqual([]),
     );
+    // Retiring the tail is right, but it empties the journal with no NACK and
+    // no quarantine, so it has to be announced on the abandonment channel.
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+    });
+    expect(senderErrors[0].serverMessage).toContain(
+      "3 deferred frame(s) whose transaction was never committed",
+    );
+    expect(senderErrors[0].serverMessage).toContain("[fsn=5..7]");
     expect(session.metrics).toMatchObject({
       replayPublishedFrameSequence: 7n,
       replayAcknowledgedFrameSequence: 7n,
