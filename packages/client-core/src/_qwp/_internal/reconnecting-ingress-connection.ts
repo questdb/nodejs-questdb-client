@@ -129,6 +129,16 @@ interface RecoveredDiscardTail {
   readonly predecessorSequence?: bigint;
 }
 
+interface CapacityWaiter {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  // Assigned immediately after the waiter is built: the timeout callback
+  // closes over the waiter, so the object has to exist first. Optional
+  // rather than asserted, because between those two statements it genuinely
+  // holds no timer, and clearTimeout() accepts undefined.
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 class RetriableIngressNackError extends Error {
   constructor(
     readonly frameSequence: bigint,
@@ -165,15 +175,7 @@ class RetriableIngressConnectionError extends Error {
 class QwpMemoryReplayStore implements QwpIngressReplayStore {
   private readonly records = new Map<bigint, Uint8Array>();
   private readonly symbols: string[] = [];
-  private readonly capacityWaiters = new Set<{
-    resolve: () => void;
-    reject: (error: Error) => void;
-    // Assigned immediately after the waiter is built: the timeout callback
-    // closes over the waiter, so the object has to exist first. Optional
-    // rather than asserted, because between those two statements it genuinely
-    // holds no timer, and clearTimeout() accepts undefined.
-    timer?: ReturnType<typeof setTimeout>;
-  }>();
+  private readonly capacityWaiters = new Set<CapacityWaiter>();
   private usedBytes = 0;
   private closing = false;
   private totalBackpressureStalls = 0;
@@ -287,7 +289,7 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     requiredBytes: number,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const waiter = {
+      const waiter: CapacityWaiter = {
         resolve: () => {
           clearTimeout(waiter.timer);
           this.capacityWaiters.delete(waiter);
