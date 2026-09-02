@@ -18,6 +18,31 @@ cd nodejs-questdb-client
 pnpm install
 ```
 
+## Repository Layout
+
+The repository is a pnpm workspace of three packages:
+
+| Package                              | Published | Contents                                                              |
+| ------------------------------------ | --------- | --------------------------------------------------------------------- |
+| `packages/client-core`               | no        | Shared runtime-neutral QWP protocol and session code                   |
+| `packages/nodejs-client`             | yes       | `@questdb/nodejs-client`: ILP transports plus the Node QWP adapter     |
+| `packages/browser-client`            | yes       | `@questdb/browser-client`: the browser QWP adapter                     |
+
+`client-core` is private and never published; both public packages inline it at
+build time. Each published package exposes its whole API from its package root,
+so `packages/*/src/index.ts` are the only public entry points.
+
+Build both packages with:
+
+```bash
+pnpm build
+```
+
+`packages/browser-client` must stay free of Node built-ins, Node typings,
+`undici`, and `ws`. Run `pnpm test:dist` after any change to a package boundary:
+it loads both built tarball layouts through their `exports` maps and checks the
+browser bundle for Node imports.
+
 ## Running Tests
 
 The project uses Vitest for testing. Tests are located in the `test` directory.
@@ -52,6 +77,38 @@ pnpm eslint
 ```bash
 pnpm eslint --fix
 ```
+
+## CI Gates
+
+`.github/workflows/build.yml` runs the following on every pull request, across
+Node.js 20, 22, and latest. Run them locally before pushing — `pnpm test` alone
+does not cover the type-checking, packaging, or browser-bundle gates.
+
+| Command                             | Covers                                                        |
+| ----------------------------------- | ------------------------------------------------------------- |
+| `pnpm eslint`                       | `packages/*/src`                                               |
+| `pnpm typecheck`                    | Package sources plus the QWP public API contract               |
+| `pnpm typecheck:qwp-browser`        | The browser source graph, with DOM libs and no `@types/node`   |
+| `pnpm typecheck:test`               | `test/**`, which `pnpm typecheck` does not reach               |
+| `pnpm typecheck:bench`              | `benchmarks/**`                                                |
+| `pnpm lint:bench`                   | `benchmarks/**`                                                |
+| `pnpm test`                         | The Vitest suite, including containerized integration tests    |
+| `pnpm test:dist`                    | Both built packages loaded through their `exports` maps        |
+| `pnpm typecheck:dist`               | The emitted `.d.ts` files, as a consumer sees them             |
+| `pnpm check:packages`               | That everything `exports` references is present and packed     |
+
+A separate job drives the built browser bundle in real Chromium against a local
+mock server:
+
+```bash
+pnpm test:qwp-browser
+```
+
+Vitest strips types without checking them, so a test can reference a deleted
+export and still pass; `pnpm typecheck:test` is what catches that. Likewise the
+compiled table writers promise per-column row typing that lives only in the
+emitted declarations, which is why `pnpm typecheck:dist` exists alongside
+`pnpm test:dist`.
 
 ## Making Changes
 

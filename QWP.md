@@ -1557,10 +1557,13 @@ They are intentionally not CI performance gates.
 
 ## Public API policy
 
-Only the four package entry points listed at the top are public. In particular,
-paths containing `internal`, `qwp-node`, or `src` are implementation details even if
-a bundler can resolve them. The compatibility contract checks the documented
-high-level constructors, session classes, errors, constants, and option signatures
-from the shared, browser, and Node entry points. Additional low-level codec exports
-from `qwp` are intended for advanced integrations; prefer high-level APIs when no
-custom encoder or transport is required.
+Only the two package roots listed at the top are public: `@questdb/nodejs-client`
+and `@questdb/browser-client`. Each declares exactly one `exports` subpath, so
+those two specifiers are the whole supported surface. In particular, paths
+containing `internal`, `qwp-node`, `client-core`, or `src` are implementation
+details even if a bundler can resolve them, and `@questdb/client-core` is a private
+workspace package that is never published. The compatibility contract checks the
+documented high-level constructors, session classes, errors, constants, and option
+signatures exported from both package roots. Additional low-level codec exports
+share those roots and are intended for advanced integrations; prefer the high-level
+APIs when no custom encoder or transport is required.

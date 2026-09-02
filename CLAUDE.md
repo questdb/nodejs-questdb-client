@@ -58,6 +58,8 @@ documentation, and single root build.
 
    - `bufferv1.ts`: Text-based protocol (version 1) for backward compatibility
    - `bufferv2.ts`: Binary protocol (version 2) with double encoding and array support
+   - `bufferv3.ts`: Extends v2 with DECIMAL columns (`decimalColumn`, `decimalColumnText`)
+   - All three are public exports (`SenderBufferV1`/`V2`/`V3`), selected by `createBuffer`
    - Dynamic buffer resizing and row-level transaction support
 
 4. **Configuration** (`packages/nodejs-client/src/options.ts`): Comprehensive options parsing from connection strings with validation and deprecation handling.
@@ -70,7 +72,8 @@ documentation, and single root build.
 
 - **Version 1**: Text-based serialization, compatible with older QuestDB versions
 - **Version 2**: Binary encoding for doubles, supports array columns, better performance
-- **Auto-negotiation**: HTTP transport can automatically detect and use the best protocol version
+- **Version 3**: Adds DECIMAL columns on top of version 2
+- **Auto-negotiation**: HTTP transport can automatically detect and use the best protocol version, preferring v3 over v2
 
 ### Key Design Patterns
 
@@ -97,5 +100,5 @@ Integration tests use TestContainers to spin up QuestDB instances for realistic 
 - Buffer automatically resizes up to `max_buf_size` (default 100MB)
 - Auto-flush triggers based on row count or time interval
 - Each worker thread needs its own Sender instance (buffers cannot be shared)
-- Protocol version 2 is recommended for new implementations with array column support
+- Protocol version 2 or higher is recommended for new implementations; v2 adds array columns and v3 adds DECIMAL
 - Run `pnpm test:dist` after package-boundary changes; it checks both npm tarballs, ESM/CJS loading, browser bundling, and the absence of Node modules from the browser artifact.
