@@ -2,6 +2,7 @@ import {
   QWP_COLUMN_TYPE,
   QWP_MAX_ARRAY_DIMENSION_LENGTH,
   QWP_MAX_ARRAY_DIMENSIONS,
+  QWP_MAX_COLUMNS_PER_TABLE,
   QwpColumnType,
   QwpIngressEncodeOptions,
   QwpIngressResponse,
@@ -1942,6 +1943,13 @@ export class QwpSender {
     if (entries.length === 0) {
       throw new TypeError("QWP writer schema must contain at least one column");
     }
+    // Reject an over-wide schema when it is compiled rather than on the first
+    // flush that tries to encode a row from it.
+    if (entries.length > QWP_MAX_COLUMNS_PER_TABLE) {
+      throw new TypeError(
+        `QWP writer schema exceeds the maximum of ${QWP_MAX_COLUMNS_PER_TABLE} columns [received=${entries.length}]`,
+      );
+    }
 
     const columns: CompiledQwpWriterColumn[] = [];
     const inputNames = new Set<string>();
@@ -2218,6 +2226,17 @@ export class QwpSender {
         metadata = { ...metadata, decimalScale: existingSchema.decimalScale };
       }
       if (this.currentRow.has(nameKey)) return this;
+      if (!existingSchema && table.schema.size >= QWP_MAX_COLUMNS_PER_TABLE) {
+        // QwpTableBuffer enforces this too, but only once buildTable() runs
+        // during flush -- and a throw there escapes before releaseStagedRows(),
+        // so every later flush() and close() hit the same wall and the whole
+        // staged batch became unreachable. Rejecting the column here discards
+        // just this row through failRow(), leaving the sender usable and the
+        // rows staged before it intact.
+        throw new Error(
+          `column count exceeds maximum ${QWP_MAX_COLUMNS_PER_TABLE} for table '${table.name}'`,
+        );
+      }
       const canonicalName = existingSchema?.name ?? name;
       if (!existingSchema) this.currentRowSchemaKeys.push(nameKey);
       table.schema.set(nameKey, { name: canonicalName, type, ...metadata });

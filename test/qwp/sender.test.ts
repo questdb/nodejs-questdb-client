@@ -36,6 +36,7 @@ import {
   int64,
   ipv4,
   long,
+  QWP_MAX_COLUMNS_PER_TABLE,
   long256,
   longArray,
   short,
@@ -1096,6 +1097,50 @@ describe("QWP high-level sender", () => {
     const staged = (sender as unknown as { tables: readonly unknown[] }).tables;
     expect(staged).toHaveLength(1);
     expect(sender.metrics.pendingRows).toBe(1);
+  });
+
+  it("rejects an over-wide row at the column that crosses the cap, not at flush", async () => {
+    // QwpTableBuffer enforces the 2048-column cap, but only inside
+    // buildTable() during flush -- and that throw escaped before
+    // releaseStagedRows(), so every later flush() and close() hit the same
+    // wall, the sender was permanently unusable, and the rows staged before
+    // the over-wide one could never be sent.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("wide").longColumn("keeper", 1n).atNow();
+
+    sender.table("wide");
+    expect(() => {
+      for (let index = 0; index < QWP_MAX_COLUMNS_PER_TABLE + 8; index++) {
+        sender.longColumn(`c${index}`, BigInt(index));
+      }
+    }).toThrow(/column count exceeds maximum 2048/);
+
+    // The over-wide row and its table selection are gone; nothing else is.
+    expect(sender.metrics.pendingRows).toBe(1);
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.sends).toHaveLength(1);
+
+    // And the sender still works afterwards.
+    await sender.table("wide").longColumn("keeper", 2n).atNow();
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.sends).toHaveLength(2);
+    await sender.close();
+  });
+
+  it("rejects an over-wide compiled writer schema when it is compiled", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const schema: Record<string, ReturnType<typeof long>> = {};
+    for (let index = 0; index < QWP_MAX_COLUMNS_PER_TABLE + 1; index++) {
+      schema[`c${index}`] = long();
+    }
+
+    expect(() => sender.writer("wide", schema)).toThrow(
+      /exceeds the maximum of 2048 columns/,
+    );
+    await sender.close();
   });
 
   it("keeps the sender usable after a failed row, without losing staged rows", async () => {
