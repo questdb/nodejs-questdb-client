@@ -225,6 +225,7 @@ const egressSessionOptionsContract: QwpEgressSessionOptions = {
   bufferPoolSize: 4,
   queryTimeoutMs: 30_000,
   cancelDrainTimeoutMs: 5_000,
+  maxBatchRows: 4096,
 };
 
 const fixedConnectionIngressContract: QwpIngressSessionOptions = {

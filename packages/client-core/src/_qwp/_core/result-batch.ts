@@ -1288,6 +1288,21 @@ interface PreparedResultBatch {
 
 /** Stateful decoder for connection-scoped QWP result batches. */
 export class QwpResultBatchDecoder {
+  /**
+   * Upper bound on a batch's declared row count, taken from the client's own
+   * `maxBatchRows` request.
+   *
+   * That request only ever reached the wire -- an upgrade header on Node, a
+   * query parameter in the browser -- and nothing checked the answer against
+   * it. Scratch arrays are sized from the declared row count and deliberately
+   * retained per pool slot for reuse, so a peer that ignores the request, or a
+   * hostile one, sets this session's memory floor for its lifetime: bounded
+   * only by QWP_MAX_CELLS_PER_BATCH times the pool size, which the cap's own
+   * comment puts at roughly half a gigabyte per slot.
+   *
+   * Left undefined the batch is bounded by the cell cap alone, as before.
+   */
+  maxBatchRows?: number;
   private readonly symbolDictionary: string[] = [];
   private readonly viewBatches: QwpResultBatchView[] = [];
   private readonly viewLayouts: QwpResultColumnViewLayout[][] = [];
@@ -1421,6 +1436,13 @@ export class QwpResultBatchDecoder {
     } else if (!this.schema) {
       throw new QwpProtocolError(
         "continuation RESULT_BATCH arrived before its schema-bearing batch",
+      );
+    }
+    // Checked before the grid, because it is the bound this client actually
+    // asked for and the more actionable error of the two.
+    if (this.maxBatchRows !== undefined && rowCount > this.maxBatchRows) {
+      throw new QwpProtocolError(
+        `RESULT_BATCH declares ${rowCount} rows, above the ${this.maxBatchRows} this client requested`,
       );
     }
     // Each dimension passed its own cap; the grid they describe still has to

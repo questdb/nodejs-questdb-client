@@ -917,7 +917,13 @@ export async function connectQwpNodeEgress(
       sessionOptions.serverInfoTimeoutMs ??
         QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
     ),
-    sessionOptions,
+    // The request this client puts on the wire is also the bound it enforces
+    // on the answer; without it a peer's declared row count sizes the decoder
+    // scratch on its own.
+    {
+      ...sessionOptions,
+      maxBatchRows: sessionOptions.maxBatchRows ?? options.maxBatchRows,
+    },
     signal,
   );
 }

@@ -231,7 +231,11 @@ function rleZstdFrame(
 }
 
 /** A compressed RESULT_BATCH declaring an all-NULL grid of the given shape. */
-function compressedAllNullBatch(rows: number, columns: number): Uint8Array {
+function compressedAllNullBatch(
+  rows: number,
+  columns: number,
+  requestId = 1n,
+): Uint8Array {
   const schema = new QwpByteWriter();
   writeQwpVarint(schema, 0); // table name
   writeQwpVarint(schema, rows);
@@ -254,7 +258,7 @@ function compressedAllNullBatch(rows: number, columns: number): Uint8Array {
     schemaBytes.length + columns * (1 + bitmapBytes),
   );
   const payload = new QwpByteWriter();
-  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(1n);
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
   writeQwpVarint(payload, 0);
   payload.writeBytes(body);
   return encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_ZSTD, 1);
@@ -811,6 +815,29 @@ describe("QWP result batch decoder", () => {
     expect(batch.get(0, 0)).toBeNull();
   });
 
+  it("bounds a RESULT_BATCH by the row count this client asked for", () => {
+    // maxBatchRows only ever reached the wire -- an upgrade header on Node, a
+    // query parameter in the browser -- and nothing checked the answer against
+    // it. Scratch arrays are sized from the declared row count and are
+    // deliberately retained per pool slot for reuse, so a peer that ignores
+    // the request, or a hostile one, sets this session's memory floor for its
+    // lifetime: bounded only by the cell cap times the pool size.
+    const message = decodeQwpEgressMessage(compressedAllNullBatch(4096, 4));
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const decoder = new QwpResultBatchDecoder();
+    decoder.maxBatchRows = 1024;
+    const before = process.memoryUsage().heapUsed;
+    expect(() => decoder.decode(message)).toThrow(
+      /declares 4096 rows, above the 1024 this client requested/,
+    );
+    // Rejected in prepare(), before a column is read.
+    expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+
+    // Left unset the cell cap stays the only bound, as before.
+    expect(new QwpResultBatchDecoder().decode(message).rowCount).toBe(4096);
+  });
+
   it("bounds the delta symbol dictionary a RESULT_BATCH declares", () => {
     // A zero-length entry costs one decompressed byte, so a few hundred
     // Zstd-compressed bytes can declare millions of them. Reject beyond the
@@ -1048,6 +1075,37 @@ describe("QwpEgressSession", () => {
       ),
     ).rejects.toThrow("cancelDrainTimeoutMs must be a positive finite number");
     expect(factoryCalls).toBe(0);
+
+    await expect(
+      QwpEgressSession.connect(
+        async () => {
+          factoryCalls++;
+          return new FakeConnection();
+        },
+        { maxBatchRows: 0 },
+      ),
+    ).rejects.toThrow("maxBatchRows must be an integer between 1 and");
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("enforces its maxBatchRows on the batches a query receives", async () => {
+    // The session has to hand its own request down to the decoder; otherwise
+    // the bound exists only as a header on the wire.
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection, { maxBatchRows: 1024 });
+    connection.receive(serverInfo());
+    await session.ready;
+
+    const query = await session.query("select * from x");
+    connection.receive(compressedAllNullBatch(4096, 4, 0n));
+
+    const consume = async () => {
+      for await (const batch of query) void batch;
+    };
+    await expect(consume()).rejects.toThrow(
+      /declares 4096 rows, above the 1024 this client requested/,
+    );
+    await session.close().catch(() => undefined);
   });
 
   it("closes the transport when SERVER_INFO does not arrive", async () => {

@@ -19,6 +19,7 @@ import {
   QwpServerInfoMessage,
 } from "./_core";
 import { QwpAsyncQueue } from "./_internal/async-queue";
+import { validateQwpMaxBatchRows } from "./_internal/egress-limits";
 import { QwpReconnectingEgressConnection } from "./_internal/reconnecting-egress-connection";
 import {
   QwpBinaryConnection,
@@ -41,6 +42,14 @@ export interface QwpEgressSessionOptions {
   queryTimeoutMs?: number;
   /** Maximum wait for a terminal response after CANCEL. Defaults to 5 seconds. */
   cancelDrainTimeoutMs?: number;
+  /**
+   * Rejects a RESULT_BATCH declaring more rows than this. The connect helpers
+   * default it to the `maxBatchRows` they put on the wire, so the request the
+   * client makes is also the bound it enforces; decoder scratch is sized from
+   * the declared row count and retained per pool slot, so an answer above the
+   * request would set this session's memory floor for its lifetime.
+   */
+  maxBatchRows?: number;
   /**
    * Bounded failover policy. Failover and at-least-once active-query replay
    * are enabled by default; set false to keep one fixed connection.
@@ -84,6 +93,7 @@ interface QwpValidatedEgressSessionOptions {
   readonly bufferPoolSize: number;
   readonly queryTimeoutMs: number;
   readonly cancelDrainTimeoutMs: number;
+  readonly maxBatchRows?: number;
 }
 
 interface QwpReplayableQueryRequest {
@@ -148,6 +158,7 @@ function validateEgressSessionOptions(
       options.cancelDrainTimeoutMs ?? 5_000,
       "cancelDrainTimeoutMs",
     ),
+    maxBatchRows: validateQwpMaxBatchRows(options.maxBatchRows),
   };
 }
 
@@ -686,6 +697,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     this.defaultInitialCredit = validated.initialCredit;
     this.bufferPoolSize = validated.bufferPoolSize;
     this.cancelDrainTimeoutMs = validated.cancelDrainTimeoutMs;
+    this.decoder.maxBatchRows = validated.maxBatchRows;
     let resolve!: (value: QwpServerInfoMessage) => void;
     let reject!: (error: unknown) => void;
     this.ready = new Promise<QwpServerInfoMessage>((res, rej) => {

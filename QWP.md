@@ -1173,6 +1173,14 @@ sends `X-QWP-Max-Batch-Rows`; browsers use the `qwp_max_batch_rows` URL paramete
 which requires a server that supports browser QWP negotiation. Older servers ignore
 the browser parameter and keep their configured batch size.
 
+The connect helpers also enforce that request on what comes back: a `RESULT_BATCH`
+declaring more rows than were asked for is rejected as a `QwpProtocolError` before
+any column is read. Decoder scratch is sized from the declared row count and
+retained per buffer-pool slot for reuse, so an answer above the request would set
+the session's memory floor for its lifetime. Set `maxBatchRows` on the session
+options to bound a session built directly from a connection; left unset, the cell
+cap below is the only bound.
+
 A single `RESULT_BATCH` may declare at most `QWP_MAX_CELLS_PER_BATCH` cells --
 32Mi, its rows multiplied by its columns. The row and column caps bound each
 dimension on its own, and a compressed body detaches the grid they describe from
