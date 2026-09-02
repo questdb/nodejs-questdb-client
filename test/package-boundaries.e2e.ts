@@ -225,6 +225,30 @@ describe("public npm package boundaries", () => {
     },
   );
 
+  it.each(["import", "require"] as const)(
+    "resolves the browser package under the browser condition with %s",
+    (format) => {
+      // jest-environment-jsdom adds `browser` to the export conditions while
+      // still emitting require(), and so does `node --conditions=browser`.
+      // Conditions match in declaration order, so a `browser` key that resolves
+      // straight to the ESM file hands a CommonJS require an .mjs and Node
+      // below 22.12 fails with ERR_REQUIRE_ESM. `browser` must therefore split
+      // on import/require the same way the top-level map does.
+      const script =
+        format === "require"
+          ? 'console.log(typeof require("@questdb/browser-client").connectQwpBrowserClient);'
+          : 'console.log(typeof (await import("@questdb/browser-client")).connectQwpBrowserClient);';
+      const output = execFileSync(
+        process.execPath,
+        format === "import"
+          ? ["--conditions=browser", "--input-type=module", "--eval", script]
+          : ["--conditions=browser", "--eval", script],
+        { cwd: consumerDirectory, encoding: "utf8" },
+      );
+      expect(output.trim()).toBe("function");
+    },
+  );
+
   it("bundles the browser package root for a browser consumer", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "questdb-browser-"));
     const bundle = path.join(directory, "client.mjs");
