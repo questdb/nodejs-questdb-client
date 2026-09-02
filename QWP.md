@@ -115,7 +115,7 @@ continues to come from `addr`, because the typed object intentionally omits
 | `max_name_len`                                  | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                    |
 | `sender_id`                                     | string           | `default` | Identifies this producer to the server and in the journal.               |
 | `max_frame_rejections`                          | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation.   |
-| `poison_min_escalation_window_millis`           | integer ms       | `5000`    | Minimum dwell before a poison frame may escalate.                        |
+| `poison_min_escalation_window_millis`           | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.              |
 | `catch_up_cap_gap_min_escalation_window_millis` | integer ms       | `300000`  | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. |
 | `connection_listener_inbox_capacity`            | integer          | —         | Bound on the connection-event inbox before events are dropped.           |
 | `error_inbox_capacity`                          | integer          | —         | Bound on the `onSenderError` inbox before events are dropped.            |
@@ -879,11 +879,13 @@ process or page; configuring a Node directory makes the same replay crash-safe.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` defaults to 4 consecutive strikes,
-and `poisonMinEscalationWindowMs` defaults to 5 seconds. Both conditions must be met
-before escalation. Normal (1000), going-away (1001), service-restart (1012), and
-try-again-later (1013) closes, `NOT_WRITABLE`, retriable symbol-dictionary catch-up
-rejections, and intervening connection-establishment failures reset the strike
-episode. Abnormal closes (1006), internal-error closes (1011), and transport errors
+and `poisonMinEscalationWindowMs` defaults to 5 minutes. Both conditions must be met
+before escalation. The window measures _connected_ dwell only: time spent unable to
+reach a server is banked and withheld, so an outage never supplies the dwell, and the
+strikes a frame has already earned survive the reconnect it caused. Normal (1000),
+going-away (1001), service-restart (1012), and try-again-later (1013) closes,
+`NOT_WRITABLE`, `DICTIONARY_GAP`, and retriable symbol-dictionary catch-up rejections
+reset the strike episode. Abnormal closes (1006), internal-error closes (1011), and transport errors
 without close information may count when an unacknowledged replay head exists.
 Escalation is terminal for that producer; store-and-forward retains and quarantines
 the affected rows for explicit `retryQwpNodeOrphanSlot()` recovery rather than

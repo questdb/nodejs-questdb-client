@@ -358,6 +358,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private poisonFrameSequence?: bigint;
   private poisonFirstStrikeMs = 0;
   private poisonStrikes = 0;
+  /** Elapsed connection-outage time withheld from the escalation window. */
+  private poisonOutageMs = 0;
+  private poisonOutageStartedMs = 0;
   private catchUpCapGapAttempts = 0;
   private catchUpCapGapFirstMs = 0;
   private durableAckMismatchAttempts = 0;
@@ -419,8 +422,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? 5_000;
     this.maxDurationMs = reconnectOptions.maxDurationMs ?? 30_000;
     this.maxFrameRejections = reconnectOptions.maxFrameRejections ?? 4;
+    // WRITE_ERROR and INTERNAL_ERROR are RETRIABLE by policy, but the only
+    // thing separating "this frame is poison" from "the server cannot write
+    // right now" is how long the rejection persists. Five seconds did not
+    // separate them at all: a concurrent DDL, a checkpoint or a briefly full
+    // server volume outlives it easily, and with the reconnect backoff capped
+    // at maxBackoffMs four strikes accumulate well inside that window -- so a
+    // transient server-side fault permanently killed a running producer.
     this.poisonMinEscalationWindowMs =
-      reconnectOptions.poisonMinEscalationWindowMs ?? 5_000;
+      reconnectOptions.poisonMinEscalationWindowMs ?? 300_000;
     this.catchUpCapGapMinEscalationWindowMs =
       catchUpCapGapMinEscalationWindowMs;
     this.orphanDurableAckMismatchMaxDurationMs =
@@ -900,6 +910,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         const replayed = await this.replayInto(candidate);
         if (this.closing) throw new QwpSendClosedError();
         this.install(candidate, replayed);
+        // The server is reachable again, so the escalation window resumes.
+        this.endPoisonOutage();
         this.resetCatchUpCapGapEpisode();
         this.resetDurableAckMismatchEpisode();
         this.connectingCandidate = undefined;
@@ -928,10 +940,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       } catch (error) {
         // A poison frame is meant to identify a connection that repeatedly
         // accepts the same replay head and then rejects it or disappears. A
-        // failed connection/replay attempt breaks that sequence: the server
-        // is unavailable independently of the frame, so old strikes must not
-        // survive while the outage supplies the escalation dwell time.
-        this.resetPoisonEpisode();
+        // failed connection/replay attempt breaks that sequence, so the
+        // outage must not supply the escalation dwell time -- but the strikes
+        // already earned have to survive it. Wiping the episode here made the
+        // canonical poison case unreachable: a frame that takes the server
+        // down guarantees the next connect fails, which reset the count
+        // before it could ever reach maxFrameRejections.
+        this.beginPoisonOutage();
         if (reconnecting) this.totalReconnectErrors++;
         lastError = error;
         if (this.connectingCandidate === candidate) {
@@ -1394,6 +1409,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       const exempt =
         frame.dictionaryCatchup ||
         response.status === QWP_STATUS.NOT_WRITABLE ||
+        // A DICTIONARY_GAP is the server asking for symbol catch-up, not a
+        // verdict on this frame. The catch-up it triggers has not been sent
+        // yet, so charging the frame a strike condemns it before the recovery
+        // it asked for has been attempted.
+        response.status === QWP_STATUS.DICTIONARY_GAP ||
         qwpSenderErrorCategory(response.status) ===
           QWP_SENDER_ERROR_CATEGORY.UNKNOWN;
       if (exempt) {
@@ -1488,20 +1508,48 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.poisonFrameSequence = undefined;
     this.poisonFirstStrikeMs = 0;
     this.poisonStrikes = 0;
+    this.poisonOutageMs = 0;
+    this.poisonOutageStartedMs = 0;
+  }
+
+  /**
+   * Marks the start of a connection-establishment outage. The strikes a frame
+   * has already earned survive it -- otherwise a frame that takes the server
+   * down can never escalate, because the very crash it causes makes the next
+   * connect fail and wipes the episode. Only the dwell the outage would have
+   * contributed is withheld, which is what the escalation window is for.
+   */
+  private beginPoisonOutage(): void {
+    if (this.poisonFrameSequence === undefined) return;
+    if (this.poisonOutageStartedMs === 0) {
+      this.poisonOutageStartedMs = Date.now();
+    }
+  }
+
+  /** Banks the elapsed outage so it cannot count toward the escalation window. */
+  private endPoisonOutage(): void {
+    if (this.poisonOutageStartedMs === 0) return;
+    this.poisonOutageMs += Date.now() - this.poisonOutageStartedMs;
+    this.poisonOutageStartedMs = 0;
   }
 
   private recordPoisonStrike(frameSequence: bigint): boolean {
     const now = Date.now();
+    this.endPoisonOutage();
     if (this.poisonFrameSequence === frameSequence) {
       this.poisonStrikes++;
     } else {
       this.poisonFrameSequence = frameSequence;
       this.poisonStrikes = 1;
       this.poisonFirstStrikeMs = now;
+      this.poisonOutageMs = 0;
+      this.poisonOutageStartedMs = 0;
     }
+    const connectedDwellMs =
+      now - this.poisonFirstStrikeMs - this.poisonOutageMs;
     return (
       this.poisonStrikes >= this.maxFrameRejections &&
-      now - this.poisonFirstStrikeMs >= this.poisonMinEscalationWindowMs
+      connectedDwellMs >= this.poisonMinEscalationWindowMs
     );
   }
 
