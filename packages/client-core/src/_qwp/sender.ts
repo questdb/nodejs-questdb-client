@@ -1948,7 +1948,17 @@ export class QwpSender {
   ): Promise<T> {
     if (deadline === undefined) return operation;
     const remaining = deadline - Date.now();
-    if (remaining <= 0) throw this.closeTimeoutError();
+    if (remaining <= 0) {
+      // `operation` is already running: the caller evaluated it to pass it in,
+      // and an ACK waiter is already registered against the session. Throwing
+      // without racing it would leave nothing subscribed, so the rejection
+      // session.close() delivers moments later arrives unhandled -- which Node
+      // turns into a process exit by default, after close() has already
+      // reported the timeout the caller did handle. The Promise.race below
+      // subscribes both operands, so only this early return needs the guard.
+      void operation.catch(() => undefined);
+      throw this.closeTimeoutError();
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([

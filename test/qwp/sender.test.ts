@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   QWP_COLUMN_TYPE,
   QWP_EGRESS_MESSAGE,
@@ -702,6 +702,61 @@ describe("QWP high-level sender", () => {
       connected: false,
       closed: true,
     });
+  });
+
+  it("keeps the close ACK wait observed when the drain deadline has elapsed", async () => {
+    // closeNow() builds the wait promise -- registering a session waiter --
+    // and only then enters withCloseDeadline, which re-reads the clock. When
+    // the publication has consumed the whole budget that re-read throws before
+    // Promise.race can subscribe, so the rejection session.close() delivers a
+    // moment later has no handler. Node turns that into a process exit, after
+    // close() has already reported the timeout the caller did handle.
+    let skewMs = 0;
+    class ElapsingSession extends WatermarkSession {
+      private readonly rejecters = new Set<(error: Error) => void>();
+
+      override waitForAcknowledged(): Promise<void> {
+        // Real code reaches this when the publication lands on the deadline,
+        // a window of microseconds. Forcing the skew here makes it certain.
+        skewMs = 10_000;
+        return new Promise<void>((_resolve, reject) => {
+          this.rejecters.add(reject);
+        });
+      }
+
+      override async close(): Promise<void> {
+        for (const reject of this.rejecters) {
+          reject(new Error("QWP ingress session is closed"));
+        }
+        this.rejecters.clear();
+        await super.close();
+      }
+    }
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const realNow = Date.now;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    try {
+      const session = new ElapsingSession();
+      const sender = new QwpSender(async () => session, {
+        autoFlush: false,
+        closeFlushTimeoutMs: 1_000,
+      });
+      await sender.table("events").longColumn("value", 42n).atNow();
+
+      await expect(sender.close()).rejects.toBeInstanceOf(
+        QwpSenderCloseTimeoutError,
+      );
+      expect(session.closeCount).toBe(1);
+      // Let the orphaned rejection reach the unhandled-rejection check.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      vi.restoreAllMocks();
+    }
   });
 
   it("publishes on close without draining when the timeout is zero", async () => {
