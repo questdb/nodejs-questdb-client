@@ -28,6 +28,15 @@ abstract class SenderBufferBase implements SenderBuffer {
   private hasTable: boolean;
   private hasSymbols: boolean;
   private hasColumns: boolean;
+  /**
+   * Whether a column setter has been called on the row being built, whether or
+   * not it wrote anything. Distinct from {@link hasColumns}, which tracks bytes
+   * in the buffer and therefore decides the field separator and whether the row
+   * can be closed. Symbol ordering is a property of the call sequence, so it
+   * must be judged on calls: a column whose value was nullish emits nothing but
+   * still means the caller has moved past the symbol section.
+   */
+  private hasColumnCall: boolean;
 
   private readonly maxNameLength: number;
 
@@ -126,6 +135,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.hasTable = false;
     this.hasSymbols = false;
     this.hasColumns = false;
+    this.hasColumnCall = false;
   }
 
   /**
@@ -521,6 +531,7 @@ abstract class SenderBufferBase implements SenderBuffer {
       throw new Error("Column can be set only after table name is set");
     }
     validateColumnName(name, this.maxNameLength);
+    this.hasColumnCall = true;
   }
 
   /**
@@ -528,13 +539,19 @@ abstract class SenderBufferBase implements SenderBuffer {
    * The symbol equivalent of {@link validateColumnCall}. Symbols carry an
    * extra ordering rule: they must precede every column on the row.
    *
+   * The rule is enforced against {@link hasColumnCall}, not {@link hasColumns},
+   * so it does not depend on this row's data. Testing the written-bytes flag
+   * let the same call site pass whenever the preceding column happened to be
+   * nullish and throw whenever it carried a value -- the exact data-dependent
+   * validation {@link validateColumnCall} exists to avoid.
+   *
    * @param name - The symbol name to validate.
    */
   protected validateSymbolCall(name: string): void {
     if (typeof name !== "string") {
       throw new Error(`Symbol name must be a string, received ${typeof name}`);
     }
-    if (!this.hasTable || this.hasColumns) {
+    if (!this.hasTable || this.hasColumnCall) {
       throw new Error(
         "Symbol can be added only after table name is set and before any column added",
       );

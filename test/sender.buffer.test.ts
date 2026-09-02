@@ -585,6 +585,12 @@ describe("Sender message builder test suite (anything not covered in client inte
       expect(() => build().intColumn("i", 1).symbol("s", value)).toThrow(
         "Symbol can be added only after table name is set and before any column added",
       );
+      // And the rule holds when the preceding column was itself omitted. It is
+      // a property of the call sequence, so judging it by the bytes written
+      // made the same call site pass or throw according to this row's data.
+      expect(() => build().intColumn("i", value).symbol("s", "v")).toThrow(
+        "Symbol can be added only after table name is set and before any column added",
+      );
       // The scale describes the column, not this row's value.
       expect(() => build().decimalColumn("d", value, 999)).toThrow(
         "Scale must be between 0 and 76",
