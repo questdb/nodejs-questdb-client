@@ -4519,7 +4519,10 @@ describe("QWP Node file replay store", () => {
       segmentFile: segment,
       reason: expect.stringContaining("CRC32C"),
     });
-    expect(reports[0].discardedBytes).toBeGreaterThanOrEqual(recordSize);
+    // Exactly the abandoned record, not the segment's preallocated tail.
+    // Measuring to EOF reported the whole 4 MiB segment for this one lost
+    // record, which tells an operator nothing about the real loss.
+    expect(reports[0].discardedBytes).toBe(recordSize);
     await recovered.close();
   });
 
@@ -4581,6 +4584,10 @@ describe("QWP Node file replay store", () => {
         reason: expect.stringContaining("replay can no longer reach"),
       });
       expect(reports[0].discardedBytes).toBeGreaterThan(0);
+      // Written bytes only. These records carry 3-byte payloads, so the loss
+      // is tens of bytes; the segment is preallocated to 4 MiB and measuring
+      // to EOF used to report all of it.
+      expect(reports[0].discardedBytes).toBeLessThan(1024);
       await recovered.close();
     },
   );

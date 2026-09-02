@@ -620,10 +620,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
               this.reportRecoveryDataLoss({
                 directory: this.directory,
                 segmentFile: name,
-                discardedBytes: Math.max(
-                  0,
-                  decoded.size - SEGMENT_HEADER_SIZE - decoded.logicalSize,
-                ),
+                // Written bytes only. Segments are preallocated, so the span
+                // from the valid prefix to EOF is mostly zero padding that was
+                // never journalled and cannot have been lost.
+                discardedBytes: Math.max(0, decoded.discardedBytes ?? 0),
                 reason: decoded.interiorDamage
                   ? "a damaged record is followed by intact records that replay can no longer reach"
                   : "the active segment tail contains a complete record whose CRC32C does not match",
@@ -2252,6 +2252,11 @@ interface DecodedSegment {
    * records that are still on disk, so recovery quarantines instead.
    */
   readonly interiorDamage?: boolean;
+  /**
+   * Written bytes abandoned beyond the valid prefix, excluding the segment's
+   * unwritten zero padding. Set only when the segment is damaged.
+   */
+  readonly discardedBytes?: number;
 }
 
 function selectRecoveredActivePath(
@@ -2362,6 +2367,10 @@ async function scanSegment(
         // after it are still intact and must not be truncated away.
         tornTail: !paddingToEnd,
         interiorDamage: !paddingToEnd,
+        discardedBytes: paddingToEnd
+          ? 0
+          : (await findWrittenEnd(handle, offset, fileSize, scanBuffer)) -
+            offset,
       };
     }
     if (remaining < FRAME_HEADER_SIZE) {
@@ -2419,6 +2428,8 @@ async function scanSegment(
           fileSize,
           scratch,
         ),
+        discardedBytes:
+          (await findWrittenEnd(handle, offset, fileSize, scanBuffer)) - offset,
       };
     }
     const frameSequence = firstSequence + BigInt(records.length);
@@ -2483,6 +2494,39 @@ async function hasValidRecordAt(
     payloadRemaining -= chunkLength;
   }
   return frameHeader.readUInt32LE(0) === (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Offset one past the last non-zero byte in `[start, end)`, or `start` when the
+ * range holds no data at all.
+ *
+ * Segments are preallocated to their full configured size, so the range between
+ * the valid prefix and EOF is mostly unwritten zero padding. Measuring loss to
+ * EOF would put a whole segment's capacity into every recovery report -- at the
+ * 4 MiB default, a single abandoned record reads as four million lost bytes.
+ * Only bytes that were actually written can have been lost.
+ */
+async function findWrittenEnd(
+  handle: FileHandle,
+  start: number,
+  end: number,
+  scratch: Buffer,
+): Promise<number> {
+  let writtenEnd = start;
+  let offset = start;
+  while (offset < end) {
+    const length = Math.min(end - offset, scratch.byteLength);
+    const chunk = scratch.subarray(0, length);
+    await readFully(handle, chunk, offset);
+    for (let index = length - 1; index >= 0; index--) {
+      if (chunk[index] !== 0) {
+        writtenEnd = offset + index + 1;
+        break;
+      }
+    }
+    offset += length;
+  }
+  return writtenEnd;
 }
 
 async function isZeroFilledFile(
