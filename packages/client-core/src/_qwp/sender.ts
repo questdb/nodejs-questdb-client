@@ -1888,9 +1888,24 @@ export class QwpSender {
       // than keeping the event loop alive until the connect timeout fires,
       // and still attach cleanup in case it had already connected.
       this.connectAbort.abort();
-      void this.sessionPromise
-        .then((connected) => connected.close())
-        .catch(() => undefined);
+      // Await that teardown. Firing it and returning meant close() resolved
+      // while the connection it had just aborted was still releasing the
+      // store-and-forward advisory lock, its journal handles and its socket,
+      // so reopening the same sf_dir immediately after `await close()` failed
+      // with QwpReplayStoreLockedError naming this very process. The abort
+      // makes the unwind quick, but it is still bounded here so a factory
+      // that ignores the signal cannot make close() wait out its connect
+      // timeout.
+      try {
+        await this.withCloseDeadline(
+          this.sessionPromise
+            .then((connected) => connected.close())
+            .catch(() => undefined),
+          publishDeadline,
+        );
+      } catch (error) {
+        closeError ??= error;
+      }
     }
 
     if (this.pendingRowCount > 0 || this.currentRow.size > 0) {

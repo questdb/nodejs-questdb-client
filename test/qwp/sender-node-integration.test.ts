@@ -344,26 +344,13 @@ describe("Sender QWP integration", () => {
       await vi.waitFor(() => expect(sockets.size).toBe(1));
       await sender.close();
 
-      // The lock may outlive close() by an in-flight load, but not by the
-      // connect budget -- three seconds is an order of magnitude under the 30s
-      // configured here and far above a load.
-      const deadline = Date.now() + 3_000;
-      let reopened = false;
-      let lastError: unknown;
-      while (!reopened && Date.now() < deadline) {
-        const probe = new QwpNodeFileReplayStore({
-          directory: join(directory, "default"),
-        });
-        try {
-          await probe.load();
-          await probe.close();
-          reopened = true;
-        } catch (error) {
-          lastError = error;
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-      }
-      expect(reopened, `slot still locked: ${lastError}`).toBe(true);
+      // close() awaits the aborted connection's own teardown, so the slot is
+      // free the moment it returns -- no polling window.
+      const probe = new QwpNodeFileReplayStore({
+        directory: join(directory, "default"),
+      });
+      await probe.load();
+      await probe.close();
     } finally {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => stalled.close(() => resolve()));
