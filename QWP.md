@@ -1374,7 +1374,10 @@ form with complete `ingress` and `egress` trees remains supported for advanced
 cases that intentionally connect the two sides differently.
 
 `connectQwpNodeClient()` and `connectQwpBrowserClient()` prewarm each configured
-pool minimum. Their `createQwp*Client()` counterparts are lazy. Pools grow to
+pool minimum. Their `createQwp*Client()` counterparts are lazy. A prewarm that
+fails rejects but does not close the client: connections it did establish stay
+pooled, and calling `connect()` again makes a fresh attempt, so a transient
+outage at start-up can be retried rather than requiring a new client. Pools grow to
 their maximum under concurrent borrows and apply one FIFO acquisition deadline;
 exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active

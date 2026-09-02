@@ -227,6 +227,54 @@ describe("QWP pooled client", () => {
     expect(releases).toBe(1);
   });
 
+  it("stays usable after a failed connect and retries on the next one", async () => {
+    // connectNow() closed the whole client when prewarm rejected, and
+    // connect() memoized the rejected promise. Between them, a single
+    // transient outage during prewarm -- a rolling restart, an LB warm-up, a
+    // 502 from a proxy -- destroyed the client: the retry replayed the old
+    // rejection without reaching the server, and every borrow afterwards
+    // threw QwpClientClosedError.
+    let reachable = false;
+    let senderCreations = 0;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          senderCreations++;
+          if (!reachable) throw new Error("connection refused");
+          const session = new FakeSenderSession();
+          const sender = new QwpSender(async () => session, {
+            autoFlush: false,
+          });
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 1,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 500,
+      },
+    );
+
+    await expect(client.connect()).rejects.toThrow(/connection refused/);
+    expect(client.metrics).toMatchObject({ closing: false, closed: false });
+    const attemptsAfterFailure = senderCreations;
+
+    // The endpoint comes back; the retry actually reaches it.
+    reachable = true;
+    await expect(client.connect()).resolves.toBe(client);
+    expect(senderCreations).toBeGreaterThan(attemptsAfterFailure);
+
+    const sender = await client.borrowSender();
+    await sender.close();
+    await client.close();
+  });
+
   it("validates idle, lifetime, and housekeeping options", () => {
     const factories = {
       createSender: async () => {

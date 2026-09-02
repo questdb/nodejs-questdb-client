@@ -633,7 +633,18 @@ export class QwpClient {
 
   /** Pre-connects the configured minimum sender and query pool sizes. */
   connect(): Promise<this> {
-    if (!this.connectPromise) this.connectPromise = this.connectNow();
+    if (!this.connectPromise) {
+      const attempt = this.connectNow();
+      this.connectPromise = attempt;
+      // A failed prewarm is not a terminal state -- the endpoint may simply
+      // have been unavailable for a moment during a rolling restart or an LB
+      // warm-up. Forget the attempt so a retry starts a new one; memoizing it
+      // meant every later connect() replayed the first rejection without ever
+      // reaching the server again. The caller still sees this rejection.
+      attempt.catch(() => {
+        if (this.connectPromise === attempt) this.connectPromise = undefined;
+      });
+    }
     return this.connectPromise;
   }
 
@@ -680,15 +691,17 @@ export class QwpClient {
 
   private async connectNow(): Promise<this> {
     this.throwIfUnavailable();
-    try {
-      await this.ensureStarted();
-      this.throwIfUnavailable();
-      await Promise.all([this.senderPool.prewarm(), this.queryPool.prewarm()]);
-      return this;
-    } catch (error) {
-      await this.close();
-      throw error;
-    }
+    await this.ensureStarted();
+    this.throwIfUnavailable();
+    // prewarm() releases every entry it did manage to acquire back into the
+    // pool before it rethrows, so a partial prewarm leaves healthy warm
+    // entries rather than half-built ones. Closing the client here to tidy
+    // them up therefore destroyed a recoverable client over a transient
+    // outage: close() latches closing/closed irreversibly, so every later
+    // borrowSender()/borrowQuery() threw QwpClientClosedError and the object
+    // had to be rebuilt. Let the rejection reach the caller instead.
+    await Promise.all([this.senderPool.prewarm(), this.queryPool.prewarm()]);
+    return this;
   }
 
   private async closeNow(): Promise<void> {
