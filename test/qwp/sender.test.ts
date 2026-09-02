@@ -1202,7 +1202,7 @@ describe("QWP high-level sender", () => {
     structuredClone(detached, { transfer: [detached.buffer] });
     sender.table("events").longColumn("value", 2n);
     expect(() => sender.binaryColumn("payload", detached)).toThrow(
-      /detached ArrayBuffer/,
+      /detached(?: or out-of-bounds)? ArrayBuffer/,
     );
 
     // The row in progress and its table selection are gone, so the sender is
