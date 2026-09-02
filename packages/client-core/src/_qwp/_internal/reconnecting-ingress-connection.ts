@@ -168,7 +168,11 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
   private readonly capacityWaiters = new Set<{
     resolve: () => void;
     reject: (error: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
+    // Assigned immediately after the waiter is built: the timeout callback
+    // closes over the waiter, so the object has to exist first. Optional
+    // rather than asserted, because between those two statements it genuinely
+    // holds no timer, and clearTimeout() accepts undefined.
+    timer?: ReturnType<typeof setTimeout>;
   }>();
   private usedBytes = 0;
   private closing = false;
@@ -294,7 +298,7 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
           this.capacityWaiters.delete(waiter);
           reject(error);
         },
-        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+        timer: undefined,
       };
       waiter.timer = setTimeout(() => {
         this.totalAppendTimeouts++;
