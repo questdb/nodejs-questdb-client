@@ -2341,6 +2341,19 @@ export class QwpSender {
     }
     for (const { table, rows } of snapshots) {
       table.rows.splice(0, rows.length);
+      // A QWP column carries one decimal scale per frame, which is why the
+      // first value locks it. Once every row that locked it has been
+      // published there is nothing left for a later row to be uniform with,
+      // so the lock has to go too -- it is frame state, like the Java
+      // client's ColumnBuffer, not table state. Keeping it for the sender's
+      // lifetime meant a stream whose first decimal happened to be integral
+      // rejected every more precise value it ever saw afterwards, while the
+      // same rows over ILP v3 were accepted.
+      if (table.rows.length === 0) {
+        for (const [key, column] of table.schema) {
+          if (isDecimalType(column.type)) table.schema.delete(key);
+        }
+      }
     }
     const rowCount = snapshots.reduce(
       (count, item) => count + item.rows.length,

@@ -1099,6 +1099,55 @@ describe("QWP high-level sender", () => {
     expect(sender.metrics.pendingRows).toBe(1);
   });
 
+  it("relocks a decimal column's scale once its rows have been published", async () => {
+    // A QWP column carries one decimal scale per frame, so the first value
+    // locks it -- but the lock lived in table.schema, which releaseStagedRows()
+    // never cleared. A stream whose first decimal happened to be integral
+    // therefore rejected every more precise value for the sender's lifetime,
+    // while ILP v3 accepted the same sequence.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("fx").decimalColumnText("price", 1).atNow();
+    await sender.flush();
+
+    await sender.table("fx").decimalColumnText("price", 1.5).atNow();
+    await sender.flush();
+
+    expect(session.sends).toHaveLength(2);
+    expect(column(session.sends[0].tables[0], "price").values).toEqual([1n]);
+    const second = column(session.sends[1].tables[0], "price");
+    expect(second.values).toEqual([15n]);
+    expect(second.decimalScale).toBe(1);
+    await sender.close();
+  });
+
+  it("keeps one decimal scale across rows that share a frame", async () => {
+    // Within a frame the scale still locks on the first value and later rows
+    // are rescaled onto it, because the wire format can only carry one.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("fx").decimalColumnText("price", 1.25).atNow();
+    await sender.table("fx").decimalColumnText("price", 2).atNow();
+    await sender.flush();
+
+    const staged = column(session.sends[0].tables[0], "price");
+    expect(staged.decimalScale).toBe(2);
+    expect(staged.values).toEqual([125n, 200n]);
+
+    // And within the next frame a value that cannot be rescaled without loss
+    // still fails its row rather than silently changing the column's scale.
+    sender.table("fx").decimalColumnText("price", 1);
+    expect(() => sender.decimalColumnText("other", 1)).not.toThrow();
+    await sender.atNow();
+    sender.table("fx");
+    expect(() => sender.decimalColumnText("price", 1.5)).toThrow(
+      /cannot rescale decimal/,
+    );
+    await sender.close();
+  });
+
   it("validates the call site for the empty-Int8Array spelling of a NULL decimal", async () => {
     // An empty Int8Array is the documented byte-array spelling of NULL, and it
     // used to return before addColumn(), where a non-nullish call gets its

@@ -646,7 +646,10 @@ ambiguity: `float32()`/`float64()` and `int32()`/`int64()` mean exactly what the
 
 Geohash precision and decimal scale belong to the column, not the value, so they are
 fixed when the schema is compiled and validated against the sender's staged schema on
-every append. Decimal text and `{ unscaled, scale }` values are rescaled to the
+every append. On the fluent row API there is no schema to fix them, so a decimal
+column instead locks its scale on the first value staged for it and holds that lock
+for the rest of the frame; the lock is released once those rows are published, so the
+next frame's first value sets it afresh. Decimal text and `{ unscaled, scale }` values are rescaled to the
 column's scale when that is exact, and rejected when it would round: at
 `decimal64(2)`, `"1.50"` stages as `150n` and `"1.005"` raises `QwpWriterRowError`.
 Base-32 geohash text carries five bits per character, so `geohash(20)` accepts
