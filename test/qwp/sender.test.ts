@@ -1316,6 +1316,46 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("rejects two compiled writers whose union crosses the cap on one table", async () => {
+    // Compile time bounds each writer's own schema, so two that fit alone can
+    // still merge past the cap on a shared table. Only QwpTableBuffer caught
+    // that, inside buildTable() during flush, and the throw escaped before
+    // releaseStagedRows(): flush() and close() then raised it forever and the
+    // staged rows could be neither sent nor discarded.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    const half = QWP_MAX_COLUMNS_PER_TABLE / 2;
+    const first: Record<string, ReturnType<typeof long>> = {};
+    const second: Record<string, ReturnType<typeof long>> = {};
+    for (let index = 0; index < half; index++) {
+      first[`a${index}`] = long();
+      second[`b${index}`] = long();
+    }
+    const firstRow = Object.fromEntries(
+      Object.keys(first).map((name) => [name, 1n]),
+    );
+    const secondRow = Object.fromEntries(
+      Object.keys(second).map((name) => [name, 2n]),
+    );
+
+    await sender.writer("wide", first).row(firstRow);
+    // Each writer is well under the cap on its own; together they are 2049.
+    await expect(
+      sender.writer("wide", { ...second, overflow: long() }).row({
+        ...secondRow,
+        overflow: 3n,
+      }),
+    ).rejects.toThrow(/column count exceeds maximum 2048/);
+
+    // The rejected row never reached the schema, so the sender still flushes
+    // and closes instead of wedging on the cap.
+    expect(sender.metrics.pendingRows).toBe(1);
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.sends).toHaveLength(1);
+    await sender.close();
+  });
+
   it("keeps the sender usable after a failed row, without losing staged rows", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });

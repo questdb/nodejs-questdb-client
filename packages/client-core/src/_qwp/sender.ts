@@ -2174,6 +2174,30 @@ export class QwpSender {
       }
     }
 
+    // Compile time bounds one writer's own schema, but two writers on the same
+    // table merge into one, so their union can exceed the cap even though both
+    // fit alone -- as can a writer appending onto a table the fluent API has
+    // already filled. QwpTableBuffer catches it either way, but only once
+    // buildTable() runs during flush, and a throw there escapes before
+    // releaseStagedRows(), so every later flush() and close() hit the same wall
+    // and the whole staged batch became unreachable. Reject the row before the
+    // schema is merged, the way the fluent path rejects the column.
+    const stagedSchema = existingTable?.schema;
+    let mergedColumnCount = stagedSchema?.size ?? 0;
+    for (const nameKey of row.columns.keys()) {
+      if (!stagedSchema?.has(nameKey)) mergedColumnCount++;
+    }
+    if (mergedColumnCount > QWP_MAX_COLUMNS_PER_TABLE) {
+      throw new QwpWriterRowError(
+        schema.tableName,
+        undefined,
+        rowIndex,
+        new Error(
+          `column count exceeds maximum ${QWP_MAX_COLUMNS_PER_TABLE} for table '${schema.tableName}'`,
+        ),
+      );
+    }
+
     let table = existingTable;
     if (!table) {
       table = { name: schema.tableName, rows: [], schema: new Map() };

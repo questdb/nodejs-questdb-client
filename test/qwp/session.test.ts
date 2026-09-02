@@ -24,6 +24,7 @@ import {
   QWP_FLAG_DEFER_COMMIT,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_INGRESS_PROGRESS_KIND,
+  QWP_MAX_ROWS_PER_TABLE,
   QWP_STATUS,
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
@@ -2197,6 +2198,53 @@ describe("QwpIngressSession", () => {
     ).resolves.toMatchObject({ sequence: 0n });
     await session.close();
   });
+
+  it("splits a table over the row cap instead of failing the whole batch", async () => {
+    // QWP_MAX_ROWS_PER_TABLE is enforced inside encodeQwpIngressFrame(), which
+    // planIngressFrames() calls before its size test and its bisection -- so
+    // the throw escaped the planner entirely. The batch could then be neither
+    // split nor, because close() only discards staging for
+    // QwpBatchTooLargeError, abandoned: flush() and close() raised the same
+    // plain Error for the rest of the sender's life.
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const rows = longTable(
+      "events",
+      Array.from({ length: QWP_MAX_ROWS_PER_TABLE + 1 }, (_, index) =>
+        BigInt(index),
+      ),
+    );
+    const session = new QwpIngressSession(await connecting, {
+      // Far above either half, so only the row cap can force the split.
+      maxBatchSizeBytes: 64 * 1024 * 1024,
+    });
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, sequence, undefined, [
+          ["events", sequence + 1n],
+        ]),
+      );
+    };
+
+    await expect(
+      session.sendTables([rows], { gorilla: false }),
+    ).resolves.toMatchObject({ sequence: 1n });
+
+    const rowCounts = socket.sent.map(firstIngressTableRowCount);
+    expect(socket.sent).toHaveLength(2);
+    expect(rowCounts.every((count) => count <= QWP_MAX_ROWS_PER_TABLE)).toBe(
+      true,
+    );
+    expect(rowCounts.reduce((total, count) => total + count, 0)).toBe(
+      QWP_MAX_ROWS_PER_TABLE + 1,
+    );
+    await session.close();
+  }, 60_000);
 
   it("splits an oversized ingress flush at row boundaries under the negotiated cap", async () => {
     const socket = new FakeWebSocket();

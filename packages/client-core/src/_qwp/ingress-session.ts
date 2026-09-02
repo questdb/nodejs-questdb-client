@@ -4,6 +4,7 @@ import {
   encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
   QWP_FLAG_DEFER_COMMIT,
+  QWP_MAX_ROWS_PER_TABLE,
   QWP_STATUS,
   QwpIngressEncodeOptions,
   QwpIngressResponse,
@@ -93,24 +94,40 @@ function planIngressFrames(
 
   const plan = (candidate: readonly QwpTableBuffer[]): void => {
     const dictionarySize = dictionary?.size;
-    const frame = encodeQwpIngressFrame(candidate, {
-      ...encodeOptions,
-      deferCommit: false,
-      dictionary,
-      confirmedMaxSymbolId: dictionary
-        ? confirmedMaxSymbolId
-        : encodeOptions.confirmedMaxSymbolId,
-    });
-    if (frame.byteLength <= maxBatchSizeBytes) {
-      frames.push(frame);
-      if (dictionary) confirmedMaxSymbolId = dictionary.size - 1;
-      return;
+    // A table over the row cap cannot be encoded at all, and that is knowable
+    // without encoding it. Testing it here makes it a splittable candidate
+    // like any oversized one: encodeQwpIngressFrame() discovers the same cap,
+    // but it runs before the size test and the bisection below, so its throw
+    // escaped plan() entirely. The batch could then be neither split nor --
+    // close() only discards staging for QwpBatchTooLargeError -- abandoned,
+    // and every later flush() and close() raised it again.
+    const overRowCap = candidate.some(
+      (table) => table.rowCount > QWP_MAX_ROWS_PER_TABLE,
+    );
+    let frameByteLength = 0;
+    if (!overRowCap) {
+      const frame = encodeQwpIngressFrame(candidate, {
+        ...encodeOptions,
+        deferCommit: false,
+        dictionary,
+        confirmedMaxSymbolId: dictionary
+          ? confirmedMaxSymbolId
+          : encodeOptions.confirmedMaxSymbolId,
+      });
+      if (frame.byteLength <= maxBatchSizeBytes) {
+        frames.push(frame);
+        if (dictionary) confirmedMaxSymbolId = dictionary.size - 1;
+        return;
+      }
+      frameByteLength = frame.byteLength;
+      if (dictionarySize !== undefined) dictionary!.truncate(dictionarySize);
     }
 
-    if (dictionarySize !== undefined) dictionary!.truncate(dictionarySize);
     const units = splitUnitCount(candidate);
     if (units <= 1) {
-      throw new QwpBatchTooLargeError(frame.byteLength, maxBatchSizeBytes);
+      // Only reachable for an oversized single row: splitUnitCount() counts
+      // rows, so a table over the row cap always leaves more than one unit.
+      throw new QwpBatchTooLargeError(frameByteLength, maxBatchSizeBytes);
     }
     const [left, right] = splitTablesAtUnit(candidate, Math.ceil(units / 2));
     plan(left);
