@@ -1099,6 +1099,75 @@ describe("QWP high-level sender", () => {
     expect(sender.metrics.pendingRows).toBe(1);
   });
 
+  it("validates the call site for the empty-Int8Array spelling of a NULL decimal", async () => {
+    // An empty Int8Array is the documented byte-array spelling of NULL, and it
+    // used to return before addColumn(), where a non-nullish call gets its
+    // availability, row-state and column-name checks. That made this one
+    // spelling silently accept call sites every other spelling rejects.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    // No table selected yet.
+    expect(() => sender.decimalColumn("d", new Int8Array(0), 2)).toThrow(
+      /table name must be set before adding columns/,
+    );
+
+    sender.table("fx");
+    expect(() => sender.decimalColumn("bad.name", new Int8Array(0), 2)).toThrow(
+      /column name contains illegal characters/,
+    );
+
+    sender.table("fx");
+    expect(() =>
+      sender.decimalColumn(42 as unknown as string, new Int8Array(0), 2),
+    ).toThrow(/column name must be a string/);
+
+    // The null spelling has always behaved this way; the two now agree.
+    sender.table("fx");
+    expect(() => sender.decimalColumn("bad.name", null, 2)).toThrow(
+      /column name contains illegal characters/,
+    );
+
+    // A well-formed call still omits the column.
+    await sender
+      .table("fx")
+      .decimalColumn("kept", 12_345n, 2)
+      .decimalColumn("absent", new Int8Array(0), 2)
+      .atNow();
+    await sender.flush();
+    const [table] = session.sends[0].tables;
+    expect(table.columns.map((candidate) => candidate.name)).toEqual(["kept"]);
+    await sender.close();
+  });
+
+  it("discards the row when a binary value cannot be copied", async () => {
+    // new Uint8Array(value) was an argument expression, so it ran before
+    // addColumn()'s try. A detached buffer therefore threw past failRow() and
+    // left the sender inside a half-built row that the next atNow() published.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+
+    const detached = new Uint8Array([1, 2, 3]);
+    structuredClone(detached, { transfer: [detached.buffer] });
+    sender.table("events").longColumn("value", 2n);
+    expect(() => sender.binaryColumn("payload", detached)).toThrow(
+      /detached ArrayBuffer/,
+    );
+
+    // The row in progress and its table selection are gone, so the sender is
+    // ready for the next row rather than stuck inside the failed one.
+    expect(() => sender.table("events")).not.toThrow();
+    await sender.longColumn("value", 3n).atNow();
+    await sender.flush();
+
+    const [table] = session.sends[0].tables;
+    expect(table.rowCount).toBe(2);
+    expect(column(table, "value").values).toEqual([1n, 3n]);
+    await sender.close();
+  });
+
   it("rejects an over-wide row at the column that crosses the cap, not at flush", async () => {
     // QwpTableBuffer enforces the 2048-column cap, but only inside
     // buildTable() during flush -- and that throw escaped before

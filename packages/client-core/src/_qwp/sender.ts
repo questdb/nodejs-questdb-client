@@ -1365,7 +1365,21 @@ export class QwpSender {
         new TypeError("binaryColumn accepts only Uint8Array values"),
       );
     }
-    return this.addColumn(name, QWP_COLUMN_TYPE.BINARY, new Uint8Array(value));
+    try {
+      // The defensive copy is the one conversion here that can throw, and as
+      // an argument expression it ran before addColumn()'s own try. A view
+      // whose ArrayBuffer has been transferred away -- structuredClone with
+      // `transfer`, or worker.postMessage -- therefore escaped past failRow()
+      // and left the sender inside a half-built row that the next
+      // at()/atNow() published. Copy inside the guard, as uuidColumn() does.
+      return this.addColumn(
+        name,
+        QWP_COLUMN_TYPE.BINARY,
+        new Uint8Array(value),
+      );
+    } catch (error) {
+      return this.failRow(error);
+    }
   }
 
   charColumn(name: string, value: string | null | undefined): QwpSender {
@@ -1485,6 +1499,16 @@ export class QwpSender {
         new RangeError("decimal scale must be between 0 and 76"),
       );
     }
+    // An empty Int8Array is the documented byte-array spelling of NULL, so it
+    // has to be checked like the null spelling. Returning from inside the try
+    // below skipped addColumn(), which is where a non-nullish call gets its
+    // availability, row-state and column-name checks -- so this one spelling
+    // silently accepted a misspelled name, a non-string name and a call made
+    // before table(), exactly the hole omitsNullish() exists to close.
+    if (unscaled instanceof Int8Array && unscaled.length === 0) {
+      this.omitsNullish(name, null);
+      return this;
+    }
     if (this.omitsNullish(name, unscaled)) return this;
     try {
       if (typeof unscaled !== "bigint" && !(unscaled instanceof Int8Array)) {
@@ -1496,7 +1520,6 @@ export class QwpSender {
           "decimalColumn accepts only bigint or Int8Array values",
         );
       }
-      if (unscaled instanceof Int8Array && unscaled.length === 0) return this;
       if (unscaled instanceof Int8Array && unscaled.length > 32) {
         throw new RangeError("decimal unscaled value cannot exceed 32 bytes");
       }
