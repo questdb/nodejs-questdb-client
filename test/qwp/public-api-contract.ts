@@ -1,5 +1,8 @@
-import { Sender } from "../../src";
-import type { ExtraOptions, QwpExtraOptions } from "../../src";
+import { Sender } from "../../packages/nodejs-client/src";
+import type {
+  ExtraOptions,
+  QwpExtraOptions,
+} from "../../packages/nodejs-client/src";
 import {
   binary,
   char,
@@ -18,14 +21,14 @@ import {
   longArray,
   symbol as qwpSymbol,
   uuid,
-} from "../../src/qwp";
+} from "../../packages/nodejs-client/src";
 import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
   connectQwpBrowserEgress,
   connectQwpBrowserIngress,
   connectQwpBrowserSender,
-} from "../../src/qwp/browser";
+} from "../../packages/browser-client/src";
 import type {
   QwpBrowserClusterOptions,
   QwpBrowserClientEgressOptions,
@@ -37,7 +40,7 @@ import type {
   QwpBrowserSplitClientOptions,
   QwpBrowserUnifiedClientOptions,
   QwpBrowserWebSocketOptions,
-} from "../../src/qwp/browser";
+} from "../../packages/browser-client/src";
 import {
   connectQwpNodeEgress,
   connectQwpNodeClient,
@@ -49,7 +52,7 @@ import {
   parseQwpNodeClientConfig,
   retryQwpNodeOrphanSlot,
   scanQwpNodeOrphanSlots,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 import type {
   QwpNodeClientOptions,
   QwpNodeClientConfigOptions,
@@ -62,7 +65,7 @@ import type {
   QwpNodeReplayRecoveryEvent,
   QwpNodeStoreAndForwardOptions,
   QwpNodeWebSocketOptions,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 import type {
   QwpBinaryConnection,
   QwpClient,
@@ -85,7 +88,7 @@ import type {
   QwpSenderOptions,
   QwpTableWriter,
   QwpWriterRow,
-} from "../../src/qwp";
+} from "../../packages/nodejs-client/src";
 
 // This file is part of the repository typecheck. Assignments deliberately
 // capture the documented call shapes, so removing or changing a public

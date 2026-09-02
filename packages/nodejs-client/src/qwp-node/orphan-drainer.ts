@@ -1,0 +1,659 @@
+import { open, readdir, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  QWP_RECONNECT_EVENT_KIND,
+  QWP_UPGRADE_ERROR_KIND,
+  type QwpReconnectEvent,
+  QwpConnectionCloseInfo,
+  QwpIngressTransportMetrics,
+  QwpReplayRejectedError,
+  QwpUpgradeError,
+} from "../../../client-core/src/_qwp/transport";
+import {
+  isQwpNodeReplayQuarantineSlotName,
+  QwpReplayStoreCorruptionError,
+  QwpReplayStoreLockedError,
+} from "./file-replay-store";
+import { QwpProtocolError } from "../../../client-core/src/_qwp/_core/errors";
+import {
+  QwpCatchUpCapGapError,
+  QwpDurableAckPersistentFailureError,
+} from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
+import { QwpNotificationDispatcher } from "../../../client-core/src/_qwp/_internal/notification-dispatcher";
+import {
+  createQwpDataLossSenderError,
+  defaultQwpSenderErrorHandler,
+  type QwpSenderError,
+} from "../../../client-core/src/_qwp/sender-error";
+
+const SEGMENT_SUFFIX = ".sfa";
+const SEGMENT_HEADER_SIZE = 24;
+const FRAME_HEADER_SIZE = 8;
+const SEGMENT_HEADER_PROBE_SIZE = SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE;
+const DEFAULT_MAX_CONCURRENT = 4;
+const DEFAULT_SCAN_INTERVAL_MS = 30_000;
+const DEFAULT_PROGRESS_POLL_MS = 50;
+const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
+const DEFAULT_ERROR_INBOX_CAPACITY = 256;
+
+/** A terminal orphan-drain failure marker. Remove it to retry the slot. */
+/** Java-compatible marker that excludes a failed slot from automatic drain. */
+export const QWP_ORPHAN_FAILED_SENTINEL = ".failed";
+
+export const QWP_ORPHAN_DRAIN_EVENT_KIND = {
+  DISCOVERED: "discovered",
+  STARTED: "started",
+  DRAINED: "drained",
+  LOCKED: "locked",
+  /** The attempt failed transiently; the slot is left for a later scan. */
+  RETRYING: "retrying",
+  DURABLE_ACK_UNAVAILABLE: "durable-ack-unavailable",
+  DURABLE_ACK_PERSISTENT_FAILURE: "durable-ack-persistent-failure",
+  PRIMARY_UNAVAILABLE: "primary-unavailable",
+  FAILED: "failed",
+  SCAN_FAILED: "scan-failed",
+} as const;
+
+export type QwpNodeOrphanDrainEventKind =
+  (typeof QWP_ORPHAN_DRAIN_EVENT_KIND)[keyof typeof QWP_ORPHAN_DRAIN_EVENT_KIND];
+
+export interface QwpNodeOrphanDrainEvent {
+  readonly kind: QwpNodeOrphanDrainEventKind;
+  readonly timestampMs: number;
+  readonly directory?: string;
+  readonly error?: Error;
+  /** One-based attempt in the current capability/topology episode. */
+  readonly attempt?: number;
+  /** Elapsed time in the current consecutive capability-gap episode. */
+  readonly episodeMs?: number;
+  /** Present when a failed slot has been abandoned behind its sentinel. */
+  readonly senderError?: QwpSenderError;
+  readonly metrics: QwpNodeOrphanDrainerMetrics;
+}
+
+export interface QwpNodeOrphanDrainerMetrics {
+  readonly scans: number;
+  readonly discovered: number;
+  readonly queued: number;
+  readonly active: number;
+  readonly drained: number;
+  readonly locked: number;
+  /** Attempts that failed transiently and left the slot in place. */
+  readonly retrying: number;
+  readonly failed: number;
+  readonly scanFailures: number;
+  readonly deliveredNotifications: number;
+  readonly droppedNotifications: number;
+  readonly deliveredErrorNotifications: number;
+  readonly droppedErrorNotifications: number;
+  readonly closing: boolean;
+  readonly closed: boolean;
+}
+
+/** Minimal session surface used by the Node orphan drainer. */
+export interface QwpNodeOrphanDrainSession {
+  readonly closed: Promise<QwpConnectionCloseInfo>;
+  readonly metrics: Pick<
+    QwpIngressTransportMetrics,
+    "pendingReplayFrames" | "pendingReplayBytes"
+  > & {
+    readonly lastError?: Error;
+  };
+  /** Prompts durable-ACK progress when the adopted slot requires it. */
+  pollDurableAck?(): Promise<void>;
+  close(code?: number, reason?: string): Promise<void>;
+}
+
+export interface QwpNodeOrphanDrainerOptions {
+  /** Directory whose child directories are independent replay slots. */
+  rootDirectory: string;
+  /** Slot names owned by the foreground producer/pool and never adoptable. */
+  excludeSlot?: (slotName: string) => boolean;
+  /** Creates one independent replay session for an adopted slot. */
+  createSession(
+    directory: string,
+    onReconnectEvent?: (event: QwpReconnectEvent) => void,
+  ): Promise<QwpNodeOrphanDrainSession>;
+  /** Atomically reserves a candidate against a foreground pool owner. */
+  tryReserveSlot?: (directory: string) => boolean;
+  /** Releases a reservation previously granted by tryReserveSlot. */
+  releaseSlot?: (directory: string) => void;
+  /** Maximum slots drained concurrently. Defaults to 4. */
+  maxConcurrent?: number;
+  /**
+   * Periodic rescan cadence; zero disables the timer. Explicit scanNow()
+   * requests remain available. Defaults to 30s.
+   */
+  scanIntervalMs?: number;
+  /** Durable-ACK prompt cadence for adopted sessions. Zero disables it. */
+  durableAckPollIntervalMs?: number;
+  onEvent?: (event: QwpNodeOrphanDrainEvent) => void;
+  /** Java-parity data-loss notification for an abandoned orphan slot. */
+  onSenderError?: (error: QwpSenderError) => void;
+  /** Bounded lifecycle-event inbox. Defaults to 64. */
+  eventInboxCapacity?: number;
+  /** Bounded data-loss inbox. Defaults to 256. */
+  errorInboxCapacity?: number;
+}
+
+/**
+ * Returns child replay slots containing unacknowledged records.
+ *
+ * The scan is deliberately read-only and does not inspect lock ownership.
+ * Adoption obtains the replay store's exclusive lock, closing the race with a
+ * live foreground producer or another drainer.
+ */
+export async function scanQwpNodeOrphanSlots(
+  rootDirectory: string,
+  excludeSlot?: (slotName: string) => boolean,
+): Promise<readonly string[]> {
+  let entries;
+  try {
+    entries = await readdir(rootDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return [];
+    throw error;
+  }
+
+  const candidates: string[] = [];
+  for (const entry of entries) {
+    if (
+      !entry.isDirectory() ||
+      isQwpNodeReplayQuarantineSlotName(entry.name) ||
+      excludeSlot?.(entry.name)
+    ) {
+      continue;
+    }
+    const directory = join(rootDirectory, entry.name);
+    let children;
+    try {
+      children = await readdir(directory, { withFileTypes: true });
+    } catch {
+      // A disappearing or unreadable sibling must not starve later slots in
+      // the same group. A future periodic scan can observe it if it recovers.
+      continue;
+    }
+    if (
+      children.some(
+        (child) => child.isFile() && child.name === QWP_ORPHAN_FAILED_SENTINEL,
+      )
+    ) {
+      continue;
+    }
+    let hasAssignedSegment = false;
+    for (const child of children) {
+      if (!child.isFile() || !child.name.endsWith(SEGMENT_SUFFIX)) continue;
+      if (await isAssignedSegmentOrInvalid(join(directory, child.name))) {
+        hasAssignedSegment = true;
+        break;
+      }
+    }
+    if (hasAssignedSegment) {
+      candidates.push(directory);
+    }
+  }
+  candidates.sort();
+  return candidates;
+}
+
+async function isAssignedSegmentOrInvalid(path: string): Promise<boolean> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+    const header = Buffer.alloc(SEGMENT_HEADER_PROBE_SIZE);
+    const { bytesRead } = await handle.read(header, 0, header.byteLength, 0);
+    if (
+      bytesRead < SEGMENT_HEADER_SIZE ||
+      header.toString("ascii", 0, 4) !== "SF01" ||
+      header.readUInt8(4) !== 1 ||
+      header.readUInt16LE(6) !== 0
+    ) {
+      return true;
+    }
+    if (bytesRead < SEGMENT_HEADER_PROBE_SIZE) return false;
+    for (let offset = SEGMENT_HEADER_SIZE; offset < bytesRead; offset++) {
+      if (header[offset] !== 0) return true;
+    }
+    return false;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    // Let adoption report/quarantine an unreadable or malformed segment.
+    return true;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Bounded Node-only scanner and background drainer for replay slots left by
+ * terminated producer processes. Each adopted slot uses its own connection.
+ */
+export class QwpNodeOrphanDrainer {
+  private readonly rootDirectory: string;
+  private readonly excludeSlot?: (slotName: string) => boolean;
+  private readonly createSession: (
+    directory: string,
+    onReconnectEvent?: (event: QwpReconnectEvent) => void,
+  ) => Promise<QwpNodeOrphanDrainSession>;
+  private readonly tryReserveSlot?: (directory: string) => boolean;
+  private readonly releaseSlot?: (directory: string) => void;
+  private readonly maxConcurrent: number;
+  private readonly scanIntervalMs: number;
+  private readonly durableAckPollIntervalMs: number;
+  private readonly eventDispatcher?: QwpNotificationDispatcher<QwpNodeOrphanDrainEvent>;
+  private readonly errorDispatcher?: QwpNotificationDispatcher<QwpSenderError>;
+  private readonly known = new Set<string>();
+  private readonly queue: string[] = [];
+  private readonly active = new Map<string, QwpNodeOrphanDrainSession>();
+  private readonly workers = new Set<Promise<void>>();
+  private scanTimer?: ReturnType<typeof setTimeout>;
+  private scanPromise?: Promise<void>;
+  private scanRequested = false;
+  private closePromise?: Promise<void>;
+  private started = false;
+  private closing = false;
+  private closed = false;
+  private scans = 0;
+  private discovered = 0;
+  private drained = 0;
+  private locked = 0;
+  private retrying = 0;
+  private failed = 0;
+  private scanFailures = 0;
+
+  constructor(options: QwpNodeOrphanDrainerOptions) {
+    const rootDirectory = options.rootDirectory.trim();
+    if (!rootDirectory) {
+      throw new RangeError("QWP orphan-drain root directory must not be empty");
+    }
+    const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+    if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent < 1) {
+      throw new RangeError(
+        "QWP orphan-drain maxConcurrent must be a positive safe integer",
+      );
+    }
+    const scanIntervalMs = options.scanIntervalMs ?? DEFAULT_SCAN_INTERVAL_MS;
+    if (!Number.isFinite(scanIntervalMs) || scanIntervalMs < 0) {
+      throw new RangeError(
+        "QWP orphan-drain scanIntervalMs must be a non-negative finite number",
+      );
+    }
+    const durableAckPollIntervalMs =
+      options.durableAckPollIntervalMs ?? DEFAULT_PROGRESS_POLL_MS;
+    if (
+      !Number.isFinite(durableAckPollIntervalMs) ||
+      durableAckPollIntervalMs < 0
+    ) {
+      throw new RangeError(
+        "QWP orphan-drain durableAckPollIntervalMs must be a non-negative finite number",
+      );
+    }
+    for (const [name, value] of [
+      ["eventInboxCapacity", options.eventInboxCapacity],
+      ["errorInboxCapacity", options.errorInboxCapacity],
+    ] as const) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+        throw new RangeError(`${name} must be a positive safe integer`);
+      }
+    }
+    this.rootDirectory = rootDirectory;
+    this.excludeSlot = options.excludeSlot;
+    this.createSession = options.createSession;
+    if (
+      (options.tryReserveSlot === undefined) !==
+      (options.releaseSlot === undefined)
+    ) {
+      throw new RangeError(
+        "QWP orphan-drain slot reservation requires both tryReserveSlot and releaseSlot",
+      );
+    }
+    this.tryReserveSlot = options.tryReserveSlot;
+    this.releaseSlot = options.releaseSlot;
+    this.maxConcurrent = maxConcurrent;
+    this.scanIntervalMs = scanIntervalMs;
+    this.durableAckPollIntervalMs = durableAckPollIntervalMs;
+    if (options.onEvent) {
+      this.eventDispatcher = new QwpNotificationDispatcher(
+        options.onEvent,
+        options.eventInboxCapacity ??
+          DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY,
+      );
+    }
+    this.errorDispatcher = new QwpNotificationDispatcher(
+      options.onSenderError ?? defaultQwpSenderErrorHandler,
+      options.errorInboxCapacity ?? DEFAULT_ERROR_INBOX_CAPACITY,
+    );
+  }
+
+  get metrics(): QwpNodeOrphanDrainerMetrics {
+    return Object.freeze({
+      scans: this.scans,
+      discovered: this.discovered,
+      queued: this.queue.length,
+      active: this.active.size,
+      drained: this.drained,
+      locked: this.locked,
+      retrying: this.retrying,
+      failed: this.failed,
+      scanFailures: this.scanFailures,
+      deliveredNotifications: this.eventDispatcher?.metrics.delivered ?? 0,
+      droppedNotifications: this.eventDispatcher?.metrics.dropped ?? 0,
+      deliveredErrorNotifications: this.errorDispatcher?.metrics.delivered ?? 0,
+      droppedErrorNotifications: this.errorDispatcher?.metrics.dropped ?? 0,
+      closing: this.closing,
+      closed: this.closed,
+    });
+  }
+
+  /** Starts an immediate scan and the optional periodic scanner. */
+  start(): void {
+    if (this.started || this.closing || this.closed) return;
+    this.started = true;
+    this.requestScan();
+  }
+
+  /** Requests an immediate scan, coalescing with one already in progress. */
+  scanNow(): void {
+    if (!this.started || this.closing || this.closed) return;
+    this.requestScan();
+  }
+
+  close(): Promise<void> {
+    if (!this.closePromise) this.closePromise = this.closeNow();
+    return this.closePromise;
+  }
+
+  private async scanOnce(): Promise<void> {
+    if (this.closing) return;
+    this.scans++;
+    try {
+      const candidates = await scanQwpNodeOrphanSlots(
+        this.rootDirectory,
+        this.excludeSlot,
+      );
+      for (const directory of candidates) {
+        if (this.closing || this.known.has(directory)) continue;
+        this.known.add(directory);
+        this.queue.push(directory);
+        this.discovered++;
+        this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.DISCOVERED, directory);
+      }
+      this.pump();
+    } catch (error) {
+      this.scanFailures++;
+      this.emit(
+        QWP_ORPHAN_DRAIN_EVENT_KIND.SCAN_FAILED,
+        undefined,
+        toError(error, "QWP orphan-slot scan failed"),
+      );
+    }
+  }
+
+  private requestScan(): void {
+    if (this.closing || this.closed) return;
+    if (this.scanPromise) {
+      this.scanRequested = true;
+      return;
+    }
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = undefined;
+    const scanning = this.scanOnce();
+    this.scanPromise = scanning;
+    void scanning.then(
+      () => this.finishScan(scanning),
+      () => this.finishScan(scanning),
+    );
+  }
+
+  private finishScan(scanning: Promise<void>): void {
+    if (this.scanPromise !== scanning) return;
+    this.scanPromise = undefined;
+    if (this.closing || this.closed) return;
+    if (this.scanRequested) {
+      this.scanRequested = false;
+      this.requestScan();
+      return;
+    }
+    if (this.scanIntervalMs > 0) {
+      this.scanTimer = setTimeout(() => {
+        this.scanTimer = undefined;
+        this.requestScan();
+      }, this.scanIntervalMs);
+      this.scanTimer.unref?.();
+    }
+  }
+
+  private pump(): void {
+    while (
+      !this.closing &&
+      this.workers.size < this.maxConcurrent &&
+      this.queue.length > 0
+    ) {
+      const directory = this.queue.shift()!;
+      const worker = this.drainOne(directory).finally(() => {
+        this.workers.delete(worker);
+        this.known.delete(directory);
+        this.pump();
+      });
+      this.workers.add(worker);
+    }
+  }
+
+  private async drainOne(directory: string): Promise<void> {
+    let session: QwpNodeOrphanDrainSession | undefined;
+    let reserved = false;
+    try {
+      if (this.tryReserveSlot && !this.tryReserveSlot(directory)) return;
+      reserved = this.tryReserveSlot !== undefined;
+      session = await this.createSession(directory, (event) =>
+        this.emitReconnectEvent(directory, event),
+      );
+      if (this.closing) {
+        await session.close(1001, "QWP orphan drainer is closing");
+        return;
+      }
+      this.active.set(directory, session);
+      this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.STARTED, directory);
+      await this.waitUntilDrained(session);
+      if (this.closing) return;
+      this.drained++;
+      this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.DRAINED, directory);
+    } catch (error) {
+      if (this.closing) return;
+      if (error instanceof QwpReplayStoreLockedError) {
+        this.locked++;
+        this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.LOCKED, directory, error);
+        return;
+      }
+      const failure = toError(error, "QWP orphan drain failed");
+      if (!isTerminalDrainFailure(failure)) {
+        // Transient: the journal is intact and a later scan can still drain
+        // it. Quarantining here would abandon accepted rows -- and report
+        // data loss -- because the process briefly ran out of descriptors or
+        // the server was unreachable.
+        this.retrying++;
+        this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING, directory, failure);
+        return;
+      }
+      this.failed++;
+      await markFailed(directory, failure).catch(() => undefined);
+      this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED, directory, failure);
+    } finally {
+      if (session) {
+        this.active.delete(directory);
+        await session
+          .close(1000, "QWP orphan slot drained")
+          .catch(() => undefined);
+      }
+      if (reserved) this.releaseSlot?.(directory);
+    }
+  }
+
+  private async waitUntilDrained(
+    session: QwpNodeOrphanDrainSession,
+  ): Promise<void> {
+    const terminal = session.closed.then(() => "closed" as const);
+    let nextDurablePoll =
+      this.durableAckPollIntervalMs > 0
+        ? Date.now() + this.durableAckPollIntervalMs
+        : Number.POSITIVE_INFINITY;
+    while (!this.closing) {
+      if (session.metrics.pendingReplayFrames === 0) return;
+      const outcome = await Promise.race([
+        terminal,
+        delay(DEFAULT_PROGRESS_POLL_MS).then(() => "poll" as const),
+      ]);
+      if (outcome === "closed") {
+        throw (
+          session.metrics.lastError ??
+          new Error(
+            "QWP orphan drain session closed before its replay slot drained",
+          )
+        );
+      }
+      if (
+        session.pollDurableAck &&
+        this.durableAckPollIntervalMs > 0 &&
+        Date.now() >= nextDurablePoll
+      ) {
+        await session.pollDurableAck();
+        nextDurablePoll = Date.now() + this.durableAckPollIntervalMs;
+      }
+    }
+  }
+
+  private async closeNow(): Promise<void> {
+    if (this.closed) return;
+    this.closing = true;
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = undefined;
+    this.scanRequested = false;
+    this.queue.length = 0;
+    await this.scanPromise?.catch(() => undefined);
+    await Promise.all(
+      Array.from(this.active.values(), (session) =>
+        session
+          .close(1001, "QWP orphan drainer is closing")
+          .catch(() => undefined),
+      ),
+    );
+    await Promise.allSettled(Array.from(this.workers));
+    this.known.clear();
+    await Promise.all([
+      this.eventDispatcher?.close(),
+      this.errorDispatcher?.close(),
+    ]);
+    this.closed = true;
+  }
+
+  private emit(
+    kind: QwpNodeOrphanDrainEventKind,
+    directory?: string,
+    error?: Error,
+    attempt?: number,
+    episodeMs?: number,
+  ): void {
+    const senderError =
+      kind === QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED && directory && error
+        ? createQwpDataLossSenderError(error.message, directory)
+        : undefined;
+    this.eventDispatcher?.offer({
+      kind,
+      timestampMs: Date.now(),
+      directory,
+      error,
+      attempt,
+      episodeMs,
+      senderError,
+      metrics: this.metrics,
+    });
+    if (senderError) this.errorDispatcher?.offer(senderError);
+  }
+
+  private emitReconnectEvent(
+    directory: string,
+    event: QwpReconnectEvent,
+  ): void {
+    let kind: QwpNodeOrphanDrainEventKind | undefined;
+    switch (event.kind) {
+      case QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE:
+        kind = QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_UNAVAILABLE;
+        break;
+      case QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE:
+        kind = QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE;
+        break;
+      case QWP_RECONNECT_EVENT_KIND.PRIMARY_UNAVAILABLE:
+        kind = QWP_ORPHAN_DRAIN_EVENT_KIND.PRIMARY_UNAVAILABLE;
+        break;
+      default:
+        return;
+    }
+    this.emit(
+      kind,
+      directory,
+      event.cause instanceof Error ? event.cause : undefined,
+      event.attempt,
+      event.episodeMs,
+    );
+  }
+}
+
+async function markFailed(directory: string, error: Error): Promise<void> {
+  await writeFile(
+    join(directory, QWP_ORPHAN_FAILED_SENTINEL),
+    `${new Date().toISOString()} ${error.name}: ${error.message}\n`,
+    { encoding: "utf8", flag: "w", mode: 0o600 },
+  );
+}
+
+/** Removes a terminal marker so an operator-approved slot can be retried. */
+export async function retryQwpNodeOrphanSlot(directory: string): Promise<void> {
+  try {
+    await unlink(join(directory, QWP_ORPHAN_FAILED_SENTINEL));
+  } catch (error) {
+    if (nodeErrorCode(error) !== "ENOENT") throw error;
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Only failures that are terminal by design quarantine a slot behind its
+ * `.failed` sentinel and report the abandoned bytes as data loss: a rejected
+ * authentication, a protocol violation, a head the server will not accept, an
+ * exhausted durable-ACK or symbol catch-up capability-gap episode, and a
+ * corrupt journal.
+ * Everything else -- an unreachable server, an ACK timeout, EMFILE, ENOSPC --
+ * is transient, and the slot is left intact for a later scan.
+ *
+ * QwpReplayRejectedError covers both ways the connection gives up on a head
+ * frame: a deterministically terminal status, and a retriable status repeated
+ * until the poison detector escalated it. Re-adopting either restarts the same
+ * frame against the same server with the strike count reset, which is the hot
+ * retry loop the `.failed` sentinel exists to prevent. Poison escalation
+ * driven by connection loss rather than a NACK arrives as a QwpProtocolError
+ * and is already covered above.
+ */
+function isTerminalDrainFailure(error: Error): boolean {
+  if (error instanceof QwpReplayStoreCorruptionError) return true;
+  if (error instanceof QwpProtocolError) return true;
+  if (error instanceof QwpReplayRejectedError) return true;
+  if (error instanceof QwpCatchUpCapGapError) return true;
+  if (error instanceof QwpDurableAckPersistentFailureError) return true;
+  if (error instanceof QwpUpgradeError) {
+    return error.kind === QWP_UPGRADE_ERROR_KIND.AUTHENTICATION;
+  }
+  return false;
+}
+
+function toError(error: unknown, fallback: string): Error {
+  return error instanceof Error ? error : new Error(fallback, { cause: error });
+}
+
+function nodeErrorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error
+    ? String(error.code)
+    : undefined;
+}

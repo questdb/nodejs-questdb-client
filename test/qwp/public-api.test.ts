@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import * as browser from "../../src/qwp/browser";
-import * as node from "../../src/qwp/node";
-import * as shared from "../../src/qwp";
+import * as browser from "../../packages/browser-client/src";
+import * as node from "../../packages/nodejs-client/src";
+import * as shared from "../../packages/client-core/src/qwp";
 
 const sharedRuntimeContract = [
   "QWP_INGRESS_PROGRESS_KIND",

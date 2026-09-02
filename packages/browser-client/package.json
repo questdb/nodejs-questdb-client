@@ -1,0 +1,48 @@
+{
+  "name": "@questdb/browser-client",
+  "version": "4.2.0",
+  "description": "QuestDB JavaScript Client for browsers",
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.mjs browser-client && bunchee"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "main": "dist/cjs/index.js",
+  "module": "dist/es/index.mjs",
+  "browser": "dist/es/index.mjs",
+  "types": "dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/es/index.d.mts",
+        "default": "./dist/es/index.mjs"
+      },
+      "import": {
+        "types": "./dist/es/index.d.mts",
+        "default": "./dist/es/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/questdb/nodejs-questdb-client.git",
+    "directory": "packages/browser-client"
+  },
+  "homepage": "https://questdb.github.io/nodejs-questdb-client",
+  "keywords": [
+    "QuestDB",
+    "browser",
+    "JavaScript",
+    "TypeScript"
+  ],
+  "author": "QuestDB",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}

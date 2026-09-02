@@ -1,3 +1,10 @@
+# QuestDB JavaScript Client
+
+This repository builds two runtime-specific npm packages from a shared private
+core: `@questdb/nodejs-client` for Node.js and `@questdb/browser-client` for
+browsers. The browser package exposes its complete API from its package root and
+does not include Node.js transports or dependencies.
+
 ## Installation
 
 ```shell
@@ -9,6 +16,12 @@ yarn add @questdb/nodejs-client
 
 # With pnpm
 pnpm add @questdb/nodejs-client
+```
+
+For browser applications:
+
+```shell
+npm install @questdb/browser-client
 ```
 
 ## Compatibility table
@@ -28,12 +41,12 @@ Use the <i>stdlib_http</i> option to switch to the standard HTTP/HTTPS modules.
 ## Configuration options
 
 Detailed description of the client's configuration options can be found in
-the {@link index.SenderOptions | SenderOptions} documentation.
+the [SenderOptions documentation](https://questdb.github.io/nodejs-questdb-client/classes/_questdb_nodejs-client.SenderOptions.html).
 
 ## Examples
 
 The examples below demonstrate how to use the client. <br>
-For more details, please, check the {@link index.Sender | Sender}'s documentation.
+For more details, see the [Sender documentation](https://questdb.github.io/nodejs-questdb-client/classes/_questdb_nodejs-client.Sender.html).
 
 ### Basic API usage
 
@@ -148,7 +161,7 @@ validates each complete row before changing sender state and accepts both indivi
 rows and synchronous or asynchronous iterables:
 
 ```typescript
-import * as qwp from "@questdb/nodejs-client/qwp";
+import * as qwp from "@questdb/nodejs-client";
 
 const trades = sender.writer("trades", {
   symbol: qwp.symbol(),
@@ -233,7 +246,7 @@ retain unacknowledged frames in memory; set `reconnect: false` in the session op
 for a fixed connection. Only Node store-and-forward survives process failure.
 
 ```typescript
-import { connectQwpBrowserSender } from "@questdb/nodejs-client/qwp/browser";
+import { connectQwpBrowserSender } from "@questdb/browser-client";
 
 const url = new URL("/write/v4", location.href);
 url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -293,7 +306,7 @@ connection topology separate from batch acceptance and durable progress.
 import {
   QWP_INGRESS_PROGRESS_KIND,
   createQwpBrowserSender,
-} from "@questdb/nodejs-client/qwp/browser";
+} from "@questdb/browser-client";
 
 const sender = createQwpBrowserSender(
   { url },
@@ -351,7 +364,7 @@ does not run an interactive OIDC authorization flow.
 import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserSender,
-} from "@questdb/nodejs-client/qwp/browser";
+} from "@questdb/browser-client";
 
 await bootstrapQwpBrowserSession({
   url: new URL("/exec", location.href),
@@ -420,7 +433,7 @@ Node.js egress clients can opt into compressed result batches during the
 WebSocket upgrade. Raw batches remain the default for compatibility.
 
 ```typescript
-import { connectQwpNodeEgress } from "@questdb/nodejs-client/qwp/node";
+import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
 const session = await connectQwpNodeEgress(
   {

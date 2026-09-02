@@ -4,9 +4,13 @@ import * as https from "node:https";
 import type { AddressInfo } from "node:net";
 import { Agent as UndiciAgent } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import * as qwpNode from "../../src/qwp/node";
-import { Sender } from "../../src/sender";
-import { SenderOptions, qwpConfig } from "../../src/options";
+// Spy on the module Sender imports, rather than the public re-export facade.
+import * as qwpNode from "../../packages/nodejs-client/src/qwp";
+import { Sender } from "../../packages/nodejs-client/src/sender";
+import {
+  SenderOptions,
+  qwpConfig,
+} from "../../packages/nodejs-client/src/options";
 
 /**
  * A wss:// producer must verify the server certificate, and its authorization

@@ -2,8 +2,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 
-import { createBuffer, Sender, SenderOptions } from "../src";
-import { PROTOCOL_VERSION_V3 } from "../src/options";
+import {
+  createBuffer,
+  Sender,
+  SenderOptions,
+} from "../packages/nodejs-client/src";
+import { PROTOCOL_VERSION_V3 } from "../packages/nodejs-client/src/options";
 
 type Column = { name: string } & (
   | { type: "STRING"; value: string }

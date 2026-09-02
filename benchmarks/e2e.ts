@@ -2,7 +2,7 @@ import { it } from "vitest";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Sender } from "../src";
+import { Sender } from "../packages/nodejs-client/src";
 import { BENCHMARK_WORKLOADS } from "./workloads";
 
 const ADDRESS = process.env.QDB_ADDR ?? "localhost:9000";

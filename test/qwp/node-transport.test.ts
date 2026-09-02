@@ -31,7 +31,7 @@ import {
   QwpUpgradeError,
   type QwpSenderError,
   writeQwpVarint,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 
 function serverInfo(
   role: number = QWP_SERVER_ROLE.STANDALONE,

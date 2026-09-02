@@ -39,8 +39,11 @@ import {
   qwpVarintSize,
   readQwpVarint,
   writeQwpVarint,
-} from "../../src/qwp";
-import { encodeUtf8, utf8Length } from "../../src/_qwp/_core/bytes";
+} from "../../packages/client-core/src/qwp";
+import {
+  encodeUtf8,
+  utf8Length,
+} from "../../packages/client-core/src/_qwp/_core/bytes";
 
 function dataView(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

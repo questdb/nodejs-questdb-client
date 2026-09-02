@@ -1,4 +1,4 @@
-import { connectQwpBrowserSender } from "@questdb/nodejs-client/qwp/browser";
+import { connectQwpBrowserSender } from "@questdb/browser-client";
 
 async function main(): Promise<void> {
   const url = new URL("/write/v4", location.href);

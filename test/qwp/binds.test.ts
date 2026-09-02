@@ -8,7 +8,7 @@ import {
   QwpBindValues,
   QwpByteReader,
   readQwpVarint,
-} from "../../src/qwp";
+} from "../../packages/client-core/src/qwp";
 
 function expectNonNullHeader(reader: QwpByteReader, type: number): void {
   expect(reader.readUint8()).toBe(type);

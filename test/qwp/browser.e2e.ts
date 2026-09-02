@@ -17,7 +17,7 @@ import {
   QwpByteWriter,
   readQwpVarint,
   writeQwpVarint,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 
 function listen(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -52,10 +52,13 @@ function closeWebSocketServer(server: WebSocketServer): Promise<void> {
   });
 }
 
-// Rooted at dist/, not dist/es/qwp: the browser bundle imports shared chunks
-// from dist/_qwp, so serving only its own directory 403s every entry import.
+// Rooted at the browser package dist/: the entry imports package-local shared
+// chunks, so serving only dist/es would 404 every shared-module request.
 function createModuleServer(): Server {
-  const moduleRoot = path.resolve(process.cwd(), "dist");
+  const moduleRoot = path.resolve(
+    process.cwd(),
+    "packages/browser-client/dist",
+  );
   return createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -146,7 +149,7 @@ describe("QWP in a real browser", () => {
     assetServer = createModuleServer();
     await listen(assetServer);
     const address = assetServer.address() as AddressInfo;
-    assetUrl = `http://127.0.0.1:${address.port}/es/qwp/browser.mjs`;
+    assetUrl = `http://127.0.0.1:${address.port}/es/index.mjs`;
 
     browser = await chromium.launch({
       channel: process.env.QWP_BROWSER_CHANNEL,

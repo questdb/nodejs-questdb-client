@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { QwpNodeFileReplayStore } from "../../src/qwp/node";
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src";
 
 const FIXTURE_DIRECTORY = join(process.cwd(), "test/qwp/fixtures/sfa");
 

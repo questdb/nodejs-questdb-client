@@ -2,8 +2,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { QwpSender, type QwpSenderSession } from "../../src/qwp";
-import { QWP_SUPPORTED_CONFIG_KEYS } from "../../src/qwp-node/client-config";
+import {
+  QwpSender,
+  type QwpSenderSession,
+} from "../../packages/client-core/src/qwp";
+import { QWP_SUPPORTED_CONFIG_KEYS } from "../../packages/nodejs-client/src/qwp-node/client-config";
 
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

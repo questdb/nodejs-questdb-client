@@ -6,7 +6,12 @@ import http from "http";
 
 import crypto from "node:crypto";
 
-import { Sender, SenderOptions, UndiciTransport, HttpTransport } from "../src";
+import {
+  Sender,
+  SenderOptions,
+  UndiciTransport,
+  HttpTransport,
+} from "../packages/nodejs-client/src";
 import { MockProxy } from "./util/mockproxy";
 import { MockHttp } from "./util/mockhttp";
 

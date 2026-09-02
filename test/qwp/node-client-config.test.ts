@@ -8,7 +8,7 @@ import {
   parseQwpNodeClientConfig,
   type QwpNodeClientOptions,
   type QwpWebSocketLike,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 
 class RejectingWebSocket {
   binaryType = "";

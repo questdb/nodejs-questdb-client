@@ -20,7 +20,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.12.4
           run_install: true
 
       - name: Linting
@@ -29,10 +29,8 @@ jobs:
       - name: Type-checking
         run: pnpm typecheck
 
-      # tsconfig.qwp-browser.json is where the browser contract lives: strict,
-      # no @types/node, DOM lib, over src/qwp/** minus node.ts. `pnpm typecheck`
-      # does not cover it, so without this step nothing stops a Node built-in or
-      # a strict-null violation reaching the browser entry point.
+      # This contract uses DOM libraries with no @types/node and covers only
+      # the source graph shipped in @questdb/browser-client.
       - name: Type-checking (browser)
         run: pnpm typecheck:qwp-browser
 
@@ -42,24 +40,32 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Built package tests
+        run: pnpm exec vitest run --config vitest.dist.config.ts
+
       # Guards the emitted .d.ts row typing, which no runtime suite can see.
       - name: Type-checking (built package consumer)
         run: |
           pnpm exec tsc --noEmit -p tsconfig.dist-types.json
           pnpm exec tsc --noEmit -p tsconfig.dist-types.cjs.json
 
-      # Every subpath in `exports`, not just the root: a publish that omits
-      # ./qwp, ./qwp/browser or ./qwp/node resolves to nothing for consumers.
-      # Entry bundles also import shared chunks that no `exports` entry names,
-      # so the walk follows relative imports: a chunk left out of `files`
-      # publishes a package whose every entry resolves to a missing file.
+      # Checks both npm tarballs and follows every exported declaration and
+      # runtime module through its relative dependency graph.
       - name: Check for build artifacts
         run: node scripts/check-build-artifacts.mjs
 
-      - name: Publish
+      - name: Publish @questdb/nodejs-client
         uses: JS-DevTools/npm-publish@v3
         with:
           token: ${{ secrets.CI_TOKEN }}
           access: public
           strategy: all
-          package: package.json
+          package: packages/nodejs-client/package.json
+
+      - name: Publish @questdb/browser-client
+        uses: JS-DevTools/npm-publish@v3
+        with:
+          token: ${{ secrets.CI_TOKEN }}
+          access: public
+          strategy: all
+          package: packages/browser-client/package.json

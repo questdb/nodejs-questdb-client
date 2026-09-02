@@ -22,8 +22,8 @@ import {
   designatedTimestamp,
   long,
   symbol as qwpSymbol,
-} from "../../src/qwp";
-import { QwpAsyncQueue } from "../../src/_qwp/_internal/async-queue";
+} from "../../packages/client-core/src/qwp";
+import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 
 function writeString(writer: QwpByteWriter, value: string): void {
   const encoded = new TextEncoder().encode(value);

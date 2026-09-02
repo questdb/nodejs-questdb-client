@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { qwpColumnNameKey } from "../../src/_qwp/_core/identifiers";
+import { qwpColumnNameKey } from "../../packages/client-core/src/_qwp/_core/identifiers";
 
 /**
  * The pre-optimization reference: lower-case each UTF-16 code unit

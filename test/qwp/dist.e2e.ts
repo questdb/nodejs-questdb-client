@@ -7,15 +7,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 
 /**
- * Consumer-facing checks that run against the built package instead of `src/`.
+ * Consumer-facing checks that run against the built packages instead of the
+ * private core source.
  *
- * Every other suite imports from `src/`, where all four entry points resolve to
- * one module instance. The published package emits one bundle per entry point,
- * so module-private state is duplicated per bundle and cross-entry-point usage
- * can break in ways `src/`-level tests structurally cannot observe. The
- * compiled writer regression these tests cover is exactly that: the column
- * factories live only in `./qwp`, while `writer()` lives on senders built from
- * `./qwp/node`, `./qwp/browser`, and the package root.
+ * Each public package now emits one root entry. These checks ensure the legacy
+ * Sender and the complete runtime-specific QWP surface coexist in that entry,
+ * with one class/type identity per module format.
  *
  * Requires a build. Run with `pnpm test:dist`.
  */
@@ -24,50 +21,70 @@ const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
+const NODE_PACKAGE = path.join(ROOT, "packages/nodejs-client");
+const BROWSER_PACKAGE = path.join(ROOT, "packages/browser-client");
 const require_ = createRequire(import.meta.url);
 
-type Subpath = "." | "./qwp" | "./qwp/browser" | "./qwp/node";
 type Format = "import" | "require";
 
-/** Resolves a subpath through package.json `exports`, as a consumer would. */
-let resolveExport: (subpath: Subpath, format: Format) => string;
+/** Resolves the Node package root through `exports`, as a consumer would. */
+let resolveExport: (format: Format) => string;
 
 beforeAll(async () => {
   const manifest = JSON.parse(
-    await readFile(path.join(ROOT, "package.json"), "utf8"),
+    await readFile(path.join(NODE_PACKAGE, "package.json"), "utf8"),
+  ) as { exports: Record<string, Record<Format, { default: string }>> };
+  const browserManifest = JSON.parse(
+    await readFile(path.join(BROWSER_PACKAGE, "package.json"), "utf8"),
   ) as { exports: Record<string, Record<Format, { default: string }>> };
 
-  resolveExport = (subpath, format) => {
-    const target = manifest.exports[subpath]?.[format]?.default;
+  resolveExport = (format) => {
+    const target = manifest.exports["."]?.[format]?.default;
     if (!target) {
-      throw new Error(
-        `package.json exports has no '${format}' target for '${subpath}'`,
-      );
+      throw new Error(`package.json exports has no '${format}' root target`);
     }
-    return path.join(ROOT, target);
+    return path.join(NODE_PACKAGE, target);
   };
 
-  for (const subpath of [
-    ".",
-    "./qwp",
-    "./qwp/browser",
-    "./qwp/node",
-  ] as const) {
-    for (const format of ["import", "require"] as const) {
-      const target = resolveExport(subpath, format);
-      if (!existsSync(target)) {
-        throw new Error(
-          `${target} is missing - run 'pnpm build' before this suite`,
-        );
-      }
+  for (const format of ["import", "require"] as const) {
+    const target = resolveExport(format);
+    if (!existsSync(target)) {
+      throw new Error(
+        `${target} is missing - run 'pnpm build' before this suite`,
+      );
+    }
+  }
+
+  resolveBrowserExport = (format) => {
+    const target = browserManifest.exports["."]?.[format]?.default;
+    if (!target) {
+      throw new Error(
+        `browser package exports has no '${format}' target for '.'`,
+      );
+    }
+    return path.join(BROWSER_PACKAGE, target);
+  };
+  for (const format of ["import", "require"] as const) {
+    const target = resolveBrowserExport(format);
+    if (!existsSync(target)) {
+      throw new Error(
+        `${target} is missing - run 'pnpm build' before this suite`,
+      );
     }
   }
 });
 
-const load = (subpath: Subpath, format: Format) =>
+let resolveBrowserExport: (format: Format) => string;
+
+const load = (format: Format) =>
   format === "require"
-    ? Promise.resolve(require_(resolveExport(subpath, format)))
-    : import(pathToFileURL(resolveExport(subpath, format)).href);
+    ? Promise.resolve(require_(resolveExport(format)))
+    : import(pathToFileURL(resolveExport(format)).href);
+
+const loadBrowser = (format: Format) =>
+  format === "require"
+    ? Promise.resolve(require_(resolveBrowserExport(format)))
+    : import(pathToFileURL(resolveBrowserExport(format)).href);
 
 const runNode = (script: string) =>
   new Promise<{ code: number | null; stdout: string; stderr: string }>(
@@ -105,37 +122,37 @@ const URL_ = "ws://127.0.0.1:9/write/v4";
 describe.each(["import", "require"] as const)(
   "built package (%s)",
   (format) => {
-    // The factories are exported only from './qwp', so every real use of a
-    // compiled writer crosses at least one entry-point boundary.
-    it.each(["./qwp/browser", "./qwp/node"] as const)(
-      "compiles a writer on a %s sender from './qwp' column factories",
-      async (senderSubpath) => {
-        const qwp: any = await load("./qwp", format);
-        const entry: any = await load(senderSubpath, format);
-        const create =
-          senderSubpath === "./qwp/node"
-            ? entry.createQwpNodeSender
-            : entry.createQwpBrowserSender;
+    it("exposes Sender and the complete Node QWP API at the root", async () => {
+      const qwp: any = await load(format);
+      const node: any = await load(format);
+      const sender = node.createQwpNodeSender({ url: URL_, autoFlush: false });
+      const trades = sender.writer("trades", schemaFrom(qwp));
+      await stageTwoRows(trades);
 
-        const sender = create({ url: URL_, autoFlush: false });
-        const trades = sender.writer("trades", schemaFrom(qwp));
-        await stageTwoRows(trades);
+      expect(sender.metrics.pendingRows).toBe(2);
+    });
 
-        expect(sender.metrics.pendingRows).toBe(2);
-      },
-    );
+    it("exposes a self-contained browser writer at the package root", async () => {
+      const browser: any = await loadBrowser(format);
+      const sender = browser.createQwpBrowserSender({
+        url: URL_,
+        autoFlush: false,
+      });
+      const trades = sender.writer("trades", schemaFrom(browser));
+      await stageTwoRows(trades);
 
-    it("keeps package-root writer and error identity across QWP entries", async () => {
-      const root: any = await load(".", format);
-      const qwp: any = await load("./qwp", format);
+      expect(sender.metrics.pendingRows).toBe(2);
+    });
+
+    it("keeps one writer and error identity within the package root", async () => {
+      const root: any = await load(format);
+      const qwp: any = await load(format);
 
       const sender = await root.Sender.fromConfig(
         "ws::addr=127.0.0.1:9;auto_flush=off;",
         { log: () => {} },
       );
-      // Loading the public Node entry after the root proves its static import
-      // selected this same-format module instance.
-      const node: any = await load("./qwp/node", format);
+      const node: any = await load(format);
       const trades = sender.writer("trades", schemaFrom(qwp));
       await stageTwoRows(trades);
 
@@ -157,19 +174,19 @@ describe.each(["import", "require"] as const)(
       expect(rowError).toBeInstanceOf(node.QwpWriterRowError);
 
       const otherFormat = format === "import" ? "require" : "import";
-      const otherNode: any = await load("./qwp/node", otherFormat);
+      const otherNode: any = await load(otherFormat);
       expect(trades).not.toBeInstanceOf(otherNode.QwpTableWriter);
       expect(rowError).not.toBeInstanceOf(otherNode.QwpWriterRowError);
     });
 
     it("keeps synchronous package-root identity", async () => {
-      const root: any = await load(".", format);
+      const root: any = await load(format);
       const sender = new root.Sender(
         new root.SenderOptions("ws::addr=127.0.0.1:9;auto_flush=off;", {
           log: () => {},
         }),
       );
-      const node: any = await load("./qwp/node", format);
+      const node: any = await load(format);
       const trades = sender.writer("trades", schemaFrom(node));
 
       expect(trades).toBeInstanceOf(node.QwpTableWriter);
@@ -187,22 +204,16 @@ describe.each(["import", "require"] as const)(
       expect(rowError).toBeInstanceOf(node.QwpWriterRowError);
     });
 
-    it("re-exported factories keep the identity of their defining bundle", async () => {
-      const qwp: any = await load("./qwp", format);
-      const node: any = await load("./qwp/node", format);
-      const browser: any = await load("./qwp/browser", format);
+    it("re-exported factories keep the root module identity", async () => {
+      const qwp: any = await load(format);
+      const node: any = await load(format);
 
-      // './qwp/node' and './qwp/browser' re-export the factories with
-      // `export * from "./index"`, so they must be the very same functions.
       expect(node.symbol).toBe(qwp.symbol);
-      expect(browser.symbol).toBe(qwp.symbol);
 
-      // ...and a descriptor built through any of them must be accepted by a
-      // writer compiled in any other bundle. This is the assertion that fails
-      // when the column brand is a module-private Symbol rather than a shared
-      // one: the factory and the validator end up in different bundles.
+      // A descriptor obtained through any root reference must be accepted by
+      // the writer from that same emitted module.
       const sender = node.createQwpNodeSender({ url: URL_, autoFlush: false });
-      for (const factories of [qwp, node, browser]) {
+      for (const factories of [qwp, node]) {
         expect(() =>
           sender.writer("trades", schemaFrom(factories)),
         ).not.toThrow();
@@ -212,10 +223,10 @@ describe.each(["import", "require"] as const)(
 );
 
 describe("package-root static QWP import", () => {
-  it("uses the ESM QWP entry for synchronous ESM construction", async () => {
-    const rootUrl = pathToFileURL(resolveExport(".", "import")).href;
-    const nodeUrl = pathToFileURL(resolveExport("./qwp/node", "import")).href;
-    const commonJsNode = resolveExport("./qwp/node", "require");
+  it("uses only the ESM root for synchronous ESM construction", async () => {
+    const rootUrl = pathToFileURL(resolveExport("import")).href;
+    const nodeUrl = pathToFileURL(resolveExport("import")).href;
+    const commonJsNode = resolveExport("require");
     const configuration = "ws::addr=127.0.0.1:9;auto_flush=off;";
     const script = `
       (async () => {
@@ -259,7 +270,7 @@ describe("store-and-forward locking", () => {
   it.each(["import", "require"] as const)(
     "loads QWP with the package root (%s)",
     async (format) => {
-      const target = resolveExport(".", format);
+      const target = resolveExport(format);
       const probe =
         '({ ws: !!require.cache[require.resolve("ws")],' +
         " dgram: process.moduleLoadList.some((m) => /dgram/.test(m)) })";
@@ -294,7 +305,7 @@ describe("store-and-forward locking", () => {
   it.each(["import", "require"] as const)(
     "the package root loads (%s) on a platform no addon would support",
     async (format) => {
-      const target = resolveExport(".", format);
+      const target = resolveExport(format);
       const load_ =
         format === "require"
           ? `console.log(typeof require(${JSON.stringify(target)}).Sender)`
@@ -317,10 +328,7 @@ describe("store-and-forward locking", () => {
 
   it("ships the slot lock in the bundle with no native addon", async () => {
     for (const format of ["import", "require"] as const) {
-      const bundle = await readFile(
-        resolveExport("./qwp/node", format),
-        "utf8",
-      );
+      const bundle = await readFile(resolveExport(format), "utf8");
 
       // The `.lock.owner` mutex is the whole locking implementation, so it must
       // be inlined rather than reached through any external specifier.
@@ -338,7 +346,10 @@ describe("store-and-forward locking", () => {
       dependencies?: Record<string, string>;
       optionalDependencies?: Record<string, string>;
     } = JSON.parse(
-      await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+      await readFile(
+        new URL("../../packages/nodejs-client/package.json", import.meta.url),
+        "utf8",
+      ),
     );
 
     expect(manifest.optionalDependencies).toBeUndefined();

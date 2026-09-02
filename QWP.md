@@ -5,31 +5,23 @@ It describes the supported public entry points, delivery semantics, authenticati
 failure handling, and migration from the existing Node.js sender and the low-level
 QWP API.
 
-QWP support is currently a preview. The documented exports are the compatibility
-baseline for the first QWP release, but may still change before that release. Once
-released, changes to this documented surface follow the package's semantic-versioning
-policy. Imports from internal source paths are never supported.
+The documented exports are the public compatibility baseline. Changes to this
+surface follow the package's semantic-versioning policy. Imports from internal
+source paths are never supported.
 
 ## Choose an entry point
 
-| Entry point                          | Runtime            | Use it for                                                                                |
-| ------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------- |
-| `@questdb/nodejs-client`             | Node.js            | Existing `Sender`, including QWP ingress selected with `ws::`, `wss::`, or `udp::`        |
-| `@questdb/nodejs-client/qwp/browser` | Browser            | Browser-safe QWP ingress, egress, authentication bootstrap, sessions, and codecs          |
-| `@questdb/nodejs-client/qwp/node`    | Node.js            | QWP ingress and egress with upgrade headers, TLS agents, and persistent store-and-forward |
-| `@questdb/nodejs-client/qwp`         | Browser or Node.js | Shared protocol codecs and low-level session abstractions for advanced integrations       |
+| Package                   | Runtime | Use it for                                                                                          |
+| ------------------------- | ------- | --------------------------------------------------------------------------------------------------- |
+| `@questdb/nodejs-client`  | Node.js | Existing `Sender`, QWP codecs, WebSocket/UDP ingress, egress, TLS, and persistent store-and-forward |
+| `@questdb/browser-client` | Browser | Browser-safe QWP ingress, egress, authentication bootstrap, sessions, and codecs                    |
 
-The three QWP subpaths are declared both in `exports` and in `typesVersions`, so
-they resolve under every TypeScript `moduleResolution` setting, including the
-legacy `node10` that `module: "commonjs"` still implies by default. Keep the two
-declarations in step: `exports` alone leaves a `node10` consumer with
-`TS2307: Cannot find module '@questdb/nodejs-client/qwp/node'` at compile time
-while the same import works perfectly at runtime.
+Each distribution exposes its complete API directly from its package root.
 
-Do not import the package root from browser code. It retains the existing Node.js
-transports and dependencies for backward compatibility. The browser entry point has
-no Node.js imports. Node-only features remain in `qwp/node`, so supporting browsers
-does not require redesigning or breaking the existing client.
+Browser applications should install and import `@questdb/browser-client`. Its
+published module graph has no Node.js imports, Node.js typings, Node engine
+requirement, `undici`, or `ws`. Node-only transports and persistence remain in
+`@questdb/nodejs-client`.
 
 QWP uses `/write/v4` for ingress and `/read/v1` for egress. A server must expose
 these WebSocket routes; optional features are enabled only when negotiation confirms
@@ -222,7 +214,7 @@ self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
 fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the same
-transport from `qwp/node`.
+transport from `@questdb/nodejs-client`.
 
 UDP provides no authentication, TLS, server or durable ACK, transactions,
 reconnection, compression, or store-and-forward. Local socket errors are delivered
@@ -510,8 +502,8 @@ Use `QwpSender` directly when QWP-only column types or detailed session controls
 needed:
 
 ```typescript
-import * as qwp from "@questdb/nodejs-client/qwp";
-import { connectQwpNodeSender } from "@questdb/nodejs-client/qwp/node";
+import * as qwp from "@questdb/nodejs-client";
+import { connectQwpNodeSender } from "@questdb/nodejs-client";
 
 const sender = await connectQwpNodeSender(
   {
@@ -742,7 +734,7 @@ Browser applications must use the browser entry point and a same-origin WebSocke
 route (directly or through a reverse proxy):
 
 ```typescript
-import { connectQwpBrowserSender } from "@questdb/nodejs-client/qwp/browser";
+import { connectQwpBrowserSender } from "@questdb/browser-client";
 
 const url = new URL("/write/v4", location.href);
 url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -765,7 +757,7 @@ cookies over REST before opening the WebSocket:
 import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserSender,
-} from "@questdb/nodejs-client/qwp/browser";
+} from "@questdb/browser-client";
 
 await bootstrapQwpBrowserSession({
   url: new URL("/exec", location.href),
@@ -911,7 +903,7 @@ Use immutable metrics snapshots for polling and callbacks for event-driven telem
 import {
   QWP_INGRESS_PROGRESS_KIND,
   createQwpNodeSender,
-} from "@questdb/nodejs-client/qwp/node";
+} from "@questdb/nodejs-client";
 
 const sender = createQwpNodeSender(
   { url: "ws://localhost:9000/write/v4" },
@@ -972,7 +964,7 @@ QWP egress streams typed result batches. One connection executes one active quer
 a time.
 
 ```typescript
-import { connectQwpNodeEgress } from "@questdb/nodejs-client/qwp/node";
+import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
 const session = await connectQwpNodeEgress(
   {
@@ -1195,7 +1187,7 @@ retrying initial connection establishment.
 Browser egress uses the same session API:
 
 ```typescript
-import { connectQwpBrowserEgress } from "@questdb/nodejs-client/qwp/browser";
+import { connectQwpBrowserEgress } from "@questdb/browser-client";
 
 const readUrl = new URL("/read/v1", location.href);
 readUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -1227,7 +1219,7 @@ authentication and TLS configuration to both sides, and validates ingress,
 egress, and pool settings before opening a socket:
 
 ```typescript
-import { connectQwpNodeClient } from "@questdb/nodejs-client/qwp/node";
+import { connectQwpNodeClient } from "@questdb/nodejs-client";
 
 const db = await connectQwpNodeClient(
   "wss::" +
@@ -1283,7 +1275,7 @@ The object form remains available for cases where constructing the two sides
 separately is useful:
 
 ```typescript
-import { connectQwpNodeClient } from "@questdb/nodejs-client/qwp/node";
+import { connectQwpNodeClient } from "@questdb/nodejs-client";
 
 const db = await connectQwpNodeClient({
   ingress: {
@@ -1348,7 +1340,7 @@ parameters. Omit `sessionBootstrap.url` to derive the matching `/exec` route
 for every failover endpoint:
 
 ```typescript
-import { connectQwpBrowserClient } from "@questdb/nodejs-client/qwp/browser";
+import { connectQwpBrowserClient } from "@questdb/browser-client";
 
 const db = await connectQwpBrowserClient({
   cluster: {

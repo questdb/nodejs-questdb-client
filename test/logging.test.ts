@@ -9,7 +9,7 @@ import {
   vi,
 } from "vitest";
 
-import { Logger } from "../src";
+import { Logger } from "../packages/nodejs-client/src";
 
 describe("Default logging suite", function () {
   const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -19,7 +19,7 @@ describe("Default logging suite", function () {
   let log: Logger;
 
   beforeAll(async () => {
-    log = (await import("../src/logging")).log;
+    log = (await import("../packages/client-core/src/logging")).log;
   });
 
   afterAll(() => {

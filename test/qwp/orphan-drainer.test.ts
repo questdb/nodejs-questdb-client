@@ -11,7 +11,7 @@ import {
   retryQwpNodeOrphanSlot,
   scanQwpNodeOrphanSlots,
   type QwpNodeOrphanDrainSession,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_SENDER_ERROR_CATEGORY,
@@ -19,7 +19,7 @@ import {
   QWP_STATUS,
   QwpReplayRejectedError,
   type QwpSenderError,
-} from "../../src/qwp";
+} from "../../packages/client-core/src/qwp";
 
 class FakeDrainSession implements QwpNodeOrphanDrainSession {
   pendingReplayFrames = 1;

@@ -32,7 +32,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.12.4
           run_install: true
 
       - name: Linting
@@ -41,10 +41,8 @@ jobs:
       - name: Type-checking
         run: pnpm typecheck
 
-      # tsconfig.qwp-browser.json is where the browser contract lives: strict,
-      # no @types/node, DOM lib, over src/qwp/** minus node.ts. `pnpm typecheck`
-      # does not cover it, so without this step nothing stops a Node built-in or
-      # a strict-null violation reaching the browser entry point.
+      # This contract uses DOM libraries with no @types/node and covers only
+      # the source graph shipped in @questdb/browser-client.
       - name: Type-checking (browser)
         run: pnpm typecheck:qwp-browser
 
@@ -64,16 +62,14 @@ jobs:
         run: pnpm test
 
       # Loads the built bundles through package.json `exports`, the way a
-      # consumer does. Every other suite imports from `src/`, where all four
-      # entry points share one module instance and cross-bundle defects are
-      # invisible.
+      # consumer does, and verifies the two npm package boundaries.
       - name: Built package tests
         run: pnpm test:dist
 
       # test:dist asserts runtime behaviour only. The compiled writers promise
       # per-column row typing, which lives entirely in the emitted .d.ts files
-      # and is therefore invisible to every suite that imports from `src/`,
-      # where all four entry points share one module instance.
+      # and is therefore invisible to source-level tests, where the public
+      # entries share one private-core module instance.
       - name: Type-checking (built package consumer)
         run: pnpm typecheck:dist
 
@@ -101,7 +97,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.12.4
           run_install: true
 
       - name: Install Chromium

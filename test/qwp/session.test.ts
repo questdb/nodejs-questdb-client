@@ -9,13 +9,13 @@ import {
   createQwpBrowserSender,
   QwpBrowserSessionBootstrapError,
   QwpWebSocketLike,
-} from "../../src/qwp/browser";
+} from "../../packages/browser-client/src";
 import {
   connectQwpNodeEgress,
   connectQwpNodeWebSocket,
   QwpDurableAckUnavailableError,
   QwpVersionMismatchError,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 import {
   QWP_COLUMN_TYPE,
   QWP_COMPRESSION_CODEC,
@@ -50,8 +50,8 @@ import {
   QwpUpgradeError,
   QwpSymbolDictionary,
   readQwpVarintNumber,
-} from "../../src/qwp";
-import { openQwpWebSocket } from "../../src/_qwp/_internal/websocket-connection";
+} from "../../packages/client-core/src/qwp";
+import { openQwpWebSocket } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
 
 type Listener = (event: unknown) => void;
 

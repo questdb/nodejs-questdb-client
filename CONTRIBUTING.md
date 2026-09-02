@@ -1,26 +1,29 @@
-# Contributing to nodejs-questdb-client
+# Contributing to the QuestDB JavaScript Client
 
-Thank you for your interest in contributing to nodejs-questdb-client! This document provides guidelines and instructions for contributing to the project.
+Thank you for your interest in contributing to the QuestDB JavaScript Client!
+This repository contains both the Node.js and browser npm packages.
 
 ## Development Setup
 
 1. Fork and clone the repository:
+
 ```bash
 git clone https://github.com/YOUR_USERNAME/nodejs-questdb-client.git
 cd nodejs-questdb-client
 ```
 
 2. Install dependencies:
+
 ```bash
 pnpm install
 ```
-
 
 ## Running Tests
 
 The project uses Vitest for testing. Tests are located in the `test` directory.
 
 1. Run tests in watch mode during development:
+
 ```bash
 pnpm run test
 ```
@@ -30,8 +33,7 @@ pnpm run test
 - Some tests use mock servers and certificates located in the `test/certs` directory
 
 > You can generate the certificates by running the `generateCerts.sh` script in the `scripts` directory. The script requires two arguments: the output directory and the password for the certificates.
-`./scripts/generateCerts.sh . questdbPwd123`
-
+> `./scripts/generateCerts.sh . questdbPwd123`
 
 ## Code Style and Quality
 
@@ -40,23 +42,27 @@ pnpm run test
 2. Format your code using Prettier
 
 3. Lint your code:
+
 ```bash
-pnpm run lint
+pnpm eslint
 ```
 
 4. Fix linting issues:
+
 ```bash
-pnpm run lint --fix
+pnpm eslint --fix
 ```
 
 ## Making Changes
 
 1. Create a new branch for your changes:
+
 ```bash
 git checkout -b feature/your-feature-name
 ```
 
 2. Make your changes and commit them with clear, descriptive commit messages:
+
 ```bash
 git add .
 git commit -m "feat: add new feature"
@@ -65,6 +71,7 @@ git commit -m "feat: add new feature"
 We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification for commit messages.
 
 3. Push your changes to your fork:
+
 ```bash
 git push origin feature/your-feature-name
 ```
@@ -88,10 +95,10 @@ git push origin feature/your-feature-name
 ## Need Help?
 
 If you have questions or need help, you can:
+
 - Open an issue with your question
 - Join our community discussions (if available)
 
 ## License
 
-By contributing to nodejs-questdb-client, you agree that your contributions will be licensed under the project's license.
-
+By contributing to the QuestDB JavaScript Client, you agree that your contributions will be licensed under the project's license.

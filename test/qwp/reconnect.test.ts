@@ -30,7 +30,7 @@ import {
   QwpReplayStoreLockLostError,
   QwpReplayStoreSegmentTooLargeError,
   type QwpNodeReplayDataLossReport,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_COLUMN_TYPE,
@@ -74,15 +74,15 @@ import {
   encodeQwpQueryRequest,
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
-} from "../../src/qwp";
-import { QwpNodeAdvisoryLock } from "../../src/qwp-node/advisory-lock";
-import { QwpAsyncQueue } from "../../src/_qwp/_internal/async-queue";
-import { qwpSegmentMaintenanceWorker } from "../../src/qwp-node/segment-maintenance-worker";
-import { createQwpEgressFailoverConnectionFactory } from "../../src/_qwp/_internal/egress-routing";
+} from "../../packages/client-core/src/qwp";
+import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
+import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
+import { qwpSegmentMaintenanceWorker } from "../../packages/nodejs-client/src/qwp-node/segment-maintenance-worker";
+import { createQwpEgressFailoverConnectionFactory } from "../../packages/client-core/src/_qwp/_internal/egress-routing";
 import {
   createQwpFailoverConnectionFactory,
   createQwpFailoverHealthTracker,
-} from "../../src/_qwp/_internal/failover";
+} from "../../packages/client-core/src/_qwp/_internal/failover";
 
 async function expectOnlyJavaSlotLockMetadata(
   directory: string,

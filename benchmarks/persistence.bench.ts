@@ -6,7 +6,7 @@ import {
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
   type QwpSfDurability,
-} from "../src/qwp-node/file-replay-store";
+} from "../packages/nodejs-client/src/qwp-node/file-replay-store";
 
 const FRAME = new Uint8Array(4096).fill(0x41);
 const APPENDS = 100;

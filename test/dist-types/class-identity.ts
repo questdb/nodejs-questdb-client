@@ -1,25 +1,23 @@
 // Pins that the classes a factory returns can be named in a type position by a
 // consumer of the published package.
 //
-// src/_qwp/** is emitted as shared chunks rather than inlined per entry, so
-// each class is declared exactly once across the four bundles. Were an entry to
-// start inlining them again, its declaration would be a second, nominally
-// distinct one -- every class here carries private members -- and these
-// annotations would stop compiling.
+// The Node package has one emitted declaration surface. Every class here
+// carries private members, so these annotations ensure its factories and
+// public types continue to refer to that same declaration.
 import {
   connectQwpNodeClient,
   createQwpNodeSender,
-} from "@questdb/nodejs-client/qwp/node";
+} from "@questdb/nodejs-client";
 import type {
   QwpClient,
   QwpSender,
   QwpTableWriter,
-} from "@questdb/nodejs-client/qwp";
+} from "@questdb/nodejs-client";
 import {
   designatedTimestamp,
   QwpUpgradeError,
   symbol,
-} from "@questdb/nodejs-client/qwp";
+} from "@questdb/nodejs-client";
 
 declare const senderOptions: Parameters<typeof createQwpNodeSender>[0];
 declare const clientOptions: Parameters<typeof connectQwpNodeClient>[0];

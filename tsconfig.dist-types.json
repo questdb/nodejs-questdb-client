@@ -9,10 +9,12 @@
     "strict": true,
     "noEmit": true,
     "paths": {
-      "@questdb/nodejs-client": ["./dist/es/index.d.mts"],
-      "@questdb/nodejs-client/qwp": ["./dist/es/qwp/index.d.mts"],
-      "@questdb/nodejs-client/qwp/node": ["./dist/es/qwp/node.d.mts"],
-      "@questdb/nodejs-client/qwp/browser": ["./dist/es/qwp/browser.d.mts"]
+      "@questdb/nodejs-client": [
+        "./packages/nodejs-client/dist/es/index.d.mts"
+      ],
+      "@questdb/browser-client": [
+        "./packages/browser-client/dist/es/index.d.mts"
+      ]
     }
   }
 }

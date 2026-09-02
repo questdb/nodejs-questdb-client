@@ -32,9 +32,9 @@ import {
   QwpResultRowView,
   readQwpVarint,
   writeQwpVarint,
-} from "../../src/qwp";
-import { decompressQwpZstdFrame } from "../../src/_qwp/_core/zstd";
-import { QwpAsyncQueue } from "../../src/_qwp/_internal/async-queue";
+} from "../../packages/client-core/src/qwp";
+import { decompressQwpZstdFrame } from "../../packages/client-core/src/_qwp/_core/zstd";
+import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 
 const RESULT_FLAGS = QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_GORILLA;
 

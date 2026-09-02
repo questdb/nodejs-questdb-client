@@ -32,11 +32,11 @@ const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
-const DIST = path.join(ROOT, "dist");
+const DIST = path.join(ROOT, "packages/nodejs-client/dist");
 const CHILD = path.join(ROOT, "test/qwp/sfa-multiprocess-child.mjs");
 
 // One heartbeat interval plus slack: how long a holder needs before it can
-// notice that its lock was taken. Both live in src/qwp-node/advisory-lock.ts.
+// notice that its lock was taken. Both live in packages/nodejs-client/src/qwp-node/advisory-lock.ts.
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const BEAT_SETTLE_MS = HEARTBEAT_INTERVAL_MS + 1_500;
 const STALE_AFTER_MS = 15_000;
@@ -143,7 +143,7 @@ async function simulateLapsedHeartbeat(directory: string): Promise<void> {
 }
 
 // The store's on-disk segment layout, mirrored from
-// src/qwp-node/file-replay-store.ts. A fixed 24-byte segment header precedes a
+// packages/nodejs-client/src/qwp-node/file-replay-store.ts. A fixed 24-byte segment header precedes a
 // run of frames, each an 8-byte header -- a CRC32C followed by a uint32
 // little-endian payload length -- then the payload. The rest of the fixed-size
 // file is zero padding, so a frame whose header reads back as all zeroes marks

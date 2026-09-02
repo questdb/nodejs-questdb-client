@@ -1,15 +1,10 @@
 {
   "$schema": "https://typedoc.org/schema.json",
-  "entryPoints": [
-    "./src/index.ts",
-    "./src/qwp/index.ts",
-    "./src/qwp/browser.ts",
-    "./src/qwp/node.ts"
-  ],
+  "entryPoints": ["./packages/nodejs-client", "./packages/browser-client"],
+  "entryPointStrategy": "packages",
   "out": "docs",
   "name": "QuestDB JavaScript Client",
   "readme": "./README.md",
-  "tsconfig": "./tsconfig.json",
   "exclude": ["**/test/**/*", "**/examples/**/*", "**/node_modules/**/*"],
   "excludePrivate": true,
   "excludeProtected": false,

@@ -6,11 +6,11 @@ import {
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
   QWP_STATUS,
-} from "../../src/qwp";
+} from "../../packages/client-core/src/qwp";
 
 const logging = vi.hoisted(() => ({ log: vi.fn() }));
 
-vi.mock("../../src/logging", () => logging);
+vi.mock("../../packages/client-core/src/logging", () => logging);
 
 describe("QWP typed sender errors", () => {
   beforeEach(() => logging.log.mockClear());

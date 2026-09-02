@@ -4,7 +4,7 @@ import {
   QWP_COLUMN_TYPE,
   QwpSymbolDictionary,
   QwpTableBuffer,
-} from "../src/_qwp/_core";
+} from "../packages/client-core/src/_qwp/_core";
 import {
   floorInternSymbols,
   floorWriteLongs,

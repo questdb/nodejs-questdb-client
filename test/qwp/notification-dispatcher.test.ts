@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { QwpNotificationDispatcher } from "../../src/_qwp/_internal/notification-dispatcher";
+import { QwpNotificationDispatcher } from "../../packages/client-core/src/_qwp/_internal/notification-dispatcher";
 
 describe("QwpNotificationDispatcher", () => {
   it("delivers outside the protocol call stack in FIFO order", async () => {

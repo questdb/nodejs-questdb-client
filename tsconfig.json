@@ -1,14 +1,11 @@
 {
-  "include": ["src", "test/qwp/public-api-contract.ts"],
+  "include": ["packages/*/src", "test/qwp/public-api-contract.ts"],
   "compilerOptions": {
     "moduleResolution": "bundler",
     "module": "ESNext",
     "declaration": true,
     "target": "ESNext",
-    "lib": [
-      "es2020",
-      "esnext"
-    ],
+    "lib": ["es2020", "esnext"],
     // Types should go into this directory
     // Go to .js file when using IDE functions like "Go to Definition" in VSCode
     "declarationMap": true

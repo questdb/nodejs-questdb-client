@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { Sender } from "../../src";
+import { Sender } from "../../packages/nodejs-client/src";
 import {
   QwpSymbolDictionary,
   connectQwpNodeUdp,
   connectQwpNodeUdpSender,
   createQwpNodeUdpSender,
   type QwpNodeUdpSocketLike,
-} from "../../src/qwp/node";
-import { decodeQwpFrame, QWP_COLUMN_TYPE, QwpTableBuffer } from "../../src/qwp";
-import { QwpUdpDatagramTooLargeError } from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
+import {
+  decodeQwpFrame,
+  QWP_COLUMN_TYPE,
+  QwpTableBuffer,
+} from "../../packages/client-core/src/qwp";
+import { QwpUdpDatagramTooLargeError } from "../../packages/nodejs-client/src";
 
 class FakeUdpSocket implements QwpNodeUdpSocketLike {
   readonly packets: Uint8Array[] = [];

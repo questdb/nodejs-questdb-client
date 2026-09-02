@@ -2,10 +2,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Agent } from "undici";
 
-import { Sender } from "../src/sender";
-import { SenderOptions } from "../src";
-import { qwpConfig } from "../src/options";
-import { log } from "../src/logging";
+import { Sender } from "../packages/nodejs-client/src/sender";
+import { SenderOptions } from "../packages/nodejs-client/src";
+import { qwpConfig } from "../packages/nodejs-client/src/options";
+import { log } from "../packages/client-core/src/logging";
 
 import { MockHttp } from "./util/mockhttp";
 import { readFileSync } from "fs";

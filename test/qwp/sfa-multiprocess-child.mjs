@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 
 const [, , distDir, directory] = process.argv;
 const { QwpNodeFileReplayStore } = await import(
-  pathToFileURL(`${distDir}/es/qwp/node.mjs`).href
+  pathToFileURL(`${distDir}/es/index.mjs`).href
 );
 
 const payload = (marker) => new Uint8Array(64).fill(marker.charCodeAt(0));

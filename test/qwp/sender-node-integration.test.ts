@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Sender } from "../../src";
+import { Sender } from "../../packages/nodejs-client/src";
 import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_MAGIC,
@@ -13,7 +13,7 @@ import {
   QwpByteWriter,
   QwpNodeFileReplayStore,
   decodeQwpIngressSymbolDictionaryDelta,
-} from "../../src/qwp/node";
+} from "../../packages/nodejs-client/src";
 
 function okResponse(sequence: bigint, table: string): Uint8Array {
   const encodedTable = new TextEncoder().encode(table);

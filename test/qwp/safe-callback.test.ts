@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   isPromiseLike,
   safelyInvoke,
-} from "../../src/_qwp/_internal/safe-callback";
+} from "../../packages/client-core/src/_qwp/_internal/safe-callback";
 
 /**
  * Runs `body`, then waits long enough for Node to surface any orphaned

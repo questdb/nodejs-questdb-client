@@ -44,7 +44,7 @@ import {
   uuid,
   varchar,
   writeQwpVarint,
-} from "../../src/qwp";
+} from "../../packages/client-core/src/qwp";
 
 class RecordingSession implements QwpSenderSession {
   readonly sends: {
@@ -1885,10 +1885,7 @@ describe("QWP high-level sender", () => {
         values: [],
       },
     });
-    for (const dimension of [
-      QWP_MAX_ARRAY_DIMENSION_LENGTH + 1,
-      2 ** 32,
-    ]) {
+    for (const dimension of [QWP_MAX_ARRAY_DIMENSION_LENGTH + 1, 2 ** 32]) {
       await expect(
         typed.row({
           samples: { dimensions: [0, dimension], values: [] },
@@ -1898,9 +1895,11 @@ describe("QWP high-level sender", () => {
 
     await sender.flush();
     expect(
-      (column(session.sends[0].tables[0], "samples").values[0] as {
-        dimensions: number[];
-      }).dimensions,
+      (
+        column(session.sends[0].tables[0], "samples").values[0] as {
+          dimensions: number[];
+        }
+      ).dimensions,
     ).toEqual([0, QWP_MAX_ARRAY_DIMENSION_LENGTH]);
 
     const raw = new QwpTableBuffer("raw");
