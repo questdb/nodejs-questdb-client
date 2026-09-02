@@ -5042,7 +5042,7 @@ describe("QWP Node file replay store", () => {
     await expect(stat(ownerPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("does not re-prove a slot lock that has already gone stale", async () => {
+  it("never re-proves a slot lock in place once it has gone stale", async () => {
     // A holder paused past the staleness window is already `lost` by its own
     // rule, and a contender is entitled to reclaim its slot the moment the
     // mtime is that old. The owner-record read and the mtime touch inside a
@@ -5050,13 +5050,60 @@ describe("QWP Node file replay store", () => {
     // resuming beat stamp the new owner's directory and reset provenAtMs --
     // clearing the fence and un-fencing a lock this process had already lost.
     // One beat later the rightful owner saw a drifted mtime and fenced itself
-    // off its own slot. A stale holder must not beat at all.
+    // off its own slot. A stale holder recovers by re-entering contention, so
+    // what has to hold is that it never touches the directory in place.
     const directory = await trackedDirectory();
     const lock = await QwpNodeAdvisoryLock.acquire(directory);
     const beat = () =>
       (lock as unknown as { beat(): Promise<void> }).beat.call(lock);
     const ownerPath = join(directory, ".lock.owner");
-    const stampedMtimeMs = (await stat(ownerPath)).mtimeMs;
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 20_000);
+      expect(lock.lost).toBe(true);
+
+      // A successor adopted the slot while this holder was stalled, and is
+      // heartbeating: its directory carries its own token and a current mtime.
+      await rm(ownerPath, { recursive: true, force: true });
+      await mkdir(ownerPath);
+      await writeFile(
+        join(ownerPath, "owner"),
+        JSON.stringify({
+          pid: process.pid,
+          host: hostname(),
+          token: "successor-token",
+        }),
+      );
+      const live = new Date(Date.now());
+      await utimes(ownerPath, live, live);
+      const successorMtimeMs = (await stat(ownerPath)).mtimeMs;
+
+      await beat();
+
+      // Fenced for good, and the successor's directory is byte-for-byte as it
+      // left it -- neither stamped nor reclaimed.
+      expect(lock.lost).toBe(true);
+      expect((await stat(ownerPath)).mtimeMs).toBe(successorMtimeMs);
+      expect(
+        JSON.parse(await readFile(join(ownerPath, "owner"), "utf8")).token,
+      ).toBe("successor-token");
+    } finally {
+      vi.useRealTimers();
+    }
+    await lock.release().catch(() => undefined);
+  });
+
+  it("recovers a slot lock after a stall nobody contended", async () => {
+    // Fencing on staleness is right -- the holder genuinely cannot prove it
+    // still owns the slot -- but latching there is not. `beat()` is the only
+    // writer of provenAtMs and used to decline to run once `lost`, so a
+    // suspended VM, a debugger pause or a long event-loop block ended a
+    // producer for the life of the process even with no contender at all.
+    const directory = await trackedDirectory();
+    const lock = await QwpNodeAdvisoryLock.acquire(directory);
+    const beat = () =>
+      (lock as unknown as { beat(): Promise<void> }).beat.call(lock);
 
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
@@ -5065,15 +5112,58 @@ describe("QWP Node file replay store", () => {
 
       await beat();
 
-      // The beat must not have re-proven ownership: the fence stays raised and
-      // the directory mtime is untouched, so it cannot have stamped a
-      // successor's directory either.
-      expect(lock.lost).toBe(true);
-      expect((await stat(ownerPath)).mtimeMs).toBe(stampedMtimeMs);
+      // The token still matched, so nobody adopted the slot and the journal
+      // behind it was never replayed by anyone else.
+      expect(lock.lost).toBe(false);
     } finally {
       vi.useRealTimers();
     }
-    await lock.release().catch(() => undefined);
+    await lock.release();
+    await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("keeps appending after the slot lock recovers from a stall", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) });
+
+    const lock = (store as unknown as { slotLock: QwpNodeAdvisoryLock })
+      .slotLock;
+    const beat = () =>
+      (lock as unknown as { beat(): Promise<void> }).beat.call(lock);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // The clock stays advanced for the rest of the test: the process resumed
+      // at a later wall-clock time and keeps running there. Handing it back to
+      // real time would clear `lost` on its own, because provenAtMs was
+      // stamped before the jump, and the assertion below would pass with or
+      // without a recovery path.
+      vi.setSystemTime(Date.now() + 20_000);
+      await expect(
+        store.append({ frameSequence: 1n, payload: Uint8Array.of(4, 5, 6) }),
+      ).rejects.toBeInstanceOf(QwpReplayStoreLockLostError);
+
+      await beat();
+
+      // The producer is live again rather than terminal for the rest of the
+      // process, and the frame staged before the stall is still journalled.
+      await store.append({
+        frameSequence: 1n,
+        payload: Uint8Array.of(4, 5, 6),
+      });
+      await store.close();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    await expect(reopened.load()).resolves.toEqual([
+      { frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) },
+      { frameSequence: 1n, payload: Uint8Array.of(4, 5, 6) },
+    ]);
+    await reopened.close();
   });
 
   it("reclaims a slot whose owner heartbeat stopped", async () => {

@@ -102,7 +102,7 @@ export class QwpNodeAdvisoryLock {
     readonly pidPath: string,
     private readonly ownerPath: string,
     private ownerMtimeMs: number,
-    private readonly token: string,
+    private token: string,
   ) {
     this.startHeartbeat();
   }
@@ -289,16 +289,22 @@ export class QwpNodeAdvisoryLock {
   }
 
   private async beat(): Promise<void> {
-    // A holder that has already gone stale must not re-prove itself. A
-    // contender reclaims a slot only once its mtime is stale, which is the same
-    // instant this object's own `lost` rule fires (both use STALE_AFTER_MS, and
-    // provenAtMs is stamped with the mtime). So a beat that resumes past the
-    // window may be racing a reclaim: the owner-record read and the mtime touch
-    // below are separate syscalls, and a reclaim landing between them would let
-    // this stamp the new owner's directory and reset the fence -- un-fencing a
-    // lock this process has already lost. Staying out once `lost` keeps that
-    // window closed; the mtime it declined to refresh keeps `lost` latched.
-    if (this.released || this.compromised || this.lost) return;
+    if (this.released || this.compromised) return;
+    // A holder that has already gone stale must not re-prove itself *in place*.
+    // A contender reclaims a slot only once its mtime is stale, which is the
+    // same instant this object's own `lost` rule fires (both use
+    // STALE_AFTER_MS, and provenAtMs is stamped with the mtime). So a beat that
+    // resumes past the window may be racing a reclaim: the owner-record read
+    // and the mtime touch below are separate syscalls, and a reclaim landing
+    // between them would stamp the new owner's directory, whose holder then
+    // sees a drifted mtime and fences itself off its own slot.
+    //
+    // Re-entering contention has no such window, so a stall is recoverable
+    // rather than terminal.
+    if (this.lost) {
+      await this.reacquireAfterStall();
+      return;
+    }
     try {
       const current = await stat(this.ownerPath);
       if (Math.trunc(current.mtimeMs) !== Math.trunc(this.ownerMtimeMs)) {
@@ -347,6 +353,62 @@ export class QwpNodeAdvisoryLock {
     // write after resuming lands before the timer can run. Ownership this
     // object cannot still vouch for counts as lost.
     return Date.now() - this.provenAtMs > STALE_AFTER_MS;
+  }
+
+  /**
+   * Re-enters contention for a slot this object has already gone stale on.
+   *
+   * A stall longer than STALE_AFTER_MS -- a suspended VM or container, a
+   * debugger pause, a long event-loop block -- used to fence a producer
+   * permanently, because `beat()` declined to run and it is the only writer of
+   * {@link provenAtMs}. Nothing had necessarily taken the slot; the holder
+   * simply could no longer prove it still owned one.
+   *
+   * The token settles that. While it still matches, nobody adopted the slot,
+   * so no other process has replayed or rewritten the journal and the store's
+   * in-memory view of it is still accurate. Re-claiming through the same
+   * primitives a fresh contender uses keeps the guarantee that made staying
+   * out safe: {@link reclaimIfStale} declines a directory that is not stale,
+   * and its rename lets exactly one contender win, so a peer that claimed the
+   * pathname first is never disturbed.
+   */
+  private async reacquireAfterStall(): Promise<void> {
+    const ownership = await this.ownershipState().catch(
+      () => "unknown" as const,
+    );
+    // Positive proof somebody adopted the slot. Stay fenced for good.
+    if (ownership === "foreign") {
+      this.markCompromised();
+      return;
+    }
+    // Proves nothing about ownership, so neither reclaim nor latch: retry.
+    if (ownership === "unknown") return;
+
+    try {
+      if (!(await reclaimIfStale(this.ownerPath))) return;
+      if (!(await claimOwnerDirectory(this.ownerPath))) return;
+    } catch {
+      return;
+    }
+
+    const token = newOwnerToken();
+    try {
+      await writeFile(
+        join(this.ownerPath, OWNER_FILE),
+        JSON.stringify({ pid: process.pid, host: hostname(), token }),
+        { encoding: "utf8", mode: 0o600 },
+      );
+      this.ownerMtimeMs = await touchOwnerDirectory(this.ownerPath);
+    } catch {
+      // A directory claimed but never stamped would read as recordless to the
+      // next contender. Drop it so the pathname is clean either way.
+      await removeOwnerDirectory(this.ownerPath).catch(() => undefined);
+      return;
+    }
+    // Only now is this a live acquisition again, under a new token: the old one
+    // must not resurrect a directory this object no longer holds.
+    this.token = token;
+    this.provenAtMs = Date.now();
   }
 
   private markCompromised(): void {
