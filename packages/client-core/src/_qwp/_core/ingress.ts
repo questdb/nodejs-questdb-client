@@ -10,7 +10,6 @@ import {
   QWP_HEADER_SIZE,
   QWP_MAX_ARRAY_DIMENSION_LENGTH,
   QWP_MAX_ARRAY_DIMENSIONS,
-  QWP_MAX_ERROR_MESSAGE_LENGTH,
   QWP_MAX_ROWS_PER_TABLE,
   QWP_MAX_SYMBOL_DICTIONARY_SIZE,
   QWP_STATUS,
@@ -835,11 +834,17 @@ export function decodeQwpIngressResponse(
   }
 
   const messageLength = reader.readUint16("NACK message length");
-  if (messageLength > QWP_MAX_ERROR_MESSAGE_LENGTH) {
-    throw new QwpProtocolError(
-      `QWP error message exceeds ${QWP_MAX_ERROR_MESSAGE_LENGTH} bytes`,
-    );
-  }
+  // Bounded by the frame, not by a policy cap. The declared u16 length is
+  // checked against the remaining payload inside readUtf8() -> readBytes() ->
+  // ensureAvailable(), which is what stops a peer declaring 0xFFFF over a tiny
+  // payload. A separate 1024-byte ceiling used to sit here, and it rejected
+  // frames the server is allowed to send: QwpIngressProcessorState truncates
+  // ingress error text at (http.send.buffer.size - 100) / 1.5 characters --
+  // about 1.4M at the 2 MB default -- so anything up to the u16 maximum is
+  // legal on the wire. Worse, the rejection became a QwpProtocolError, which
+  // the reconnecting transport rethrows as terminal, so a verbose explanation
+  // attached to an otherwise retriable WRITE_ERROR killed a running producer.
+  // The Java client bound-checks against the frame and nothing else.
   const errorMessage = reader.readUtf8(messageLength, "NACK message");
   reader.expectEnd("ingress NACK");
   return { status, sequence, tables: [], errorMessage };

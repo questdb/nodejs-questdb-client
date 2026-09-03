@@ -109,7 +109,13 @@ export const QWP_MAX_TABLE_NAME_LENGTH = 127;
 export const QWP_MAX_IDENTIFIER_BYTES = QWP_MAX_TABLE_NAME_LENGTH * 3;
 export const QWP_MAX_ROWS_PER_TABLE = 1_000_000;
 export const QWP_MAX_SYMBOL_DICTIONARY_SIZE = 1_000_000;
-export const QWP_MAX_ERROR_MESSAGE_LENGTH = 1024;
+// No QWP_MAX_ERROR_MESSAGE_LENGTH. Server-supplied error text is bounded by
+// its u16 length field and by the frame that carries it, and by nothing else:
+// the server truncates ingress error text at
+// (http.send.buffer.size - 100) / 1.5 characters and caps egress QUERY_ERROR
+// at whatever its caller passes, so no fixed client-side ceiling matches the
+// protocol. The Java client agrees -- its own MAX_ERROR_MESSAGE_LENGTH is a
+// write-side truncation bound and is never applied when decoding.
 /** Largest client-requested egress RESULT_BATCH row cap. */
 export const QWP_MAX_BATCH_ROWS_UPPER_BOUND = 1_048_576;
 /**

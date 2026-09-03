@@ -19,7 +19,6 @@ import {
   encodeQwpVarint,
   QWP_COLUMN_TYPE,
   QWP_MAX_COLUMNS_PER_TABLE,
-  QWP_MAX_ERROR_MESSAGE_LENGTH,
   QWP_MAX_ROWS_PER_TABLE,
   QWP_MAX_SYMBOL_DICTIONARY_SIZE,
   QWP_COMPRESSION_CODEC,
@@ -33,6 +32,7 @@ import {
   QWP_STATUS,
   QwpByteReader,
   QwpByteWriter,
+  QwpProtocolError,
   QwpSymbolDictionary,
   QwpTableBuffer,
   qwpGorillaSize,
@@ -724,21 +724,34 @@ describe("protocol caps", () => {
     );
   });
 
-  it("rejects a NACK whose declared message length is above the cap", () => {
-    const nack = (length: number) =>
+  it("bounds a NACK message by its frame, not by a fixed ceiling", () => {
+    // A 1024-byte ceiling used to sit on this path and it rejected frames the
+    // server is allowed to send. QwpIngressProcessorState truncates ingress
+    // error text at (http.send.buffer.size - 100) / 1.5 characters -- about
+    // 1.4M at the 2 MB default -- so any length the u16 field can express is
+    // legal. The rejection surfaced as a QwpProtocolError, which the
+    // reconnecting transport rethrows as terminal, so a verbose explanation on
+    // an otherwise retriable WRITE_ERROR killed a running producer. The Java
+    // client checks the declared length against the frame and nothing else.
+    const nack = (declared: number, present = declared) =>
       new QwpByteWriter()
         .writeUint8(QWP_STATUS.WRITE_ERROR)
         .writeBigUint64(0n)
-        .writeUint16(length)
-        .writeBytes(new Uint8Array(length))
+        .writeUint16(declared)
+        .writeBytes(new Uint8Array(present).fill(0x78))
         .toUint8Array();
 
-    expect(() =>
-      decodeQwpIngressResponse(nack(QWP_MAX_ERROR_MESSAGE_LENGTH + 1)),
-    ).toThrow(`exceeds ${QWP_MAX_ERROR_MESSAGE_LENGTH} bytes`);
-    expect(() =>
-      decodeQwpIngressResponse(nack(QWP_MAX_ERROR_MESSAGE_LENGTH)),
-    ).not.toThrow();
+    for (const length of [0, 1, 1024, 1025, 8192, 65535]) {
+      const response = decodeQwpIngressResponse(nack(length));
+      expect(response.status).toBe(QWP_STATUS.WRITE_ERROR);
+      expect(response.errorMessage).toHaveLength(length);
+    }
+
+    // The frame remains the bound: a length the payload cannot satisfy is
+    // still rejected before anything is copied.
+    expect(() => decodeQwpIngressResponse(nack(65535, 16))).toThrow(
+      QwpProtocolError,
+    );
   });
 });
 
