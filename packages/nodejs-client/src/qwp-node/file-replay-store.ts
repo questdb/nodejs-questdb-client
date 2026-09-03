@@ -142,7 +142,13 @@ interface PendingCapacity {
 export interface QwpNodeReplayDataLossReport {
   readonly directory: string;
   readonly segmentFile: string;
-  /** Bytes at and after the damaged record that recovery could not retain. */
+  /**
+   * Bytes at and after the damaged record that recovery could not retain.
+   *
+   * Zero means a loss was detected whose extent the journal cannot measure --
+   * a segment whose records are gone leaves nothing to count. Treat it as
+   * "unknown", not as "nothing lost", and read {@link reason}.
+   */
   readonly discardedBytes: number;
   readonly reason: string;
 }
@@ -658,6 +664,39 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           );
           const retainEmptyActive =
             decoded.records.length === 0 && path === selectedActivePath;
+          if (
+            retainEmptyActive &&
+            decoded.manifestRequired &&
+            !decoded.tornTail
+          ) {
+            // A record region that reads back as zeros all the way to EOF is
+            // scanned as an unwritten tail: no torn record, no CRC mismatch,
+            // nothing to count. That is also what an unordered page-cache
+            // writeback leaves after a host crash, and the default durability
+            // is `memory`, which never fsyncs records -- so a whole segment of
+            // accepted frames can vanish while every other damage shape is
+            // reported. Recovery used to return the surviving prefix and call
+            // that success.
+            //
+            // MANIFEST_REQUIRED_FLAG is what separates the two cases. It is
+            // stamped and fsynced as the last step of activateHotSpare, one
+            // write syscall before the first record lands, so a flagged
+            // segment with no readable records almost always means records
+            // were written and lost. The residual ambiguity -- a crash inside
+            // that one-syscall window, where nothing was ever acknowledged to
+            // the producer -- is why this reports an undetermined extent
+            // rather than a byte count. Reporting a loss that may not have
+            // happened is recoverable; silently dropping accepted rows is not.
+            this.reportRecoveryDataLoss({
+              directory: this.directory,
+              segmentFile: name,
+              discardedBytes: 0,
+              reason:
+                `the active segment holding frame sequences from ${decoded.firstSequence} ` +
+                `contains no readable records, so any frames journalled into it were lost ` +
+                `before reaching disk`,
+            });
+          }
           if (liveRecords.length === 0 && !retainEmptyActive) {
             await handle.close();
             recoveryHandles.delete(handle);
@@ -1991,8 +2030,14 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
    */
   private reportRecoveryDataLoss(report: QwpNodeReplayDataLossReport): void {
     const message =
-      `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
-      `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`;
+      report.discardedBytes > 0
+        ? `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
+          `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`
+        : // A segment whose records are gone leaves no bytes to count, so the
+          // extent is unknown rather than zero. Say that instead of reporting
+          // a confident "discarded 0 byte(s)".
+          `QWP store-and-forward lost journalled data of undetermined size during recovery ` +
+          `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`;
     if (!this.onRecoveryDataLoss) {
       log("error", message);
       return;

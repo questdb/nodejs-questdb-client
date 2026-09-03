@@ -4605,6 +4605,92 @@ describe("QWP Node file replay store", () => {
     },
   );
 
+  it("reports a tail segment whose records never reached disk", async () => {
+    // The one damage shape that stayed silent. A record region reading back as
+    // zeros all the way to EOF scans as an ordinary unwritten tail -- no torn
+    // record, no CRC mismatch, no bytes to count -- so recovery returned the
+    // surviving prefix and called it success. It is also exactly what an
+    // unordered page-cache writeback leaves after a host crash: the header
+    // survives because activateHotSpare fsyncs it, while the records do not,
+    // because the connect-string default durability never fsyncs them. A whole
+    // segment of accepted frames could vanish with no callback and no log.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 12; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    await first.close();
+
+    const segments = await assignedReplaySegments(directory);
+    expect(segments.length).toBeGreaterThan(1);
+    const tail = segments[segments.length - 1];
+    const path = join(directory, tail);
+    const size = (await stat(path)).size;
+    const file = await open(path, "r+");
+    try {
+      // Header intact, every record byte lost.
+      await file.write(Buffer.alloc(size - 24, 0), 0, size - 24, 24);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    const frames = await recovered.load();
+    expect(frames.length).toBeLessThan(12);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].segmentFile).toBe(tail);
+    // No readable record survives, so there is nothing to measure: zero here
+    // means "extent unknown", which the reason has to spell out.
+    expect(reports[0].discardedBytes).toBe(0);
+    expect(reports[0].reason).toMatch(/no readable records/);
+    await recovered.close();
+  });
+
+  it("stays silent when an undamaged journal is reopened", async () => {
+    // The counterpart to the test above: an ordinary reopen must not report a
+    // loss, or the notification means nothing.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 12; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    await first.close();
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    await expect(recovered.load()).resolves.toHaveLength(12);
+    expect(reports).toEqual([]);
+    await recovered.close();
+  });
+
   it("reports the records a damaged length field strands behind it", async () => {
     // The length field is read before the CRC32C that would have covered it,
     // so corrupting it is the one damage shape that reaches repair without any
