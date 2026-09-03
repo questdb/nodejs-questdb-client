@@ -346,12 +346,7 @@ export function resolveQwpNodeClientConfig(
       "zstd",
       "auto",
     ] as const),
-    compressionLevel: optionalInteger(
-      value("compression_level"),
-      "compression_level",
-      1,
-      22,
-    ),
+    compressionLevel: parseCompressionLevel(value, parsed.values),
     maxBatchRows: optionalInteger(
       value("max_batch_rows"),
       "max_batch_rows",
@@ -809,6 +804,31 @@ function validateSenderId(value: string): string {
  * egress connection then refused with a RangeError at the first query, and
  * refused legal ones outright.
  */
+/**
+ * `compression` defaults to `raw`, which sends no accept-encoding header at
+ * all, so a level on its own never reaches the wire: the key parsed, validated
+ * its 1..22 range, and then provably did nothing. Rejecting it is better than
+ * quietly enabling Zstd against a server that may predate QWP compression,
+ * which is the compatibility the `raw` default exists to preserve.
+ */
+function parseCompressionLevel(
+  value: (key: string) => string | undefined,
+  values: ReadonlyMap<string, readonly string[]>,
+): number | undefined {
+  const level = optionalInteger(
+    value("compression_level"),
+    "compression_level",
+    1,
+    22,
+  );
+  if (level !== undefined && !values.has("compression")) {
+    throw new RangeError(
+      "conflicting configuration: compression_level requires compression=zstd or compression=auto",
+    );
+  }
+  return level;
+}
+
 function validateReconnectBounds(
   reconnect: QwpReconnectOptions | false | undefined,
   name: string,

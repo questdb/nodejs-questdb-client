@@ -410,6 +410,22 @@ describe("QWP unified Node client configuration", () => {
     ).not.toThrow();
   });
 
+  it("rejects a compression level that cannot reach the wire", () => {
+    // compression defaults to raw, which sends no accept-encoding header, so a
+    // level on its own parsed, validated its range, and then provably did
+    // nothing.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;compression_level=9;"),
+    ).toThrow(/compression_level requires compression/);
+    const zstd = parseQwpNodeClientConfig(
+      "ws::addr=localhost;compression=zstd;compression_level=9;",
+    );
+    expect(zstd.egress).toMatchObject({
+      compression: "zstd",
+      compressionLevel: 9,
+    });
+  });
+
   it("validates the string before applying explicit programmatic overrides", () => {
     const options = parseQwpNodeClientConfig(
       "ws::addr=localhost;target=primary;query_pool_max=2;",

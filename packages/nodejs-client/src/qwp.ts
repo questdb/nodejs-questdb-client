@@ -326,7 +326,11 @@ export interface QwpNodeEgressOptions
    * `auto` currently advertises the same ordered preference as `zstd`.
    */
   compression?: QwpEgressCompression;
-  /** Zstd level hint sent to the server. Must be between 1 and 22. */
+  /**
+   * Zstd level hint sent to the server. Must be between 1 and 22, and only
+   * takes effect alongside `compression`; the default `raw` sends no
+   * accept-encoding header for a level to travel on.
+   */
   compressionLevel?: number;
   /** Requests a server-side RESULT_BATCH row cap. */
   maxBatchRows?: number;

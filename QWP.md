@@ -160,8 +160,8 @@ session that consumes it.
 | `max_batch_rows`    | integer, 1..1048576   | —          | Rows the server puts in one result batch.          |
 | `initial_credit`    | integer ≥ 0           | —          | Starting flow-control credit for a query.          |
 | `buffer_pool_size`  | integer ≥ 1           | —          | Reusable result buffers held per session.          |
-| `compression`       | `raw`, `zstd`, `auto` | negotiated | Result compression to negotiate.                   |
-| `compression_level` | integer, 1..22        | —          | zstd level requested from the server.              |
+| `compression`       | `raw`, `zstd`, `auto` | `raw`      | Result compression to negotiate.                   |
+| `compression_level` | integer, 1..22        | —          | zstd level requested; requires `compression`.      |
 | `client_id`         | string                | —          | Identifies this client in server-side diagnostics. |
 
 ### Pool

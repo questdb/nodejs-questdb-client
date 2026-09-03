@@ -309,7 +309,11 @@ export interface QwpBrowserEgressOptions
    * negotiation. Defaults to raw for compatibility.
    */
   compression?: QwpEgressCompression;
-  /** Zstd level hint. Must be between 1 and 22. */
+  /**
+   * Zstd level hint. Must be between 1 and 22, and only takes effect
+   * alongside `compression`; the default `raw` negotiates no compression for
+   * a level to travel on.
+   */
   compressionLevel?: number;
   /** Requests a server-side RESULT_BATCH row cap. */
   maxBatchRows?: number;
