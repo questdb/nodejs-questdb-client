@@ -1177,6 +1177,39 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("keeps a decimal column's scale locked while a row is still open", async () => {
+    // releaseStagedRows() purges a decimal column's locked scale once every
+    // row that locked it has been published -- but a row still being built is
+    // not published, and finishRow() pushes its columns without re-registering
+    // the schema. Purging its entry let the next row register a different
+    // scale for the same column; both rows then shared one frame, where
+    // setDecimalScale() keeps only the first, so the later value went out at
+    // the earlier scale -- off by a power of ten, with no error at all.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    // Frame 0 locks scale 2 on 'price'.
+    await sender.table("fx").decimalColumnText("price", "1.25").atNow();
+    await sender.flush();
+
+    await sender.table("fx").decimalColumnText("price", "2.50").atNow();
+    // Left open deliberately: flush() publishes completed rows and leaves the
+    // row in progress alone, so this is a supported thing to interleave.
+    sender.table("fx").decimalColumnText("price", "3.75");
+    await sender.flush();
+    await sender.atNow();
+
+    await sender.table("fx").decimalColumnText("price", "4.5").atNow();
+    await sender.flush();
+
+    expect(session.sends).toHaveLength(3);
+    const last = column(session.sends[2].tables[0], "price");
+    expect(last.decimalScale).toBe(2);
+    // 45n here would be 0.45 stored for a value of 4.5.
+    expect(last.values).toEqual([375n, 450n]);
+    await sender.close();
+  });
+
   it("keeps one decimal scale across rows that share a frame", async () => {
     // Within a frame the scale still locks on the first value and later rows
     // are rescaled onto it, because the wire format can only carry one.

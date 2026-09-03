@@ -2398,9 +2398,20 @@ export class QwpSender {
       // lifetime meant a stream whose first decimal happened to be integral
       // rejected every more precise value it ever saw afterwards, while the
       // same rows over ILP v3 were accepted.
+      //
+      // "Every row that locked it" excludes the row still being built. Its
+      // columns already carry the locked scale and finishRow() pushes them
+      // without re-registering the schema, so purging its entry let the next
+      // row register a different scale for the same column. Both rows then
+      // landed in one frame, where QwpTableBuffer.setDecimalScale() keeps only
+      // the first -- writing the later value at the earlier scale, off by a
+      // power of ten, with no error.
       if (table.rows.length === 0) {
+        const openRow = this.current === table ? this.currentRow : undefined;
         for (const [key, column] of table.schema) {
-          if (isDecimalType(column.type)) table.schema.delete(key);
+          if (isDecimalType(column.type) && !openRow?.has(key)) {
+            table.schema.delete(key);
+          }
         }
       }
     }
