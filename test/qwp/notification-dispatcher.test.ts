@@ -75,6 +75,35 @@ describe("QwpNotificationDispatcher", () => {
     }
   });
 
+  it("holds the event loop open until close() settles", async () => {
+    // close() resolves only from its drain deadline or from the drain
+    // finishing, and both timers were unref'd. In a process whose only
+    // remaining handles belonged to the QWP client -- a batch job, or a
+    // SIGTERM shutdown -- the loop then emptied, neither timer fired, and Node
+    // exited with the awaited close() never settling: the `finally` blocks,
+    // the shutdown log and any process.exitCode after it were all skipped.
+    // A single pending notification was enough. vitest's own handles keep the
+    // loop alive and so hide the symptom entirely, which is why this asserts
+    // the ref state rather than trying to observe the hang.
+    const refdTimeouts = (): number =>
+      process.getActiveResourcesInfo().filter((kind) => kind === "Timeout")
+        .length;
+
+    const baseline = refdTimeouts();
+    const dispatcher = new QwpNotificationDispatcher<number>(() => {}, 8);
+    dispatcher.offer(1);
+    dispatcher.offer(2);
+    // An idle observer must still never keep the process alive by itself.
+    expect(refdTimeouts()).toBe(baseline);
+
+    const closing = dispatcher.close();
+    expect(refdTimeouts()).toBeGreaterThan(baseline);
+
+    await closing;
+    expect(dispatcher.metrics.closed).toBe(true);
+    expect(refdTimeouts()).toBe(baseline);
+  });
+
   it("drains retained notifications and rejects post-close offers", async () => {
     const received: number[] = [];
     const dispatcher = new QwpNotificationDispatcher<number>(

@@ -83,13 +83,19 @@ export class QwpNotificationDispatcher<T> {
       return this.closePromise;
     }
     this.schedule();
+    // Deliberately ref'd, unlike the idle timer below. close() resolves only
+    // from this timer or from the drain finishing, so unref'ing it made the
+    // returned promise unsettleable whenever the QWP client held the last
+    // ref'd handle: the loop emptied, neither timer fired, and Node exited
+    // with everything sequenced after `await close()` skipped. The wait is
+    // bounded by drainDeadlineMs, and close() is an explicit caller action, so
+    // holding the loop open for that window is the correct trade.
     this.closeTimer = setTimeout(() => {
       this.closeTimer = undefined;
       this.dropped += this.queue.length;
       this.queue.length = 0;
       if (!this.dispatching) this.finishClose();
     }, drainDeadlineMs);
-    unrefTimer(this.closeTimer);
     return this.closePromise;
   }
 
@@ -99,7 +105,9 @@ export class QwpNotificationDispatcher<T> {
       this.timer = undefined;
       this.dispatchOne();
     }, 0);
-    unrefTimer(this.timer);
+    // An idle observer must never hold the process open, but once closing has
+    // started this timer is one of the two things that can settle close().
+    if (!this.closing) unrefTimer(this.timer);
   }
 
   private dispatchOne(): void {
