@@ -406,6 +406,9 @@ abstract class SenderBufferBase implements SenderBuffer {
    * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
    * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`. This
    * validation leaves the open row unchanged so the call can be retried.
+   * @throws {Error} If the row cannot be closed within `max_buf_size`. The
+   * partial close is rewound, so the same call succeeds once a `flush()` frees
+   * space.
    */
   at(timestamp: number | bigint, unit: TimestampUnit = "us") {
     // The unit is a call-site parameter, so reject it before attempting to
@@ -432,22 +435,30 @@ abstract class SenderBufferBase implements SenderBuffer {
       this.discardIncompleteRow();
       throw error;
     }
-    // A full buffer is not a malformed row. checkCapacity() throws before
-    // anything is written, so the row is still intact and a flush() that frees
-    // space lets the same at() succeed -- which is what happened before the
-    // discard contract existed. Discarding here dropped a fully built row and
-    // then reported "The row must have a symbol or column set before it is
-    // closed" on the retry, naming the wrong problem entirely.
+    // A full buffer is not a malformed row: the row is still intact and a
+    // flush() that frees space lets the same at() succeed -- which is what
+    // happened before the discard contract existed. Discarding here dropped a
+    // fully built row and then reported "The row must have a symbol or column
+    // set before it is closed" on the retry, naming the wrong problem
+    // entirely.
+    //
+    // This reservation covers the separator only; writeTimestamp() reserves
+    // its own digits and is where a full buffer actually throws, one byte into
+    // the close. Rewinding is what makes that retryable, so the reservation
+    // cannot carry the guarantee on its own.
     this.checkCapacity([], 1);
+    const startOfClose = this.position;
     try {
       this.write(" ");
       this.writeTimestamp(timestamp, unit, true);
       this.write("\n");
       this.startNewRow();
     } catch (error) {
-      // Past the first write the row is half encoded, so it cannot be retried
-      // and has to go.
-      this.discardIncompleteRow();
+      // Everything the close writes lives at or above startOfClose, and the
+      // row's own bytes below it are untouched, so rewinding restores exactly
+      // the state before this call. A half-encoded close leaves nothing behind
+      // to discard the row over.
+      this.position = startOfClose;
       throw error;
     }
   }
@@ -468,13 +479,15 @@ abstract class SenderBufferBase implements SenderBuffer {
       throw error;
     }
     // See at(): a capacity failure leaves the row intact and retryable after a
-    // flush, so it must not discard.
+    // flush, so it must not discard. The reservation covers this whole close,
+    // which is one byte, but the rewind keeps both closers under one rule.
     this.checkCapacity([], 1);
+    const startOfClose = this.position;
     try {
       this.write("\n");
       this.startNewRow();
     } catch (error) {
-      this.discardIncompleteRow();
+      this.position = startOfClose;
       throw error;
     }
   }

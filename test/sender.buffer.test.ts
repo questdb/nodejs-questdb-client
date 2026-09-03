@@ -733,6 +733,43 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("keeps a row open when its designated timestamp does not fit", async function () {
+    // at() reserves one byte for the separator, but writeTimestamp() reserves
+    // its own digits and is where a full buffer actually throws -- one byte
+    // into the close, so the row was discarded and the retry then reported
+    // "The row must have a symbol or column set before it is closed", the very
+    // error the reservation was added to eliminate. Everything the close
+    // writes sits above the row, so rewinding it restores the open row.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 64,
+      max_buf_size: 64,
+    });
+
+    // Eight complete rows of 7 bytes fill 56 of the 64 available bytes.
+    for (let row = 0; row < 8; row++) {
+      await sender.table("t").intColumn("a", 5).atNow();
+    }
+    // The ninth row's columns reach 62, so the separator fits and the
+    // timestamp that follows it does not.
+    sender.table("t").intColumn("a", 5);
+    await expect(async () => await sender.at(1000, "us")).rejects.toThrow(
+      "Max buffer size is 64 bytes",
+    );
+
+    // The open row is still staged above the eight completed ones -- 62 bytes,
+    // not the 56 a discard would leave -- and closes once space is freed.
+    expect(bufferPosition(sender)).toBe(62);
+    expect(bufferContent(sender)).toBe("t a=5i\n".repeat(8));
+    expect(drainBuffer(sender).toString()).toBe("t a=5i\n".repeat(8));
+    await sender.at(1000, "us");
+    expect(bufferContent(sender)).toBe("t a=5i 1000000\n");
+    await sender.close();
+  });
+
   it("keeps the symbol section open when a column call overflows the buffer", async function () {
     // hasColumnCall was set before writeColumn()'s own checkCapacity(), the
     // last check that can reject before a byte is written. A column call the

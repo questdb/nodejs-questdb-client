@@ -522,10 +522,12 @@ class Sender {
 
   /**
    * Closes the row after writing the designated timestamp.
-   * On ILP, an invalid timestamp unit is rejected before closing begins and
-   * leaves the row open so this method can be retried. If other validation or
-   * encoding rejects the row before it is completed, the incomplete row and its
-   * table selection are discarded; rows completed earlier remain staged. Start
+   * On ILP, an invalid timestamp unit is rejected before closing begins, and a
+   * row that does not fit `max_buf_size` has its partial close rewound; both
+   * leave the row open so this method can be retried, the latter once a
+   * `flush()` frees space. If other validation or encoding rejects the row
+   * before it is completed, the incomplete row and its table selection are
+   * discarded; rows completed earlier remain staged. Start
    * the next row with {@link table} again. If this call triggers an auto-flush
    * that fails, ILP transports have already removed the entire staged batch from
    * the sender buffer. Applications that need to retry ILP rows must retain and
@@ -566,8 +568,10 @@ class Sender {
   /**
    * Closes the row without writing a designated timestamp.
    * Designated timestamp will be populated by the server on this record.
-   * If validation or encoding rejects the row before it is completed, the
-   * incomplete row and its table selection are discarded; rows completed
+   * On ILP, a row that does not fit `max_buf_size` has its partial close
+   * rewound and stays open, so the same call succeeds once a `flush()` frees
+   * space. If validation or encoding rejects the row before it is completed,
+   * the incomplete row and its table selection are discarded; rows completed
    * earlier remain staged. Start the next row with {@link table} again. If this
    * call triggers an auto-flush that fails, ILP transports have already removed
    * the entire staged batch from the sender buffer. Applications that need to

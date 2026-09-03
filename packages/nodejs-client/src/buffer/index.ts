@@ -247,6 +247,9 @@ interface SenderBuffer {
    * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
    * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`. This
    * validation leaves the open row unchanged so the call can be retried.
+   * @throws {Error} If the row cannot be closed within `max_buf_size`. The
+   * partial close is rewound, so the same call succeeds once a `flush()` frees
+   * space.
    */
   at(timestamp: number | bigint, unit: TimestampUnit): void;
 
