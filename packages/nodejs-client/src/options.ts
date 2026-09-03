@@ -200,9 +200,11 @@ type DeprecatedOptions = {
  * </li>
  * <li> addr: <i>string</i> - Hostname and port, separated by colon. This key is mandatory, but the port part is optional. <br>
  * If no port is specified, a default will be used. <br>
- * When the protocol is HTTP/HTTPS, the port defaults to 9000. When the protocol is TCP/TCPS, the port defaults to 9009. <br>
+ * When the protocol is HTTP/HTTPS, the port defaults to 9000. When the protocol is TCP/TCPS, the port defaults to 9009.
+ * When the protocol is UDP, the port defaults to 9007. <br>
+ * WS/WSS resolve their address through the QWP configuration schema instead, documented in QWP.md. <br>
  * <br>
- * Examples: <i>http::addr=localhost:9000</i>, <i>https::addr=localhost:9000</i>, <i>http::addr=localhost</i>, <i>tcp::addr=localhost:9009</i>
+ * Examples: <i>http::addr=localhost:9000</i>, <i>https::addr=localhost:9000</i>, <i>http::addr=localhost</i>, <i>tcp::addr=localhost:9009</i>, <i>udp::addr=localhost:9007</i>
  * </li>
  * </ul>
  * <br>
