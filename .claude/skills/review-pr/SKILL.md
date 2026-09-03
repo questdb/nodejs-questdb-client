@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Review a GitHub pull request or local Git range against @questdb/nodejs-client TypeScript ILP/QWP client coding standards
+description: Review a GitHub pull request or local Git range against the QuestDB JavaScript client (@questdb/nodejs-client and @questdb/browser-client) TypeScript ILP/QWP coding standards
 argument-hint: "[PR number or URL | --range=<base>..<head>] [--level=0..3]"
 allowed-tools: Bash, Read, Grep, Glob, Agent
 ---
@@ -25,10 +25,12 @@ to verify a regression test against reverted production hunks; remove it afterwa
 ## Review mindset
 
 You are a senior QuestDB engineer performing a blocking code review.
-`@questdb/nodejs-client` is mission-critical software: it serializes rows into the
-QuestDB InfluxDB Line Protocol (ILP) over HTTP/HTTPS or TCP/TCPS, and into the QuestDB
-Wire Protocol (QWP) over WebSocket or fire-and-forget UDP, with a browser build, an
-egress query path, and a crash-safe Node store-and-forward journal. A bug can silently
+`@questdb/nodejs-client` and `@questdb/browser-client` are mission-critical software,
+built from a shared private `@questdb/client-core` workspace package: they serialize
+rows into the QuestDB InfluxDB Line Protocol (ILP) over HTTP/HTTPS or TCP/TCPS, and
+into the QuestDB Wire Protocol (QWP) over WebSocket or fire-and-forget UDP, with a
+browser build, an egress query path, and a crash-safe Node store-and-forward journal.
+A bug can silently
 corrupt bytes, drop or duplicate rows, abandon persisted data, leak credentials,
 exhaust resources, or break supported Node.js and browser consumers.
 
@@ -74,8 +76,9 @@ when the gates pass. Zero findings is a successful outcome.
   against the actual multiplier, and treat the PR description as a hypothesis.
 - **Assess reachability before reporting.** Drop theoretical paths that callers,
   validation, configuration, or buffer bounds make impossible.
-- **Never review generated artifacts as source.** `dist/cjs/**`, `dist/es/**`, and
-  `docs/**` are generated. Review their `src/**/*.ts` or documentation source instead.
+- **Never review generated artifacts as source.** `packages/*/dist/**` and `docs/**`
+  are generated. Review their `packages/*/src/**/*.ts` or documentation source
+  instead.
 
 ## Review level
 
@@ -83,19 +86,20 @@ Parse `$ARGUMENTS` for `--level=N`, `-lN`, or a bare digit `0`-`3`. Default to
 level 0. Strip the level token and any `--range=` token before passing a PR target
 to `gh`.
 
-| Level | What runs |
-|-------|-----------|
-| **0 (default)** | Steps 1, 2, 2.4, 2.5f, 2.6, and 4. Review inline without agent fanout. Build a compact coverage map and apply the Step 3b admission gate inline from a blank evidence form. |
-| **1** | Add Steps 2.5a and 2.5e when tests change. Run Agent 1 plus at most two applicable roles from Agents 2-7, 9-13, and 14-15. Independently falsify each surviving atomic candidate. |
-| **2** | Run all of Step 2.5, restricting 2.5b to exported/public/protected symbols, transport interfaces, shared helpers, and configuration options. Run Agent 1 plus at most four change-relevant roles. Independently falsify each surviving candidate. |
-| **3** | Run the full workflow. Select at most six applicable discovery roles: Agent 1 always; Agent 8 when changed symbols have out-of-diff callers; Agents 2-7 and 14-15 when their domains are touched; Agents 9-13 for changed tests or a fix claim; Agent 10 only when a distinct adversarial pass is warranted. Depth comes from evidence, not agent count. |
+| Level           | What runs                                                                                                                                                                                                                                                                                                                                                |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **0 (default)** | Steps 1, 2, 2.4, 2.5f, 2.6, and 4. Review inline without agent fanout. Build a compact coverage map and apply the Step 3b admission gate inline from a blank evidence form.                                                                                                                                                                              |
+| **1**           | Add Steps 2.5a and 2.5e when tests change. Run Agent 1 plus at most two applicable roles from Agents 2-7, 9-13, and 14-15. Independently falsify each surviving atomic candidate.                                                                                                                                                                        |
+| **2**           | Run all of Step 2.5, restricting 2.5b to exported/public/protected symbols, transport interfaces, shared helpers, and configuration options. Run Agent 1 plus at most four change-relevant roles. Independently falsify each surviving candidate.                                                                                                        |
+| **3**           | Run the full workflow. Select at most six applicable discovery roles: Agent 1 always; Agent 8 when changed symbols have out-of-diff callers; Agents 2-7 and 14-15 when their domains are touched; Agents 9-13 for changed tests or a fix claim; Agent 10 only when a distinct adversarial pass is warranted. Depth comes from evidence, not agent count. |
 
 State the selected level at the start of the review. If defaulted, mention that level
-3 exists for a full mission-critical pass. Changes to `src/buffer/**`, `src/_qwp/**`,
-`src/qwp-node/**`, transport/auth/TLS, protocol negotiation, flush semantics, or any
-public entry point (`src/index.ts`, `src/qwp/index.ts`, `src/qwp/node.ts`,
-`src/qwp/browser.ts`) are high risk; recommend level 3, but honor an explicit lower
-level and state the limitation. Replay-journal, ack-watermark, drainer, and failover
+3 exists for a full mission-critical pass. Changes to
+`packages/nodejs-client/src/buffer/**`, `packages/client-core/src/_qwp/**`,
+`packages/nodejs-client/src/qwp-node/**`, transport/auth/TLS, protocol negotiation,
+flush semantics, or either public entry point (`packages/nodejs-client/src/index.ts`,
+`packages/browser-client/src/index.ts`) are high risk; recommend level 3, but honor
+an explicit lower level and state the limitation. Replay-journal, ack-watermark, drainer, and failover
 changes stay high risk regardless of how small the diff is.
 
 ## Spawning review agents
@@ -159,8 +163,9 @@ Check the repository conventions in `CONTRIBUTING.md` and recent accepted PRs:
 - README/TSDoc updates accompany user-visible behavior where needed.
 - New or renamed options document their defaults and deprecation path through
   `SenderOptions.resolveDeprecated`.
-- New or renamed QWP keys are wired through `src/qwp-node/client-config.ts`, validated
-  against the transports that support them, and documented in `QWP.md`.
+- New or renamed QWP keys are wired through
+  `packages/nodejs-client/src/qwp-node/client-config.ts`, validated against the
+  transports that support them, and documented in `QWP.md`.
 - A changed public QWP surface updates `test/qwp/public-api-contract.ts`.
 
 ## Step 2.4: Submodule boundaries (mandatory at every level)
@@ -211,17 +216,21 @@ and exports. Group results by file and include overrides and implementations.
 
 At minimum check:
 
-- All four public entry points — `src/index.ts`, `src/qwp/index.ts`, `src/qwp/node.ts`,
-  `src/qwp/browser.ts` — and emitted public type implications.
+- Both public entry points — `packages/nodejs-client/src/index.ts` and
+  `packages/browser-client/src/index.ts` — and emitted public type implications.
+  Each re-exports the shared `packages/client-core/src/qwp` barrel, so a change
+  there reaches both packages.
 - `SenderBufferBase` plus `SenderBufferV1`/`V2`/`V3` overrides and `createBuffer`.
 - `SenderTransport` plus Undici, stdlib HTTP, and TCP implementations.
 - `SenderOptions.resolveAuto`, `resolveDeprecated`, config parsing, `fromConfig`, and
-  `fromEnv` for option changes, plus `src/qwp-node/client-config.ts` for QWP keys.
-- Changed `src/_qwp/_core/**` constants and codecs against both the ingress encoder and
-  the egress decoder; one cap or type byte is normally read by both sides.
+  `fromEnv` for option changes, plus
+  `packages/nodejs-client/src/qwp-node/client-config.ts` for QWP keys.
+- Changed `packages/client-core/src/_qwp/_core/**` constants and codecs against both
+  the ingress encoder and the egress decoder; one cap or type byte is normally read
+  by both sides.
 - `QwpSender` and the writer helpers, `QwpIngressSession`, `QwpEgressSession`,
-  `QwpClient`, the reconnecting connections in `src/_qwp/_internal/**`, and the UDP
-  sender.
+  `QwpClient`, the reconnecting connections in
+  `packages/client-core/src/_qwp/_internal/**`, and the UDP sender.
 - `QwpNodeFileReplayStore`, `QwpNodeOrphanDrainer`, the advisory lock, and the segment
   maintenance worker for any store-and-forward change.
 - Unit/integration tests and test helpers, including `test/qwp/**` and its fixtures.
@@ -297,13 +306,16 @@ Record current facts with file/line citations; do not rely on this list becoming
   an mtime heartbeat for stale recovery. Reintroducing a native addon would break
   every consumer on a platform or Node major it has no binary for, so treat a new
   `optionalDependencies` entry or a compiled binary in the bundle as a finding.
-  `fzstd` is a devDependency that the bundler inlines; making it an external import
-  would break installs.
-- Dual ESM/CJS build and every `package.json` exports subpath (`.`, `./qwp`,
-  `./qwp/browser`, `./qwp/node`), plus which sources each subpath is allowed to import.
+  `fzstd` is a dependency of the private `packages/client-core` package, which no
+  published package declares, so the bundler must inline it; making it an external
+  import would break every install.
+- Dual ESM/CJS build. Each published package declares exactly one `package.json`
+  exports subpath, `.`, so those two specifiers are the whole public surface; check
+  which sources each is allowed to import.
 - ILP protocol default/negotiation and TCP's explicit-version requirement.
 - QWP `QWP_VERSION`, the `/write/v4` ingress and `/read/v1` egress routes, the caps in
-  `src/_qwp/_core/constants.ts`, and the capabilities negotiated per connection.
+  `packages/client-core/src/_qwp/_core/constants.ts`, and the capabilities negotiated
+  per connection.
 - `worker_threads` use by the segment maintenance worker, and the `Date.now()` /
   `Math.random()` dependencies in backoff, episode, and timeout accounting that
   deterministic tests must be able to control.
@@ -408,10 +420,10 @@ Focus on per-row/per-cell `toString`, string concatenation, repeated `Buffer.byt
 per-character writes, resize copying, large arrays, and avoidable buffer copies. Every
 candidate must state its multiplier or fixed bound and whether users wait on the path.
 
-**Agent 7 — Public API, compatibility, and code quality:** Check `src/index.ts`, ESM/
-CJS exports, `.d.ts` implications, TSDoc, option defaults/deprecations, supported Node
-APIs, README/examples, unsound casts, dead code/imports, ESLint, Prettier, naming, and
-member ordering. Separate compatibility defects from cosmetics.
+**Agent 7 — Public API, compatibility, and code quality:** Check both package roots,
+ESM/CJS exports, `.d.ts` implications, TSDoc, option defaults/deprecations, supported
+Node APIs, README/examples, unsound casts, dead code/imports, ESLint, Prettier,
+naming, and member ordering. Separate compatibility defects from cosmetics.
 
 **Agent 8 — Cross-context caller impact:** Walk every 2.5b callsite with callers up to
 two levels. For each, return `SAFE`, `CANDIDATE`, or `INSUFFICIENT_EVIDENCE` and state
@@ -445,8 +457,9 @@ fails when the production fix is reverted in an isolated scratch worktree.
 **Agent 14 — QWP wire format and protocol sessions:** Reconstruct frame headers,
 LEB128 varints, column encodings, Gorilla bit packing, zstd framing, symbol-dictionary
 IDs with their delta/reset flags, decimal scale, geohash bits, array shape, and NULL
-bitmaps against the caps in `src/_qwp/_core/constants.ts`. Check the ingress encoder and
-the egress decoder together because both read the same constants. Check status-byte to
+bitmaps against the caps in `packages/client-core/src/_qwp/_core/constants.ts`. Check
+the ingress encoder and the egress decoder together because both read the same
+constants. Check status-byte to
 category to policy mapping, per-table transaction grouping, durable-ACK negotiation,
 ingress cap splitting, and that a truncated, oversized, or hostile server frame is
 rejected before it is allocated, copied, or trusted.
@@ -496,7 +509,7 @@ Admit a behavioral candidate only when every applicable field has cited evidence
   dispatch, ownership, and cleanup.
 - **Head observation:** executed trigger and observed result at the reviewed revision.
 - **Base observation:** identical trigger/result at `$BASE`, or `N/A — genuinely new
-  surface` with proof.
+surface` with proof.
 - **User symptom:** independently observable consequence.
 - **Counterevidence search:** strongest disproof and why it does not apply.
 - **Artifact:** command/test, output, environment/configuration, and revision identity.
@@ -519,8 +532,8 @@ Apply these special burdens:
 
 Then independently verify Node-client specifics:
 
-1. Read exact source lines in `src/**/*.ts`, not generated output, and trace callers,
-   interfaces, factories, and v1/v2/v3 overrides.
+1. Read exact source lines in `packages/*/src/**/*.ts`, not generated output, and
+   trace callers, interfaces, factories, and v1/v2/v3 overrides.
 2. Count every emitted byte against capacity, including escaped multi-byte UTF-8,
    separators, suffixes, marker bytes, dimension headers, and decimal payloads.
 3. Reconstruct expected wire bytes and compare them with both production output and
@@ -538,8 +551,9 @@ Then independently verify Node-client specifics:
 10. For test efficacy, prove the assertion reaches the change and would fail under the
     claimed regression. Recompute expected hex/bytes rather than trusting fixtures.
 11. For QWP wire claims, reconstruct the frame bytes for encode and decode, and check
-    every length, cap, and flag against `src/_qwp/_core/constants.ts` rather than against
-    an assumed peer behavior.
+    every length, cap, and flag against
+    `packages/client-core/src/_qwp/_core/constants.ts` rather than against an assumed
+    peer behavior.
 12. For replay, ack, reconnect, or failover claims, trace the cumulative ack watermark
     and prove which frames a restart, NACK, or non-orderly close resends or drops.
     Classify the failure through `qwpDefaultSenderErrorPolicy` before calling anything
@@ -619,8 +633,8 @@ enumerated instance independently rather than sampling and generalizing.
 ### QWP wire format and sessions
 
 - Frame header magic, version, flags, table count, and payload length agree between
-  encoder and decoder, and every cap in `src/_qwp/_core/constants.ts` is enforced on both
-  sides.
+  encoder and decoder, and every cap in
+  `packages/client-core/src/_qwp/_core/constants.ts` is enforced on both sides.
 - Varints stay inside uint64; row, column, name-length, array-element, and dictionary
   limits are checked on encode and on decode.
 - Symbol dictionary IDs stay dense and connection-scoped; delta and reset flags match
@@ -700,8 +714,9 @@ nor hard-fails on a transient outage.
 
 - Export new public symbols; treat removals/renames/signature/default changes as
   compatibility changes.
-- Only the four documented entry points are public. Paths containing `internal`,
-  `qwp-node`, or `src` are implementation details even when a bundler resolves them.
+- Only the two package roots are public. Paths containing `internal`, `qwp-node`,
+  `client-core`, or `src` are implementation details even when a bundler resolves
+  them.
 - A changed exported QWP symbol, option, constant, or error updates
   `test/qwp/public-api-contract.ts` and `QWP.md`.
 - Keep TSDoc/types accurate and avoid casts that hide runtime null/type problems.
