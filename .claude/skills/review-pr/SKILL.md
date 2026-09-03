@@ -665,6 +665,15 @@ nor hard-fails on a transient outage.
 - Node foreground replay is unbounded after startup. Attempt and duration budgets apply
   to `"sync"` startup and to the browser/memory policy only; a budget that latches a
   running sender terminal during a long outage is a data-loss defect.
+- Connectivity errors are the caller's problem only during initialization, and
+  `lazy_connect` decides who sees them. Left off, the default, the initial connect must
+  surface DNS, connection-refused, TLS, authentication and upgrade-timeout failures to
+  the caller. Set on, `connectQwpNodeClient()` must resolve with no server present: the
+  sender buffers immediately, ingress uses `initial_connect_retry=async`, and egress
+  defers to the first query on `query_pool_min=0`. An explicit
+  `initial_connect_retry=off|sync`, or a positive `query_pool_min`, conflicts with it
+  and is rejected before the client is created. Past initialization both modes revert
+  to the steady-state contract above, whichever one started the client.
 - Backoff is exponential with full jitter and a capped per-attempt delay, while the
   store-and-forward retry loop itself stays uncapped.
 - NACK policy follows `qwpDefaultSenderErrorPolicy`: `WRITE_ERROR`, `INTERNAL_ERROR`,
