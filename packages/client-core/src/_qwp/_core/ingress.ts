@@ -337,6 +337,7 @@ function columnPayloadSize(
           `QWP array must have between 1 and ${QWP_MAX_ARRAY_DIMENSIONS} dimensions`,
         );
       }
+      let expected = 1;
       for (const [index, dimension] of array.dimensions.entries()) {
         if (
           !Number.isSafeInteger(dimension) ||
@@ -347,6 +348,20 @@ function columnPayloadSize(
             `array dimension ${index} must be between 0 and ${QWP_MAX_ARRAY_DIMENSION_LENGTH}`,
           );
         }
+        expected *= dimension;
+      }
+      // The cell is sized and written from values.length while the peer reads
+      // the product of the dimension header, so a mismatch encodes a frame
+      // whose payload length is self-consistent and whose array column still
+      // runs the reader off the end of the cell. The compiled writers and
+      // flattenQwpArray() already guarantee the pair agrees; a QwpArrayValue
+      // pushed straight onto a column buffer -- the documented low-level path
+      // -- is the one that does not, so the invariant is checked next to the
+      // rank and axis-length checks that share this loop.
+      if (expected !== array.values.length) {
+        throw new RangeError(
+          `array shape ${array.dimensions.join("x")} needs ${expected} value(s), received ${array.values.length}`,
+        );
       }
       size += 1 + array.dimensions.length * 4 + array.values.length * 8;
     }

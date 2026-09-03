@@ -296,6 +296,30 @@ describe("QWP ingress codec", () => {
     ).toThrow(/column type mismatch/);
   });
 
+  it("rejects an array cell whose values do not fill its dimensions", () => {
+    // The cell is sized and written from values.length while the peer reads the
+    // product of the dimension header, so a mismatch encodes a frame whose
+    // payload length is self-consistent and whose array column still runs the
+    // reader off the end of the cell. The compiled writers and flattenQwpArray()
+    // guarantee the pair agrees; a QwpArrayValue pushed straight onto a column
+    // buffer -- the documented low-level path -- did not.
+    const table = new QwpTableBuffer("events");
+    table
+      .getOrCreateColumn("samples", QWP_COLUMN_TYPE.DOUBLE_ARRAY)!
+      .values.push({ dimensions: [2, 2], values: [1, 2, 3] });
+    table.nextRow();
+    expect(() => encodeQwpIngressFrame([table])).toThrow(
+      /array shape 2x2 needs 4 value\(s\), received 3/,
+    );
+
+    const consistent = new QwpTableBuffer("events");
+    consistent
+      .getOrCreateColumn("samples", QWP_COLUMN_TYPE.DOUBLE_ARRAY)!
+      .values.push({ dimensions: [2, 2], values: [1, 2, 3, 4] });
+    consistent.nextRow();
+    expect(() => encodeQwpIngressFrame([consistent])).not.toThrow();
+  });
+
   it("slices compacted table rows without losing null positions", () => {
     const table = new QwpTableBuffer("events");
     table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(10n);
