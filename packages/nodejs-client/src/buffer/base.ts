@@ -428,12 +428,25 @@ abstract class SenderBufferBase implements SenderBuffer {
           `Designated timestamp must be a BigInt if it is set in nanoseconds`,
         );
       }
-      this.checkCapacity([], 1);
+    } catch (error) {
+      this.discardIncompleteRow();
+      throw error;
+    }
+    // A full buffer is not a malformed row. checkCapacity() throws before
+    // anything is written, so the row is still intact and a flush() that frees
+    // space lets the same at() succeed -- which is what happened before the
+    // discard contract existed. Discarding here dropped a fully built row and
+    // then reported "The row must have a symbol or column set before it is
+    // closed" on the retry, naming the wrong problem entirely.
+    this.checkCapacity([], 1);
+    try {
       this.write(" ");
       this.writeTimestamp(timestamp, unit, true);
       this.write("\n");
       this.startNewRow();
     } catch (error) {
+      // Past the first write the row is half encoded, so it cannot be retried
+      // and has to go.
       this.discardIncompleteRow();
       throw error;
     }
@@ -450,7 +463,14 @@ abstract class SenderBufferBase implements SenderBuffer {
           "The row must have a symbol or column set before it is closed",
         );
       }
-      this.checkCapacity([], 1);
+    } catch (error) {
+      this.discardIncompleteRow();
+      throw error;
+    }
+    // See at(): a capacity failure leaves the row intact and retryable after a
+    // flush, so it must not discard.
+    this.checkCapacity([], 1);
+    try {
       this.write("\n");
       this.startNewRow();
     } catch (error) {
@@ -605,9 +625,16 @@ abstract class SenderBufferBase implements SenderBuffer {
         `Column value must be of type ${valueType}, received ${typeof value}`,
       );
     }
+    // checkCapacity() is the last thing that can reject before a byte is
+    // written -- a full buffer at max_buf_size throws here -- so the flag has
+    // to be set after it, not before. Setting it first closed the symbol
+    // section on a call that contributed nothing, and the row then could not
+    // be closed at all: symbol() raised the ordering error and at()/atNow()
+    // raised "The row must have a symbol or column set before it is closed",
+    // neither of which named the full buffer that actually stopped the call.
+    this.checkCapacity([name], 2 + name.length);
     // Past every check that can reject the call: this one writes.
     this.hasColumnCall = true;
-    this.checkCapacity([name], 2 + name.length);
     this.write(this.hasColumns ? "," : " ");
     this.writeEscaped(name);
     this.write("=");

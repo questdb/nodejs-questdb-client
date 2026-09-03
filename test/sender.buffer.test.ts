@@ -698,6 +698,65 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("keeps a row open when the buffer is too full to close it", async function () {
+    // A full buffer is not a malformed row. checkCapacity() throws before
+    // at()/atNow() writes anything, so the row is intact and a flush() that
+    // frees space lets the same close succeed -- which is what happened before
+    // the discard contract existed. Routing it through the discard dropped a
+    // fully built row and then reported "The row must have a symbol or column
+    // set before it is closed" on the retry, naming the wrong problem.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 62,
+      max_buf_size: 62,
+    });
+
+    // Eight complete rows of 7 bytes fill 56 of the 62 available bytes.
+    for (let row = 0; row < 8; row++) {
+      await sender.table("t").intColumn("a", 5).atNow();
+    }
+    // The ninth row's columns land exactly on the cap, so the newline that
+    // closes it is the first thing that cannot fit.
+    sender.table("t").intColumn("a", 5);
+    await expect(async () => await sender.atNow()).rejects.toThrow(
+      "Max buffer size is 62 bytes",
+    );
+
+    // Freeing space lets the same row close, and nothing was lost.
+    expect(bufferContent(sender)).toBe("t a=5i\n".repeat(8));
+    expect(drainBuffer(sender).toString()).toBe("t a=5i\n".repeat(8));
+    await sender.atNow();
+    expect(bufferContent(sender)).toBe("t a=5i\n");
+    await sender.close();
+  });
+
+  it("keeps the symbol section open when a column call overflows the buffer", async function () {
+    // hasColumnCall was set before writeColumn()'s own checkCapacity(), the
+    // last check that can reject before a byte is written. A column call the
+    // full buffer refused therefore closed the symbol section even though it
+    // contributed nothing, and the row could then not be closed at all.
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 32,
+      max_buf_size: 32,
+    });
+
+    sender.table("t");
+    expect(() => sender.stringColumn("a".repeat(20), "v")).toThrow(
+      "Max buffer size is 32 bytes",
+    );
+    // The rejected call wrote nothing, so symbols are still allowed.
+    await sender.symbol("s", "v").atNow();
+    expect(bufferContent(sender)).toBe("t,s=v\n");
+    await sender.close();
+  });
+
   it("keeps a row open when its designated timestamp unit is rejected", async function () {
     // Unit validation happens before the close attempt mutates the row, so the
     // caller can correct a bad constant and retry at() directly.
@@ -1762,6 +1821,16 @@ function buffer(sender: Sender) {
 function bufferSize(sender: Sender) {
   // @ts-expect-error - Accessing private field
   return sender.buffer.bufferSize;
+}
+
+/**
+ * Drains and compacts the buffer exactly as flush() does, without the network
+ * send flush() would also perform. Lets a test free buffer space against a
+ * sender whose host does not resolve.
+ */
+function drainBuffer(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.toBufferNew();
 }
 
 function bufferPosition(sender: Sender) {
