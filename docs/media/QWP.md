@@ -5,10 +5,9 @@ It describes the supported public entry points, delivery semantics, authenticati
 failure handling, and migration from the existing Node.js sender and the low-level
 QWP API.
 
-QWP support is currently a preview. The documented exports are the compatibility
-baseline for the first QWP release, but may still change before that release. Once
-released, changes to this documented surface follow the package's semantic-versioning
-policy. Imports from internal source paths are never supported.
+The documented exports are the public compatibility baseline. Changes to this
+surface follow the package's semantic-versioning policy. Imports from internal
+source paths are never supported.
 
 ## Choose an entry point
 
@@ -70,7 +69,7 @@ keys owned only by egress or the pooled facade are accepted as intentional no-op
 Every `ws::`/`wss::` connect string is parsed by one schema, shared with the
 other QuestDB clients, whichever entry point builds the client —
 `Sender.fromConfig()`, `SenderOptions.fromConfig()`, `connectQwpNodeClient()`,
-or `connectQwpNodeQuery()`. An unrecognised key is rejected with
+or `connectQwpNodeEgress()`. An unrecognised key is rejected with
 `unknown configuration key: <key>`; a legacy ILP key adds a hint pointing at
 where it applies instead.
 
@@ -116,7 +115,7 @@ continues to come from `addr`, because the typed object intentionally omits
 | `max_name_len`                                  | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                    |
 | `sender_id`                                     | string           | `default` | Identifies this producer to the server and in the journal.               |
 | `max_frame_rejections`                          | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation.   |
-| `poison_min_escalation_window_millis`           | integer ms       | `5000`    | Minimum dwell before a poison frame may escalate.                        |
+| `poison_min_escalation_window_millis`           | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.              |
 | `catch_up_cap_gap_min_escalation_window_millis` | integer ms       | `300000`  | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. |
 | `connection_listener_inbox_capacity`            | integer          | —         | Bound on the connection-event inbox before events are dropped.           |
 | `error_inbox_capacity`                          | integer          | —         | Bound on the `onSenderError` inbox before events are dropped.            |
@@ -142,17 +141,17 @@ Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
 shown as a dash is applied downstream of the connect string, by the sender or
 session that consumes it.
 
-| Key                         | Value                          | Default       | Meaning                                                           |
-| --------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------- |
-| `sf_dir`                    | path                           | —             | Journal directory. Enables store-and-forward.                     |
-| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.              |
-| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.    |
-| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file.                                         |
-| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                |
-| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.  |
-| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`. |
-| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.               |
-| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                       |
+| Key                         | Value                          | Default       | Meaning                                                                                                              |
+| --------------------------- | ------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `sf_dir`                    | path                           | —             | Journal directory. Enables store-and-forward.                                                                        |
+| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                 |
+| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.                                                       |
+| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file. Also caps one ingress frame, including without `sf_dir`, since a frame must fit a segment. |
+| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                   |
+| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                     |
+| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`.                                                    |
+| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                  |
+| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                                                                          |
 
 ### Egress
 
@@ -167,20 +166,21 @@ session that consumes it.
 
 ### Pool
 
-Applied by the pooled facade; a standalone sender or query client ignores them.
+Applied by the pooled facade. A standalone sender or query client ignores
+them, with one exception noted in the table.
 
-| Key                       | Value       | Default | Meaning                                       |
-| ------------------------- | ----------- | ------- | --------------------------------------------- |
-| `sender_pool_min`         | integer     | —       | Senders kept warm.                            |
-| `sender_pool_max`         | integer     | —       | Sender ceiling.                               |
-| `query_pool_min`          | integer     | —       | Query sessions kept warm.                     |
-| `query_pool_max`          | integer     | —       | Query-session ceiling.                        |
-| `acquire_timeout_ms`      | integer ms  | —       | How long `acquire()` waits for a free entry.  |
-| `query_close_timeout_ms`  | integer ms  | —       | Bound on closing a borrowed query session.    |
-| `idle_timeout_ms`         | integer ms  | —       | Idle time before a pooled entry is reaped.    |
-| `max_lifetime_ms`         | integer ms  | —       | Absolute lifetime of a pooled entry.          |
-| `housekeeper_interval_ms` | integer ms  | —       | How often the pool reaps aged entries.        |
-| `lazy_connect`            | `on`, `off` | off     | Start without blocking on a first connection. |
+| Key                       | Value       | Default | Meaning                                                                                                                         |
+| ------------------------- | ----------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `sender_pool_min`         | integer     | —       | Senders kept warm.                                                                                                              |
+| `sender_pool_max`         | integer     | —       | Sender ceiling.                                                                                                                 |
+| `query_pool_min`          | integer     | —       | Query sessions kept warm.                                                                                                       |
+| `query_pool_max`          | integer     | —       | Query-session ceiling.                                                                                                          |
+| `acquire_timeout_ms`      | integer ms  | —       | How long `acquire()` waits for a free entry.                                                                                    |
+| `query_close_timeout_ms`  | integer ms  | —       | Bound on the CANCEL drain when a query session closes. Also honoured by a standalone egress session built from `egressSession`. |
+| `idle_timeout_ms`         | integer ms  | —       | Idle time before a pooled entry is reaped.                                                                                      |
+| `max_lifetime_ms`         | integer ms  | —       | Absolute lifetime of a pooled entry.                                                                                            |
+| `housekeeper_interval_ms` | integer ms  | —       | How often the pool reaps aged entries.                                                                                          |
+| `lazy_connect`            | `on`, `off` | off     | Start without blocking on a first connection.                                                                                   |
 
 ### Reserved
 
@@ -210,7 +210,13 @@ await sender.close();
 ```
 
 The default port is 9007, the maximum datagram size (`max_datagram_size`) is 1400
-bytes, and the multicast TTL (`multicast_ttl`) is zero. Each datagram is
+bytes, and the multicast TTL (`multicast_ttl`) is zero. `max_datagram_size` accepts
+1 through 65507, the IPv4 payload maximum; a larger value is rejected when the sender
+is created. Many hosts refuse datagrams well below that ceiling — macOS defaults
+`net.inet.udp.maxdgram` to 9216 — so keep the value at or under the path MTU unless
+the receiver is known to accept more. A datagram the operating system refuses is
+discarded before transmission: it is reported through `onError` and does not advance
+`publishedSequence` or `acknowledgedSequence`. Each datagram is
 self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
@@ -308,14 +314,22 @@ The connect-string key
 
 `durability` controls the local persistence barrier:
 
-- `"append"` (the default) issues a data-only durability barrier after every vectored
-  positional frame write; manifest and directory metadata retain full barriers;
-  hot-spare creation and activation are durable before publication resolves.
+- `"append"` (the default for this object form) issues a data-only durability
+  barrier after every vectored positional frame write; manifest and directory
+  metadata retain full barriers; hot-spare creation and activation are durable
+  before publication resolves.
 - `"periodic"` checkpoints segment files, symbol metadata, and directory changes in the
   background. The default interval is 5 seconds, and `close()` performs a final
   checkpoint. A power failure can lose the most recent checkpoint window.
 - `"memory"` relies on operating-system writeback. It survives an orderly close and
   normally a process failure, but it makes no power-loss durability promise.
+
+The two surfaces do not share a default. `storeAndForward.durability` above
+defaults to `"append"`, while the `sf_durability` connect-string key defaults to
+`"memory"` — so a journal configured with `sf_dir=` alone never issues a
+per-append barrier, and a host crash can lose whatever writeback had not yet
+reached disk. Set `sf_durability=append` explicitly when a connect-string journal
+has to survive power loss.
 
 `backpressurePolicy: "error"` preserves the existing immediate
 `QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
@@ -647,7 +661,10 @@ ambiguity: `float32()`/`float64()` and `int32()`/`int64()` mean exactly what the
 
 Geohash precision and decimal scale belong to the column, not the value, so they are
 fixed when the schema is compiled and validated against the sender's staged schema on
-every append. Decimal text and `{ unscaled, scale }` values are rescaled to the
+every append. On the fluent row API there is no schema to fix them, so a decimal
+column instead locks its scale on the first value staged for it and holds that lock
+for the rest of the frame; the lock is released once those rows are published, so the
+next frame's first value sets it afresh. Decimal text and `{ unscaled, scale }` values are rescaled to the
 column's scale when that is exact, and rejected when it would round: at
 `decimal64(2)`, `"1.50"` stages as `150n` and `"1.005"` raises `QwpWriterRowError`.
 Base-32 geohash text carries five bits per character, so `geohash(20)` accepts
@@ -880,11 +897,13 @@ process or page; configuring a Node directory makes the same replay crash-safe.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` defaults to 4 consecutive strikes,
-and `poisonMinEscalationWindowMs` defaults to 5 seconds. Both conditions must be met
-before escalation. Normal (1000), going-away (1001), service-restart (1012), and
-try-again-later (1013) closes, `NOT_WRITABLE`, retriable symbol-dictionary catch-up
-rejections, and intervening connection-establishment failures reset the strike
-episode. Abnormal closes (1006), internal-error closes (1011), and transport errors
+and `poisonMinEscalationWindowMs` defaults to 5 minutes. Both conditions must be met
+before escalation. The window measures _connected_ dwell only: time spent unable to
+reach a server is banked and withheld, so an outage never supplies the dwell, and the
+strikes a frame has already earned survive the reconnect it caused. Normal (1000),
+going-away (1001), service-restart (1012), and try-again-later (1013) closes,
+`NOT_WRITABLE`, `DICTIONARY_GAP`, and retriable symbol-dictionary catch-up rejections
+reset the strike episode. Abnormal closes (1006), internal-error closes (1011), and transport errors
 without close information may count when an unacknowledged replay head exists.
 Escalation is terminal for that producer; store-and-forward retains and quarantines
 the affected rows for explicit `retryQwpNodeOrphanSlot()` recovery rather than
@@ -895,6 +914,27 @@ or catching-up primary can be classified and skipped. Browsers deliberately expo
 an opaque upgrade error because their WebSocket API hides the HTTP response. Avoid
 placing ingress replica endpoints in a browser endpoint list unless the proxy routes
 writers to a primary.
+
+On Node.js a `401` or `403` on the upgrade is classified as an authentication
+failure, and it is the one endpoint verdict that is terminal for the entire endpoint
+set rather than for the endpoint that returned it. It short-circuits the sweep: the
+endpoints ranked after it are never tried, and the reconnect loop rethrows before the
+attempt and duration budgets are consulted, so no reconnect setting extends it. A
+credential is cluster-wide, so a node rejecting it reports a configuration error that
+walking on to a peer would only mask; the Java client applies the same rule. Every
+other rejected status keeps the sweep walking, including `404`, which one node can
+return mid-deploy while its peers are healthy, and a sweep mixing such attempts stays
+retryable if any one of them was.
+
+Note how this composes with health ranking. A non-orderly close demotes the endpoint
+it happened on, so a peer that answers `401` can rank ahead of the endpoint that just
+dropped; that sweep then ends without the dropped endpoint being retried at all, and
+the sender stays terminal even after it recovers. Two cases are exempt. A Node
+foreground store-and-forward sender that has already connected once retries these
+failures indefinitely, so a credential can rotate under a running producer without
+losing journaled rows. A browser cannot distinguish them at all, because its upgrade
+error carries no status; browser authentication failures surface from the REST
+session bootstrap instead.
 
 ### Observability
 
@@ -1073,7 +1113,10 @@ credit window bounds server read-ahead while application work is in progress.
 
 `target` accepts `any` (the default), `primary`, or `replica`. Primary routing also
 accepts standalone servers and a primary completing catch-up, matching the Java
-client. Both keys apply to ingress and egress alike. `zone` is an opaque, case-insensitive preference for `any` and `replica`;
+client. Both keys apply to ingress and egress on Node.js. In browsers they apply
+to egress only: ingress cannot learn a server's role or zone there, because the
+WebSocket API hides the upgrade response that carries them. `zone` is an opaque,
+case-insensitive preference for `any` and `replica`;
 cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
 followed across zones. The client validates the authoritative role and zone from the
 first QWP `SERVER_INFO` frame before accepting an endpoint, so the same guarantees
@@ -1143,6 +1186,14 @@ smaller `RESULT_BATCH` messages. The server clamps the request to its hard cap. 
 sends `X-QWP-Max-Batch-Rows`; browsers use the `qwp_max_batch_rows` URL parameter,
 which requires a server that supports browser QWP negotiation. Older servers ignore
 the browser parameter and keep their configured batch size.
+
+The connect helpers also enforce that request on what comes back: a `RESULT_BATCH`
+declaring more rows than were asked for is rejected as a `QwpProtocolError` before
+any column is read. Decoder scratch is sized from the declared row count and
+retained per buffer-pool slot for reuse, so an answer above the request would set
+the session's memory floor for its lifetime. Set `maxBatchRows` on the session
+options to bound a session built directly from a connection; left unset, the cell
+cap below is the only bound.
 
 A single `RESULT_BATCH` may declare at most `QWP_MAX_CELLS_PER_BATCH` cells --
 32Mi, its rows multiplied by its columns. The row and column caps bound each
@@ -1263,11 +1314,14 @@ const db = await connectQwpNodeClient(
 ```
 
 For unified strings with `sf_dir`, Java-compatible defaults apply: memory
-durability, a 10 GiB total journal cap, 4 MiB frame/segment batches, a 30-second
-capacity wait, a 60-second close drain, and fail-fast initial connection. Set
+durability, a 10 GiB total journal cap, 4 MiB journal segments, a 30-second
+capacity wait, a 5-second close drain, and fail-fast initial connection. Set
 `sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
+The 4 MiB default sizes journal segments only; it does not install an ingress
+frame cap. Set `sf_max_segment_bytes` explicitly, or `qwp.session.maxBatchSizeBytes`,
+to bound frames before the first publication tells the client the server's cap.
 Without `sf_dir`, `sf_max_total_bytes` and `sf_append_deadline_millis` tune the
-built-in memory replay queue instead.
+built-in memory replay queue instead, and `sf_max_segment_bytes` still caps a frame.
 The parser also supports `max_name_len` and the Java listener/error inbox
 capacity keys. Those capacities actively bound asynchronous connection and
 typed-error delivery and are reflected in ingress drop counters.
@@ -1370,7 +1424,10 @@ form with complete `ingress` and `egress` trees remains supported for advanced
 cases that intentionally connect the two sides differently.
 
 `connectQwpNodeClient()` and `connectQwpBrowserClient()` prewarm each configured
-pool minimum. Their `createQwp*Client()` counterparts are lazy. Pools grow to
+pool minimum. Their `createQwp*Client()` counterparts are lazy. A prewarm that
+fails rejects but does not close the client: connections it did establish stay
+pooled, and calling `connect()` again makes a fresh attempt, so a transient
+outage at start-up can be retried rather than requiring a new client. Pools grow to
 their maximum under concurrent borrows and apply one FIFO acquisition deadline;
 exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active
@@ -1522,10 +1579,13 @@ They are intentionally not CI performance gates.
 
 ## Public API policy
 
-Only the four package entry points listed at the top are public. In particular,
-paths containing `internal`, `qwp-node`, or `src` are implementation details even if
-a bundler can resolve them. The compatibility contract checks the documented
-high-level constructors, session classes, errors, constants, and option signatures
-from the shared, browser, and Node entry points. Additional low-level codec exports
-from `qwp` are intended for advanced integrations; prefer high-level APIs when no
-custom encoder or transport is required.
+Only the two package roots listed at the top are public: `@questdb/nodejs-client`
+and `@questdb/browser-client`. Each declares exactly one `exports` subpath, so
+those two specifiers are the whole supported surface. In particular, paths
+containing `internal`, `qwp-node`, `client-core`, or `src` are implementation
+details even if a bundler can resolve them, and `@questdb/client-core` is a private
+workspace package that is never published. The compatibility contract checks the
+documented high-level constructors, session classes, errors, constants, and option
+signatures exported from both package roots. Additional low-level codec exports
+share those roots and are intended for advanced integrations; prefer the high-level
+APIs when no custom encoder or transport is required.

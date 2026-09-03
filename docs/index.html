@@ -20,7 +20,7 @@ does not include Node.js transports or dependencies.</p>
 <tbody>
 <tr>
 <td>^4.0.0</td>
-<td>v20 and above</td>
+<td>v20.18.1 and above</td>
 <td>Undici Http Agent</td>
 </tr>
 <tr>
@@ -30,6 +30,8 @@ does not include Node.js transports or dependencies.</p>
 </tr>
 </tbody>
 </table>
+<p><code>^4.0.0</code> depends on <code>undici</code>, which declares <code>node &gt;=20.18.1</code>; installing on an
+earlier v20 warns with <code>EBADENGINE</code> and fails outright under <code>engine-strict</code>.</p>
 <p>The current version of the client requires Node.js v20 or newer version.
 Versions up to and including 3.0.0 are compatible with Node.js v16 and above.</p>
 <p>The Undici HTTP agent was introduced in 4.0.0, and it is the default HTTP transport.
