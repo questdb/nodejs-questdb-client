@@ -792,6 +792,38 @@ function parseUdpOptions(options: SenderOptions) {
       "max_datagram_size and multicast_ttl are only supported for QWP UDP transport",
     );
   }
+  validateUdpUnsupportedOptions(options);
+}
+
+/**
+ * Rejects the ILP-only keys a `udp::` connect string used to accept in
+ * silence.
+ *
+ * UDP shares this parser with http/tcp, so every key they accept parsed here
+ * too -- but the UDP branch of the Sender returns before createBuffer(), and
+ * QwpNodeUdpOptions has no field for any of these, so nothing ever read them.
+ * A user capping memory with max_buf_size got no cap and no diagnostic, while
+ * the QWP parser's own hint for the same key pointed at udp as a transport
+ * that supports it. The parser rejects an unknown key, so accepting a known
+ * one that does nothing is the outlier.
+ */
+function validateUdpUnsupportedOptions(options: SenderOptions): void {
+  if (options.protocol !== UDP) return;
+  const unsupported = [
+    "init_buf_size",
+    "max_buf_size",
+    "request_timeout",
+    "request_min_throughput",
+    "retry_timeout",
+    "stdlib_http",
+  ] as const;
+  for (const key of unsupported) {
+    if (options[key] !== undefined) {
+      throw new Error(
+        `'${key}' option is not supported for QWP UDP transport, it applies to the http/tcp transports only`,
+      );
+    }
+  }
 }
 
 /** @ignore Rejects security options that the fire-and-forget UDP wire cannot honor. */

@@ -34,13 +34,11 @@ const RELOCATED_HINTS = new Map([
     "protocol_version",
     "(QWP negotiates the protocol version during the WebSocket upgrade)",
   ],
-  ["init_buf_size", "(applies to legacy http/tcp/udp transports only)"],
-  ["max_buf_size", "(applies to legacy http/tcp/udp transports only)"],
-  ["request_timeout", "(applies to legacy http/tcp/udp transports only)"],
-  [
-    "request_min_throughput",
-    "(applies to legacy http/tcp/udp transports only)",
-  ],
+  ["init_buf_size", "(applies to legacy http/tcp transports only)"],
+  ["max_buf_size", "(applies to legacy http/tcp transports only)"],
+  ["request_timeout", "(applies to legacy http/tcp transports only)"],
+  ["request_min_throughput", "(applies to legacy http/tcp transports only)"],
+  ["tls_ca", "(use tls_roots on ws/wss)"],
   ["max_datagram_size", "(applies to the legacy udp transport only)"],
   ["multicast_ttl", "(applies to the legacy udp transport only)"],
 ]);

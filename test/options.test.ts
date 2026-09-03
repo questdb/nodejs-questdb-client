@@ -865,6 +865,52 @@ describe("Configuration string parser suite", function () {
     );
   });
 
+  it("rejects the ILP-only keys a udp connect string cannot act on", async function () {
+    // udp shares this parser with http/tcp, so their keys parsed here too --
+    // but the UDP branch of the Sender returns before createBuffer() and
+    // QwpNodeUdpOptions has no field for any of them, so nothing read them. A
+    // user capping memory with max_buf_size got no cap and no diagnostic,
+    // while the QWP schema's hint for the same key named udp as a transport
+    // that supports it. An unknown key was already rejected; a known key that
+    // does nothing was the outlier.
+    for (const key of [
+      "init_buf_size=1024",
+      "max_buf_size=1048576",
+      "request_timeout=5000",
+      "request_min_throughput=1024",
+      "retry_timeout=1000",
+      "stdlib_http=on",
+    ]) {
+      const name = key.split("=")[0];
+      await expect(
+        SenderOptions.fromConfig(`udp::addr=host;${key};`),
+        key,
+      ).rejects.toThrow(
+        `'${name}' option is not supported for QWP UDP transport, it applies to the http/tcp transports only`,
+      );
+      // http and tcp still take them, and ws/wss still relocate them.
+      await expect(
+        SenderOptions.fromConfig(`tcp::addr=host;protocol_version=1;${key};`),
+        key,
+      ).resolves.toBeDefined();
+    }
+
+    // The ws/wss hint no longer names udp as a transport these apply to.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host;max_buf_size=1048576;"),
+    ).rejects.toThrow(
+      "unknown configuration key: max_buf_size (applies to legacy http/tcp transports only)",
+    );
+
+    // tls_ca is the ILP spelling of the QWP schema's tls_roots, and the ILP
+    // parser points users at it by name, so ws/wss owes them the way back.
+    await expect(
+      SenderOptions.fromConfig("wss::addr=host;tls_ca=/tmp/ca.pem;"),
+    ).rejects.toThrow(
+      "unknown configuration key: tls_ca (use tls_roots on ws/wss)",
+    );
+  });
+
   it("parses a ws connect string with one schema, whichever entry point is used", async function () {
     // There must be a single QWP parser: Sender.fromConfig() and
     // SenderOptions.fromConfig() + new Sender() previously disagreed, and
