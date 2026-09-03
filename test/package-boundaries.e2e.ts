@@ -159,7 +159,11 @@ describe("public npm package boundaries", () => {
     ]);
     expect(nodeManifest.repository.directory).toBe("packages/nodejs-client");
     expect(Object.keys(nodeManifest.exports)).toEqual(["."]);
-    expect(nodeManifest.engines?.node).toBe(">=20");
+    // Must not sit below what the runtime dependencies themselves allow, or
+    // the package advertises a Node range it cannot install on: undici 7.x
+    // declares >=20.18.1, so a plain ">=20" warned with EBADENGINE and failed
+    // outright under engine-strict.
+    expect(nodeManifest.engines?.node).toBe(">=20.18.1");
     expect(Object.keys(nodeManifest.dependencies ?? {}).sort()).toEqual([
       "undici",
       "ws",

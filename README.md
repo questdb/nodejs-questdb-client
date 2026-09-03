@@ -28,8 +28,11 @@ npm install @questdb/browser-client
 
 | QuestDB client version | Supported Node.js versions | Default HTTP Agent  |
 | ---------------------- | -------------------------- | ------------------- |
-| ^4.0.0                 | v20 and above              | Undici Http Agent   |
+| ^4.0.0                 | v20.18.1 and above         | Undici Http Agent   |
 | ^3.0.0                 | v16 and above              | Standard Http Agent |
+
+`^4.0.0` depends on `undici`, which declares `node >=20.18.1`; installing on an
+earlier v20 warns with `EBADENGINE` and fails outright under `engine-strict`.
 
 The current version of the client requires Node.js v20 or newer version.
 Versions up to and including 3.0.0 are compatible with Node.js v16 and above.

@@ -314,14 +314,22 @@ The connect-string key
 
 `durability` controls the local persistence barrier:
 
-- `"append"` (the default) issues a data-only durability barrier after every vectored
-  positional frame write; manifest and directory metadata retain full barriers;
-  hot-spare creation and activation are durable before publication resolves.
+- `"append"` (the default for this object form) issues a data-only durability
+  barrier after every vectored positional frame write; manifest and directory
+  metadata retain full barriers; hot-spare creation and activation are durable
+  before publication resolves.
 - `"periodic"` checkpoints segment files, symbol metadata, and directory changes in the
   background. The default interval is 5 seconds, and `close()` performs a final
   checkpoint. A power failure can lose the most recent checkpoint window.
 - `"memory"` relies on operating-system writeback. It survives an orderly close and
   normally a process failure, but it makes no power-loss durability promise.
+
+The two surfaces do not share a default. `storeAndForward.durability` above
+defaults to `"append"`, while the `sf_durability` connect-string key defaults to
+`"memory"` — so a journal configured with `sf_dir=` alone never issues a
+per-append barrier, and a host crash can lose whatever writeback had not yet
+reached disk. Set `sf_durability=append` explicitly when a connect-string journal
+has to survive power loss.
 
 `backpressurePolicy: "error"` preserves the existing immediate
 `QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
