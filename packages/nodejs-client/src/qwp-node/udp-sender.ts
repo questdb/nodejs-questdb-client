@@ -10,6 +10,17 @@ import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callb
 
 const DEFAULT_QWP_UDP_PORT = 9007;
 const DEFAULT_MAX_DATAGRAM_SIZE = 1_400;
+/**
+ * Largest payload an IPv4 UDP datagram can carry: 65535 total minus the 20-byte
+ * IP and 8-byte UDP headers. Anything above this is unsendable on every host,
+ * so it is rejected at configuration time rather than failing per datagram.
+ *
+ * A host may refuse well below it -- `net.inet.udp.maxdgram` is 9216 on macOS
+ * by default -- which no static bound can predict. That residual case is what
+ * the send path's sequence accounting covers: a datagram the kernel refuses
+ * never advances the published or acknowledged watermark.
+ */
+const MAX_IPV4_DATAGRAM_PAYLOAD = 65_507;
 
 /** Minimal injectable UDP socket surface used by the Node QWP sender. */
 export interface QwpNodeUdpSocketLike {
@@ -94,9 +105,8 @@ export class QwpNodeUdpSession implements QwpSenderSession {
   private constructor(options: QwpNodeUdpOptions) {
     this.host = validateHost(options.host);
     this.port = validatePort(options.port ?? DEFAULT_QWP_UDP_PORT);
-    this.maxBatchSizeBytes = validatePositiveInteger(
+    this.maxBatchSizeBytes = validateMaxDatagramSize(
       options.maxDatagramSize ?? DEFAULT_MAX_DATAGRAM_SIZE,
-      "maxDatagramSize",
     );
     this.multicastTtl = validateTtl(options.multicastTtl ?? 0);
     this.multicastInterface = options.multicastInterface?.trim() || undefined;
@@ -255,10 +265,21 @@ export class QwpNodeUdpSession implements QwpSenderSession {
     this.assertOpen();
     return new Promise<void>((resolve) => {
       const complete = (error: Error | null, bytes = 0): void => {
-        this.sequence++;
         if (error) {
-          this.reportError(error);
+          // The watermark deliberately does not advance here. `sequence` backs
+          // both publishedFrameSequence and acknowledgedFrameSequence, so
+          // counting a datagram the kernel refused reported rows that never
+          // left the host as delivered: flushAndGetSequence() returned a
+          // sequence covering them and waitForAcknowledged() resolved on it.
+          this.reportError(
+            describeSendFailure(
+              error,
+              datagram.byteLength,
+              this.maxBatchSizeBytes,
+            ),
+          );
         } else {
+          this.sequence++;
           this.totalDatagramsSent++;
           this.totalBytesSent += bytes;
         }
@@ -379,6 +400,16 @@ function validatePort(port: number): number {
   return value;
 }
 
+function validateMaxDatagramSize(size: number): number {
+  const value = validatePositiveInteger(size, "maxDatagramSize");
+  if (value > MAX_IPV4_DATAGRAM_PAYLOAD) {
+    throw new RangeError(
+      `QWP UDP maxDatagramSize must not exceed ${MAX_IPV4_DATAGRAM_PAYLOAD}`,
+    );
+  }
+  return value;
+}
+
 function validateTtl(ttl: number): number {
   if (!Number.isSafeInteger(ttl) || ttl < 0 || ttl > 255) {
     throw new RangeError("QWP UDP multicastTtl must be between 0 and 255");
@@ -395,4 +426,25 @@ function validatePositiveInteger(value: number, name: string): number {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * Names the configuration behind a refused datagram. `EMSGSIZE` on its own says
+ * only that the kernel rejected the write; the actionable part is that
+ * maxDatagramSize is above what this host accepts, which no static bound can
+ * predict (macOS defaults `net.inet.udp.maxdgram` to 9216, far below the 65507
+ * IPv4 maximum). Reported through onError, so the raw error stays the cause.
+ */
+function describeSendFailure(
+  error: Error,
+  datagramBytes: number,
+  maxDatagramSize: number,
+): Error {
+  if ((error as NodeJS.ErrnoException).code !== "EMSGSIZE") return error;
+  const described = new Error(
+    `QWP UDP datagram of ${datagramBytes} bytes exceeds what this host accepts, so it was discarded before transmission; lower max_datagram_size (currently ${maxDatagramSize})`,
+    { cause: error },
+  );
+  described.name = "QwpUdpDatagramRefusedError";
+  return described;
 }

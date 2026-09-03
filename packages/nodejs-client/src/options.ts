@@ -290,9 +290,13 @@ type DeprecatedOptions = {
  * <br>
  * UDP specific options
  * <ul>
- * <li> max_datagram_size: <i>integer</i> - Maximum encoded datagram size in bytes, defaults to 1400. <br>
+ * <li> max_datagram_size: <i>integer</i> - Maximum encoded datagram size in bytes, from 1 to 65507,
+ * defaults to 1400. <br>
  * A row that cannot fit a single datagram is rejected before transmission. It is also the default for
- * <i>auto_flush_bytes</i>. Supported by the udp transport only; http, tcp and ws/wss reject it.
+ * <i>auto_flush_bytes</i>. Supported by the udp transport only; http, tcp and ws/wss reject it. <br>
+ * 65507 is the IPv4 maximum, but many hosts refuse well below it, so keep this at or under the path
+ * MTU unless the receiver is known to accept more. A datagram the operating system refuses is
+ * discarded before transmission and does not advance the published or acknowledged sequence.
  * </li>
  * <li> multicast_ttl: <i>integer</i> - Multicast time-to-live for outgoing datagrams, from 0 to 255, defaults to 0. <br>
  * Supported by the udp transport only; http, tcp and ws/wss reject it.
@@ -779,6 +783,17 @@ function parseMaxNameLength(options: SenderOptions) {
 
 function parseUdpOptions(options: SenderOptions) {
   parseInteger(options, "max_datagram_size", "maximum datagram size", 1);
+  // 65535 minus the 20-byte IP and 8-byte UDP headers. A larger value can never
+  // be transmitted on IPv4, so it is rejected here rather than silently losing
+  // every datagram the kernel refuses. Bounded like multicast_ttl below.
+  if (
+    options.max_datagram_size !== undefined &&
+    options.max_datagram_size > 65507
+  ) {
+    throw new Error(
+      `Invalid maximum datagram size option: ${options.max_datagram_size}, must not exceed 65507`,
+    );
+  }
   parseInteger(options, "multicast_ttl", "multicast TTL", 0);
   if (options.multicast_ttl !== undefined && options.multicast_ttl > 255) {
     throw new Error(`Invalid multicast TTL option: ${options.multicast_ttl}`);

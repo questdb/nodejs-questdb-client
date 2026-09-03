@@ -210,7 +210,13 @@ await sender.close();
 ```
 
 The default port is 9007, the maximum datagram size (`max_datagram_size`) is 1400
-bytes, and the multicast TTL (`multicast_ttl`) is zero. Each datagram is
+bytes, and the multicast TTL (`multicast_ttl`) is zero. `max_datagram_size` accepts
+1 through 65507, the IPv4 payload maximum; a larger value is rejected when the sender
+is created. Many hosts refuse datagrams well below that ceiling — macOS defaults
+`net.inet.udp.maxdgram` to 9216 — so keep the value at or under the path MTU unless
+the receiver is known to accept more. A datagram the operating system refuses is
+discarded before transmission: it is reported through `onError` and does not advance
+`publishedSequence` or `acknowledgedSequence`. Each datagram is
 self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot

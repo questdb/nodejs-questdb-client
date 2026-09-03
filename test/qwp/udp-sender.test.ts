@@ -284,17 +284,46 @@ describe("QWP Node UDP sender", () => {
       onError: (error) => errors.push(error),
     });
 
+    // The flush still resolves and the rows are not retried, but the watermark
+    // must not move: `sequence` backs both publishedFrameSequence and
+    // acknowledgedFrameSequence, so advancing it over a datagram that never
+    // left the host reported those rows as delivered -- flushAndGetSequence()
+    // returned a sequence covering them and waitForAcknowledged() resolved.
     await expect(session.sendTables([longTable(1)])).resolves.toMatchObject({
       status: 0,
-      sequence: 0n,
+      sequence: -1n,
     });
     expect(errors.map((error) => error.message)).toEqual([
       "network unreachable",
     ]);
     expect(session.udpMetrics).toMatchObject({
-      publishedDatagramSequence: 0n,
+      publishedDatagramSequence: -1n,
       totalDatagramsSent: 0,
       totalSendErrors: 1,
+    });
+    await expect(session.waitForAcknowledged(0n)).rejects.toThrow(
+      /has not been published/,
+    );
+    await session.close();
+  });
+
+  it("rejects a datagram size no IPv4 host can transmit", async () => {
+    // 65507 is 65535 minus the IP and UDP headers. Above it every datagram is
+    // refused by the kernel, which the fire-and-forget send path then discards
+    // one by one, so the whole batch vanishes with flush() still resolving.
+    // Reject the configuration instead, the way multicastTtl already is.
+    await expect(
+      connectQwpNodeUdp({
+        host: "localhost",
+        maxDatagramSize: 65_508,
+        socketFactory: () => new FakeUdpSocket(),
+      }),
+    ).rejects.toThrow("QWP UDP maxDatagramSize must not exceed 65507");
+
+    const session = await connectQwpNodeUdp({
+      host: "localhost",
+      maxDatagramSize: 65_507,
+      socketFactory: () => new FakeUdpSocket(),
     });
     await session.close();
   });

@@ -844,6 +844,22 @@ describe("Configuration string parser suite", function () {
     await expect(
       SenderOptions.fromConfig("udp::addr=host;multicast_ttl=256;"),
     ).rejects.toThrow("Invalid multicast TTL option: 256");
+    // 65507 is 65535 minus the IP and UDP headers. Above it every datagram is
+    // refused by the kernel, and the fire-and-forget send path discards each
+    // one, so the whole batch vanished while flush() still resolved true.
+    // Bounded here like multicast_ttl above, rather than failing per datagram.
+    expect(
+      (
+        await SenderOptions.fromConfig(
+          "udp::addr=host;max_datagram_size=65507;",
+        )
+      ).max_datagram_size,
+    ).toBe(65507);
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host;max_datagram_size=65508;"),
+    ).rejects.toThrow(
+      "Invalid maximum datagram size option: 65508, must not exceed 65507",
+    );
     await expect(
       SenderOptions.fromConfig("udp::addr=host;username=admin;"),
     ).rejects.toThrow("authentication is not supported for QWP UDP transport");
