@@ -377,6 +377,39 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/only supported by the wss schema/);
   });
 
+  it("validates egress bounds against the egress defaults, not the ingress ones", () => {
+    // validateReconnectBounds() filled the unset side from the ingress pair
+    // (100/5000) for both sessions, while the egress connection uses 50/1000.
+    // It therefore accepted strings the egress session then refused with a
+    // RangeError at the first borrowQuery(), and refused legal ones outright.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;failover_backoff_initial_ms=2000;",
+      ),
+    ).toThrow(/QWP egress failover maximum backoff/);
+    // 75ms clears the real egress initial default of 50ms, so it is legal.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;failover_backoff_max_ms=75;",
+      ),
+    ).not.toThrow();
+    // The ingress pair is unchanged.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;reconnect_initial_backoff_millis=6000;",
+      ),
+    ).toThrow(/QWP ingress reconnect maximum backoff/);
+    // QwpEgressSession requires a positive drain bound, so accepting zero here
+    // only moved the RangeError to the first query and named a field the
+    // connect string never mentions.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;query_close_timeout_ms=0;"),
+    ).toThrow(/query_close_timeout_ms/);
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;query_close_timeout_ms=1;"),
+    ).not.toThrow();
+  });
+
   it("validates the string before applying explicit programmatic overrides", () => {
     const options = parseQwpNodeClientConfig(
       "ws::addr=localhost;target=primary;query_pool_max=2;",

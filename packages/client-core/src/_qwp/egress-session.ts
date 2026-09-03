@@ -20,7 +20,10 @@ import {
 } from "./_core";
 import { QwpAsyncQueue } from "./_internal/async-queue";
 import { validateQwpMaxBatchRows } from "./_internal/egress-limits";
-import { QwpReconnectingEgressConnection } from "./_internal/reconnecting-egress-connection";
+import {
+  QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
+  QwpReconnectingEgressConnection,
+} from "./_internal/reconnecting-egress-connection";
 import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
@@ -113,13 +116,6 @@ export const QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS = 5_000;
 export const QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE = 4;
 
 const MAX_UINT64 = 0xffffffffffffffffn;
-const DEFAULT_EGRESS_RECONNECT_OPTIONS: Readonly<QwpReconnectOptions> = {
-  maxAttempts: 8,
-  initialBackoffMs: 50,
-  maxBackoffMs: 1_000,
-  maxDurationMs: 30_000,
-};
-
 function validateOptionalTimeout(
   value: number | undefined,
   name: string,
@@ -728,7 +724,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     const reconnectOptions =
       options.reconnect === false
         ? undefined
-        : (options.reconnect ?? DEFAULT_EGRESS_RECONNECT_OPTIONS);
+        : // Spread, not `??`: tuning one field must not discard the rest.
+          { ...QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS, ...options.reconnect };
     const connection = reconnectOptions
       ? await QwpReconnectingEgressConnection.connect(
           factory,

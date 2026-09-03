@@ -23,6 +23,28 @@ import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
 import { safelyInvoke } from "./safe-callback";
 
+/**
+ * The egress reconnect policy applied when a field is not configured.
+ *
+ * Egress bounds a query connection so a caller is not left waiting, which is
+ * why these differ from the ingress defaults. QwpEgressSession.connect()
+ * spreads this under the caller's options and the constructor below reads every
+ * field from the merged result, so the two layers cannot drift apart.
+ */
+export const QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS: Readonly<
+  Required<
+    Omit<
+      QwpReconnectOptions,
+      "onEvent" | "maxFrameRejections" | "poisonMinEscalationWindowMs"
+    >
+  >
+> = {
+  maxAttempts: 8,
+  initialBackoffMs: 50,
+  maxBackoffMs: 1_000,
+  maxDurationMs: 30_000,
+};
+
 type ReplayResetHandler = (
   event: QwpEgressReplayResetEvent,
 ) => void | Promise<void>;
@@ -95,10 +117,13 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     private readonly onReplayReset?: ReplayResetHandler,
     private readonly retryInitialConnection = true,
   ) {
-    this.maxAttempts = reconnectOptions.maxAttempts ?? 8;
-    this.initialBackoffMs = reconnectOptions.initialBackoffMs ?? 50;
-    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? 1_000;
-    this.maxDurationMs = reconnectOptions.maxDurationMs ?? 30_000;
+    const defaults = QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS;
+    this.maxAttempts = reconnectOptions.maxAttempts ?? defaults.maxAttempts;
+    this.initialBackoffMs =
+      reconnectOptions.initialBackoffMs ?? defaults.initialBackoffMs;
+    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? defaults.maxBackoffMs;
+    this.maxDurationMs =
+      reconnectOptions.maxDurationMs ?? defaults.maxDurationMs;
     validateReconnectPolicy(
       this.maxAttempts,
       this.initialBackoffMs,

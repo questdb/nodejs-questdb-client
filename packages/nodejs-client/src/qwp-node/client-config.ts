@@ -9,6 +9,8 @@ import type {
 } from "../qwp";
 import type { QwpClientPoolOptions } from "../../../client-core/src/_qwp/client";
 import type { QwpEgressSessionOptions } from "../../../client-core/src/_qwp/egress-session";
+import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
+import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-egress-connection";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 import type {
@@ -263,10 +265,9 @@ export function resolveQwpNodeClientConfig(
       "buffer_pool_size",
       1,
     ),
-    cancelDrainTimeoutMs: optionalInteger(
+    cancelDrainTimeoutMs: optionalPositiveInteger(
       value("query_close_timeout_ms"),
       "query_close_timeout_ms",
-      0,
     ),
     ...extraOptions.egressSession,
   };
@@ -672,7 +673,11 @@ function parseEgressReconnect(
       0,
     ),
   };
-  validateReconnectBounds(reconnect, "QWP egress failover");
+  validateReconnectBounds(
+    reconnect,
+    "QWP egress failover",
+    QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
+  );
   if (failover === false) return false;
   // The Java facade defaults egress failover to on for cluster strings.
   return failover === true || hasDefinedValue(reconnect)
@@ -763,8 +768,13 @@ function validateStoreAndForwardDependencies(
   validateReconnectBounds(
     parseIngressReconnect(values),
     "QWP ingress reconnect",
+    QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
   );
-  validateReconnectBounds(parseEgressReconnect(values), "QWP egress failover");
+  validateReconnectBounds(
+    parseEgressReconnect(values),
+    "QWP egress failover",
+    QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
+  );
 }
 
 function resolveInitialConnectMode(
@@ -792,13 +802,22 @@ function validateSenderId(value: string): string {
   return value;
 }
 
+/**
+ * Rejects a backoff pair the session it configures would reject at connect
+ * time. The unset side has to be filled from that session's own defaults:
+ * checking egress against the ingress pair both passed configurations the
+ * egress connection then refused with a RangeError at the first query, and
+ * refused legal ones outright.
+ */
 function validateReconnectBounds(
   reconnect: QwpReconnectOptions | false | undefined,
   name: string,
+  defaults: Pick<QwpReconnectOptions, "initialBackoffMs" | "maxBackoffMs">,
 ): void {
   if (!reconnect) return;
-  const initialBackoffMs = reconnect.initialBackoffMs ?? 100;
-  const maxBackoffMs = reconnect.maxBackoffMs ?? 5_000;
+  const initialBackoffMs =
+    reconnect.initialBackoffMs ?? defaults.initialBackoffMs!;
+  const maxBackoffMs = reconnect.maxBackoffMs ?? defaults.maxBackoffMs!;
   if (maxBackoffMs < initialBackoffMs) {
     throw new RangeError(
       `${name} maximum backoff must be greater than or equal to its initial backoff`,
