@@ -52,6 +52,31 @@ import {
   type QwpSenderError,
 } from "../sender-error";
 
+/**
+ * The ingress reconnect policy applied when a field is not configured.
+ *
+ * QwpIngressSession.connect() spreads this under the caller's options, and the
+ * constructor below reads every field from the merged result, so the two layers
+ * cannot disagree. They used to: the session default object was replaced
+ * wholesale by any partial `reconnect`, and the constructor's own per-field
+ * fallbacks then supplied maxAttempts 3 and maxDurationMs 30s instead of the
+ * unlimited/5-minute policy the session promises. Setting one documented key --
+ * `reconnect_max_duration_millis`, say, which QWP.md presents as the ws/wss
+ * replacement for ILP's `retry_timeout` -- therefore capped a running sender at
+ * three reconnect attempts and latched it terminal during a transient outage.
+ */
+export const QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<
+  Required<Omit<QwpReconnectOptions, "onEvent">>
+> = {
+  /** Zero is unlimited: a running producer must outlast any outage. */
+  maxAttempts: 0,
+  initialBackoffMs: 100,
+  maxBackoffMs: 5_000,
+  maxDurationMs: 300_000,
+  maxFrameRejections: 4,
+  poisonMinEscalationWindowMs: 300_000,
+};
+
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
 const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
@@ -424,11 +449,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       store.appendSymbolDictionary !== undefined;
     this.recoveredDiscardTail = recoveredDiscardTail;
     this.localMaxBatchSizeBytes = localMaxBatchSizeBytes;
-    this.maxAttempts = reconnectOptions.maxAttempts ?? 3;
-    this.initialBackoffMs = reconnectOptions.initialBackoffMs ?? 100;
-    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? 5_000;
-    this.maxDurationMs = reconnectOptions.maxDurationMs ?? 30_000;
-    this.maxFrameRejections = reconnectOptions.maxFrameRejections ?? 4;
+    const defaults = QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS;
+    this.maxAttempts = reconnectOptions.maxAttempts ?? defaults.maxAttempts;
+    this.initialBackoffMs =
+      reconnectOptions.initialBackoffMs ?? defaults.initialBackoffMs;
+    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? defaults.maxBackoffMs;
+    this.maxDurationMs =
+      reconnectOptions.maxDurationMs ?? defaults.maxDurationMs;
+    this.maxFrameRejections =
+      reconnectOptions.maxFrameRejections ?? defaults.maxFrameRejections;
     // WRITE_ERROR and INTERNAL_ERROR are RETRIABLE by policy, but the only
     // thing separating "this frame is poison" from "the server cannot write
     // right now" is how long the rejection persists. Five seconds did not
@@ -437,7 +466,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     // at maxBackoffMs four strikes accumulate well inside that window -- so a
     // transient server-side fault permanently killed a running producer.
     this.poisonMinEscalationWindowMs =
-      reconnectOptions.poisonMinEscalationWindowMs ?? 300_000;
+      reconnectOptions.poisonMinEscalationWindowMs ??
+      defaults.poisonMinEscalationWindowMs;
     this.catchUpCapGapMinEscalationWindowMs =
       catchUpCapGapMinEscalationWindowMs;
     this.orphanDurableAckMismatchMaxDurationMs =

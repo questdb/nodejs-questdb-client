@@ -23,7 +23,10 @@ import {
   QwpReconnectOptions,
   QwpReplayDictionaryPersistenceError,
 } from "./transport";
-import { QwpReconnectingIngressConnection } from "./_internal/reconnecting-ingress-connection";
+import {
+  QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
+  QwpReconnectingIngressConnection,
+} from "./_internal/reconnecting-ingress-connection";
 import { QwpNotificationDispatcher } from "./_internal/notification-dispatcher";
 import { safelyInvoke } from "./_internal/safe-callback";
 import {
@@ -253,13 +256,6 @@ export const QWP_INGRESS_PROGRESS_KIND = {
   ACKNOWLEDGED: "acknowledged",
   DURABLE_ACKNOWLEDGED: "durable-acknowledged",
 } as const;
-
-const DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<QwpReconnectOptions> = {
-  maxAttempts: 0,
-  initialBackoffMs: 100,
-  maxBackoffMs: 5_000,
-  maxDurationMs: 300_000,
-};
 
 export type QwpIngressProgressKind =
   (typeof QWP_INGRESS_PROGRESS_KIND)[keyof typeof QWP_INGRESS_PROGRESS_KIND];
@@ -612,10 +608,15 @@ export class QwpIngressSession {
     if (options.replayStore && options.reconnect === false) {
       throw new RangeError("a QWP replayStore requires ingress reconnect");
     }
+    // Spread, not `??`: a caller who tunes one field is asking to change that
+    // field, not to opt out of every other default. Replacing the object left
+    // the connection's per-field fallbacks to supply maxAttempts and
+    // maxDurationMs, which are not the session's policy -- so setting a single
+    // documented key silently capped reconnect at three attempts.
     const reconnectOptions =
       options.reconnect === false
         ? undefined
-        : (options.reconnect ?? DEFAULT_INGRESS_RECONNECT_OPTIONS);
+        : { ...QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS, ...options.reconnect };
     const initialConnectMode =
       options.initialConnectMode ??
       (options.reconnect === undefined && !options.backgroundStoreAndForward

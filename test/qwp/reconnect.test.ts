@@ -2831,6 +2831,57 @@ describe("QWP ingress reconnect and replay", () => {
     },
   );
 
+  it("tunes the ingress reconnect defaults instead of replacing them", async () => {
+    // A partial reconnect object used to replace the session's default policy
+    // wholesale, leaving the connection's own per-field fallbacks to supply
+    // maxAttempts 3 and maxDurationMs 30s in place of the unlimited/5-minute
+    // policy. Setting one documented key -- `reconnect_max_duration_millis` is
+    // presented as the ws/wss replacement for ILP's `retry_timeout` -- therefore
+    // capped a running sender at three sweeps and latched it terminal during a
+    // transient outage, with no connect-string key able to restore the default.
+    const primary = new FakeConnection("primary");
+    const replacement = new FakeConnection("replacement");
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return primary;
+        if (factoryCalls <= 6) {
+          throw new QwpUpgradeError("offline", {
+            kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+            retryable: true,
+            tryNextEndpoint: true,
+          });
+        }
+        return replacement;
+      },
+      {
+        // Deliberately partial: neither maxAttempts nor maxDurationMs is set,
+        // so both must still come from the session defaults.
+        reconnect: {
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          poisonMinEscalationWindowMs: 600_000,
+        },
+      },
+    );
+
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(primary.sent).toHaveLength(1));
+    primary.drop();
+
+    // Five failed sweeps is past the fallback ceiling of three; unlimited
+    // attempts means the sixth still reconnects and the frame is delivered.
+    await vi.waitFor(() => expect(replacement.sent).toEqual(primary.sent));
+    expect(factoryCalls).toBe(7);
+    replacement.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    await session.close();
+  });
+
   it("escalates a frame that keeps taking the connection down across reconnect failures", async () => {
     // The canonical poison case is a frame that crashes the server, which
     // guarantees the following connect attempt fails. Wiping the episode on

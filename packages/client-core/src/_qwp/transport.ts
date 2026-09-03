@@ -295,24 +295,45 @@ export const QWP_INITIAL_CONNECT_MODE = {
 export type QwpInitialConnectMode =
   (typeof QWP_INITIAL_CONNECT_MODE)[keyof typeof QWP_INITIAL_CONNECT_MODE];
 
+/**
+ * Reconnect tuning shared by ingress and egress. The two sides ship different
+ * defaults, so every field below documents both; an unset field keeps its own
+ * side's default rather than the other's.
+ *
+ * The ingress defaults favour survival -- a producer holding buffered or
+ * journalled rows must outlast an outage rather than give up on it -- while
+ * egress bounds a query connection so a caller is not left waiting.
+ */
 export interface QwpReconnectOptions {
-  /** Maximum connection sweeps per outage. Defaults to 3; zero is unlimited. */
+  /**
+   * Maximum connection sweeps per outage; zero is unlimited.
+   * Ingress defaults to zero, egress to 8.
+   */
   maxAttempts?: number;
-  /** Full-jitter ceiling before the first failed sweep is retried. Defaults to 100ms. */
+  /**
+   * Full-jitter ceiling before the first failed sweep is retried.
+   * Ingress defaults to 100ms, egress to 50ms.
+   */
   initialBackoffMs?: number;
-  /** Full-jitter exponential-backoff ceiling. Defaults to 5s. */
+  /**
+   * Full-jitter exponential-backoff ceiling.
+   * Ingress defaults to 5s, egress to 1s.
+   */
   maxBackoffMs?: number;
-  /** Total reconnect deadline. Defaults to 30s; zero disables the deadline. */
+  /**
+   * Total reconnect deadline; zero disables the deadline.
+   * Ingress defaults to 5 minutes, egress to 30s.
+   */
   maxDurationMs?: number;
   /**
    * Consecutive retriable rejections of one ingress frame before it is treated
-   * as poison and retained for inspection. Defaults to 4.
+   * as poison and retained for inspection. Defaults to 4. Ingress only.
    */
   maxFrameRejections?: number;
   /**
    * Minimum time the same ingress frame must remain suspect before repeated
-   * rejections or non-orderly closes become terminal. Defaults to 5s; zero
-   * escalates as soon as maxFrameRejections is reached.
+   * rejections or non-orderly closes become terminal. Defaults to 5 minutes;
+   * zero escalates as soon as maxFrameRejections is reached. Ingress only.
    */
   poisonMinEscalationWindowMs?: number;
   onEvent?: (event: QwpReconnectEvent) => void;
