@@ -77,6 +77,17 @@ export const QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<
   poisonMinEscalationWindowMs: 300_000,
 };
 
+/** Byte offset of the flags field inside the 12-byte QWP frame header. */
+const QWP_FLAGS_OFFSET = 5;
+
+/** Peeks the deferred-commit flag without decoding or copying the payload. */
+function defersCommit(payload: Uint8Array): boolean {
+  return (
+    payload.byteLength > QWP_FLAGS_OFFSET &&
+    (payload[QWP_FLAGS_OFFSET] & QWP_FLAG_DEFER_COMMIT) !== 0
+  );
+}
+
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
 const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
@@ -139,6 +150,13 @@ interface ReplayFrame extends Omit<QwpIngressReplayReference, "frameSequence"> {
   transmitted: boolean;
   durableTargets?: Map<string, bigint>;
   dictionaryCatchup?: boolean;
+  /**
+   * The frame carries QWP_FLAG_DEFER_COMMIT, so QuestDB deliberately withholds
+   * its cumulative ACK until the transaction commits. Read from the frame
+   * header rather than passed in, so it survives a journal round-trip and is
+   * still known for frames recovered after a restart.
+   */
+  deferCommit?: boolean;
 }
 
 type LoadedReplayRecord = QwpIngressReplayReference & {
@@ -778,6 +796,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       payloadLength: payload.byteLength,
       ackDelivered: false,
       transmitted: false,
+      deferCommit: defersCommit(payload),
     };
     const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
@@ -1189,6 +1208,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         );
       }
       const payload = await this.readFramePayload(frame);
+      frame.deferCommit = defersCommit(payload);
       replayed.push(frame);
       await this.sendPhysical(connection, payload, true);
     }
@@ -1631,13 +1651,31 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     );
   }
 
+  /**
+   * The frame a non-orderly close is charged against, or undefined when the
+   * close says nothing about any particular frame.
+   *
+   * This path infers suspicion from a frame sitting past the ACK watermark
+   * when the connection died, so it may only consider frames the server was
+   * expected to answer. A deferred frame is not one: QuestDB withholds its
+   * cumulative OK for the life of the open transaction, so "unacknowledged" is
+   * the protocol's normal state for it and carries no evidence about the
+   * frame. Charging it meant four ordinary transport drops during one
+   * transaction latched a running sender terminal. This is the same reasoning
+   * translateResponse() applies to dictionary catch-up and DICTIONARY_GAP; a
+   * NACK naming the frame still escalates it there, because that is a real
+   * verdict rather than an inference.
+   */
   private currentPoisonHead(): ReplayFrame | undefined {
     const progress =
       this.highestOkFrameSequence > this.acknowledgedFrameSequence
         ? this.highestOkFrameSequence
         : this.acknowledgedFrameSequence;
     return this.wireFrames.find(
-      (frame) => !frame.dictionaryCatchup && frame.frameSequence > progress,
+      (frame) =>
+        !frame.dictionaryCatchup &&
+        !frame.deferCommit &&
+        frame.frameSequence > progress,
     );
   }
 

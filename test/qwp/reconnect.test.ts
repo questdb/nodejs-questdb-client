@@ -35,6 +35,7 @@ import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_COLUMN_TYPE,
   QWP_EGRESS_CAPABILITY,
+  QWP_FLAG_DEFER_COMMIT,
   QWP_EGRESS_MESSAGE,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_SERVER_ROLE,
@@ -2830,6 +2831,65 @@ describe("QWP ingress reconnect and replay", () => {
       await session.close();
     },
   );
+
+  it("does not charge an open transaction's deferred frame for a non-orderly close", async () => {
+    // The close path infers suspicion from a frame still sitting past the ACK
+    // watermark when the connection died, so it may only consider frames the
+    // server was expected to answer. A deferred frame is not one: QuestDB
+    // withholds its cumulative OK for the life of the open transaction, so no
+    // ACK can ever clear the episode while the transaction is open and every
+    // drop stacked another strike. Four ordinary transport drops during one
+    // transaction therefore latched a running sender terminal.
+    //
+    // The test directly above is the control: an ordinary frame under exactly
+    // the same drops is still condemned at maxFrameRejections.
+    const handedOut: FakeConnection[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = new FakeConnection(`deferred-${handedOut.length}`);
+        handedOut.push(connection);
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 20,
+          maxDurationMs: 0,
+          maxFrameRejections: 2,
+          poisonMinEscalationWindowMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    const pending = session.sendFrame(
+      encodeQwpFrame(Uint8Array.of(1), QWP_FLAG_DEFER_COMMIT, 0),
+    );
+    const dropNext = async (index: number) => {
+      await vi.waitFor(() => {
+        expect(handedOut).toHaveLength(index + 1);
+        expect(handedOut[index].sent).toHaveLength(1);
+      });
+      handedOut[index].drop();
+    };
+    // Two more drops than maxFrameRejections allows for a chargeable frame.
+    await dropNext(0);
+    await dropNext(1);
+    await dropNext(2);
+
+    // Still replaying rather than condemned, and the frame completes as soon
+    // as the transaction's commit-bearing ACK arrives.
+    await vi.waitFor(() => {
+      expect(handedOut).toHaveLength(4);
+      expect(handedOut[3].sent).toHaveLength(1);
+    });
+    handedOut[3].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    await session.close();
+  });
 
   it("tunes the ingress reconnect defaults instead of replacing them", async () => {
     // A partial reconnect object used to replace the session's default policy
