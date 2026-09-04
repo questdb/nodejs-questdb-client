@@ -2122,6 +2122,49 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
+  it("keeps the ordinary watermark on a session built on a raw durable-capable connection", async () => {
+    // acknowledgedFrameSequence short-circuits on getIngressMetrics(), which
+    // only the reconnecting connection implements, so the case above exercises
+    // the connection's gate. A session constructed directly -- or connected
+    // with reconnect:false -- reads the session's own gate instead, and the
+    // two have to agree: negotiation alone must not select a watermark that
+    // nothing advances.
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpNodeWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: (_url, options) => {
+        // Reported by the server without being asked for.
+        options.onUpgrade({
+          "x-qwp-version": "1",
+          "x-qwp-durable-ack": "enabled",
+        });
+        return asQwpSocket(socket);
+      },
+    });
+    socket.open();
+    const connection = await connecting;
+    expect(connection.handshake.durableAckEnabled).toBe(true);
+    expect(connection.getIngressMetrics).toBeUndefined();
+
+    // No durableAckKeepaliveMs: the caller never asked for durable progress.
+    const session = new QwpIngressSession(connection, {});
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+      );
+    };
+
+    await session.sendFrame(Uint8Array.of(1));
+    await vi.waitFor(() =>
+      expect(session.metrics.acknowledgedSequence).toBe(0n),
+    );
+    expect(session.acknowledgedFrameSequence).toBe(0n);
+    await expect(
+      session.waitForAcknowledged(0n, 1_000),
+    ).resolves.toBeUndefined();
+    await session.close();
+  });
+
   it("fails a fixed session and its ACK waiters after a publication-only NACK", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
