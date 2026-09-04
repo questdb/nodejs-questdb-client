@@ -346,7 +346,7 @@ export function resolveQwpNodeClientConfig(
       "zstd",
       "auto",
     ] as const),
-    compressionLevel: parseCompressionLevel(value, parsed.values),
+    compressionLevel: parseCompressionLevel(value),
     maxBatchRows: optionalInteger(
       value("max_batch_rows"),
       "max_batch_rows",
@@ -813,7 +813,6 @@ function validateSenderId(value: string): string {
  */
 function parseCompressionLevel(
   value: (key: string) => string | undefined,
-  values: ReadonlyMap<string, readonly string[]>,
 ): number | undefined {
   const level = optionalInteger(
     value("compression_level"),
@@ -821,7 +820,12 @@ function parseCompressionLevel(
     1,
     22,
   );
-  if (level !== undefined && !values.has("compression")) {
+  const compression = value("compression");
+  if (
+    level !== undefined &&
+    compression !== "zstd" &&
+    compression !== "auto"
+  ) {
     throw new RangeError(
       "conflicting configuration: compression_level requires compression=zstd or compression=auto",
     );

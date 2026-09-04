@@ -500,6 +500,11 @@ function writeColumn(
     case QWP_COLUMN_TYPE.BOOLEAN: {
       const bitmap = new Uint8Array(Math.ceil(column.values.length / 8));
       column.values.forEach((value, index) => {
+        if (typeof value !== "boolean") {
+          throw new TypeError(
+            `QWP BOOLEAN column '${column.name}' accepts only booleans`,
+          );
+        }
         if (value) bitmap[index >>> 3] |= 1 << (index & 7);
       });
       writer.writeBytes(bitmap);

@@ -343,6 +343,11 @@ describe("QWP ingress codec", () => {
       return () => encodeQwpIngressFrame([table]);
     };
 
+    expect(cell(QWP_COLUMN_TYPE.BOOLEAN, "false")).toThrow(
+      /QWP BOOLEAN column 'c' accepts only booleans/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.BOOLEAN, false)).not.toThrow();
+    expect(cell(QWP_COLUMN_TYPE.BOOLEAN, true)).not.toThrow();
     expect(cell(QWP_COLUMN_TYPE.BYTE, 300)).toThrow(
       /QWP BYTE column 'c' value 300 must be an integer between -128 and 127/,
     );

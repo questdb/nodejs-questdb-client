@@ -417,11 +417,23 @@ describe("QWP unified Node client configuration", () => {
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=localhost;compression_level=9;"),
     ).toThrow(/compression_level requires compression/);
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;compression=raw;compression_level=9;",
+      ),
+    ).toThrow(/compression_level requires compression=zstd or compression=auto/);
     const zstd = parseQwpNodeClientConfig(
       "ws::addr=localhost;compression=zstd;compression_level=9;",
     );
     expect(zstd.egress).toMatchObject({
       compression: "zstd",
+      compressionLevel: 9,
+    });
+    const auto = parseQwpNodeClientConfig(
+      "ws::addr=localhost;compression=auto;compression_level=9;",
+    );
+    expect(auto.egress).toMatchObject({
+      compression: "auto",
       compressionLevel: 9,
     });
   });
