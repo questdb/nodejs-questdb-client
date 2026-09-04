@@ -458,6 +458,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     connectionListenerInboxCapacity = 64,
     errorInboxCapacity = 256,
     onSenderError?: (error: QwpSenderError) => void,
+    /**
+     * Whether the caller actually asked for durable progress. The handshake
+     * flag alone is the server's answer, not the client's question, and only
+     * the question decides which watermark this connection maintains.
+     */
+    private readonly durableAckTracked = true,
   ) {
     this.store = store;
     this.lazyReplayStore = isLazyReplayStore(store) ? store : undefined;
@@ -568,6 +574,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     errorInboxCapacity = 256,
     onSenderError?: (error: QwpSenderError) => void,
     signal?: AbortSignal,
+    durableAckTracked = true,
   ): Promise<QwpReconnectingIngressConnection> {
     const store: QwpIngressReplayStore =
       replayStore ??
@@ -663,6 +670,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         connectionListenerInboxCapacity,
         errorInboxCapacity,
         onSenderError,
+        durableAckTracked,
       );
       // The store's lock is held from here on, so an abort has something to
       // release and must reach the connect that is about to run.
@@ -1457,7 +1465,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         this.highestOkFrameSequence = frame.frameSequence;
       }
       this.clearPoisonThrough(frame.frameSequence);
-      if (this.handshake.durableAckEnabled) {
+      // Gated on the request, not on the handshake flag alone. A server that
+      // reports durable-ACK support the caller never asked for switched this
+      // connection onto a watermark that only DURABLE_ACK frames advance --
+      // and nothing polls for those unless the caller asked, so the watermark
+      // stalled at -1n while cumulative OKs kept arriving. close() then failed
+      // with "pending data may be lost" on a fully acknowledged sender, and
+      // durableTargets accumulated one map per frame with nothing to drain it.
+      if (this.handshake.durableAckEnabled && this.durableAckTracked) {
         frame.durableTargets = new Map(
           response.tables.map((table) => [
             table.name,

@@ -669,6 +669,11 @@ export class QwpIngressSession {
           // replay store -- so close() could not tear down the one connect
           // that holds a lock.
           signal,
+          // The connection keeps its own watermark, so it needs the same
+          // answer durableAckTracked gives here: the handshake flag is the
+          // server's, and only the caller's request decides whether ordinary
+          // OKs or durable progress may advance it.
+          options.durableAckKeepaliveMs !== undefined,
         )
       : await factory(signal);
     try {
@@ -705,13 +710,40 @@ export class QwpIngressSession {
   }
 
   /**
-   * Highest cumulative ACK watermark. When durable ACK was negotiated this
+   * Whether this session maintains a durable watermark at all.
+   *
+   * The handshake flag on its own is not enough: durable targets are tracked
+   * only when the caller asked for durable progress with
+   * durableAckKeepaliveMs, which is also what waitForDurable() requires. The
+   * two conditions have to be read together everywhere, because a session
+   * that reports a watermark nothing advances is worse than one that reports
+   * the ordinary ACK -- it stalls rather than degrades.
+   *
+   * Zero is a tracking-on, polling-off setting and stays inside the tracked
+   * set; only `undefined` means the caller never asked.
+   */
+  private get durableAckTracked(): boolean {
+    return (
+      this.options.durableAckKeepaliveMs !== undefined &&
+      this.connection.handshake.durableAckEnabled === true
+    );
+  }
+
+  /**
+   * Highest cumulative ACK watermark. When durable ACK is being tracked this
    * advances only after durability; otherwise it follows ordinary OK ACKs.
    */
   get acknowledgedFrameSequence(): bigint {
     const transport = this.connection.getIngressMetrics?.();
     if (transport) return transport.acknowledgedFrameSequence;
-    return this.connection.handshake.durableAckEnabled
+    // Keyed on tracking, not on the handshake flag alone. A server that
+    // reports durable-ACK support the caller never asked for -- or a session
+    // built directly on a durable-capable connection without
+    // durableAckKeepaliveMs -- left this pinned at -1n while the server's
+    // cumulative OK had already landed, so waitForAcknowledged() timed out on
+    // acknowledged frames and close() failed with QwpSenderCloseTimeoutError
+    // and "pending data may be lost" on a fully acknowledged sender.
+    return this.durableAckTracked
       ? this.durableAcknowledgedSequence
       : this.acknowledgedSequence;
   }
@@ -1531,12 +1563,7 @@ export class QwpIngressSession {
   }
 
   private trackDurableTargets(response: QwpIngressResponse): void {
-    if (
-      this.options.durableAckKeepaliveMs === undefined ||
-      !this.connection.handshake.durableAckEnabled
-    ) {
-      return;
-    }
+    if (!this.durableAckTracked) return;
     for (const table of response.tables) {
       const durable = this.durableWatermarks.get(table.name);
       if (durable !== undefined && durable >= table.sequenceTransaction) {
@@ -1647,10 +1674,11 @@ export class QwpIngressSession {
 
   private scheduleDurablePoll(): void {
     const interval = this.options.durableAckKeepaliveMs;
+    // Zero is tracked but never polled, so it is excluded here and nowhere
+    // else.
     if (
-      interval === undefined ||
       interval === 0 ||
-      !this.connection.handshake.durableAckEnabled ||
+      !this.durableAckTracked ||
       this.pendingDurableTargets.size === 0 ||
       this.durablePollTimer
     ) {

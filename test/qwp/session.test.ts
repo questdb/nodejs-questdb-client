@@ -2083,6 +2083,45 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
+  it("keeps the ordinary watermark when durable ACKs are negotiated but untracked", async () => {
+    // The watermark used to switch on the handshake flag alone, while durable
+    // targets are only tracked when the caller asked for them with
+    // durableAckKeepaliveMs. A session negotiated durable -- here by a server
+    // that selects the subprotocol without being asked -- then reported a
+    // watermark nothing advances: waitForAcknowledged() timed out on frames
+    // the server had already acknowledged, and close() failed with
+    // "pending data may be lost" on a fully acknowledged sender.
+    const socket = new FakeWebSocket();
+    socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+    const connecting = connectQwpBrowserIngress(
+      {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      },
+      {},
+    );
+    socket.open();
+    const session = await connecting;
+    expect(session.handshake.durableAckEnabled).toBe(true);
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+      );
+    };
+
+    await session.publishFrame(Uint8Array.of(1));
+    const sequence = session.publishedFrameSequence;
+    await vi.waitFor(() =>
+      expect(session.metrics.acknowledgedSequence).toBe(0n),
+    );
+    // Nothing tracks durability here, so the cumulative OK is the watermark.
+    expect(session.acknowledgedFrameSequence).toBe(0n);
+    await expect(
+      session.waitForAcknowledged(sequence, 1_000),
+    ).resolves.toBeUndefined();
+    await session.close();
+  });
+
   it("fails a fixed session and its ACK waiters after a publication-only NACK", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
