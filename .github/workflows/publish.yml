@@ -54,6 +54,11 @@ jobs:
       - name: Check for build artifacts
         run: node scripts/check-build-artifacts.mjs
 
+      # Both packages are published from one commit, and npm-publish silently
+      # skips a version that already exists. Fail here instead of half-releasing.
+      - name: Check release versions
+        run: node scripts/check-release-versions.mjs
+
       - name: Publish @questdb/nodejs-client
         uses: JS-DevTools/npm-publish@v3
         with:

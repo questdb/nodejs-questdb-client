@@ -110,6 +110,16 @@ compiled table writers promise per-column row typing that lives only in the
 emitted declarations, which is why `pnpm typecheck:dist` exists alongside
 `pnpm test:dist`.
 
+## Releasing
+
+`.github/workflows/publish.yml` publishes both packages from one commit, so
+bump `packages/nodejs-client/package.json` and
+`packages/browser-client/package.json` to the same new version before
+dispatching it. `node scripts/check-release-versions.mjs` runs first and
+refuses a dispatch whose version either package has already published, because
+the publish action skips an existing version silently and would otherwise
+release only the other half.
+
 ## Making Changes
 
 1. Create a new branch for your changes:
