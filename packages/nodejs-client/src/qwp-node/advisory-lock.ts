@@ -50,7 +50,23 @@ interface OwnerRecord {
    * acquisition happens to occupy that path now.
    */
   readonly token?: string;
+  /**
+   * Identifies the writing process, not the acquisition.
+   *
+   * `pid` alone cannot: a producer that is SIGKILLed and restarted into the
+   * same PID -- the container shape where the app is always PID 1, or PID
+   * wraparound -- leaves a record whose PID is alive again, as the successor
+   * itself. Absent on records written before this field existed, which fall
+   * back to expiring by mtime.
+   */
+  readonly instance?: string;
 }
+
+/**
+ * Minted once per process, so a record naming this PID can be told apart from
+ * one this process actually wrote.
+ */
+const PROCESS_INSTANCE = randomUUID();
 
 /** @internal Advisory-lock contention with Java-compatible diagnostics. */
 export class QwpNodeAdvisoryLockBusyError extends Error {
@@ -173,7 +189,12 @@ export class QwpNodeAdvisoryLock {
     try {
       await writeFile(
         join(ownerPath, OWNER_FILE),
-        JSON.stringify({ pid: process.pid, host: hostname(), token }),
+        JSON.stringify({
+          pid: process.pid,
+          host: hostname(),
+          token,
+          instance: PROCESS_INSTANCE,
+        }),
         { encoding: "utf8", mode: 0o600 },
       );
       ownerMtimeMs = await touchOwnerDirectory(ownerPath);
@@ -395,7 +416,12 @@ export class QwpNodeAdvisoryLock {
     try {
       await writeFile(
         join(this.ownerPath, OWNER_FILE),
-        JSON.stringify({ pid: process.pid, host: hostname(), token }),
+        JSON.stringify({
+          pid: process.pid,
+          host: hostname(),
+          token,
+          instance: PROCESS_INSTANCE,
+        }),
         { encoding: "utf8", mode: 0o600 },
       );
       this.ownerMtimeMs = await touchOwnerDirectory(this.ownerPath);
@@ -494,7 +520,29 @@ async function isStale(ownerPath: string, mtimeMs: number): Promise<boolean> {
   return (
     owner.state === "present" &&
     owner.record.host === hostname() &&
-    !isPidAlive(owner.record.pid)
+    (!isPidAlive(owner.record.pid) || isReusedPid(owner.record))
+  );
+}
+
+/**
+ * Whether a record names a PID that is alive only because this process is now
+ * that PID.
+ *
+ * `isPidAlive` answers "yes" for our own PID, so a producer SIGKILLed and
+ * restarted into the same PID -- a container where the app is always PID 1, or
+ * PID wraparound -- could not adopt its predecessor's slot through the fast
+ * path and waited out the full staleness window, reporting itself as the
+ * holder while it did. A record naming this PID that this process did not
+ * write can only have come from a predecessor that is gone.
+ *
+ * Records written before `instance` existed return false and keep expiring by
+ * mtime, which is the conservative answer.
+ */
+function isReusedPid(record: OwnerRecord): boolean {
+  return (
+    record.pid === process.pid &&
+    record.instance !== undefined &&
+    record.instance !== PROCESS_INSTANCE
   );
 }
 
@@ -529,7 +577,7 @@ async function readOwnerFile(ownerPath: string): Promise<OwnerRead> {
   try {
     const parsed: unknown = JSON.parse(contents);
     if (parsed && typeof parsed === "object") {
-      const { pid, host, token } = parsed as Partial<OwnerRecord>;
+      const { pid, host, token, instance } = parsed as Partial<OwnerRecord>;
       if (typeof pid === "number" && typeof host === "string") {
         return {
           state: "present",
@@ -537,6 +585,7 @@ async function readOwnerFile(ownerPath: string): Promise<OwnerRead> {
             pid,
             host,
             token: typeof token === "string" ? token : undefined,
+            instance: typeof instance === "string" ? instance : undefined,
           },
         };
       }

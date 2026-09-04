@@ -2062,15 +2062,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
    * handler it logs, so abandoned journal bytes are never silent.
    */
   private reportRecoveryDataLoss(report: QwpNodeReplayDataLossReport): void {
-    const message =
-      report.discardedBytes > 0
-        ? `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
-          `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`
-        : // A segment whose records are gone leaves no bytes to count, so the
-          // extent is unknown rather than zero. Say that instead of reporting
-          // a confident "discarded 0 byte(s)".
-          `QWP store-and-forward lost journalled data of undetermined size during recovery ` +
-          `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`;
+    const message = formatQwpNodeReplayDataLoss(report);
     if (!this.onRecoveryDataLoss) {
       log("error", message);
       return;
@@ -2941,6 +2933,26 @@ function corruptRecord(
 }
 
 /** @internal True for slot names reserved for operator-inspected data loss. */
+/**
+ * Renders a recovery data-loss report for a human.
+ *
+ * `discardedBytes: 0` is the "extent unknown" signal, not a count: a segment
+ * whose record region reads back as zeros leaves nothing to measure. Reporting
+ * it verbatim turned a whole-segment loss into "discarded 0 journal byte(s)",
+ * which reads as though nothing was lost -- so every channel that surfaces one
+ * of these reports formats it here rather than interpolating the field.
+ */
+export function formatQwpNodeReplayDataLoss(
+  report: QwpNodeReplayDataLossReport,
+): string {
+  const where = `[directory=${report.directory}, segment=${report.segmentFile}]`;
+  return report.discardedBytes > 0
+    ? `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
+        `${where}: ${report.reason}`
+    : `QWP store-and-forward lost journalled data of undetermined size during recovery ` +
+        `${where}: ${report.reason}`;
+}
+
 export function isQwpNodeReplayQuarantineSlotName(name: string): boolean {
   const marker = name.lastIndexOf(QUARANTINE_SLOT_INFIX);
   if (marker <= 0) return false;

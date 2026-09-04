@@ -62,6 +62,7 @@ import {
   type QwpPoolSlotReservation,
 } from "../../client-core/src/_qwp/client";
 import {
+  formatQwpNodeReplayDataLoss,
   quarantineQwpNodeReplayStore,
   QwpNodeFileReplayStore,
   QwpReplayStoreCorruptionError,
@@ -766,8 +767,7 @@ function withRecoveryDataLossReporter(
     ...options,
     onRecoveryDataLoss: (report: QwpNodeReplayDataLossReport) => {
       const senderError = createQwpDataLossSenderError(
-        `QWP store-and-forward discarded ${report.discardedBytes} journal byte(s) during recovery ` +
-          `[directory=${report.directory}, segment=${report.segmentFile}]: ${report.reason}`,
+        formatQwpNodeReplayDataLoss(report),
       );
       // A rejected promise from an async onSenderError must fall back to the
       // default handler, exactly as a synchronous throw does.

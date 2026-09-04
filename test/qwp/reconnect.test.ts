@@ -4817,6 +4817,72 @@ describe("QWP Node file replay store", () => {
     await recovered.close();
   });
 
+  it("reports an undetermined-extent loss as such through onSenderError", async () => {
+    // The store's own logger words this correctly; the onSenderError bridge
+    // interpolated discardedBytes instead, so a whole lost segment reached an
+    // alerting consumer as "discarded 0 journal byte(s)" -- which reads as
+    // nothing lost. Both channels format through the same helper now.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 12; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    await first.close();
+
+    const segments = (await readdir(directory))
+      .filter((name) => name.endsWith(".sfa"))
+      .sort();
+    const tail = segments[segments.length - 1];
+    const path = join(directory, tail);
+    const size = (await stat(path)).size;
+    const file = await open(path, "r+");
+    try {
+      await file.write(Buffer.alloc(size - 24, 0), 0, size - 24, 24);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const senderErrors: QwpSenderError[] = [];
+    const session = await connectQwpNodeIngress(
+      {
+        // Nothing listens here; `async` startup resolves regardless, and the
+        // recovery report is what this test is after.
+        url: "ws://127.0.0.1:1/write/v4",
+        storeAndForward: {
+          directory,
+          maxSegmentBytes: 4096,
+          durability: "memory",
+          initialConnectMode: "async",
+        },
+      },
+      {
+        onSenderError: (error) => senderErrors.push(error),
+        reconnect: { initialBackoffMs: 10_000, maxBackoffMs: 10_000 },
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(senderErrors).not.toHaveLength(0));
+      const dataLoss = senderErrors.find(
+        (error) => error.category === "data-loss",
+      );
+      expect(dataLoss?.serverMessage).toMatch(
+        /lost journalled data of undetermined size/,
+      );
+      expect(dataLoss?.serverMessage).not.toMatch(/discarded 0 journal byte/);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
   it("stays silent when an undamaged journal is reopened", async () => {
     // The counterpart to the test above: an ordinary reopen must not report a
     // loss, or the notification means nothing.
@@ -5445,6 +5511,45 @@ describe("QWP Node file replay store", () => {
     await expect(store.load()).resolves.toEqual([]);
     await store.close();
     await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("reclaims a slot from a predecessor whose PID this process now has", async () => {
+    const directory = await trackedDirectory();
+    const ownerPath = join(directory, ".lock.owner");
+    await mkdir(ownerPath);
+    // A producer SIGKILLed and restarted into the same PID -- the container
+    // shape where the app is always PID 1, or PID wraparound. isPidAlive()
+    // answers "yes" because the successor *is* that PID now, so the fast path
+    // could not reclaim and startup blocked for the full 15s staleness window,
+    // reporting the caller's own PID as the holder while it did. The record's
+    // instance is what separates a predecessor from a live self.
+    await writeFile(
+      join(ownerPath, "owner"),
+      JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        instance: "00000000-0000-4000-8000-000000000000",
+      }),
+    );
+
+    const store = new QwpNodeFileReplayStore({ directory });
+    await expect(store.load()).resolves.toEqual([]);
+    await store.close();
+    await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("leaves a slot held by this process's own live acquisition alone", async () => {
+    // The mirror of the case above: a record this process really did write
+    // must never be reclaimed as a reused PID, or a lock would steal itself.
+    const directory = await trackedDirectory();
+    const lock = await QwpNodeAdvisoryLock.acquire(directory);
+    try {
+      await expect(QwpNodeAdvisoryLock.acquire(directory)).rejects.toThrow(
+        /advisory lock is already held/,
+      );
+    } finally {
+      await lock.release();
+    }
   });
 
   it("leaves a slot owned by a live heartbeat alone", async () => {
