@@ -705,6 +705,51 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("disowns the eager first connect when the attempt is aborted", async () => {
+    // connect() starts the first transport eagerly and nothing observes that
+    // promise until connectLoop's first attempt awaits it. An abort leaves
+    // before then, so the cleanup has to disown it on every such path -- not
+    // only when the reconnecting connection was never constructed. Without
+    // that the promise floated: a transport that opened anyway was never
+    // closed, and a failing one surfaced as an unhandled rejection, which
+    // Node turns into process exit by default, *after* the caller had already
+    // handled the rejection connect() itself returned.
+    const controller = new AbortController();
+    controller.abort();
+
+    // A factory that ignores the signal and opens anyway must still be closed.
+    const opened = new FakeConnection("primary");
+    await expect(
+      QwpIngressSession.connect(async () => opened, {}, controller.signal),
+    ).rejects.toThrow();
+    await expect(
+      Promise.race([
+        opened.closed.then(() => "closed"),
+        new Promise((resolve) => setTimeout(() => resolve("leaked"), 1_000)),
+      ]),
+    ).resolves.toBe("closed");
+
+    // A factory that fails must leave no unhandled rejection behind it.
+    const unhandled: unknown[] = [];
+    const observe = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", observe);
+    try {
+      await expect(
+        QwpIngressSession.connect(
+          async () => {
+            throw new Error("first connect failed");
+          },
+          {},
+          controller.signal,
+        ),
+      ).rejects.toThrow();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.off("unhandledRejection", observe);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
   it("bounds memory replay and resumes publication after ACK trimming", async () => {
     const connection = new FakeConnection("primary");
     const session = await QwpIngressSession.connect(async () => connection, {

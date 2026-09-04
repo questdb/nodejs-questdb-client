@@ -583,7 +583,30 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     // and even quarantine directories.
     const abortError = () =>
       signal?.reason ?? new Error("QWP connect was aborted");
-    if (signal?.aborted) throw abortError();
+    // The caller started `initialConnection` eagerly and nothing observes it
+    // until connectLoop's first attempt awaits it, so every path that leaves
+    // before that has to disown it here. Skipping this left the promise
+    // floating: its rejection became an unhandled rejection -- which Node
+    // turns into process exit by default -- fired *after* the caller had
+    // already handled the rejection connect() itself returned, and a
+    // connection it resolved anyway was leaked instead of closed.
+    //
+    // Deliberately not awaited. Attaching the handlers is what stops the
+    // unhandled rejection, and it takes effect synchronously; waiting for the
+    // attempt to settle would let a factory that ignores its signal turn an
+    // abort into a hang -- the failure the store-and-forward slot-release
+    // test exists to prevent. Nothing is left to sequence after it either:
+    // the connection is disowned, so closing it is pure cleanup.
+    const disownInitialConnection = (): void => {
+      void initialConnection?.then(
+        (opened) => opened.close().catch(() => undefined),
+        () => undefined,
+      );
+    };
+    if (signal?.aborted) {
+      disownInitialConnection();
+      throw abortError();
+    }
     try {
       const lazyStore = isLazyReplayStore(store) ? store : undefined;
       const records: readonly LoadedReplayRecord[] = lazyStore
@@ -670,9 +693,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       return connection;
     } catch (error) {
       await connection?.close().catch(() => undefined);
+      // Unconditional: an abort landing after the connection was constructed
+      // -- the aborted() check below it, or the onAbort that closes it out
+      // from under connectLoop -- leaves before attempt 1 awaits
+      // initialConnection just as surely as a failure before it. Guarding
+      // this on `!connection` is what let those two paths orphan it. The
+      // connection above is already closed by the time this runs, so closing
+      // a candidate it had adopted is a no-op rather than a double free.
+      disownInitialConnection();
       if (!connection) {
-        const opened = await initialConnection?.catch(() => undefined);
-        await opened?.close().catch(() => undefined);
         await store.close().catch(() => undefined);
       }
       throw error;
