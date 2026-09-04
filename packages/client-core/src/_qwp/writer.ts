@@ -292,7 +292,7 @@ export function double(): QwpWriterColumn<number> {
 }
 
 /** Defines a regular timestamp column with an explicit input unit. */
-export function timestamp<const Unit extends QwpTimestampUnit = "us">(
+export function timestamp<Unit extends QwpTimestampUnit = "us">(
   unit: Unit = "us" as Unit,
 ): QwpWriterColumn<TimestampInput<Unit>> {
   validateTimestampUnit(unit);
@@ -300,7 +300,7 @@ export function timestamp<const Unit extends QwpTimestampUnit = "us">(
 }
 
 /** Defines the writer's required designated timestamp field. */
-export function designatedTimestamp<const Unit extends QwpTimestampUnit = "us">(
+export function designatedTimestamp<Unit extends QwpTimestampUnit = "us">(
   unit: Unit = "us" as Unit,
 ): QwpWriterColumn<TimestampInput<Unit>, true> {
   validateTimestampUnit(unit);

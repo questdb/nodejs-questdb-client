@@ -231,7 +231,7 @@ class Sender {
    * Compiles a table-bound object-row writer for QWP transports.
    * Legacy ILP transports continue to use the fluent row API.
    */
-  writer<const Schema extends QwpWriterSchema>(
+  writer<Schema extends QwpWriterSchema>(
     tableName: string,
     schema: Schema,
   ): QwpTableWriter<Schema> {

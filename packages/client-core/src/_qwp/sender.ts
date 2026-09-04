@@ -1097,7 +1097,7 @@ export class QwpSender {
    * Compiles an immutable table schema into an atomic object-row writer.
    * The returned writer remains usable after this sender is reset.
    */
-  writer<const Schema extends QwpWriterSchema>(
+  writer<Schema extends QwpWriterSchema>(
     tableName: string,
     schema: Schema,
   ): QwpTableWriter<Schema> {
