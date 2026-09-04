@@ -796,8 +796,8 @@ abstract class SenderBufferBase implements SenderBuffer {
    * integer portion of the decimal value.
    * @param {number} scale - The number of fractional digits (the scale) of the decimal value.
    * @returns {SenderBuffer} Returns with a reference to this buffer.
-   * @throws {RangeError} If `scale` is not between 0 and 76. Scale validation
-   * runs even when `unscaled` is null or undefined.
+   * @throws {RangeError} If `scale` is not an integer between 0 and 76. Scale
+   * validation runs even when `unscaled` is null or undefined.
    * @throws {Error} Indicating decimals are not supported in protocol v1/v2.
    */
   decimalColumn(
@@ -808,7 +808,7 @@ abstract class SenderBufferBase implements SenderBuffer {
     this.validateColumnCall(name);
     // The scale describes the column, not this row's value. Keep its validation
     // consistent with protocol v3 even though v1/v2 reject the decimal API.
-    if (scale < 0 || scale > 76) {
+    if (!Number.isSafeInteger(scale) || scale < 0 || scale > 76) {
       throw new RangeError("Scale must be between 0 and 76");
     }
     throw new Error("Decimals are not supported in protocol v1/v2");

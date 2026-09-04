@@ -215,7 +215,7 @@ interface SenderBuffer {
    * @throws {Error} If decimals are not supported by the buffer implementation, or validation fails.
    * Possible validation errors:
    * - `unscaled` length is not between 0 and 32 bytes.
-   * - `scale` is not between 0 and 76.
+   * - `scale` is not an integer between 0 and 76.
    * - `unscaled` contains invalid bytes.
    */
   decimalColumn(

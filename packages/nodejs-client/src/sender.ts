@@ -515,7 +515,7 @@ class Sender {
    * @returns {Sender} Returns with a reference to this buffer.
    * @throws Error if decimals are not supported by the buffer implementation, or decimal validation fails:
    * - unscaled value length is not between 0 and 32 bytes
-   * - scale is not between 0 and 76
+   * - scale is not an integer between 0 and 76
    * - unscaled value contains invalid bytes
    */
   decimalColumn(

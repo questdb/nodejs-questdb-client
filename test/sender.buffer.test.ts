@@ -592,9 +592,11 @@ describe("Sender message builder test suite (anything not covered in client inte
         "Symbol can be added only after table name is set and before any column added",
       );
       // The scale describes the column, not this row's value.
-      expect(() => build().decimalColumn("d", value, 999)).toThrow(
-        "Scale must be between 0 and 76",
-      );
+      for (const scale of [999, 1.5, Number.NaN]) {
+        expect(() => build().decimalColumn("d", value, scale)).toThrow(
+          "Scale must be between 0 and 76",
+        );
+      }
       // Nor does the timestamp unit: a bad unit is reported even when the
       // value is omitted, rather than only on rows that carry one.
       expect(() => build().timestampColumn("ts", value, "s" as "us")).toThrow(
@@ -979,7 +981,7 @@ describe("Sender message builder test suite (anything not covered in client inte
             "Decimals are not supported in protocol v1/v2",
           );
 
-          for (const scale of [-1, 77]) {
+          for (const scale of [-1, 77, 1.5, Number.NaN]) {
             target.reset();
             expect(() =>
               target.table("t").decimalColumn("d", value, scale),
@@ -1897,21 +1899,19 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("throws when decimal scale is outside the accepted range", async function () {
+  it("throws when decimal scale is not an integer in range", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "3",
       host: "host",
       init_buf_size: 1024,
     });
-    expect(() => sender.table("fx").decimalColumn("mid", 1n, -1)).toThrow(
-      "Scale must be between 0 and 76",
-    );
-    sender.reset();
-    expect(() => sender.table("fx").decimalColumn("mid", 1n, 77)).toThrow(
-      "Scale must be between 0 and 76",
-    );
-    sender.reset();
+    for (const scale of [-1, 77, 1.5, Number.NaN]) {
+      expect(() =>
+        sender.table("fx").decimalColumn("mid", 1n, scale),
+      ).toThrow("Scale must be between 0 and 76");
+      sender.reset();
+    }
     await sender.close();
   });
 

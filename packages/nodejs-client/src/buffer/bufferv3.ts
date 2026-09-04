@@ -84,7 +84,7 @@ class SenderBufferV3 extends SenderBufferV2 {
    * @throws {Error} If decimals are not supported by the buffer implementation, or validation fails.
    * Possible validation errors:
    * - `unscaled` length is not between 0 and 32 bytes.
-   * - `scale` is not between 0 and 76.
+   * - `scale` is not an integer between 0 and 76.
    * - `unscaled` contains invalid bytes.
    */
   decimalColumn(
@@ -96,7 +96,7 @@ class SenderBufferV3 extends SenderBufferV2 {
     // The scale describes the column, not this row's value, so it is checked
     // before the value is: otherwise a bad constant is reported only on rows
     // that happen to carry a value.
-    if (scale < 0 || scale > 76) {
+    if (!Number.isSafeInteger(scale) || scale < 0 || scale > 76) {
       throw new RangeError("Scale must be between 0 and 76");
     }
     // A null or undefined value omits the column entirely (see issue #28).
