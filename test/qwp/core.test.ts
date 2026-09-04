@@ -35,6 +35,8 @@ import {
   QwpProtocolError,
   QwpSymbolDictionary,
   QwpTableBuffer,
+  type QwpColumnBuffer,
+  type QwpColumnType,
   qwpGorillaSize,
   qwpVarintSize,
   readQwpVarint,
@@ -318,6 +320,73 @@ describe("QWP ingress codec", () => {
       .values.push({ dimensions: [2, 2], values: [1, 2, 3, 4] });
     consistent.nextRow();
     expect(() => encodeQwpIngressFrame([consistent])).not.toThrow();
+  });
+
+  it("rejects a fixed-width cell its column cannot represent", () => {
+    // Every primitive the encoder writes through wraps silently, so an
+    // out-of-range value used to reach QuestDB as a different, valid-looking
+    // number in a frame whose payload length was perfectly self-consistent --
+    // no error on either side. BYTE 300 arrived as 44 and DECIMAL64 2^63 as
+    // its own negation. The high-level setters all reject these; a value
+    // pushed straight onto a column buffer -- the documented low-level path --
+    // did not.
+    const cell = (
+      type: QwpColumnType,
+      value: unknown,
+      prepare?: (table: QwpTableBuffer, column: QwpColumnBuffer) => void,
+    ) => {
+      const table = new QwpTableBuffer("events");
+      const column = table.getOrCreateColumn("c", type)!;
+      prepare?.(table, column);
+      column.values.push(value);
+      table.nextRow();
+      return () => encodeQwpIngressFrame([table]);
+    };
+
+    expect(cell(QWP_COLUMN_TYPE.BYTE, 300)).toThrow(
+      /QWP BYTE column 'c' value 300 must be an integer between -128 and 127/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.SHORT, 70000)).toThrow(/QWP SHORT column 'c'/);
+    expect(cell(QWP_COLUMN_TYPE.INT, 2 ** 31)).toThrow(/QWP INT column 'c'/);
+    expect(cell(QWP_COLUMN_TYPE.IPV4, 0x100000001)).toThrow(
+      /QWP IPV4 column 'c'/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.LONG, 2n ** 64n + 7n)).toThrow(
+      /QWP LONG column 'c' value 18446744073709551623 does not fit a signed 64-bit integer/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.TIMESTAMP, 2n ** 63n)).toThrow(
+      /QWP TIMESTAMP column 'c'/,
+    );
+    expect(
+      cell(QWP_COLUMN_TYPE.DECIMAL64, 2n ** 63n, (table, column) =>
+        table.setDecimalScale(column, 0),
+      ),
+    ).toThrow(
+      /QWP DECIMAL column 'c' unscaled value 9223372036854775808 does not fit a signed 64-bit integer/,
+    );
+    expect(
+      cell(QWP_COLUMN_TYPE.DECIMAL128, 2n ** 127n, (table, column) =>
+        table.setDecimalScale(column, 0),
+      ),
+    ).toThrow(/does not fit a signed 128-bit integer/);
+
+    // A negative or over-precision geohash used to spill into the stray high
+    // bits of the last byte, encoding differently than the bind encoder does
+    // for the same input.
+    const geohash = (value: bigint) =>
+      cell(QWP_COLUMN_TYPE.GEOHASH, value, (table, column) =>
+        table.setGeohashPrecision(column, 5),
+      );
+    expect(geohash(-1n)).toThrow(
+      /QWP GEOHASH column 'c' value -1 must be between 0 and 31 for 5 bits/,
+    );
+    expect(geohash(0x20n)).toThrow(/must be between 0 and 31 for 5 bits/);
+    expect(geohash(0x1fn)).not.toThrow();
+
+    // In-range values still encode, and to the same bytes as before.
+    expect(cell(QWP_COLUMN_TYPE.BYTE, 127)).not.toThrow();
+    expect(cell(QWP_COLUMN_TYPE.IPV4, -0x80000000)).not.toThrow();
+    expect(cell(QWP_COLUMN_TYPE.LONG, 2n ** 63n - 1n)).not.toThrow();
   });
 
   it("slices compacted table rows without losing null positions", () => {

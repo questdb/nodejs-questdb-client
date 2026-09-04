@@ -406,12 +406,66 @@ function writeNullHeader(
   writer.writeBytes(bitmap);
 }
 
+/**
+ * Rejects a fixed-width cell that its column cannot represent.
+ *
+ * Every primitive this file writes through wraps silently -- the DataView
+ * setters truncate and BigInt.asIntN folds -- so without these guards an
+ * out-of-range value reaches QuestDB as a different, valid-looking number
+ * inside a frame whose payload length is perfectly self-consistent, and
+ * neither side reports anything. BYTE 300 arrived as 44, DECIMAL64 2^63 as
+ * its own negation.
+ *
+ * Every high-level entry point already rejects the same input --
+ * checkedRange, checkedInt64, fitsSigned, parseIpv4 -- so this closes the gap
+ * for a value pushed straight onto a column buffer, the documented low-level
+ * path, exactly as the array-shape check in columnPayloadSize() does for the
+ * shape invariant.
+ */
+function checkedCellRange(
+  value: number,
+  minimum: number,
+  maximum: number,
+  label: string,
+  name: string,
+): number {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(
+      `QWP ${label} column '${name}' value ${value} must be an integer between ${minimum} and ${maximum}`,
+    );
+  }
+  return value;
+}
+
+/** The bigint counterpart of {@link checkedCellRange}. */
+function checkedCellSigned(
+  value: bigint,
+  bits: number,
+  label: string,
+  name: string,
+): bigint {
+  if (BigInt.asIntN(bits, value) !== value) {
+    throw new RangeError(
+      `QWP ${label} column '${name}' value ${value} does not fit a signed ${bits}-bit integer`,
+    );
+  }
+  return value;
+}
+
 function writeSignedLittleEndian(
   writer: QwpByteWriter,
   value: bigint,
   width: number,
+  name: string,
 ): void {
+  // asIntN was already being computed here, so the comparison that turns the
+  // silent fold into a rejection is free.
   let remaining = BigInt.asIntN(width * 8, value);
+  if (remaining !== value) {
+    throw new RangeError(
+      `QWP DECIMAL column '${name}' unscaled value ${value} does not fit a signed ${width * 8}-bit integer`,
+    );
+  }
   for (let index = 0; index < width; index++) {
     writer.writeUint8(Number(remaining & 0xffn));
     remaining >>= 8n;
@@ -436,10 +490,16 @@ function writeColumn(
       return;
     }
     case QWP_COLUMN_TYPE.BYTE:
-      for (const value of column.values) writer.writeInt8(Number(value));
+      for (const value of column.values)
+        writer.writeInt8(
+          checkedCellRange(Number(value), -128, 127, "BYTE", column.name),
+        );
       return;
     case QWP_COLUMN_TYPE.SHORT:
-      for (const value of column.values) writer.writeInt16(Number(value));
+      for (const value of column.values)
+        writer.writeInt16(
+          checkedCellRange(Number(value), -32768, 32767, "SHORT", column.name),
+        );
       return;
     case QWP_COLUMN_TYPE.CHAR:
       for (const value of column.values) {
@@ -451,11 +511,30 @@ function writeColumn(
       }
       return;
     case QWP_COLUMN_TYPE.INT:
-      for (const value of column.values) writer.writeInt32(Number(value));
+      for (const value of column.values)
+        writer.writeInt32(
+          checkedCellRange(
+            Number(value),
+            -0x80000000,
+            0x7fffffff,
+            "INT",
+            column.name,
+          ),
+        );
       return;
     case QWP_COLUMN_TYPE.IPV4:
+      // Signed int32 and unsigned uint32 both carry the same packed bits, the
+      // pair parseIpv4() accepts, so the range spans both.
       for (const value of column.values)
-        writer.writeUint32(Number(value) >>> 0);
+        writer.writeUint32(
+          checkedCellRange(
+            Number(value),
+            -0x80000000,
+            0xffffffff,
+            "IPV4",
+            column.name,
+          ) >>> 0,
+        );
       return;
     case QWP_COLUMN_TYPE.FLOAT:
       for (const value of column.values) writer.writeFloat32(Number(value));
@@ -463,13 +542,33 @@ function writeColumn(
     // DATE joins LONG here: raw int64s, no per-column encoding byte.
     // See columnPayloadSize() for why it is not a timestamp on ingress.
     case QWP_COLUMN_TYPE.LONG:
-    case QWP_COLUMN_TYPE.DATE:
+    case QWP_COLUMN_TYPE.DATE: {
+      const label = column.type === QWP_COLUMN_TYPE.DATE ? "DATE" : "LONG";
       for (const value of column.values) {
-        writer.writeBigInt64(BigInt(value as number | bigint));
+        writer.writeBigInt64(
+          checkedCellSigned(
+            BigInt(value as number | bigint),
+            64,
+            label,
+            column.name,
+          ),
+        );
       }
       return;
+    }
     case QWP_COLUMN_TYPE.TIMESTAMP:
     case QWP_COLUMN_TYPE.TIMESTAMP_NANOS: {
+      const label =
+        column.type === QWP_COLUMN_TYPE.TIMESTAMP
+          ? "TIMESTAMP"
+          : "TIMESTAMP_NANOS";
+      // Checked before the branch so the Gorilla encoder is covered too: it
+      // consumes these values itself, and a delta computed from an
+      // out-of-int64 input is wrong in the packed stream rather than in a
+      // writeBigInt64 this could have guarded.
+      for (const value of column.values) {
+        checkedCellSigned(BigInt(value as bigint), 64, label, column.name);
+      }
       if (!options.gorilla) {
         for (const value of column.values) {
           writer.writeBigInt64(BigInt(value as bigint));
@@ -549,8 +648,19 @@ function writeColumn(
       const precision = column.geohashPrecision ?? 1;
       writeQwpVarint(writer, precision);
       const width = Math.ceil(precision / 8);
+      // One bigint per column, not per cell. geohashColumn() and the compiled
+      // writers already enforce this range; unchecked here, a negative value
+      // sign-extended into the stray high bits of the last byte and an
+      // over-precision one overflowed into them, so the same input encoded
+      // differently than the bind encoder, which masks it.
+      const limit = 1n << BigInt(precision);
       for (const value of column.values) {
         let remaining = BigInt(value as bigint);
+        if (remaining < 0n || remaining >= limit) {
+          throw new RangeError(
+            `QWP GEOHASH column '${column.name}' value ${remaining} must be between 0 and ${limit - 1n} for ${precision} bits`,
+          );
+        }
         for (let index = 0; index < width; index++) {
           writer.writeUint8(Number(remaining & 0xffn));
           remaining >>= 8n;
@@ -569,7 +679,12 @@ function writeColumn(
             ? 16
             : 32;
       for (const value of column.values) {
-        writeSignedLittleEndian(writer, BigInt(value as bigint), width);
+        writeSignedLittleEndian(
+          writer,
+          BigInt(value as bigint),
+          width,
+          column.name,
+        );
       }
       return;
     }
