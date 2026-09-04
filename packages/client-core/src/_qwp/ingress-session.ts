@@ -523,6 +523,7 @@ export class QwpIngressSession {
     readonly error: QwpIngressNackError;
   };
   private nextSequence = 0n;
+  private highestSentSequence = -1n;
   private sendTail: Promise<void> = Promise.resolve();
   private durablePollTimer?: ReturnType<typeof setTimeout>;
   private readonly localMaxBatchSizeBytes?: number;
@@ -1040,6 +1041,7 @@ export class QwpIngressSession {
     this.totalBytesPublished += frame.byteLength;
     const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
+      this.highestSentSequence = sequence;
       await this.connection.send(frame);
     });
     // A local store-capacity failure is backpressure, not a terminal session
@@ -1100,6 +1102,7 @@ export class QwpIngressSession {
       async () => {
         this.throwIfUnavailable();
         sendStarted = true;
+        this.highestSentSequence = sequence;
         await this.connection.send(frame);
       },
       (error: unknown) => {
@@ -1433,6 +1436,14 @@ export class QwpIngressSession {
     if (response.sequence === null) {
       throw new QwpProtocolError("QWP response is missing its wire sequence");
     }
+    if (response.sequence > this.highestSentSequence) {
+      // A peer can acknowledge only a frame allocated by this session. Trusting
+      // a larger cumulative sequence would resolve future ACK barriers and make
+      // an unsent or unacknowledged frame appear accepted.
+      throw new QwpProtocolError(
+        `QWP response sequence is beyond the last frame sent: ${response.sequence} > ${this.highestSentSequence}`,
+      );
+    }
     if (response.status === QWP_STATUS.OK) {
       this.totalAcks++;
       this.trackDurableFrame(response);
@@ -1584,7 +1595,7 @@ export class QwpIngressSession {
   }
 
   private trackDurableFrame(response: QwpIngressResponse): void {
-    if (!this.connection.handshake.durableAckEnabled) return;
+    if (!this.durableAckTracked) return;
     this.durableFrameTargets.set(
       response.sequence!,
       new Map(

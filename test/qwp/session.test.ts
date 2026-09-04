@@ -41,6 +41,7 @@ import {
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QwpIngressAckTimeoutError,
   QwpIngressNackError,
+  QwpProtocolError,
   QwpIngressResponse,
   QwpIngressSession,
   QwpIngressSessionClosedError,
@@ -2009,6 +2010,30 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
+  it("rejects an ACK beyond the last frame in a fixed session", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting, {
+      onError: () => undefined,
+    });
+
+    await session.publishFrame(Uint8Array.of(1));
+    const acknowledged = session.waitForAcknowledged(0n, 1_000);
+    socket.message(ingressResponse(QWP_STATUS.OK, 100n));
+
+    await expect(acknowledged).rejects.toBeInstanceOf(QwpProtocolError);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
+    expect(socket.closeCalls).toContainEqual({
+      code: 1002,
+      reason: "invalid QWP response",
+    });
+    await session.close();
+  });
+
   it("times out an independent ACK watermark wait without closing the session", async () => {
     vi.useFakeTimers();
     try {
@@ -2116,6 +2141,13 @@ describe("QwpIngressSession", () => {
     );
     // Nothing tracks durability here, so the cumulative OK is the watermark.
     expect(session.acknowledgedFrameSequence).toBe(0n);
+    expect(
+      (
+        session as unknown as {
+          durableFrameTargets: ReadonlyMap<bigint, unknown>;
+        }
+      ).durableFrameTargets.size,
+    ).toBe(0);
     await expect(
       session.waitForAcknowledged(sequence, 1_000),
     ).resolves.toBeUndefined();
@@ -2159,6 +2191,13 @@ describe("QwpIngressSession", () => {
       expect(session.metrics.acknowledgedSequence).toBe(0n),
     );
     expect(session.acknowledgedFrameSequence).toBe(0n);
+    expect(
+      (
+        session as unknown as {
+          durableFrameTargets: ReadonlyMap<bigint, unknown>;
+        }
+      ).durableFrameTargets.size,
+    ).toBe(0);
     await expect(
       session.waitForAcknowledged(0n, 1_000),
     ).resolves.toBeUndefined();
