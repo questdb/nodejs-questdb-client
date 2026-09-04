@@ -402,8 +402,13 @@ function observeConnectionHealth(
   demoteEndpoint: () => void,
   deprioritizeEndpoint: () => void,
 ): QwpBinaryConnection {
-  void connection.closed.then((info) => {
-    if (!info.wasClean) demoteEndpoint();
+  let closeRequested = false;
+  void connection.closed.then(() => {
+    // `wasClean` describes the WebSocket closing handshake, not whether the
+    // endpoint remained usable. A peer can complete that handshake cleanly in
+    // the middle of an operation; only a close initiated through this wrapper
+    // is an intentional owner shutdown that should preserve endpoint affinity.
+    if (!closeRequested) demoteEndpoint();
   }, demoteEndpoint);
   const observed: QwpBinaryConnection = {
     messages: connection.messages,
@@ -425,7 +430,10 @@ function observeConnectionHealth(
         throw error;
       }
     },
-    close: (code, reason) => connection.close(code, reason),
+    close: (code, reason) => {
+      closeRequested = true;
+      return connection.close(code, reason);
+    },
   };
   if (connection.ping) {
     observed.ping = async () => {

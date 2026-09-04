@@ -637,6 +637,52 @@ describe("QWP endpoint failover", () => {
     await session.close();
   });
 
+  it("rotates after a preferred endpoint closes cleanly before its ACK", async () => {
+    const attempts: string[] = [];
+    const connections: FakeConnection[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      async (endpoint) => {
+        attempts.push(String(endpoint));
+        const connection = new FakeConnection(String(endpoint));
+        connections.push(connection);
+        return connection;
+      },
+    );
+    const session = await QwpIngressSession.connect(factory, {
+      reconnect: {
+        maxAttempts: 1,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+      },
+    });
+
+    const pending = session.sendFrame(Uint8Array.of(9));
+    const primary = connections[0];
+    await vi.waitFor(() => expect(primary.sent).toHaveLength(1));
+    // Invoke the underlying connection directly to model a peer-initiated
+    // clean WebSocket closing handshake rather than an owner-requested close.
+    await primary.close(1000, "server restart");
+    await vi.waitFor(() =>
+      expect(
+        connections.find((connection) => connection.endpoint === "secondary")
+          ?.sent,
+      ).toHaveLength(1),
+    );
+    const secondary = connections.find(
+      (connection) => connection.endpoint === "secondary",
+    )!;
+    secondary.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    expect(attempts).toEqual(["primary", "secondary"]);
+    await session.close();
+  });
+
   it("uses a NOT_WRITABLE endpoint only after other endpoints fail", async () => {
     const attempts: string[] = [];
     let secondaryAvailable = true;
@@ -3720,6 +3766,45 @@ describe("QWP ingress reconnect and replay", () => {
 });
 
 describe("QWP egress reconnect and replay", () => {
+  it("waits for a late reconnect candidate before close resolves", async () => {
+    const first = new FakeConnection("primary");
+    const late = new FakeConnection("secondary");
+    let factoryCalls = 0;
+    let releaseLate!: () => void;
+    const session = await QwpEgressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) {
+          queueMicrotask(() => first.receive(serverInfo("primary")));
+          return first;
+        }
+        return new Promise<QwpBinaryConnection>((resolve) => {
+          releaseLate = () => resolve(late);
+        });
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    first.drop();
+    await vi.waitFor(() => expect(factoryCalls).toBe(2));
+    let closeResolved = false;
+    const closing = session.close().then(() => {
+      closeResolved = true;
+    });
+    await Promise.resolve();
+    expect(closeResolved).toBe(false);
+
+    releaseLate();
+    await closing;
+    await expect(late.closed).resolves.toMatchObject({ code: 1000 });
+  });
+
   it("does not start another attempt when the deadline expires in backoff", async () => {
     const random = vi.spyOn(Math, "random").mockReturnValue(0.999);
     let factoryCalls = 0;
