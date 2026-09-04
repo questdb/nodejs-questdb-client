@@ -58,6 +58,7 @@ import {
   QwpIngressReplayStore,
   QwpHandshakeMetadata,
   QwpMemoryReplayAppendTimeoutError,
+  QwpMemoryReplayBatchTooLargeError,
   QwpMemoryReplayFrameTooLargeError,
   QwpProtocolError,
   QwpSymbolDictionary,
@@ -77,6 +78,7 @@ import {
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
 import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
+import { quarantineQwpNodeReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { qwpSegmentMaintenanceWorker } from "../../packages/nodejs-client/src/qwp-node/segment-maintenance-worker";
 import { createQwpEgressFailoverConnectionFactory } from "../../packages/client-core/src/_qwp/_internal/egress-routing";
@@ -2239,6 +2241,89 @@ describe("QWP ingress reconnect and replay", () => {
       sequence: retried.sequence,
     });
     await session.close();
+  });
+
+  it("preflights a split batch before publishing a deferred journal prefix", async () => {
+    const directory = await createTemporaryDirectory();
+    const connection = new FakeConnection("primary");
+    const replayStore = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 128,
+      // One fixed segment: 24-byte segment header, 8-byte record header,
+      // and the configured 128-byte maximum frame payload.
+      maxBytes: 160,
+    });
+    const session = await QwpIngressSession.connect(async () => connection, {
+      backgroundStoreAndForward: true,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+      maxBatchSizeBytes: 128,
+    });
+    const table = new QwpTableBuffer("t");
+    for (const suffix of ["a", "b", "c"]) {
+      table
+        .getOrCreateColumn("value", QWP_COLUMN_TYPE.VARCHAR)!
+        .values.push(suffix.repeat(60));
+      table.nextRow();
+    }
+
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const sending = session.sendTablesWithPublication([table]);
+        const acknowledgementError = sending.acknowledgement.catch(
+          (error: unknown) => error,
+        );
+        await expect(sending.publication).rejects.toBeInstanceOf(
+          QwpReplayStoreFullError,
+        );
+        expect(await acknowledgementError).toBeInstanceOf(
+          QwpReplayStoreFullError,
+        );
+        expect(replayStore.metrics.pendingRecords).toBe(0);
+        expect(connection.sent).toHaveLength(0);
+      }
+      const recovered = session.sendFrame(Uint8Array.of(7));
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+      await expect(recovered).resolves.toMatchObject({ status: QWP_STATUS.OK });
+      await vi.waitFor(() =>
+        expect(replayStore.metrics.pendingRecords).toBe(0),
+      );
+    } finally {
+      await session.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preflights split batches against the in-memory replay budget", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      backgroundStoreAndForward: true,
+      reconnect: { maxAttempts: 1 },
+      memoryReplayMaxBytes: 200,
+      maxBatchSizeBytes: 128,
+    });
+    const table = new QwpTableBuffer("t");
+    for (const suffix of ["a", "b", "c"]) {
+      table
+        .getOrCreateColumn("value", QWP_COLUMN_TYPE.VARCHAR)!
+        .values.push(suffix.repeat(60));
+      table.nextRow();
+    }
+
+    try {
+      await expect(session.publishTables([table])).rejects.toBeInstanceOf(
+        QwpMemoryReplayBatchTooLargeError,
+      );
+      expect(session.metrics.pendingReplayFrames).toBe(0);
+      expect(connection.sent).toHaveLength(0);
+      const recovered = session.sendFrame(Uint8Array.of(7));
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+      await expect(recovered).resolves.toMatchObject({ status: QWP_STATUS.OK });
+    } finally {
+      await session.close();
+    }
   });
 
   it("falls back to full symbols after dictionary persistence fails", async () => {
@@ -4486,6 +4571,23 @@ describe("QWP Node file replay store", () => {
       totalBackpressureStalls: 0,
     });
     await defaults.close();
+  });
+
+  it("refuses to quarantine a slot acquired by a successor", async () => {
+    const directory = await trackedDirectory();
+    const successor = new QwpNodeFileReplayStore({ directory });
+    await successor.load();
+    await successor.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    await expect(
+      quarantineQwpNodeReplayStore(directory, new Error("predecessor failed")),
+    ).rejects.toBeInstanceOf(QwpReplayStoreLockedError);
+    await expect(stat(directory)).resolves.toBeDefined();
+    await expect(
+      successor.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+    ).resolves.toBeUndefined();
+    expect(successor.metrics.pendingRecords).toBe(2);
+    await successor.close();
   });
 
   it("survives restart and deletes only the acknowledged prefix", async () => {

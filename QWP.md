@@ -291,7 +291,10 @@ drainer then sends it in order. The default `"append"` boundary is locally durab
 while `"periodic"` and `"memory"` trade that immediate guarantee for throughput.
 Applications can therefore keep publishing during an outage until the configured
 `maxBytes` applies backpressure. A failed journal publication leaves the high-level
-rows staged so the caller can retry.
+rows staged so the caller can retry. When one logical flush is split across multiple
+deferred frames, the client checks that every frame can fit before journalling the
+prefix; an undersized journal therefore rejects without leaving an unacknowledgeable
+partial transaction behind.
 
 `initialConnectMode` selects persistent startup behavior: `"off"` (the default)
 makes one
@@ -876,7 +879,9 @@ Unacknowledged frames are retained in memory and replayed at least once after a
 transport failure. The built-in memory replay queue is capped at 128 MiB. When the
 cap is full, publication waits for ACK-driven trimming for at most 30 seconds, then
 rejects with `QwpMemoryReplayAppendTimeoutError`; a single frame that can never fit
-is rejected immediately with `QwpMemoryReplayFrameTooLargeError`. Set
+is rejected immediately with `QwpMemoryReplayFrameTooLargeError`, and a split logical
+batch that can never fit is rejected before its first frame with
+`QwpMemoryReplayBatchTooLargeError`. Set
 `memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on ingress session options
 to tune these bounds. The accounting includes a fixed per-frame allowance so many
 small frames cannot bypass the byte cap.
@@ -1484,6 +1489,9 @@ The public error classes preserve enough context for policy decisions:
 | `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |
 | `QwpIngressAckTimeoutError`        | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
 | `QwpBatchTooLargeError`            | One encoded row cannot fit the effective ingress cap                                                        |
+| `QwpMemoryReplayFrameTooLargeError` | One frame cannot fit the in-memory replay budget                                                           |
+| `QwpMemoryReplayBatchTooLargeError` | One split logical batch cannot fit the in-memory replay budget                                             |
+| `QwpMemoryReplayAppendTimeoutError` | The in-memory replay queue did not regain capacity before its append deadline                              |
 | `QwpReconnectExhaustedError`       | The configured reconnect boundary was reached                                                               |
 | `QwpReplayRejectedError`           | A replayed frame was rejected and retained for inspection                                                   |
 | `QwpReplayStoreFullError`          | The Node.js replay journal reached its configured size                                                      |

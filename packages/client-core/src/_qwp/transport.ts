@@ -61,6 +61,20 @@ export class QwpMemoryReplayFrameTooLargeError extends RangeError {
   }
 }
 
+/** One logical batch can never fit in the configured in-memory replay budget. */
+export class QwpMemoryReplayBatchTooLargeError extends RangeError {
+  constructor(
+    readonly maxBytes: number,
+    readonly frameCount: number,
+    readonly requiredBytes: number,
+  ) {
+    super(
+      `QWP logical batch exceeds the in-memory replay budget [maxBytes=${maxBytes}, frameCount=${frameCount}, requiredBytes=${requiredBytes}]`,
+    );
+    this.name = "QwpMemoryReplayBatchTooLargeError";
+  }
+}
+
 /** ACK-driven trimming did not free in-memory replay capacity in time. */
 export class QwpMemoryReplayAppendTimeoutError extends Error {
   constructor(
@@ -201,6 +215,11 @@ export interface QwpIngressReplayStore {
   loadReferences?(): Promise<readonly QwpIngressReplayReference[]>;
   /** Reads one previously loaded durable payload on demand. */
   readPayload?(frameSequence: bigint): Promise<Uint8Array>;
+  /**
+   * @internal Waits until every payload in one logical batch can be appended
+   * without an ACK between frames. Implementations must not mutate the journal.
+   */
+  prepareAppendBatch?(payloads: readonly Uint8Array[]): Promise<void>;
   append(record: QwpIngressReplayRecord): Promise<void>;
   acknowledgeThrough(frameSequence: bigint): Promise<void>;
   /** Loads the durable, dense symbol prefix used by persisted delta frames. */
@@ -546,6 +565,13 @@ export interface QwpBinaryConnection {
    * before send(), keeping replay ACK translation aligned with the session.
    */
   skipIngressClientSequence?(): void;
+
+  /**
+   * @internal Serializes a whole logical batch capacity check before its first
+   * frame is sent, preventing a deferred prefix from consuming the only space
+   * needed by its commit-bearing suffix.
+   */
+  prepareIngressBatch?(payloads: readonly Uint8Array[]): Promise<void>;
 
   /**
    * @internal Marks this endpoint as temporarily unsuitable and asks a stateful

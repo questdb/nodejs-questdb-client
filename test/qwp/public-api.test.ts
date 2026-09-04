@@ -32,6 +32,7 @@ const sharedRuntimeContract = [
   "QwpIngressAckTimeoutError",
   "QwpIngressSession",
   "QwpMemoryReplayAppendTimeoutError",
+  "QwpMemoryReplayBatchTooLargeError",
   "QwpMemoryReplayFrameTooLargeError",
   "QwpProtocolError",
   "QwpPoolAcquireTimeoutError",

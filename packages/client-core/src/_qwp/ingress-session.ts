@@ -1171,6 +1171,11 @@ export class QwpIngressSession {
   ): QwpIngressSendResult {
     const sends: QwpIngressSendResult[] = [];
     let publicationBarrier = this.sendTail;
+    if (frames.length > 1 && this.connection.prepareIngressBatch) {
+      publicationBarrier = publicationBarrier.then(() =>
+        this.connection.prepareIngressBatch!(frames),
+      );
+    }
     for (const frame of frames) {
       const sending = this.startFrameWithPublication(frame, publicationBarrier);
       const tracked = onFramePublished
@@ -1201,14 +1206,47 @@ export class QwpIngressSession {
     };
   }
 
-  private async publishPlannedFrames(
+  private publishPlannedFrames(
     frames: readonly Uint8Array[],
     onFramePublished?: (frame: Uint8Array) => void,
   ): Promise<void> {
-    for (const frame of frames) {
-      await this.publishFrame(frame);
-      onFramePublished?.(frame);
+    let publicationBarrier = this.sendTail;
+    if (frames.length > 1 && this.connection.prepareIngressBatch) {
+      publicationBarrier = publicationBarrier.then(() =>
+        this.connection.prepareIngressBatch!(frames),
+      );
     }
+    for (const frame of frames) {
+      const sequence = this.nextSequence++;
+      this.totalFramesPublished++;
+      this.totalBytesPublished += frame.byteLength;
+      const publishing = publicationBarrier.then(
+        async () => {
+          this.throwIfUnavailable();
+          this.highestSentSequence = sequence;
+          await this.connection.send(frame);
+        },
+        (error: unknown) => {
+          // Keep replay ACK translation aligned when the whole-batch preflight,
+          // or an earlier frame, prevents this sequence from reaching send().
+          this.connection.skipIngressClientSequence?.();
+          throw error;
+        },
+      );
+      void publishing.then(
+        () => {
+          this.totalFramesSent++;
+          this.totalBytesSent += frame.byteLength;
+        },
+        () => undefined,
+      );
+      this.emitProgress(QWP_INGRESS_PROGRESS_KIND.PUBLISHED, sequence);
+      publicationBarrier = onFramePublished
+        ? publishing.then(() => onFramePublished(frame))
+        : publishing;
+    }
+    this.sendTail = publicationBarrier.catch(() => undefined);
+    return publicationBarrier;
   }
 
   /**

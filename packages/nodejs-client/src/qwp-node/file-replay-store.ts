@@ -887,6 +887,20 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     return this.appendWithBackpressure(record, bytes);
   }
 
+  async prepareAppendBatch(payloads: readonly Uint8Array[]): Promise<void> {
+    if (this.closing || this.closed) throw this.closedError();
+    const recordSizes = payloads.map((payload) => {
+      if (payload.byteLength > this.maxSegmentBytes) {
+        throw new QwpReplayStoreSegmentTooLargeError(
+          this.maxSegmentBytes,
+          payload.byteLength,
+        );
+      }
+      return FRAME_HEADER_SIZE + payload.byteLength;
+    });
+    await this.prepareAppendBatchWithBackpressure(recordSizes);
+  }
+
   acknowledgeThrough(frameSequence: bigint): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
@@ -1217,6 +1231,87 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             : TRANSIENT_STORE_RETRY_DELAY_MS,
         );
       }
+    }
+  }
+
+  private async prepareAppendBatchWithBackpressure(
+    recordSizes: readonly number[],
+  ): Promise<void> {
+    let deadline = 0;
+    let stalled = false;
+    for (;;) {
+      if (this.closing || this.closed) throw this.closedError();
+      const capacityGeneration = this.capacityGeneration;
+      try {
+        await this.enqueue(async () => {
+          this.assertReady();
+          // A speculative spare is provisioned outside the operation queue.
+          // Settle one already in flight so its reservation is counted once,
+          // but do not create filesystem state merely to perform a preflight.
+          await this.hotSpareTask?.catch(() => undefined);
+          await this.assertReadyAfterWait();
+          this.assertBatchCapacity(recordSizes);
+        });
+        return;
+      } catch (error) {
+        if (this.closing || this.closed) throw this.closedError();
+        if (!(error instanceof QwpReplayStoreFullError)) throw error;
+        if (this.backpressurePolicy === QWP_SF_BACKPRESSURE_POLICY.ERROR) {
+          throw error;
+        }
+        if (!stalled) {
+          stalled = true;
+          deadline = Date.now() + this.appendDeadlineMs;
+          this.totalBackpressureStalls++;
+        }
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          this.totalAppendTimeouts++;
+          throw new QwpReplayStoreAppendTimeoutError(
+            this.maxBytes,
+            error.requiredBytes,
+            this.appendDeadlineMs,
+          );
+        }
+        await this.waitForCapacity(
+          capacityGeneration,
+          remainingMs,
+          error.requiredBytes,
+        );
+      }
+    }
+  }
+
+  private assertBatchCapacity(recordSizes: readonly number[]): void {
+    const segmentCapacity = this.segmentFileSize - SEGMENT_HEADER_SIZE;
+    let remaining = this.activeSegment
+      ? this.activeSegment.capacity - this.activeSegment.logicalSize
+      : 0;
+    let newSegments = 0;
+    for (const size of recordSizes) {
+      if (size > remaining) {
+        newSegments++;
+        remaining = segmentCapacity;
+      }
+      remaining -= size;
+    }
+
+    const hotSpareSegments = this.hotSpare && newSegments > 0 ? 1 : 0;
+    let additionalSegments = newSegments - hotSpareSegments;
+    let projectedTotalBytes = this.totalBytes;
+    let projectedFrameBytes = this.totalBytes - this.dictionaryFileSize;
+    let projectedSegments = this.segments.size + hotSpareSegments;
+    while (additionalSegments-- > 0) {
+      const requiredBytes = projectedTotalBytes + this.segmentFileSize;
+      const preservesLiveness =
+        this.dictionaryFileSize > 0 &&
+        (projectedFrameBytes < this.liveFrameBytes || projectedSegments === 0);
+      if (requiredBytes > this.maxBytes && !preservesLiveness) {
+        throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
+      }
+      projectedTotalBytes = requiredBytes;
+      projectedFrameBytes += this.segmentFileSize;
+      projectedSegments++;
     }
   }
 
@@ -3011,6 +3106,33 @@ export async function quarantineQwpNodeReplayStore(
   let result: QwpReplayStoreQuarantinedError | undefined;
   let failure: unknown;
   try {
+    let slotLock: QwpNodeAdvisoryLock;
+    try {
+      // The logical lock prevents a new acquisition while this check runs; the
+      // lifetime lock proves the pathname still belongs to the failed store,
+      // rather than to a successor that acquired it before quarantine resumed.
+      slotLock = await QwpNodeAdvisoryLock.acquire(normalized);
+    } catch (error) {
+      if (error instanceof QwpNodeAdvisoryLockBusyError) {
+        throw new QwpReplayStoreLockedError(normalized, error.holderPid);
+      }
+      throw new QwpReplayStoreError(
+        `could not verify QWP store-and-forward slot ownership before quarantine [directory=${normalized}]`,
+        error,
+      );
+    }
+    try {
+      // Release before rename while the parent lock is still held. Otherwise
+      // the owner directory would move with the slot and could not be released
+      // through the original lock pathname.
+      await slotLock.release();
+    } catch (error) {
+      throw new QwpReplayStoreError(
+        `could not release QWP store-and-forward slot verification lock before quarantine [directory=${normalized}]`,
+        error,
+      );
+    }
+
     let quarantineDirectory: string | undefined;
     for (let attempt = 0; attempt < MAX_QUARANTINE_SLOT_ATTEMPTS; attempt++) {
       const candidate = join(

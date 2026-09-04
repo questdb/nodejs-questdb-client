@@ -28,6 +28,7 @@ import {
   QwpIngressTransportMetrics,
   QwpInitialConnectMode,
   QwpMemoryReplayAppendTimeoutError,
+  QwpMemoryReplayBatchTooLargeError,
   QwpMemoryReplayFrameTooLargeError,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
@@ -285,6 +286,48 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     // the connection and this accounting store avoids doubling the backlog.
     this.records.set(record.frameSequence, record.payload);
     this.usedBytes += requiredBytes;
+  }
+
+  async prepareAppendBatch(payloads: readonly Uint8Array[]): Promise<void> {
+    if (this.closing) throw new QwpSendClosedError();
+    let requiredBytes = 0;
+    for (const payload of payloads) {
+      const recordBytes =
+        payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+      if (recordBytes > this.maxBytes) {
+        throw new QwpMemoryReplayFrameTooLargeError(
+          this.maxBytes,
+          payload.byteLength,
+          recordBytes,
+        );
+      }
+      requiredBytes += recordBytes;
+    }
+    if (requiredBytes > this.maxBytes) {
+      throw new QwpMemoryReplayBatchTooLargeError(
+        this.maxBytes,
+        payloads.length,
+        requiredBytes,
+      );
+    }
+    if (this.usedBytes + requiredBytes <= this.maxBytes) return;
+
+    this.totalBackpressureStalls++;
+    const deadline = Date.now() + this.appendDeadlineMs;
+    while (this.usedBytes + requiredBytes > this.maxBytes) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        this.totalAppendTimeouts++;
+        throw new QwpMemoryReplayAppendTimeoutError(
+          this.maxBytes,
+          this.usedBytes,
+          requiredBytes,
+          this.appendDeadlineMs,
+        );
+      }
+      await this.waitForCapacity(remainingMs, requiredBytes);
+      if (this.closing) throw new QwpSendClosedError();
+    }
   }
 
   async acknowledgeThrough(frameSequence: bigint): Promise<void> {
@@ -820,6 +863,25 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     // the journal, so consuming a frame sequence here would leave a hole that
     // makes every later append non-contiguous.
     this.nextClientSequence++;
+  }
+
+  prepareIngressBatch(payloads: readonly Uint8Array[]): Promise<void> {
+    if (payloads.length < 2 || !this.store.prepareAppendBatch) {
+      return Promise.resolve();
+    }
+    const preparing = this.sendTail.then(async () => {
+      this.throwIfUnavailable();
+      // Dictionary blocks consume the same journal budget. Persist them before
+      // checking frame capacity; send() will see the overlap and make no second
+      // sidecar append when the prepared frames are published.
+      for (const payload of payloads) {
+        const delta = readSymbolDictionaryDelta(payload);
+        if (delta) await this.persistSymbolDictionaryDelta(delta);
+      }
+      await this.store.prepareAppendBatch!(payloads);
+    });
+    this.sendTail = preparing.catch(() => undefined);
+    return preparing;
   }
 
   send(payload: Uint8Array): Promise<void> {
