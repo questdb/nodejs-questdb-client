@@ -146,6 +146,14 @@ export function resolveQwpNodeClientConfig(
   validateTls(parsed);
 
   const authorization = createAuthorization(parsed.values);
+  if (
+    authorization !== undefined &&
+    extraOptions.webSocket?.authorization !== undefined
+  ) {
+    throw new Error(
+      "a custom QWP 'qwp.webSocket.authorization' header cannot be combined with 'username'/'password' or 'token'; supply only one",
+    );
+  }
   const configuredAgent = createTlsAgent(parsed);
   const callerAgent = extraOptions.webSocket?.agent;
   if (callerAgent && configuredAgent) {

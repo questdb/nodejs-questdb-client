@@ -430,4 +430,28 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
         .authorization,
     ).toBe("Negotiate abc");
   });
+
+  it("rejects connect-string credentials combined with custom authorization", async () => {
+    const extraOptions = {
+      qwp: { webSocket: { authorization: "Bearer override" } },
+    };
+    for (const configuration of [
+      "wss::addr=localhost;username=alice;password=s3cret;",
+      "wss::addr=localhost;token=tok-123;",
+    ]) {
+      await expect(
+        Sender.fromConfig(configuration, extraOptions),
+        configuration,
+      ).rejects.toThrow(
+        /cannot be combined with 'username'\/'password' or 'token'/,
+      );
+      expect(
+        () =>
+          qwpNode.parseQwpNodeClientConfig(configuration, {
+            webSocket: extraOptions.qwp.webSocket,
+          }),
+        configuration,
+      ).toThrow(/cannot be combined with 'username'\/'password' or 'token'/);
+    }
+  });
 });
