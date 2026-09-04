@@ -19,7 +19,8 @@ additional public import paths.
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 20.18.1 or newer (the floor `undici` declares; an earlier v20
+  warns with `EBADENGINE` and fails outright under `engine-strict`)
 - A running QuestDB instance
 - QWP endpoints `/write/v4` and `/read/v1` for QWP ingestion and queries
 
