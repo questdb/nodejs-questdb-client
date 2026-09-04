@@ -860,9 +860,29 @@ describe("Configuration string parser suite", function () {
     ).rejects.toThrow(
       "Invalid maximum datagram size option: 65508, must not exceed 65507",
     );
-    await expect(
-      SenderOptions.fromConfig("udp::addr=host;username=admin;"),
-    ).rejects.toThrow("authentication is not supported for QWP UDP transport");
+    // Every credential key a TCP JWK connect string can carry, including the
+    // two that http and tcp accept and ignore. Left out, token_x/token_y
+    // walked the user through their credentials one error at a time and then
+    // fell silent on the last pair, reading as if UDP had accepted them.
+    for (const credential of [
+      "username=admin",
+      "password=secret",
+      "token=abc",
+      "token_x=aa",
+      "token_y=bb",
+    ]) {
+      await expect(
+        SenderOptions.fromConfig(`udp::addr=host;${credential};`),
+      ).rejects.toThrow(
+        "authentication is not supported for QWP UDP transport",
+      );
+    }
+    // The same keys stay accepted-and-ignored on the transports that document
+    // them that way.
+    expect(
+      (await SenderOptions.fromConfig("tcp::addr=host;token_x=aa;token_y=bb;"))
+        .token_x,
+    ).toBe("aa");
     await expect(
       SenderOptions.fromConfig("udp::addr=host;tls_verify=on;"),
     ).rejects.toThrow("TLS is not supported for QWP UDP transport");

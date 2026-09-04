@@ -853,6 +853,13 @@ function validateUdpSecurityOptions(options: SenderOptions): void {
     options.username !== undefined ||
     options.password !== undefined ||
     options.token !== undefined ||
+    // token_x/token_y are accepted and ignored on http and tcp, so they are
+    // the two keys a TCP JWK connect string still carries after the ones
+    // above have been removed. Left out, the diagnostic walked the user
+    // through their credentials one error at a time and then fell silent on
+    // the last pair, reading as if it had accepted them.
+    options.token_x !== undefined ||
+    options.token_y !== undefined ||
     options.auth !== undefined ||
     options.jwk !== undefined
   ) {
