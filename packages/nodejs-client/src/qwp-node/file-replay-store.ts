@@ -414,6 +414,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private slotLock?: QwpNodeAdvisoryLock;
   private closePromise?: Promise<void>;
   private loaded = false;
+  /**
+   * Whether recovery finished reading the directory, so {@link records}
+   * describes what actually survives on disk.
+   *
+   * A load that throws *after* this point has scanned every segment, unlinked
+   * the ones holding only acknowledged frames, and rejected the journal on a
+   * relationship between the records and the watermark -- so an empty
+   * {@link records} means nothing acknowledged is left to resurrect. A load
+   * that throws *before* it read nothing conclusive, and its empty
+   * {@link records} is vacuous. Only the first case may drop the watermark.
+   */
+  private recoveryScanCompleted = false;
   private closing = false;
   private closed = false;
   private activeSegment?: StoredSegment;
@@ -753,6 +765,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         for (const path of removalPaths) await ignoreMissing(unlink(path));
         if (this.segments.size === 0) await this.removeManifest();
         if (changedDirectory) await syncDirectory(this.directory);
+        // Past every read and every unlink: from here on the segment set and
+        // this.records describe the directory as it now stands, whether or not
+        // the sequence validation below accepts it.
+        this.recoveryScanCompleted = true;
         recoveredEntries.sort((left, right) =>
           left.record.frameSequence < right.record.frameSequence
             ? -1
@@ -809,6 +825,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
               ),
             ]);
           } finally {
+            // A watermark the scan proved is stranded -- the journal kept no
+            // record above it, so every frame it covers was already unlinked
+            // -- is dropped here so a second attempt can recover the slot
+            // instead of quarantining it. It has to happen while the lock is
+            // still held: past releaseDirectoryLock() the pathname may belong
+            // to a successor, and this unlink would resurrect *its*
+            // acknowledged frames. A load that failed before the scan
+            // completed knows nothing about the watermark and leaves it alone.
+            if (this.recoveryScanCompleted && this.records.size === 0) {
+              await this.removeAcknowledgedThrough().catch(() => undefined);
+            }
             await this.releaseDirectoryLock();
           }
         }
@@ -1527,7 +1554,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     while (this.pendingTrimSegments.length > 0) {
       await this.runMaintenanceBatch();
     }
-    if (this.records.size === 0) await this.removeAcknowledgedThrough();
+    // Only meaningful once recovery established what is on disk. After a load
+    // that failed mid-scan this map is empty because nothing was ever read,
+    // not because nothing survives -- dropping the watermark on that reading
+    // replayed frames the server had already acknowledged.
+    if (this.recoveryScanCompleted && this.records.size === 0) {
+      await this.removeAcknowledgedThrough();
+    }
   }
 
   private async trimSegment(segment: StoredSegment): Promise<void> {
@@ -2244,9 +2277,14 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
    * parity), its `.ack-watermark` -- which resurrects acknowledged frames for
    * re-send -- or its `.symbol-dict`. These paths therefore skip the directory
    * and release in-memory state only.
+   *
+   * Fail-closed: a store that never acquired the lock, or that released it on
+   * a failed load, owns nothing either. Answering "yes" for a missing lock is
+   * what let a failed load's own close() unlink a successor's
+   * `.ack-watermark`.
    */
   private get ownsDirectory(): boolean {
-    return !this.slotLock?.lost;
+    return this.slotLock !== undefined && !this.slotLock.lost;
   }
 
   private assertReady(): void {

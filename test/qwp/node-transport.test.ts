@@ -1,6 +1,13 @@
 import type { AddressInfo, Socket } from "node:net";
 import { createServer as createTcpServer } from "node:net";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -761,6 +768,52 @@ describe("QWP Node transport", () => {
       );
       // And the six frames the journal still held were replayed, not dropped.
       expect(delivered.length).toBeGreaterThanOrEqual(6);
+    } finally {
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the ACK watermark when a load fails before it can read the journal", async () => {
+    // The sibling test above turns on a failed load's close() dropping a
+    // *stranded* watermark. That drop used to be unconditional, and a load
+    // that failed for an unrelated reason -- EACCES/EMFILE/EIO/ENOSPC on a
+    // segment, all classified retryable -- took the same path: records is
+    // empty there because nothing was ever read, not because nothing
+    // survives. Dropping the watermark on that reading resurrected every
+    // acknowledged frame on the next start, so QuestDB received them twice.
+    const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-wm-"));
+    const directory = join(rootDirectory, "sender-0");
+    try {
+      const seed = new QwpNodeFileReplayStore({
+        directory,
+        durability: "append",
+      });
+      await seed.load();
+      for (let sequence = 0n; sequence < 4n; sequence++) {
+        await seed.append({
+          frameSequence: sequence,
+          payload: new Uint8Array(64).fill(0x41),
+        });
+      }
+      await seed.acknowledgeThrough(1n);
+      await seed.close();
+
+      const segment = join(directory, "sf-0000000000000000.sfa");
+      await chmod(segment, 0o000);
+      const failing = new QwpNodeFileReplayStore({ directory });
+      await expect(failing.loadReferences()).rejects.toThrow(
+        /could not scan QWP store-and-forward segment/,
+      );
+      await failing.close();
+      // The watermark the scan never reached is still there.
+      expect(await readdir(directory)).toContain(".ack-watermark");
+
+      await chmod(segment, 0o600);
+      const restarted = new QwpNodeFileReplayStore({ directory });
+      const recovered = await restarted.loadReferences();
+      // Only the two unacknowledged frames replay; 0 and 1 stay acknowledged.
+      expect(recovered.map((entry) => entry.frameSequence)).toEqual([2n, 3n]);
+      await restarted.close();
     } finally {
       await rm(rootDirectory, { recursive: true, force: true });
     }
