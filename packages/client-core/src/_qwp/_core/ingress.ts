@@ -439,12 +439,15 @@ function writeNullHeader(
  * shape invariant.
  */
 function checkedCellRange(
-  value: number,
+  value: unknown,
   minimum: number,
   maximum: number,
   label: string,
   name: string,
 ): number {
+  if (typeof value !== "number") {
+    throw new TypeError(`QWP ${label} column '${name}' accepts only numbers`);
+  }
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new RangeError(
       `QWP ${label} column '${name}' value ${value} must be an integer between ${minimum} and ${maximum}`,
@@ -525,13 +528,13 @@ function writeColumn(
     case QWP_COLUMN_TYPE.BYTE:
       for (const value of column.values)
         writer.writeInt8(
-          checkedCellRange(Number(value), -128, 127, "BYTE", column.name),
+          checkedCellRange(value, -128, 127, "BYTE", column.name),
         );
       return;
     case QWP_COLUMN_TYPE.SHORT:
       for (const value of column.values)
         writer.writeInt16(
-          checkedCellRange(Number(value), -32768, 32767, "SHORT", column.name),
+          checkedCellRange(value, -32768, 32767, "SHORT", column.name),
         );
       return;
     case QWP_COLUMN_TYPE.CHAR:
@@ -547,7 +550,7 @@ function writeColumn(
       for (const value of column.values)
         writer.writeInt32(
           checkedCellRange(
-            Number(value),
+            value,
             -0x80000000,
             0x7fffffff,
             "INT",
@@ -561,7 +564,7 @@ function writeColumn(
       for (const value of column.values)
         writer.writeUint32(
           checkedCellRange(
-            Number(value),
+            value,
             -0x80000000,
             0xffffffff,
             "IPV4",
@@ -672,7 +675,9 @@ function writeColumn(
         for (const dimension of array.dimensions) writer.writeUint32(dimension);
         for (const item of array.values) {
           if (column.type === QWP_COLUMN_TYPE.DOUBLE_ARRAY) {
-            writer.writeFloat64(Number(item));
+            writer.writeFloat64(
+              checkedCellNumber(item, "DOUBLE_ARRAY", column.name),
+            );
           } else {
             writer.writeBigInt64(BigInt(item));
           }

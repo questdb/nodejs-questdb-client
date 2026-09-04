@@ -357,6 +357,18 @@ describe("QWP ingress codec", () => {
     expect(cell(QWP_COLUMN_TYPE.BYTE, 300)).toThrow(
       /QWP BYTE column 'c' value 300 must be an integer between -128 and 127/,
     );
+    expect(cell(QWP_COLUMN_TYPE.BYTE, "7")).toThrow(
+      /QWP BYTE column 'c' accepts only numbers/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.SHORT, "7")).toThrow(
+      /QWP SHORT column 'c' accepts only numbers/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.INT, "7")).toThrow(
+      /QWP INT column 'c' accepts only numbers/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.IPV4, "7")).toThrow(
+      /QWP IPV4 column 'c' accepts only numbers/,
+    );
     expect(cell(QWP_COLUMN_TYPE.SHORT, 70000)).toThrow(/QWP SHORT column 'c'/);
     expect(cell(QWP_COLUMN_TYPE.INT, 2 ** 31)).toThrow(/QWP INT column 'c'/);
     expect(cell(QWP_COLUMN_TYPE.IPV4, 0x100000001)).toThrow(
@@ -368,6 +380,19 @@ describe("QWP ingress codec", () => {
     expect(cell(QWP_COLUMN_TYPE.TIMESTAMP, 2n ** 63n)).toThrow(
       /QWP TIMESTAMP column 'c'/,
     );
+
+    expect(
+      cell(QWP_COLUMN_TYPE.DOUBLE_ARRAY, {
+        dimensions: [1],
+        values: ["1.25"],
+      }),
+    ).toThrow(/QWP DOUBLE_ARRAY column 'c' accepts only numbers/);
+    expect(
+      cell(QWP_COLUMN_TYPE.DOUBLE_ARRAY, {
+        dimensions: [1],
+        values: [9_007_199_254_740_993n],
+      }),
+    ).toThrow(/QWP DOUBLE_ARRAY column 'c' accepts only numbers/);
     expect(
       cell(QWP_COLUMN_TYPE.DECIMAL64, 2n ** 63n, (table, column) =>
         table.setDecimalScale(column, 0),
