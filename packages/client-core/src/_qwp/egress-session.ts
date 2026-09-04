@@ -14,6 +14,7 @@ import {
   QwpProtocolError,
   QwpResultBatch,
   QwpResultBatchDecoder,
+  type QwpResultBatchMessage,
   QwpResultBatchView,
   QwpResultEndMessage,
   QwpServerInfoMessage,
@@ -1074,23 +1075,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             case "result-batch": {
               const query = this.requireActive(message.requestId);
               if (query.retired) {
-                const creditBytes = query.lateBatchCredit(payload.byteLength);
-                if (creditBytes > 0) {
-                  void this.sendWhileActive(
-                    message.requestId,
-                    encodeQwpCredit(message.requestId, creditBytes),
-                  ).catch(() => undefined);
-                }
+                this.discardBatch(query, message, payload);
               } else if (query.usesViews) {
                 const reservation = await query.reserveViewBatch();
                 if (reservation.status === "retired") {
-                  const creditBytes = query.lateBatchCredit(payload.byteLength);
-                  if (creditBytes > 0) {
-                    void this.sendWhileActive(
-                      message.requestId,
-                      encodeQwpCredit(message.requestId, creditBytes),
-                    ).catch(() => undefined);
-                  }
+                  this.discardBatch(query, message, payload);
                 } else if (reservation.status === "reserved") {
                   try {
                     query.pushReservedView(
@@ -1107,13 +1096,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
               } else {
                 const reservation = await query.reserveMaterializedBatch();
                 if (reservation === "retired") {
-                  const creditBytes = query.lateBatchCredit(payload.byteLength);
-                  if (creditBytes > 0) {
-                    void this.sendWhileActive(
-                      message.requestId,
-                      encodeQwpCredit(message.requestId, creditBytes),
-                    ).catch(() => undefined);
-                  }
+                  this.discardBatch(query, message, payload);
                 } else if (reservation === "reserved") {
                   try {
                     query.pushReserved(
@@ -1192,6 +1175,29 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       );
     }
     return this.active;
+  }
+
+  /**
+   * Drops a RESULT_BATCH whose query is no longer taking rows, returning its
+   * credit so the server keeps draining.
+   *
+   * The rows go, but the delta symbol dictionary the batch carries does not:
+   * it is connection-scoped and cumulative, so a skipped chunk desynchronises
+   * every later query on the same session.
+   */
+  private discardBatch(
+    query: QwpEgressQuery,
+    message: QwpResultBatchMessage,
+    payload: Uint8Array,
+  ): void {
+    this.decoder.absorbDictionary(message);
+    const creditBytes = query.lateBatchCredit(payload.byteLength);
+    if (creditBytes > 0) {
+      void this.sendWhileActive(
+        message.requestId,
+        encodeQwpCredit(message.requestId, creditBytes),
+      ).catch(() => undefined);
+    }
   }
 
   private async prepareConnectionReset(

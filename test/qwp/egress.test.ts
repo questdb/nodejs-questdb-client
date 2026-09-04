@@ -121,6 +121,40 @@ function firstResultBatch(requestId = 0n): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), RESULT_FLAGS, 1);
 }
 
+/**
+ * A RESULT_BATCH of one SYMBOL row whose delta dictionary appends `entries`
+ * starting at `dictionaryStart`, and whose single cell references `symbolId`
+ * in the connection-scoped dictionary.
+ */
+function symbolDeltaBatch(
+  requestId: bigint,
+  batchSequence: number,
+  dictionaryStart: number,
+  entries: readonly string[],
+  symbolId: number,
+): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
+  writeQwpVarint(payload, batchSequence);
+  writeQwpVarint(payload, dictionaryStart);
+  writeQwpVarint(payload, entries.length);
+  for (const entry of entries) writeString(payload, entry);
+  writeQwpVarint(payload, 0); // table name
+  writeQwpVarint(payload, 1); // rows
+  if (batchSequence === 0) {
+    writeQwpVarint(payload, 1); // columns, schema rides the first batch only
+    writeString(payload, "sym");
+    payload.writeUint8(QWP_COLUMN_TYPE.SYMBOL);
+  }
+  payload.writeUint8(0); // no nulls
+  writeQwpVarint(payload, symbolId);
+  return encodeQwpFrame(
+    payload.toUint8Array(),
+    QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
+    1,
+  );
+}
+
 function emptyResultBatch(
   requestId: bigint,
   batchSequence: number,
@@ -1671,6 +1705,54 @@ describe("QwpEgressSession", () => {
     const nextQuery = await session.query("select 2");
     connection.receive(resultEnd(nextQuery.requestId, 0n));
     await nextQuery.completion;
+    await session.close();
+  });
+
+  it("keeps the connection dictionary in sync across a retired query", async () => {
+    // The symbol dictionary is connection-scoped and cumulative: the server
+    // numbers entries from where the previous batch left off, on the
+    // connection rather than on the query. Batches for a retired query were
+    // dropped without being read at all, so the entries they carried never
+    // reached the decoder -- and resetQuerySchema() deliberately keeps the
+    // dictionary across queries, so the gap surfaced on the *next* query as
+    // "delta symbol dictionary is out of sync", naming data the caller never
+    // asked for. Breaking out of the documented `for await` loop is enough to
+    // reach it.
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+    });
+    connection.receive(firstResultBatch(query.requestId)); // dictionary [alpha, beta]
+    for await (const _batch of query) break;
+
+    // A batch still in flight when the break retired the query. Its rows are
+    // discarded, but it carries dictionary entry 2.
+    connection.receive(symbolDeltaBatch(query.requestId, 1, 2, ["gamma"], 2));
+    connection.receive(
+      queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
+    );
+    await expect(query.completion).rejects.toMatchObject({
+      name: "QwpEgressQueryAbandonedError",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The next query continues the same dictionary at entry 3.
+    const next = await session.query("select * from y");
+    connection.receive(symbolDeltaBatch(next.requestId, 0, 3, ["delta"], 3));
+    connection.receive(resultEnd(next.requestId, 1n));
+
+    const decoded = [];
+    for await (const batch of next) decoded.push(batch);
+    await next.completion;
+    // Resolving id 3 proves gamma was absorbed: without it the id would be
+    // off by one, and the batch would not have decoded at all.
+    expect(decoded.map((batch) => batch.columns[0].values)).toEqual([
+      ["delta"],
+    ]);
     await session.close();
   });
 

@@ -1322,6 +1322,33 @@ export class QwpResultBatchDecoder {
     }
   }
 
+  /**
+   * Applies the delta symbol dictionary carried by a batch whose rows are
+   * being discarded, without touching any per-query state.
+   *
+   * The dictionary is connection-scoped and cumulative: the server numbers
+   * entries from where the previous batch left off, on the connection rather
+   * than on the query. A batch dropped because its query was retired -- by a
+   * `break` out of the async iterator, a query deadline, or a throwing
+   * `queryViews` callback -- still carries the entries the server has since
+   * assigned, so skipping it entirely left this dictionary behind the
+   * server's. `resetQuerySchema()` deliberately does not clear the dictionary,
+   * so the gap survived into the next query and surfaced there as
+   * "delta symbol dictionary is out of sync", naming data the caller never
+   * asked for.
+   *
+   * The dictionary sits at the front of the body, so this reads only as far as
+   * it needs to and never decodes the rows it is throwing away.
+   */
+  absorbDictionary(message: QwpResultBatchMessage): void {
+    if ((message.flags & QWP_FLAG_DELTA_SYMBOL_DICTIONARY) === 0) return;
+    const body =
+      (message.flags & QWP_FLAG_ZSTD) !== 0
+        ? decompressQwpZstdFrame(message.body)
+        : message.body;
+    this.readDeltaDictionary(new QwpByteReader(body), body.length);
+  }
+
   /** @internal Drops frame-backed references after a failed slot decode. */
   releaseView(slot: number): void {
     this.viewBatches[slot]?.release();
