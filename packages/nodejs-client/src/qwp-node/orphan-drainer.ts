@@ -517,18 +517,30 @@ export class QwpNodeOrphanDrainer {
         this.durableAckPollIntervalMs > 0 &&
         Date.now() >= nextDurablePoll
       ) {
-        // A poll is a keepalive prompt, not a drain step, so its failure must
-        // not end the attempt. An adopted session connects in the background,
-        // and until its first upgrade lands the handshake carries no
-        // durableAckEnabled -- so pollDurableAck() rejects with "durable ACK
-        // was not negotiated for this session", which is a not-yet rather
+        // A poll is a keepalive prompt, not a drain step, so a not-yet answer
+        // must not end the attempt. An adopted session connects in the
+        // background, and until its first upgrade lands the handshake carries
+        // no durableAckEnabled -- so pollDurableAck() rejects with "durable
+        // ACK was not negotiated for this session", which is a not-yet rather
         // than a verdict on the slot. Unguarded, that rejection reached
         // drainOne() and abandoned the slot ~200ms in, so with
         // request_durable_ack on, every scan burned a lock-and-rescan cycle
         // and orphan recovery made no progress for exactly as long as the
-        // endpoint stayed unreachable -- the outage it exists to cover. The
-        // loop's terminal condition is session.closed, which still fires.
-        await session.pollDurableAck().catch(() => undefined);
+        // endpoint stayed unreachable -- the outage it exists to cover.
+        //
+        // A terminal verdict still has to reach drainOne(), because it is the
+        // only place that can quarantine the slot and report the loss.
+        // pingWithReconnect() is the one requestReconnect() caller that hands
+        // its rejection to an external caller instead of latching it, so a
+        // reconnect that dies on rotated credentials or an exhausted episode
+        // arrives here and nowhere else: session.closed never settles for it,
+        // and swallowing it left the drain looping forever on a slot that can
+        // never drain, holding its worker and its lock with no .failed
+        // sentinel and no data-loss report for the operator.
+        await session.pollDurableAck().catch((error: unknown) => {
+          const failure = toError(error, "QWP durable ACK poll failed");
+          if (isTerminalDrainFailure(failure)) throw failure;
+        });
         nextDurablePoll = Date.now() + this.durableAckPollIntervalMs;
       }
     }

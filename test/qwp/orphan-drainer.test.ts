@@ -211,6 +211,50 @@ describe("QWP Node orphan drainer", () => {
     await drainer.close();
   });
 
+  it("still quarantines when the keepalive poll carries a terminal verdict", async () => {
+    // A poll failure must not end the attempt, but it must not swallow a
+    // verdict either. pingWithReconnect() is the one requestReconnect() caller
+    // that hands its rejection to an external caller instead of latching it,
+    // so a reconnect that dies on rotated credentials or an exhausted episode
+    // arrives through this poll and nowhere else -- session.closed never
+    // settles for it. Swallowing every failure left the drain looping forever
+    // on a slot that can never drain, holding its worker and its lock, with no
+    // .failed sentinel and no data-loss report for the operator.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "rejected-head");
+    const rejected = new QwpReplayRejectedError(
+      0n,
+      QWP_STATUS.SCHEMA_MISMATCH,
+      "column type mismatch",
+    );
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 1,
+      createSession: async () => {
+        const session = new FakeDrainSession();
+        // Rejects while leaving the session open, exactly as a terminal
+        // reconnect raised through ping() does.
+        session.pollDurableAck = () => Promise.reject(rejected);
+        return session;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(drainer.metrics).toMatchObject({ retrying: 0, active: 0 });
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+    });
+    await drainer.close();
+  });
+
   it("discovers a slot orphaned after the startup scan", async () => {
     const rootDirectory = await root();
     const drainer = new QwpNodeOrphanDrainer({
