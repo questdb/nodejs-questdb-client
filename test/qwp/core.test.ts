@@ -348,6 +348,12 @@ describe("QWP ingress codec", () => {
     );
     expect(cell(QWP_COLUMN_TYPE.BOOLEAN, false)).not.toThrow();
     expect(cell(QWP_COLUMN_TYPE.BOOLEAN, true)).not.toThrow();
+    expect(cell(QWP_COLUMN_TYPE.FLOAT, "1.25")).toThrow(
+      /QWP FLOAT column 'c' accepts only numbers/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.DOUBLE, "12.5")).toThrow(
+      /QWP DOUBLE column 'c' accepts only numbers/,
+    );
     expect(cell(QWP_COLUMN_TYPE.BYTE, 300)).toThrow(
       /QWP BYTE column 'c' value 300 must be an integer between -128 and 127/,
     );
@@ -392,6 +398,8 @@ describe("QWP ingress codec", () => {
     expect(cell(QWP_COLUMN_TYPE.BYTE, 127)).not.toThrow();
     expect(cell(QWP_COLUMN_TYPE.IPV4, -0x80000000)).not.toThrow();
     expect(cell(QWP_COLUMN_TYPE.LONG, 2n ** 63n - 1n)).not.toThrow();
+    expect(cell(QWP_COLUMN_TYPE.FLOAT, 1.25)).not.toThrow();
+    expect(cell(QWP_COLUMN_TYPE.DOUBLE, 12.5)).not.toThrow();
   });
 
   it("slices compacted table rows without losing null positions", () => {

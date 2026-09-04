@@ -453,6 +453,18 @@ function checkedCellRange(
   return value;
 }
 
+/** Rejects coercible values that the typed floating-point APIs do not accept. */
+function checkedCellNumber(
+  value: unknown,
+  label: string,
+  name: string,
+): number {
+  if (typeof value !== "number") {
+    throw new TypeError(`QWP ${label} column '${name}' accepts only numbers`);
+  }
+  return value;
+}
+
 /** The bigint counterpart of {@link checkedCellRange}. */
 function checkedCellSigned(
   value: bigint,
@@ -558,7 +570,9 @@ function writeColumn(
         );
       return;
     case QWP_COLUMN_TYPE.FLOAT:
-      for (const value of column.values) writer.writeFloat32(Number(value));
+      for (const value of column.values) {
+        writer.writeFloat32(checkedCellNumber(value, "FLOAT", column.name));
+      }
       return;
     // DATE joins LONG here: raw int64s, no per-column encoding byte.
     // See columnPayloadSize() for why it is not a timestamp on ingress.
@@ -607,7 +621,9 @@ function writeColumn(
       return;
     }
     case QWP_COLUMN_TYPE.DOUBLE:
-      for (const value of column.values) writer.writeFloat64(Number(value));
+      for (const value of column.values) {
+        writer.writeFloat64(checkedCellNumber(value, "DOUBLE", column.name));
+      }
       return;
     case QWP_COLUMN_TYPE.UUID:
       for (const value of column.values) {
