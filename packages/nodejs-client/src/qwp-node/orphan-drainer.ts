@@ -517,7 +517,18 @@ export class QwpNodeOrphanDrainer {
         this.durableAckPollIntervalMs > 0 &&
         Date.now() >= nextDurablePoll
       ) {
-        await session.pollDurableAck();
+        // A poll is a keepalive prompt, not a drain step, so its failure must
+        // not end the attempt. An adopted session connects in the background,
+        // and until its first upgrade lands the handshake carries no
+        // durableAckEnabled -- so pollDurableAck() rejects with "durable ACK
+        // was not negotiated for this session", which is a not-yet rather
+        // than a verdict on the slot. Unguarded, that rejection reached
+        // drainOne() and abandoned the slot ~200ms in, so with
+        // request_durable_ack on, every scan burned a lock-and-rescan cycle
+        // and orphan recovery made no progress for exactly as long as the
+        // endpoint stayed unreachable -- the outage it exists to cover. The
+        // loop's terminal condition is session.closed, which still fires.
+        await session.pollDurableAck().catch(() => undefined);
         nextDurablePoll = Date.now() + this.durableAckPollIntervalMs;
       }
     }

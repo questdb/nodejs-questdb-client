@@ -170,6 +170,47 @@ describe("QWP Node orphan drainer", () => {
     expect(drainer.metrics).toMatchObject({ active: 0, closed: true });
   });
 
+  it("keeps draining while the adopted session cannot yet poll durable ACK", async () => {
+    // An adopted session connects in the background, so until its first
+    // upgrade lands its handshake carries no durableAckEnabled and
+    // pollDurableAck() rejects with exactly this message -- a not-yet, not a
+    // verdict on the slot. Unguarded, that rejection reached drainOne() and
+    // abandoned the slot ~200ms in, so with request_durable_ack on every scan
+    // burned a lock-and-rescan cycle and orphan recovery made no progress for
+    // as long as the endpoint stayed unreachable.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "offline-producer");
+    let polls = 0;
+    const events: string[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 1,
+      createSession: async () => {
+        const session = new FakeDrainSession();
+        session.pollDurableAck = async () => {
+          // Rejects while the session is still connecting, then succeeds the
+          // way it does once the upgrade has landed.
+          if (++polls < 3) {
+            throw new Error("durable ACK was not negotiated for this session");
+          }
+          session.pendingReplayFrames = 0;
+        };
+        return session;
+      },
+      onEvent: (event) => events.push(event.kind),
+    });
+
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.drained).toBe(1));
+    expect(polls).toBeGreaterThanOrEqual(3);
+    expect(events).toContain(QWP_ORPHAN_DRAIN_EVENT_KIND.DRAINED);
+    expect(events).not.toContain(QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING);
+    expect(drainer.metrics).toMatchObject({ retrying: 0, failed: 0 });
+    expect(directory).toContain("offline-producer");
+    await drainer.close();
+  });
+
   it("discovers a slot orphaned after the startup scan", async () => {
     const rootDirectory = await root();
     const drainer = new QwpNodeOrphanDrainer({
