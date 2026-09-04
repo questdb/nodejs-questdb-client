@@ -404,8 +404,10 @@ abstract class SenderBufferBase implements SenderBuffer {
    *
    * @throws {Error} If `timestamp` is not an integer or `BigInt`.
    * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
-   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`. This
-   * validation leaves the open row unchanged so the call can be retried.
+   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`.
+   * Argument validation -- the unit and the timestamp alike -- runs before the
+   * close touches the row, so it leaves the open row unchanged and the call
+   * can be retried with a corrected argument.
    * @throws {Error} If the row cannot be closed within `max_buf_size`. The
    * partial close is rewound, so the same call succeeds once a `flush()` frees
    * space.
@@ -415,25 +417,31 @@ abstract class SenderBufferBase implements SenderBuffer {
     // close (and potentially discard) the row. This also avoids writing the
     // timestamp separator before discovering that the unit is invalid.
     this.validateTimestampUnit(unit);
-    try {
-      if (!this.hasSymbols && !this.hasColumns) {
-        throw new Error(
-          "The row must have a symbol or column set before it is closed",
-        );
-      }
-      if (typeof timestamp !== "bigint" && !Number.isInteger(timestamp)) {
-        throw new Error(
-          `Designated timestamp must be an integer or BigInt, received ${timestamp}`,
-        );
-      }
-      if (unit == "ns" && typeof timestamp !== "bigint") {
-        throw new Error(
-          `Designated timestamp must be a BigInt if it is set in nanoseconds`,
-        );
-      }
-    } catch (error) {
+    // The timestamp itself is a call-site parameter too, on exactly the same
+    // footing as the unit above: neither depends on the row, neither has
+    // touched it yet, and a caller who corrects the argument can close the
+    // same row. Discarding here dropped a fully built row over a typo and
+    // then reported "The row must have a symbol or column set before it is
+    // closed" on the retry, naming the wrong problem -- the failure hoisting
+    // the unit check out of the discard was meant to avoid.
+    if (typeof timestamp !== "bigint" && !Number.isInteger(timestamp)) {
+      throw new Error(
+        `Designated timestamp must be an integer or BigInt, received ${timestamp}`,
+      );
+    }
+    if (unit == "ns" && typeof timestamp !== "bigint") {
+      throw new Error(
+        `Designated timestamp must be a BigInt if it is set in nanoseconds`,
+      );
+    }
+    // This one does describe the row, and the row it describes can never be
+    // closed, so it has to go: leaving hasTable set wedges every later
+    // table() with "Table name has already been set".
+    if (!this.hasSymbols && !this.hasColumns) {
       this.discardIncompleteRow();
-      throw error;
+      throw new Error(
+        "The row must have a symbol or column set before it is closed",
+      );
     }
     // A full buffer is not a malformed row: the row is still intact and a
     // flush() that frees space lets the same at() succeed -- which is what
@@ -468,15 +476,13 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Designated timestamp will be populated by the server on this record.
    */
   atNow() {
-    try {
-      if (!this.hasSymbols && !this.hasColumns) {
-        throw new Error(
-          "The row must have a symbol or column set before it is closed",
-        );
-      }
-    } catch (error) {
+    // See at(): this row can never be closed, so it is discarded rather than
+    // left to wedge the next table().
+    if (!this.hasSymbols && !this.hasColumns) {
       this.discardIncompleteRow();
-      throw error;
+      throw new Error(
+        "The row must have a symbol or column set before it is closed",
+      );
     }
     // See at(): a capacity failure leaves the row intact and retryable after a
     // flush, so it must not discard. The reservation covers this whole close,

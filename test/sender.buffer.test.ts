@@ -794,6 +794,53 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("keeps a row open when its designated timestamp value is rejected", async function () {
+    // The timestamp is a call-site argument on the same footing as the unit:
+    // it does not describe the row, and nothing has been written when it is
+    // checked. Discarding here dropped a fully built row over a typo and then
+    // reported "The row must have a symbol or column set before it is closed"
+    // on the corrected retry, naming the wrong problem entirely.
+    const build = () =>
+      new Sender({
+        protocol: "http",
+        protocol_version: "2",
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      });
+
+    // A non-integer number, then the same row closed with a corrected value.
+    const fractional = build();
+    fractional.table("t").stringColumn("c", "x");
+    await expect(async () => await fractional.at(1000.5)).rejects.toThrow(
+      "Designated timestamp must be an integer or BigInt, received 1000.5",
+    );
+    await fractional.at(1000);
+    expect(bufferContent(fractional)).toBe('t c="x" 1000t\n');
+    await fractional.close();
+
+    // 'ns' demands a BigInt; passing a number leaves the row closable too.
+    const nanos = build();
+    nanos.table("t").stringColumn("c", "x");
+    await expect(async () => await nanos.at(1000, "ns")).rejects.toThrow(
+      "Designated timestamp must be a BigInt if it is set in nanoseconds",
+    );
+    await nanos.at(1000n, "ns");
+    expect(bufferContent(nanos)).toBe('t c="x" 1000n\n');
+    await nanos.close();
+
+    // A row with nothing in it still cannot be closed, and is still discarded
+    // so the next table() is not wedged by it.
+    const empty = build();
+    empty.table("t");
+    await expect(async () => await empty.at(1000)).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+    await empty.table("t").stringColumn("c", "y").at(2000);
+    expect(bufferContent(empty)).toBe('t c="y" 2000t\n');
+    await empty.close();
+  });
+
   it("keeps a row open when its designated timestamp unit is rejected", async function () {
     // Unit validation happens before the close attempt mutates the row, so the
     // caller can correct a bad constant and retry at() directly.

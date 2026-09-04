@@ -125,9 +125,11 @@ Three consequences are worth knowing:
   including its table name, and leaves rows already in the buffer alone. Catch
   the error and start the next row from `table()`; there is no need to `reset()`
   and nothing already buffered is lost. Two rejections leave the row open
-  instead: an invalid designated timestamp unit, which is caught before closing
-  begins, and a row that does not fit `max_buf_size`, whose partial close is
-  rewound so the same call succeeds once a `flush()` frees space. If an ILP
+  instead: an invalid designated timestamp -- either its unit or its value,
+  both caught before closing begins, so the call can be retried with a
+  corrected argument -- and a row that does not fit `max_buf_size`, whose
+  partial close is rewound so the same call succeeds once a `flush()` frees
+  space. If an ILP
   auto-flush send fails, the
   completed batch has already been removed from the sender buffer; applications
   that need to retry must retain and resubmit those rows. QWP keeps successfully

@@ -245,8 +245,10 @@ interface SenderBuffer {
    *
    * @throws {Error} If `timestamp` is not an integer or `BigInt`.
    * @throws {Error} If `unit` is `'ns'` but `timestamp` is not a `BigInt`.
-   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`. This
-   * validation leaves the open row unchanged so the call can be retried.
+   * @throws {Error} If `unit` is not one of `'ns'`, `'us'`, or `'ms'`.
+   * Argument validation -- the unit and the timestamp alike -- runs before the
+   * close touches the row, so it leaves the open row unchanged and the call
+   * can be retried with a corrected argument.
    * @throws {Error} If the row cannot be closed within `max_buf_size`. The
    * partial close is rewound, so the same call succeeds once a `flush()` frees
    * space.

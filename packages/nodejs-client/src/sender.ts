@@ -522,10 +522,11 @@ class Sender {
 
   /**
    * Closes the row after writing the designated timestamp.
-   * On ILP, an invalid timestamp unit is rejected before closing begins, and a
-   * row that does not fit `max_buf_size` has its partial close rewound; both
-   * leave the row open so this method can be retried, the latter once a
-   * `flush()` frees space. If other validation or encoding rejects the row
+   * On ILP, an invalid designated timestamp -- its unit or its value -- is
+   * rejected before closing begins, and a row that does not fit
+   * `max_buf_size` has its partial close rewound; both leave the row open so
+   * this method can be retried, the former with a corrected argument and the
+   * latter once a `flush()` frees space. If other validation or encoding rejects the row
    * before it is completed, the incomplete row and its table selection are
    * discarded; rows completed earlier remain staged. Start
    * the next row with {@link table} again. If this call triggers an auto-flush
