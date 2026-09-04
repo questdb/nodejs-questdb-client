@@ -704,9 +704,14 @@ of `awaitServerAck`, and returns the highest stable frame sequence published by 
 call. It returns `-1n` when there was nothing to publish. `publishedSequence` and
 `acknowledgedSequence` expose the current immutable watermarks. ACK waits are
 cumulative, so one later acknowledgement resolves all covered waits and callers may
-wait for different sequences concurrently. When durable ACK was negotiated, the
+wait for different sequences concurrently. When durable ACK is being tracked, the
 acknowledged watermark advances only after QuestDB reports durable progress;
-otherwise it follows ordinary protocol OK responses. A deadline failure raises
+otherwise it follows ordinary protocol OK responses. Tracking needs both halves:
+the caller has to ask for durable progress (`requestDurableAck`, or
+`durableAckKeepaliveMs` directly) and the server has to confirm it. Negotiation
+alone is not enough, because nothing polls for durable progress that was never
+requested — a server that offers the capability unasked leaves the watermark on
+ordinary OK ACKs rather than stalling it. A deadline failure raises
 `QwpIngressAckTimeoutError` without closing an otherwise healthy session.
 
 Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` or
