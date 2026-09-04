@@ -416,23 +416,24 @@ abstract class SenderBufferBase implements SenderBuffer {
    * space.
    */
   at(timestamp: number | bigint, unit: TimestampUnit = "us") {
-    // The unit is a call-site parameter, so reject it before attempting to
-    // close (and potentially discard) the row. This also avoids writing the
-    // timestamp separator before discovering that the unit is invalid.
-    this.validateTimestampUnit(unit);
-    // This one describes the row rather than the call, and the row it
-    // describes can never be closed by any argument, so it has to go first:
-    // leaving hasTable set wedges every later table() with "Table name has
-    // already been set". Checking the timestamp ahead of it meant a caller who
-    // got both wrong was told about the argument, kept an unclosable row, and
-    // then hit that wedge -- so this stays above the argument checks even
-    // though they no longer discard.
+    // This describes the row rather than the call, and the row it describes
+    // can never be closed by any argument, so it goes first: leaving hasTable
+    // set wedges every later table() with "Table name has already been set".
+    // Checking an argument ahead of it meant a caller who got both wrong was
+    // told about the argument, kept an unclosable row, and then hit that
+    // wedge -- which is what an invalid unit used to do, because its check sat
+    // above this one.
     if (!this.hasSymbols && !this.hasColumns) {
       this.discardIncompleteRow();
       throw new Error(
         "The row must have a symbol or column set before it is closed",
       );
     }
+    // The unit is a call-site parameter: nothing has been written yet, so a
+    // caller who corrects it can close the same row. Checking it here rather
+    // than above also keeps the timestamp separator out of the buffer until
+    // the unit is known to be valid.
+    this.validateTimestampUnit(unit);
     // The timestamp itself is a call-site parameter, on exactly the same
     // footing as the unit above: neither depends on the row, neither has
     // touched it yet, and a caller who corrects the argument can close the
@@ -660,11 +661,27 @@ abstract class SenderBufferBase implements SenderBuffer {
     // neither of which named the full buffer that actually stopped the call.
     this.checkCapacity([name], 2 + name.length);
     // Past every check that can reject the call: this one writes.
+    const startOfColumn = this.position;
+    const hadColumnCall = this.hasColumnCall;
     this.hasColumnCall = true;
-    this.write(this.hasColumns ? "," : " ");
-    this.writeEscaped(name);
-    this.write("=");
-    writeValue();
+    try {
+      this.write(this.hasColumns ? "," : " ");
+      this.writeEscaped(name);
+      this.write("=");
+      writeValue();
+    } catch (error) {
+      // writeValue() reserves its own bytes, so a full buffer throws one step
+      // into the cell, after the separator and name are already down.
+      // Everything this call wrote sits at or above startOfColumn and the row
+      // below it is untouched, so rewinding restores exactly the state before
+      // the call -- the rule at()/atNow() already follow. Left in place, the
+      // `,name=` stub was closed by the next at() into a line with an empty
+      // field, which QuestDB rejects. A call that wrote nothing also did not
+      // move the caller past the symbol section, so the flag goes back too.
+      this.position = startOfColumn;
+      this.hasColumnCall = hadColumnCall;
+      throw error;
+    }
     this.hasColumns = true;
   }
 

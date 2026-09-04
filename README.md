@@ -121,16 +121,17 @@ Three consequences are worth knowing:
   "The row must have a symbol or column set before it is closed". QWP is
   columnar and can express it, so the row is sent with no columns — carrying
   only its designated timestamp.
-- A rejected `at()`/`atNow()` on ILP discards the row it could not close,
-  including its table name, and leaves rows already in the buffer alone. Catch
-  the error and start the next row from `table()`; there is no need to `reset()`
-  and nothing already buffered is lost. Two rejections leave the row open
-  instead: an invalid designated timestamp -- either its unit or its value,
-  both caught before closing begins, so the call can be retried with a
-  corrected argument -- and a row that does not fit `max_buf_size`, whose
-  partial close is rewound so the same call succeeds once a `flush()` frees
-  space. If an ILP
-  auto-flush send fails, the
+- ILP discards a row only when it can never be closed -- when every value on it
+  was nullish, so it carries no symbol and no column. That discard takes the
+  table name with it and leaves rows already in the buffer alone: catch the
+  error and start the next row from `table()`; there is no need to `reset()`
+  and nothing already buffered is lost. Every other rejection leaves the row
+  open and the call retryable: an invalid designated timestamp -- either its
+  unit or its value, both caught before closing begins -- can be retried with a
+  corrected argument; a row that does not fit `max_buf_size` has its partial
+  close rewound, so the same call succeeds once a `flush()` frees space; and a
+  rejected column or symbol call writes nothing at all, leaving the row exactly
+  as it was. If an ILP auto-flush send fails, the
   completed batch has already been removed from the sender buffer; applications
   that need to retry must retain and resubmit those rows. QWP keeps successfully
   closed rows for its retry and replay path.

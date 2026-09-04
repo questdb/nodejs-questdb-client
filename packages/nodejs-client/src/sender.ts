@@ -522,18 +522,19 @@ class Sender {
 
   /**
    * Closes the row after writing the designated timestamp.
-   * On ILP, an invalid designated timestamp -- its unit or its value -- is
-   * rejected before closing begins, and a row that does not fit
-   * `max_buf_size` has its partial close rewound; both leave the row open so
-   * this method can be retried, the former with a corrected argument and the
-   * latter once a `flush()` frees space. If other validation or encoding rejects the row
-   * before it is completed, the incomplete row and its table selection are
-   * discarded; rows completed earlier remain staged. Start
-   * the next row with {@link table} again. If this call triggers an auto-flush
-   * that fails, ILP transports have already removed the entire staged batch from
-   * the sender buffer. Applications that need to retry ILP rows must retain and
-   * resubmit them. QWP retains successfully closed rows for its retry and replay
-   * path.
+   * On ILP, a row is discarded -- its columns and its table selection alike --
+   * only when it can never be closed, which means it carries no symbol and no
+   * column; rows completed earlier remain staged, and the next row starts from
+   * {@link table} again. Every other rejection leaves the row open and this
+   * call retryable: an invalid designated timestamp, its unit or its value, is
+   * caught before closing begins, so a corrected argument closes the same row,
+   * and a row that does not fit `max_buf_size` has its partial close rewound,
+   * so the same call succeeds once a `flush()` frees space. A rejected column
+   * or symbol call likewise writes nothing. If this call triggers an
+   * auto-flush that fails, ILP transports have already removed the entire
+   * staged batch from the sender buffer. Applications that need to retry ILP
+   * rows must retain and resubmit them. QWP retains successfully closed rows
+   * for its retry and replay path.
    *
    * **Precision rules**:
    * - **Protocol v2 and higher:**
@@ -569,15 +570,17 @@ class Sender {
   /**
    * Closes the row without writing a designated timestamp.
    * Designated timestamp will be populated by the server on this record.
-   * On ILP, a row that does not fit `max_buf_size` has its partial close
-   * rewound and stays open, so the same call succeeds once a `flush()` frees
-   * space. If validation or encoding rejects the row before it is completed,
-   * the incomplete row and its table selection are discarded; rows completed
-   * earlier remain staged. Start the next row with {@link table} again. If this
-   * call triggers an auto-flush that fails, ILP transports have already removed
-   * the entire staged batch from the sender buffer. Applications that need to
-   * retry ILP rows must retain and resubmit them. QWP retains successfully
-   * closed rows for its retry and replay path.
+   * On ILP, a row is discarded -- its columns and its table selection alike --
+   * only when it can never be closed, which means it carries no symbol and no
+   * column; rows completed earlier remain staged, and the next row starts from
+   * {@link table} again. Every other rejection leaves the row open and this
+   * call retryable: a row that does not fit `max_buf_size` has its partial
+   * close rewound, so the same call succeeds once a `flush()` frees space, and
+   * a rejected column or symbol call writes nothing. If this call triggers an
+   * auto-flush that fails, ILP transports have already removed the entire
+   * staged batch from the sender buffer. Applications that need to retry ILP
+   * rows must retain and resubmit them. QWP retains successfully closed rows
+   * for its retry and replay path.
    *
    * @returns {Promise<void>} Resolves after the row is closed and any triggered auto-flush completes.
    */

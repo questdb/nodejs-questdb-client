@@ -878,6 +878,64 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("discards an unclosable row even when the timestamp unit is also wrong", async function () {
+    // The row check has to precede every argument check, because a row with no
+    // symbol and no column cannot be closed by any argument. The unit check
+    // used to sit above it, so this combination reported the unit, kept the
+    // unclosable row, and wedged the next table() with "Table name has already
+    // been set" -- after which rows meant for the new table were staged under
+    // the old one.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+
+    await sender.table("t1").intColumn("a", 1).at(1n, "ns");
+    sender.table("t2");
+    await expect(
+      async () => await sender.at(2n, "seconds" as "us"),
+    ).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+
+    // The wedge is gone: the next table() is accepted and the row lands under
+    // it, not under t2.
+    await sender.table("t3").intColumn("z", 9).at(3n, "ns");
+    expect(bufferContent(sender)).toBe("t1 a=1i 1n\nt3 z=9i 3n\n");
+    await sender.close();
+  });
+
+  it("leaves no partial cell behind when a column value overflows the buffer", async function () {
+    // writeColumn() writes the separator, the name and '=' before invoking the
+    // value encoder, which reserves its own bytes and is where a full buffer
+    // actually throws. The `,name=` stub used to stay in the buffer and the
+    // next at() closed it into `t a=1i,b= 1\n` -- a field with an empty value,
+    // which QuestDB rejects -- after an error the caller had already handled.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 32,
+      max_buf_size: 32,
+    });
+
+    await sender.table("t").intColumn("a", 1);
+    const positionBefore = bufferPosition(sender);
+    expect(() => sender.stringColumn("b", "x".repeat(200))).toThrow(
+      "Max buffer size is 32 bytes",
+    );
+    // The rejected call contributed nothing, so the row is exactly as it was.
+    expect(bufferPosition(sender)).toBe(positionBefore);
+
+    await sender.at(1n, "ns");
+    expect(bufferContent(sender)).toBe("t a=1i 1\n");
+    await sender.close();
+  });
+
   it("omits decimal columns with null or undefined value", async function () {
     const sender = new Sender({
       protocol: "tcp",
