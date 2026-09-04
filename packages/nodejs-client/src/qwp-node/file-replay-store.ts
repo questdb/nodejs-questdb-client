@@ -1245,6 +1245,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     let segment = this.activeSegment;
     if (!segment || segment.logicalSize + bytes.byteLength > segment.capacity) {
       segment = await this.activateHotSpare(record.frameSequence);
+      await this.assertReadyAfterWait();
     }
     const expectedSequence = segment.firstSequence + BigInt(segment.frameCount);
     if (record.frameSequence !== expectedSequence) {
@@ -1262,8 +1263,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       try {
         await writeFully(handle, Uint8Array.of(MANIFEST_REQUIRED_FLAG), 5);
         await handle.sync();
+        await this.assertReadyAfterWait();
         segment.manifestFlagPending = false;
       } catch (error) {
+        if (error instanceof QwpReplayStoreLockLostError) throw error;
         throw new QwpReplayStoreError(
           `could not stamp the QWP store-and-forward manifest-required flag [file=${segment.path}]`,
           error,
@@ -1278,7 +1281,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
         this.dirtyRecordPaths.add(segment.path);
       }
+      await this.assertReadyAfterWait();
     } catch (error) {
+      if (error instanceof QwpReplayStoreLockLostError) throw error;
       // The fixed file cannot be shortened without losing its reservation.
       // Clear the attempted range so recovery still observes canonical zero
       // padding if the caller retries after a transient write failure.
@@ -2290,6 +2295,21 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     // has to notice the slot was taken over. Writing on would corrupt the new
     // owner's journal rather than this store's own.
     if (this.slotLock?.lost) {
+      throw new QwpReplayStoreLockLostError(this.directory);
+    }
+    if (this.checkpointFailure) throw this.checkpointFailure;
+    if (this.maintenanceFailure) throw this.maintenanceFailure;
+  }
+
+  /** Re-proves a lease that may have expired while an async syscall waited. */
+  private async assertReadyAfterWait(): Promise<void> {
+    this.assertOpen();
+    if (!this.loaded) {
+      throw new QwpReplayStoreInvariantError(
+        "QWP store-and-forward journal must be loaded before use",
+      );
+    }
+    if (!this.slotLock || !(await this.slotLock.ensureOwned())) {
       throw new QwpReplayStoreLockLostError(this.directory);
     }
     if (this.checkpointFailure) throw this.checkpointFailure;

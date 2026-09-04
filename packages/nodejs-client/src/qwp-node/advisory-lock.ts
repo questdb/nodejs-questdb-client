@@ -377,6 +377,22 @@ export class QwpNodeAdvisoryLock {
   }
 
   /**
+   * Re-establishes ownership after an awaited filesystem operation may have
+   * outlived the lease. Returning false means the caller must not mutate the
+   * guarded resource.
+   *
+   * Unlike reading the token and refreshing the timestamp in place, the stale
+   * path re-enters the same rename-and-claim arbitration as a contender. That
+   * closes the gap where a contender could reclaim the old owner directory
+   * between a token read and the caller's next write.
+   */
+  async ensureOwned(): Promise<boolean> {
+    if (this.released || this.compromised) return false;
+    if (this.lost) await this.reacquireAfterStall();
+    return !this.lost;
+  }
+
+  /**
    * Re-enters contention for a slot this object has already gone stale on.
    *
    * A stall longer than STALE_AFTER_MS -- a suspended VM or container, a

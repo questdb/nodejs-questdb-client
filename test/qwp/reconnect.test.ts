@@ -3244,6 +3244,49 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("does not reuse completed durability across table incarnations", async () => {
+    const connection = new FakeConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    const replayStore = new TrackingReplayStore();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      durableAckKeepaliveMs: 0,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+    });
+
+    const oldSend = session.sendFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
+    connection.receive(
+      ingressResponse(QWP_STATUS.OK, 0n, [["trades", 100n]]),
+    );
+    const oldAck = await oldSend;
+    connection.receive(durableResponse([["trades", 100n]]));
+    await session.waitForDurable(oldAck);
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+
+    const recreatedSend = session.sendFrame(Uint8Array.of(2));
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["trades", 1n]]));
+    const recreatedAck = await recreatedSend;
+    expect(Array.from(replayStore.records.keys())).toEqual([1n]);
+
+    let durable = false;
+    const waiting = session.waitForDurable(recreatedAck).then(() => {
+      durable = true;
+    });
+    await Promise.resolve();
+    expect(durable).toBe(false);
+    expect(Array.from(replayStore.records.keys())).toEqual([1n]);
+
+    connection.receive(durableResponse([["trades", 1n]]));
+    await waiting;
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+    await session.close();
+  });
+
   it("continues recovered dictionary IDs until a drained close retires them", async () => {
     const directory = await createTemporaryDirectory();
     const dictionary = new QwpSymbolDictionary();
@@ -5145,6 +5188,74 @@ describe("QWP Node file replay store", () => {
       vi.useRealTimers();
     }
     await store.close().catch(() => undefined);
+  });
+
+  it("fences an append that loses its slot during segment activation", async () => {
+    const directory = await trackedDirectory();
+    const predecessor = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+    });
+    await predecessor.load();
+    await predecessor.append({
+      frameSequence: 0n,
+      payload: Uint8Array.of(0),
+    });
+
+    type SyncHandle = { sync(): Promise<void> };
+    const internals = predecessor as unknown as {
+      hotSpare?: { handle: SyncHandle };
+      slotLock?: { provenAtMs: number };
+    };
+    await vi.waitFor(() => expect(internals.hotSpare).toBeDefined());
+    const handle = internals.hotSpare!.handle;
+    const realSync = handle.sync.bind(handle);
+    let syncCalls = 0;
+    let resumeActivation!: () => void;
+    const activationPaused = new Promise<void>((resolve) => {
+      resumeActivation = resolve;
+    });
+    handle.sync = async () => {
+      await realSync();
+      syncCalls++;
+      if (syncCalls === 2) await activationPaused;
+    };
+
+    const staleAppend = predecessor.append({
+      frameSequence: 1n,
+      payload: Uint8Array.of(11),
+    });
+    await vi.waitFor(() => expect(syncCalls).toBe(2));
+
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(join(directory, ".lock.owner"), longAgo, longAgo);
+    internals.slotLock!.provenAtMs = longAgo.getTime();
+    const successor = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+      onRecoveryDataLoss: () => undefined,
+    });
+    await successor.load();
+    await successor.append({
+      frameSequence: 1n,
+      payload: Uint8Array.of(22),
+    });
+    expect(await successor.readPayload(1n)).toEqual(Uint8Array.of(22));
+
+    resumeActivation();
+    await expect(staleAppend).rejects.toBeInstanceOf(
+      QwpReplayStoreLockLostError,
+    );
+    expect(await successor.readPayload(1n)).toEqual(Uint8Array.of(22));
+
+    await predecessor.close().catch(() => undefined);
+    await successor.close();
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    await expect(reopened.load()).resolves.toEqual([
+      { frameSequence: 0n, payload: Uint8Array.of(0) },
+      { frameSequence: 1n, payload: Uint8Array.of(22) },
+    ]);
+    await reopened.close();
   });
 
   it("treats an owner directory with no record yet as held", async () => {

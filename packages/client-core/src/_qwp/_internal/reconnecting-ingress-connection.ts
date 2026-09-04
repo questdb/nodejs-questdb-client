@@ -1593,6 +1593,19 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       lastCovered = frame.frameSequence;
     }
     if (lastCovered !== undefined) await this.acknowledgeThrough(lastCovered);
+    this.pruneCompletedDurableWatermarks();
+  }
+
+  /** Do not carry a completed table incarnation into a later same-name table. */
+  private pruneCompletedDurableWatermarks(): void {
+    const pendingTables = new Set<string>();
+    for (const frame of this.frames.values()) {
+      if (!frame.durableTargets) continue;
+      for (const table of frame.durableTargets.keys()) pendingTables.add(table);
+    }
+    for (const table of this.durableWatermarks.keys()) {
+      if (!pendingTables.has(table)) this.durableWatermarks.delete(table);
+    }
   }
 
   private clearPoisonThrough(frameSequence: bigint): void {

@@ -1287,6 +1287,12 @@ export class QwpIngressSession {
         new RangeError("durable ACK timeout must be a positive finite number"),
       );
     }
+    if (
+      response.sequence !== null &&
+      response.sequence <= this.durableAcknowledgedSequence
+    ) {
+      return Promise.resolve();
+    }
     const targets = new Map(
       response.tables.map((table) => [table.name, table.sequenceTransaction]),
     );
@@ -1615,7 +1621,35 @@ export class QwpIngressSession {
     } else {
       this.scheduleDurablePoll();
     }
+    this.pruneCompletedDurableWatermarks();
     return advanced || frameAdvanced;
+  }
+
+  /**
+   * A table name can be dropped and recreated with a fresh transaction space.
+   * Retain watermarks only while some frame or waiter still needs them; the
+   * cumulative durable frame sequence preserves completed-response lookups.
+   */
+  private pruneCompletedDurableWatermarks(): void {
+    for (const table of this.durableWatermarks.keys()) {
+      if (this.pendingDurableTargets.has(table)) continue;
+      let referenced = false;
+      for (const targets of this.durableFrameTargets.values()) {
+        if (targets.has(table)) {
+          referenced = true;
+          break;
+        }
+      }
+      if (!referenced) {
+        for (const waiter of this.durableWaiters) {
+          if (waiter.targets.has(table)) {
+            referenced = true;
+            break;
+          }
+        }
+      }
+      if (!referenced) this.durableWatermarks.delete(table);
+    }
   }
 
   private advanceDurableFrameWatermark(): boolean {
