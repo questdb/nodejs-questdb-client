@@ -249,6 +249,9 @@ interface SenderBuffer {
    * Argument validation -- the unit and the timestamp alike -- runs before the
    * close touches the row, so it leaves the open row unchanged and the call
    * can be retried with a corrected argument.
+   * @throws {Error} If the row has no symbol or column set. Such a row can
+   * never be closed by any argument, so it is discarded ahead of the argument
+   * checks and the next row starts from `table()`.
    * @throws {Error} If the row cannot be closed within `max_buf_size`. The
    * partial close is rewound, so the same call succeeds once a `flush()` frees
    * space.

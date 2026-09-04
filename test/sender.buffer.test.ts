@@ -839,6 +839,19 @@ describe("Sender message builder test suite (anything not covered in client inte
     await empty.table("t").stringColumn("c", "y").at(2000);
     expect(bufferContent(empty)).toBe('t c="y" 2000t\n');
     await empty.close();
+
+    // The row state is judged before the argument, because a row with nothing
+    // in it cannot be closed by any timestamp. Checking the argument first
+    // named the argument, kept the unclosable row, and wedged the next table()
+    // with "Table name has already been set".
+    const both = build();
+    both.table("t");
+    await expect(async () => await both.at(1000.5)).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+    await both.table("t").stringColumn("c", "z").at(3000);
+    expect(bufferContent(both)).toBe('t c="z" 3000t\n');
+    await both.close();
   });
 
   it("keeps a row open when its designated timestamp unit is rejected", async function () {

@@ -408,6 +408,9 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Argument validation -- the unit and the timestamp alike -- runs before the
    * close touches the row, so it leaves the open row unchanged and the call
    * can be retried with a corrected argument.
+   * @throws {Error} If the row has no symbol or column set. Such a row can
+   * never be closed by any argument, so it is discarded ahead of the argument
+   * checks and the next row starts from `table()`.
    * @throws {Error} If the row cannot be closed within `max_buf_size`. The
    * partial close is rewound, so the same call succeeds once a `flush()` frees
    * space.
@@ -417,7 +420,20 @@ abstract class SenderBufferBase implements SenderBuffer {
     // close (and potentially discard) the row. This also avoids writing the
     // timestamp separator before discovering that the unit is invalid.
     this.validateTimestampUnit(unit);
-    // The timestamp itself is a call-site parameter too, on exactly the same
+    // This one describes the row rather than the call, and the row it
+    // describes can never be closed by any argument, so it has to go first:
+    // leaving hasTable set wedges every later table() with "Table name has
+    // already been set". Checking the timestamp ahead of it meant a caller who
+    // got both wrong was told about the argument, kept an unclosable row, and
+    // then hit that wedge -- so this stays above the argument checks even
+    // though they no longer discard.
+    if (!this.hasSymbols && !this.hasColumns) {
+      this.discardIncompleteRow();
+      throw new Error(
+        "The row must have a symbol or column set before it is closed",
+      );
+    }
+    // The timestamp itself is a call-site parameter, on exactly the same
     // footing as the unit above: neither depends on the row, neither has
     // touched it yet, and a caller who corrects the argument can close the
     // same row. Discarding here dropped a fully built row over a typo and
@@ -432,15 +448,6 @@ abstract class SenderBufferBase implements SenderBuffer {
     if (unit == "ns" && typeof timestamp !== "bigint") {
       throw new Error(
         `Designated timestamp must be a BigInt if it is set in nanoseconds`,
-      );
-    }
-    // This one does describe the row, and the row it describes can never be
-    // closed, so it has to go: leaving hasTable set wedges every later
-    // table() with "Table name has already been set".
-    if (!this.hasSymbols && !this.hasColumns) {
-      this.discardIncompleteRow();
-      throw new Error(
-        "The row must have a symbol or column set before it is closed",
       );
     }
     // A full buffer is not a malformed row: the row is still intact and a
