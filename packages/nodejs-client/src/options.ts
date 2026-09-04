@@ -867,6 +867,56 @@ function validateUdpSecurityOptions(options: SenderOptions): void {
   }
 }
 
+/**
+ * @ignore
+ * The ws/wss counterpart of {@link validateUdpSecurityOptions}, for the
+ * programmatic path only: a `ws::`/`wss::` connect string is validated by
+ * resolveQwpNodeClientConfig(), which rejects all of this already. Built from
+ * an options object those keys used to be read by nobody and dropped in
+ * silence, so a sender the caller believed was authenticated, or verifying a
+ * custom CA, was neither.
+ */
+function validateWebSocketSecurityOptions(options: SenderOptions): void {
+  if (options.protocol !== WS && options.protocol !== WSS) return;
+  if (options.protocol === WS) {
+    if (options.tls_verify !== undefined || options.tls_ca !== undefined) {
+      throw new Error(
+        "tls_verify and tls_ca are only supported by the wss protocol",
+      );
+    }
+  }
+  if (
+    // QWP authenticates with HTTP Basic or Bearer on the upgrade; it has no
+    // JWK path at all, so these cannot be honoured by any spelling. token_x
+    // and token_y are what a TCP JWK config still carries once keyId/token
+    // have been renamed, so they are named here for the same reason UDP names
+    // them: a diagnostic that stops short of them reads as if it accepted them.
+    options.auth !== undefined ||
+    options.jwk !== undefined ||
+    options.token_x !== undefined ||
+    options.token_y !== undefined
+  ) {
+    throw new Error(
+      "JWK authentication is not supported for QWP WebSocket transport; use 'username' and 'password', or 'token'",
+    );
+  }
+  if (
+    options.qwp?.webSocket?.authorization !== undefined &&
+    (options.username !== undefined ||
+      options.password !== undefined ||
+      options.token !== undefined)
+  ) {
+    // The same rule the custom-agent branch of createConfiguredQwpSender()
+    // applies to TLS: two ways of configuring one channel, so reject the
+    // ambiguity rather than silently picking a winner. Letting the explicit
+    // header win connected as a different principal than the credentials the
+    // caller also supplied, with nothing to say which was used.
+    throw new Error(
+      "a custom QWP 'qwp.webSocket.authorization' header cannot be combined with 'username'/'password' or 'token'; supply only one",
+    );
+  }
+}
+
 function parseStdlibTransport(options: SenderOptions) {
   parseBoolean(options, "stdlib_http", "stdlib http");
 }
@@ -928,6 +978,7 @@ export {
   WSS,
   UDP,
   validateUdpSecurityOptions,
+  validateWebSocketSecurityOptions,
   PROTOCOL_VERSION_AUTO,
   PROTOCOL_VERSION_V1,
   PROTOCOL_VERSION_V2,

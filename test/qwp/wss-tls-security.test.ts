@@ -356,4 +356,78 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
       "QWP Bearer authentication requires a non-empty 'token'",
     );
   });
+
+  it("rejects the JWK credentials QWP has no way to honour", () => {
+    // qwpAuthorization() reads username/password/token only, so an ILP-style
+    // auth or jwk object was dropped in silence and the upgrade went out
+    // unauthenticated -- while the sibling udp path rejects the very same
+    // keys. token_x/token_y are what a TCP JWK config still carries once the
+    // renamed keys are removed, and are named for the same reason udp names
+    // them.
+    for (const credential of [
+      { auth: { keyId: "admin", token: "priv" } },
+      { jwk: { kid: "admin", d: "priv", x: "a", y: "b", kty: "EC" } },
+      { token_x: "aa" },
+      { token_y: "bb" },
+    ]) {
+      expect(
+        () => constructWss(credential),
+        JSON.stringify(credential),
+      ).toThrow(
+        "JWK authentication is not supported for QWP WebSocket transport",
+      );
+    }
+  });
+
+  it("rejects tls_verify and tls_ca on the plaintext ws protocol", () => {
+    // `ws::` rejects these through the QWP schema; the programmatic object
+    // read neither, so a caller who meant wss and supplied a CA got a
+    // plaintext socket and no diagnostic. tls_ca was not even opened, so a
+    // missing file went unnoticed too.
+    vi.spyOn(qwpNode, "createQwpNodeSender").mockReturnValue({
+      reset() {},
+    } as unknown as qwpNode.QwpSender);
+    for (const tls of [{ tls_verify: false }, { tls_ca: CA_PATH }]) {
+      expect(
+        () =>
+          new Sender({
+            protocol: "ws",
+            host: "localhost",
+            port: 9000,
+            ...tls,
+          } as never),
+        JSON.stringify(tls),
+      ).toThrow("tls_verify and tls_ca are only supported by the wss protocol");
+    }
+    // wss still accepts both.
+    expect(agentTlsOptions(ingressFor({ tls_ca: CA_PATH }).agent).ca).toEqual(
+      readFileSync(CA_PATH),
+    );
+  });
+
+  it("rejects a custom authorization header combined with credentials", () => {
+    // The adjacent agent branch rejects exactly this shape of ambiguity for
+    // TLS -- "rather than doing either quietly". The header silently won over
+    // username/password, so the sender connected as a different principal
+    // than the credentials the caller also supplied.
+    for (const credentials of [
+      { username: "alice", password: "s3cret" },
+      { token: "tok-123" },
+    ]) {
+      expect(
+        () =>
+          constructWss({
+            ...credentials,
+            qwp: { webSocket: { authorization: "Bearer override" } },
+          }),
+        JSON.stringify(credentials),
+      ).toThrow(/cannot be combined with 'username'\/'password' or 'token'/);
+    }
+    // On its own the explicit header is still the way to supply a scheme the
+    // option vocabulary does not cover.
+    expect(
+      ingressFor({ qwp: { webSocket: { authorization: "Negotiate abc" } } })
+        .authorization,
+    ).toBe("Negotiate abc");
+  });
 });

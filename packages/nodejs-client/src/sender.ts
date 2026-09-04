@@ -9,6 +9,7 @@ import {
   selectQwpSchemeAgent,
   UDP,
   validateUdpSecurityOptions,
+  validateWebSocketSecurityOptions,
   WS,
   WSS,
 } from "./options";
@@ -104,6 +105,13 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * a Node.js <i>http.Agent</i>/<i>https.Agent</i>; an incompatible top-level agent is ignored with a warning. <br>
  * If no custom agent is configured, the Sender will use its own agent which overrides some default values
  * of <i>undici.Agent</i>. The Sender's own agent uses persistent connections with 1 minute idle timeout, pipelines requests default to 1.
+ * </p>
+ * <p>
+ * QWP authenticates the WebSocket upgrade with HTTP Basic (<i>username</i> and <i>password</i>) or Bearer
+ * (<i>token</i>); it has no JWK path, so <i>auth</i>, <i>jwk</i>, <i>token_x</i> and <i>token_y</i> are rejected
+ * rather than ignored. <i>tls_verify</i> and <i>tls_ca</i> apply to <i>wss</i> only. Supplying
+ * <i>qwp.webSocket.authorization</i> alongside <i>username</i>/<i>password</i> or <i>token</i> is rejected as
+ * ambiguous, the same way a custom agent cannot be combined with <i>tls_verify</i>/<i>tls_ca</i>.
  * </p>
  */
 class Sender {
@@ -615,6 +623,7 @@ function createConfiguredQwpSender(
   options: SenderOptions,
   logger: Logger,
 ): QwpSender {
+  validateWebSocketSecurityOptions(options);
   if (!options.host || !options.port) {
     throw new Error("The 'host' and 'port' options are mandatory for QWP");
   }
