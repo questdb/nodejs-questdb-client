@@ -21,6 +21,7 @@ import {
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
+import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { safelyInvoke } from "./safe-callback";
 
 /**
@@ -243,6 +244,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     skipQueueBarrier = false,
   ): Promise<void> {
     const outageStarted = Date.now();
+    const reconnectDeadlineMs =
+      this.maxDurationMs > 0 ? outageStarted + this.maxDurationMs : undefined;
     const previousEndpoint = this.lastEndpoint;
     let attempt = 0;
     let backoffMs = this.initialBackoffMs;
@@ -255,14 +258,22 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         cause: initialCause,
       });
       if (backoffMs > 0) {
-        await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
+        await this.waitForBackoffWithinDeadline(
+          jitterReconnectDelayMs(backoffMs),
+          reconnectDeadlineMs,
+          attempt,
+        );
         backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
       }
     }
 
     while (!this.closing) {
       if (attempt > 0 && backoffMs > 0) {
-        await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
+        await this.waitForBackoffWithinDeadline(
+          jitterReconnectDelayMs(backoffMs),
+          reconnectDeadlineMs,
+          attempt,
+        );
         backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
       }
       this.throwIfUnavailable();
@@ -272,7 +283,13 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         const abort = new AbortController();
         this.connectAbort = abort;
         try {
-          candidate = await this.factory(abort.signal);
+          candidate = await awaitReconnectDeadline(
+            this.factory(abort.signal),
+            reconnectDeadlineMs,
+            attempt,
+            () => abort.abort(),
+            (opened) => void opened.close().catch(() => undefined),
+          );
         } finally {
           if (this.connectAbort === abort) this.connectAbort = undefined;
         }
@@ -282,9 +299,11 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           throw new QwpSendClosedError();
         }
         const iterator = candidate.messages[Symbol.asyncIterator]();
-        const serverInfoPayload = await this.readServerInfo(
-          iterator,
-          candidate,
+        const serverInfoPayload = await awaitReconnectDeadline(
+          this.readServerInfo(iterator, candidate),
+          reconnectDeadlineMs,
+          attempt,
+          () => void candidate?.close().catch(() => undefined),
         );
         const serverInfo = decodeQwpEgressMessage(serverInfoPayload);
         if (serverInfo.kind !== "server-info") {
@@ -294,12 +313,17 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         }
         if (reconnecting) {
           this.validateServerInfo(serverInfo, candidate);
-          await this.replayInto(
-            candidate,
-            serverInfo,
-            previousEndpoint,
-            initialCause,
-            skipQueueBarrier,
+          await awaitReconnectDeadline(
+            this.replayInto(
+              candidate,
+              serverInfo,
+              previousEndpoint,
+              initialCause,
+              skipQueueBarrier,
+            ),
+            reconnectDeadlineMs,
+            attempt,
+            () => void candidate?.close().catch(() => undefined),
           );
         } else {
           this.initialServerInfo = serverInfo;
@@ -342,6 +366,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           previousEndpoint,
           cause: error,
         });
+        if (error instanceof QwpReconnectExhaustedError) throw error;
         if (!isRetryableReconnectError(error)) throw error;
         if (!reconnecting && !this.retryInitialConnection) throw error;
         const attemptsExhausted =
@@ -655,6 +680,19 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       };
       this.cancelBackoff = cancel;
     });
+  }
+
+  private waitForBackoffWithinDeadline(
+    delayMs: number,
+    deadlineMs: number | undefined,
+    attempts: number,
+  ): Promise<void> {
+    return awaitReconnectDeadline(
+      this.waitForBackoff(delayMs),
+      deadlineMs,
+      attempts,
+      () => this.cancelBackoff?.(),
+    );
   }
 
   private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {

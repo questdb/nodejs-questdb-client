@@ -340,14 +340,22 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       );
     }
     const iterator = this.batches[Symbol.asyncIterator]();
+    let nextTail: Promise<void> = Promise.resolve();
     return {
-      next: async () => {
-        await this.releaseDeliveredCredit();
-        const result = await iterator.next();
-        if (result.done) return { value: undefined, done: true };
-        this.releaseBufferedBatches(1);
-        this.deliveredCreditBytes = result.value.creditBytes;
-        return { value: result.value.batch, done: false };
+      next: () => {
+        const next = nextTail.then(async () => {
+          await this.releaseDeliveredCredit();
+          const result = await iterator.next();
+          if (result.done) return { value: undefined, done: true } as const;
+          this.releaseBufferedBatches(1);
+          this.deliveredCreditBytes = result.value.creditBytes;
+          return { value: result.value.batch, done: false } as const;
+        });
+        nextTail = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        return next;
       },
       return: async () => {
         if (this.terminal) this.discardBufferedResults();

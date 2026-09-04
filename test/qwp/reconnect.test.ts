@@ -705,6 +705,29 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("enforces the total reconnect deadline during an in-flight connect", async () => {
+    let attemptSignal: AbortSignal | undefined;
+    const startedAt = Date.now();
+    const connecting = QwpIngressSession.connect(
+      (signal) => {
+        attemptSignal = signal;
+        return new Promise<QwpBinaryConnection>(() => undefined);
+      },
+      {
+        reconnect: {
+          maxAttempts: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          maxDurationMs: 25,
+        },
+      },
+    );
+
+    await expect(connecting).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(attemptSignal?.aborted).toBe(true);
+  });
+
   it("disowns the eager first connect when the attempt is aborted", async () => {
     // connect() starts the first transport eagerly and nothing observes that
     // promise until connectLoop's first attempt awaits it. An abort leaves
@@ -3259,9 +3282,7 @@ describe("QWP ingress reconnect and replay", () => {
 
     const oldSend = session.sendFrame(Uint8Array.of(1));
     await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
-    connection.receive(
-      ingressResponse(QWP_STATUS.OK, 0n, [["trades", 100n]]),
-    );
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["trades", 100n]]));
     const oldAck = await oldSend;
     connection.receive(durableResponse([["trades", 100n]]));
     await session.waitForDurable(oldAck);
@@ -3699,6 +3720,54 @@ describe("QWP ingress reconnect and replay", () => {
 });
 
 describe("QWP egress reconnect and replay", () => {
+  it("does not start another attempt when the deadline expires in backoff", async () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.999);
+    let factoryCalls = 0;
+    try {
+      await expect(
+        QwpEgressSession.connect(
+          async () => {
+            factoryCalls++;
+            throw new QwpUpgradeError("offline", {
+              kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+              retryable: true,
+              tryNextEndpoint: true,
+            });
+          },
+          {
+            reconnect: {
+              maxAttempts: 0,
+              initialBackoffMs: 1_000,
+              maxBackoffMs: 1_000,
+              maxDurationMs: 25,
+            },
+          },
+        ),
+      ).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
+      expect(factoryCalls).toBe(1);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it("enforces the total reconnect deadline while awaiting SERVER_INFO", async () => {
+    const connection = new FakeConnection("primary");
+    const startedAt = Date.now();
+    const connecting = QwpEgressSession.connect(async () => connection, {
+      serverInfoTimeoutMs: 5_000,
+      reconnect: {
+        maxAttempts: 0,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        maxDurationMs: 25,
+      },
+    });
+
+    await expect(connecting).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    await expect(connection.closed).resolves.toMatchObject({ code: 1000 });
+  });
+
   it("keeps default initial connection establishment fail-fast", async () => {
     const failure = new Error("offline");
     let factoryCalls = 0;

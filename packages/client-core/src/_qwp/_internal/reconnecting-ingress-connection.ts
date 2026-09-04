@@ -41,6 +41,7 @@ import {
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
+import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 import {
   createQwpDataLossSenderError,
@@ -951,6 +952,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     initialConnection?: Promise<QwpBinaryConnection>,
   ): Promise<void> {
     const outageStarted = Date.now();
+    const reconnectDeadlineMs =
+      attemptPolicy === "configured" && this.maxDurationMs > 0
+        ? outageStarted + this.maxDurationMs
+        : undefined;
     const previousEndpoint = this.lastEndpoint;
     let attempt = 0;
     let backoffMs = this.initialBackoffMs;
@@ -967,15 +972,27 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     const initialRetryDelayMs = reconnectDelayMs(initialCause);
     if (initialRetryDelayMs > 0) {
-      await this.waitForBackoff(jitterReconnectDelayMs(initialRetryDelayMs));
+      await this.waitForBackoffWithinDeadline(
+        jitterReconnectDelayMs(initialRetryDelayMs),
+        reconnectDeadlineMs,
+        attempt,
+      );
     } else if (reconnecting && backoffMs > 0) {
-      await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
+      await this.waitForBackoffWithinDeadline(
+        jitterReconnectDelayMs(backoffMs),
+        reconnectDeadlineMs,
+        attempt,
+      );
       backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
     }
 
     while (!this.closing) {
       if (attempt > 0 && backoffMs > 0) {
-        await this.waitForBackoff(jitterReconnectDelayMs(backoffMs));
+        await this.waitForBackoffWithinDeadline(
+          jitterReconnectDelayMs(backoffMs),
+          reconnectDeadlineMs,
+          attempt,
+        );
         backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
       }
       this.throwIfUnavailable();
@@ -984,12 +1001,24 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       let candidate: QwpBinaryConnection | undefined;
       try {
         if (attempt === 1 && initialConnection) {
-          candidate = await initialConnection;
+          candidate = await awaitReconnectDeadline(
+            initialConnection,
+            reconnectDeadlineMs,
+            attempt,
+            () => undefined,
+            (opened) => void opened.close().catch(() => undefined),
+          );
         } else {
           const abort = new AbortController();
           this.connectAbort = abort;
           try {
-            candidate = await this.factory(abort.signal);
+            candidate = await awaitReconnectDeadline(
+              this.factory(abort.signal),
+              reconnectDeadlineMs,
+              attempt,
+              () => abort.abort(),
+              (opened) => void opened.close().catch(() => undefined),
+            );
           } finally {
             if (this.connectAbort === abort) this.connectAbort = undefined;
           }
@@ -1000,7 +1029,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           await candidate.close().catch(() => undefined);
           throw new QwpSendClosedError();
         }
-        const replayed = await this.replayInto(candidate);
+        const replayed = await awaitReconnectDeadline(
+          this.replayInto(candidate),
+          reconnectDeadlineMs,
+          attempt,
+          () => void candidate?.close().catch(() => undefined),
+        );
         if (this.closing) throw new QwpSendClosedError();
         this.install(candidate, replayed);
         // The server is reachable again, so the escalation window resumes.
@@ -1053,6 +1087,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           previousEndpoint,
           cause: error,
         });
+        if (error instanceof QwpReconnectExhaustedError) throw error;
         const capGapError =
           error instanceof QwpCatchUpCapGapError
             ? this.applyCatchUpCapGapPolicy(error)
@@ -2037,6 +2072,19 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       };
       this.cancelBackoff = cancel;
     });
+  }
+
+  private waitForBackoffWithinDeadline(
+    delayMs: number,
+    deadlineMs: number | undefined,
+    attempts: number,
+  ): Promise<void> {
+    return awaitReconnectDeadline(
+      this.waitForBackoff(delayMs),
+      deadlineMs,
+      attempts,
+      () => this.cancelBackoff?.(),
+    );
   }
 
   private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {

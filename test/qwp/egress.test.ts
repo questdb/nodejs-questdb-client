@@ -1301,6 +1301,48 @@ describe("QwpEgressSession", () => {
     await session.close();
   });
 
+  it("serializes concurrent iterator advances before replenishing credit", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+    });
+    const message = decodeQwpEgressMessage(firstResultBatch(query.requestId));
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(message);
+    for (const creditBytes of [101, 202, 303]) {
+      await expect(query.reserveMaterializedBatch()).resolves.toBe("reserved");
+      query.pushReserved(batch, creditBytes);
+    }
+
+    const iterator = query[Symbol.asyncIterator]();
+    const [first, second] = await Promise.all([
+      iterator.next(),
+      iterator.next(),
+    ]);
+    expect(first.done).toBe(false);
+    expect(second.done).toBe(false);
+    expect(connection.sent).toHaveLength(2);
+    const firstCredit = new QwpByteReader(connection.sent[1]);
+    expect(firstCredit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+    expect(firstCredit.readBigUint64()).toBe(query.requestId);
+    expect(readQwpVarint(firstCredit)).toBe(101n);
+    expect(firstCredit.remaining).toBe(0);
+
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    expect(connection.sent).toHaveLength(3);
+    const secondCredit = new QwpByteReader(connection.sent[2]);
+    expect(secondCredit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+    expect(secondCredit.readBigUint64()).toBe(query.requestId);
+    expect(readQwpVarint(secondCredit)).toBe(202n);
+    expect(secondCredit.remaining).toBe(0);
+
+    connection.receive(resultEnd(query.requestId));
+    await query.completion;
+    await session.close();
+  });
+
   it("bounds reusable views to an awaited callback and then replenishes credit", async () => {
     const connection = new FakeConnection();
     const session = new QwpEgressSession(connection);
