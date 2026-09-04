@@ -77,6 +77,12 @@ function columnPlan(
   return plan;
 }
 
+function timestampLabel(column: QwpColumnBuffer): string {
+  return column.type === QWP_COLUMN_TYPE.TIMESTAMP
+    ? "TIMESTAMP"
+    : "TIMESTAMP_NANOS";
+}
+
 /** Gorilla bytes for a timestamp column, or null when it stays uncompressed. */
 function plannedGorilla(
   column: QwpColumnBuffer,
@@ -84,7 +90,17 @@ function plannedGorilla(
 ): Uint8Array | null {
   const plan = columnPlan(column, options);
   if (plan.gorilla === undefined) {
-    const timestamps = column.values.map((value) => BigInt(value as bigint));
+    const label = timestampLabel(column);
+    // Range-checked inside the conversion this branch already runs, rather
+    // than in a pass of its own: a separate check loop would re-derive every
+    // bigint the map here has just derived, which is the duplicate work the
+    // ColumnPlan doc above exists to remove. Checking before qwpGorillaSize()
+    // also keeps an out-of-int64 value out of the packed stream entirely,
+    // instead of rejecting the frame after a wrong delta has been computed
+    // from it.
+    const timestamps = column.values.map((value) =>
+      checkedCellSigned(BigInt(value as bigint), 64, label, column.name),
+    );
     plan.gorilla =
       timestamps.length > 2 && qwpGorillaSize(timestamps) > 0
         ? encodeQwpGorilla(timestamps)
@@ -558,23 +574,21 @@ function writeColumn(
     }
     case QWP_COLUMN_TYPE.TIMESTAMP:
     case QWP_COLUMN_TYPE.TIMESTAMP_NANOS: {
-      const label =
-        column.type === QWP_COLUMN_TYPE.TIMESTAMP
-          ? "TIMESTAMP"
-          : "TIMESTAMP_NANOS";
-      // Checked before the branch so the Gorilla encoder is covered too: it
-      // consumes these values itself, and a delta computed from an
-      // out-of-int64 input is wrong in the packed stream rather than in a
-      // writeBigInt64 this could have guarded.
-      for (const value of column.values) {
-        checkedCellSigned(BigInt(value as bigint), 64, label, column.name);
-      }
       if (!options.gorilla) {
+        // The only arm plannedGorilla() does not cover, so it carries the
+        // check itself -- inline, like LONG above, rather than as a second
+        // traversal of values this loop is already converting.
+        const label = timestampLabel(column);
         for (const value of column.values) {
-          writer.writeBigInt64(BigInt(value as bigint));
+          writer.writeBigInt64(
+            checkedCellSigned(BigInt(value as bigint), 64, label, column.name),
+          );
         }
         return;
       }
+      // Both remaining arms are covered by plannedGorilla(), which range-checks
+      // every value as it converts it -- in the sizing pass, so the frame is
+      // rejected before a byte of it is written.
       const gorilla = plannedGorilla(column, options);
       if (gorilla) {
         writer.writeUint8(QWP_ENCODING_GORILLA);
