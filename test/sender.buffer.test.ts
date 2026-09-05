@@ -2,8 +2,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 
-import { Sender, SenderOptions } from "../src";
-import { PROTOCOL_VERSION_V3 } from "../src/options";
+import {
+  createBuffer,
+  Sender,
+  SenderOptions,
+} from "../packages/nodejs-client/src";
+import { PROTOCOL_VERSION_V3 } from "../packages/nodejs-client/src/options";
 
 type Column = { name: string } & (
   | { type: "STRING"; value: string }
@@ -181,17 +185,28 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("does not support arrays with protocol v1", async function () {
-    const sender = new Sender({
+  it("rejects arrays with protocol v1 regardless of value", async function () {
+    const options = {
       protocol: "tcp",
       protocol_version: "1",
       host: "host",
+      auto_flush: false,
       init_buf_size: 1024,
-    });
-    expect(() =>
-      sender.table("tableName").arrayColumn("arrayCol", [12.3, 23.4]),
-    ).toThrow("Arrays are not supported in protocol v1");
-    await sender.close();
+    };
+
+    // Cover both the public buffer factory and the Sender delegation path.
+    for (const target of [createBuffer(options), new Sender(options)]) {
+      for (const value of [[12.3, 23.4], null, undefined]) {
+        target.reset();
+        expect(() =>
+          target.table("tableName").arrayColumn("arrayCol", value),
+        ).toThrow("Arrays are not supported in protocol v1");
+      }
+      if (target instanceof Sender) {
+        target.reset();
+        await target.close();
+      }
+    }
   });
 
   it("supports arrays with protocol v2", async function () {
@@ -437,29 +452,548 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("supports arrays with NULL value", async function () {
+  it("omits array columns with NULL value", async function () {
     const sender = new Sender({
       protocol: "http",
       protocol_version: "2",
       host: "host",
       init_buf_size: 1024,
     });
+    // A null or undefined array column is omitted from the row entirely: in ILP
+    // a NULL value is represented by not sending the field. Column separators
+    // stay correct whether the omitted column is leading or in the middle.
     await sender
       .table("tableName")
-      .arrayColumn("arrayCol", undefined as unknown as unknown[])
+      .arrayColumn("undefCol", undefined)
+      .intColumn("i", 42)
+      .arrayColumn("nullCol", null)
+      .intColumn("j", 7)
       .atNow();
+    expect(bufferContentHex(sender)).toBe(toHex("tableName i=42i,j=7i\n"));
+    await sender.close();
+
+    // A row whose only columns are NULL arrays has no fields and cannot be closed.
+    const emptySender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await expect(
+      async () =>
+        await emptySender
+          .table("tableName")
+          .arrayColumn("nullCol", null)
+          .atNow(),
+    ).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+    await emptySender.close();
+  });
+
+  it("omits columns and symbols with null or undefined value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+    // null and undefined values are skipped entirely (recorded as NULL by the
+    // server), matching the Python client. See issue #28. The kept columns keep
+    // their separators correctly regardless of which values were skipped.
     await sender
       .table("tableName")
-      .arrayColumn("arrayCol", null as unknown as unknown[])
+      .symbol("skippedSym1", null)
+      .symbol("skippedSym2", undefined)
+      .symbol("keptSym", "sv")
+      .stringColumn("skippedStr", null)
+      .stringColumn("keptStr", "hello")
+      .floatColumn("skippedFloat", undefined)
+      .floatColumn("keptFloat", 1.5)
+      .intColumn("skippedInt", null)
+      .intColumn("keptInt", 42)
+      .booleanColumn("skippedBool", undefined)
+      .booleanColumn("keptBool", true)
+      .timestampColumn("skippedTs", null)
+      .timestampColumn("keptTs", 1000)
       .atNow();
-    expect(bufferContentHex(sender)).toBe(
-      toHex("tableName arrayCol==") +
-        " 0e 21 " +
-        toHex("\ntableName arrayCol==") +
-        " 0e 21 " +
-        toHex("\n"),
+    expect(bufferContent(sender)).toBe(
+      'tableName,keptSym=sv keptStr="hello",keptFloat=1.5,keptInt=42i,keptBool=t,keptTs=1000t\n',
     );
     await sender.close();
+  });
+
+  it("omits float columns with null or undefined value on every version", async function () {
+    // floatColumn is the one scalar setter overridden per protocol version
+    // (bufferv1 and bufferv2, the latter inherited by v3). Every other setter
+    // lives once in SenderBufferBase, so the v1 test above covers them all --
+    // but the v2/v3 override had no coverage, and v2 is what HTTP negotiates by
+    // default.
+    for (const version of ["1", "2", "3"] as const) {
+      const sender = new Sender({
+        protocol: "tcp",
+        protocol_version: version,
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      });
+      await sender
+        .table("tableName")
+        .floatColumn("skipped", null)
+        .floatColumn("alsoSkipped", undefined)
+        .intColumn("kept", 1)
+        .atNow();
+      expect(bufferContent(sender)).toBe("tableName kept=1i\n");
+      await sender.close();
+    }
+  });
+
+  it("validates the column call even when the value is nullish", async function () {
+    // Omitting the column must not take the rest of the call's validation with
+    // it. A nullish value used to return before the name, the row state and
+    // the decimal scale were ever looked at, so the same call site raised on
+    // rows that carried a value and stayed silent on rows that did not -- a
+    // misspelled or over-long name first surfaced in production.
+    const build = () =>
+      new Sender({
+        protocol: "tcp",
+        protocol_version: "3",
+        host: "host",
+        auto_flush: false,
+        max_name_len: 5,
+        init_buf_size: 1024,
+      }).table("t");
+
+    for (const value of [null, undefined] as const) {
+      expect(() => build().stringColumn("tooLongForFive", value)).toThrow(
+        "Column name is too long, max length is 5",
+      );
+      expect(() => build().intColumn("", value)).toThrow(
+        "Empty string is not allowed as column name",
+      );
+      expect(() => build().floatColumn("a.b", value)).toThrow(
+        "Invalid character in column name: .",
+      );
+      expect(() =>
+        build().booleanColumn(123 as unknown as string, value),
+      ).toThrow("Column name must be a string, received number");
+      expect(() => build().symbol(123 as unknown as string, value)).toThrow(
+        "Symbol name must be a string, received number",
+      );
+      // Symbols must still precede every column on the row.
+      expect(() => build().intColumn("i", 1).symbol("s", value)).toThrow(
+        "Symbol can be added only after table name is set and before any column added",
+      );
+      // And the rule holds when the preceding column was itself omitted. It is
+      // a property of the call sequence, so judging it by the bytes written
+      // made the same call site pass or throw according to this row's data.
+      expect(() => build().intColumn("i", value).symbol("s", "v")).toThrow(
+        "Symbol can be added only after table name is set and before any column added",
+      );
+      // The scale describes the column, not this row's value.
+      for (const scale of [999, 1.5, Number.NaN]) {
+        expect(() => build().decimalColumn("d", value, scale)).toThrow(
+          "Scale must be between 0 and 76",
+        );
+      }
+      // Nor does the timestamp unit: a bad unit is reported even when the
+      // value is omitted, rather than only on rows that carry one.
+      expect(() => build().timestampColumn("ts", value, "s" as "us")).toThrow(
+        "Unknown timestamp unit: s",
+      );
+    }
+
+    // A column set before any table is still rejected.
+    const noTable = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+    expect(() => noTable.stringColumn("c", null)).toThrow(
+      "Column can be set only after table name is set",
+    );
+  });
+
+  it("keeps the symbol section open when a column call is rejected", async function () {
+    // hasColumnCall was set inside validateColumnCall(), before every check
+    // that can still reject the call, so a caught column error closed the
+    // row's symbol section as well. A capability probe -- try arrayColumn(),
+    // fall back to a symbol -- then hit a second, unrelated "Symbol can be
+    // added only after table name is set" failure. Only a call that writes,
+    // or that deliberately omits a nullish value, moves past the symbols.
+    const build = () =>
+      new Sender({
+        protocol: "tcp",
+        protocol_version: "1",
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      }).table("t");
+
+    const rejected: [string, (sender: Sender) => unknown][] = [
+      ["arrays on v1", (sender) => sender.arrayColumn("a", [1.0])],
+      ["decimals on v1", (sender) => sender.decimalColumnText("d", "1.5")],
+      ["a non-integer int", (sender) => sender.intColumn("i", 1.5)],
+      [
+        "a wrongly typed value",
+        (sender) => sender.stringColumn("c", 42 as unknown as string),
+      ],
+    ];
+
+    for (const [label, reject] of rejected) {
+      const sender = build();
+      expect(() => reject(sender), label).toThrow();
+      // The failed call contributed nothing, so symbols are still legal.
+      await sender.symbol("s", "v").intColumn("v", 1).atNow();
+      expect(bufferContent(sender), label).toBe("t,s=v v=1i\n");
+      await sender.close();
+    }
+
+    // A column that omitted a nullish value did contribute a call, so it does
+    // close the section -- the rule the flag exists for.
+    const omitted = build();
+    expect(() => omitted.intColumn("i", null).symbol("s", "v")).toThrow(
+      "Symbol can be added only after table name is set and before any column added",
+    );
+    await omitted.close();
+
+    // A nullish symbol is still a symbol, and never closes the section.
+    const nullishSymbol = build();
+    await nullishSymbol
+      .symbol("a", null)
+      .symbol("b", "v")
+      .intColumn("v", 1)
+      .atNow();
+    expect(bufferContent(nullishSymbol)).toBe("t,b=v v=1i\n");
+    await nullishSymbol.close();
+  });
+
+  it("discards a row that cannot be closed instead of wedging the sender", async function () {
+    // A rejected close used to leave hasTable set and position past
+    // endOfLastRow, so every later table() raised "Table name has already been
+    // set" -- including after a successful flush(), because compact() moves
+    // bytes without touching the row flags. Only reset() recovered, and it
+    // discards whatever was already staged.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+
+    await sender.table("t").stringColumn("kept", "first").atNow();
+
+    // Every value nullish: nothing to encode, so the row cannot be closed.
+    await expect(
+      async () => await sender.table("t").arrayColumn("a", null).atNow(),
+    ).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+
+    // The sender carries on, and the good row is untouched.
+    await sender.table("t").stringColumn("kept", "second").atNow();
+    expect(bufferContent(sender)).toBe('t kept="first"\nt kept="second"\n');
+    await sender.close();
+  });
+
+  it("keeps a row open when the buffer is too full to close it", async function () {
+    // A full buffer is not a malformed row. checkCapacity() throws before
+    // at()/atNow() writes anything, so the row is intact and a flush() that
+    // frees space lets the same close succeed -- which is what happened before
+    // the discard contract existed. Routing it through the discard dropped a
+    // fully built row and then reported "The row must have a symbol or column
+    // set before it is closed" on the retry, naming the wrong problem.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 62,
+      max_buf_size: 62,
+    });
+
+    // Eight complete rows of 7 bytes fill 56 of the 62 available bytes.
+    for (let row = 0; row < 8; row++) {
+      await sender.table("t").intColumn("a", 5).atNow();
+    }
+    // The ninth row's columns land exactly on the cap, so the newline that
+    // closes it is the first thing that cannot fit.
+    sender.table("t").intColumn("a", 5);
+    await expect(async () => await sender.atNow()).rejects.toThrow(
+      "Max buffer size is 62 bytes",
+    );
+
+    // Freeing space lets the same row close, and nothing was lost.
+    expect(bufferContent(sender)).toBe("t a=5i\n".repeat(8));
+    expect(drainBuffer(sender).toString()).toBe("t a=5i\n".repeat(8));
+    await sender.atNow();
+    expect(bufferContent(sender)).toBe("t a=5i\n");
+    await sender.close();
+  });
+
+  it("keeps a row open when its designated timestamp does not fit", async function () {
+    // at() reserves one byte for the separator, but writeTimestamp() reserves
+    // its own digits and is where a full buffer actually throws -- one byte
+    // into the close, so the row was discarded and the retry then reported
+    // "The row must have a symbol or column set before it is closed", the very
+    // error the reservation was added to eliminate. Everything the close
+    // writes sits above the row, so rewinding it restores the open row.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 64,
+      max_buf_size: 64,
+    });
+
+    // Eight complete rows of 7 bytes fill 56 of the 64 available bytes.
+    for (let row = 0; row < 8; row++) {
+      await sender.table("t").intColumn("a", 5).atNow();
+    }
+    // The ninth row's columns reach 62, so the separator fits and the
+    // timestamp that follows it does not.
+    sender.table("t").intColumn("a", 5);
+    await expect(async () => await sender.at(1000, "us")).rejects.toThrow(
+      "Max buffer size is 64 bytes",
+    );
+
+    // The open row is still staged above the eight completed ones -- 62 bytes,
+    // not the 56 a discard would leave -- and closes once space is freed.
+    expect(bufferPosition(sender)).toBe(62);
+    expect(bufferContent(sender)).toBe("t a=5i\n".repeat(8));
+    expect(drainBuffer(sender).toString()).toBe("t a=5i\n".repeat(8));
+    await sender.at(1000, "us");
+    expect(bufferContent(sender)).toBe("t a=5i 1000000\n");
+    await sender.close();
+  });
+
+  it("keeps the symbol section open when a column call overflows the buffer", async function () {
+    // hasColumnCall was set before writeColumn()'s own checkCapacity(), the
+    // last check that can reject before a byte is written. A column call the
+    // full buffer refused therefore closed the symbol section even though it
+    // contributed nothing, and the row could then not be closed at all.
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 32,
+      max_buf_size: 32,
+    });
+
+    sender.table("t");
+    expect(() => sender.stringColumn("a".repeat(20), "v")).toThrow(
+      "Max buffer size is 32 bytes",
+    );
+    // The rejected call wrote nothing, so symbols are still allowed.
+    await sender.symbol("s", "v").atNow();
+    expect(bufferContent(sender)).toBe("t,s=v\n");
+    await sender.close();
+  });
+
+  it("keeps a row open when its designated timestamp value is rejected", async function () {
+    // The timestamp is a call-site argument on the same footing as the unit:
+    // it does not describe the row, and nothing has been written when it is
+    // checked. Discarding here dropped a fully built row over a typo and then
+    // reported "The row must have a symbol or column set before it is closed"
+    // on the corrected retry, naming the wrong problem entirely.
+    const build = () =>
+      new Sender({
+        protocol: "http",
+        protocol_version: "2",
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      });
+
+    // A non-integer number, then the same row closed with a corrected value.
+    const fractional = build();
+    fractional.table("t").stringColumn("c", "x");
+    await expect(async () => await fractional.at(1000.5)).rejects.toThrow(
+      "Designated timestamp must be an integer or BigInt, received 1000.5",
+    );
+    await fractional.at(1000);
+    expect(bufferContent(fractional)).toBe('t c="x" 1000t\n');
+    await fractional.close();
+
+    // 'ns' demands a BigInt; passing a number leaves the row closable too.
+    const nanos = build();
+    nanos.table("t").stringColumn("c", "x");
+    await expect(async () => await nanos.at(1000, "ns")).rejects.toThrow(
+      "Designated timestamp must be a BigInt if it is set in nanoseconds",
+    );
+    await nanos.at(1000n, "ns");
+    expect(bufferContent(nanos)).toBe('t c="x" 1000n\n');
+    await nanos.close();
+
+    // A row with nothing in it still cannot be closed, and is still discarded
+    // so the next table() is not wedged by it.
+    const empty = build();
+    empty.table("t");
+    await expect(async () => await empty.at(1000)).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+    await empty.table("t").stringColumn("c", "y").at(2000);
+    expect(bufferContent(empty)).toBe('t c="y" 2000t\n');
+    await empty.close();
+
+    // The row state is judged before the argument, because a row with nothing
+    // in it cannot be closed by any timestamp. Checking the argument first
+    // named the argument, kept the unclosable row, and wedged the next table()
+    // with "Table name has already been set".
+    const both = build();
+    both.table("t");
+    await expect(async () => await both.at(1000.5)).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+    await both.table("t").stringColumn("c", "z").at(3000);
+    expect(bufferContent(both)).toBe('t c="z" 3000t\n');
+    await both.close();
+  });
+
+  it("keeps a row open when its designated timestamp unit is rejected", async function () {
+    // Unit validation happens before the close attempt mutates the row, so the
+    // caller can correct a bad constant and retry at() directly.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+
+    await expect(
+      async () =>
+        await sender
+          .table("t")
+          .stringColumn("c", "x")
+          .at(1000, "weeks" as "us"),
+    ).rejects.toThrow("Unknown timestamp unit: weeks");
+
+    await sender.at(1000, "us");
+    expect(bufferContent(sender)).toBe('t c="x" 1000t\n');
+    await sender.close();
+  });
+
+  it("discards an unclosable row even when the timestamp unit is also wrong", async function () {
+    // The row check has to precede every argument check, because a row with no
+    // symbol and no column cannot be closed by any argument. The unit check
+    // used to sit above it, so this combination reported the unit, kept the
+    // unclosable row, and wedged the next table() with "Table name has already
+    // been set" -- after which rows meant for the new table were staged under
+    // the old one.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "2",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 1024,
+    });
+
+    await sender.table("t1").intColumn("a", 1).at(1n, "ns");
+    sender.table("t2");
+    await expect(
+      async () => await sender.at(2n, "seconds" as "us"),
+    ).rejects.toThrow(
+      "The row must have a symbol or column set before it is closed",
+    );
+
+    // The wedge is gone: the next table() is accepted and the row lands under
+    // it, not under t2.
+    await sender.table("t3").intColumn("z", 9).at(3n, "ns");
+    expect(bufferContent(sender)).toBe("t1 a=1i 1n\nt3 z=9i 3n\n");
+    await sender.close();
+  });
+
+  it("leaves no partial cell behind when a column value overflows the buffer", async function () {
+    // writeColumn() writes the separator, the name and '=' before invoking the
+    // value encoder, which reserves its own bytes and is where a full buffer
+    // actually throws. The `,name=` stub used to stay in the buffer and the
+    // next at() closed it into `t a=1i,b= 1\n` -- a field with an empty value,
+    // which QuestDB rejects -- after an error the caller had already handled.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 32,
+      max_buf_size: 32,
+    });
+
+    await sender.table("t").intColumn("a", 1);
+    const positionBefore = bufferPosition(sender);
+    expect(() => sender.stringColumn("b", "x".repeat(200))).toThrow(
+      "Max buffer size is 32 bytes",
+    );
+    // The rejected call contributed nothing, so the row is exactly as it was.
+    expect(bufferPosition(sender)).toBe(positionBefore);
+
+    await sender.at(1n, "ns");
+    expect(bufferContent(sender)).toBe("t a=1i 1\n");
+    await sender.close();
+  });
+
+  it("omits decimal columns with null or undefined value", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "3",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("fx")
+      .decimalColumnText("skippedText", null)
+      .decimalColumnText("keptText", "1.5")
+      .decimalColumn("skippedBin", undefined, 2)
+      .intColumn("keptInt", 7)
+      .atNow();
+    expect(bufferContent(sender)).toBe("fx keptText=1.5d,keptInt=7i\n");
+    await sender.close();
+  });
+
+  it("rejects decimals with protocol v1/v2 regardless of value", async function () {
+    for (const version of ["1", "2"] as const) {
+      const options = {
+        protocol: "tcp",
+        protocol_version: version,
+        host: "host",
+        auto_flush: false,
+        init_buf_size: 1024,
+      };
+
+      // Cover both the public buffer factory and the Sender delegation path.
+      for (const target of [createBuffer(options), new Sender(options)]) {
+        for (const value of ["1.5", null, undefined] as const) {
+          target.reset();
+          expect(() => target.table("t").decimalColumnText("d", value)).toThrow(
+            "Decimals are not supported in protocol v1/v2",
+          );
+        }
+
+        for (const value of [15n, null, undefined] as const) {
+          target.reset();
+          expect(() => target.table("t").decimalColumn("d", value, 2)).toThrow(
+            "Decimals are not supported in protocol v1/v2",
+          );
+
+          for (const scale of [-1, 77, 1.5, Number.NaN]) {
+            target.reset();
+            expect(() =>
+              target.table("t").decimalColumn("d", value, scale),
+            ).toThrow("Scale must be between 0 and 76");
+          }
+        }
+        if (target instanceof Sender) {
+          target.reset();
+          await target.close();
+        }
+      }
+    }
   });
 
   it("throws on invalid timestamp unit", async function () {
@@ -481,6 +1015,41 @@ describe("Sender message builder test suite (anything not covered in client inte
           .atNow(),
     ).rejects.toThrow("Unknown timestamp unit: foobar");
     await sender.close();
+  });
+
+  it("rejects a bad timestamp unit even when the value is nullish, on every version", async function () {
+    for (const version of ["1", "2", "3"] as const) {
+      const build = () =>
+        new Sender({
+          protocol: "tcp",
+          protocol_version: version,
+          host: "host",
+          auto_flush: false,
+          init_buf_size: 1024,
+        });
+
+      // A bad unit used to be reported only inside writeTimestamp, which never
+      // runs for an omitted value, so it stayed silent on nullish rows.
+      for (const value of [null, undefined] as const) {
+        expect(() =>
+          build()
+            .table("t")
+            .timestampColumn("ts", value, "weeks" as "us"),
+        ).toThrow("Unknown timestamp unit: weeks");
+      }
+
+      // A valid unit still omits a null value (issue #28); `ns` with a null
+      // value is likewise omitted, not rejected for not being a BigInt.
+      const sender = build();
+      await sender
+        .table("t")
+        .timestampColumn("skippedNs", null, "ns")
+        .timestampColumn("skippedMs", undefined, "ms")
+        .intColumn("kept", 1)
+        .atNow();
+      expect(bufferContent(sender)).toBe("t kept=1i\n");
+      await sender.close();
+    }
   });
 
   it("supports timestamp field as number for 'us' and 'ms' units with protocol v1", async function () {
@@ -1330,21 +1899,19 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("throws when decimal scale is outside the accepted range", async function () {
+  it("throws when decimal scale is not an integer in range", async function () {
     const sender = new Sender({
       protocol: "tcp",
       protocol_version: "3",
       host: "host",
       init_buf_size: 1024,
     });
-    expect(() => sender.table("fx").decimalColumn("mid", 1n, -1)).toThrow(
-      "Scale must be between 0 and 76",
-    );
-    sender.reset();
-    expect(() => sender.table("fx").decimalColumn("mid", 1n, 77)).toThrow(
-      "Scale must be between 0 and 76",
-    );
-    sender.reset();
+    for (const scale of [-1, 77, 1.5, Number.NaN]) {
+      expect(() =>
+        sender.table("fx").decimalColumn("mid", 1n, scale),
+      ).toThrow("Scale must be between 0 and 76");
+      sender.reset();
+    }
     await sender.close();
   });
 
@@ -1409,6 +1976,16 @@ function buffer(sender: Sender) {
 function bufferSize(sender: Sender) {
   // @ts-expect-error - Accessing private field
   return sender.buffer.bufferSize;
+}
+
+/**
+ * Drains and compacts the buffer exactly as flush() does, without the network
+ * send flush() would also perform. Lets a test free buffer space against a
+ * sender whose host does not resolve.
+ */
+function drainBuffer(sender: Sender) {
+  // @ts-expect-error - Accessing private field
+  return sender.buffer.toBufferNew();
 }
 
 function bufferPosition(sender: Sender) {

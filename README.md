@@ -1,3 +1,10 @@
+# QuestDB JavaScript Client
+
+This repository builds two runtime-specific npm packages from a shared private
+core: `@questdb/nodejs-client` for Node.js and `@questdb/browser-client` for
+browsers. The browser package exposes its complete API from its package root and
+does not include Node.js transports or dependencies.
+
 ## Installation
 
 ```shell
@@ -11,12 +18,21 @@ yarn add @questdb/nodejs-client
 pnpm add @questdb/nodejs-client
 ```
 
+For browser applications:
+
+```shell
+npm install @questdb/browser-client
+```
+
 ## Compatibility table
 
 | QuestDB client version | Supported Node.js versions | Default HTTP Agent  |
-|------------------------|----------------------------|---------------------|
-| ^4.0.0                 | v20 and above              | Undici Http Agent   |
+| ---------------------- | -------------------------- | ------------------- |
+| ^4.0.0                 | v20.18.1 and above         | Undici Http Agent   |
 | ^3.0.0                 | v16 and above              | Standard Http Agent |
+
+`^4.0.0` depends on `undici`, which declares `node >=20.18.1`; installing on an
+earlier v20 warns with `EBADENGINE` and fails outright under `engine-strict`.
 
 The current version of the client requires Node.js v20 or newer version.
 Versions up to and including 3.0.0 are compatible with Node.js v16 and above.
@@ -28,12 +44,12 @@ Use the <i>stdlib_http</i> option to switch to the standard HTTP/HTTPS modules.
 ## Configuration options
 
 Detailed description of the client's configuration options can be found in
-the {@link SenderOptions} documentation.
+the [SenderOptions documentation](https://questdb.github.io/nodejs-questdb-client/classes/_questdb_nodejs-client.SenderOptions.html).
 
 ## Examples
 
 The examples below demonstrate how to use the client. <br>
-For more details, please, check the {@link Sender}'s documentation.
+For more details, see the [Sender documentation](https://questdb.github.io/nodejs-questdb-client/classes/_questdb_nodejs-client.Sender.html).
 
 ### Basic API usage
 
@@ -65,6 +81,436 @@ async function run() {
 run().then(console.log).catch(console.error);
 ```
 
+### Null and undefined values
+
+Passing `null` or `undefined` as a column or symbol value omits that column from
+the row, and QuestDB records the omission as NULL. This is the model the QuestDB
+clients share — the Java client puts it as "to mark the value NULL, omit the
+column from the row" — with the JavaScript client doing the omission for you, so a
+record with optional fields needs no branching:
+
+```typescript
+const trade: { side?: string; amount?: number } = { amount: 0.011 };
+
+await sender
+  .table("trades")
+  .symbol("symbol", "BTC-USD")
+  .symbol("side", trade.side) // undefined -> column omitted -> NULL
+  .floatColumn("price", 39269.98)
+  .floatColumn("amount", trade.amount)
+  .at(Date.now(), "ms");
+// wire: trades,symbol=BTC-USD price=39269.98,amount=0.011 <timestamp>
+```
+
+The eight column methods on `Sender` follow this rule for both ILP
+(`http`/`https`/`tcp`/`tcps`) and QWP (`ws`/`wss`/`udp`) transports, subject to
+protocol support. The broader direct `QwpSender` API and compiled QWP writers
+follow the same omission rule for their additional column types. Capability
+checks still run for nullish values: ILP v1 always rejects `arrayColumn`, and ILP
+v1/v2 always reject the decimal column methods. The QWP-only
+`QwpSender.long256Column` method spreads one value over four arguments; it omits
+the column when _all four_ words are nullish and rejects a partial set rather
+than treating it as NULL.
+
+Three consequences are worth knowing:
+
+- An omitted column is not created on a table that does not already have it. The
+  omission carries no type, so schema-on-write has nothing to infer from.
+- A row in which _every_ value is nullish behaves differently per protocol. ILP
+  has no way to encode a row with no fields, so `at()`/`atNow()` rejects it with
+  "The row must have a symbol or column set before it is closed". QWP is
+  columnar and can express it, so the row is sent with no columns — carrying
+  only its designated timestamp.
+- ILP discards a row only when it can never be closed -- when every value on it
+  was nullish, so it carries no symbol and no column. That discard takes the
+  table name with it and leaves rows already in the buffer alone: catch the
+  error and start the next row from `table()`; there is no need to `reset()`
+  and nothing already buffered is lost. Every other rejection leaves the row
+  open and the call retryable: an invalid designated timestamp -- either its
+  unit or its value, both caught before closing begins -- can be retried with a
+  corrected argument; a row that does not fit `max_buf_size` has its partial
+  close rewound, so the same call succeeds once a `flush()` frees space; and a
+  rejected column or symbol call writes nothing at all, leaving the row exactly
+  as it was. If an ILP auto-flush send fails, the
+  completed batch has already been removed from the sender buffer; applications
+  that need to retry must retain and resubmit those rows. QWP keeps successfully
+  closed rows for its retry and replay path.
+
+**Changed in this release.** Earlier versions threw a type error for most
+nullish values, and protocol v2 encoded `arrayColumn(name, null)` as an explicit
+NULL array marker. Supported column methods now omit the column instead. If your
+code relied on the throw as a data-quality guard, validate before calling the
+sender.
+
+### QWP ingress from Node.js or a browser
+
+See the [complete QWP guide](./QWP.md) for ingress and egress APIs, the combined
+pooled client, browser authentication, delivery semantics, migration guidance, and
+the public API policy.
+
+Node.js applications can select QWP through the regular `Sender` API:
+
+```typescript
+import { Sender } from "@questdb/nodejs-client";
+
+const sender = await Sender.fromConfig("ws::addr=127.0.0.1:9000");
+await sender.connect();
+await sender
+  .table("trades")
+  .symbol("symbol", "ETH-USD")
+  .floatColumn("price", 2615.54)
+  .at(Date.now(), "ms");
+await sender.flush();
+await sender.close();
+```
+
+For repeated object rows, compile the table schema once. The resulting writer
+validates each complete row before changing sender state and accepts both individual
+rows and synchronous or asynchronous iterables:
+
+```typescript
+import * as qwp from "@questdb/nodejs-client";
+
+const trades = sender.writer("trades", {
+  symbol: qwp.symbol(),
+  side: qwp.symbol(),
+  price: qwp.double(),
+  quantity: qwp.long(),
+  timestamp: qwp.designatedTimestamp("ns"),
+});
+
+await trades.row({
+  symbol: "ETH-USD",
+  side: "sell",
+  price: 2615.54,
+  quantity: 42n,
+  timestamp: 1_723_000_000_000_000_000n,
+});
+await trades.rows(moreTrades);
+```
+
+The schema vocabulary covers every QuestDB column type the fluent row API can write,
+including `date()`, `char()`, `binary()`, `uuid()`, `long256()`, `ipv4()`,
+`geohash(precisionBits)`, `decimal64/128/256(scale)`, `doubleArray()`, and
+`longArray()`. See [QWP.md](QWP.md#compiled-object-row-writers) for the accepted value
+forms of each field.
+
+The regular `Sender` accepts the same unified QWP configuration vocabulary as
+the pooled Node client. Use comma-separated or repeated `addr` values for
+failover; standalone ingress validates but otherwise ignores egress- and
+pool-only keys.
+
+Node.js also supports fire-and-forget QWP-over-UDP through the same API:
+
+```typescript
+const sender = await Sender.fromConfig(
+  "udp::addr=239.1.2.3:9007;max_datagram_size=1400;multicast_ttl=1",
+);
+await sender.connect();
+await sender
+  .table("trades")
+  .symbol("symbol", "ETH-USD")
+  .floatColumn("price", 2615.54)
+  .atNow();
+await sender.close();
+```
+
+UDP datagrams are self-contained and split at row boundaries. UDP has no
+authentication, acknowledgements, transactions, retry, or store-and-forward and is
+not available in browsers. See the QWP guide for the lower-level Node UDP API.
+
+QWP `flush()` resolves at the local publication boundary by default in both
+Node.js and browsers, matching the Java QWP sender. Set
+`qwp.sender.awaitServerAck: true` to wait for QuestDB's protocol ACK instead,
+or `awaitDurableAck: true` to wait through durable upload. When Node QWP is
+configured with `qwp.webSocket.storeAndForward`, the publication boundary is
+the local durable journal, so the sender can accept flushes while QuestDB is
+offline and a background drainer reconnects and sends them in order.
+Set `initialConnectMode` to `"off"` (the default), `"sync"`, or `"async"` to
+choose fail-fast, bounded blocking, or background startup. Supplying reconnect
+budget settings without an explicit mode promotes initial startup to `"sync"`,
+matching the Java client. The configuration-string
+equivalent is `initial_connect_retry`, used together with the store-and-forward
+options in `extraOptions.qwp`.
+Persistent frames are coalesced into fixed-size 4 MiB `.sfa` segments by default,
+using the shared Java/Rust/Python SFA envelope, manifest, ACK watermark, and symbol
+dictionary formats. The active segment and a pre-sized temporary hot spare keep open
+handles. A shared worker provisions spares, checkpoints files, and trims acknowledged
+segments. Recovery keeps only frame offsets in memory and reads payloads from disk as
+they are sent, so a large persisted backlog is not duplicated on the JavaScript heap.
+Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
+the Node client scans and drains slots left by failed producer processes with bounded
+concurrency. Pooled QWP clients recover idle in-range and out-of-range `sender-N`
+slots automatically without raising `senderPoolMin`, including leftovers after
+`senderPoolMax` is reduced. Terminally bad slots are marked `.failed` for inspection
+and can be re-enabled with
+`retryQwpNodeOrphanSlot()`. This persistent mode is Node-only; browser senders
+use the in-memory replay boundary.
+
+Browser applications use the browser entry point, which has no Node.js
+dependencies. Cookies are supplied by the browser during a same-origin
+WebSocket upgrade. Browser and non-persistent Node ingress reconnect by default and
+retain unacknowledged frames in memory; set `reconnect: false` in the session options
+for a fixed connection. Only Node store-and-forward survives process failure.
+
+```typescript
+import { connectQwpBrowserSender } from "@questdb/browser-client";
+
+const url = new URL("/write/v4", location.href);
+url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+await sender.table("events").longColumn("value", 42n).atNow();
+await sender.flush();
+await sender.close();
+```
+
+For batches larger than the automatic flush threshold, transactional mode
+keeps each auto-flushed frame in an open server-side transaction. An explicit
+`flush()` (or its `commit()` alias) publishes the group-closing frame. Set
+`awaitServerAck: true`, or wait on the sequence returned by
+`flushAndGetSequence()`, when the call must also observe the cumulative ACK.
+QuestDB guarantees this atomicity per table; a flush that contains multiple
+tables is not one cross-table transaction.
+
+```typescript
+const sender = await connectQwpBrowserSender(
+  { url },
+  {
+    autoFlushRows: 10_000,
+    autoFlushBytes: 4 * 1024 * 1024,
+    transactional: true,
+  },
+);
+
+for (const event of events) {
+  await sender
+    .table("events")
+    .symbol("source", event.source)
+    .longColumn("value", event.value)
+    .at(event.timestamp, "ms");
+}
+await sender.commit();
+await sender.close();
+```
+
+QWP `close()` publishes completed rows and waits up to 5 seconds for their
+committed-frame ACK watermark. Configure `closeFlushTimeoutMs` (or
+`close_flush_timeout_millis` in a `ws::` string); `0` publishes without waiting.
+An unfinished row is not completed implicitly.
+
+The server intentionally withholds ACKs for deferred frames until commit. The
+sender pipelines transactional auto-flushes without waiting for those ACKs,
+then publishes the group-closing frame at `flush()`/`commit()`. With
+`awaitServerAck` or `awaitDurableAck`, that call also waits for all covered
+ACKs; durable waiting starts only after the transaction commits. Closing
+without an explicit commit abandons the open transaction and logs a warning;
+QuestDB rolls it back when the WebSocket disconnects.
+
+Ingress sessions expose browser-safe progress/error callbacks and immutable
+metrics snapshots. Reconnect events remain on `reconnect.onEvent`, keeping
+connection topology separate from batch acceptance and durable progress.
+
+```typescript
+import {
+  QWP_INGRESS_PROGRESS_KIND,
+  createQwpBrowserSender,
+} from "@questdb/browser-client";
+
+const sender = createQwpBrowserSender(
+  { url },
+  { autoFlush: false },
+  {
+    reconnect: {
+      onEvent: (event) => console.info("QWP connection", event),
+    },
+    onProgress: (event) => {
+      if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
+        console.info("accepted through", event.sequence);
+      }
+    },
+    onError: (event) => console.error("QWP ingress", event.error),
+    onSenderError: (error) =>
+      console.error(
+        "QWP rejection",
+        error.category,
+        error.appliedPolicy,
+        error.fromFsn,
+        error.toFsn,
+      ),
+  },
+);
+
+await sender.connect();
+const snapshot = sender.metrics;
+console.info(
+  snapshot.totalRowsPublished,
+  snapshot.ingress?.totalFramesReplayed,
+);
+```
+
+Snapshots distinguish the client-session acceptance sequence from persistent
+replay watermarks. With durable ACKs, `replayAcknowledgedFrameSequence`
+advances only after the durable watermark covers a frame. Observer callbacks are
+dispatched asynchronously through bounded, drop-oldest inboxes, so they do not run
+inside ACK or reconnect protocol stacks. The metrics snapshot exposes delivered and
+dropped progress, connection, and error notification counters.
+`connectionListenerInboxCapacity` and `errorInboxCapacity` tune the Java-compatible
+64/256 defaults. `onSenderError` receives typed category/policy, wire status, message
+sequence, stable frame-sequence range, and quarantine context. If it is omitted,
+retriable rejections are logged at `warn` and terminal rejections or abandoned data at
+`error`; general asynchronous ingress failures are also logged when `onError` is
+omitted. Observer exceptions are contained, but CPU-bound callbacks should still move
+work to a Worker because browser and Node JavaScript share the event loop.
+
+When QuestDB authentication is enabled, establish the browser's HttpOnly
+`qdb_session` cookie over REST before opening a QWP WebSocket. A QuestDB REST
+token and an OIDC access token both use the `bearer` form. The application is
+responsible for obtaining an OIDC token from its identity provider; the client
+does not run an interactive OIDC authorization flow.
+
+```typescript
+import {
+  bootstrapQwpBrowserSession,
+  connectQwpBrowserSender,
+} from "@questdb/browser-client";
+
+await bootstrapQwpBrowserSession({
+  url: new URL("/exec", location.href),
+  authentication: { type: "bearer", token: oidcOrRestAccessToken },
+  // QuestDB Enterprise only; omit to use the authenticated principal.
+  serviceAccount: "market_data_writer",
+});
+
+const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+```
+
+The bootstrap can also be attached to the connection options. It then runs
+before each initial, reconnect, or failover WebSocket attempt:
+
+```typescript
+const sender = await connectQwpBrowserSender(
+  {
+    url,
+    sessionBootstrap: {
+      authentication: {
+        type: "basic",
+        username: "admin",
+        password: "quest",
+      },
+    },
+  },
+  { autoFlush: false },
+);
+```
+
+The REST request uses `credentials: "include"`. The default bootstrap URL is
+`/exec` beside `/write/v4` or `/read/v1`; set `sessionBootstrap.url` explicitly
+when a reverse proxy exposes a different REST path. The REST and WebSocket
+routes should be served from the same browser origin (or configured with
+credentialed CORS), otherwise the browser may decline to store or send the
+HttpOnly cookies. JavaScript deliberately never reads `qdb_session` or the
+Enterprise `qdbServiceAccount` cookie.
+
+Browsers can request durable ingress acknowledgements without custom HTTP
+headers. The client offers a QWP WebSocket subprotocol and verifies that the
+server selected it before sending data. Browser keepalives use side-effect-free,
+table-less QWP poll frames because the WebSocket API does not expose
+protocol-level PING frames. A poll completes once published: durable progress
+arrives independently, and an open deferred transaction may intentionally
+prevent the server from sending a cumulative OK for that poll. Supplying
+`durableAckKeepaliveMs` requires durable negotiation (`requestDurableAck: true`,
+either explicit or implied by `awaitDurableAck`); manual polls and durable waits
+reject locally when the capability was not negotiated.
+
+```typescript
+const sender = await connectQwpBrowserSender(
+  { url, requestDurableAck: true },
+  { autoFlush: false, awaitDurableAck: true },
+);
+```
+
+Browser durable ACKs are an in-memory delivery confirmation only. Persistent
+store-and-forward remains available exclusively through the Node.js entry
+point. In-memory ingress replay is capped at 128 MiB and waits at most 30 seconds
+for ACK-driven trimming by default; tune `memoryReplayMaxBytes` and
+`memoryReplayAppendDeadlineMs` in the ingress session options when needed.
+
+### Zstd-compressed QWP egress
+
+Node.js egress clients can opt into compressed result batches during the
+WebSocket upgrade. Raw batches remain the default for compatibility.
+
+```typescript
+import { connectQwpNodeEgress } from "@questdb/nodejs-client";
+
+const session = await connectQwpNodeEgress(
+  {
+    url: "ws://127.0.0.1:9000/read/v1",
+    compression: "zstd",
+    compressionLevel: 3,
+  },
+  {
+    queryTimeoutMs: 30_000,
+  },
+);
+try {
+  const query = await session.query("select * from trades", {
+    initialCredit: 1024 * 1024,
+  });
+  console.log("effective Zstd level", session.negotiatedZstdLevel);
+  for await (const batch of query) {
+    for (const row of batch.rows()) console.log(row);
+  }
+  await query.completion;
+} finally {
+  await session.close();
+}
+```
+
+Zstd decoding and negotiation are also included in the browser entry point.
+Because browsers cannot set the `X-QWP-Accept-Encoding` upgrade header, the
+client sends the same preference through the WebSocket URL's
+`qwp_accept_encoding` parameter. No proxy-injected compression header is
+required. Older servers ignore the parameter and safely continue with raw
+batches.
+
+Level `1` is the lowest-CPU default and is usually the right starting point.
+Higher values trade server CPU for wire size; the client accepts levels 1–22,
+while the server may clamp the request or apply an operator-configured level.
+`session.negotiatedCompression` and `session.negotiatedZstdLevel` report what
+the active server actually selected and refresh after reconnection or failover.
+Both `"zstd"` and `"auto"` advertise Zstd followed by raw fallback, and the
+server still sends an individual batch raw when compression would make it
+larger.
+
+Matching the Java client, egress queries default `initialCredit` to zero, meaning
+unbounded server send-ahead. Set a positive session or per-query value to bound wire
+buffering—particularly in browsers. With positive credit, the client automatically
+replenishes the exact wire size of each result batch after consumption. Set
+`autoCredit: false` to manage credit explicitly through `query.grantCredit()`.
+
+For allocation-sensitive consumers, `session.queryViews(sql, onBatch)` supplies
+bounded, reusable column views instead of materializing every value into JavaScript
+arrays. Typed accessors read fixed-width values directly from QWP bytes, and raw
+byte views are available for vectorized processing. The callback is awaited before
+credit is replenished, while the receive loop decodes ahead through the bounded
+reusable buffer pool. Views are invalid when their callback returns; copy a byte
+view with `.slice()` or call `batch.materialize()` inside the callback to retain
+data. Tune the default four-slot pool with the session's `bufferPoolSize`.
+
+`queryTimeoutMs` sets the session's default query deadline; a per-query
+`timeoutMs` overrides it, and zero disables the deadline. When a deadline
+expires, the client rejects iteration and `query.completion` with
+`QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and waits for the terminal
+server response before accepting another query on that connection. Breaking out
+of `for await` early cancels the query too. `cancelDrainTimeoutMs` bounds that
+wait (5 seconds by default); an unresponsive cancellation closes the connection
+with `QwpEgressQueryCancelTimeoutError` instead of wedging the session.
+To bound only the caller's wait without cancelling, use
+`await query.awaitCompletion(timeoutMs)`. It returns `false` on timeout and leaves
+the query active, matching Java `Completion.await(timeout, unit)`. The SERVER_INFO
+handshake timeout defaults to five seconds on both clients.
+
 ### Authentication and secure connection
 
 #### Username and password authentication with HTTP transport
@@ -80,7 +526,7 @@ async function run() {
   // pass the authentication details to the sender
   // for secure connection use 'https' protocol instead of 'http'
   const sender = await Sender.fromConfig(
-    `http::addr=127.0.0.1:9000;username=${USER};password=${PWD}`
+    `http::addr=127.0.0.1:9000;username=${USER};password=${PWD}`,
   );
 
   // add rows to the buffer of the sender
@@ -114,7 +560,7 @@ async function run() {
   // pass the authentication details to the sender
   // for secure connection use 'https' protocol instead of 'http'
   const sender = await Sender.fromConfig(
-    `http::addr=127.0.0.1:9000;token=${TOKEN}`
+    `http::addr=127.0.0.1:9000;token=${TOKEN}`,
   );
 
   // add rows to the buffer of the sender
@@ -148,7 +594,7 @@ async function run() {
 
   // pass the authentication details to the sender
   const sender = await Sender.fromConfig(
-    `tcp::addr=127.0.0.1:9009;username=${CLIENT_ID};token=${PRIVATE_KEY}`
+    `tcp::addr=127.0.0.1:9009;username=${CLIENT_ID};token=${PRIVATE_KEY}`,
   );
   await sender.connect();
 
@@ -178,42 +624,42 @@ import { Sender } from "@questdb/nodejs-client";
 
 async function run() {
   // create a sender
-  const sender = await Sender.fromConfig('http::addr=localhost:9000');
+  const sender = await Sender.fromConfig("http::addr=localhost:9000");
 
   // order book snapshots to ingest
   const orderBooks = [
     {
-      symbol: 'BTC-USD',
-      exchange: 'Coinbase',
+      symbol: "BTC-USD",
+      exchange: "Coinbase",
       timestamp: Date.now(),
-      bidPrices: [50100.25, 50100.20, 50100.15, 50100.10, 50100.05],
+      bidPrices: [50100.25, 50100.2, 50100.15, 50100.1, 50100.05],
       bidSizes: [0.5, 1.2, 2.1, 0.8, 3.5],
-      askPrices: [50100.30, 50100.35, 50100.40, 50100.45, 50100.50],
-      askSizes: [0.6, 1.5, 1.8, 2.2, 4.0]
+      askPrices: [50100.3, 50100.35, 50100.4, 50100.45, 50100.5],
+      askSizes: [0.6, 1.5, 1.8, 2.2, 4.0],
     },
     {
-      symbol: 'ETH-USD',
-      exchange: 'Coinbase',
+      symbol: "ETH-USD",
+      exchange: "Coinbase",
       timestamp: Date.now(),
-      bidPrices: [2850.50, 2850.45, 2850.40, 2850.35, 2850.30],
+      bidPrices: [2850.5, 2850.45, 2850.4, 2850.35, 2850.3],
       bidSizes: [5.0, 8.2, 12.5, 6.8, 15.0],
-      askPrices: [2850.55, 2850.60, 2850.65, 2850.70, 2850.75],
-      askSizes: [4.5, 7.8, 10.2, 8.5, 20.0]
-    }
+      askPrices: [2850.55, 2850.6, 2850.65, 2850.7, 2850.75],
+      askSizes: [4.5, 7.8, 10.2, 8.5, 20.0],
+    },
   ];
 
   try {
     // add rows to the buffer of the sender
     for (const orderBook of orderBooks) {
       await sender
-        .table('order_book_l2')
-        .symbol('symbol', orderBook.symbol)
-        .symbol('exchange', orderBook.exchange)
-        .arrayColumn('bid_prices', orderBook.bidPrices)
-        .arrayColumn('bid_sizes', orderBook.bidSizes)
-        .arrayColumn('ask_prices', orderBook.askPrices)
-        .arrayColumn('ask_sizes', orderBook.askSizes)
-        .at(orderBook.timestamp, 'ms');
+        .table("order_book_l2")
+        .symbol("symbol", orderBook.symbol)
+        .symbol("exchange", orderBook.exchange)
+        .arrayColumn("bid_prices", orderBook.bidPrices)
+        .arrayColumn("bid_sizes", orderBook.bidSizes)
+        .arrayColumn("ask_prices", orderBook.askPrices)
+        .arrayColumn("ask_sizes", orderBook.askSizes)
+        .at(orderBook.timestamp, "ms");
     }
 
     // flush the buffer of the sender, sending the data to QuestDB

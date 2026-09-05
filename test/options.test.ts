@@ -2,7 +2,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Agent } from "undici";
 
-import { SenderOptions } from "../src";
+import { Sender } from "../packages/nodejs-client/src/sender";
+import { SenderOptions } from "../packages/nodejs-client/src";
+import { qwpConfig } from "../packages/nodejs-client/src/options";
+import { log } from "../packages/client-core/src/logging";
+
 import { MockHttp } from "./util/mockhttp";
 import { readFileSync } from "fs";
 
@@ -64,36 +68,45 @@ describe("Configuration string parser suite", function () {
     );
     expect(options.protocol).toBe("https");
 
+    options = await SenderOptions.fromConfig("ws::addr=host");
+    expect(options.protocol).toBe("ws");
+
+    options = await SenderOptions.fromConfig("wss::addr=host");
+    expect(options.protocol).toBe("wss");
+
+    options = await SenderOptions.fromConfig("udp::addr=host");
+    expect(options.protocol).toBe("udp");
+
     await expect(
       async () => await SenderOptions.fromConfig("HTTP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'HTTP', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'HTTP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("Http::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'Http', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'Http', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("HtTps::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'HtTps', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'HtTps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
 
     await expect(
       async () => await SenderOptions.fromConfig("TCP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'TCP', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'TCP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("TcP::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'TcP', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'TcP', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
     await expect(
       async () => await SenderOptions.fromConfig("Tcps::"),
     ).rejects.toThrow(
-      "Invalid protocol: 'Tcps', accepted protocols: 'http', 'https', 'tcp', 'tcps'",
+      "Invalid protocol: 'Tcps', accepted protocols: 'http', 'https', 'tcp', 'tcps', 'ws', 'wss', 'udp'",
     );
   });
 
@@ -230,9 +243,22 @@ describe("Configuration string parser suite", function () {
     expect(options.port).toBe(9009);
     expect(options.username).toBe("user1");
     expect(options.token).toBe("jwkprivkey123");
+
+    // ws/wss endpoints belong to the QWP schema, not the legacy ILP fields.
+    options = await SenderOptions.fromConfig("udp::addr=hostname");
+    expect(options.host).toBe("hostname");
+    expect(options.port).toBe(9007);
+    expect(options.protocol_version).toBeUndefined();
   });
 
   it("can parse protocol version", async function () {
+    // Rejected by the QWP schema, with the Java client's relocation hint.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=hostname;protocol_version=1"),
+    ).rejects.toThrow(
+      "unknown configuration key: protocol_version (QWP negotiates the protocol version during the WebSocket upgrade)",
+    );
+
     // invalid protocol version
     await expect(
       async () =>
@@ -790,6 +816,240 @@ describe("Configuration string parser suite", function () {
     ).rejects.toThrow("Invalid auto flush rows option, not a number: '1w23'");
   });
 
+  it("parses auto_flush_bytes only for the udp transport", async function () {
+    // udp is a legacy transport in the Java client's vocabulary, so its keys
+    // stay on this parser; ws/wss carry auto_flush_bytes through the QWP one.
+    const options = await SenderOptions.fromConfig(
+      "udp::addr=host:9007;auto_flush_bytes=1400;",
+    );
+    expect(options.auto_flush_bytes).toBe(1400);
+
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host:9007;auto_flush_bytes=-1;"),
+    ).rejects.toThrow("Invalid auto flush bytes option: -1");
+    await expect(
+      SenderOptions.fromConfig("http::addr=host:9000;auto_flush_bytes=123;"),
+    ).rejects.toThrow(
+      "auto_flush_bytes is only supported for the udp transport",
+    );
+  });
+
+  it("parses and validates QWP UDP options", async function () {
+    const options = await SenderOptions.fromConfig(
+      "udp::addr=host;max_datagram_size=1400;multicast_ttl=2;",
+    );
+    expect(options.max_datagram_size).toBe(1400);
+    expect(options.multicast_ttl).toBe(2);
+
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host;multicast_ttl=256;"),
+    ).rejects.toThrow("Invalid multicast TTL option: 256");
+    // 65507 is 65535 minus the IP and UDP headers. Above it every datagram is
+    // refused by the kernel, and the fire-and-forget send path discards each
+    // one, so the whole batch vanished while flush() still resolved true.
+    // Bounded here like multicast_ttl above, rather than failing per datagram.
+    expect(
+      (
+        await SenderOptions.fromConfig(
+          "udp::addr=host;max_datagram_size=65507;",
+        )
+      ).max_datagram_size,
+    ).toBe(65507);
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host;max_datagram_size=65508;"),
+    ).rejects.toThrow(
+      "Invalid maximum datagram size option: 65508, must not exceed 65507",
+    );
+    // Every credential key a TCP JWK connect string can carry, including the
+    // two that http and tcp accept and ignore. Left out, token_x/token_y
+    // walked the user through their credentials one error at a time and then
+    // fell silent on the last pair, reading as if UDP had accepted them.
+    for (const credential of [
+      "username=admin",
+      "password=secret",
+      "token=abc",
+      "token_x=aa",
+      "token_y=bb",
+    ]) {
+      await expect(
+        SenderOptions.fromConfig(`udp::addr=host;${credential};`),
+      ).rejects.toThrow(
+        "authentication is not supported for QWP UDP transport",
+      );
+    }
+    // The same keys stay accepted-and-ignored on the transports that document
+    // them that way.
+    expect(
+      (await SenderOptions.fromConfig("tcp::addr=host;token_x=aa;token_y=bb;"))
+        .token_x,
+    ).toBe("aa");
+    await expect(
+      SenderOptions.fromConfig("udp::addr=host;tls_verify=on;"),
+    ).rejects.toThrow("TLS is not supported for QWP UDP transport");
+    // On ws/wss these are legacy keys, rejected by the QWP schema with a
+    // relocation hint. max_datagram_size and multicast_ttl are UDP-only -- http
+    // and tcp reject them too -- so the hint must name only udp, not all three.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host;max_datagram_size=1400;"),
+    ).rejects.toThrow(
+      "unknown configuration key: max_datagram_size (applies to the legacy udp transport only)",
+    );
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host;multicast_ttl=2;"),
+    ).rejects.toThrow(
+      "unknown configuration key: multicast_ttl (applies to the legacy udp transport only)",
+    );
+  });
+
+  it("rejects the ILP-only keys a udp connect string cannot act on", async function () {
+    // udp shares this parser with http/tcp, so their keys parsed here too --
+    // but the UDP branch of the Sender returns before createBuffer() and
+    // QwpNodeUdpOptions has no field for any of them, so nothing read them. A
+    // user capping memory with max_buf_size got no cap and no diagnostic,
+    // while the QWP schema's hint for the same key named udp as a transport
+    // that supports it. An unknown key was already rejected; a known key that
+    // does nothing was the outlier.
+    for (const key of [
+      "init_buf_size=1024",
+      "max_buf_size=1048576",
+      "request_timeout=5000",
+      "request_min_throughput=1024",
+      "retry_timeout=1000",
+      "stdlib_http=on",
+    ]) {
+      const name = key.split("=")[0];
+      await expect(
+        SenderOptions.fromConfig(`udp::addr=host;${key};`),
+        key,
+      ).rejects.toThrow(
+        `'${name}' option is not supported for QWP UDP transport, it applies to the http/tcp transports only`,
+      );
+      // http and tcp still take them, and ws/wss still relocate them.
+      await expect(
+        SenderOptions.fromConfig(`tcp::addr=host;protocol_version=1;${key};`),
+        key,
+      ).resolves.toBeDefined();
+    }
+
+    // The ws/wss hint no longer names udp as a transport these apply to.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host;max_buf_size=1048576;"),
+    ).rejects.toThrow(
+      "unknown configuration key: max_buf_size (applies to legacy http/tcp transports only)",
+    );
+
+    // tls_ca is the ILP spelling of the QWP schema's tls_roots, and the ILP
+    // parser points users at it by name, so ws/wss owes them the way back.
+    await expect(
+      SenderOptions.fromConfig("wss::addr=host;tls_ca=/tmp/ca.pem;"),
+    ).rejects.toThrow(
+      "unknown configuration key: tls_ca (use tls_roots on ws/wss)",
+    );
+  });
+
+  it("parses a ws connect string with one schema, whichever entry point is used", async function () {
+    // There must be a single QWP parser: Sender.fromConfig() and
+    // SenderOptions.fromConfig() + new Sender() previously disagreed, and
+    // tls_ca/tls_roots were exactly inverted between them.
+    const cases = [
+      ["sf_dir=/tmp/qwp-parity", true],
+      ["transaction=on", true],
+      ["close_flush_timeout_millis=-1", true],
+      ["tls_ca=/tmp/nope.pem", false],
+      ["init_buf_size=1024", false],
+      ["max_buf_size=99999", false],
+      ["retry_timeout=1000", false],
+      ["protocol_version=2", false],
+      ["bogus_key=1", false],
+    ] as const;
+
+    for (const [setting, accepted] of cases) {
+      const config = `ws::addr=127.0.0.1:9000;${setting};`;
+      const viaOptions = await SenderOptions.fromConfig(config, {
+        log: () => {},
+      }).then(
+        () => "ok",
+        (error: Error) => error.message,
+      );
+      const viaSender = await Sender.fromConfig(config, { log: () => {} }).then(
+        async (sender) => {
+          await sender.close().catch(() => undefined);
+          return "ok";
+        },
+        (error: Error) => error.message,
+      );
+      expect(viaOptions).toBe(viaSender);
+      expect(viaOptions === "ok").toBe(accepted);
+    }
+  });
+
+  it("applies typed QWP ingress overrides after URL parsing", async function () {
+    const options = await SenderOptions.fromConfig(
+      "ws::addr=url-primary:9000,url-secondary:9001;" +
+        "target=primary;zone=url-zone;sender_id=url-sender;",
+      {
+        qwp: {
+          webSocket: {
+            failoverUrls: ["ws://typed-secondary:9100/custom-write"],
+            target: "replica",
+            zone: "typed-zone",
+            senderId: "typed-sender",
+          },
+        },
+      },
+    );
+    const resolved = qwpConfig(options);
+
+    expect(String(resolved?.ingress.url)).toBe(
+      "ws://url-primary:9000/write/v4",
+    );
+    expect(resolved?.ingress.failoverUrls?.map(String)).toEqual([
+      "ws://typed-secondary:9100/custom-write",
+    ]);
+    expect(resolved?.ingress).toMatchObject({
+      target: "replica",
+      zone: "typed-zone",
+      senderId: "typed-sender",
+    });
+    expect(resolved?.egress.failoverUrls?.map(String)).toEqual([
+      "ws://url-secondary:9001/read/v1",
+    ]);
+    expect(resolved?.egress).toMatchObject({
+      target: "primary",
+      zone: "url-zone",
+    });
+
+    await expect(
+      SenderOptions.fromConfig("ws::addr=url-primary:9000;target=not-a-role;", {
+        qwp: { webSocket: { target: "replica" } },
+      }),
+    ).rejects.toThrow(/target/);
+  });
+
+  it("leaves QWP-only keys to the QWP schema", async function () {
+    // close_flush_timeout_millis, initial_connect_retry and
+    // catch_up_cap_gap_min_escalation_window_millis are QWP vocabulary. This
+    // parser never sees them: on ws/wss the QWP schema takes the whole connect
+    // string, and on a legacy transport they are simply unknown.
+    await expect(
+      SenderOptions.fromConfig(
+        "ws::addr=host:9000;close_flush_timeout_millis=123;initial_connect_retry=off;",
+      ),
+    ).resolves.toMatchObject({ protocol: "ws" });
+
+    for (const key of [
+      "close_flush_timeout_millis=123",
+      "initial_connect_retry=sync",
+      "catch_up_cap_gap_min_escalation_window_millis=1",
+    ]) {
+      await expect(
+        SenderOptions.fromConfig(`http::addr=host:9000;${key};`),
+      ).rejects.toThrow(
+        `Unknown configuration key: '${key.slice(0, key.indexOf("="))}'`,
+      );
+    }
+  });
+
   it("can parse auto_flush_interval config", async function () {
     let options = await SenderOptions.fromConfig(
       "http::addr=host:9000;protocol_version=2;auto_flush_interval=30",
@@ -1141,6 +1401,36 @@ describe("Configuration string parser suite", function () {
           },
         ),
     ).rejects.toThrow("Invalid logging function");
+  });
+
+  it("keeps a QWP logger supplied without a top-level one", async function () {
+    // resolveQwpConfig() set `log` after spreading qwp.sender, and the QWP
+    // config resolver spreads that object last, so an explicit undefined beat
+    // the caller's logger and QwpSender fell back to its no-op sink. Every
+    // sender-level message was lost, including the warn that completed rows
+    // are being discarded at close. Sibling fields of the same documented
+    // object always took effect, which is what made this a slip rather than a
+    // precedence rule.
+    const senderLog = () => undefined;
+    const qwpOnly = await SenderOptions.fromConfig("ws::addr=host:9000;", {
+      qwp: { sender: { log: senderLog } },
+    });
+    expect(qwpConfig(qwpOnly)?.sender?.log).toBe(senderLog);
+
+    // The top-level logger still wins when both are given.
+    const both = await SenderOptions.fromConfig("ws::addr=host:9000;", {
+      log: console.log,
+      qwp: { sender: { log: senderLog } },
+    });
+    expect(qwpConfig(both)?.sender?.log).toBe(console.log);
+
+    // With no logger anywhere -- a bare ws::/wss:: connect string and no
+    // extraOptions -- the default console logger is installed, not the no-op
+    // sink, so it emits the same warnings and errors the other transports do.
+    const neither = await SenderOptions.fromConfig("ws::addr=host:9000;");
+    expect(qwpConfig(neither)?.sender?.log).toBe(log);
+    const secure = await SenderOptions.fromConfig("wss::addr=host:9000;");
+    expect(qwpConfig(secure)?.sender?.log).toBe(log);
   });
 
   it("can take a custom agent", async function () {

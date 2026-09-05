@@ -4,21 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the QuestDB Node.js client library (@questdb/nodejs-client) that provides data ingestion capabilities to QuestDB databases. The client supports multiple transport protocols (HTTP/HTTPS, TCP/TCPS) and authentication methods.
+This repository builds the QuestDB JavaScript clients: `@questdb/nodejs-client`
+for Node.js and `@questdb/browser-client` for browsers. A private
+`@questdb/client-core` workspace package owns their shared implementation.
 
 ## Development Commands
 
 ### Build
+
 ```bash
-pnpm build          # Build the library using bunchee (produces both ESM and CJS outputs)
+pnpm build          # Build both public ESM/CJS packages from client-core
 ```
 
 ### Testing
+
 ```bash
 pnpm test           # Run all tests using Vitest
 ```
 
 ### Code Quality
+
 ```bash
 pnpm eslint         # Run ESLint on all source files
 pnpm typecheck      # Run TypeScript type checking without emitting files
@@ -26,8 +31,9 @@ pnpm format         # Format code using Prettier
 ```
 
 ### Documentation
+
 ```bash
-pnpm docs           # Build JSDoc documentation
+pnpm run docs       # Build TypeDoc documentation
 pnpm preview:docs   # Preview generated documentation locally
 ```
 
@@ -35,26 +41,39 @@ pnpm preview:docs   # Preview generated documentation locally
 
 ### Core Components
 
-1. **Sender** (`src/sender.ts`): Main API class that orchestrates data ingestion. Handles auto-flushing, connection management, and provides the builder pattern API for constructing rows.
+Runtime-neutral QWP implementation lives under `packages/client-core/src`.
+Each public package owns its runtime-specific source, package metadata,
+documentation, and single root build.
 
-2. **Transport Layer** (`src/transport/`):
+1. **Sender** (`packages/nodejs-client/src/sender.ts`): Main Node.js API class that orchestrates data ingestion. Handles auto-flushing, connection management, and provides the builder pattern API for constructing rows.
+
+2. **Transport Layer** (`packages/nodejs-client/src/transport/`):
+
    - `http/undici.ts`: Default HTTP transport using Undici library for high performance
    - `http/stdlib.ts`: Alternative HTTP transport using Node.js built-in modules
    - `tcp.ts`: TCP/TCPS transport for persistent connections with JWK authentication
    - Protocol negotiation and retry logic for HTTP transports
 
-3. **Buffer System** (`src/buffer/`):
+3. **Buffer System** (`packages/nodejs-client/src/buffer/`):
+
    - `bufferv1.ts`: Text-based protocol (version 1) for backward compatibility
    - `bufferv2.ts`: Binary protocol (version 2) with double encoding and array support
+   - `bufferv3.ts`: Extends v2 with DECIMAL columns (`decimalColumn`, `decimalColumnText`)
+   - All three are public exports (`SenderBufferV1`/`V2`/`V3`), selected by `createBuffer`
    - Dynamic buffer resizing and row-level transaction support
 
-4. **Configuration** (`src/options.ts`): Comprehensive options parsing from connection strings with validation and deprecation handling.
+4. **Configuration** (`packages/nodejs-client/src/options.ts`): Comprehensive options parsing from connection strings with validation and deprecation handling.
+
+5. **QWP core** (`packages/client-core/src/qwp/` and `packages/client-core/src/_qwp/`): Shared browser-safe protocol/session code.
+
+6. **Runtime adapters**: `packages/nodejs-client/src/qwp.ts` owns Node WebSocket, UDP, TLS, and persistence support; `packages/browser-client/src/index.ts` owns the browser WebSocket and authentication adapter. The browser package must remain free of Node built-ins, Node typings, `undici`, and `ws`.
 
 ### Protocol Versions
 
 - **Version 1**: Text-based serialization, compatible with older QuestDB versions
 - **Version 2**: Binary encoding for doubles, supports array columns, better performance
-- **Auto-negotiation**: HTTP transport can automatically detect and use the best protocol version
+- **Version 3**: Adds DECIMAL columns on top of version 2
+- **Auto-negotiation**: HTTP transport can automatically detect and use the best protocol version, preferring v3 over v2
 
 ### Key Design Patterns
 
@@ -66,6 +85,7 @@ pnpm preview:docs   # Preview generated documentation locally
 ## Testing Strategy
 
 Tests are organized by component:
+
 - `sender.config.test.ts`: Configuration parsing and validation
 - `sender.buffer.test.ts`: Buffer operations and protocol serialization
 - `sender.transport.test.ts`: Transport layer functionality
@@ -80,4 +100,5 @@ Integration tests use TestContainers to spin up QuestDB instances for realistic 
 - Buffer automatically resizes up to `max_buf_size` (default 100MB)
 - Auto-flush triggers based on row count or time interval
 - Each worker thread needs its own Sender instance (buffers cannot be shared)
-- Protocol version 2 is recommended for new implementations with array column support
+- Protocol version 2 or higher is recommended for new implementations; v2 adds array columns and v3 adds DECIMAL
+- Run `pnpm test:dist` after package-boundary changes; it checks both npm tarballs, ESM/CJS loading, browser bundling, and the absence of Node modules from the browser artifact.

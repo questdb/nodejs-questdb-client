@@ -6,7 +6,11 @@ on:
       - main
   pull_request:
   schedule:
-    - cron: '15 2,10,18 * * *'
+    - cron: "15 2,10,18 * * *"
+  # GitHub disables a scheduled workflow after 60 days of repository
+  # inactivity, which stops it running on pull requests too. Dispatch is
+  # how to re-run it after that without pushing to a branch.
+  workflow_dispatch:
 
 jobs:
   test:
@@ -28,7 +32,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.12.4
           run_install: true
 
       - name: Linting
@@ -37,5 +41,121 @@ jobs:
       - name: Type-checking
         run: pnpm typecheck
 
+      # This contract uses DOM libraries with no @types/node and covers only
+      # the source graph shipped in @questdb/browser-client.
+      - name: Type-checking (browser)
+        run: pnpm typecheck:qwp-browser
+
+      # `pnpm typecheck` covers src plus a single contract file, so nothing
+      # type-checked test/** at all: a test could reference a deleted export
+      # and still pass, because vitest strips types without checking them.
+      - name: Type-checking (tests)
+        run: pnpm typecheck:test
+
+      - name: Type-checking (benchmarks)
+        run: pnpm typecheck:bench
+
+      - name: Linting (benchmarks)
+        run: pnpm lint:bench
+
       - name: Tests
         run: pnpm test
+
+      # Loads the built bundles through package.json `exports`, the way a
+      # consumer does, and verifies the two npm package boundaries.
+      - name: Built package tests
+        run: pnpm test:dist
+
+      # test:dist asserts runtime behaviour only. The compiled writers promise
+      # per-column row typing, which lives entirely in the emitted .d.ts files
+      # and is therefore invisible to source-level tests, where the public
+      # entries share one private-core module instance.
+      - name: Type-checking (built package consumer)
+        run: pnpm typecheck:dist
+
+      # The same gate publish.yml runs. Keeping it here too means a chunk that
+      # escapes `files`, or a regression in the check itself, fails a pull
+      # request instead of first being discovered during a release.
+      - name: Check for build artifacts
+        run: node scripts/check-build-artifacts.mjs
+
+  # Drives the built browser bundle in real Chromium against a local mock
+  # server. Tests that need a live QuestDB belong in the server repositories,
+  # where the topology and authentication fixtures already exist.
+  qwp-browser:
+    name: QWP browser bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.4
+          run_install: true
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser bundle tests
+        run: pnpm test:qwp-browser
+
+  enterprise-qwp-e2e:
+    name: Dispatch Enterprise QWP E2E
+    runs-on: ubuntu-latest
+    # Azure credentials are not exposed to fork PRs. The repository variable
+    # keeps this dormant until the Enterprise pipeline and PAT are configured.
+    if: >-
+      vars.ENTERPRISE_E2E_ENABLED == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - name: Queue Enterprise TypeScript-client E2E
+        env:
+          ENT_DISPATCH_PAT: ${{ secrets.ENT_DISPATCH_PAT }}
+          CLIENT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CLIENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CLIENT_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ENT_DISPATCH_PAT:-}" ]; then
+            echo "ENT_DISPATCH_PAT is not configured" >&2
+            exit 1
+          fi
+
+          ORG_URL="https://dev.azure.com/questdb/"
+          PROJECT="questdb-enterprise"
+          PIPELINE_NAME="build-and-test-e2e-javascript-client"
+          PIPELINES=$(curl -fsS -u ":${ENT_DISPATCH_PAT}" \
+            "${ORG_URL}${PROJECT}/_apis/pipelines?api-version=7.0")
+          PIPELINE_ID=$(echo "$PIPELINES" | jq -r --arg name "$PIPELINE_NAME" \
+            '.value[] | select(.name == $name) | .id' | head -1)
+          if [ -z "$PIPELINE_ID" ] || [ "$PIPELINE_ID" = "null" ]; then
+            echo "Enterprise pipeline '$PIPELINE_NAME' is not registered" >&2
+            exit 1
+          fi
+
+          BODY=$(jq -n \
+            --arg commit "$CLIENT_COMMIT" \
+            --arg pr "$CLIENT_PR_NUMBER" \
+            --arg branch "$CLIENT_BRANCH" \
+            '{
+              templateParameters: {
+                javascriptClientCommit: $commit,
+                javascriptClientPrNumber: $pr,
+                clientBranch: $branch
+              }
+            }')
+          RESPONSE=$(curl -fsS -u ":${ENT_DISPATCH_PAT}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d "$BODY" \
+            "${ORG_URL}${PROJECT}/_apis/pipelines/${PIPELINE_ID}/runs?api-version=7.0")
+          echo "Enterprise E2E queued: $(echo "$RESPONSE" | jq -r '._links.web.href')"

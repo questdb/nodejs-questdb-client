@@ -1,0 +1,540 @@
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  QWP_ORPHAN_DRAIN_EVENT_KIND,
+  QWP_ORPHAN_FAILED_SENTINEL,
+  QwpNodeOrphanDrainer,
+  QwpReplayStoreCorruptionError,
+  QwpReplayStoreLockedError,
+  retryQwpNodeOrphanSlot,
+  scanQwpNodeOrphanSlots,
+  type QwpNodeOrphanDrainSession,
+} from "../../packages/nodejs-client/src";
+import {
+  QWP_RECONNECT_EVENT_KIND,
+  QWP_SENDER_ERROR_CATEGORY,
+  QWP_SENDER_ERROR_POLICY,
+  QWP_STATUS,
+  QwpReplayRejectedError,
+  QwpUnrecoverableReplayDictionaryError,
+  type QwpSenderError,
+} from "../../packages/client-core/src/qwp";
+
+class FakeDrainSession implements QwpNodeOrphanDrainSession {
+  pendingReplayFrames = 1;
+  readonly closed: Promise<{
+    code: number;
+    reason: string;
+    wasClean: boolean;
+  }>;
+  private resolveClosed!: (info: {
+    code: number;
+    reason: string;
+    wasClean: boolean;
+  }) => void;
+  lastError?: Error;
+  closes = 0;
+
+  constructor() {
+    this.closed = new Promise((resolve) => {
+      this.resolveClosed = resolve;
+    });
+  }
+
+  get metrics() {
+    return {
+      pendingReplayFrames: this.pendingReplayFrames,
+      pendingReplayBytes: this.pendingReplayFrames,
+      lastError: this.lastError,
+    };
+  }
+
+  pollDurableAck(): Promise<void> {
+    this.pendingReplayFrames = 0;
+    return Promise.resolve();
+  }
+
+  close(code = 1000, reason = ""): Promise<void> {
+    if (this.closes++ === 0) {
+      this.resolveClosed({ code, reason, wasClean: code === 1000 });
+    }
+    return Promise.resolve();
+  }
+
+  fail(error: Error): void {
+    this.lastError = error;
+    this.resolveClosed({ code: 1011, reason: error.message, wasClean: false });
+  }
+}
+
+function assignedSfaSegment(): Buffer {
+  const bytes = Buffer.alloc(24 + 8);
+  bytes.write("SF01", 0, "ascii");
+  bytes.writeUInt8(1, 4);
+  // A non-zero envelope probe is enough for the read-only orphan scanner;
+  // adoption performs full CRC and manifest validation under the slot lock.
+  bytes.writeUInt8(1, 24);
+  return bytes;
+}
+
+describe("QWP Node orphan drainer", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+    );
+  });
+
+  async function root(): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), "qwp-orphans-"));
+    roots.push(directory);
+    return directory;
+  }
+
+  async function recordSlot(
+    rootDirectory: string,
+    name: string,
+  ): Promise<string> {
+    const directory = join(rootDirectory, name);
+    await mkdir(directory);
+    await writeFile(
+      join(directory, "sf-0000000000000000.sfa"),
+      assignedSfaSegment(),
+    );
+    return directory;
+  }
+
+  it("finds record-bearing child slots while excluding live and failed slots", async () => {
+    const rootDirectory = await root();
+    const orphan = await recordSlot(rootDirectory, "orphan");
+    const segmented = join(rootDirectory, "segmented");
+    await mkdir(segmented);
+    await writeFile(
+      join(segmented, "sf-0000000000000000.sfa"),
+      assignedSfaSegment(),
+    );
+    await recordSlot(rootDirectory, "live");
+    const failed = await recordSlot(rootDirectory, "failed");
+    await writeFile(join(failed, QWP_ORPHAN_FAILED_SENTINEL), "inspect me");
+    await recordSlot(rootDirectory, "sender-0.unreplayable-0");
+    await mkdir(join(rootDirectory, "empty"));
+
+    await expect(
+      scanQwpNodeOrphanSlots(rootDirectory, (name) => name === "live"),
+    ).resolves.toEqual([orphan, segmented]);
+    await expect(
+      scanQwpNodeOrphanSlots(join(rootDirectory, "missing")),
+    ).resolves.toEqual([]);
+  });
+
+  it("adopts and drains discovered slots with bounded background workers", async () => {
+    const rootDirectory = await root();
+    const first = await recordSlot(rootDirectory, "first");
+    const second = await recordSlot(rootDirectory, "second");
+    const sessions = new Map<string, FakeDrainSession>();
+    const events: string[] = [];
+    let activeCreations = 0;
+    let maximumCreations = 0;
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      maxConcurrent: 1,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 1,
+      createSession: async (directory) => {
+        activeCreations++;
+        maximumCreations = Math.max(maximumCreations, activeCreations);
+        const session = new FakeDrainSession();
+        sessions.set(directory, session);
+        const close = session.close.bind(session);
+        session.close = async (code, reason) => {
+          await close(code, reason);
+          activeCreations--;
+        };
+        return session;
+      },
+      onEvent: (event) => events.push(`${event.kind}:${event.directory}`),
+    });
+
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.drained).toBe(2));
+    expect(new Set(sessions.keys())).toEqual(new Set([first, second]));
+    expect(maximumCreations).toBe(1);
+    expect(events).toContain(`${QWP_ORPHAN_DRAIN_EVENT_KIND.DRAINED}:${first}`);
+    expect(events).toContain(
+      `${QWP_ORPHAN_DRAIN_EVENT_KIND.DRAINED}:${second}`,
+    );
+    await drainer.close();
+    expect(drainer.metrics).toMatchObject({ active: 0, closed: true });
+  });
+
+  it("keeps draining while the adopted session cannot yet poll durable ACK", async () => {
+    // An adopted session connects in the background, so until its first
+    // upgrade lands its handshake carries no durableAckEnabled and
+    // pollDurableAck() rejects with exactly this message -- a not-yet, not a
+    // verdict on the slot. Unguarded, that rejection reached drainOne() and
+    // abandoned the slot ~200ms in, so with request_durable_ack on every scan
+    // burned a lock-and-rescan cycle and orphan recovery made no progress for
+    // as long as the endpoint stayed unreachable.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "offline-producer");
+    let polls = 0;
+    const events: string[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 1,
+      createSession: async () => {
+        const session = new FakeDrainSession();
+        session.pollDurableAck = async () => {
+          // Rejects while the session is still connecting, then succeeds the
+          // way it does once the upgrade has landed.
+          if (++polls < 3) {
+            throw new Error("durable ACK was not negotiated for this session");
+          }
+          session.pendingReplayFrames = 0;
+        };
+        return session;
+      },
+      onEvent: (event) => events.push(event.kind),
+    });
+
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.drained).toBe(1));
+    expect(polls).toBeGreaterThanOrEqual(3);
+    expect(events).toContain(QWP_ORPHAN_DRAIN_EVENT_KIND.DRAINED);
+    expect(events).not.toContain(QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING);
+    expect(drainer.metrics).toMatchObject({ retrying: 0, failed: 0 });
+    expect(directory).toContain("offline-producer");
+    await drainer.close();
+  });
+
+  it("still quarantines when the keepalive poll carries a terminal verdict", async () => {
+    // A poll failure must not end the attempt, but it must not swallow a
+    // verdict either. pingWithReconnect() is the one requestReconnect() caller
+    // that hands its rejection to an external caller instead of latching it,
+    // so a reconnect that dies on rotated credentials or an exhausted episode
+    // arrives through this poll and nowhere else -- session.closed never
+    // settles for it. Swallowing every failure left the drain looping forever
+    // on a slot that can never drain, holding its worker and its lock, with no
+    // .failed sentinel and no data-loss report for the operator.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "rejected-head");
+    const rejected = new QwpReplayRejectedError(
+      0n,
+      QWP_STATUS.SCHEMA_MISMATCH,
+      "column type mismatch",
+    );
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 1,
+      createSession: async () => {
+        const session = new FakeDrainSession();
+        // Rejects while leaving the session open, exactly as a terminal
+        // reconnect raised through ping() does.
+        session.pollDurableAck = () => Promise.reject(rejected);
+        return session;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(drainer.metrics).toMatchObject({ retrying: 0, active: 0 });
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+    });
+    await drainer.close();
+  });
+
+  it("discovers a slot orphaned after the startup scan", async () => {
+    const rootDirectory = await root();
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 10,
+      durableAckPollIntervalMs: 1,
+      createSession: async (directory) => {
+        const session = new FakeDrainSession();
+        session.pollDurableAck = async () => {
+          session.pendingReplayFrames = 0;
+          await rm(join(directory, "sf-0000000000000000.sfa"));
+        };
+        return session;
+      },
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.scans).toBeGreaterThan(0));
+
+    await recordSlot(rootDirectory, "late-producer");
+    await vi.waitFor(() => expect(drainer.metrics.drained).toBe(1));
+    expect(drainer.metrics.scans).toBeGreaterThan(1);
+    await drainer.close();
+  });
+
+  it("forwards durable-ACK and primary-unavailable reconnect events", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "rolling-upgrade");
+    const events: Array<{
+      kind: string;
+      directory?: string;
+      attempt?: number;
+      episodeMs?: number;
+    }> = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 1,
+      createSession: async (_directory, onReconnectEvent) => {
+        onReconnectEvent?.({
+          kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE,
+          attempt: 3,
+          timestampMs: Date.now(),
+          episodeMs: 25,
+        });
+        onReconnectEvent?.({
+          kind: QWP_RECONNECT_EVENT_KIND.PRIMARY_UNAVAILABLE,
+          attempt: 2,
+          timestampMs: Date.now(),
+        });
+        onReconnectEvent?.({
+          kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+          attempt: 16,
+          timestampMs: Date.now(),
+          episodeMs: 300_000,
+          cause: new Error("durable ACK remained unavailable"),
+        });
+        return new FakeDrainSession();
+      },
+      onEvent: (event) => events.push(event),
+    });
+
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.drained).toBe(1));
+    await vi.waitFor(() =>
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_UNAVAILABLE,
+            directory,
+            attempt: 3,
+            episodeMs: 25,
+          }),
+          expect.objectContaining({
+            kind: QWP_ORPHAN_DRAIN_EVENT_KIND.PRIMARY_UNAVAILABLE,
+            directory,
+            attempt: 2,
+          }),
+          expect.objectContaining({
+            kind: QWP_ORPHAN_DRAIN_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+            directory,
+            attempt: 16,
+            episodeMs: 300_000,
+            error: expect.objectContaining({
+              message: "durable ACK remained unavailable",
+            }),
+          }),
+        ]),
+      ),
+    );
+    await drainer.close();
+  });
+
+  it("skips live locked slots without quarantining them", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "live");
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        throw new QwpReplayStoreLockedError(directory, process.pid);
+      },
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.locked).toBe(1));
+    expect(await readdir(directory)).not.toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await drainer.close();
+  });
+
+  it("leaves a slot intact when the drain attempt fails transiently", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "transient");
+    // EMFILE while opening one descriptor per segment, an unreachable server,
+    // an ACK poll timeout: the journal is intact and a later scan can drain it.
+    const transient = Object.assign(new Error("EMFILE: too many open files"), {
+      code: "EMFILE",
+    });
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        throw transient;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+
+    await vi.waitFor(() => expect(drainer.metrics.retrying).toBe(1));
+    expect(drainer.metrics.failed).toBe(0);
+    // No sentinel, no abandoned-data report, and the slot is still offered to
+    // the next scan.
+    expect(await readdir(directory)).not.toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    expect(senderErrors).toEqual([]);
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
+      directory,
+    ]);
+
+    await drainer.close();
+  });
+
+  it("quarantines a head the server will not accept", async () => {
+    // QWP.md promises `.failed` "so a corrupt or permanently rejected head
+    // cannot cause a hot retry loop". A rejected head arrives as
+    // QwpReplayRejectedError, which the classifier did not recognise, so the
+    // slot was re-adopted on every scan and the same frame re-sent forever
+    // with the poison strike count reset each time.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "rejected");
+    const rejected = new QwpReplayRejectedError(
+      0n,
+      QWP_STATUS.SCHEMA_MISMATCH,
+      "column type mismatch",
+    );
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        const session = new FakeDrainSession();
+        // The realistic route: the connection gives up on the head frame and
+        // fails the session while its replay frames are still pending.
+        queueMicrotask(() => session.fail(rejected));
+        return session;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(drainer.metrics.retrying).toBe(0);
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+    });
+    // The sentinel takes the slot out of the scan, so nothing re-sends it.
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
+
+    await drainer.close();
+  });
+
+  it("quarantines terminal failures until an operator explicitly retries", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "corrupt");
+    // Terminal by design: a corrupt journal cannot be replayed, so the slot is
+    // quarantined rather than retried.
+    const terminal = new QwpReplayStoreCorruptionError("corrupt replay record");
+    const senderErrors: QwpSenderError[] = [];
+    const events: string[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        throw terminal;
+      },
+      onEvent: (event) => {
+        if (event.senderError) events.push(event.senderError.category);
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    await vi.waitFor(() => expect(events).toEqual(["data-loss"]));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+      serverMessage: terminal.message,
+    });
+    expect(drainer.metrics).toMatchObject({
+      deliveredNotifications: expect.any(Number),
+      droppedNotifications: 0,
+      deliveredErrorNotifications: 1,
+      droppedErrorNotifications: 0,
+    });
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
+
+    await retryQwpNodeOrphanSlot(directory);
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
+      directory,
+    ]);
+    await drainer.close();
+  });
+
+  it("quarantines an orphan whose symbol dictionary cannot be reconstructed", async () => {
+    // The foreground path classifies this with QwpReplayStoreCorruptionError,
+    // through isQuarantinableReplayRecoveryError(): both are journal verdicts,
+    // and frames referencing symbol IDs no replay can resolve are as final as
+    // a torn segment. isTerminalDrainFailure() omitted it, so the drainer
+    // re-adopted the slot on every scan for good -- taking its lock and
+    // re-reading every segment each time -- while the operator got no sentinel
+    // and no data-loss notification.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "dictionary");
+    const terminal = new QwpUnrecoverableReplayDictionaryError(
+      "recovered delta frames reference unreconstructable symbol IDs",
+    );
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        throw terminal;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+      serverMessage: terminal.message,
+    });
+    // Quarantined, so a later scan leaves it for the operator instead of
+    // adopting it again.
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
+    await drainer.close();
+  });
+
+  it("stops active sessions when the owning client closes", async () => {
+    const rootDirectory = await root();
+    await recordSlot(rootDirectory, "offline");
+    const session = new FakeDrainSession();
+    session.pollDurableAck = () => Promise.resolve();
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => session,
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.active).toBe(1));
+    await drainer.close();
+    expect(session.closes).toBeGreaterThan(0);
+    expect(drainer.metrics.closed).toBe(true);
+  });
+});

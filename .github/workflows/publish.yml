@@ -20,7 +20,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.12.4
           run_install: true
 
       - name: Linting
@@ -29,21 +29,48 @@ jobs:
       - name: Type-checking
         run: pnpm typecheck
 
+      # This contract uses DOM libraries with no @types/node and covers only
+      # the source graph shipped in @questdb/browser-client.
+      - name: Type-checking (browser)
+        run: pnpm typecheck:qwp-browser
+
       - name: Tests
         run: pnpm test
 
       - name: Build
         run: pnpm build
 
-      - name: Check for build artifacts
-        run: |
-          [ -f dist/cjs/index.js ] || (echo "CJS build missing" && exit 1)
-          [ -f dist/es/index.mjs ] || (echo "ESM build missing" && exit 1)
+      - name: Built package tests
+        run: pnpm exec vitest run --config vitest.dist.config.ts
 
-      - name: Publish
+      # Guards the emitted .d.ts row typing, which no runtime suite can see.
+      - name: Type-checking (built package consumer)
+        run: |
+          pnpm exec tsc --noEmit -p tsconfig.dist-types.json
+          pnpm exec tsc --noEmit -p tsconfig.dist-types.cjs.json
+
+      # Checks both npm tarballs and follows every exported declaration and
+      # runtime module through its relative dependency graph.
+      - name: Check for build artifacts
+        run: node scripts/check-build-artifacts.mjs
+
+      # Both packages are published from one commit, and npm-publish silently
+      # skips a version that already exists. Fail here instead of half-releasing.
+      - name: Check release versions
+        run: node scripts/check-release-versions.mjs
+
+      - name: Publish @questdb/nodejs-client
         uses: JS-DevTools/npm-publish@v3
         with:
           token: ${{ secrets.CI_TOKEN }}
           access: public
           strategy: all
-          package: package.json
+          package: packages/nodejs-client/package.json
+
+      - name: Publish @questdb/browser-client
+        uses: JS-DevTools/npm-publish@v3
+        with:
+          token: ${{ secrets.CI_TOKEN }}
+          access: public
+          strategy: all
+          package: packages/browser-client/package.json

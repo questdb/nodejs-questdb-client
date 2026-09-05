@@ -1,9 +1,12 @@
 // @ts-check
 import { describe, it, expect } from "vitest";
 
-import { Sender } from "../src";
-import { DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFER_SIZE } from "../src/buffer";
-import { log } from "../src/logging";
+import { Sender } from "../packages/nodejs-client/src";
+import {
+  DEFAULT_BUFFER_SIZE,
+  DEFAULT_MAX_BUFFER_SIZE,
+} from "../packages/nodejs-client/src/buffer";
+import { log } from "../packages/client-core/src/logging";
 
 describe("Sender configuration options suite", function () {
   it("creates a sender from a configuration string", async function () {
