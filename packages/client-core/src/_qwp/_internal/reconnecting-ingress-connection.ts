@@ -1415,6 +1415,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (this.isRecoveredDiscardFrame(frame.frameSequence)) continue;
       frame.durableTargets = undefined;
       if (cap !== undefined && frame.payloadLength > cap) {
+        // The frame is valid for the journal but not for this endpoint. Keep the
+        // endpoint usable for smaller work while making the shared failover
+        // tracker try a different node on the next reconnect attempt.
+        if (this.isEndpointSpecificCap(connection, frame.payloadLength)) {
+          connection.deprioritizeEndpoint?.();
+        }
         throw new RangeError(
           `persisted QWP frame exceeds reconnect target batch cap [size=${frame.payloadLength}, max=${cap}]`,
         );
@@ -2054,6 +2060,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // resend set; it is deliberately not pushed onto the wire log, because
       // nothing reached the wire and the log is indexed by wire sequence.
       frame.transmitted = true;
+      if (this.isEndpointSpecificCap(connection, frame.payloadLength)) {
+        connection.deprioritizeEndpoint?.();
+      }
       await this.requestReconnect(
         new RangeError(
           `QWP frame exceeds reconnect target batch cap [size=${frame.payloadLength}, max=${cap}]`,
@@ -2103,6 +2112,19 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (this.lazyReplayStore) frame.payload = undefined;
     }
     return true;
+  }
+
+  private isEndpointSpecificCap(
+    connection: QwpBinaryConnection,
+    payloadLength: number,
+  ): boolean {
+    const endpointCap = connection.handshake.maxBatchSizeBytes;
+    return (
+      endpointCap !== undefined &&
+      payloadLength > endpointCap &&
+      (this.localMaxBatchSizeBytes === undefined ||
+        payloadLength <= this.localMaxBatchSizeBytes)
+    );
   }
 
   private async readFramePayload(frame: ReplayFrame): Promise<Uint8Array> {

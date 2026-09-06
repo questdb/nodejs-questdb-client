@@ -459,6 +459,16 @@ describe("QWP ingress codec", () => {
     );
     expect(geohash(0x20n)).toThrow(/must be between 0 and 31 for 5 bits/);
     expect(geohash(0x1fn)).not.toThrow();
+    expect(
+      cell(QWP_COLUMN_TYPE.GEOHASH, 0n, (_table, column) => {
+        column.geohashPrecision = 61;
+      }),
+    ).toThrow(/invalid geohash precision 61; expected 1 through 60/);
+    expect(
+      cell(QWP_COLUMN_TYPE.DECIMAL64, 0n, (_table, column) => {
+        column.decimalScale = 19;
+      }),
+    ).toThrow(/invalid decimal scale 19; expected 0 through 18/);
 
     // In-range values still encode, and to the same bytes as before.
     expect(cell(QWP_COLUMN_TYPE.BYTE, 127)).not.toThrow();

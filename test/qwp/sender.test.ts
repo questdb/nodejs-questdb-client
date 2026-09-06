@@ -1177,6 +1177,35 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("keeps a decimal column's type after releasing its frame scale", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("fx").decimal64Column("price", 125n, 2).atNow();
+    await sender.flush();
+
+    expect(() => sender.table("fx").stringColumn("price", "wrong")).toThrow(
+      /column type mismatch/,
+    );
+    const wrongWriter = sender.writer("fx", { price: varchar() });
+    await expect(wrongWriter.row({ price: "wrong" })).rejects.toThrow(
+      /conflicts with the sender's staged schema/,
+    );
+    await sender.table("fx").decimal64Column("price", 15n, 1).atNow();
+    await sender.flush();
+
+    expect(session.sends).toHaveLength(2);
+    expect(column(session.sends[0].tables[0], "price")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL64,
+      decimalScale: 2,
+    });
+    expect(column(session.sends[1].tables[0], "price")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL64,
+      decimalScale: 1,
+    });
+    await sender.close();
+  });
+
   it("keeps a decimal column's scale locked while a row is still open", async () => {
     // releaseStagedRows() purges a decimal column's locked scale once every
     // row that locked it has been published -- but a row still being built is

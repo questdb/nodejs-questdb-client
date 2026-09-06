@@ -185,13 +185,25 @@ interface StagedColumn {
   decimalScale?: number;
 }
 
+type StagedSchemaColumn = Pick<
+  StagedColumn,
+  "name" | "type" | "geohashPrecision" | "decimalScale"
+>;
+
+type PublishedSchemaColumn = Pick<
+  StagedColumn,
+  "name" | "type" | "geohashPrecision"
+>;
+
 interface StagedTable {
   name: string;
   rows: StagedRow[];
-  schema: Map<
-    string,
-    Pick<StagedColumn, "name" | "type" | "geohashPrecision" | "decimalScale">
-  >;
+  /** Frame-local metadata, including the decimal scale currently locked. */
+  schema: Map<string, StagedSchemaColumn>;
+  /** Types that have crossed the local publication boundary. */
+  publishedSchema: Map<string, PublishedSchemaColumn>;
+  /** Completed and in-progress column identities, including frame-unlocked decimals. */
+  knownColumnNames: Set<string>;
 }
 
 interface StagedRow {
@@ -971,10 +983,12 @@ export class QwpSender {
   private readonly tablesByName = new Map<string, StagedTable>();
   private current?: StagedTable;
   private currentRow = new Map<string, StagedColumn>();
-  // Schema keys the row in progress introduced. A row that is discarded must
-  // not leave its column types behind: nothing was published, so nothing was
-  // learned about the table.
+  // Frame-schema keys the row in progress introduced. A discarded row must
+  // remove their transient metadata; published type identity lives separately.
   private currentRowSchemaKeys: string[] = [];
+  // Column identities first seen in the row in progress. These leave the
+  // table-wide column count again when that row is discarded.
+  private currentRowNewColumnKeys: string[] = [];
   private pendingRowCount = 0;
   private pendingByteCount = 0;
   /**
@@ -1084,6 +1098,7 @@ export class QwpSender {
     this.tablesByName.clear();
     this.current = undefined;
     this.currentRowSchemaKeys.length = 0;
+    this.currentRowNewColumnKeys.length = 0;
     this.currentRow.clear();
     // A flush already in flight holds snapshots of the tables just dropped.
     // Retiring them against the counters this call zeroes would subtract the
@@ -1117,7 +1132,13 @@ export class QwpSender {
     new QwpTableBuffer(name, this.maxNameLength);
     let table = this.tablesByName.get(name);
     if (!table) {
-      table = { name, rows: [], schema: new Map() };
+      table = {
+        name,
+        rows: [],
+        schema: new Map(),
+        publishedSchema: new Map(),
+        knownColumnNames: new Set(),
+      };
       this.tablesByName.set(name, table);
       this.tables.push(table);
     }
@@ -2154,12 +2175,14 @@ export class QwpSender {
     const existingTable = this.tablesByName.get(schema.tableName);
     if (existingTable) {
       for (const [nameKey, column] of row.columns) {
-        const existing = existingTable.schema.get(nameKey);
+        const staged = existingTable.schema.get(nameKey);
+        const existing = staged ?? existingTable.publishedSchema.get(nameKey);
         if (
           existing &&
           (existing.type !== column.type ||
             existing.geohashPrecision !== column.geohashPrecision ||
-            existing.decimalScale !== column.decimalScale)
+            (staged !== undefined &&
+              staged.decimalScale !== column.decimalScale))
         ) {
           const inputName = schema.columns.find(
             (candidate) => candidate.nameKey === nameKey,
@@ -2182,10 +2205,11 @@ export class QwpSender {
     // releaseStagedRows(), so every later flush() and close() hit the same wall
     // and the whole staged batch became unreachable. Reject the row before the
     // schema is merged, the way the fluent path rejects the column.
-    const stagedSchema = existingTable?.schema;
-    let mergedColumnCount = stagedSchema?.size ?? 0;
+    let mergedColumnCount = existingTable?.knownColumnNames.size ?? 0;
     for (const nameKey of row.columns.keys()) {
-      if (!stagedSchema?.has(nameKey)) mergedColumnCount++;
+      if (!existingTable?.knownColumnNames.has(nameKey)) {
+        mergedColumnCount++;
+      }
     }
     if (mergedColumnCount > QWP_MAX_COLUMNS_PER_TABLE) {
       throw new QwpWriterRowError(
@@ -2200,7 +2224,13 @@ export class QwpSender {
 
     let table = existingTable;
     if (!table) {
-      table = { name: schema.tableName, rows: [], schema: new Map() };
+      table = {
+        name: schema.tableName,
+        rows: [],
+        schema: new Map(),
+        publishedSchema: new Map(),
+        knownColumnNames: new Set(),
+      };
       this.tablesByName.set(schema.tableName, table);
       this.tables.push(table);
     }
@@ -2208,6 +2238,7 @@ export class QwpSender {
       const existing = table.schema.get(nameKey);
       if (existing) column.name = existing.name;
       else {
+        column.name = table.publishedSchema.get(nameKey)?.name ?? column.name;
         table.schema.set(nameKey, {
           name: column.name,
           type: column.type,
@@ -2215,6 +2246,7 @@ export class QwpSender {
           decimalScale: column.decimalScale,
         });
       }
+      table.knownColumnNames.add(nameKey);
     }
     table.rows.push(row);
     this.pendingRowCount++;
@@ -2275,13 +2307,15 @@ export class QwpSender {
       // ignored, not rescaled and allowed to discard the value already staged.
       if (this.currentRow.has(nameKey)) return this;
       const existingSchema = table.schema.get(nameKey);
+      const publishedSchema = table.publishedSchema.get(nameKey);
+      const knownSchema = existingSchema ?? publishedSchema;
       if (
-        existingSchema &&
-        (existingSchema.type !== type ||
-          existingSchema.geohashPrecision !== metadata.geohashPrecision)
+        knownSchema &&
+        (knownSchema.type !== type ||
+          knownSchema.geohashPrecision !== metadata.geohashPrecision)
       ) {
         throw new Error(
-          `column type mismatch for '${name}' [existing=${existingSchema.type}, received=${type}]`,
+          `column type mismatch for '${name}' [existing=${knownSchema.type}, received=${type}]`,
         );
       }
       if (
@@ -2301,7 +2335,10 @@ export class QwpSender {
         );
         metadata = { ...metadata, decimalScale: existingSchema.decimalScale };
       }
-      if (!existingSchema && table.schema.size >= QWP_MAX_COLUMNS_PER_TABLE) {
+      if (
+        !knownSchema &&
+        table.knownColumnNames.size >= QWP_MAX_COLUMNS_PER_TABLE
+      ) {
         // QwpTableBuffer enforces this too, but only once buildTable() runs
         // during flush -- and a throw there escapes before releaseStagedRows(),
         // so every later flush() and close() hit the same wall and the whole
@@ -2312,8 +2349,12 @@ export class QwpSender {
           `column count exceeds maximum ${QWP_MAX_COLUMNS_PER_TABLE} for table '${table.name}'`,
         );
       }
-      const canonicalName = existingSchema?.name ?? name;
+      const canonicalName = knownSchema?.name ?? name;
       if (!existingSchema) this.currentRowSchemaKeys.push(nameKey);
+      if (!knownSchema) {
+        table.knownColumnNames.add(nameKey);
+        this.currentRowNewColumnKeys.push(nameKey);
+      }
       table.schema.set(nameKey, { name: canonicalName, type, ...metadata });
       this.currentRow.set(nameKey, {
         name: canonicalName,
@@ -2332,6 +2373,7 @@ export class QwpSender {
     const estimatedBytes = stagedRowBytes(this.currentRow);
     table.rows.push({ columns: this.currentRow, estimatedBytes });
     this.currentRowSchemaKeys.length = 0;
+    this.currentRowNewColumnKeys.length = 0;
     this.currentRow = new Map();
     this.current = undefined;
     this.pendingRowCount++;
@@ -2359,16 +2401,24 @@ export class QwpSender {
     const table = this.current;
     if (table) {
       for (const key of this.currentRowSchemaKeys) table.schema.delete(key);
+      for (const key of this.currentRowNewColumnKeys) {
+        table.knownColumnNames.delete(key);
+      }
       // A table this row brought into being, and that nothing else has staged
       // or learned from, goes with it. Otherwise a loop that keeps rejecting
       // rows on fresh table names accumulates empty StagedTables forever.
-      if (table.rows.length === 0 && table.schema.size === 0) {
+      if (
+        table.rows.length === 0 &&
+        table.schema.size === 0 &&
+        table.knownColumnNames.size === 0
+      ) {
         this.tablesByName.delete(table.name);
         const index = this.tables.indexOf(table);
         if (index >= 0) this.tables.splice(index, 1);
       }
     }
     this.currentRowSchemaKeys.length = 0;
+    this.currentRowNewColumnKeys.length = 0;
     this.currentRow.clear();
     this.current = undefined;
   }
@@ -2382,6 +2432,7 @@ export class QwpSender {
   private releaseStagedRows(
     snapshots: readonly { table: StagedTable; rows: readonly StagedRow[] }[],
     generation: number,
+    published: boolean,
   ): number {
     if (generation !== this.stagingGeneration) {
       // reset() dropped this staging and already zeroed the counters. The
@@ -2392,6 +2443,19 @@ export class QwpSender {
       return 0;
     }
     for (const { table, rows } of snapshots) {
+      if (published) {
+        for (const row of rows) {
+          for (const [nameKey, column] of row.columns) {
+            if (!table.publishedSchema.has(nameKey)) {
+              table.publishedSchema.set(nameKey, {
+                name: column.name,
+                type: column.type,
+                geohashPrecision: column.geohashPrecision,
+              });
+            }
+          }
+        }
+      }
       table.rows.splice(0, rows.length);
       // A QWP column carries one decimal scale per frame, which is why the
       // first value locks it. Once every row that locked it has been
@@ -2444,7 +2508,7 @@ export class QwpSender {
     const snapshots = this.tables
       .filter((table) => table.rows.length > 0)
       .map((table) => ({ table, rows: table.rows.slice() }));
-    return this.releaseStagedRows(snapshots, this.stagingGeneration);
+    return this.releaseStagedRows(snapshots, this.stagingGeneration, false);
   }
 
   private async tryFlush(): Promise<void> {
@@ -2571,7 +2635,7 @@ export class QwpSender {
       (count, snapshot) => count + snapshot.rows.length,
       0,
     );
-    this.releaseStagedRows(snapshots, generation);
+    this.releaseStagedRows(snapshots, generation, true);
     this.totalRowsPublished += publishedRows;
     this.lastFlushTime = Date.now();
     this.log(

@@ -79,6 +79,14 @@ function assignedSfaSegment(): Buffer {
   return bytes;
 }
 
+function manifestRequiredEmptySfaSegment(): Buffer {
+  const bytes = Buffer.alloc(24 + 8);
+  bytes.write("SF01", 0, "ascii");
+  bytes.writeUInt8(1, 4);
+  bytes.writeUInt8(1, 5);
+  return bytes;
+}
+
 describe("QWP Node orphan drainer", () => {
   const roots: string[] = [];
 
@@ -128,6 +136,20 @@ describe("QWP Node orphan drainer", () => {
     await expect(
       scanQwpNodeOrphanSlots(join(rootDirectory, "missing")),
     ).resolves.toEqual([]);
+  });
+
+  it("finds manifest-required slots whose record pages were lost", async () => {
+    const rootDirectory = await root();
+    const directory = join(rootDirectory, "lost-record-pages");
+    await mkdir(directory);
+    await writeFile(
+      join(directory, "sf-0000000000000000.sfa"),
+      manifestRequiredEmptySfaSegment(),
+    );
+
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
+      directory,
+    ]);
   });
 
   it("adopts and drains discovered slots with bounded background workers", async () => {

@@ -769,6 +769,34 @@ function validateTableForEncoding(table: QwpTableBuffer): void {
         `table '${table.name}' column '${column.name}' has ${nonNullCount} non-null row(s) but ${column.values.length} value(s)`,
       );
     }
+    if (column.type === QWP_COLUMN_TYPE.GEOHASH) {
+      const precision = column.geohashPrecision ?? 1;
+      if (!Number.isInteger(precision) || precision < 1 || precision > 60) {
+        throw new RangeError(
+          `invalid geohash precision ${precision}; expected 1 through 60`,
+        );
+      }
+    }
+    const maximumDecimalScale =
+      column.type === QWP_COLUMN_TYPE.DECIMAL64
+        ? 18
+        : column.type === QWP_COLUMN_TYPE.DECIMAL128
+          ? 38
+          : column.type === QWP_COLUMN_TYPE.DECIMAL256
+            ? 76
+            : undefined;
+    if (maximumDecimalScale !== undefined) {
+      const scale = column.decimalScale ?? 0;
+      if (
+        !Number.isInteger(scale) ||
+        scale < 0 ||
+        scale > maximumDecimalScale
+      ) {
+        throw new RangeError(
+          `invalid decimal scale ${scale}; expected 0 through ${maximumDecimalScale}`,
+        );
+      }
+    }
   }
 }
 

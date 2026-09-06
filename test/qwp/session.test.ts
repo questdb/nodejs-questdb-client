@@ -435,6 +435,35 @@ describe("QWP WebSocket adapters", () => {
     expect(requestedHosts).toEqual(["primary.example"]);
   });
 
+  it("bounds and cancels rejected browser bootstrap response bodies", async () => {
+    let producedBytes = 0;
+    let cancelled = false;
+    const chunk = new Uint8Array(768).fill("x".charCodeAt(0));
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        producedBytes += chunk.byteLength;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    await expect(
+      bootstrapQwpBrowserSession({
+        url: "https://questdb.example/exec",
+        authentication: { type: "bearer", token: "invalid" },
+        fetch: async () =>
+          new Response(body, { status: 500, statusText: "Server Error" }),
+      }),
+    ).rejects.toMatchObject({
+      name: "QwpBrowserSessionBootstrapError",
+      responseBody: "x".repeat(1_024),
+    } satisfies Partial<QwpBrowserSessionBootstrapError>);
+    expect(cancelled).toBe(true);
+    expect(producedBytes).toBeLessThanOrEqual(chunk.byteLength * 3);
+  });
+
   it("completes the browser session bootstrap before opening WebSocket", async () => {
     const socket = new FakeWebSocket();
     const events: string[] = [];

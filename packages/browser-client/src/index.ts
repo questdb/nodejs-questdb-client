@@ -120,6 +120,34 @@ export class QwpBrowserSessionBootstrapError extends QwpUpgradeError {
   }
 }
 
+const QWP_BROWSER_BOOTSTRAP_ERROR_BODY_LIMIT = 1_024;
+
+async function readBoundedBootstrapErrorBody(
+  response: Response,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+
+  const bytes = new Uint8Array(QWP_BROWSER_BOOTSTRAP_ERROR_BODY_LIMIT);
+  let length = 0;
+  try {
+    while (length < bytes.byteLength) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const copied = Math.min(value.byteLength, bytes.byteLength - length);
+      bytes.set(value.subarray(0, copied), length);
+      length += copied;
+      if (length === bytes.byteLength) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new TextDecoder().decode(bytes.subarray(0, length));
+}
+
 function validateAuthentication(
   authentication: QwpBrowserSessionAuthentication,
 ): void {
@@ -249,32 +277,28 @@ export async function bootstrapQwpBrowserSession(
     },
     signal: options.signal,
   });
+  if (response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    return {
+      url: requestUrl.toString(),
+      status: response.status,
+      serviceAccount: options.serviceAccount,
+    };
+  }
   let responseBody = "";
   try {
-    responseBody = await response.text();
+    responseBody = await readBoundedBootstrapErrorBody(response);
   } catch (error) {
-    if (response.ok) {
-      return {
-        url: requestUrl.toString(),
-        status: response.status,
-        serviceAccount: options.serviceAccount,
-      };
-    }
-    responseBody = error instanceof Error ? error.message : String(error);
+    responseBody = (
+      error instanceof Error ? error.message : String(error)
+    ).slice(0, QWP_BROWSER_BOOTSTRAP_ERROR_BODY_LIMIT);
   }
-  if (!response.ok) {
-    throw new QwpBrowserSessionBootstrapError(
-      responseBody.slice(0, 1_024),
-      requestUrl,
-      response.status,
-      response.statusText,
-    );
-  }
-  return {
-    url: requestUrl.toString(),
-    status: response.status,
-    serviceAccount: options.serviceAccount,
-  };
+  throw new QwpBrowserSessionBootstrapError(
+    responseBody,
+    requestUrl,
+    response.status,
+    response.statusText,
+  );
 }
 
 export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {

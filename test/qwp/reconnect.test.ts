@@ -2592,6 +2592,43 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   }, 20_000);
 
+  it("deprioritizes a healthy endpoint below the recovered frame cap", async () => {
+    const payload = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8);
+    const store = new TrackingReplayStore();
+    store.records.set(0n, payload);
+    const attempted: string[] = [];
+    const smallConnections: FakeConnection[] = [];
+    const largeConnections: FakeConnection[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "small-cap",
+      ["large-cap"],
+      async (endpoint) => {
+        attempted.push(String(endpoint));
+        const connection = new FakeConnection(String(endpoint), {
+          qwpVersion: 1,
+          maxBatchSizeBytes: endpoint === "small-cap" ? 4 : 64,
+        });
+        if (endpoint === "small-cap") smallConnections.push(connection);
+        else largeConnections.push(connection);
+        return connection;
+      },
+    );
+
+    const session = await QwpIngressSession.connect(factory, {
+      replayStore: store,
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+
+    expect(attempted).toEqual(["small-cap", "large-cap"]);
+    expect(smallConnections).toHaveLength(1);
+    expect(smallConnections[0].sent).toHaveLength(0);
+    expect(largeConnections).toHaveLength(1);
+    expect(largeConnections[0].sent).toEqual([payload]);
+    largeConnections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await session.close();
+  });
+
   it("chunks reconnect dictionary catch-up under the negotiated batch cap", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary", {

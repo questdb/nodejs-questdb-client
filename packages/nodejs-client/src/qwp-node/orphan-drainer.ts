@@ -211,6 +211,12 @@ async function isAssignedSegmentOrInvalid(path: string): Promise<boolean> {
     ) {
       return true;
     }
+    // Byte 5 is zero only for a manifest-optional empty spare. A
+    // manifest-required segment was already assigned to accepted frames, even
+    // when memory durability let their record pages disappear in a host crash.
+    // Unknown non-zero flags are invalid and likewise need full adoption so the
+    // replay store can report or quarantine them.
+    if (header.readUInt8(5) !== 0) return true;
     if (bytesRead < SEGMENT_HEADER_PROBE_SIZE) return false;
     for (let offset = SEGMENT_HEADER_SIZE; offset < bytesRead; offset++) {
       if (header[offset] !== 0) return true;
