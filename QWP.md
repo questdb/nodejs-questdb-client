@@ -1557,6 +1557,11 @@ Code that manually creates `QwpTableBuffer` and calls
 to produce encoded table buffers itself. The high-level sender owns batching, symbol
 deltas, ACK tracking, auto-flush, transactions, and durable waits.
 
+Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
+signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
+every element. Coercible values such as booleans and numeric strings, unsafe or
+fractional numbers, and out-of-range bigints are rejected before encoding.
+
 ### Java client concepts
 
 The TypeScript high-level sender follows the Java client's core model—fluent rows,

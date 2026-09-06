@@ -18,13 +18,18 @@ export interface QwpSymbolValue {
 
 export interface QwpArrayValue {
   dimensions: number[];
+  /** DOUBLE_ARRAY uses numbers; LONG_ARRAY uses safe integers or signed int64 bigints. */
   values: (number | bigint)[];
 }
 
 export interface QwpColumnBuffer {
   name: string;
   type: QwpColumnType;
-  /** Non-null values only; QWP compacts values around the null bitmap. */
+  /**
+   * Non-null values only; QWP compacts values around the null bitmap.
+   * LONG, DATE, and TIMESTAMP values accept safe integer numbers or signed
+   * int64 bigints. LONG_ARRAY applies the same rule to every element.
+   */
   values: unknown[];
   /** One entry per row; true means NULL. */
   nulls: boolean[];

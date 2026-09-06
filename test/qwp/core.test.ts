@@ -377,6 +377,17 @@ describe("QWP ingress codec", () => {
     expect(cell(QWP_COLUMN_TYPE.LONG, 2n ** 64n + 7n)).toThrow(
       /QWP LONG column 'c' value 18446744073709551623 does not fit a signed 64-bit integer/,
     );
+    expect(cell(QWP_COLUMN_TYPE.LONG, true)).toThrow(
+      /QWP LONG column 'c' accepts only safe integer numbers or bigints/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.LONG, "7")).toThrow(
+      /QWP LONG column 'c' accepts only safe integer numbers or bigints/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.LONG, Number.MAX_SAFE_INTEGER + 1)).toThrow(
+      /QWP LONG column 'c' accepts only safe integer numbers or bigints/,
+    );
+    expect(cell(QWP_COLUMN_TYPE.LONG, 7)).not.toThrow();
+    expect(cell(QWP_COLUMN_TYPE.LONG, 7n)).not.toThrow();
     expect(cell(QWP_COLUMN_TYPE.TIMESTAMP, 2n ** 63n)).toThrow(
       /QWP TIMESTAMP column 'c'/,
     );
@@ -393,6 +404,36 @@ describe("QWP ingress codec", () => {
         values: [9_007_199_254_740_993n],
       }),
     ).toThrow(/QWP DOUBLE_ARRAY column 'c' accepts only numbers/);
+    expect(
+      cell(QWP_COLUMN_TYPE.LONG_ARRAY, {
+        dimensions: [1],
+        values: [true],
+      }),
+    ).toThrow(
+      /QWP LONG_ARRAY column 'c' accepts only safe integer numbers or bigints/,
+    );
+    expect(
+      cell(QWP_COLUMN_TYPE.LONG_ARRAY, {
+        dimensions: [1],
+        values: [Number.MAX_SAFE_INTEGER + 1],
+      }),
+    ).toThrow(
+      /QWP LONG_ARRAY column 'c' accepts only safe integer numbers or bigints/,
+    );
+    expect(
+      cell(QWP_COLUMN_TYPE.LONG_ARRAY, {
+        dimensions: [1],
+        values: [2n ** 63n],
+      }),
+    ).toThrow(
+      /QWP LONG_ARRAY column 'c' value 9223372036854775808 does not fit a signed 64-bit integer/,
+    );
+    expect(
+      cell(QWP_COLUMN_TYPE.LONG_ARRAY, {
+        dimensions: [2],
+        values: [7, 7n],
+      }),
+    ).not.toThrow();
     expect(
       cell(QWP_COLUMN_TYPE.DECIMAL64, 2n ** 63n, (table, column) =>
         table.setDecimalScale(column, 0),

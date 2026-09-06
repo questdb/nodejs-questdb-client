@@ -99,7 +99,7 @@ function plannedGorilla(
     // instead of rejecting the frame after a wrong delta has been computed
     // from it.
     const timestamps = column.values.map((value) =>
-      checkedCellSigned(BigInt(value as bigint), 64, label, column.name),
+      checkedCellSigned(value, 64, label, column.name),
     );
     plan.gorilla =
       timestamps.length > 2 && qwpGorillaSize(timestamps) > 0
@@ -468,19 +468,28 @@ function checkedCellNumber(
   return value;
 }
 
-/** The bigint counterpart of {@link checkedCellRange}. */
+/** The signed-integer counterpart of {@link checkedCellRange}. */
 function checkedCellSigned(
-  value: bigint,
+  value: unknown,
   bits: number,
   label: string,
   name: string,
 ): bigint {
-  if (BigInt.asIntN(bits, value) !== value) {
-    throw new RangeError(
-      `QWP ${label} column '${name}' value ${value} does not fit a signed ${bits}-bit integer`,
+  if (
+    typeof value !== "bigint" &&
+    (typeof value !== "number" || !Number.isSafeInteger(value))
+  ) {
+    throw new TypeError(
+      `QWP ${label} column '${name}' accepts only safe integer numbers or bigints`,
     );
   }
-  return value;
+  const converted = typeof value === "bigint" ? value : BigInt(value);
+  if (BigInt.asIntN(bits, converted) !== converted) {
+    throw new RangeError(
+      `QWP ${label} column '${name}' value ${converted} does not fit a signed ${bits}-bit integer`,
+    );
+  }
+  return converted;
 }
 
 function writeSignedLittleEndian(
@@ -583,14 +592,7 @@ function writeColumn(
     case QWP_COLUMN_TYPE.DATE: {
       const label = column.type === QWP_COLUMN_TYPE.DATE ? "DATE" : "LONG";
       for (const value of column.values) {
-        writer.writeBigInt64(
-          checkedCellSigned(
-            BigInt(value as number | bigint),
-            64,
-            label,
-            column.name,
-          ),
-        );
+        writer.writeBigInt64(checkedCellSigned(value, 64, label, column.name));
       }
       return;
     }
@@ -603,7 +605,7 @@ function writeColumn(
         const label = timestampLabel(column);
         for (const value of column.values) {
           writer.writeBigInt64(
-            checkedCellSigned(BigInt(value as bigint), 64, label, column.name),
+            checkedCellSigned(value, 64, label, column.name),
           );
         }
         return;
@@ -679,7 +681,9 @@ function writeColumn(
               checkedCellNumber(item, "DOUBLE_ARRAY", column.name),
             );
           } else {
-            writer.writeBigInt64(BigInt(item));
+            writer.writeBigInt64(
+              checkedCellSigned(item, 64, "LONG_ARRAY", column.name),
+            );
           }
         }
       }
