@@ -551,6 +551,9 @@ function validateAuthentication(
       "QWP 'token' authentication cannot be combined with 'username'/'password'",
     );
   }
+  if (username?.includes(":")) {
+    throw new TypeError("QWP Basic authentication username cannot contain ':'");
+  }
 }
 
 function createAuthorization(
@@ -829,11 +832,7 @@ function parseCompressionLevel(
     22,
   );
   const compression = value("compression");
-  if (
-    level !== undefined &&
-    compression !== "zstd" &&
-    compression !== "auto"
-  ) {
+  if (level !== undefined && compression !== "zstd" && compression !== "auto") {
     throw new RangeError(
       "conflicting configuration: compression_level requires compression=zstd or compression=auto",
     );

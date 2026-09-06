@@ -2270,6 +2270,10 @@ export class QwpSender {
         validateQwpColumnName(name, this.maxNameLength);
       }
       const nameKey = qwpColumnNameKey(name);
+      // The fluent API is first-value-wins within a row. Apply that rule before
+      // schema reconciliation: a duplicate decimal with a different scale is
+      // ignored, not rescaled and allowed to discard the value already staged.
+      if (this.currentRow.has(nameKey)) return this;
       const existingSchema = table.schema.get(nameKey);
       if (
         existingSchema &&
@@ -2297,7 +2301,6 @@ export class QwpSender {
         );
         metadata = { ...metadata, decimalScale: existingSchema.decimalScale };
       }
-      if (this.currentRow.has(nameKey)) return this;
       if (!existingSchema && table.schema.size >= QWP_MAX_COLUMNS_PER_TABLE) {
         // QwpTableBuffer enforces this too, but only once buildTable() runs
         // during flush -- and a throw there escapes before releaseStagedRows(),

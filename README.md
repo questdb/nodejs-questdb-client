@@ -431,8 +431,10 @@ const sender = await connectQwpBrowserSender(
 
 Browser durable ACKs are an in-memory delivery confirmation only. Persistent
 store-and-forward remains available exclusively through the Node.js entry
-point. In-memory ingress replay is capped at 128 MiB and waits at most 30 seconds
-for ACK-driven trimming by default; tune `memoryReplayMaxBytes` and
+point. In-memory ingress replay targets a 128 MiB cap and waits at most 30 seconds
+for ACK-driven trimming by default. A commit-bearing logical batch may temporarily
+raise usage to at most twice that target so a retained deferred prefix cannot deadlock;
+tune `memoryReplayMaxBytes` and
 `memoryReplayAppendDeadlineMs` in the ingress session options when needed.
 
 ### Zstd-compressed QWP egress

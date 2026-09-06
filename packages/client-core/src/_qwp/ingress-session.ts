@@ -202,9 +202,12 @@ export interface QwpIngressSessionOptions {
    */
   reconnect?: QwpReconnectOptions | false;
   /**
-   * Hard cap for the built-in memory-only replay queue, including estimated
-   * per-frame bookkeeping. Defaults to 128 MiB. This applies in browsers and
-   * non-persistent Node sessions; custom replay stores enforce their own cap.
+   * Target cap for the built-in memory-only replay queue, including estimated
+   * per-frame bookkeeping. Defaults to 128 MiB. A transaction-closing logical
+   * batch may temporarily exceed this target by up to one target-sized batch,
+   * because the server cannot ACK its deferred prefix before receiving that
+   * batch. This applies in browsers and non-persistent Node sessions; custom
+   * replay stores enforce their own cap.
    */
   memoryReplayMaxBytes?: number;
   /**

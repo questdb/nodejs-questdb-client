@@ -859,6 +859,43 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("admits a transaction commit when its deferred prefix fills memory replay", async () => {
+    // QuestDB intentionally sends no ACK for the auto-flushed deferred frame.
+    // With a strict per-append cap, the tiny group-closing frame then waited
+    // for an ACK that could only be produced after that same frame was sent.
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      memoryReplayMaxBytes: 110,
+      memoryReplayAppendDeadlineMs: 50,
+    });
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+      transactional: true,
+      awaitServerAck: true,
+    });
+
+    await sender.table("events").longColumn("value", 42n).atNow();
+    expect(connection.sent).toHaveLength(1);
+    expect(connection.sent[0][5] & QWP_FLAG_DEFER_COMMIT).toBe(
+      QWP_FLAG_DEFER_COMMIT,
+    );
+    expect(session.metrics.memoryReplayUsedBytes).toBeLessThanOrEqual(110);
+
+    const committing = sender.commit();
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+    expect(connection.sent[1][5] & QWP_FLAG_DEFER_COMMIT).toBe(0);
+    expect(session.metrics.memoryReplayUsedBytes).toBeGreaterThan(110);
+    connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["events", 1n]]));
+
+    await expect(committing).resolves.toBe(true);
+    await vi.waitFor(() =>
+      expect(session.metrics.memoryReplayUsedBytes).toBe(0),
+    );
+    expect(sender.metrics.totalTransactionsCommitted).toBe(1);
+    await sender.close();
+  });
+
   it("bounds memory replay waits with typed capacity errors", async () => {
     const connection = new FakeConnection("primary");
     const session = await QwpIngressSession.connect(async () => connection, {
@@ -5767,6 +5804,96 @@ describe("QWP Node file replay store", () => {
       vi.useRealTimers();
     }
     await lock.release().catch(() => undefined);
+  });
+
+  it("fences a heartbeat that touches a successor after token handoff", async () => {
+    // The lease timestamp and owner directory mtime are intentionally separate:
+    // near the staleness boundary a contender can decide the directory is old
+    // while the holder still considers its last proof current. Pause that
+    // holder after its token read, let the contender rename-and-claim, then
+    // resume it at the pathname touch that used to refresh the successor and
+    // falsely re-prove the predecessor.
+    const directory = await trackedDirectory();
+    const predecessor = new QwpNodeFileReplayStore({ directory });
+    await predecessor.load();
+    await predecessor.append({
+      frameSequence: 0n,
+      payload: Uint8Array.of(1),
+    });
+
+    type LockInternals = {
+      beat(): Promise<void>;
+      ownershipState(): Promise<"owned" | "foreign" | "unknown">;
+      ownerMtimeMs: number;
+      provenAtMs: number;
+    };
+    const predecessorLock = (
+      predecessor as unknown as { slotLock: QwpNodeAdvisoryLock }
+    ).slotLock;
+    const lockInternals = predecessorLock as unknown as LockInternals;
+    const ownerPath = join(directory, ".lock.owner");
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(ownerPath, longAgo, longAgo);
+    lockInternals.ownerMtimeMs = Math.trunc((await stat(ownerPath)).mtimeMs);
+    lockInternals.provenAtMs = Date.now();
+
+    const realOwnershipState =
+      lockInternals.ownershipState.bind(predecessorLock);
+    let resumeHeartbeat!: () => void;
+    const heartbeatPaused = new Promise<void>((resolve) => {
+      resumeHeartbeat = resolve;
+    });
+    let ownerRead!: () => void;
+    const ownerWasRead = new Promise<void>((resolve) => {
+      ownerRead = resolve;
+    });
+    let ownershipReads = 0;
+    lockInternals.ownershipState = async () => {
+      const state = await realOwnershipState();
+      if (++ownershipReads === 1) {
+        ownerRead();
+        await heartbeatPaused;
+      }
+      return state;
+    };
+
+    const staleHeartbeat = lockInternals.beat();
+    await ownerWasRead;
+
+    const successor = new QwpNodeFileReplayStore({ directory });
+    await successor.load();
+    await successor.append({
+      frameSequence: 1n,
+      payload: Uint8Array.of(22),
+    });
+    // Ensure the resumed utimes changes the successor's recorded mtime, so its
+    // next heartbeat also proves that a foreign touch does not evict an owner
+    // whose token still matches.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    resumeHeartbeat();
+    await staleHeartbeat;
+
+    expect(predecessorLock.lost).toBe(true);
+    await expect(
+      predecessor.append({
+        frameSequence: 1n,
+        payload: Uint8Array.of(11),
+      }),
+    ).rejects.toBeInstanceOf(QwpReplayStoreLockLostError);
+    expect(await successor.readPayload(1n)).toEqual(Uint8Array.of(22));
+
+    const successorLock = (
+      successor as unknown as { slotLock: QwpNodeAdvisoryLock }
+    ).slotLock;
+    await (successorLock as unknown as LockInternals).beat();
+    expect(successorLock.lost).toBe(false);
+    await successor.append({
+      frameSequence: 2n,
+      payload: Uint8Array.of(33),
+    });
+
+    await predecessor.close().catch(() => undefined);
+    await successor.close();
   });
 
   it("recovers a slot lock after a stall nobody contended", async () => {

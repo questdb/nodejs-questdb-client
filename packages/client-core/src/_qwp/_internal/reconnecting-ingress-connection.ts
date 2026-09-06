@@ -90,6 +90,14 @@ function defersCommit(payload: Uint8Array): boolean {
   );
 }
 
+/** Durable-ACK polls do not change the server-side ingress transaction. */
+function isDurableAckPoll(payload: Uint8Array): boolean {
+  return (
+    payload.byteLength > QWP_FLAGS_OFFSET &&
+    (payload[QWP_FLAGS_OFFSET] & QWP_FLAG_DURABLE_ACK_POLL) !== 0
+  );
+}
+
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
 const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
@@ -184,6 +192,14 @@ interface CapacityWaiter {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+interface PreparedTransactionCloseBatch {
+  readonly frames: readonly {
+    readonly payloadLength: number;
+    readonly deferCommit: boolean;
+  }[];
+  nextFrame: number;
+}
+
 class RetriableIngressNackError extends Error {
   constructor(
     readonly frameSequence: bigint,
@@ -225,6 +241,14 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
   private closing = false;
   private totalBackpressureStalls = 0;
   private totalAppendTimeouts = 0;
+  /** Whether the most recently journalled frame left a transaction open. */
+  private transactionOpen = false;
+  /**
+   * One preflighted logical batch that closes an already-open transaction.
+   * QuestDB cannot ACK its retained prefix before this suffix is sent, so the
+   * suffix is a bounded liveness exception to the normal memory target.
+   */
+  private preparedTransactionClose?: PreparedTransactionCloseBatch;
 
   constructor(
     readonly maxBytes = DEFAULT_MEMORY_REPLAY_MAX_BYTES,
@@ -257,6 +281,7 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     }
     const requiredBytes =
       record.payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+    const deferCommit = defersCommit(record.payload);
     if (requiredBytes > this.maxBytes) {
       throw new QwpMemoryReplayFrameTooLargeError(
         this.maxBytes,
@@ -264,7 +289,17 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
         requiredBytes,
       );
     }
-    if (this.usedBytes + requiredBytes > this.maxBytes) {
+    const preparedCloseFrame = this.matchesPreparedTransactionClose(
+      record.payload,
+    );
+    const changesTransaction = !isDurableAckPoll(record.payload);
+    const closesOpenTransaction =
+      this.transactionOpen && changesTransaction && !deferCommit;
+    if (
+      this.usedBytes + requiredBytes > this.maxBytes &&
+      !preparedCloseFrame &&
+      !closesOpenTransaction
+    ) {
       this.totalBackpressureStalls++;
       const deadline = Date.now() + this.appendDeadlineMs;
       while (this.usedBytes + requiredBytes > this.maxBytes) {
@@ -286,6 +321,14 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     // the connection and this accounting store avoids doubling the backlog.
     this.records.set(record.frameSequence, record.payload);
     this.usedBytes += requiredBytes;
+    if (changesTransaction) this.transactionOpen = deferCommit;
+    if (preparedCloseFrame) {
+      const prepared = this.preparedTransactionClose!;
+      prepared.nextFrame++;
+      if (prepared.nextFrame === prepared.frames.length) {
+        this.preparedTransactionClose = undefined;
+      }
+    }
   }
 
   async prepareAppendBatch(payloads: readonly Uint8Array[]): Promise<void> {
@@ -311,6 +354,27 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
       );
     }
     if (this.usedBytes + requiredBytes <= this.maxBytes) return;
+
+    // A deferred prefix receives no server ACK, so waiting for ACK-driven
+    // trimming before its commit-bearing suffix is journalled can never make
+    // progress. The batch itself is still limited to maxBytes above; allowing
+    // it beside the retained prefix therefore caps the temporary liveness
+    // usage at twice the configured target.
+    if (
+      this.transactionOpen &&
+      payloads.length > 0 &&
+      !isDurableAckPoll(payloads[payloads.length - 1]) &&
+      !defersCommit(payloads[payloads.length - 1])
+    ) {
+      this.preparedTransactionClose = {
+        frames: payloads.map((payload) => ({
+          payloadLength: payload.byteLength,
+          deferCommit: defersCommit(payload),
+        })),
+        nextFrame: 0,
+      };
+      return;
+    }
 
     this.totalBackpressureStalls++;
     const deadline = Date.now() + this.appendDeadlineMs;
@@ -369,6 +433,20 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     this.records.clear();
     this.symbols.length = 0;
     this.usedBytes = 0;
+    this.transactionOpen = false;
+    this.preparedTransactionClose = undefined;
+  }
+
+  private matchesPreparedTransactionClose(payload: Uint8Array): boolean {
+    const prepared = this.preparedTransactionClose;
+    if (!prepared) return false;
+    const expected = prepared.frames[prepared.nextFrame];
+    const matches =
+      expected !== undefined &&
+      expected.payloadLength === payload.byteLength &&
+      expected.deferCommit === defersCommit(payload);
+    if (!matches) this.preparedTransactionClose = undefined;
+    return matches;
   }
 
   private waitForCapacity(

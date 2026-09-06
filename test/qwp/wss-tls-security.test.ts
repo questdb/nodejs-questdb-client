@@ -357,6 +357,12 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
     );
   });
 
+  it("rejects a colon in a programmatic Basic username", () => {
+    expect(() =>
+      constructWss({ username: "alice:admin", password: "s3cret" }),
+    ).toThrow("QWP Basic authentication username cannot contain ':'");
+  });
+
   it("rejects the JWK credentials QWP has no way to honour", () => {
     // qwpAuthorization() reads username/password/token only, so an ILP-style
     // auth or jwk object was dropped in silence and the upgrade went out

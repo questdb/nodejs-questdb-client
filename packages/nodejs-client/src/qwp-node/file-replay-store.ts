@@ -1320,6 +1320,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     bytes: EncodedRecord,
   ): Promise<void> {
     this.assertReady();
+    // The owner directory is a reusable pathname. Re-prove its token at the
+    // head of the queued mutation so a delayed heartbeat cannot make a stale
+    // writer overwrite a successor's record at the same logical offset.
+    await this.assertReadyAfterWait();
     validateFrameSequence(record.frameSequence);
     if (this.records.has(record.frameSequence)) {
       throw new QwpReplayStoreInvariantError(

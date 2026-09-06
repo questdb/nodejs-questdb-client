@@ -748,6 +748,9 @@ function qwpAuthorization(options: SenderOptions): string | undefined {
       "QWP 'token' authentication cannot be combined with 'username'/'password'",
     );
   }
+  if (options.username?.includes(":")) {
+    throw new TypeError("QWP Basic authentication username cannot contain ':'");
+  }
   if (hasToken) {
     if (!options.token) {
       throw new Error("QWP Bearer authentication requires a non-empty 'token'");

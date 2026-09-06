@@ -369,6 +369,11 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/cannot be combined/);
     expect(() =>
       parseQwpNodeClientConfig(
+        "ws::addr=localhost;username=alice:admin;password=secret;",
+      ),
+    ).toThrow("QWP Basic authentication username cannot contain ':'");
+    expect(() =>
+      parseQwpNodeClientConfig(
         "ws::addr=localhost;failover=off;failover_backoff_initial_ms=1000;failover_backoff_max_ms=10;",
       ),
     ).toThrow(/maximum backoff/);
@@ -421,7 +426,9 @@ describe("QWP unified Node client configuration", () => {
       parseQwpNodeClientConfig(
         "ws::addr=localhost;compression=raw;compression_level=9;",
       ),
-    ).toThrow(/compression_level requires compression=zstd or compression=auto/);
+    ).toThrow(
+      /compression_level requires compression=zstd or compression=auto/,
+    );
     const zstd = parseQwpNodeClientConfig(
       "ws::addr=localhost;compression=zstd;compression_level=9;",
     );

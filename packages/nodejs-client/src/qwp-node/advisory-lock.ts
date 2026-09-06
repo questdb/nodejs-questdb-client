@@ -110,7 +110,7 @@ export class QwpNodeAdvisoryLock {
   private released = false;
   private compromised = false;
   /** When this object last proved it still owned the directory. */
-  private provenAtMs = Date.now();
+  private provenAtMs: number;
   private heartbeat?: NodeJS.Timeout;
 
   private constructor(
@@ -120,6 +120,10 @@ export class QwpNodeAdvisoryLock {
     private ownerMtimeMs: number,
     private token: string,
   ) {
+    // Use the same filesystem timestamp contenders inspect for staleness.
+    // Date.now() can be several milliseconds newer, leaving a boundary where
+    // a contender may reclaim while this holder still considers itself live.
+    this.provenAtMs = ownerMtimeMs;
     this.startHeartbeat();
   }
 
@@ -328,15 +332,11 @@ export class QwpNodeAdvisoryLock {
     }
     try {
       const current = await stat(this.ownerPath);
-      if (Math.trunc(current.mtimeMs) !== Math.trunc(this.ownerMtimeMs)) {
-        // Someone judged this lock stale and took it. Stop refreshing so the
-        // new owner's heartbeat is the only one advancing the mtime.
-        this.markCompromised();
-        return;
-      }
       // The mtime alone cannot separate our directory from a replacement that
-      // landed inside the same clock tick, and some filesystems report whole
-      // seconds. The token settles it.
+      // landed inside the same clock tick, and a stale predecessor can touch a
+      // successor's pathname after the rename. In both cases the token is the
+      // authority: a matching token means an mtime drift did not transfer
+      // ownership, while a foreign token fences this holder.
       const ownership = await this.ownershipState();
       if (ownership === "foreign") {
         this.markCompromised();
@@ -350,8 +350,22 @@ export class QwpNodeAdvisoryLock {
         // closed on its own, which is recoverable; latching here is not.
         return;
       }
-      this.ownerMtimeMs = await touchOwnerDirectory(this.ownerPath);
-      this.provenAtMs = Date.now();
+      if (Math.trunc(current.mtimeMs) !== Math.trunc(this.ownerMtimeMs)) {
+        this.ownerMtimeMs = Math.trunc(current.mtimeMs);
+      }
+      const touchedMtimeMs = await touchOwnerDirectory(this.ownerPath);
+      // The owner directory is a reusable pathname. A contender can rename
+      // our stale directory after the read above and install its own before
+      // utimes() runs, in which case the touch refreshed the successor. Never
+      // turn that foreign touch into a fresh local lease.
+      const afterTouch = await this.ownershipState();
+      if (afterTouch === "foreign") {
+        this.markCompromised();
+        return;
+      }
+      if (afterTouch === "unknown") return;
+      this.ownerMtimeMs = touchedMtimeMs;
+      this.provenAtMs = touchedMtimeMs;
     } catch (error) {
       // A directory that is gone is proof of loss: it cannot later reappear
       // with a drifted mtime, so waiting for one means never noticing at all.
@@ -388,8 +402,28 @@ export class QwpNodeAdvisoryLock {
    */
   async ensureOwned(): Promise<boolean> {
     if (this.released || this.compromised) return false;
+    // A heartbeat may have been suspended between reading the owner token and
+    // touching the reusable pathname. Check the token on every mutation fence
+    // instead of trusting a still-fresh timestamp that such a race could have
+    // stamped onto a successor's directory.
+    const ownership = await this.ownershipState().catch(
+      () => "unknown" as const,
+    );
+    if (ownership === "foreign") {
+      this.markCompromised();
+      return false;
+    }
+    if (ownership === "unknown") return false;
     if (this.lost) await this.reacquireAfterStall();
-    return !this.lost;
+    if (this.lost) return false;
+    const confirmed = await this.ownershipState().catch(
+      () => "unknown" as const,
+    );
+    if (confirmed === "foreign") {
+      this.markCompromised();
+      return false;
+    }
+    return confirmed === "owned";
   }
 
   /**
@@ -450,7 +484,7 @@ export class QwpNodeAdvisoryLock {
     // Only now is this a live acquisition again, under a new token: the old one
     // must not resurrect a directory this object no longer holds.
     this.token = token;
-    this.provenAtMs = Date.now();
+    this.provenAtMs = this.ownerMtimeMs;
   }
 
   private markCompromised(): void {

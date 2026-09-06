@@ -56,7 +56,9 @@ try {
 ```
 
 `username` plus `password` selects HTTP Basic authentication for the WebSocket
-upgrade. `token` selects Bearer authentication. Use `wss::` in production.
+upgrade; the username cannot contain `:` because that character separates the
+two Basic credential fields. `token` selects Bearer authentication. Use `wss::`
+in production.
 
 `Sender.fromConfig()` uses the same Java-compatible `ws::`/`wss::` vocabulary
 as `connectQwpNodeClient()`. Comma-separated or repeated `addr` values configure
@@ -91,7 +93,7 @@ continues to come from `addr`, because the typed object intentionally omits
 | Key                  | Value              | Default   | Meaning                                                                                  |
 | -------------------- | ------------------ | --------- | ---------------------------------------------------------------------------------------- |
 | `addr`               | `host[:port]`      | port 9000 | Endpoint. Repeat the key, or comma-separate, for ordered failover.                       |
-| `username`, `user`   | string             | —         | HTTP Basic user for the WebSocket upgrade.                                               |
+| `username`, `user`   | string without `:` | —         | HTTP Basic user for the WebSocket upgrade.                                               |
 | `password`, `pass`   | string             | —         | HTTP Basic password.                                                                     |
 | `token`              | string             | —         | Bearer token; alternative to Basic.                                                      |
 | `tls_verify`         | `on`, `unsafe_off` | on        | Certificate verification. `unsafe_off` disables it.                                      |
@@ -868,10 +870,13 @@ the most recent successful same-zone endpoint remains sticky. Background orphan
 drainers publish health observations but never reset foreground classifications.
 Ingress reconnect is enabled by default for factory-created browser and Node sessions.
 Unacknowledged frames are retained in memory and replayed at least once after a
-transport failure. The built-in memory replay queue is capped at 128 MiB. When the
+transport failure. The built-in memory replay queue targets a 128 MiB cap. When the
 cap is full, publication waits for ACK-driven trimming for at most 30 seconds, then
 rejects with `QwpMemoryReplayAppendTimeoutError`; a single frame that can never fit
-is rejected immediately with `QwpMemoryReplayFrameTooLargeError`. Set
+is rejected immediately with `QwpMemoryReplayFrameTooLargeError`. A logical batch
+that closes an already-open transaction may temporarily take the queue to at most twice
+the configured cap: QuestDB cannot ACK the deferred prefix until it receives that
+commit-bearing suffix, so waiting at the cap would deadlock the transaction. Set
 `memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on ingress session options
 to tune these bounds. The accounting includes a fixed per-frame allowance so many
 small frames cannot bypass the byte cap.

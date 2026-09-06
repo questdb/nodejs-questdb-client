@@ -1859,6 +1859,26 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("ignores a duplicate decimal before reconciling its scale", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender
+      .table("fx")
+      .decimalColumn("price", 1n, 0)
+      // This cannot be rescaled to scale zero without losing precision, but it
+      // is a duplicate in the same row and the first value must win.
+      .decimalColumn("price", 11n, 1)
+      .atNow();
+    await sender.flush();
+
+    const price = column(session.sends[0].tables[0], "price");
+    expect(session.sends[0].tables[0].rowCount).toBe(1);
+    expect(price.decimalScale).toBe(0);
+    expect(price.values).toEqual([1n]);
+    await sender.close();
+  });
+
   it("rejects a decimal the column's locked scale cannot represent", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });
