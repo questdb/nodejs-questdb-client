@@ -4750,6 +4750,35 @@ describe("QWP Node file replay store", () => {
     await recovered.close();
   });
 
+  it("validates a recovered payload again when lazy replay reads it", async () => {
+    const directory = await trackedDirectory();
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({
+      frameSequence: 0n,
+      payload: Uint8Array.of(1, 2, 3, 4),
+    });
+    await seed.close();
+
+    const recovered = new QwpNodeFileReplayStore({ directory });
+    await expect(recovered.loadReferences()).resolves.toEqual([
+      { frameSequence: 0n, payloadLength: 4 },
+    ]);
+    const [segment] = await assignedReplaySegments(directory);
+    const file = await open(join(directory, segment), "r+");
+    try {
+      await file.write(Uint8Array.of(0xff), 0, 1, 24 + 8);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    await expect(recovered.readPayload(0n)).rejects.toBeInstanceOf(
+      QwpReplayStoreCorruptionError,
+    );
+    await recovered.close();
+  });
+
   it("ignores an ack-watermark slot whose checksum does not match", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
@@ -5108,15 +5137,11 @@ describe("QWP Node file replay store", () => {
     ["a zeroed record", "hole"],
     ["a flipped payload byte", "bitrot"],
   ] as const)(
-    "reports the records %s strands behind it instead of dropping them silently",
+    "preserves a journal when %s has intact records behind it",
     async (_label, shape) => {
-      // Truncating here is only correct for an unwritten tail. A lost block --
-      // what an unordered page-cache writeback leaves after a host crash under
-      // the connect-string default durability -- or bit rot strands the records
-      // behind it. Replay needs a contiguous sequence, so the tear makes them
-      // unreachable whatever recovery does; the Java client abandons the
-      // active segment's residue by policy for exactly that reason. What it
-      // must never do is abandon them without saying so.
+      // Replay cannot cross the missing sequence, but a CRC-valid record after
+      // the damage proves this is not an interrupted tail append. Preserve the
+      // original bytes so the high-level connection can quarantine the slot.
       const directory = await trackedDirectory();
       const first = new QwpNodeFileReplayStore({ directory });
       await first.load();
@@ -5143,30 +5168,21 @@ describe("QWP Node file replay store", () => {
       } finally {
         await file.close();
       }
+      const beforeRecovery = await readFile(join(directory, segment));
 
       const reports: QwpNodeReplayDataLossReport[] = [];
       const recovered = new QwpNodeFileReplayStore({
         directory,
         onRecoveryDataLoss: (report) => reports.push(report),
       });
-      // Recovery still succeeds on the valid prefix, so the producer keeps
-      // running rather than being blocked behind an operator.
-      await expect(recovered.load()).resolves.toEqual([
-        { frameSequence: 0n, payload: Uint8Array.of(0, 0, 0) },
-        { frameSequence: 1n, payload: Uint8Array.of(1, 1, 1) },
-      ]);
-      expect(reports).toHaveLength(1);
-      expect(reports[0]).toMatchObject({
-        directory,
-        segmentFile: segment,
-        reason: expect.stringContaining("replay can no longer reach"),
-      });
-      expect(reports[0].discardedBytes).toBeGreaterThan(0);
-      // Written bytes only. These records carry 3-byte payloads, so the loss
-      // is tens of bytes; the segment is preallocated to 4 MiB and measuring
-      // to EOF used to report all of it.
-      expect(reports[0].discardedBytes).toBeLessThan(1024);
-      await recovered.close();
+      await expect(recovered.load()).rejects.toThrow(/interior damage/);
+      expect(reports).toEqual([]);
+      expect(
+        Buffer.compare(
+          await readFile(join(directory, segment)),
+          beforeRecovery,
+        ),
+      ).toBe(0);
     },
   );
 

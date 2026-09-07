@@ -84,6 +84,7 @@ interface StoredRecord {
   readonly size: number;
   readonly payloadOffset?: number;
   readonly payloadLength?: number;
+  readonly crc32c?: number;
   readonly segment?: StoredSegment;
 }
 
@@ -108,6 +109,7 @@ interface HotSpareSegment {
 
 interface ScannedRecord extends QwpIngressReplayReference {
   readonly payloadOffset: number;
+  readonly crc32c: number;
 }
 
 interface RecoveredStoredRecord {
@@ -628,8 +630,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 "non-active segment has a torn record tail",
               );
             }
+            if (decoded.interiorDamage) {
+              // A verified record after the damaged one makes this interior
+              // corruption, not an interrupted tail append. Preserve the
+              // complete journal for the caller's quarantine path instead of
+              // deleting intact records that an operator may still recover.
+              throw corruptRecord(
+                name,
+                "active segment contains interior damage followed by intact records",
+              );
+            }
             if (
-              decoded.interiorDamage ||
               decoded.crcMismatch ||
               decoded.framingOverrun
             ) {
@@ -648,11 +659,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 // from the valid prefix to EOF is mostly zero padding that was
                 // never journalled and cannot have been lost.
                 discardedBytes: Math.max(0, decoded.discardedBytes ?? 0),
-                reason: decoded.interiorDamage
-                  ? "a damaged record is followed by intact records that replay can no longer reach"
-                  : decoded.crcMismatch
-                    ? "the active segment tail contains a complete record whose CRC32C does not match"
-                    : "a record's framing runs past the end of the segment, so its length field is damaged or the file was truncated",
+                reason: decoded.crcMismatch
+                  ? "the active segment tail contains a complete record whose CRC32C does not match"
+                  : "a record's framing runs past the end of the segment, so its length field is damaged or the file was truncated",
               });
             }
             await repairSegmentTail(
@@ -744,6 +753,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 size: 0,
                 payloadOffset: record.payloadOffset,
                 payloadLength: record.payloadLength,
+                crc32c: record.crc32c,
                 segment,
               },
             });
@@ -869,6 +879,16 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       }
       const payload = new Uint8Array(stored.payloadLength);
       await readFully(handle, payload, stored.payloadOffset);
+      const length = Buffer.allocUnsafe(4);
+      length.writeUInt32LE(stored.payloadLength);
+      if (
+        stored.crc32c === undefined ||
+        crc32cParts([length, payload]) !== stored.crc32c
+      ) {
+        throw new QwpReplayStoreCorruptionError(
+          `QWP store-and-forward payload CRC32C does not match [frameSequence=${frameSequence}]`,
+        );
+      }
       return payload;
     });
   }
@@ -1407,6 +1427,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       size: 0,
       payloadOffset: writeOffset + FRAME_HEADER_SIZE,
       payloadLength: record.payload.byteLength,
+      crc32c: bytes.header.readUInt32LE(0),
       segment,
     });
     this.scheduleHotSpare();
@@ -2588,10 +2609,9 @@ async function scanSegment(
         // after it are still intact and must not be truncated away.
         tornTail: !paddingToEnd,
         interiorDamage: !paddingToEnd,
-        discardedBytes: paddingToEnd
-          ? 0
-          : (await findWrittenEnd(handle, offset, fileSize, scanBuffer)) -
-            offset,
+        // Interior damage is quarantined, so recovery neither discards nor
+        // needs to measure the preserved suffix.
+        discardedBytes: paddingToEnd ? 0 : undefined,
       };
     }
     if (remaining < FRAME_HEADER_SIZE) {
@@ -2643,6 +2663,12 @@ async function scanSegment(
     }
     const actualCrc = (crc ^ 0xffffffff) >>> 0;
     if (storedCrc !== actualCrc) {
+      const interiorDamage = await hasValidRecordAt(
+        handle,
+        recordEnd,
+        fileSize,
+        scratch,
+      );
       return {
         firstSequence,
         manifestRequired: (flags & MANIFEST_REQUIRED_FLAG) !== 0,
@@ -2654,14 +2680,13 @@ async function scanSegment(
         crcMismatch: true,
         // A record that still verifies where this one ends means the damage is
         // bit rot in the middle of the journal, not an interrupted append.
-        interiorDamage: await hasValidRecordAt(
-          handle,
-          recordEnd,
-          fileSize,
-          scratch,
-        ),
-        discardedBytes:
-          (await findWrittenEnd(handle, offset, fileSize, scanBuffer)) - offset,
+        interiorDamage,
+        // An interior suffix is preserved through quarantine, so only measure
+        // bytes for a true terminal tail that recovery will discard.
+        discardedBytes: interiorDamage
+          ? undefined
+          : (await findWrittenEnd(handle, offset, fileSize, scanBuffer)) -
+            offset,
       };
     }
     const frameSequence = firstSequence + BigInt(records.length);
@@ -2670,6 +2695,7 @@ async function scanSegment(
       frameSequence,
       payloadLength,
       payloadOffset: offset + FRAME_HEADER_SIZE,
+      crc32c: storedCrc,
     });
     offset = recordEnd;
   }

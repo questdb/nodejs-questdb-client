@@ -445,6 +445,11 @@ therefore scales with the active encoding/send window rather than total disk bac
 Recovery also handles the canonical creation crash window in which a valid SFA
 segment becomes durable before its manifest.
 
+A partial final append is repaired only when no valid record follows it. If the
+scanner finds an intact CRC-verified record after a damaged record, the slot is
+treated as structurally corrupt and preserved through the quarantine path below;
+recovery never erases that intact suffix in place.
+
 On startup, a dictionary sidecar truncated at a complete-block boundary is rebuilt
 from the ordered symbol deltas embedded in surviving committed frames and healed
 before replay. A corrupt or stale dictionary sidecar is replaced when those committed
