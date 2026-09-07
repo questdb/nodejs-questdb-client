@@ -927,6 +927,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   }
 
   acknowledgeThrough(frameSequence: bigint): Promise<void> {
+    return this.removeThrough(frameSequence, true);
+  }
+
+  discardThrough(frameSequence: bigint): Promise<void> {
+    return this.removeThrough(frameSequence, false);
+  }
+
+  private removeThrough(
+    frameSequence: bigint,
+    persistAcknowledgement: boolean,
+  ): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
       this.assertReady();
@@ -936,10 +947,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         acknowledged.push(entry);
       }
       if (acknowledged.length === 0) return;
-      // Persist the logical cursor before mutating files or in-memory state. A
-      // crash after this point can leave extra bytes, but never resurrects an
-      // acknowledged prefix from a partially-live segment.
-      await this.persistAcknowledgedThrough(frameSequence);
+      if (persistAcknowledgement) {
+        // Persist the logical cursor before mutating files or in-memory state.
+        // A crash after this point can leave extra bytes, but never resurrects
+        // an acknowledged prefix from a partially-live segment.
+        await this.persistAcknowledgedThrough(frameSequence);
+      }
       const emptiedSegments = new Set<StoredSegment>();
       for (const [sequence, record] of acknowledged) {
         if (record.segment) {
@@ -952,7 +965,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             await ignoreMissing(unlink(record.path));
           } catch (error) {
             throw new QwpReplayStoreError(
-              `could not acknowledge QWP store-and-forward record [frameSequence=${sequence}]`,
+              `could not ${persistAcknowledgement ? "acknowledge" : "discard"} QWP store-and-forward record [frameSequence=${sequence}]`,
               error,
             );
           }

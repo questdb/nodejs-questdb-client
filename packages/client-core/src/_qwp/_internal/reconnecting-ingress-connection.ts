@@ -395,6 +395,14 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
   }
 
   async acknowledgeThrough(frameSequence: bigint): Promise<void> {
+    this.removeThrough(frameSequence);
+  }
+
+  async discardThrough(frameSequence: bigint): Promise<void> {
+    this.removeThrough(frameSequence);
+  }
+
+  private removeThrough(frameSequence: bigint): void {
     for (const sequence of this.records.keys()) {
       if (sequence > frameSequence) break;
       const payload = this.records.get(sequence)!;
@@ -540,6 +548,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private progressAtLastExemptRecycle = -1n;
   private zeroProgressRecycles = 0;
   private recoveredDiscardTail?: RecoveredDiscardTail;
+  private readonly abandonedFrameRanges: Array<{
+    readonly fromFsn: bigint;
+    readonly toFsn: bigint;
+  }> = [];
   private generation = 0;
   private sendTail: Promise<void> = Promise.resolve();
   private drainTail: Promise<void> = Promise.resolve();
@@ -903,6 +915,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return Object.freeze({
       publishedFrameSequence: this.publishedFrameSequence,
       acknowledgedFrameSequence: this.acknowledgedFrameSequence,
+      abandonedFrameRanges: Object.freeze(
+        this.abandonedFrameRanges.map((range) => Object.freeze({ ...range })),
+      ),
       pendingReplayFrames: this.frames.size,
       pendingReplayBytes,
       memoryReplayMaxBytes: memoryMetrics?.maxBytes,
@@ -1949,12 +1964,16 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     frameSequence: bigint,
   ): Promise<void> {
     await this.store.acknowledgeThrough(frameSequence);
+    this.removeFramesThrough(frameSequence);
+    if (frameSequence > this.acknowledgedFrameSequence) {
+      this.acknowledgedFrameSequence = frameSequence;
+    }
+  }
+
+  private removeFramesThrough(frameSequence: bigint): void {
     for (const sequence of this.frames.keys()) {
       if (sequence > frameSequence) break;
       this.frames.delete(sequence);
-    }
-    if (frameSequence > this.acknowledgedFrameSequence) {
-      this.acknowledgedFrameSequence = frameSequence;
     }
   }
 
@@ -1977,7 +1996,18 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       return;
     }
     const frameCount = tail.tipSequence - tail.startSequence + 1n;
-    await this.acknowledgeStoredFramesThrough(tail.tipSequence);
+    if (this.store.discardThrough) {
+      await this.store.discardThrough(tail.tipSequence);
+    } else {
+      // Compatibility for custom stores implementing the original interface.
+      // This still must not advance the transport's public ACK watermark.
+      await this.store.acknowledgeThrough(tail.tipSequence);
+    }
+    this.removeFramesThrough(tail.tipSequence);
+    this.abandonedFrameRanges.push({
+      fromFsn: tail.startSequence,
+      toFsn: tail.tipSequence,
+    });
     this.recoveredDiscardTail = undefined;
     // Retiring the tail is correct: it belongs to a transaction the producer
     // never committed, the server rolled it back on disconnect, and replaying

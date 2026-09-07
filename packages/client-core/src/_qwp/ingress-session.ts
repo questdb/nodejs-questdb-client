@@ -410,6 +410,20 @@ export class QwpIngressAckTimeoutError extends Error {
   }
 }
 
+/** A recovered frame was deliberately retired without a server ACK. */
+export class QwpIngressAckAbandonedError extends Error {
+  constructor(
+    readonly targetSequence: bigint,
+    readonly fromFsn: bigint,
+    readonly toFsn: bigint,
+  ) {
+    super(
+      `QWP frame was abandoned before server acknowledgement [targetSequence=${targetSequence}, abandoned=${fromFsn}..${toFsn}]`,
+    );
+    this.name = "QwpIngressAckAbandonedError";
+  }
+}
+
 export class QwpBatchTooLargeError extends RangeError {
   constructor(
     readonly batchSizeBytes: number,
@@ -1718,6 +1732,13 @@ export class QwpIngressSession {
   private resolveAcknowledgedSequenceWaiters(): void {
     const acknowledged = this.acknowledgedFrameSequence;
     for (const pending of this.acknowledgedSequenceWaiters) {
+      const failure = this.acknowledgementFailure(pending.targetSequence);
+      if (failure) {
+        this.acknowledgedSequenceWaiters.delete(pending);
+        if (pending.timer) clearTimeout(pending.timer);
+        pending.reject(failure);
+        continue;
+      }
       if (pending.targetSequence > acknowledged) continue;
       this.acknowledgedSequenceWaiters.delete(pending);
       if (pending.timer) clearTimeout(pending.timer);
@@ -1727,7 +1748,20 @@ export class QwpIngressSession {
 
   private acknowledgementFailure(
     targetSequence: bigint,
-  ): QwpIngressNackError | undefined {
+  ): Error | undefined {
+    const abandoned = this.connection
+      .getIngressMetrics?.()
+      .abandonedFrameRanges?.find(
+        (range) =>
+          targetSequence >= range.fromFsn && targetSequence <= range.toFsn,
+      );
+    if (abandoned) {
+      return new QwpIngressAckAbandonedError(
+        targetSequence,
+        abandoned.fromFsn,
+        abandoned.toFsn,
+      );
+    }
     const rejection = this.acknowledgementRejection;
     return rejection && rejection.sequence <= targetSequence
       ? rejection.error

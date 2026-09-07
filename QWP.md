@@ -724,6 +724,10 @@ alone is not enough, because nothing polls for durable progress that was never
 requested — a server that offers the capability unasked leaves the watermark on
 ordinary OK ACKs rather than stalling it. A deadline failure raises
 `QwpIngressAckTimeoutError` without closing an otherwise healthy session.
+If crash recovery retires an incomplete deferred transaction that QuestDB never
+received, its frame range does not advance this watermark. Waiting on one of those
+frames rejects with `QwpIngressAckAbandonedError`; later frames can still be sent and
+acknowledged normally.
 
 Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` or
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to

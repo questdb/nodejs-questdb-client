@@ -52,6 +52,7 @@ import {
   QwpEgressSession,
   QwpEgressSessionClosedError,
   QwpIngressSession,
+  QwpIngressAckAbandonedError,
   QwpIngressSessionClosedError,
   QwpIngressReplayRecord,
   QwpIngressReplayReference,
@@ -3824,16 +3825,24 @@ describe("QWP ingress reconnect and replay", () => {
     expect(senderErrors[0].serverMessage).toContain("[fsn=5..7]");
     expect(session.metrics).toMatchObject({
       replayPublishedFrameSequence: 7n,
-      replayAcknowledgedFrameSequence: 7n,
+      replayAcknowledgedFrameSequence: 4n,
       pendingReplayFrames: 0,
       totalFramesReplayed: 0,
     });
+    await expect(session.waitForAcknowledged(7n, 1_000)).rejects.toMatchObject({
+      name: "QwpIngressAckAbandonedError",
+      targetSequence: 7n,
+      fromFsn: 5n,
+      toFsn: 7n,
+    } satisfies Partial<QwpIngressAckAbandonedError>);
+    expect(await readdir(directory)).not.toContain(".ack-watermark");
 
     const currentFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
     const current = session.sendFrame(currentFrame);
     await vi.waitFor(() => expect(connection.sent).toEqual([currentFrame]));
     connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
     await expect(current).resolves.toMatchObject({ sequence: 0n });
+    await expect(session.waitForAcknowledged(8n, 1_000)).resolves.toBeUndefined();
     await session.close();
 
     const verify = new QwpNodeFileReplayStore({ directory });
@@ -3876,12 +3885,15 @@ describe("QWP ingress reconnect and replay", () => {
       expect(await assignedReplaySegments(directory)).toEqual([]),
     );
     expect(session.metrics).toMatchObject({
-      replayAcknowledgedFrameSequence: 7n,
+      replayAcknowledgedFrameSequence: 5n,
       pendingReplayFrames: 0,
       totalFramesReplayed: 1,
     });
     expect(session.publishedFrameSequence).toBe(7n);
-    await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(7n));
+    await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(5n));
+    await expect(session.waitForAcknowledged(6n, 1_000)).rejects.toBeInstanceOf(
+      QwpIngressAckAbandonedError,
+    );
 
     const currentFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
     const current = session.sendFrame(currentFrame);
@@ -3896,6 +3908,7 @@ describe("QWP ingress reconnect and replay", () => {
       expect(await assignedReplaySegments(directory)).toEqual([]),
     );
     await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(8n));
+    await expect(session.waitForAcknowledged(8n, 1_000)).resolves.toBeUndefined();
     await session.close();
     await rm(directory, { recursive: true, force: true });
   });

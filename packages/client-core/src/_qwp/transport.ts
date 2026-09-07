@@ -222,6 +222,11 @@ export interface QwpIngressReplayStore {
   prepareAppendBatch?(payloads: readonly Uint8Array[]): Promise<void>;
   append(record: QwpIngressReplayRecord): Promise<void>;
   acknowledgeThrough(frameSequence: bigint): Promise<void>;
+  /**
+   * @internal Removes a local prefix without representing it as a server ACK.
+   * Persistent stores should provide this when recovery can abandon frames.
+   */
+  discardThrough?(frameSequence: bigint): Promise<void>;
   /** Loads the durable, dense symbol prefix used by persisted delta frames. */
   loadSymbolDictionary?(): Promise<readonly string[]>;
   /** Persists new dense entries before a delta frame is made replayable. */
@@ -241,8 +246,13 @@ export interface QwpIngressReplayStore {
 export interface QwpIngressTransportMetrics {
   /** Highest stable replay-frame sequence handed to the transport. */
   readonly publishedFrameSequence: bigint;
-  /** Highest replay-frame sequence removed from store-and-forward. */
+  /** Highest replay-frame sequence removed after a server acknowledgement. */
   readonly acknowledgedFrameSequence: bigint;
+  /** Stable frame ranges retired without ever receiving a server ACK. */
+  readonly abandonedFrameRanges?: readonly {
+    readonly fromFsn: bigint;
+    readonly toFsn: bigint;
+  }[];
   readonly pendingReplayFrames: number;
   readonly pendingReplayBytes: number;
   /** Configured cap for the built-in memory replay store. */
