@@ -3,6 +3,7 @@ export * from "../../client-core/src/qwp";
 
 import type { Agent } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
+import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import WebSocket from "ws";
 import { log } from "./logging";
@@ -646,6 +647,13 @@ async function connectQwpNodeIngressInternal(
       },
     );
   const storeAndForward = resolveNodeStoreAndForwardOptions(connectionOptions);
+  if (storeAndForward) {
+    await warnAboutUnreachableJournal(
+      connectionOptions.storeAndForward!.directory.trim(),
+      storeAndForward.directory,
+      connectionOptions.senderId,
+    );
+  }
   if (storeAndForward && sessionOptions.replayStore) {
     throw new RangeError(
       "storeAndForward and a custom replayStore cannot both be configured",
@@ -699,6 +707,11 @@ async function connectQwpNodeIngressInternal(
           { ...connectionOptions, senderId: undefined, storeAndForward },
           sessionOptions,
           healthTracker,
+          // The options above deliberately drop senderId so the drainer's own
+          // sessions do not re-nest an already-resolved slot directory. Whether
+          // one was configured is still what decides if the parent directory is
+          // a store-and-forward group, so pass it separately.
+          connectionOptions.senderId !== undefined,
         )
       : undefined;
   const connectionFactory = createQwpNodeConnectionFactoryInternal(
@@ -1159,9 +1172,28 @@ function createStandaloneOrphanDrainer(
   options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions,
   healthTracker: QwpFailoverHealthTracker,
+  slotIsNamed: boolean,
 ): QwpNodeOrphanDrainer {
   const storeAndForward = options.storeAndForward!;
   const ownDirectory = storeAndForward.directory.trim();
+  if (!slotIsNamed) {
+    // Without a senderId the journal is the configured directory itself, so
+    // its parent is the application's, not a store-and-forward group -- and
+    // scanning it adopted, transmitted and emptied journals from unrelated
+    // sibling directories the caller never designated. Sibling adoption needs
+    // a group root, which is exactly what naming the slot establishes.
+    log(
+      "warn",
+      `Ignoring drainOrphans for QWP store-and-forward directory '${ownDirectory}': sibling adoption scans the parent directory, so it requires a 'senderId' that makes that parent a store-and-forward group`,
+    );
+    return createNodeOrphanDrainer(
+      options,
+      sessionOptions,
+      ownDirectory,
+      () => true,
+      healthTracker,
+    );
+  }
   return createNodeOrphanDrainer(
     options,
     sessionOptions,
@@ -1392,6 +1424,47 @@ function resolveNodeStoreAndForwardOptions(
     ...storeAndForward,
     directory: join(rootDirectory, validateQwpSenderId(options.senderId)),
   };
+}
+
+/** Extension of a store-and-forward segment file, per QwpNodeFileReplayStore. */
+const JOURNAL_SEGMENT_SUFFIX = ".sfa";
+
+/**
+ * Warns when the same configured directory already holds a journal under the
+ * layout the *other* construction style would have used.
+ *
+ * `senderId` decides where the journal lives: named, it is
+ * `<directory>/<senderId>`; unnamed, it is `<directory>` itself. A connect
+ * string always names it (`default` by default) while the typed options
+ * normally do not, so moving between `Sender.fromConfig("ws::...;sf_dir=D")`
+ * and `new Sender({ ...storeAndForward: { directory: D } })` -- a change that
+ * looks like pure configuration style -- silently points at a different
+ * journal. The unsent frames in the old one are not lost, but nothing replays
+ * them, the orphan scanner cannot see them because it only inspects child
+ * directories, and no error is raised. Say so instead.
+ */
+async function warnAboutUnreachableJournal(
+  configuredDirectory: string,
+  resolvedDirectory: string,
+  senderId: string | undefined,
+): Promise<void> {
+  const alternate =
+    senderId === undefined
+      ? join(configuredDirectory, "default")
+      : configuredDirectory;
+  if (alternate === resolvedDirectory) return;
+  let entries: string[];
+  try {
+    entries = await readdir(alternate);
+  } catch {
+    return;
+  }
+  if (!entries.some((entry) => entry.endsWith(JOURNAL_SEGMENT_SUFFIX))) return;
+  log(
+    "warn",
+    `QWP store-and-forward is using '${resolvedDirectory}', but '${alternate}' holds journal segments that nothing will replay [senderId=${senderId ?? "unset"}]. ` +
+      `A connect string names the slot ('default' unless sender_id says otherwise) and journals into <directory>/<sender_id>; typed options without a senderId journal into <directory> itself.`,
+  );
 }
 
 function validateQwpSenderId(value: string): string {

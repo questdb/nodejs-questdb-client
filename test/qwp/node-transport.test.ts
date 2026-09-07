@@ -947,6 +947,50 @@ describe("QWP Node transport", () => {
     }
   });
 
+  it("does not adopt siblings of an unnamed store-and-forward directory", async () => {
+    // Sibling adoption scans the parent of the journal directory. With a
+    // sender_id that parent is the store-and-forward group root, which is what
+    // QWP.md tells operators to dedicate. Through the typed API there is no
+    // senderId, the journal is the configured directory itself, and the parent
+    // is whatever the application happens to keep next to it -- so the drainer
+    // adopted, transmitted and emptied an unrelated neighbour's journal.
+    const root = await mkdtemp(join(tmpdir(), "qwp-node-siblings-"));
+    const neighbour = join(root, "unrelated-neighbour");
+    try {
+      const seeded = new QwpNodeFileReplayStore({ directory: neighbour });
+      await seeded.load();
+      await seeded.append({ frameSequence: 0n, payload: Uint8Array.of(9) });
+      await seeded.close();
+
+      const session = await connectQwpNodeIngress({
+        url: "ws://127.0.0.1:1/write/v4",
+        connectTimeoutMs: 50,
+        storeAndForward: {
+          directory: join(root, "journal"),
+          initialConnectMode: "async",
+          drainOrphans: true,
+          orphanScanIntervalMs: 50,
+        },
+      });
+      try {
+        // Past the point where a scanner rooted at the parent reaches it, and
+        // checked while this session is still open: adoption is visible as the
+        // neighbour's slot lock being held, before any of its frames move.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(await readdir(neighbour)).not.toContain(".lock.owner");
+        const verify = new QwpNodeFileReplayStore({ directory: neighbour });
+        await expect(verify.load()).resolves.toEqual([
+          { frameSequence: 0n, payload: Uint8Array.of(9) },
+        ]);
+        await verify.close();
+      } finally {
+        await session.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("publishes through the high-level sender before an endpoint is online", async () => {
     const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await listen(reservation);
