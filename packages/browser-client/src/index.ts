@@ -1022,6 +1022,15 @@ export async function connectQwpBrowserClient(
   options: QwpBrowserClientOptions,
 ): Promise<QwpClient> {
   const client = createQwpBrowserClient(options);
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error) {
+    // The caller never receives this client, so this helper owns its teardown.
+    // See connectQwpNodeClient(): a failed prewarm leaves the pool housekeeper
+    // and any already-established sessions running with nobody able to stop
+    // them. Retrying is still available through createQwpBrowserClient().
+    await client.close().catch(() => undefined);
+    throw error;
+  }
   return client;
 }

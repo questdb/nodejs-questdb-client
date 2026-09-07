@@ -1049,7 +1049,20 @@ export async function connectQwpNodeClient(
   const client = createQwpNodeClient(
     resolveNodeClientOptions(optionsOrConfiguration, extraOptions),
   );
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error) {
+    // connect() starts the background factories -- the orphan drainer and the
+    // pool housekeeper -- before it prewarms, and a failed prewarm
+    // deliberately leaves the client open so createQwpNodeClient() callers can
+    // retry connect() on the handle they still hold. This helper never hands
+    // that handle back, so nobody could stop what it started: the drainer went
+    // on adopting sibling replay slots, holding their advisory locks for the
+    // life of the process, and its unref-free drain loop kept the process
+    // alive. Every retry leaked another one.
+    await client.close().catch(() => undefined);
+    throw error;
+  }
   return client;
 }
 

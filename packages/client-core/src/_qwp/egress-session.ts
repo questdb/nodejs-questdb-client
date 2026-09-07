@@ -1061,13 +1061,44 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     } catch (closeError) {
       transportClose = Promise.reject(closeError);
     }
-    const [, closeResult] = await Promise.allSettled([
-      this.sendTail,
-      transportClose,
-      this.receiveLoop,
-      active?.waitForViewDrain() ?? Promise.resolve(),
-    ]);
-    if (closeResult.status === "rejected") throw closeResult.reason;
+    // Everything above already cleared this session's deadlines -- the
+    // SERVER_INFO timer, the cancel drain, and the active query's own timeout
+    // -- so nothing below is bounded by anything except this race.
+    //
+    // Three of these four entries can be held open by a queryViews() batch
+    // callback: waitForViewDrain() is the promise chain that awaits the
+    // handler, and the receive loop parks on the same chain in finish(),
+    // finishError() and the cache-reset branch. A handler that resolves slowly
+    // delayed close() by its full duration and one that never resolved made
+    // close() never resolve at all, so a SIGTERM shutdown hung with the socket
+    // already closed. Bound them by cancelDrainTimeoutMs, which is already the
+    // documented ceiling on draining a closing query session.
+    //
+    // Releasing early is safe here in a way it is not on the live-session
+    // paths: the decoder is per-session and dies with it, this method never
+    // resets the query schema, and pooled reuse drains through
+    // prepareForPoolRelease() instead, which is a separate and already bounded
+    // path. A handler still running past this point merely reads buffers
+    // nobody will touch again; control.isDone() is its cooperative signal.
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainDeadline = new Promise<void>((resolve) => {
+      drainTimer = setTimeout(resolve, this.cancelDrainTimeoutMs);
+      // Never hold the runtime open just to abandon a callback.
+      (drainTimer as { unref?: () => void }).unref?.();
+    });
+    const bounded = (pending: Promise<unknown>): Promise<unknown> =>
+      Promise.race([pending, drainDeadline]);
+    try {
+      const [, closeResult] = await Promise.allSettled([
+        bounded(this.sendTail),
+        transportClose,
+        bounded(this.receiveLoop),
+        bounded(active?.waitForViewDrain() ?? Promise.resolve()),
+      ]);
+      if (closeResult.status === "rejected") throw closeResult.reason;
+    } finally {
+      clearTimeout(drainTimer);
+    }
   }
 
   private async consumeMessages(): Promise<void> {

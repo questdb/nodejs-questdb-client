@@ -1519,6 +1519,45 @@ describe("QwpEgressSession", () => {
     await session.close();
   });
 
+  it("bounds close() on a view callback that is still in flight", async () => {
+    // closeNow() clears the SERVER_INFO timer, the cancel drain and the active
+    // query's own timeout, then awaited the view drain and the receive loop --
+    // both of which park on the user's batch callback. A handler that never
+    // settled therefore made close() never settle either, so a SIGTERM
+    // shutdown hung with the socket already closed. cancelDrainTimeoutMs is
+    // the documented ceiling on draining a closing query session, so it bounds
+    // these too; the handler is abandoned rather than awaited.
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection, {
+      cancelDrainTimeoutMs: 100,
+    });
+    connection.receive(serverInfo());
+
+    let enterHandler!: () => void;
+    const handlerEntered = new Promise<void>((resolve) => {
+      enterHandler = resolve;
+    });
+    let releaseHandler!: () => void;
+    const handlerReleased = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    const query = await session.queryViews("select * from x", async () => {
+      enterHandler();
+      await handlerReleased;
+    });
+    connection.receive(firstResultBatch(query.requestId));
+    await handlerEntered;
+
+    const startedAt = Date.now();
+    await session.close();
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(connection.closeCalls.length).toBe(1);
+
+    // The abandoned handler settling afterwards must not throw into the void.
+    releaseHandler();
+    await expect(query.completion).rejects.toBeDefined();
+  });
+
   it("does not clear the delta symbol dictionary under a live view callback", async () => {
     // A server-initiated CACHE_RESET cleared the connection symbol dictionary
     // in place immediately. Delta-mode views alias that array and resolve their

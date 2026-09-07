@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   connectQwpNodeClient,
   createQwpNodeClient,
+  QwpNodeFileReplayStore,
   parseQwpNodeClientConfig,
   type QwpNodeClientOptions,
   type QwpWebSocketLike,
@@ -205,6 +206,51 @@ describe("QWP unified Node client configuration", () => {
       expect(attempts).toBe(1);
     } finally {
       await client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("releases what it started when the helper's initial connect fails", async () => {
+    // connectQwpNodeClient() never hands the client back on failure, so it
+    // owns the teardown. It used to rethrow bare, leaving the orphan drainer
+    // connect() had already started to adopt sibling replay slots and hold
+    // their advisory locks for the life of the process -- unreachable to any
+    // other process and to a retry in this one, with no handle to stop it.
+    const directory = await mkdtemp(join(tmpdir(), "qwp-unified-leak-"));
+    try {
+      // A slot left behind by a crashed producer. The pooled facade always
+      // recovers canonical `<sender_id>-<n>` siblings, whatever drain_orphans
+      // says, so this is reachable on a plain restart-during-outage.
+      const orphan = join(directory, "default-7");
+      const seeded = new QwpNodeFileReplayStore({ directory: orphan });
+      await seeded.load();
+      await seeded.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+      await seeded.close();
+
+      await expect(
+        connectQwpNodeClient(
+          `ws::addr=offline.example;sf_dir=${directory};sender_pool_max=1;query_pool_min=0;`,
+          {
+            webSocket: {
+              webSocketFactory: (_url, { onConnected }) => {
+                onConnected();
+                return new RejectingWebSocket() as unknown as QwpWebSocketLike;
+              },
+            },
+          },
+        ),
+      ).rejects.toThrow();
+
+      // Past the point where a still-running drainer reaches the slot, so a
+      // leak shows up as a lock nobody can take rather than as a race.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(await readdir(orphan)).not.toContain(".lock.owner");
+      const successor = new QwpNodeFileReplayStore({ directory: orphan });
+      await expect(successor.load()).resolves.toEqual([
+        { frameSequence: 0n, payload: Uint8Array.of(1) },
+      ]);
+      await successor.close();
+    } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { connectQwpBrowserClient } from "../../packages/browser-client/src";
 import {
   encodeQwpFrame,
   QWP_EGRESS_CAPABILITY,
@@ -165,6 +166,43 @@ async function createQuerySession(
   await session.ready;
   return session;
 }
+
+describe("QWP browser client startup teardown", () => {
+  it("closes the client it created when the initial connect fails", async () => {
+    // connectQwpBrowserClient() never hands the client back on failure, so it
+    // owns the teardown -- the same contract connectQwpNodeClient() breaks
+    // when it rethrows bare, leaving the pool housekeeper and any established
+    // sessions running with nobody able to stop them.
+    const closes: unknown[] = [];
+    const close = vi
+      .spyOn(QwpClient.prototype, "close")
+      .mockImplementation(function (this: QwpClient) {
+        closes.push(this);
+        return Promise.resolve();
+      });
+    try {
+      await expect(
+        connectQwpBrowserClient({
+          ingress: {
+            url: "ws://127.0.0.1:1/write/v4",
+            webSocketFactory: () => {
+              throw new Error("offline");
+            },
+          },
+          egress: {
+            url: "ws://127.0.0.1:1/read/v1",
+            webSocketFactory: () => {
+              throw new Error("offline");
+            },
+          },
+        } as never),
+      ).rejects.toThrow();
+      expect(closes).toHaveLength(1);
+    } finally {
+      close.mockRestore();
+    }
+  });
+});
 
 describe("QWP pooled client", () => {
   it("shares one shutdown deadline across creation and lease waits", async () => {
