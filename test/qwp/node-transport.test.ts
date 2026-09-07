@@ -192,7 +192,7 @@ describe("QWP Node transport", () => {
     }
   });
 
-  it("negotiates durable ACK and polls progress with a WebSocket PING", async () => {
+  it("lets the keepalive option request durable ACK directly", async () => {
     const table = "trades";
     const sequenceTransaction = 7n;
     let requestedDurableAck: string | string[] | undefined;
@@ -222,11 +222,11 @@ describe("QWP Node transport", () => {
     });
 
     const address = server.address() as AddressInfo;
+    // Node callers may request durable tracking through the session keepalive
+    // alone. The transport must promote that request into the upgrade header;
+    // otherwise ordinary OKs silently become the public ACK watermark.
     const session = await connectQwpNodeIngress(
-      {
-        url: `ws://127.0.0.1:${address.port}/write/v4`,
-        requestDurableAck: true,
-      },
+      { url: `ws://127.0.0.1:${address.port}/write/v4` },
       { durableAckKeepaliveMs: 10 },
     );
     try {
@@ -245,6 +245,20 @@ describe("QWP Node transport", () => {
     } finally {
       await session.close();
     }
+  });
+
+  it("rejects disabling durable ACK while requesting keepalive tracking", async () => {
+    await expect(
+      connectQwpNodeIngress(
+        {
+          url: "ws://127.0.0.1:1/write/v4",
+          requestDurableAck: false,
+        },
+        { durableAckKeepaliveMs: 10 },
+      ),
+    ).rejects.toThrow(
+      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
+    );
   });
 
   it("surfaces the server-clamped Zstd level from a real upgrade", async () => {

@@ -611,6 +611,21 @@ export async function connectQwpNodeIngress(
   );
 }
 
+function withDurableAckRequest(
+  options: QwpNodeIngressOptions,
+  sessionOptions: QwpIngressSessionOptions,
+): QwpNodeIngressOptions {
+  if (sessionOptions.durableAckKeepaliveMs === undefined) return options;
+  if (options.requestDurableAck === false) {
+    throw new RangeError(
+      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
+    );
+  }
+  return options.requestDurableAck === true
+    ? options
+    : { ...options, requestDurableAck: true };
+}
+
 async function connectQwpNodeIngressInternal(
   options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions,
@@ -618,13 +633,18 @@ async function connectQwpNodeIngressInternal(
   sharedHealthTracker?: QwpFailoverHealthTracker,
   signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
+  const connectionOptions = withDurableAckRequest(options, sessionOptions);
   const healthTracker =
     sharedHealthTracker ??
-    createQwpFailoverHealthTracker(options.url, options.failoverUrls, {
-      target: options.target,
-      zone: options.zone,
-    });
-  const storeAndForward = resolveNodeStoreAndForwardOptions(options);
+    createQwpFailoverHealthTracker(
+      connectionOptions.url,
+      connectionOptions.failoverUrls,
+      {
+        target: connectionOptions.target,
+        zone: connectionOptions.zone,
+      },
+    );
+  const storeAndForward = resolveNodeStoreAndForwardOptions(connectionOptions);
   if (storeAndForward && sessionOptions.replayStore) {
     throw new RangeError(
       "storeAndForward and a custom replayStore cannot both be configured",
@@ -668,20 +688,20 @@ async function connectQwpNodeIngressInternal(
     ),
     catchUpCapGapMinEscalationWindowMs:
       storeAndForward?.catchUpCapGapMinEscalationWindowMs,
-    durableAckKeepaliveMs: options.requestDurableAck
+    durableAckKeepaliveMs: connectionOptions.requestDurableAck
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : sessionOptions.durableAckKeepaliveMs,
   };
   const orphanDrainer =
     startOrphanDrainer && storeAndForward?.drainOrphans === true
       ? createStandaloneOrphanDrainer(
-          { ...options, senderId: undefined, storeAndForward },
+          { ...connectionOptions, senderId: undefined, storeAndForward },
           sessionOptions,
           healthTracker,
         )
       : undefined;
   const connectionFactory = createQwpNodeConnectionFactoryInternal(
-    options,
+    connectionOptions,
     healthTracker,
     startOrphanDrainer,
   );
@@ -1186,7 +1206,8 @@ function createNodeOrphanDrainer(
   healthTracker: QwpFailoverHealthTracker,
   slotCoordinator?: QwpPooledSfaSlotCoordinator,
 ): QwpNodeOrphanDrainer {
-  const storeAndForward = options.storeAndForward!;
+  const connectionOptions = withDurableAckRequest(options, sessionOptions);
+  const storeAndForward = connectionOptions.storeAndForward!;
   return new QwpNodeOrphanDrainer({
     rootDirectory,
     excludeSlot,
@@ -1198,7 +1219,7 @@ function createNodeOrphanDrainer(
       : undefined,
     maxConcurrent: storeAndForward.maxBackgroundDrainers,
     scanIntervalMs: storeAndForward.orphanScanIntervalMs,
-    durableAckPollIntervalMs: options.requestDurableAck
+    durableAckPollIntervalMs: connectionOptions.requestDurableAck
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : 0,
     onEvent: storeAndForward.onOrphanDrainEvent,
@@ -1208,7 +1229,7 @@ function createNodeOrphanDrainer(
     createSession: (directory, onReconnectEvent) =>
       connectQwpNodeIngressInternal(
         {
-          ...options,
+          ...connectionOptions,
           senderId: undefined,
           storeAndForward: {
             ...storeAndForward,

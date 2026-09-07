@@ -460,6 +460,70 @@ describe("QWP Node orphan drainer", () => {
     await drainer.close();
   });
 
+  it("does not report abandonment until the terminal marker is persisted", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "marker-blocked");
+    const marker = join(directory, QWP_ORPHAN_FAILED_SENTINEL);
+    // A directory at the marker path makes writeFile fail reliably. The slot
+    // remains discoverable because the scanner excludes only a marker file.
+    await mkdir(marker);
+    const terminal = new QwpReplayRejectedError(
+      0n,
+      QWP_STATUS.SCHEMA_MISMATCH,
+      "column type mismatch",
+    );
+    const events: string[] = [];
+    const senderErrors: QwpSenderError[] = [];
+    let sessionsCreated = 0;
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        sessionsCreated++;
+        const session = new FakeDrainSession();
+        queueMicrotask(() => session.fail(terminal));
+        return session;
+      },
+      onEvent: (event) => events.push(event.kind),
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+
+    await vi.waitFor(() => expect(drainer.metrics.retrying).toBe(1));
+    expect(drainer.metrics.failed).toBe(0);
+    expect(events).toContain(QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING);
+    expect(events).not.toContain(QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED);
+    expect(senderErrors).toEqual([]);
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
+      directory,
+    ]);
+
+    // Retrying a scan retries only the marker, never the terminal replay head.
+    drainer.scanNow();
+    await vi.waitFor(() => expect(drainer.metrics.scans).toBe(2));
+    await vi.waitFor(() => expect(drainer.metrics.retrying).toBe(2));
+    expect(sessionsCreated).toBe(1);
+
+    // Once marker persistence recovers, the drainer may accurately report the
+    // quarantined data and the scanner must exclude it.
+    await rm(marker, { recursive: true });
+    drainer.scanNow();
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(sessionsCreated).toBe(1);
+    expect(
+      events.filter((kind) => kind === QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED),
+    ).toHaveLength(1);
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+    });
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
+
+    await drainer.close();
+  });
+
   it("quarantines terminal failures until an operator explicitly retries", async () => {
     const rootDirectory = await root();
     const directory = await recordSlot(rootDirectory, "corrupt");

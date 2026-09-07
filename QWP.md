@@ -469,8 +469,11 @@ uses an independent QWP connection per slot, bounded by `maxBackgroundDrainers` 
 default). The scanner runs immediately and then every 30 seconds; set
 `orphanScanIntervalMs: 0` for a startup-only scan. Terminal recovery failures create
 `.failed` in the slot so a corrupt or permanently rejected head cannot cause a hot
-retry loop. After inspection or repair, call `retryQwpNodeOrphanSlot(slotDirectory)`
-to make it eligible again. `onOrphanDrainEvent` reports discovery, drain, lock
+retry loop. If that marker cannot be written, the drainer retains the slot in memory
+and retries only the marker on later scans; it does not report abandonment or replay
+the terminal head again. After inspection or repair, call
+`retryQwpNodeOrphanSlot(slotDirectory)` to make it eligible again.
+`onOrphanDrainEvent` reports discovery, drain, lock
 contention, quarantine, scanner failures, durable-ACK capability gaps, and transient
 all-replica windows through a bounded asynchronous inbox. An abandoned slot also
 reports a typed `data-loss` sender error. Callback exceptions cannot interrupt

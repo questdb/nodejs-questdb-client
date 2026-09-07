@@ -323,6 +323,17 @@ export function resolveQwpNodeClientConfig(
     "replica",
   ] as const) as QwpTarget | undefined;
   const zone = value("zone");
+  const configuredRequestDurableAck =
+    extraOptions.webSocket?.requestDurableAck ??
+    optionalBoolean(value("request_durable_ack"), "request_durable_ack");
+  if (
+    configuredRequestDurableAck === false &&
+    ingressSession.durableAckKeepaliveMs !== undefined
+  ) {
+    throw new RangeError(
+      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
+    );
+  }
   const ingress: QwpNodeIngressOptions = {
     ...common,
     url: withPath(endpoints[0], "/write/v4"),
@@ -336,8 +347,8 @@ export function resolveQwpNodeClientConfig(
     target,
     zone,
     requestDurableAck:
-      extraOptions.webSocket?.requestDurableAck ??
-      optionalBoolean(value("request_durable_ack"), "request_durable_ack"),
+      configuredRequestDurableAck ??
+      (ingressSession.durableAckKeepaliveMs === undefined ? undefined : true),
     storeAndForward,
     senderId: validateSenderId(value("sender_id") ?? "default"),
   };

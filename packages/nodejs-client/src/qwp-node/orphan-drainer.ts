@@ -46,7 +46,7 @@ export const QWP_ORPHAN_DRAIN_EVENT_KIND = {
   STARTED: "started",
   DRAINED: "drained",
   LOCKED: "locked",
-  /** The attempt failed transiently; the slot is left for a later scan. */
+  /** The attempt or terminal-marker write failed and will be retried. */
   RETRYING: "retrying",
   DURABLE_ACK_UNAVAILABLE: "durable-ack-unavailable",
   DURABLE_ACK_PERSISTENT_FAILURE: "durable-ack-persistent-failure",
@@ -79,7 +79,7 @@ export interface QwpNodeOrphanDrainerMetrics {
   readonly active: number;
   readonly drained: number;
   readonly locked: number;
-  /** Attempts that failed transiently and left the slot in place. */
+  /** Transient drain or terminal-marker writes awaiting retry. */
   readonly retrying: number;
   readonly failed: number;
   readonly scanFailures: number;
@@ -250,6 +250,7 @@ export class QwpNodeOrphanDrainer {
   private readonly eventDispatcher?: QwpNotificationDispatcher<QwpNodeOrphanDrainEvent>;
   private readonly errorDispatcher?: QwpNotificationDispatcher<QwpSenderError>;
   private readonly known = new Set<string>();
+  private readonly pendingTerminalFailures = new Map<string, Error>();
   private readonly queue: string[] = [];
   private readonly active = new Map<string, QwpNodeOrphanDrainSession>();
   private readonly workers = new Set<Promise<void>>();
@@ -374,6 +375,7 @@ export class QwpNodeOrphanDrainer {
     if (this.closing) return;
     this.scans++;
     try {
+      await this.retryPendingTerminalMarkers();
       const candidates = await scanQwpNodeOrphanSlots(
         this.rootDirectory,
         this.excludeSlot,
@@ -439,7 +441,9 @@ export class QwpNodeOrphanDrainer {
       const directory = this.queue.shift()!;
       const worker = this.drainOne(directory).finally(() => {
         this.workers.delete(worker);
-        this.known.delete(directory);
+        if (!this.pendingTerminalFailures.has(directory)) {
+          this.known.delete(directory);
+        }
         this.pump();
       });
       this.workers.add(worker);
@@ -482,8 +486,19 @@ export class QwpNodeOrphanDrainer {
         this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING, directory, failure);
         return;
       }
+      try {
+        await markFailed(directory, failure);
+      } catch (error) {
+        this.pendingTerminalFailures.set(directory, failure);
+        this.retrying++;
+        this.emit(
+          QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING,
+          directory,
+          markerPersistenceError(directory, failure, error),
+        );
+        return;
+      }
       this.failed++;
-      await markFailed(directory, failure).catch(() => undefined);
       this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED, directory, failure);
     } finally {
       if (session) {
@@ -493,6 +508,27 @@ export class QwpNodeOrphanDrainer {
           .catch(() => undefined);
       }
       if (reserved) this.releaseSlot?.(directory);
+    }
+  }
+
+  private async retryPendingTerminalMarkers(): Promise<void> {
+    for (const [directory, failure] of this.pendingTerminalFailures) {
+      if (this.closing) return;
+      try {
+        await markFailed(directory, failure);
+      } catch (error) {
+        this.retrying++;
+        this.emit(
+          QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING,
+          directory,
+          markerPersistenceError(directory, failure, error),
+        );
+        continue;
+      }
+      this.pendingTerminalFailures.delete(directory);
+      this.known.delete(directory);
+      this.failed++;
+      this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED, directory, failure);
     }
   }
 
@@ -569,6 +605,7 @@ export class QwpNodeOrphanDrainer {
     );
     await Promise.allSettled(Array.from(this.workers));
     this.known.clear();
+    this.pendingTerminalFailures.clear();
     await Promise.all([
       this.eventDispatcher?.close(),
       this.errorDispatcher?.close(),
@@ -633,6 +670,17 @@ async function markFailed(directory: string, error: Error): Promise<void> {
     join(directory, QWP_ORPHAN_FAILED_SENTINEL),
     `${new Date().toISOString()} ${error.name}: ${error.message}\n`,
     { encoding: "utf8", flag: "w", mode: 0o600 },
+  );
+}
+
+function markerPersistenceError(
+  directory: string,
+  terminalFailure: Error,
+  cause: unknown,
+): Error {
+  return new Error(
+    `failed to persist QWP orphan quarantine marker [directory=${directory}, terminal=${terminalFailure.name}: ${terminalFailure.message}]`,
+    { cause },
   );
 }
 

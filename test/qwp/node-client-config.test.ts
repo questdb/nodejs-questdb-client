@@ -569,6 +569,22 @@ describe("QWP unified Node client configuration", () => {
     expect(fromString.ingress.requestDurableAck).toBe(true);
     expect(fromString.egress.requestDurableAck).toBeUndefined();
 
+    // The keepalive is also a documented direct request for durable progress.
+    const keepaliveOnly = parseQwpNodeClientConfig(
+      "ws::addr=localhost:9000;durable_ack_keepalive_interval_millis=10;",
+    );
+    expect(keepaliveOnly.ingress.requestDurableAck).toBe(true);
+    expect(keepaliveOnly.ingressSession.durableAckKeepaliveMs).toBe(10);
+    expect(keepaliveOnly.egress.requestDurableAck).toBeUndefined();
+
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost:9000;request_durable_ack=off;durable_ack_keepalive_interval_millis=10;",
+      ),
+    ).toThrow(
+      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
+    );
+
     // Other shared webSocket overrides still reach both sides.
     const shared = parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
       webSocket: { requestDurableAck: true, clientId: "probe" },
