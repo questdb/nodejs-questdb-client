@@ -4027,6 +4027,50 @@ describe("QWP ingress reconnect and replay", () => {
 });
 
 describe("QWP egress reconnect and replay", () => {
+  it("delivers reconnect events off the reconnect stack", async () => {
+    // The ingress connection routes reconnect.onEvent through a bounded
+    // inbox; the egress one invoked it inline, so a user observer ran on the
+    // reconnect stack and the time it spent was charged to the outage it was
+    // reporting -- enough, against a tightened maxDurationMs, to exhaust the
+    // budget and end a session that would otherwise have recovered.
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("primary");
+    const connections = [first, second];
+    const order: string[] = [];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        order.push("factory");
+        queueMicrotask(() => connection.receive(serverInfo("primary")));
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          onEvent: (event) => order.push(`event:${event.kind}`),
+        },
+      },
+    );
+
+    first.drop();
+    await vi.waitFor(() =>
+      expect(order.filter((entry) => entry === "factory")).toHaveLength(2),
+    );
+    await vi.waitFor(() =>
+      expect(order.some((entry) => entry.startsWith("event:"))).toBe(true),
+    );
+
+    // Both connect attempts complete before the first observer call, which is
+    // only possible when the events are queued rather than invoked inline --
+    // inline, `reconnecting` is emitted before the second factory call.
+    const firstEventAt = order.findIndex((entry) => entry.startsWith("event:"));
+    expect(order.slice(0, firstEventAt)).toEqual(["factory", "factory"]);
+    await session.close();
+  });
+
   it("waits for a late reconnect candidate before close resolves", async () => {
     const first = new FakeConnection("primary");
     const late = new FakeConnection("secondary");

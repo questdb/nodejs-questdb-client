@@ -60,6 +60,11 @@ export interface QwpEgressSessionOptions {
    */
   reconnect?: QwpReconnectOptions | false;
   /**
+   * Bounded inbox depth for `reconnect.onEvent`. Defaults to 64, matching
+   * ingress. Overflow drops the oldest pending notification.
+   */
+  connectionListenerInboxCapacity?: number;
+  /**
    * Optional notification immediately before an active query is re-executed.
    * Not-yet-consumed batches are discarded automatically; callers that retain
    * an already-consumed prefix should discard it here. Omitting this callback
@@ -98,6 +103,7 @@ interface QwpValidatedEgressSessionOptions {
   readonly queryTimeoutMs: number;
   readonly cancelDrainTimeoutMs: number;
   readonly maxBatchRows?: number;
+  readonly connectionListenerInboxCapacity: number;
 }
 
 interface QwpReplayableQueryRequest {
@@ -156,7 +162,19 @@ function validateEgressSessionOptions(
       "cancelDrainTimeoutMs",
     ),
     maxBatchRows: validateQwpMaxBatchRows(options.maxBatchRows),
+    connectionListenerInboxCapacity: validateInboxCapacity(
+      options.connectionListenerInboxCapacity ?? 64,
+    ),
   };
+}
+
+function validateInboxCapacity(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(
+      "connectionListenerInboxCapacity must be a positive safe integer",
+    );
+  }
+  return value;
 }
 
 function validateBufferPoolSize(value: number): number {
@@ -775,6 +793,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             : undefined,
           options.reconnect !== undefined,
           signal,
+          validated.connectionListenerInboxCapacity,
         )
       : await factory(signal);
     let session: QwpEgressSession | undefined;

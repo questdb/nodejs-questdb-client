@@ -23,7 +23,7 @@ import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { monotonicNowMs } from "./monotonic-clock";
-import { safelyInvoke } from "./safe-callback";
+import { QwpNotificationDispatcher } from "./notification-dispatcher";
 
 /**
  * The egress reconnect policy applied when a field is not configured.
@@ -110,6 +110,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   readonly messages: AsyncIterable<Uint8Array> = this.messagesQueue;
   readonly closed: Promise<QwpConnectionCloseInfo>;
 
+  private readonly connectionDispatcher?: QwpNotificationDispatcher<QwpReconnectEvent>;
+
   private constructor(
     private readonly factory: QwpConnectionFactory,
     private readonly reconnectOptions: QwpReconnectOptions,
@@ -118,8 +120,15 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     private readonly encodeQueryRequest: QueryRequestEncoder,
     private readonly onReplayReset?: ReplayResetHandler,
     private readonly retryInitialConnection = true,
+    connectionListenerInboxCapacity = 64,
   ) {
     const defaults = QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS;
+    if (reconnectOptions.onEvent) {
+      this.connectionDispatcher = new QwpNotificationDispatcher(
+        reconnectOptions.onEvent,
+        connectionListenerInboxCapacity,
+      );
+    }
     this.maxAttempts = reconnectOptions.maxAttempts ?? defaults.maxAttempts;
     this.initialBackoffMs =
       reconnectOptions.initialBackoffMs ?? defaults.initialBackoffMs;
@@ -148,6 +157,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     onReplayReset?: ReplayResetHandler,
     retryInitialConnection = true,
     signal?: AbortSignal,
+    connectionListenerInboxCapacity?: number,
   ): Promise<QwpReconnectingEgressConnection> {
     const reconnecting = new QwpReconnectingEgressConnection(
       factory,
@@ -157,6 +167,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       encodeQueryRequest,
       onReplayReset,
       retryInitialConnection,
+      connectionListenerInboxCapacity,
     );
     const abortOpening = (): void => {
       void reconnecting.close().catch(() => undefined);
@@ -241,6 +252,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     // reconnect so a connection it returns late is closed by connectLoop()
     // before this close operation advertises completion.
     if (reconnectTask) await reconnectTask.catch(() => undefined);
+    // Drain the observer inbox before advertising completion, so the last
+    // events are delivered rather than discarded with the dispatcher.
+    await this.connectionDispatcher?.close();
     this.settleClosed(closeInfo);
   }
 
@@ -705,9 +719,15 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   }
 
   private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {
-    // Contain synchronous throws and rejected promises alike: a failing
-    // observer, sync or async, must never interfere with replay progress.
-    safelyInvoke(this.reconnectOptions.onEvent, {
+    // Bounded inbox, one notification per event-loop turn -- the same
+    // treatment the ingress connection gives the identical callback. Invoked
+    // inline, a user observer ran on the reconnect stack: the time it spent
+    // was added to the outage it was reporting, and because these events are
+    // emitted inside the window checked against maxDurationMs, a slow one
+    // could exhaust a budget and turn a recoverable outage into a terminal
+    // QwpReconnectExhaustedError. An async observer also had nothing bounding
+    // or counting its concurrent invocations.
+    this.connectionDispatcher?.offer({
       ...event,
       timestampMs: Date.now(),
     });
