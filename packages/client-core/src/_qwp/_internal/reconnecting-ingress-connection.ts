@@ -1048,6 +1048,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.cancelBackoff?.();
     this.messagesQueue.end();
     const connection = this.connection;
+    const reconnectTask = this.reconnectTask;
     // Tears down a connect that is still negotiating. Without this the socket
     // and its deadline outlive close(), keeping the event loop open for up to
     // connectTimeoutMs/authTimeoutMs after close() has already resolved.
@@ -1071,6 +1072,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     if (connectingCandidate && connectingCandidate !== connection) {
       await connectingCandidate.close(code, reason).catch(() => undefined);
     }
+    // A factory may legally ignore the optional AbortSignal. Join the active
+    // reconnect so connectLoop() closes any candidate it returns late before
+    // this close operation advertises completion.
+    if (reconnectTask) await reconnectTask.catch(() => undefined);
     try {
       await this.closeStore();
     } finally {

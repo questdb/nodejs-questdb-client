@@ -753,6 +753,42 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("waits for a late reconnect candidate before close resolves", async () => {
+    const first = new FakeConnection("primary");
+    const late = new FakeConnection("secondary");
+    let factoryCalls = 0;
+    let releaseLate!: () => void;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return first;
+        return new Promise<QwpBinaryConnection>((resolve) => {
+          releaseLate = () => resolve(late);
+        });
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    first.drop();
+    await vi.waitFor(() => expect(factoryCalls).toBe(2));
+    let closeResolved = false;
+    const closing = session.close().then(() => {
+      closeResolved = true;
+    });
+    await Promise.resolve();
+    expect(closeResolved).toBe(false);
+
+    releaseLate();
+    await closing;
+    await expect(late.closed).resolves.toMatchObject({ code: 1000 });
+  });
+
   it("enforces the total reconnect deadline during an in-flight connect", async () => {
     let attemptSignal: AbortSignal | undefined;
     const startedAt = Date.now();

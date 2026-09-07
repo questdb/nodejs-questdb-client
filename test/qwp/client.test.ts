@@ -167,6 +167,59 @@ async function createQuerySession(
 }
 
 describe("QWP pooled client", () => {
+  it("shares one shutdown deadline across creation and lease waits", async () => {
+    vi.useFakeTimers();
+    try {
+      let factoryCalls = 0;
+      let releaseCreation!: () => void;
+      const createSender = async (): Promise<QwpSender> => {
+        const session = new FakeSenderSession();
+        const sender = new QwpSender(async () => session, { autoFlush: false });
+        await sender.connect();
+        return sender;
+      };
+      const client = new QwpClient(
+        {
+          createSender: async () => {
+            factoryCalls++;
+            if (factoryCalls === 1) return createSender();
+            return new Promise<QwpSender>((resolve) => {
+              releaseCreation = () => void createSender().then(resolve);
+            });
+          },
+          createQuerySession: async () => {
+            throw new Error("query factory should not run");
+          },
+        },
+        {
+          senderPoolMin: 0,
+          senderPoolMax: 2,
+          queryPoolMin: 0,
+          queryPoolMax: 1,
+          acquireTimeoutMs: 200,
+        },
+      );
+      const leased = await client.borrowSender();
+      const pendingBorrow = client.borrowSender().catch((error) => error);
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+
+      let closeResolved = false;
+      const closing = client.close().then(() => {
+        closeResolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(199);
+      expect(closeResolved).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+
+      releaseCreation();
+      await expect(pendingBorrow).resolves.toBeInstanceOf(QwpClientClosedError);
+      await leased.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("coordinates a pooled sender slot with background recovery", async () => {
     const listeners = new Set<() => void>();
     let recovering = true;

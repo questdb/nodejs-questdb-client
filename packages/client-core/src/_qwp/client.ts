@@ -296,6 +296,13 @@ class QwpResourcePool<T> {
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    const shutdownDeadline =
+      Date.now() +
+      Math.min(
+        this.acquireTimeoutMs,
+        MAX_CLOSE_CREATION_WAIT_MS,
+        MAX_CLOSE_LEASE_WAIT_MS,
+      );
     this.unsubscribeSlotAvailability?.();
     for (const waiter of this.waiters) {
       if (waiter.timer) clearTimeout(waiter.timer);
@@ -324,10 +331,7 @@ class QwpResourcePool<T> {
     await idleTeardown;
     const creations = Array.from(this.creationOperations);
     if (creations.length > 0) {
-      const waitMs = Math.min(
-        this.acquireTimeoutMs,
-        MAX_CLOSE_CREATION_WAIT_MS,
-      );
+      const waitMs = Math.max(0, shutdownDeadline - Date.now());
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -345,9 +349,7 @@ class QwpResourcePool<T> {
       this.wakeCloseWaiters();
       return;
     }
-    await this.waitForLeases(
-      Math.min(this.acquireTimeoutMs, MAX_CLOSE_LEASE_WAIT_MS),
-    );
+    await this.waitForLeases(Math.max(0, shutdownDeadline - Date.now()));
   }
 
   private reserveSlot(): number | undefined {
