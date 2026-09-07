@@ -756,7 +756,11 @@ function parseAutoFlushOptions(options: SenderOptions) {
     parseInteger(options, "auto_flush_bytes", "auto flush bytes", 0);
   }
   if (options.auto_flush_bytes !== undefined && options.protocol !== UDP) {
-    throw new Error("auto_flush_bytes is only supported for the udp transport");
+    // ws/wss support it too, but their connect strings are parsed by the QWP
+    // schema, which returns before this runs.
+    throw new Error(
+      "auto_flush_bytes is only supported for the udp and ws/wss transports",
+    );
   }
   parseInteger(options, "auto_flush_interval", "auto flush interval", 0);
 }

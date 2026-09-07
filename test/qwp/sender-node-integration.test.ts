@@ -272,6 +272,49 @@ describe("Sender QWP integration", () => {
     }
   });
 
+  it("honors auto_flush_bytes from a programmatic ws sender too", async () => {
+    // The connect string resolves this key through the QWP schema and the
+    // programmatic UDP branch reads it, but the programmatic ws/wss branch
+    // dropped it in silence -- while the ILP parser rejects it outright for
+    // the transports that cannot honour it. A declared option must be applied
+    // or refused, never ignored.
+    const frames: Uint8Array[] = [];
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Max-Batch-Size: 1048576");
+    });
+    server.on("connection", (socket) => {
+      socket.on("message", (payload) => {
+        frames.push(new Uint8Array(payload as Buffer));
+        socket.send(okResponse(BigInt(frames.length - 1), "events"));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+    const { port } = server.address() as AddressInfo;
+
+    const sender = new Sender({
+      protocol: "ws",
+      host: "127.0.0.1",
+      port,
+      auto_flush_rows: 0,
+      auto_flush_interval: 0,
+      auto_flush_bytes: 8,
+    } as never);
+    try {
+      await sender.connect();
+      await sender.table("events").intColumn("value", 42).atNow();
+
+      expect(sender.publishedSequence).toBe(0n);
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+    } finally {
+      await sender.close();
+    }
+  });
+
   it("publishes pending rows and drains their ACK on close", async () => {
     const frames: Uint8Array[] = [];
     let ackSent = false;

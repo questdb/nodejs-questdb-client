@@ -830,7 +830,7 @@ describe("Configuration string parser suite", function () {
     await expect(
       SenderOptions.fromConfig("http::addr=host:9000;auto_flush_bytes=123;"),
     ).rejects.toThrow(
-      "auto_flush_bytes is only supported for the udp transport",
+      "auto_flush_bytes is only supported for the udp and ws/wss transports",
     );
   });
 

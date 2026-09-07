@@ -675,7 +675,14 @@ function createConfiguredQwpSender(
       autoFlushRows: isInteger(options.auto_flush_rows, 0)
         ? options.auto_flush_rows
         : configuredSender.autoFlushRows,
-      autoFlushBytes: configuredSender.autoFlushBytes,
+      // Read like every other auto-flush trigger. A ws::/wss:: connect string
+      // resolves auto_flush_bytes through the QWP schema, and the programmatic
+      // UDP branch below reads it, so ignoring it here was the outlier: the
+      // key is declared on SenderOptions, the ILP parser rejects it for the
+      // transports that cannot honour it, and this path silently dropped it.
+      autoFlushBytes: isInteger(options.auto_flush_bytes, 0)
+        ? options.auto_flush_bytes
+        : configuredSender.autoFlushBytes,
       autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
         ? options.auto_flush_interval
         : configuredSender.autoFlushIntervalMs,

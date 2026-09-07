@@ -170,7 +170,7 @@ export function resolveQwpNodeClientConfig(
   // explicitly. Leaving it in the shared block spread it into `egress` too,
   // so a typed `webSocket: { requestDurableAck: true }` override made every
   // pooled query session fail its /read/v1 capability check.
-  const sharedWebSocket = { ...extraOptions.webSocket };
+  const sharedWebSocket = { ...definedOnly(extraOptions.webSocket) };
   delete sharedWebSocket.requestDurableAck;
   const common = {
     ...sharedWebSocket,
@@ -193,7 +193,10 @@ export function resolveQwpNodeClientConfig(
     initialConnectMode,
   );
   const storeAndForward = extraOptions.storeAndForward
-    ? { ...configuredStoreAndForward, ...extraOptions.storeAndForward }
+    ? {
+        ...configuredStoreAndForward,
+        ...definedOnly(extraOptions.storeAndForward),
+      }
     : configuredStoreAndForward;
   validateStoreAndForwardDependencies(parsed.values, storeAndForward);
 
@@ -224,7 +227,7 @@ export function resolveQwpNodeClientConfig(
     maxNameLength:
       optionalInteger(value("max_name_len"), "max_name_len", 16) ?? 127,
     transactional: optionalBoolean(value("transaction"), "transaction"),
-    ...extraOptions.sender,
+    ...definedOnly(extraOptions.sender),
   };
 
   const ingressSession: QwpIngressSessionOptions = {
@@ -259,7 +262,7 @@ export function resolveQwpNodeClientConfig(
       "durable_ack_keepalive_interval_millis",
       0,
     ),
-    ...extraOptions.ingressSession,
+    ...definedOnly(extraOptions.ingressSession),
   };
   const egressSession: QwpEgressSessionOptions = {
     reconnect: egressReconnect,
@@ -277,7 +280,7 @@ export function resolveQwpNodeClientConfig(
       value("query_close_timeout_ms"),
       "query_close_timeout_ms",
     ),
-    ...extraOptions.egressSession,
+    ...definedOnly(extraOptions.egressSession),
   };
 
   const pool: QwpClientPoolOptions = {
@@ -313,7 +316,7 @@ export function resolveQwpNodeClientConfig(
       "housekeeper_interval_ms",
       100,
     ),
-    ...extraOptions.pool,
+    ...definedOnly(extraOptions.pool),
   };
   validatePool(pool);
 
@@ -372,7 +375,7 @@ export function resolveQwpNodeClientConfig(
       1,
       MAX_BATCH_ROWS,
     ),
-    ...extraOptions.egress,
+    ...definedOnly(extraOptions.egress),
   };
 
   return {
@@ -792,6 +795,27 @@ function validateStoreAndForwardDependencies(
     "QWP egress failover",
     QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
   );
+}
+
+/**
+ * Drops keys whose value is `undefined` before a typed override object is
+ * spread over parsed connect-string values.
+ *
+ * These options are plain objects, and `exactOptionalPropertyTypes` is off, so
+ * `{ autoFlushRows: config.rows }` with an unset `config.rows` is
+ * indistinguishable from omitting the key -- there is no way for a caller to
+ * mean "explicitly unset". Spreading it raw let that `undefined` win over a
+ * value the connect string had set, silently reverting the option to its
+ * built-in default. Every scalar read in this file already resolves overrides
+ * with `??` for the same reason; this applies the same rule to the spreads.
+ */
+function definedOnly<T extends object>(overrides: T | undefined): Partial<T> {
+  if (!overrides) return {};
+  const defined: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value !== undefined) defined[key] = value;
+  }
+  return defined as Partial<T>;
 }
 
 function resolveInitialConnectMode(

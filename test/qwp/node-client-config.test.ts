@@ -509,6 +509,41 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/compression_level/);
   });
 
+  it("ignores explicitly undefined values in a typed override", () => {
+    // Typed overrides are spread over the parsed values, so an `undefined`
+    // key erased whatever the connect string had set and silently reverted the
+    // option to its built-in default. `exactOptionalPropertyTypes` is off, so
+    // `{ autoFlushRows: config.rows }` with an unset `config.rows` is exactly
+    // this shape and cannot mean anything else.
+    const connectString =
+      "ws::addr=localhost;auto_flush_rows=5000;auto_flush_interval=7000;" +
+      "error_inbox_capacity=512;query_pool_max=6;";
+    const baseline = parseQwpNodeClientConfig(connectString);
+    expect(baseline.sender).toMatchObject({
+      autoFlushRows: 5000,
+      autoFlushIntervalMs: 7000,
+    });
+
+    const overridden = parseQwpNodeClientConfig(connectString, {
+      sender: { autoFlushRows: undefined, autoFlushIntervalMs: undefined },
+      ingressSession: { errorInboxCapacity: undefined },
+      pool: { queryPoolMax: undefined },
+    });
+    expect(overridden.sender).toMatchObject({
+      autoFlushRows: 5000,
+      autoFlushIntervalMs: 7000,
+    });
+    expect(overridden.ingressSession?.errorInboxCapacity).toBe(512);
+    expect(overridden.pool?.queryPoolMax).toBe(6);
+
+    // A value that is actually supplied still wins.
+    expect(
+      parseQwpNodeClientConfig(connectString, {
+        sender: { autoFlushRows: 10 },
+      }).sender?.autoFlushRows,
+    ).toBe(10);
+  });
+
   it("keeps the existing object API and accepts a string in the same facade", async () => {
     const legacy: QwpNodeClientOptions = {
       ingress: { url: "ws://localhost:9000/write/v4" },
