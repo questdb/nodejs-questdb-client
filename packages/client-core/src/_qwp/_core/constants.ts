@@ -91,6 +91,8 @@ export const QWP_SERVER_ROLE = {
 } as const;
 
 export const QWP_MAX_COLUMNS_PER_TABLE = 2048;
+/** Maximum table count representable by the ingress frame's uint16 header. */
+export const QWP_MAX_TABLES_PER_FRAME = 0xffff;
 /** Maximum array rank accepted by QuestDB's QWP ingress decoder. */
 export const QWP_MAX_ARRAY_DIMENSIONS = 32;
 /** Maximum signed int32 array-axis length accepted by QWP ingress. */

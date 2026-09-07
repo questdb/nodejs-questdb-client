@@ -21,6 +21,7 @@ import {
   QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_ROWS_PER_TABLE,
   QWP_MAX_SYMBOL_DICTIONARY_SIZE,
+  QWP_MAX_TABLES_PER_FRAME,
   QWP_COMPRESSION_CODEC,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
   QWP_EGRESS_CAPABILITY,
@@ -880,17 +881,19 @@ describe("protocol caps", () => {
     }
   });
 
-  it("rejects a frame with more than 65535 tables", () => {
+  it("rejects a frame over the physical table-count cap", () => {
     const table = new QwpTableBuffer("t");
     table.getOrCreateColumn("c", QWP_COLUMN_TYPE.LONG);
     // The guard runs before any encoding, so the same buffer can stand in for
     // every entry.
-    expect(() => encodeQwpIngressFrame(new Array(65_536).fill(table))).toThrow(
-      "more than 65535 tables",
-    );
     expect(() =>
-      encodeQwpIngressFrame(new Array(65_535).fill(table)),
-    ).not.toThrow("more than 65535 tables");
+      encodeQwpIngressFrame(
+        new Array(QWP_MAX_TABLES_PER_FRAME + 1).fill(table),
+      ),
+    ).toThrow(`more than ${QWP_MAX_TABLES_PER_FRAME} tables`);
+    expect(() =>
+      encodeQwpIngressFrame(new Array(QWP_MAX_TABLES_PER_FRAME).fill(table)),
+    ).not.toThrow(`more than ${QWP_MAX_TABLES_PER_FRAME} tables`);
   });
 
   it("rejects a table above the row cap", () => {

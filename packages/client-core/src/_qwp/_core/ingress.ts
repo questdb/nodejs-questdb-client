@@ -12,6 +12,7 @@ import {
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_MAX_ROWS_PER_TABLE,
   QWP_MAX_SYMBOL_DICTIONARY_SIZE,
+  QWP_MAX_TABLES_PER_FRAME,
   QWP_STATUS,
   QwpColumnType,
 } from "./constants";
@@ -819,8 +820,10 @@ function encodeQwpIngressFrameInternal(
   tables: readonly QwpTableBuffer[],
   options: QwpIngressEncodeOptions,
 ): Uint8Array {
-  if (tables.length > 0xffff) {
-    throw new Error("QWP frame contains more than 65535 tables");
+  if (tables.length > QWP_MAX_TABLES_PER_FRAME) {
+    throw new Error(
+      `QWP frame contains more than ${QWP_MAX_TABLES_PER_FRAME} tables`,
+    );
   }
   for (const table of tables) {
     validateTableForEncoding(table);

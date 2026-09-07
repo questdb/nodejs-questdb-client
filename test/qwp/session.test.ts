@@ -25,6 +25,7 @@ import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_INGRESS_PROGRESS_KIND,
   QWP_MAX_ROWS_PER_TABLE,
+  QWP_MAX_TABLES_PER_FRAME,
   QWP_STATUS,
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
@@ -2459,6 +2460,42 @@ describe("QwpIngressSession", () => {
     expect(rowCounts.reduce((total, count) => total + count, 0)).toBe(
       QWP_MAX_ROWS_PER_TABLE + 1,
     );
+    await session.close();
+  }, 60_000);
+
+  it("splits a logical batch over the physical table-count cap", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const tables = Array.from(
+      { length: QWP_MAX_TABLES_PER_FRAME + 1 },
+      (_, index) => {
+        const table = new QwpTableBuffer(`t${index}`);
+        table
+          .getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!
+          .values.push(BigInt(index));
+        table.nextRow();
+        return table;
+      },
+    );
+    const session = new QwpIngressSession(await connecting, {
+      // Keep byte size out of this test so only the table-count cap splits it.
+      maxBatchSizeBytes: 64 * 1024 * 1024,
+    });
+    socket.onSend = () => {
+      const sequence = BigInt(socket.sent.length - 1);
+      socket.message(ingressResponse(QWP_STATUS.OK, sequence));
+    };
+
+    await expect(
+      session.sendTables(tables, { gorilla: false }),
+    ).resolves.toMatchObject({ sequence: 1n });
+    expect(
+      socket.sent.map((frame) => decodeQwpFrame(frame).tableCount),
+    ).toEqual([32_768, 32_768]);
     await session.close();
   }, 60_000);
 

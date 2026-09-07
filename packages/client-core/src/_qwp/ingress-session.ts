@@ -5,6 +5,7 @@ import {
   encodeQwpIngressFrame,
   QWP_FLAG_DEFER_COMMIT,
   QWP_MAX_ROWS_PER_TABLE,
+  QWP_MAX_TABLES_PER_FRAME,
   QWP_STATUS,
   QwpIngressEncodeOptions,
   QwpIngressResponse,
@@ -86,7 +87,7 @@ function splitTablesAtUnit(
  * size. Non-final frames defer commit so the final frame closes the group.
  */
 /**
- * Splits tables into frames that fit both caps.
+ * Splits tables into frames that fit the row, table-count, and byte caps.
  *
  * `maxBatchSizeBytes` is undefined until a server advertises its cap, which is
  * a supported state -- an offline store-and-forward start, or a server that
@@ -110,18 +111,15 @@ function planIngressFrames(
 
   const plan = (candidate: readonly QwpTableBuffer[]): void => {
     const dictionarySize = dictionary?.size;
-    // A table over the row cap cannot be encoded at all, and that is knowable
-    // without encoding it. Testing it here makes it a splittable candidate
-    // like any oversized one: encodeQwpIngressFrame() discovers the same cap,
-    // but it runs before the size test and the bisection below, so its throw
-    // escaped plan() entirely. The batch could then be neither split nor --
-    // close() only discards staging for QwpBatchTooLargeError -- abandoned,
-    // and every later flush() and close() raised it again.
+    // Row and frame table-count caps are knowable before encoding. Testing them
+    // here makes them splittable like a byte-oversized candidate; letting the
+    // encoder discover either one would throw before the bisection below.
     const overRowCap = candidate.some(
       (table) => table.rowCount > QWP_MAX_ROWS_PER_TABLE,
     );
+    const overTableCap = candidate.length > QWP_MAX_TABLES_PER_FRAME;
     let frameByteLength = 0;
-    if (!overRowCap) {
+    if (!overRowCap && !overTableCap) {
       const frame = encodeQwpIngressFrame(candidate, {
         ...encodeOptions,
         deferCommit: false,
