@@ -6,6 +6,7 @@ import {
   QwpSender,
   type QwpSenderSession,
 } from "../../packages/client-core/src/qwp";
+import { resolveQwpNodeClientConfig } from "../../packages/nodejs-client/src/qwp-node/client-config";
 import { QWP_SUPPORTED_CONFIG_KEYS } from "../../packages/nodejs-client/src/qwp-node/client-config";
 import * as nodeClient from "../../packages/nodejs-client/src";
 import * as browserClient from "../../packages/browser-client/src";
@@ -152,5 +153,46 @@ describe("QWP configuration-string reference", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("documents the store-and-forward defaults the parser actually resolves", async () => {
+    // Nothing checked the Default column beyond the two auto-flush rows, so a
+    // number in this table could drift from the parser -- and did: the
+    // segment size was documented as sizing segments only when it also caps an
+    // ingress frame, and initial_connect_retry was documented as requiring
+    // sf_dir when it applies to the memory replay queue too.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = (key: string): number => {
+      const row = new RegExp(
+        `^\\| \`${key}\`\\s*\\|[^|]*\\|\\s*\`?(\\d+)\`?\\s*\\|`,
+        "m",
+      ).exec(doc);
+      if (!row) throw new Error(`no numeric default documented for ${key}`);
+      return Number(row[1]);
+    };
+
+    const resolved = resolveQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp-config-docs;",
+    );
+    expect(resolved.ingress.storeAndForward).toMatchObject({
+      maxBytes: documented("sf_max_total_bytes"),
+      maxSegmentBytes: documented("sf_max_segment_bytes"),
+      appendDeadlineMs: documented("sf_append_deadline_millis"),
+    });
+
+    // The row says a segment default is also the frame cap; that only holds
+    // if the ingress session really receives it.
+    expect(
+      resolved.ingressSession?.maxBatchSizeBytes ??
+        resolved.ingress.storeAndForward?.maxSegmentBytes,
+    ).toBe(documented("sf_max_segment_bytes"));
+
+    // ...and that initial_connect_retry is accepted without sf_dir, as the
+    // row now says.
+    expect(
+      resolveQwpNodeClientConfig(
+        "ws::addr=localhost;initial_connect_retry=async;",
+      ).ingressSession?.initialConnectMode,
+    ).toBe("async");
   });
 });

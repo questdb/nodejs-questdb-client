@@ -113,7 +113,7 @@ continues to come from `addr`, because the typed object intentionally omits
 | `request_durable_ack`                           | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.           |
 | `durable_ack_keepalive_interval_millis`         | integer ms       | —         | Poll interval for durable-ACK progress.                                  |
 | `max_name_len`                                  | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                    |
-| `sender_id`                                     | string           | `default` | Identifies this producer to the server and in the journal.               |
+| `sender_id`                                     | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.      |
 | `max_frame_rejections`                          | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation.   |
 | `poison_min_escalation_window_millis`           | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.              |
 | `catch_up_cap_gap_min_escalation_window_millis` | integer ms       | `300000`  | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. |
@@ -141,28 +141,28 @@ Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
 shown as a dash is applied downstream of the connect string, by the sender or
 session that consumes it.
 
-| Key                         | Value                          | Default       | Meaning                                                                                                              |
-| --------------------------- | ------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `sf_dir`                    | path                           | —             | Journal directory. Enables store-and-forward.                                                                        |
-| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                 |
-| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.                                                       |
-| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file. Also caps one ingress frame, including without `sf_dir`, since a frame must fit a segment. |
-| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                   |
-| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                     |
-| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`.                                                    |
-| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                  |
-| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                                                                          |
+| Key                         | Value                          | Default       | Meaning                                                                                                                                   |
+| --------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `sf_dir`                    | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                     |
+| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                      |
+| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. Without `sf_dir` it retunes the 128 MiB memory queue.                      |
+| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. Set, it caps a frame without `sf_dir` too. |
+| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                        |
+| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                          |
+| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                 |
+| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                       |
+| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                                                                                               |
 
 ### Egress
 
-| Key                 | Value                 | Default    | Meaning                                            |
-| ------------------- | --------------------- | ---------- | -------------------------------------------------- |
-| `max_batch_rows`    | integer, 1..1048576   | —          | Rows the server puts in one result batch.          |
-| `initial_credit`    | integer ≥ 0           | —          | Starting flow-control credit for a query.          |
-| `buffer_pool_size`  | integer ≥ 1           | —          | Reusable result buffers held per session.          |
-| `compression`       | `raw`, `zstd`, `auto` | `raw`      | Result compression to negotiate.                   |
-| `compression_level` | integer, 1..22        | —          | zstd level requested; requires `compression`.      |
-| `client_id`         | string                | —          | Identifies this client in server-side diagnostics. |
+| Key                 | Value                 | Default | Meaning                                            |
+| ------------------- | --------------------- | ------- | -------------------------------------------------- |
+| `max_batch_rows`    | integer, 1..1048576   | —       | Rows the server puts in one result batch.          |
+| `initial_credit`    | integer ≥ 0           | —       | Starting flow-control credit for a query.          |
+| `buffer_pool_size`  | integer ≥ 1           | —       | Reusable result buffers held per session.          |
+| `compression`       | `raw`, `zstd`, `auto` | `raw`   | Result compression to negotiate.                   |
+| `compression_level` | integer, 1..22        | —       | zstd level requested; requires `compression`.      |
+| `client_id`         | string                | —       | Identifies this client in server-side diagnostics. |
 
 ### Pool
 
@@ -245,7 +245,9 @@ const sender = await Sender.fromConfig(
         zone: "eu-west-1a",
         senderId: "producer-a",
         storeAndForward: {
-          directory: "/var/lib/my-service/qwp-replay/producer-a",
+          // The slot root. `senderId` names the journal inside it, so this must
+          // not repeat that name or the journal lands in `.../producer-a/producer-a`.
+          directory: "/var/lib/my-service/qwp-replay",
           maxBytes: 512 * 1024 * 1024,
           durability: "periodic",
           checkpointIntervalMs: 5_000,
@@ -1000,7 +1002,8 @@ console.info(sender.metrics);
 ```
 
 Callbacks are placed on bounded asynchronous inboxes and never invoked inside ACK,
-reconnect, or orphan-recovery protocol stacks. Connection events default to 64 retained
+reconnect, or orphan-recovery protocol stacks, on ingress and egress alike; the
+drop counters below are reported in the ingress metrics snapshot. Connection events default to 64 retained
 entries and errors to 256; `connectionListenerInboxCapacity` and
 `errorInboxCapacity` (or their snake-case unified-string keys) tune those bounds.
 Overflow drops the oldest pending entry and retains the newest state. Inspect
@@ -1346,11 +1349,16 @@ For unified strings with `sf_dir`, Java-compatible defaults apply: memory
 durability, a 10 GiB total journal cap, 4 MiB journal segments, a 30-second
 capacity wait, a 5-second close drain, and fail-fast initial connection. Set
 `sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
-The 4 MiB default sizes journal segments only; it does not install an ingress
-frame cap. Set `sf_max_segment_bytes` explicitly, or `qwp.session.maxBatchSizeBytes`,
-to bound frames before the first publication tells the client the server's cap.
-Without `sf_dir`, `sf_max_total_bytes` and `sf_append_deadline_millis` tune the
-built-in memory replay queue instead, and `sf_max_segment_bytes` still caps a frame.
+A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
+the ingress frame cap from the first publication onward, before the server has
+advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.
+Raise `sf_max_segment_bytes`, or lower the cap with
+`qwp.session.maxBatchSizeBytes`, to choose a different bound. Without `sf_dir`
+there is no default frame cap, and `sf_max_total_bytes`,
+`sf_append_deadline_millis` and `sf_max_segment_bytes` retune the built-in
+memory replay queue instead -- note that queue's own ceiling is 128 MiB, not the
+10 GiB the journal defaults to, while the 30-second append deadline is the same
+on both.
 The parser also supports `max_name_len` and the Java listener/error inbox
 capacity keys. Those capacities actively bound asynchronous connection and
 typed-error delivery and are reflected in ingress drop counters.
@@ -1495,33 +1503,33 @@ root.
 
 The public error classes preserve enough context for policy decisions:
 
-| Error                              | Meaning                                                                                                     |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `QwpUpgradeError`                  | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
-| `QwpRoleMismatchError`             | A connected endpoint's advertised role does not satisfy the requested egress target                         |
-| `QwpPoolAcquireTimeoutError`       | Every pooled connection is leased beyond the configured acquisition deadline                                |
-| `QwpPoolResourceError`             | Creating a new pooled sender or query connection failed                                                     |
-| `QwpClientClosedError`             | The pooled client or an individual returned lease is already closed                                         |
-| `QwpDurableAckUnavailableError`    | Durable acknowledgement was required but not negotiated                                                     |
-| `QwpSendTimeoutError`              | A send did not drain before its deadline; delivery is unknown                                               |
-| `QwpSenderCloseTimeoutError`       | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
-| `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |
-| `QwpIngressAckTimeoutError`        | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
-| `QwpBatchTooLargeError`            | One encoded row cannot fit the effective ingress cap                                                        |
-| `QwpMemoryReplayFrameTooLargeError` | One frame cannot fit the in-memory replay budget                                                           |
-| `QwpMemoryReplayBatchTooLargeError` | One split logical batch cannot fit the in-memory replay budget                                             |
-| `QwpMemoryReplayAppendTimeoutError` | The in-memory replay queue did not regain capacity before its append deadline                              |
-| `QwpReconnectExhaustedError`       | The configured reconnect boundary was reached                                                               |
-| `QwpReplayRejectedError`           | A replayed frame was rejected and retained for inspection                                                   |
-| `QwpReplayStoreFullError`          | The Node.js replay journal reached its configured size                                                      |
-| `QwpReplayStoreAppendTimeoutError` | The Node.js replay journal did not regain capacity before the configured append deadline                    |
-| `QwpReplayStoreCheckpointError`    | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
-| `QwpReplayStoreLockedError`        | Another process owns the configured Node.js replay directory                                                |
-| `QwpEgressQueryError`              | QuestDB returned a terminal query error                                                                     |
-| `QwpEgressQueryAbandonedError`     | Result iteration ended before the server completed the query                                                |
-| `QwpEgressQueryTimeoutError`       | The client deadline expired and cancellation began                                                          |
-| `QwpEgressQueryCancelTimeoutError` | A cancelled query did not produce a terminal server response before the drain deadline                      |
-| `QwpEgressReplayRequiredError`     | Deprecated compatibility type from the former explicit replay opt-in                                        |
+| Error                               | Meaning                                                                                                     |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `QwpUpgradeError`                   | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
+| `QwpRoleMismatchError`              | A connected endpoint's advertised role does not satisfy the requested egress target                         |
+| `QwpPoolAcquireTimeoutError`        | Every pooled connection is leased beyond the configured acquisition deadline                                |
+| `QwpPoolResourceError`              | Creating a new pooled sender or query connection failed                                                     |
+| `QwpClientClosedError`              | The pooled client or an individual returned lease is already closed                                         |
+| `QwpDurableAckUnavailableError`     | Durable acknowledgement was required but not negotiated                                                     |
+| `QwpSendTimeoutError`               | A send did not drain before its deadline; delivery is unknown                                               |
+| `QwpSenderCloseTimeoutError`        | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
+| `QwpIngressNackError`               | QuestDB rejected an ingress frame                                                                           |
+| `QwpIngressAckTimeoutError`         | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
+| `QwpBatchTooLargeError`             | One encoded row cannot fit the effective ingress cap                                                        |
+| `QwpMemoryReplayFrameTooLargeError` | One frame cannot fit the in-memory replay budget                                                            |
+| `QwpMemoryReplayBatchTooLargeError` | One split logical batch cannot fit the in-memory replay budget                                              |
+| `QwpMemoryReplayAppendTimeoutError` | The in-memory replay queue did not regain capacity before its append deadline                               |
+| `QwpReconnectExhaustedError`        | The configured reconnect boundary was reached                                                               |
+| `QwpReplayRejectedError`            | A replayed frame was rejected and retained for inspection                                                   |
+| `QwpReplayStoreFullError`           | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreAppendTimeoutError`  | The Node.js replay journal did not regain capacity before the configured append deadline                    |
+| `QwpReplayStoreCheckpointError`     | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
+| `QwpReplayStoreLockedError`         | Another process owns the configured Node.js replay directory                                                |
+| `QwpEgressQueryError`               | QuestDB returned a terminal query error                                                                     |
+| `QwpEgressQueryAbandonedError`      | Result iteration ended before the server completed the query                                                |
+| `QwpEgressQueryTimeoutError`        | The client deadline expired and cancellation began                                                          |
+| `QwpEgressQueryCancelTimeoutError`  | A cancelled query did not produce a terminal server response before the drain deadline                      |
+| `QwpEgressReplayRequiredError`      | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
 Always close senders and sessions in `finally`. Sender publication plus ACK draining is
 bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
