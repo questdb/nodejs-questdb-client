@@ -5226,6 +5226,56 @@ describe("QWP Node file replay store", () => {
     await recovered.close();
   });
 
+  it("retires an empty lost segment after reporting it once", async () => {
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    await first.load();
+    await first.append({
+      frameSequence: 0n,
+      payload: new Uint8Array(600).fill(1),
+    });
+    await first.close();
+
+    const [segment] = await assignedReplaySegments(directory);
+    const path = join(directory, segment);
+    const size = (await stat(path)).size;
+    const file = await open(path, "r+");
+    try {
+      await file.write(Buffer.alloc(size - 24, 0), 0, size - 24, 24);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    await expect(recovered.load()).resolves.toEqual([]);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].segmentFile).toBe(segment);
+    await recovered.close();
+    await expect(assignedReplaySegments(directory)).resolves.toEqual([]);
+
+    const repeatedReports: QwpNodeReplayDataLossReport[] = [];
+    const reopened = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+      onRecoveryDataLoss: (report) => repeatedReports.push(report),
+    });
+    await expect(reopened.load()).resolves.toEqual([]);
+    expect(repeatedReports).toEqual([]);
+    await reopened.close();
+  });
+
   it("reports an undetermined-extent loss as such through onSenderError", async () => {
     // The store's own logger words this correctly; the onSenderError bridge
     // interpolated discardedBytes instead, so a whole lost segment reached an

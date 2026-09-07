@@ -674,7 +674,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           const liveRecords = decoded.records.filter(
             (record) => record.frameSequence > acknowledgedThrough,
           );
-          const retainEmptyActive =
+          let retainEmptyActive =
             decoded.records.length === 0 && path === selectedActivePath;
           if (
             retainEmptyActive &&
@@ -708,6 +708,11 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 `contains no readable records, so any frames journalled into it were lost ` +
                 `before reaching disk`,
             });
+            // The segment has served its only remaining purpose once the loss
+            // is reported. Retaining it would make every later recovery report
+            // the same loss and offer the empty slot to the orphan drainer
+            // forever.
+            retainEmptyActive = false;
           }
           if (liveRecords.length === 0 && !retainEmptyActive) {
             await handle.close();
