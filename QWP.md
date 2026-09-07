@@ -69,7 +69,7 @@ keys owned only by egress or the pooled facade are accepted as intentional no-op
 Every `ws::`/`wss::` connect string is parsed by one schema, shared with the
 other QuestDB clients, whichever entry point builds the client —
 `Sender.fromConfig()`, `SenderOptions.fromConfig()`, `connectQwpNodeClient()`,
-or `connectQwpNodeEgress()`. An unrecognised key is rejected with
+or `createQwpNodeClient()`. An unrecognised key is rejected with
 `unknown configuration key: <key>`; a legacy ILP key adds a hint pointing at
 where it applies instead.
 
@@ -1087,6 +1087,11 @@ const query = await session.queryViews(
 );
 await query.completion;
 ```
+
+The callback receives bounded control operations such as `cancel()`,
+`grantCredit()`, and `awaitCompletion(timeoutMs)`. The unbounded `completion`
+promise is available only on the returned query handle and must be awaited
+outside the callback, after its current batch has been released.
 
 For conventional row-major processing, the same batch also owns one reusable
 `QwpResultRowView`:

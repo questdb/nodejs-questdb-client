@@ -1363,6 +1363,7 @@ describe("QwpEgressSession", () => {
       async (batch, control) => {
         delivered = batch;
         expect(control.requestId).toBe(batch.requestId);
+        expect("completion" in control).toBe(false);
         expect(batch.valid).toBe(true);
         expect(batch.column(0).getInt(2)).toBe(9);
         retainedRows = [...batch.materialize().rows()];

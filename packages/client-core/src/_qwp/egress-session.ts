@@ -283,13 +283,19 @@ export interface QwpEgressViewQuery {
   isDone(): boolean;
 }
 
+/** Query operations that are safe while a reusable batch callback is active. */
+export type QwpEgressViewCallbackControl = Omit<
+  QwpEgressViewQuery,
+  "completion"
+>;
+
 /**
  * Runs while one reusable batch view is valid. Do not retain the batch,
  * columns, or raw byte slices after the callback settles.
  */
 export type QwpResultBatchViewHandler = (
   batch: QwpResultBatchView,
-  query: QwpEgressViewQuery,
+  query: QwpEgressViewCallbackControl,
 ) => void | Promise<void>;
 
 /** One QWP query/statement and its stream of materialized result batches. */
@@ -303,6 +309,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private bufferGeneration = 0;
   private readonly bufferWaiters = new Set<() => void>();
   private readonly availableViewSlots: number[];
+  private readonly viewControl?: QwpEgressViewCallbackControl;
   private viewTail: Promise<void> = Promise.resolve();
   private wireComplete = false;
   private terminal = false;
@@ -331,6 +338,17 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.availableViewSlots = viewHandler
       ? Array.from({ length: bufferPoolSize }, (_, slot) => slot)
       : [];
+    this.viewControl = viewHandler
+      ? Object.freeze({
+          requestId: this.requestId,
+          awaitCompletion: (timeoutMs: number) =>
+            this.awaitCompletion(timeoutMs),
+          cancel: () => this.cancel(),
+          grantCredit: (additionalBytes: number | bigint) =>
+            this.grantCredit(additionalBytes),
+          isDone: () => this.isDone(),
+        })
+      : undefined;
   }
 
   [Symbol.asyncIterator](): AsyncIterator<QwpResultBatch> {
@@ -483,7 +501,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       }
       let handlerError: Error | undefined;
       try {
-        await this.viewHandler!(batch, this);
+        await this.viewHandler!(batch, this.viewControl!);
       } catch (error) {
         handlerError =
           error instanceof Error ? error : new Error(String(error));

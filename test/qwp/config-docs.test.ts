@@ -39,6 +39,15 @@ describe("QWP configuration-string reference", () => {
     expect(missing).toEqual([]);
   });
 
+  it("names only supported configuration-string entry points", async () => {
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const start = doc.indexOf("## Configuration-string keys");
+    const introduction = doc.slice(start, doc.indexOf("\n| Key", start));
+
+    expect(introduction).toContain("`createQwpNodeClient()`");
+    expect(introduction).not.toContain("`connectQwpNodeEgress()`");
+  });
+
   it("documents every key the parser accepts", async () => {
     // A key the parser takes but QWP.md never names is undiscoverable: the
     // connect string is the portable spelling shared with the other QuestDB

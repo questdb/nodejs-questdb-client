@@ -460,6 +460,10 @@ function queryViewContract(
     const requestId: bigint = query.requestId;
     const completionWait: Promise<boolean> = query.awaitCompletion(1_000);
     const done: boolean = query.isDone();
+    // Completion depends on this awaited callback settling, so it is exposed
+    // only on the queryViews() return value.
+    // @ts-expect-error completion is not callback-safe
+    void query.completion;
     const rawValues: Uint8Array | undefined = batch.column(0).valuesBytes();
     const directRow: QwpResultRowView = batch.row(0);
     const rowCallback: QwpResultRowViewCallback = (row) => {
