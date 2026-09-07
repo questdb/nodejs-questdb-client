@@ -3302,34 +3302,81 @@ describe("QWP ingress reconnect and replay", () => {
   it("withholds connection-outage time from the poison escalation window", async () => {
     // The window exists to prove a rejection persists while the client can
     // actually reach a server. Time spent unable to connect must not count
-    // toward it, or an outage alone would satisfy the dwell.
+    // toward it, or an outage alone would satisfy the dwell. Real elapsed
+    // time, because the window is measured on the monotonic clock: a faked
+    // system clock would move neither side of the comparison and prove
+    // nothing about the banking.
+    const first = new FakeConnection("terminating-1");
+    const second = new FakeConnection("terminating-2");
+    const healthy = new FakeConnection("healthy");
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return first;
+        if (factoryCalls === 2) throw new Error("connection refused");
+        if (factoryCalls === 3) {
+          // Hold the outage open past the dwell window. Banked as outage, it
+          // leaves the connected dwell far below it; counted as dwell, the
+          // second strike below escalates and the frame fails.
+          await new Promise((resolve) => setTimeout(resolve, 450));
+          return second;
+        }
+        return healthy;
+      },
+      {
+        reconnect: {
+          maxAttempts: 5,
+          maxDurationMs: 0,
+          maxFrameRejections: 2,
+          poisonMinEscalationWindowMs: 300,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    const pending = session.sendFrame(Uint8Array.of(9));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.drop();
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1), {
+      timeout: 5_000,
+    });
+    second.drop();
+    await vi.waitFor(() => expect(healthy.sent).toHaveLength(1));
+    healthy.receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(pending).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    await session.close();
+  }, 15_000);
+
+  it("does not let a system-clock step satisfy the poison escalation window", async () => {
+    // The dwell is elapsed time, not a point in time, so an NTP correction or
+    // a VM/container resume must not satisfy it. Measured on Date.now() it
+    // did: one forward step collapsed the five-minute guard to zero and turned
+    // a burst of retriable rejections -- exactly what the window exists to
+    // ride out -- into a terminal verdict, which fails a running sender or
+    // quarantines an adopted orphan slot with its rows reported lost.
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
-      const first = new FakeConnection("terminating-1");
-      const second = new FakeConnection("terminating-2");
-      const healthy = new FakeConnection("healthy");
-      let factoryCalls = 0;
+      const first = new FakeConnection("primary");
+      const second = new FakeConnection("secondary");
+      const third = new FakeConnection("primary");
+      const connections = [first, second, third];
       const session = await QwpIngressSession.connect(
         async () => {
-          factoryCalls++;
-          if (factoryCalls === 1) return first;
-          if (factoryCalls === 2) throw new Error("connection refused");
-          if (factoryCalls === 3) {
-            // Age the clock while the outage is open, so the elapsed time is
-            // banked as outage rather than counted as connected dwell.
-            vi.setSystemTime(Date.now() + 30_000);
-            return second;
-          }
-          return healthy;
+          const connection = connections.shift();
+          if (!connection) throw new Error("no connection available");
+          return connection;
         },
         {
           reconnect: {
-            maxAttempts: 5,
-            // The simulated outage advances the clock past the default
-            // 30s reconnect budget, which is not what this test is about.
+            maxAttempts: 1,
             maxDurationMs: 0,
             maxFrameRejections: 2,
-            poisonMinEscalationWindowMs: 10_000,
+            poisonMinEscalationWindowMs: 300_000,
             initialBackoffMs: 0,
             maxBackoffMs: 0,
           },
@@ -3337,13 +3384,15 @@ describe("QWP ingress reconnect and replay", () => {
       );
       const pending = session.sendFrame(Uint8Array.of(9));
       await vi.waitFor(() => expect(first.sent).toHaveLength(1));
-      first.drop();
+      first.receive(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n));
+
       await vi.waitFor(() => expect(second.sent).toHaveLength(1));
-      // Second strike: 30s of wall clock has passed, but all of it was the
-      // outage, so the connected dwell is still under the 10s window.
-      second.drop();
-      await vi.waitFor(() => expect(healthy.sent).toHaveLength(1));
-      healthy.receive(ingressResponse(QWP_STATUS.OK, 0n));
+      // The step lands while connected, which is the half outage banking
+      // cannot absorb: measured on the wall clock, the next strike escalates.
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+      second.receive(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n));
+      await vi.waitFor(() => expect(third.sent).toHaveLength(1));
+      third.receive(ingressResponse(QWP_STATUS.OK, 0n));
 
       await expect(pending).resolves.toMatchObject({
         status: QWP_STATUS.OK,

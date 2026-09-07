@@ -41,6 +41,7 @@ import {
   QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
+import { monotonicNowMs } from "./monotonic-clock";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
@@ -301,9 +302,11 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
       !closesOpenTransaction
     ) {
       this.totalBackpressureStalls++;
-      const deadline = Date.now() + this.appendDeadlineMs;
+      // Elapsed time, so a clock step cannot expire an append that has been
+      // waiting for milliseconds -- nor extend one past its deadline.
+      const deadline = monotonicNowMs() + this.appendDeadlineMs;
       while (this.usedBytes + requiredBytes > this.maxBytes) {
-        const remainingMs = deadline - Date.now();
+        const remainingMs = deadline - monotonicNowMs();
         if (remainingMs <= 0) {
           this.totalAppendTimeouts++;
           throw new QwpMemoryReplayAppendTimeoutError(
@@ -377,9 +380,9 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     }
 
     this.totalBackpressureStalls++;
-    const deadline = Date.now() + this.appendDeadlineMs;
+    const deadline = monotonicNowMs() + this.appendDeadlineMs;
     while (this.usedBytes + requiredBytes > this.maxBytes) {
-      const remainingMs = deadline - Date.now();
+      const remainingMs = deadline - monotonicNowMs();
       if (remainingMs <= 0) {
         this.totalAppendTimeouts++;
         throw new QwpMemoryReplayAppendTimeoutError(
@@ -1111,7 +1114,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       : "configured",
     initialConnection?: Promise<QwpBinaryConnection>,
   ): Promise<void> {
-    const outageStarted = Date.now();
+    // Monotonic for the same reason recordPoisonStrike() is: a clock step
+    // must not exhaust a reconnect budget that has not actually elapsed.
+    const outageStarted = monotonicNowMs();
     const reconnectDeadlineMs =
       attemptPolicy === "configured" && this.maxDurationMs > 0
         ? outageStarted + this.maxDurationMs
@@ -1301,7 +1306,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         const durationExhausted =
           attemptPolicy === "configured" &&
           this.maxDurationMs > 0 &&
-          Date.now() - outageStarted >= this.maxDurationMs;
+          monotonicNowMs() - outageStarted >= this.maxDurationMs;
         if (attemptsExhausted || durationExhausted) {
           if (attemptPolicy === "single") throw error;
           throw new QwpReconnectExhaustedError(attempt, lastError);
@@ -1837,19 +1842,26 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private beginPoisonOutage(): void {
     if (this.poisonFrameSequence === undefined) return;
     if (this.poisonOutageStartedMs === 0) {
-      this.poisonOutageStartedMs = Date.now();
+      this.poisonOutageStartedMs = monotonicNowMs();
     }
   }
 
   /** Banks the elapsed outage so it cannot count toward the escalation window. */
   private endPoisonOutage(): void {
     if (this.poisonOutageStartedMs === 0) return;
-    this.poisonOutageMs += Date.now() - this.poisonOutageStartedMs;
+    this.poisonOutageMs += monotonicNowMs() - this.poisonOutageStartedMs;
     this.poisonOutageStartedMs = 0;
   }
 
   private recordPoisonStrike(frameSequence: bigint): boolean {
-    const now = Date.now();
+    // Elapsed time, not a point in time: the dwell this window measures is how
+    // long a frame has stayed suspect while the client could reach a server,
+    // so a wall-clock correction -- an NTP step, a VM or container resume --
+    // must not satisfy it. It used to, collapsing the five-minute guard to
+    // zero and turning a transient rejection burst into a terminal sender or a
+    // quarantined orphan slot. The two sibling episode policies in this file
+    // already measure their windows this way.
+    const now = monotonicNowMs();
     this.endPoisonOutage();
     if (this.poisonFrameSequence === frameSequence) {
       this.poisonStrikes++;
@@ -2601,10 +2613,6 @@ function minimumDefined(
     : second === undefined
       ? first
       : Math.min(first, second);
-}
-
-function monotonicNowMs(): number {
-  return typeof performance === "undefined" ? Date.now() : performance.now();
 }
 
 function validateReconnectPolicy(

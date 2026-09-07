@@ -22,6 +22,7 @@ import {
 import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
+import { monotonicNowMs } from "./monotonic-clock";
 import { safelyInvoke } from "./safe-callback";
 
 /**
@@ -248,7 +249,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     reconnecting: boolean,
     skipQueueBarrier = false,
   ): Promise<void> {
-    const outageStarted = Date.now();
+    // Elapsed time: a wall-clock correction must not exhaust a reconnect
+    // budget that has not run, nor extend one that has.
+    const outageStarted = monotonicNowMs();
     const reconnectDeadlineMs =
       this.maxDurationMs > 0 ? outageStarted + this.maxDurationMs : undefined;
     const previousEndpoint = this.lastEndpoint;
@@ -379,7 +382,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           this.maxAttempts > 0 && attempt >= this.maxAttempts;
         const durationExhausted =
           this.maxDurationMs > 0 &&
-          Date.now() - outageStarted >= this.maxDurationMs;
+          monotonicNowMs() - outageStarted >= this.maxDurationMs;
         if (attemptsExhausted || durationExhausted) {
           throw new QwpReconnectExhaustedError(attempt, lastError);
         }
@@ -582,7 +585,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     // the Java client counts every re-submission of one execute() against
     // failover_max_attempts and failover_max_duration.
     if (this.protocolRecoveries === 0) {
-      this.protocolRecoveryStartedAt = Date.now();
+      this.protocolRecoveryStartedAt = monotonicNowMs();
     }
     this.protocolRecoveries++;
     // `>` not `>=`: maxAttempts counts reconnects here, as it does in
@@ -591,7 +594,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       this.maxAttempts > 0 && this.protocolRecoveries > this.maxAttempts;
     const durationExhausted =
       this.maxDurationMs > 0 &&
-      Date.now() - this.protocolRecoveryStartedAt >= this.maxDurationMs;
+      monotonicNowMs() - this.protocolRecoveryStartedAt >= this.maxDurationMs;
     if (attemptsExhausted || durationExhausted) {
       const exhausted = new QwpReconnectExhaustedError(
         this.protocolRecoveries,
