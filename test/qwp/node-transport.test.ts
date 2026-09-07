@@ -981,6 +981,26 @@ describe("QWP Node transport", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("rejects contradictory Node durable ACK sender options before connecting", () => {
+    let factoryCalls = 0;
+    expect(() =>
+      createQwpNodeSender(
+        {
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: false,
+          webSocketFactory: () => {
+            factoryCalls++;
+            throw new Error("must not connect");
+          },
+        },
+        { awaitDurableAck: true },
+      ),
+    ).toThrow(
+      "awaitDurableAck cannot be combined with requestDurableAck=false",
+    );
+    expect(factoryCalls).toBe(0);
+  });
 });
 
 function listen(server: WebSocketServer): Promise<void> {

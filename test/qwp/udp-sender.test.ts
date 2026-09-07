@@ -407,5 +407,8 @@ describe("QWP Node UDP sender", () => {
     expect(() =>
       createQwpNodeUdpSender(options, { awaitDurableAck: true }),
     ).toThrow(/does not support durable acknowledgements/);
+    expect(() =>
+      createQwpNodeUdpSender(options, { awaitServerAck: true }),
+    ).toThrow(/does not support server acknowledgements/);
   });
 });

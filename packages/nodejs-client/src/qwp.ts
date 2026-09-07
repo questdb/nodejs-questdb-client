@@ -827,6 +827,11 @@ export function createQwpNodeSender(
   senderOptions: QwpSenderOptions = {},
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
+  if (senderOptions.awaitDurableAck && options.requestDurableAck === false) {
+    throw new RangeError(
+      "awaitDurableAck cannot be combined with requestDurableAck=false",
+    );
+  }
   return new QwpSender(
     (signal) =>
       connectQwpNodeIngress(
@@ -901,6 +906,9 @@ function validateUdpSenderOptions(options: QwpSenderOptions): void {
   }
   if (options.awaitDurableAck) {
     throw new RangeError("QWP UDP does not support durable acknowledgements");
+  }
+  if (options.awaitServerAck) {
+    throw new RangeError("QWP UDP does not support server acknowledgements");
   }
 }
 

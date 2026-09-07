@@ -756,6 +756,26 @@ describe("QWP WebSocket adapters", () => {
     await sender.close();
   });
 
+  it("rejects contradictory browser durable ACK sender options before connecting", () => {
+    let factoryCalls = 0;
+    expect(() =>
+      createQwpBrowserSender(
+        {
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: false,
+          webSocketFactory: () => {
+            factoryCalls++;
+            return asQwpSocket(new FakeWebSocket());
+          },
+        },
+        { awaitDurableAck: true },
+      ),
+    ).toThrow(
+      "awaitDurableAck cannot be combined with requestDurableAck=false",
+    );
+    expect(factoryCalls).toBe(0);
+  });
+
   it("walks browser failover endpoints when the upgrade error is opaque", async () => {
     // A browser never learns the HTTP response, so every refused, reset, or
     // non-101 upgrade arrives as a bare `error` event and is classified
