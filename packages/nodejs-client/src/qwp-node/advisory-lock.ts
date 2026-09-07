@@ -1,9 +1,9 @@
 import {
   mkdir,
+  readdir,
   readFile,
   rename,
   rm,
-  rmdir,
   stat,
   unlink,
   utimes,
@@ -22,6 +22,9 @@ const LOGICAL_LOCK_DIRECTORY = ".slot-locks";
 // binding, so ownership is "created this directory" rather than a kernel lock.
 const OWNER_DIRECTORY_SUFFIX = ".owner";
 const OWNER_FILE = "owner";
+// Marks an owner directory that has been renamed out of the way, by a release
+// or by a reclaim, and is waiting to be removed. It holds no lock.
+const ABANDONED_SUFFIX = ".abandoned-";
 
 // The kernel released a `flock` the instant a holder died. A directory outlives
 // its creator, so ownership is instead proven by an owner record and heartbeat.
@@ -190,6 +193,10 @@ export class QwpNodeAdvisoryLock {
       }
     }
 
+    // This acquisition owns the slot now, so any directory a previous release
+    // or reclaim renamed aside and did not live to remove is safe to clear.
+    await sweepAbandonedOwnerDirectories(ownerPath);
+
     const token = newOwnerToken();
     let ownerMtimeMs: number;
     try {
@@ -295,7 +302,12 @@ export class QwpNodeAdvisoryLock {
    */
   private async ownershipState(): Promise<"owned" | "foreign" | "unknown"> {
     const owner = await readOwnerFile(this.ownerPath);
-    if (owner.state === "unreadable") return "unknown";
+    // A torn record is treated as unknown rather than foreign: a holder whose
+    // own record was caught mid-write must retry, not latch. Only a contender
+    // acts on the difference, in reclaimIfDefunct().
+    if (owner.state === "unreadable" || owner.state === "corrupt") {
+      return "unknown";
+    }
     if (owner.state === "absent") return "foreign";
     return owner.record.token !== undefined && owner.record.token === this.token
       ? "owned"
@@ -489,9 +501,51 @@ async function claimOwnerDirectory(ownerPath: string): Promise<boolean> {
   }
 }
 
+/**
+ * Removes an owner directory in one observable step.
+ *
+ * Unlinking the record and then removing the directory left a window whose
+ * intermediate state -- the directory present with no record inside -- is
+ * indistinguishable from an acquisition still between its own mkdir and its
+ * record write. A process killed inside that window stranded the slot for
+ * good. Renaming aside first means a crash either leaves the directory intact
+ * and reclaimable through the dead-PID path, or leaves the mutex free with a
+ * stray aside directory that the next acquisition sweeps.
+ */
 async function removeOwnerDirectory(ownerPath: string): Promise<void> {
-  await unlink(join(ownerPath, OWNER_FILE)).catch(() => undefined);
-  await rmdir(ownerPath);
+  const abandoned = `${ownerPath}${ABANDONED_SUFFIX}${process.pid}-${stealCounter++}`;
+  try {
+    await rename(ownerPath, abandoned);
+  } catch (error) {
+    // Already gone: somebody reclaimed it, or a previous attempt got this far.
+    if (nodeErrorCode(error) === "ENOENT") return;
+    throw error;
+  }
+  await rm(abandoned, { recursive: true, force: true });
+}
+
+/**
+ * Best-effort removal of aside directories left by a release or a reclaim that
+ * was killed after its rename. They hold no lock and name no owner, so the
+ * acquisition that now owns the slot is free to clear them.
+ */
+async function sweepAbandonedOwnerDirectories(
+  ownerPath: string,
+): Promise<void> {
+  const parent = dirname(ownerPath);
+  const prefix = `${basename(ownerPath)}${ABANDONED_SUFFIX}`;
+  let entries: string[];
+  try {
+    entries = await readdir(parent);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    await rm(join(parent, entry), { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  }
 }
 
 /** Refreshes the heartbeat and returns the mtime that now proves ownership. */
@@ -507,22 +561,36 @@ async function touchOwnerDirectory(ownerPath: string): Promise<number> {
  * so a lock can never be removed twice and handed to two acquirers.
  */
 async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
+  let mtimeMs: number;
   try {
-    await stat(ownerPath);
+    mtimeMs = (await stat(ownerPath)).mtimeMs;
   } catch (error) {
     // Already gone; the caller's next mkdir decides the winner.
     return nodeErrorCode(error) === "ENOENT";
   }
   const owner = await readOwnerFile(ownerPath);
-  if (
+  if (owner.state === "absent" || owner.state === "corrupt") {
+    // The directory names no process at all, so the dead-PID test below has
+    // nothing to test. The only legitimate occupant of that state is an
+    // acquisition still between its own mkdir and its record write, which
+    // lasts one writeFile; a directory whose mtime has not advanced for the
+    // liveness window is nobody's. Without this, a producer killed inside
+    // that window -- or inside a release, before the aside rename existed --
+    // stranded the slot permanently: reclaimIfDefunct returned here, so
+    // `isPidAlive` was never consulted even though `.lock.pid` named a
+    // process that was provably gone.
+    if (Date.now() - mtimeMs <= STALE_AFTER_MS) return false;
+  } else if (
     owner.state !== "present" ||
     owner.record.host !== hostname() ||
     (isPidAlive(owner.record.pid) && !isReusedPid(owner.record))
   ) {
+    // A holder that is merely suspended keeps a readable record, so it never
+    // reaches the mtime path above and is still never reclaimed by time.
     return false;
   }
 
-  const abandoned = `${ownerPath}.stale-${process.pid}-${stealCounter++}`;
+  const abandoned = `${ownerPath}${ABANDONED_SUFFIX}${process.pid}-${stealCounter++}`;
   try {
     await rename(ownerPath, abandoned);
   } catch {
@@ -568,6 +636,13 @@ function isReusedPid(record: OwnerRecord): boolean {
 type OwnerRead =
   | { readonly state: "absent" }
   | { readonly state: "present"; readonly record: OwnerRecord }
+  /**
+   * The bytes were read and do not describe an owner. Unlike `unreadable`
+   * this is positive evidence about the record itself rather than about the
+   * reader, which is what lets a contender treat a torn write the way it
+   * treats a missing one.
+   */
+  | { readonly state: "corrupt" }
   | { readonly state: "unreadable" };
 
 async function readOwnerFile(ownerPath: string): Promise<OwnerRead> {
@@ -602,9 +677,12 @@ async function readOwnerFile(ownerPath: string): Promise<OwnerRead> {
     // of ours, so it is somebody else's acquisition.
     return { state: "absent" };
   } catch {
-    // A torn write, caught mid-`writeFile` by a contender that is still
-    // establishing itself. Not proof that this acquisition lost anything.
-    return { state: "unreadable" };
+    // A torn write -- caught mid-`writeFile` by a contender that is still
+    // establishing itself, or left behind by one that died inside it. The
+    // bytes were read, so unlike a failed read this says something about the
+    // record: it names nobody. Not proof that this acquisition lost anything,
+    // which is why ownershipState() still reports it as unknown.
+    return { state: "corrupt" };
   }
 }
 

@@ -3842,7 +3842,9 @@ describe("QWP ingress reconnect and replay", () => {
     await vi.waitFor(() => expect(connection.sent).toEqual([currentFrame]));
     connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
     await expect(current).resolves.toMatchObject({ sequence: 0n });
-    await expect(session.waitForAcknowledged(8n, 1_000)).resolves.toBeUndefined();
+    await expect(
+      session.waitForAcknowledged(8n, 1_000),
+    ).resolves.toBeUndefined();
     await session.close();
 
     const verify = new QwpNodeFileReplayStore({ directory });
@@ -3908,7 +3910,9 @@ describe("QWP ingress reconnect and replay", () => {
       expect(await assignedReplaySegments(directory)).toEqual([]),
     );
     await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(8n));
-    await expect(session.waitForAcknowledged(8n, 1_000)).resolves.toBeUndefined();
+    await expect(
+      session.waitForAcknowledged(8n, 1_000),
+    ).resolves.toBeUndefined();
     await session.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -5730,6 +5734,63 @@ describe("QWP Node file replay store", () => {
       name: "QwpReplayStoreLockedError",
     });
     expect((await stat(join(directory, ".lock.owner"))).ino).toBe(ownerInode);
+  });
+
+  it.each([
+    ["never landed", undefined],
+    ["was torn mid-write", '{"pid":1,"host":'],
+  ])(
+    "reclaims an owner directory whose record %s",
+    async (_label, contents) => {
+      // The counterpart of the test above, past the liveness window. The
+      // record-less state is also what a process killed inside a release used
+      // to leave, and nothing recovered it: reclaimIfDefunct() returned before
+      // consulting isPidAlive, so the slot stayed locked against every later
+      // process -- including the orphan drainer, which reported it locked
+      // forever without ever writing a `.failed` sentinel or reporting data
+      // loss. The frames below were unreachable until an operator removed the
+      // directory by hand.
+      const directory = await trackedDirectory();
+      const seeded = new QwpNodeFileReplayStore({ directory });
+      await seeded.load();
+      await seeded.append({ frameSequence: 0n, payload: Uint8Array.of(7) });
+      await seeded.append({ frameSequence: 1n, payload: Uint8Array.of(8) });
+      await seeded.close();
+
+      const ownerPath = join(directory, ".lock.owner");
+      await mkdir(ownerPath);
+      if (contents !== undefined) {
+        await writeFile(join(ownerPath, "owner"), contents);
+      }
+      await writeFile(join(directory, ".lock.pid"), `${process.pid}\n`);
+      const aged = new Date(Date.now() - 60_000);
+      await utimes(ownerPath, aged, aged);
+
+      const store = new QwpNodeFileReplayStore({ directory });
+      await expect(store.load()).resolves.toEqual([
+        { frameSequence: 0n, payload: Uint8Array.of(7) },
+        { frameSequence: 1n, payload: Uint8Array.of(8) },
+      ]);
+      await store.close();
+    },
+  );
+
+  it("sweeps owner directories left aside by an interrupted release", async () => {
+    // release() renames the owner directory aside before removing it, so a
+    // process killed between the two leaves the mutex free rather than a
+    // record-less directory nobody can reclaim. The aside directory holds no
+    // lock, so the acquisition that follows clears it.
+    const directory = await trackedDirectory();
+    const stray = join(directory, ".lock.owner.abandoned-999999-0");
+    await mkdir(stray, { recursive: true });
+    await writeFile(join(stray, "owner"), "{}");
+
+    const lock = await QwpNodeAdvisoryLock.acquire(directory);
+    expect(await readdir(directory)).not.toContain(
+      ".lock.owner.abandoned-999999-0",
+    );
+    await lock.release();
+    expect(await readdir(directory)).not.toContain(".lock.owner");
   });
 
   it("does not remove an owner directory a later acquisition owns", async () => {
