@@ -289,6 +289,42 @@ export class QwpReplayStoreLockLostError extends QwpReplayStoreError {
   }
 }
 
+/**
+ * Ownership of the advisory lock could not be re-proved right now. Nothing was
+ * taken: reading the owner record is the only heartbeat step that needs a file
+ * descriptor, so process-wide descriptor pressure, an `EIO`, or an NFS
+ * `ESTALE` fails precisely it while `stat` and `utimes` keep succeeding.
+ *
+ * Reported separately from {@link QwpReplayStoreLockLostError} because the two
+ * demand opposite responses. A takeover is terminal; this is transient and
+ * self-healing, so it stays retryable: the append backpressure loop parks on
+ * it until `appendDeadlineMs`, and the reconnect loop retries rather than
+ * ending the session. Collapsing them terminated a producer -- permanently,
+ * with the transport healthy throughout -- because the host process briefly
+ * ran out of descriptors, and blamed a second process that did not exist.
+ */
+export class QwpReplayStoreLockUnprovableError extends QwpReplayStoreError {
+  constructor(readonly directory: string) {
+    super(
+      `could not re-prove ownership of the QWP store-and-forward journal lock; its owner record is currently unreadable [directory=${directory}]`,
+    );
+    this.name = "QwpReplayStoreLockUnprovableError";
+  }
+}
+
+/**
+ * Whether an error is a verdict from the advisory-lock fence rather than a
+ * failure of the operation itself. Both must reach the caller unwrapped: one
+ * is terminal and one is retryable, and a generic write-failure wrapper would
+ * report neither.
+ */
+function isLockFenceError(error: unknown): boolean {
+  return (
+    error instanceof QwpReplayStoreLockLostError ||
+    error instanceof QwpReplayStoreLockUnprovableError
+  );
+}
+
 export class QwpReplayStoreFullError extends QwpReplayStoreError {
   constructor(
     readonly maxBytes: number,
@@ -639,10 +675,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
                 "active segment contains interior damage followed by intact records",
               );
             }
-            if (
-              decoded.crcMismatch ||
-              decoded.framingOverrun
-            ) {
+            if (decoded.crcMismatch || decoded.framingOverrun) {
               // The active segment's damaged suffix is abandoned by policy,
               // matching the Java client. An interior tear strands the frames
               // behind it because replay requires a contiguous sequence; a
@@ -1292,10 +1325,25 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         return;
       } catch (error) {
         if (this.closing || this.closed) throw this.closedError();
-        if (!(error instanceof QwpReplayStoreFullError)) throw error;
+        // The same predicate appendWithBackpressure() applies. This preflight
+        // used to park only on capacity, so a parked background-maintenance or
+        // checkpoint fault -- rethrown verbatim by assertReadyAfterWait() and
+        // retryable in exactly the way append() waits out -- rejected the
+        // caller's flush() instead. Because maxBatchSizeBytes defaults to the
+        // 4 MiB segment size for every sf_dir producer, that made a large
+        // enough flush fail on a filesystem hiccup that a smaller one absorbed,
+        // and the error it surfaced was neither journal exhaustion nor an
+        // append deadline -- the only two an sf_dir producer should ever see.
+        if (!(error instanceof QwpReplayStoreError) || !error.retryable) {
+          throw error;
+        }
         if (this.backpressurePolicy === QWP_SF_BACKPRESSURE_POLICY.ERROR) {
           throw error;
         }
+        const requiredBytes =
+          error instanceof QwpReplayStoreFullError
+            ? error.requiredBytes
+            : recordSizes.reduce((total, size) => total + size, 0);
         if (!stalled) {
           stalled = true;
           deadline = Date.now() + this.appendDeadlineMs;
@@ -1306,14 +1354,19 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           this.totalAppendTimeouts++;
           throw new QwpReplayStoreAppendTimeoutError(
             this.maxBytes,
-            error.requiredBytes,
+            requiredBytes,
             this.appendDeadlineMs,
           );
         }
         await this.waitForCapacity(
           capacityGeneration,
           remainingMs,
-          error.requiredBytes,
+          requiredBytes,
+          // Capacity has an explicit ACK/trim wake-up; a generic retryable
+          // fault has no event when the filesystem heals, so poll for it.
+          error instanceof QwpReplayStoreFullError
+            ? undefined
+            : TRANSIENT_STORE_RETRY_DELAY_MS,
         );
       }
     }
@@ -1401,7 +1454,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         await this.assertReadyAfterWait();
         segment.manifestFlagPending = false;
       } catch (error) {
-        if (error instanceof QwpReplayStoreLockLostError) throw error;
+        if (isLockFenceError(error)) throw error;
         throw new QwpReplayStoreError(
           `could not stamp the QWP store-and-forward manifest-required flag [file=${segment.path}]`,
           error,
@@ -1418,7 +1471,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       }
       await this.assertReadyAfterWait();
     } catch (error) {
-      if (error instanceof QwpReplayStoreLockLostError) throw error;
+      if (isLockFenceError(error)) throw error;
       // The fixed file cannot be shortened without losing its reservation.
       // Clear the attempted range so recovery still observes canonical zero
       // padding if the caller retries after a transient write failure.
@@ -2426,8 +2479,16 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         "QWP store-and-forward journal must be loaded before use",
       );
     }
-    if (!this.slotLock || !(await this.slotLock.ensureOwned())) {
+    if (!this.slotLock) throw new QwpReplayStoreLockLostError(this.directory);
+    // "Cannot prove it right now" is not "somebody took it". Only the latter
+    // is terminal; the former parks and retries like any other transient
+    // journal fault.
+    const ownership = await this.slotLock.ownership();
+    if (ownership === "lost") {
       throw new QwpReplayStoreLockLostError(this.directory);
+    }
+    if (ownership === "unprovable") {
+      throw new QwpReplayStoreLockUnprovableError(this.directory);
     }
     if (this.checkpointFailure) throw this.checkpointFailure;
     if (this.maintenanceFailure) throw this.maintenanceFailure;

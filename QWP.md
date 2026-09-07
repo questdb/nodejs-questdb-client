@@ -424,9 +424,15 @@ A background provisioning, checkpoint or trim failure is parked on the store and
 raised from the next journal call, then cleared by the next successful batch. Because
 such a fault is transient — a briefly full, read-only or descriptor-starved volume —
 reaching one while applying a server acknowledgement reconnects and replays rather
-than ending the sender: a filesystem hiccup must not cost a running producer. Failures
+than ending the sender: a filesystem hiccup must not cost a running producer. The same
+applies to the advisory lock. Reading its owner record is the only heartbeat step that
+needs a file descriptor, so descriptor pressure anywhere in the host process, an `EIO`,
+or an NFS `ESTALE` can leave a holder temporarily unable to prove ownership without
+anything having taken it; that is reported as `QwpReplayStoreLockUnprovableError`,
+which is retryable and parks the same way. Failures
 that are verdicts on the journal itself carry `retryable: false` and stay terminal;
-today those are `QwpReplayStoreCorruptionError` and `QwpReplayStoreLockLostError`. The
+today those are `QwpReplayStoreCorruptionError` and `QwpReplayStoreLockLostError`, the
+latter only once a takeover has actually been established. The
 store persists its acknowledgement cursor before it mutates anything, so a fault at
 that moment leaves exactly the state a crash at that moment would leave, and replay
 resumes from the persisted watermark.

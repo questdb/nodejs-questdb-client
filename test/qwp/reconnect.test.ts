@@ -6547,6 +6547,88 @@ describe("QWP Node file replay store", () => {
     await store.close();
   }, 15_000);
 
+  it("waits out a transient trim fault in the batch preflight too", async () => {
+    // The preflight the reconnecting connection runs before a multi-frame
+    // publication parked only on capacity, so it rethrew the very trim fault
+    // append() waits out. maxBatchSizeBytes defaults to the segment size for
+    // every sf_dir producer, so a flush large enough to split then failed on a
+    // filesystem hiccup that an identical smaller flush absorbed -- and with
+    // an error that is neither journal exhaustion nor an append deadline.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 66,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 5_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+
+    const unlink = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "unlink")
+      .mockRejectedValueOnce(
+        Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        }),
+      );
+    await store.acknowledgeThrough(0n);
+    await vi.waitFor(() => expect(unlink).toHaveBeenCalled());
+
+    await expect(
+      store.prepareAppendBatch([Uint8Array.of(3)]),
+    ).resolves.toBeUndefined();
+    expect(store.metrics).toMatchObject({ totalAppendTimeouts: 0 });
+
+    unlink.mockRestore();
+    await store.close();
+  }, 15_000);
+
+  it("reports an unprovable lock as retryable rather than as a takeover", async () => {
+    // Reading the owner record is the only heartbeat step that needs a
+    // descriptor, so descriptor pressure anywhere in the host process fails
+    // precisely it while stat() and utimes() keep succeeding. Past the
+    // liveness window that used to surface as QwpReplayStoreLockLostError --
+    // retryable: false, and claiming a takeover that never happened -- which
+    // terminated the ingress session for a fault that heals on its own.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    const ownerPath = join(directory, ".lock.owner");
+    const recordPath = join(ownerPath, "owner");
+    const record = await readFile(recordPath, "utf8");
+    const untouched = await stat(ownerPath);
+    // A directory where the record belongs yields EISDIR for every reader,
+    // standing in for a transient fault without a mock.
+    await unlink(recordPath);
+    await mkdir(recordPath);
+    await utimes(ownerPath, untouched.atime, untouched.mtime);
+
+    const internals = store as unknown as {
+      slotLock?: { provenAtMs: number };
+    };
+    internals.slotLock!.provenAtMs = Date.now() - 60_000;
+
+    await expect(
+      store.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+    ).rejects.toMatchObject({
+      name: "QwpReplayStoreLockUnprovableError",
+      retryable: true,
+    });
+
+    // The fault clears and the store is usable again, so nothing was lost.
+    await rm(recordPath, { recursive: true });
+    await writeFile(recordPath, record);
+    await utimes(ownerPath, untouched.atime, untouched.mtime);
+    await expect(
+      store.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+    ).resolves.toBeUndefined();
+    await store.close();
+  });
+
   it("waits for ACK trimming without blocking the acknowledgement queue", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({

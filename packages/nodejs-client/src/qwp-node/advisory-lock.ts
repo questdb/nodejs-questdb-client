@@ -45,6 +45,12 @@ const pendingReleases = new Set<QwpNodeAdvisoryLock>();
 // claim the right to clear it.
 let stealCounter = 0;
 
+/**
+ * Whether this holder still owns its slot, has positively lost it, or merely
+ * cannot prove either right now. See {@link QwpNodeAdvisoryLock.ownership}.
+ */
+export type QwpNodeAdvisoryLockOwnership = "owned" | "lost" | "unprovable";
+
 interface OwnerRecord {
   readonly pid: number;
   readonly host: string;
@@ -403,11 +409,28 @@ export class QwpNodeAdvisoryLock {
    * its acquisition token still matches.
    */
   async ensureOwned(): Promise<boolean> {
-    if (this.released || this.compromised) return false;
+    return (await this.ownership()) === "owned";
+  }
+
+  /**
+   * The same fence as {@link ensureOwned}, separating the two reasons it can
+   * refuse.
+   *
+   * `"lost"` means a takeover was established: the owner directory carries
+   * somebody else's token, or it is gone. `"unprovable"` means only that this
+   * holder cannot currently prove anything -- reading the owner record is the
+   * one heartbeat step that needs a descriptor, so process-wide descriptor
+   * pressure, EIO, or an NFS ESTALE fails precisely it while `stat` and
+   * `utimes` keep succeeding. Collapsing the two made a self-healing local
+   * fault look like a permanent takeover, and callers that treat the verdict
+   * as terminal killed a session that had lost nothing.
+   */
+  async ownership(): Promise<QwpNodeAdvisoryLockOwnership> {
+    if (this.released || this.compromised) return "lost";
     // A live holder cannot be displaced through the lock protocol. Avoid a
     // filesystem read on every frame/ACK while the heartbeat proof is fresh;
     // only a lapsed proof needs synchronous revalidation before work resumes.
-    if (!this.lost) return true;
+    if (!this.lost) return "owned";
     // A heartbeat may have been suspended between reading the owner token and
     // touching the reusable pathname. Check the token on every mutation fence
     // once the timestamp has lapsed rather than trusting an old proof.
@@ -416,19 +439,20 @@ export class QwpNodeAdvisoryLock {
     );
     if (ownership === "foreign") {
       this.markCompromised();
-      return false;
+      return "lost";
     }
-    if (ownership === "unknown") return false;
+    if (ownership === "unknown") return "unprovable";
     await this.revalidateAfterStall();
-    if (this.lost) return false;
+    if (this.compromised) return "lost";
+    if (this.lost) return "unprovable";
     const confirmed = await this.ownershipState().catch(
       () => "unknown" as const,
     );
     if (confirmed === "foreign") {
       this.markCompromised();
-      return false;
+      return "lost";
     }
-    return confirmed === "owned";
+    return confirmed === "owned" ? "owned" : "unprovable";
   }
 
   /**

@@ -82,6 +82,7 @@ const nodeRuntimeContract = [
   "QwpReplayStoreFullError",
   "QwpReplayStoreLockedError",
   "QwpReplayStoreLockLostError",
+  "QwpReplayStoreLockUnprovableError",
   "QwpReplayStoreQuarantinedError",
   "QwpUdpDatagramTooLargeError",
   "QwpVersionMismatchError",
