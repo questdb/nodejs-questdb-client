@@ -264,12 +264,11 @@ export class QwpReplayStoreQuarantinedError extends QwpReplayStoreError {
 }
 
 /**
- * The advisory lock guarding this journal was taken over by another process
- * while it was open, so this store may no longer write to it.
+ * The advisory-lock owner record changed while this journal was open, so this
+ * store may no longer write to it. A lapsed heartbeat alone does not transfer
+ * ownership: a live holder revalidates its acquisition token before resuming.
  *
- * A holder whose heartbeat lapses -- a long synchronous section, a paused
- * process, a stalled filesystem -- can have its slot reclaimed while it still
- * believes it holds it. Whatever this store does next must not be an append:
+ * Once the token changes, whatever this store does next must not be an append:
  * the new owner appends at offsets this store still believes are free, and
  * because a frame's sequence is derived from its position, an overwrite of the
  * same width leaves a journal that reopens as intact with the new owner's
@@ -861,7 +860,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   readPayload(frameSequence: bigint): Promise<Uint8Array> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
-      this.assertReady();
+      await this.assertReadyAfterWait();
       const stored = this.records.get(frameSequence);
       if (
         !stored?.segment ||
@@ -940,7 +939,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   ): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
-      this.assertReady();
+      await this.assertReadyAfterWait();
       const acknowledged: Array<[bigint, StoredRecord]> = [];
       for (const entry of this.records.entries()) {
         if (entry[0] > frameSequence) break;
@@ -985,7 +984,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   loadSymbolDictionary(): Promise<readonly string[]> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
-      this.assertReady();
+      await this.assertReadyAfterWait();
       if (this.dictionaryLoadError) throw this.dictionaryLoadError;
       return this.symbols.slice();
     });
@@ -997,7 +996,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   ): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
-      this.assertReady();
+      await this.assertReadyAfterWait();
       if (this.dictionaryLoadError) throw this.dictionaryLoadError;
       if (startId !== this.symbols.length) {
         throw new QwpReplayStoreError(
@@ -1086,7 +1085,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   replaceSymbolDictionary(entries: readonly string[]): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
-      this.assertReady();
+      await this.assertReadyAfterWait();
       validateReplacementDictionary(entries);
       const finalPath = join(this.directory, DICTIONARY_FILE);
       const previousSize = this.dictionaryFileSize;
@@ -1282,7 +1281,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       const capacityGeneration = this.capacityGeneration;
       try {
         await this.enqueue(async () => {
-          this.assertReady();
+          await this.assertReadyAfterWait();
           // A speculative spare is provisioned outside the operation queue.
           // Settle one already in flight so its reservation is counted once,
           // but do not create filesystem state merely to perform a preflight.
@@ -1357,9 +1356,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     record: QwpIngressReplayRecord,
     bytes: EncodedRecord,
   ): Promise<void> {
-    this.assertReady();
     // The owner directory is a reusable pathname. Re-prove its token at the
-    // head of the queued mutation so a delayed heartbeat cannot make a stale
+    // head of the queued mutation so external cleanup cannot make an old
     // writer overwrite a successor's record at the same logical offset.
     await this.assertReadyAfterWait();
     validateFrameSequence(record.frameSequence);
@@ -1773,8 +1771,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.hotSpare = undefined;
     try {
       await spare.handle.close();
-      // The descriptor is ours either way, but the file is not once the slot
-      // has been reclaimed: the successor may have re-created that name.
+      // The descriptor is ours either way, but the file is not once the owner
+      // token changed: a successor may have re-created that name.
       if (!this.ownsDirectory) return;
       await qwpSegmentMaintenanceWorker.unlink(spare.path);
       this.totalBytes -= spare.size;
@@ -2402,16 +2400,14 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   /**
    * Whether this store may still mutate its own directory.
    *
-   * {@link assertReady} fences the public mutators by throwing, but background
-   * maintenance and every teardown step run outside it -- and `close()` is
-   * reached precisely by the terminal path a lost lock triggers. Once the slot
-   * has been reclaimed the pathname belongs to another acquisition, so an
-   * unlink or a manifest rewrite there destroys the live owner's journal
-   * rather than this store's: its segments, its `sf-manifest.bin` (the
-   * dual-slot record can even be overwritten by a lower generation of the same
-   * parity), its `.ack-watermark` -- which resurrects acknowledged frames for
-   * re-send -- or its `.symbol-dict`. These paths therefore skip the directory
-   * and release in-memory state only.
+   * {@link assertReadyAfterWait} fences public operations, but background
+   * maintenance and teardown cannot await it at every conditional cleanup.
+   * Once the owner token changed, the pathname belongs to another acquisition,
+   * so an unlink or manifest rewrite there destroys the live owner's journal
+   * rather than this store's: its segments, `sf-manifest.bin`,
+   * `.ack-watermark`, or `.symbol-dict`. These paths conservatively skip the
+   * directory and release in-memory state only. A merely lapsed timestamp can
+   * also skip optional cleanup; the next owner safely recovers those files.
    *
    * Fail-closed: a store that never acquired the lock, or that released it on
    * a failed load, owns nothing either. Answering "yes" for a missing lock is
@@ -2422,24 +2418,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     return this.slotLock !== undefined && !this.slotLock.lost;
   }
 
-  private assertReady(): void {
-    this.assertOpen();
-    if (!this.loaded) {
-      throw new QwpReplayStoreInvariantError(
-        "QWP store-and-forward journal must be loaded before use",
-      );
-    }
-    // Every mutating path routes through here, so this is the one place that
-    // has to notice the slot was taken over. Writing on would corrupt the new
-    // owner's journal rather than this store's own.
-    if (this.slotLock?.lost) {
-      throw new QwpReplayStoreLockLostError(this.directory);
-    }
-    if (this.checkpointFailure) throw this.checkpointFailure;
-    if (this.maintenanceFailure) throw this.maintenanceFailure;
-  }
-
-  /** Re-proves a lease that may have expired while an async syscall waited. */
+  /** Re-proves ownership before work and after any async syscall waits. */
   private async assertReadyAfterWait(): Promise<void> {
     this.assertOpen();
     if (!this.loaded) {

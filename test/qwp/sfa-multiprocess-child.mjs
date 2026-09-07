@@ -40,17 +40,6 @@ const handlers = {
     await store.close();
     return {};
   },
-  // Acquiring any other lock is what drains this process's pending-release
-  // list, which is the step that used to remove somebody else's directory.
-  async openOther({ otherDirectory }) {
-    const other = new QwpNodeFileReplayStore({
-      directory: otherDirectory,
-      durability: "append",
-    });
-    await other.loadReferences();
-    await other.close();
-    return {};
-  },
 };
 
 process.on("message", (message) => {

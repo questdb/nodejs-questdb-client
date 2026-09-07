@@ -5604,16 +5604,12 @@ describe("QWP Node file replay store", () => {
     await expectOnlyJavaSlotLockMetadata(directory);
   });
 
-  it("refuses to append once its slot lock can no longer be vouched for", async () => {
-    // A holder paused past the staleness window -- a long synchronous section,
-    // a suspended VM, a stalled filesystem -- can have its slot reclaimed while
-    // it still believes it holds it. It used to keep appending: the writes
-    // resolved, and because a frame's sequence comes from its position in the
-    // segment, an overwrite of the same width reopened as a complete journal
-    // with the new owner's frames silently gone.
-    //
-    // Only Date is faked here: the heartbeat is what must *not* get a chance to
-    // run, which is exactly the window the first write after resuming lands in.
+  it("revalidates a lapsed lease before appending", async () => {
+    // A long synchronous section or suspended VM can delay the heartbeat past
+    // its liveness window. The recorded process is still alive, so a contender
+    // cannot adopt the slot and the holder can prove its token before writing.
+    // Only Date is faked: the first operation after the clock jump must perform
+    // that revalidation itself, without waiting for the heartbeat timer.
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,
@@ -5628,11 +5624,18 @@ describe("QWP Node file replay store", () => {
       vi.setSystemTime(Date.now() + 20_000);
       await expect(
         store.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
-      ).rejects.toMatchObject({ name: "QwpReplayStoreLockLostError" });
+      ).resolves.toBeUndefined();
+      await store.close();
     } finally {
       vi.useRealTimers();
     }
-    await store.close().catch(() => undefined);
+
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    await expect(reopened.load()).resolves.toEqual([
+      { frameSequence: 0n, payload: Uint8Array.of(1) },
+      { frameSequence: 1n, payload: Uint8Array.of(2) },
+    ]);
+    await reopened.close();
   });
 
   it("fences an append that loses its slot during segment activation", async () => {
@@ -5672,9 +5675,14 @@ describe("QWP Node file replay store", () => {
     });
     await vi.waitFor(() => expect(syncCalls).toBe(2));
 
-    const longAgo = new Date(Date.now() - 60_000);
-    await utimes(join(directory, ".lock.owner"), longAgo, longAgo);
-    internals.slotLock!.provenAtMs = longAgo.getTime();
+    // Model an operator forcing a handoff after concluding the holder died.
+    // The process is deliberately still alive here so the old in-flight
+    // operation must notice the replacement token before committing state.
+    await rm(join(directory, ".lock.owner"), {
+      recursive: true,
+      force: true,
+    });
+    internals.slotLock!.provenAtMs = Date.now() - 60_000;
     const successor = new QwpNodeFileReplayStore({
       directory,
       maxSegmentBytes: 1,
@@ -5793,13 +5801,10 @@ describe("QWP Node file replay store", () => {
     await store.close();
   });
 
-  it("leaves the directory alone once its slot lock was reclaimed", async () => {
-    // assertReady() fences the public mutators, but background maintenance and
-    // every teardown step ran outside it -- and close() is reached by exactly
-    // the terminal path a lost lock triggers, so losing the slot was what set
-    // the deletions going. They unlinked the successor's segments, its
-    // sf-manifest.bin and its .symbol-dict, and dropped its .ack-watermark,
-    // which resurrects acknowledged frames for re-send.
+  it("leaves the directory alone once its owner token was replaced", async () => {
+    // Public operations fence on the owner token, but background maintenance
+    // and teardown also have to avoid deleting the replacement owner's
+    // segments, manifest, symbol dictionary, or ACK watermark.
     const directory = await trackedDirectory();
     const evicted = new QwpNodeFileReplayStore({ directory });
     await evicted.load();
@@ -5809,9 +5814,8 @@ describe("QWP Node file replay store", () => {
     // watermark, the dictionary, and the parent-anchored orphan pair.
     await evicted.acknowledgeThrough(0n);
     // acknowledgeThrough() schedules segment trimming in the background. Let
-    // that work settle before manufacturing a stale lease: otherwise the test
-    // can make the successor scan a segment that this still-live store is
-    // concurrently removing, which is not the paused-holder scenario below.
+    // that work settle before forcing the token handoff so it cannot race the
+    // successor's recovery for a reason unrelated to the cleanup fence.
     await vi.waitFor(
       async () => {
         expect(evicted.metrics.pendingSegments).toBe(0);
@@ -5820,10 +5824,13 @@ describe("QWP Node file replay store", () => {
       { timeout: 5_000 },
     );
 
-    // Stand in for a holder paused past the staleness window: the slot is
-    // reclaimed while this store still has it open.
-    const longAgo = new Date(Date.now() - 60_000);
-    await utimes(join(directory, ".lock.owner"), longAgo, longAgo);
+    // Model an operator forcing a handoff after concluding the holder died.
+    // The still-live holder must treat the replacement token as conclusive
+    // loss and leave every successor-owned path alone during close.
+    await rm(join(directory, ".lock.owner"), {
+      recursive: true,
+      force: true,
+    });
     const successor = new QwpNodeFileReplayStore({ directory });
     await expect(successor.load()).resolves.toBeDefined();
     const inherited = await successor.loadSymbolDictionary();
@@ -5842,18 +5849,15 @@ describe("QWP Node file replay store", () => {
     const successorDictionary = await readFile(join(directory, ".symbol-dict"));
 
     // The evicted store notices on its next mutating call, then shuts down --
-    // which is the moment it used to start deleting. Only Date is faked, so
-    // the heartbeat cannot run: this is the window a paused holder resumes in.
-    vi.useFakeTimers({ toFake: ["Date"] });
-    try {
-      vi.setSystemTime(Date.now() + 20_000);
-      await expect(
-        evicted.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
-      ).rejects.toMatchObject({ name: "QwpReplayStoreLockLostError" });
-      await evicted.close().catch(() => undefined);
-    } finally {
-      vi.useRealTimers();
-    }
+    // which is the moment it used to start deleting.
+    const evictedLock = (
+      evicted as unknown as { slotLock: QwpNodeAdvisoryLock }
+    ).slotLock;
+    await (evictedLock as unknown as { beat(): Promise<void> }).beat();
+    await expect(
+      evicted.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
+    ).rejects.toMatchObject({ name: "QwpReplayStoreLockLostError" });
+    await evicted.close().catch(() => undefined);
 
     expect(await durableEntries()).toEqual(before);
     expect(await readFile(join(directory, ".symbol-dict"))).toEqual(
@@ -5906,16 +5910,10 @@ describe("QWP Node file replay store", () => {
     await expect(stat(ownerPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("never re-proves a slot lock in place once it has gone stale", async () => {
-    // A holder paused past the staleness window is already `lost` by its own
-    // rule, and a contender is entitled to reclaim its slot the moment the
-    // mtime is that old. The owner-record read and the mtime touch inside a
-    // beat are separate syscalls, so a reclaim landing between them let a
-    // resuming beat stamp the new owner's directory and reset provenAtMs --
-    // clearing the fence and un-fencing a lock this process had already lost.
-    // One beat later the rightful owner saw a drifted mtime and fenced itself
-    // off its own slot. A stale holder recovers by re-entering contention, so
-    // what has to hold is that it never touches the directory in place.
+  it("never re-proves a foreign owner after a stalled heartbeat", async () => {
+    // A lapsed holder may refresh in place only while its acquisition token
+    // still matches. Model external cleanup replacing the owner directory:
+    // the resumed heartbeat must fence permanently without touching it.
     const directory = await trackedDirectory();
     const lock = await QwpNodeAdvisoryLock.acquire(directory);
     const beat = () =>
@@ -5959,12 +5957,9 @@ describe("QWP Node file replay store", () => {
   });
 
   it("fences a heartbeat that touches a successor after token handoff", async () => {
-    // The lease timestamp and owner directory mtime are intentionally separate:
-    // near the staleness boundary a contender can decide the directory is old
-    // while the holder still considers its last proof current. Pause that
-    // holder after its token read, let the contender rename-and-claim, then
-    // resume it at the pathname touch that used to refresh the successor and
-    // falsely re-prove the predecessor.
+    // Pause a heartbeat after its token read, force an external handoff, then
+    // resume it at the pathname touch. The old heartbeat may refresh the
+    // successor's mtime, but the second token check must fence the predecessor.
     const directory = await trackedDirectory();
     const predecessor = new QwpNodeFileReplayStore({ directory });
     await predecessor.load();
@@ -5976,18 +5971,12 @@ describe("QWP Node file replay store", () => {
     type LockInternals = {
       beat(): Promise<void>;
       ownershipState(): Promise<"owned" | "foreign" | "unknown">;
-      ownerMtimeMs: number;
-      provenAtMs: number;
     };
     const predecessorLock = (
       predecessor as unknown as { slotLock: QwpNodeAdvisoryLock }
     ).slotLock;
     const lockInternals = predecessorLock as unknown as LockInternals;
     const ownerPath = join(directory, ".lock.owner");
-    const longAgo = new Date(Date.now() - 60_000);
-    await utimes(ownerPath, longAgo, longAgo);
-    lockInternals.ownerMtimeMs = Math.trunc((await stat(ownerPath)).mtimeMs);
-    lockInternals.provenAtMs = Date.now();
 
     const realOwnershipState =
       lockInternals.ownershipState.bind(predecessorLock);
@@ -6012,6 +6001,7 @@ describe("QWP Node file replay store", () => {
     const staleHeartbeat = lockInternals.beat();
     await ownerWasRead;
 
+    await rm(ownerPath, { recursive: true, force: true });
     const successor = new QwpNodeFileReplayStore({ directory });
     await successor.load();
     await successor.append({
@@ -6076,56 +6066,12 @@ describe("QWP Node file replay store", () => {
     await expectOnlyJavaSlotLockMetadata(directory);
   });
 
-  it("keeps appending after the slot lock recovers from a stall", async () => {
-    const directory = await trackedDirectory();
-    const store = new QwpNodeFileReplayStore({ directory });
-    await store.load();
-    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) });
-
-    const lock = (store as unknown as { slotLock: QwpNodeAdvisoryLock })
-      .slotLock;
-    const beat = () =>
-      (lock as unknown as { beat(): Promise<void> }).beat.call(lock);
-
-    vi.useFakeTimers({ toFake: ["Date"] });
-    try {
-      // The clock stays advanced for the rest of the test: the process resumed
-      // at a later wall-clock time and keeps running there. Handing it back to
-      // real time would clear `lost` on its own, because provenAtMs was
-      // stamped before the jump, and the assertion below would pass with or
-      // without a recovery path.
-      vi.setSystemTime(Date.now() + 20_000);
-      await expect(
-        store.append({ frameSequence: 1n, payload: Uint8Array.of(4, 5, 6) }),
-      ).rejects.toBeInstanceOf(QwpReplayStoreLockLostError);
-
-      await beat();
-
-      // The producer is live again rather than terminal for the rest of the
-      // process, and the frame staged before the stall is still journalled.
-      await store.append({
-        frameSequence: 1n,
-        payload: Uint8Array.of(4, 5, 6),
-      });
-      await store.close();
-    } finally {
-      vi.useRealTimers();
-    }
-
-    const reopened = new QwpNodeFileReplayStore({ directory });
-    await expect(reopened.load()).resolves.toEqual([
-      { frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) },
-      { frameSequence: 1n, payload: Uint8Array.of(4, 5, 6) },
-    ]);
-    await reopened.close();
-  });
-
-  it("reclaims a slot whose owner heartbeat stopped", async () => {
+  it("does not reclaim a live process whose heartbeat timestamp lapsed", async () => {
     const directory = await trackedDirectory();
     const ownerPath = join(directory, ".lock.owner");
     await mkdir(ownerPath);
-    // A live PID with an mtime far beyond the staleness window: only the
-    // stopped heartbeat marks this owner as gone.
+    // A live PID with an old mtime may be suspended inside a write. Reclaiming
+    // it would let that descriptor modify a successor's accepted journal.
     await writeFile(
       join(ownerPath, "owner"),
       JSON.stringify({ pid: process.pid, host: hostname() }),
@@ -6134,12 +6080,10 @@ describe("QWP Node file replay store", () => {
     await utimes(ownerPath, longAgo, longAgo);
 
     const store = new QwpNodeFileReplayStore({ directory });
-    await expect(store.load()).resolves.toEqual([]);
-    expect(await readFile(join(directory, ".lock.pid"), "utf8")).toBe(
-      `${process.pid}\n`,
-    );
-    await store.close();
-    await expectOnlyJavaSlotLockMetadata(directory);
+    await expect(store.load()).rejects.toMatchObject({
+      name: "QwpReplayStoreLockedError",
+      directory,
+    } satisfies Partial<QwpReplayStoreLockedError>);
   });
 
   it("reclaims a slot whose owner process is gone from this host", async () => {
@@ -6165,10 +6109,9 @@ describe("QWP Node file replay store", () => {
     await mkdir(ownerPath);
     // A producer SIGKILLed and restarted into the same PID -- the container
     // shape where the app is always PID 1, or PID wraparound. isPidAlive()
-    // answers "yes" because the successor *is* that PID now, so the fast path
-    // could not reclaim and startup blocked for the full 15s staleness window,
-    // reporting the caller's own PID as the holder while it did. The record's
-    // instance is what separates a predecessor from a live self.
+    // answers "yes" because the successor *is* that PID now. The record's
+    // instance is what separates a dead predecessor from a live self without
+    // treating an old timestamp as proof.
     await writeFile(
       join(ownerPath, "owner"),
       JSON.stringify({
@@ -6198,12 +6141,12 @@ describe("QWP Node file replay store", () => {
     }
   });
 
-  it("leaves a slot owned by a live heartbeat alone", async () => {
+  it("leaves a slot owned by another host alone", async () => {
     const directory = await trackedDirectory();
     const ownerPath = join(directory, ".lock.owner");
     await mkdir(ownerPath);
-    // A PID on another host can never be probed for liveness, so a fresh
-    // heartbeat is the only thing keeping this slot held.
+    // A PID on another host cannot be probed for liveness. No timestamp can
+    // prove it dead, so the slot remains held until an operator intervenes.
     await writeFile(
       join(ownerPath, "owner"),
       JSON.stringify({ pid: 4242, host: `${hostname()}-elsewhere` }),

@@ -24,9 +24,11 @@ const OWNER_DIRECTORY_SUFFIX = ".owner";
 const OWNER_FILE = "owner";
 
 // The kernel released a `flock` the instant a holder died. A directory outlives
-// its creator, so ownership is instead proven by a liveness heartbeat: the
-// holder refreshes the owner directory's mtime, and a contender may reclaim a
-// lock whose mtime has stopped advancing.
+// its creator, so ownership is instead proven by an owner record and heartbeat.
+// A lapsed heartbeat is not permission to reclaim: the holder may merely be
+// suspended inside a filesystem write and can later resume through an already
+// open descriptor. Automatic reclaim therefore requires positive same-host
+// proof that the recorded process is gone.
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const STALE_AFTER_MS = 15_000;
 
@@ -35,7 +37,7 @@ const STALE_AFTER_MS = 15_000;
 // lock, matching Java SlotLock's fail-closed release retry list.
 const pendingReleases = new Set<QwpNodeAdvisoryLock>();
 
-// Distinguishes concurrent steal attempts within one process. A stale owner
+// Distinguishes concurrent steal attempts within one process. A defunct owner
 // directory is renamed aside before removal so that exactly one contender can
 // claim the right to clear it.
 let stealCounter = 0;
@@ -56,8 +58,8 @@ interface OwnerRecord {
    * `pid` alone cannot: a producer that is SIGKILLed and restarted into the
    * same PID -- the container shape where the app is always PID 1, or PID
    * wraparound -- leaves a record whose PID is alive again, as the successor
-   * itself. Absent on records written before this field existed, which fall
-   * back to expiring by mtime.
+   * itself. Absent on records written before this field existed, which remain
+   * fail-closed when their PID is alive.
    */
   readonly instance?: string;
 }
@@ -118,11 +120,11 @@ export class QwpNodeAdvisoryLock {
     readonly pidPath: string,
     private readonly ownerPath: string,
     private ownerMtimeMs: number,
-    private token: string,
+    private readonly token: string,
   ) {
-    // Use the same filesystem timestamp contenders inspect for staleness.
-    // Date.now() can be several milliseconds newer, leaving a boundary where
-    // a contender may reclaim while this holder still considers itself live.
+    // Use the filesystem timestamp refreshed by the heartbeat. Date.now() can
+    // be several milliseconds newer, so retaining the exact stored value keeps
+    // the holder's own liveness boundary stable.
     this.provenAtMs = ownerMtimeMs;
     this.startHeartbeat();
   }
@@ -177,7 +179,7 @@ export class QwpNodeAdvisoryLock {
     // leaves no metadata behind for a slot this process does not own.
     let claimed = await claimOwnerDirectory(ownerPath);
     if (!claimed) {
-      if (await reclaimIfStale(ownerPath)) {
+      if (await reclaimIfDefunct(ownerPath)) {
         claimed = await claimOwnerDirectory(ownerPath);
       }
       if (!claimed) {
@@ -315,28 +317,19 @@ export class QwpNodeAdvisoryLock {
 
   private async beat(): Promise<void> {
     if (this.released || this.compromised) return;
-    // A holder that has already gone stale must not re-prove itself *in place*.
-    // A contender reclaims a slot only once its mtime is stale, which is the
-    // same instant this object's own `lost` rule fires (both use
-    // STALE_AFTER_MS, and provenAtMs is stamped with the mtime). So a beat that
-    // resumes past the window may be racing a reclaim: the owner-record read
-    // and the mtime touch below are separate syscalls, and a reclaim landing
-    // between them would stamp the new owner's directory, whose holder then
-    // sees a drifted mtime and fences itself off its own slot.
-    //
-    // Re-entering contention has no such window, so a stall is recoverable
-    // rather than terminal.
+    // A stale timestamp no longer lets a contender reclaim a live owner: doing
+    // so cannot fence a filesystem call already in progress. Revalidate the
+    // acquisition token before refreshing a holder that resumes after a stall.
     if (this.lost) {
-      await this.reacquireAfterStall();
+      await this.revalidateAfterStall();
       return;
     }
     try {
       const current = await stat(this.ownerPath);
       // The mtime alone cannot separate our directory from a replacement that
-      // landed inside the same clock tick, and a stale predecessor can touch a
-      // successor's pathname after the rename. In both cases the token is the
-      // authority: a matching token means an mtime drift did not transfer
-      // ownership, while a foreign token fences this holder.
+      // landed inside the same clock tick. The token is the authority: a
+      // matching token means an mtime drift did not transfer ownership, while
+      // a foreign token fences this holder.
       const ownership = await this.ownershipState();
       if (ownership === "foreign") {
         this.markCompromised();
@@ -354,10 +347,10 @@ export class QwpNodeAdvisoryLock {
         this.ownerMtimeMs = Math.trunc(current.mtimeMs);
       }
       const touchedMtimeMs = await touchOwnerDirectory(this.ownerPath);
-      // The owner directory is a reusable pathname. A contender can rename
-      // our stale directory after the read above and install its own before
-      // utimes() runs, in which case the touch refreshed the successor. Never
-      // turn that foreign touch into a fresh local lease.
+      // The owner directory is a reusable pathname. External cleanup can
+      // replace it after the read above and before utimes() runs, in which case
+      // the touch refreshed the replacement. Never turn that foreign touch
+      // into a fresh local proof.
       const afterTouch = await this.ownershipState();
       if (afterTouch === "foreign") {
         this.markCompromised();
@@ -383,10 +376,8 @@ export class QwpNodeAdvisoryLock {
   get lost(): boolean {
     if (this.compromised) return true;
     // The heartbeat is a timer, so a section that blocks the event loop past
-    // the staleness window resumes with the flag still unset -- yet by then
-    // any contender was already entitled to reclaim the slot, and the first
-    // write after resuming lands before the timer can run. Ownership this
-    // object cannot still vouch for counts as lost.
+    // the liveness window resumes with the flag still unset. Fence the first
+    // mutation until the owner token has been revalidated and refreshed.
     return Date.now() - this.provenAtMs > STALE_AFTER_MS;
   }
 
@@ -395,17 +386,19 @@ export class QwpNodeAdvisoryLock {
    * outlived the lease. Returning false means the caller must not mutate the
    * guarded resource.
    *
-   * Unlike reading the token and refreshing the timestamp in place, the stale
-   * path re-enters the same rename-and-claim arbitration as a contender. That
-   * closes the gap where a contender could reclaim the old owner directory
-   * between a token read and the caller's next write.
+   * A contender cannot reclaim a live recorded process merely because this
+   * timestamp lapsed. The holder can therefore refresh in place after proving
+   * its acquisition token still matches.
    */
   async ensureOwned(): Promise<boolean> {
     if (this.released || this.compromised) return false;
+    // A live holder cannot be displaced through the lock protocol. Avoid a
+    // filesystem read on every frame/ACK while the heartbeat proof is fresh;
+    // only a lapsed proof needs synchronous revalidation before work resumes.
+    if (!this.lost) return true;
     // A heartbeat may have been suspended between reading the owner token and
     // touching the reusable pathname. Check the token on every mutation fence
-    // instead of trusting a still-fresh timestamp that such a race could have
-    // stamped onto a successor's directory.
+    // once the timestamp has lapsed rather than trusting an old proof.
     const ownership = await this.ownershipState().catch(
       () => "unknown" as const,
     );
@@ -414,7 +407,7 @@ export class QwpNodeAdvisoryLock {
       return false;
     }
     if (ownership === "unknown") return false;
-    if (this.lost) await this.reacquireAfterStall();
+    await this.revalidateAfterStall();
     if (this.lost) return false;
     const confirmed = await this.ownershipState().catch(
       () => "unknown" as const,
@@ -427,7 +420,7 @@ export class QwpNodeAdvisoryLock {
   }
 
   /**
-   * Re-enters contention for a slot this object has already gone stale on.
+   * Revalidates a slot this object has already gone stale on.
    *
    * A stall longer than STALE_AFTER_MS -- a suspended VM or container, a
    * debugger pause, a long event-loop block -- used to fence a producer
@@ -437,13 +430,11 @@ export class QwpNodeAdvisoryLock {
    *
    * The token settles that. While it still matches, nobody adopted the slot,
    * so no other process has replayed or rewritten the journal and the store's
-   * in-memory view of it is still accurate. Re-claiming through the same
-   * primitives a fresh contender uses keeps the guarantee that made staying
-   * out safe: {@link reclaimIfStale} declines a directory that is not stale,
-   * and its rename lets exactly one contender win, so a peer that claimed the
-   * pathname first is never disturbed.
+   * in-memory view of it is still accurate. Contenders only reclaim a recorded
+   * same-host process after proving it is gone, so refreshing a matching live
+   * acquisition cannot race a legitimate takeover.
    */
-  private async reacquireAfterStall(): Promise<void> {
+  private async revalidateAfterStall(): Promise<void> {
     const ownership = await this.ownershipState().catch(
       () => "unknown" as const,
     );
@@ -456,35 +447,19 @@ export class QwpNodeAdvisoryLock {
     if (ownership === "unknown") return;
 
     try {
-      if (!(await reclaimIfStale(this.ownerPath))) return;
-      if (!(await claimOwnerDirectory(this.ownerPath))) return;
-    } catch {
+      const touchedMtimeMs = await touchOwnerDirectory(this.ownerPath);
+      const confirmed = await this.ownershipState();
+      if (confirmed === "foreign") {
+        this.markCompromised();
+        return;
+      }
+      if (confirmed === "unknown") return;
+      this.ownerMtimeMs = touchedMtimeMs;
+      this.provenAtMs = touchedMtimeMs;
+    } catch (error) {
+      if (nodeErrorCode(error) === "ENOENT") this.markCompromised();
       return;
     }
-
-    const token = newOwnerToken();
-    try {
-      await writeFile(
-        join(this.ownerPath, OWNER_FILE),
-        JSON.stringify({
-          pid: process.pid,
-          host: hostname(),
-          token,
-          instance: PROCESS_INSTANCE,
-        }),
-        { encoding: "utf8", mode: 0o600 },
-      );
-      this.ownerMtimeMs = await touchOwnerDirectory(this.ownerPath);
-    } catch {
-      // A directory claimed but never stamped would read as recordless to the
-      // next contender. Drop it so the pathname is clean either way.
-      await removeOwnerDirectory(this.ownerPath).catch(() => undefined);
-      return;
-    }
-    // Only now is this a live acquisition again, under a new token: the old one
-    // must not resurrect a directory this object no longer holds.
-    this.token = token;
-    this.provenAtMs = this.ownerMtimeMs;
   }
 
   private markCompromised(): void {
@@ -527,19 +502,25 @@ async function touchOwnerDirectory(ownerPath: string): Promise<number> {
 }
 
 /**
- * Clears an owner directory whose holder is gone. The directory is renamed
- * aside first: `rename` lets exactly one contender win, so a lock can never be
- * removed twice and handed to two acquirers.
+ * Clears an owner directory whose same-host process is positively gone. The
+ * directory is renamed aside first: `rename` lets exactly one contender win,
+ * so a lock can never be removed twice and handed to two acquirers.
  */
-async function reclaimIfStale(ownerPath: string): Promise<boolean> {
-  let mtimeMs: number;
+async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
   try {
-    mtimeMs = (await stat(ownerPath)).mtimeMs;
-  } catch {
+    await stat(ownerPath);
+  } catch (error) {
     // Already gone; the caller's next mkdir decides the winner.
-    return true;
+    return nodeErrorCode(error) === "ENOENT";
   }
-  if (!(await isStale(ownerPath, mtimeMs))) return false;
+  const owner = await readOwnerFile(ownerPath);
+  if (
+    owner.state !== "present" ||
+    owner.record.host !== hostname() ||
+    (isPidAlive(owner.record.pid) && !isReusedPid(owner.record))
+  ) {
+    return false;
+  }
 
   const abandoned = `${ownerPath}.stale-${process.pid}-${stealCounter++}`;
   try {
@@ -552,41 +533,18 @@ async function reclaimIfStale(ownerPath: string): Promise<boolean> {
   return true;
 }
 
-async function isStale(ownerPath: string, mtimeMs: number): Promise<boolean> {
-  if (Date.now() - mtimeMs > STALE_AFTER_MS) return true;
-  // Fast path for a crash on this host: a heartbeat that can never resume is
-  // stale immediately. A PID is meaningless on another host, so this is only
-  // consulted when the record itself names this host.
-  //
-  // A directory with no readable record expires by mtime alone. It used to
-  // fall back to the `.lock.pid` sidecar, which deliberately outlives its
-  // holder for Java parity and therefore always names a process that has
-  // already exited -- and the fallback stamped that dead PID with the local
-  // hostname, so the host check below could not reject it. Every acquisition
-  // is briefly recordless, between its mkdir and its record write, so a
-  // contender arriving in that window declared a directory that had just been
-  // created stale and took it away from its live owner.
-  const owner = await readOwnerFile(ownerPath);
-  return (
-    owner.state === "present" &&
-    owner.record.host === hostname() &&
-    (!isPidAlive(owner.record.pid) || isReusedPid(owner.record))
-  );
-}
-
 /**
  * Whether a record names a PID that is alive only because this process is now
  * that PID.
  *
  * `isPidAlive` answers "yes" for our own PID, so a producer SIGKILLed and
  * restarted into the same PID -- a container where the app is always PID 1, or
- * PID wraparound -- could not adopt its predecessor's slot through the fast
- * path and waited out the full staleness window, reporting itself as the
- * holder while it did. A record naming this PID that this process did not
- * write can only have come from a predecessor that is gone.
+ * PID wraparound -- could not adopt its predecessor's slot through the
+ * ordinary PID liveness check. A record naming this PID that this process did
+ * not write can only have come from a predecessor that is gone.
  *
- * Records written before `instance` existed return false and keep expiring by
- * mtime, which is the conservative answer.
+ * Records written before `instance` existed return false; an operator must
+ * remove an ambiguous live-PID owner rather than risking concurrent writes.
  */
 function isReusedPid(record: OwnerRecord): boolean {
   return (

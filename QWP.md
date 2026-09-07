@@ -364,9 +364,7 @@ the surviving frames.
 
 The journal takes an exclusive lock when it is loaded and holds it until the sender
 or session closes. A second live Node.js process using the same directory fails with
-`QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents,
-unless the first has stopped heartbeating long enough to be reclaimed — in which case
-it is the first that stops writing, as described under the heartbeat below.
+`QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents.
 Ownership is held by a `.lock.owner` directory created next to the slot: `mkdir` is
 the only exclusive-by-construction filesystem operation available on every supported
 platform without a native addon, so exactly one process can create it. The holder PID
@@ -385,27 +383,25 @@ concurrent access is unsupported, and only between runtimes — two Node.js proc
 still exclude each other correctly.
 
 A kernel lock disappears the instant its holder dies; a directory does not. The holder
-therefore refreshes the owner directory's mtime every 5 seconds, and a contender
-reclaims a slot whose mtime has not advanced for 15 seconds. A contender also reclaims
-immediately when the owner record names a process that no longer exists on the same
-host, which is the common case after a crash. A stale owner directory is renamed aside
-before removal, so two contenders racing to reclaim one slot cannot both win it. Each
-acquisition also writes a token into the owner record and checks it before removing
-anything, so a release can never take away a directory that has since been handed to
-somebody else.
+therefore refreshes the owner directory's mtime every 5 seconds, but a lapsed timestamp
+alone never authorizes takeover: the process may be suspended inside a filesystem
+write and later resume through an open descriptor. A contender reclaims immediately
+only when the owner record names a same-host process that no longer exists (including
+a recorded prior process instance whose PID was reused), which is the common case after
+a crash. Remote-host or otherwise ambiguous owners require an operator to confirm that
+the process is gone and remove `.lock.owner`. A defunct owner directory is renamed
+aside before removal, so two contenders racing to reclaim one slot cannot both win it.
+Each acquisition also writes a token into the owner record and checks it before
+removing anything, so a release can never take away a directory that has since been
+handed to somebody else.
 
 If a holder is paused long enough for its heartbeat to lapse — `SIGSTOP`, a suspended
 VM, a stalled filesystem, or any synchronous section that blocks the event loop for
-more than 15 seconds — its lock can be reclaimed while it still believes it holds it.
-Such a holder stops writing: once it can no longer vouch for its own lock, every
-append, checkpoint and acknowledgement on that journal fails with
-`QwpReplayStoreLockLostError`, and the sender falls back to whatever its durability
-policy does when the journal is unavailable. This is deliberately conservative — the
-holder fails as soon as a contender _could_ have taken the slot, not only once one
-demonstrably has — because the alternative is writing at offsets the new owner now
-owns. A frame's sequence is derived from its position in the segment, so a same-width
-overwrite would otherwise reopen as a complete journal with the new owner's
-acknowledged frames missing and nothing reported.
+more than 15 seconds — contenders continue to refuse the slot while its recorded
+process is alive. The holder fences its first mutation after resuming, revalidates its
+acquisition token, and refreshes the heartbeat before continuing. This conservative
+rule avoids a proof-to-write race: a successor cannot accept a frame while an older
+process still has a writable descriptor for the same journal inode.
 
 New journals use the cross-client SFA persistence layout. Fixed-size
 `sf-<generation>.sfa` files have the Java/Rust 24-byte `SF01` header and

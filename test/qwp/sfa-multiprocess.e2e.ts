@@ -1,12 +1,5 @@
 import { fork, type ChildProcess } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  stat,
-  utimes,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -142,52 +135,6 @@ async function simulateLapsedHeartbeat(directory: string): Promise<void> {
   await utimes(owner, when, when);
 }
 
-// The store's on-disk segment layout, mirrored from
-// packages/nodejs-client/src/qwp-node/file-replay-store.ts. A fixed 24-byte segment header precedes a
-// run of frames, each an 8-byte header -- a CRC32C followed by a uint32
-// little-endian payload length -- then the payload. The rest of the fixed-size
-// file is zero padding, so a frame whose header reads back as all zeroes marks
-// the end of the written frames.
-const SEGMENT_HEADER_SIZE = 24;
-const FRAME_HEADER_SIZE = 8;
-
-/**
- * Tallies the marker bytes across every frame *payload* in the slot's segments.
- *
- * It walks the frame framing rather than scanning the raw file, because the
- * markers are only meaningful inside payloads: the segment header ends in a
- * microsecond wall-clock timestamp and every frame header carries a CRC, and a
- * whole-file byte scan would also count whichever of those framing bytes happen
- * to land on a marker's ASCII code on a given run -- about a 1.5% chance per
- * segment for 'A'/'B' -- turning this durability assertion flaky. Payload bytes
- * are pure marker fill by construction, so counting only them is exact.
- */
-async function markerCounts(
-  directory: string,
-): Promise<Record<string, number>> {
-  const counts: Record<string, number> = {};
-  for (const file of await readdir(directory)) {
-    if (!file.endsWith(".sfa")) continue;
-    const bytes = await readFile(path.join(directory, file));
-    let offset = SEGMENT_HEADER_SIZE;
-    while (offset + FRAME_HEADER_SIZE <= bytes.length) {
-      const payloadLength = bytes.readUInt32LE(offset + 4);
-      if (payloadLength === 0) break; // zero-filled tail: no more frames
-      const start = offset + FRAME_HEADER_SIZE;
-      const end = start + payloadLength;
-      if (end > bytes.length) break;
-      for (let index = start; index < end; index++) {
-        const byte = bytes[index];
-        if (byte < 0x41 || byte > 0x5a) continue;
-        const marker = String.fromCharCode(byte);
-        counts[marker] = (counts[marker] ?? 0) + 1;
-      }
-      offset = end;
-    }
-  }
-  return counts;
-}
-
 describe("QWP store-and-forward across processes", () => {
   it("hands one slot to exactly one of several contending processes", async () => {
     // A contract test, not a regression test: this passes against the code
@@ -256,7 +203,7 @@ describe("QWP store-and-forward across processes", () => {
     expect(opened.recovered).toBe(5);
   }, 60_000);
 
-  it("stops a reclaimed holder from overwriting the new owner's frames", async () => {
+  it("does not reclaim a live holder after its heartbeat timestamp lapses", async () => {
     const directory = await slot();
     const stalled = await track(directory);
     expect((await stalled.send("open")).ok).toBe(true);
@@ -268,64 +215,25 @@ describe("QWP store-and-forward across processes", () => {
 
     await simulateLapsedHeartbeat(directory);
     const successor = await track(directory);
-    expect((await successor.send("open")).ok).toBe(true);
-    for (let sequence = 5; sequence < 10; sequence++) {
-      expect(
-        (await successor.send("append", { sequence, marker: "B" })).ok,
-      ).toBe(true);
-    }
-
-    // The stalled holder needs one heartbeat to see that its directory moved.
-    await new Promise((resolve) => setTimeout(resolve, BEAT_SETTLE_MS));
-
-    const rejected = await stalled.send("append", {
-      sequence: 5,
-      marker: "A",
-    });
-    expect(rejected.ok).toBe(false);
-    expect(rejected.error?.name).toBe("QwpReplayStoreLockLostError");
-
-    // The decisive assertion: the successor's durable bytes are still there.
-    // A frame's sequence comes from its position, so a same-width overwrite
-    // would leave a journal that reopens as complete with these bytes gone.
-    const counts = await markerCounts(directory);
-    expect(counts.B).toBe(5 * 64);
-    expect(counts.A).toBe(5 * 64);
+    const refused = await successor.send("open");
+    expect(refused.ok).toBe(false);
+    expect(refused.error?.name).toBe("QwpReplayStoreLockedError");
   }, 60_000);
 
-  it("does not let a stalled holder's release strip a live lock", async () => {
+  it("hands off normally after a lapsed live holder closes", async () => {
     const directory = await slot();
-    const other = path.join(path.dirname(directory), "other-slot");
-    await mkdir(other, { recursive: true });
-
     const stalled = await track(directory);
     expect((await stalled.send("open")).ok).toBe(true);
 
-    // Reclaim the slot out from under it, then hand it back, so the stalled
-    // holder's own release finds a directory that is no longer its own.
     await simulateLapsedHeartbeat(directory);
     const interloper = await track(directory);
-    expect((await interloper.send("open")).ok).toBe(true);
-    expect((await interloper.send("close")).ok).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, BEAT_SETTLE_MS));
-    await stalled.send("close");
-
-    const owner = await track(directory);
-    expect((await owner.send("open")).ok).toBe(true);
-    const ownerInode = (await stat(path.join(directory, ".lock.owner"))).ino;
-
-    // Acquiring any other lock drains this process's pending-release list.
-    expect(
-      (await stalled.send("openOther", { otherDirectory: other })).ok,
-    ).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    expect((await stat(path.join(directory, ".lock.owner"))).ino).toBe(
-      ownerInode,
-    );
-    const gatecrasher = await track(directory);
-    const refused = await gatecrasher.send("open");
+    const refused = await interloper.send("open");
     expect(refused.ok).toBe(false);
     expect(refused.error?.name).toBe("QwpReplayStoreLockedError");
+
+    expect((await stalled.send("close")).ok).toBe(true);
+    const opened = await interloper.send("open");
+    expect(opened.ok).toBe(true);
+    expect(opened.recovered).toBe(0);
   }, 60_000);
 });
