@@ -46,6 +46,10 @@ export class QwpTableBuffer {
   private readonly columnList: QwpColumnBuffer[] = [];
   private readonly columnsByName = new Map<string, QwpColumnBuffer>();
   private rows = 0;
+  // Columns before this index existed when the current row began. A rollback
+  // must remove later columns even when completed rows were back-filled into
+  // them, because otherwise the aborted row changes the encoded table schema.
+  private rowStartColumnCount = 0;
   // Memoizes the non-null value offset each column's slice starts from, reused
   // while a caller walks the table in ascending `start` slices. See sliceRows().
   private sliceValueOffsets?: {
@@ -134,6 +138,7 @@ export class QwpTableBuffer {
         column.size++;
       }
     }
+    this.rowStartColumnCount = this.columnList.length;
   }
 
   setGeohashPrecision(column: QwpColumnBuffer, precision: number): void {
@@ -184,12 +189,14 @@ export class QwpTableBuffer {
         if (wasNull === false) column.values.pop();
       }
     }
-    for (let index = this.columnList.length - 1; index >= 0; index--) {
+    for (
+      let index = this.columnList.length - 1;
+      index >= this.rowStartColumnCount;
+      index--
+    ) {
       const column = this.columnList[index];
-      if (this.rows === 0 && column.size === 0) {
-        this.columnsByName.delete(qwpColumnNameKey(column.name));
-        this.columnList.splice(index, 1);
-      }
+      this.columnsByName.delete(qwpColumnNameKey(column.name));
+      this.columnList.splice(index, 1);
     }
   }
 
@@ -245,6 +252,7 @@ export class QwpTableBuffer {
       result.columnList.push(sliced);
       result.columnsByName.set(qwpColumnNameKey(sliced.name), sliced);
     }
+    result.rowStartColumnCount = result.columnList.length;
     return result;
   }
 
@@ -287,6 +295,7 @@ export class QwpTableBuffer {
     this.columnList.length = 0;
     this.columnsByName.clear();
     this.rows = 0;
+    this.rowStartColumnCount = 0;
     this.sliceValueOffsets = undefined;
   }
 }

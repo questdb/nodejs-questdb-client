@@ -299,6 +299,31 @@ describe("QWP ingress codec", () => {
     ).toThrow(/column type mismatch/);
   });
 
+  it("removes columns introduced by an aborted row", () => {
+    const table = new QwpTableBuffer("events");
+    table
+      .getOrCreateColumn("kept", QWP_COLUMN_TYPE.LONG)!
+      .values.push(1n);
+    table.nextRow();
+
+    table
+      .getOrCreateColumn("kept", QWP_COLUMN_TYPE.LONG)!
+      .values.push(2n);
+    table
+      .getOrCreateColumn("discarded", QWP_COLUMN_TYPE.VARCHAR)!
+      .values.push("not committed");
+    table.rollbackRow();
+
+    expect(table.rowCount).toBe(1);
+    expect(table.columns.map((column) => column.name)).toEqual(["kept"]);
+    expect(table.columns[0]).toMatchObject({
+      size: 1,
+      nulls: [false],
+      values: [1n],
+    });
+    expect(() => encodeQwpIngressFrame([table])).not.toThrow();
+  });
+
   it("rejects an array cell whose values do not fill its dimensions", () => {
     // The cell is sized and written from values.length while the peer reads the
     // product of the dimension header, so a mismatch encodes a frame whose

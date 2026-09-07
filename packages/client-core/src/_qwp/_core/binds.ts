@@ -476,6 +476,11 @@ export function encodeQwpBinds(setter: QwpBindSetter): QwpEncodedBinds {
     "then" in result &&
     typeof result.then === "function"
   ) {
+    // TypeScript permits Promise-returning functions where a void callback is
+    // expected. Observe a later rejection before reporting the synchronous API
+    // contract violation, otherwise callers can catch this TypeError and still
+    // have the abandoned Promise terminate their process.
+    void Promise.resolve(result).catch(() => undefined);
     throw new TypeError("binds callback must be synchronous");
   }
   return { count: values.count, payload: values.toUint8Array() };

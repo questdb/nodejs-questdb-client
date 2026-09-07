@@ -214,6 +214,26 @@ describe("QWP typed query binds", () => {
     expect(() => reusable.setInt(0, 7)).not.toThrow();
   });
 
+  it("observes a rejected async callback before reporting it as unsupported", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      expect(() =>
+        encodeQwpBinds(async () => {
+          await Promise.resolve();
+          throw new Error("late bind failure");
+        }),
+      ).toThrow(/synchronous/);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("can be reset and enforces the server bind-count cap", () => {
     const binds = new QwpBindValues().setInt(0, 1).reset().setLong(0, 2n);
     expect(binds.count).toBe(1);

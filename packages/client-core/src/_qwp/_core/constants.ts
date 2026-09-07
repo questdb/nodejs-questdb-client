@@ -110,7 +110,7 @@ export const QWP_MAX_TABLE_NAME_LENGTH = 127;
  */
 export const QWP_MAX_IDENTIFIER_BYTES = QWP_MAX_TABLE_NAME_LENGTH * 3;
 export const QWP_MAX_ROWS_PER_TABLE = 1_000_000;
-export const QWP_MAX_SYMBOL_DICTIONARY_SIZE = 1_000_000;
+export const QWP_MAX_SYMBOL_DICTIONARY_SIZE = 2_000_000;
 // No QWP_MAX_ERROR_MESSAGE_LENGTH. Server-supplied error text is bounded by
 // its u16 length field and by the frame that carries it, and by nothing else:
 // the server truncates ingress error text at
