@@ -287,6 +287,43 @@ describe("QWP Node transport", () => {
     }
   });
 
+  it("lets an explicit connect timeout bound the closing handshake too", async () => {
+    // Closing is a handshake like opening, and a peer that accepted the
+    // upgrade and then stopped reading never answers the close frame, so
+    // close() runs to the full closeTimeoutMs default. The pool's own shutdown
+    // deadline does not bound it either: the await that fires terminate() runs
+    // before that deadline is consumed. A connect string can narrow
+    // connect_timeout but has no key for this one, so a caller who asked for a
+    // short budget was held for 15s -- 75x, the shape already fixed for the
+    // upgrade deadline above.
+    const deaf = new Set<Socket>();
+    const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    wss.on("headers", (headers) => headers.push("X-QWP-Version: 1"));
+    wss.on("connection", (_socket, request) => {
+      deaf.add(request.socket);
+      request.socket.pause();
+    });
+    await new Promise<void>((resolve, reject) => {
+      wss.once("listening", resolve);
+      wss.once("error", reject);
+    });
+    const { port } = wss.address() as AddressInfo;
+
+    try {
+      const connection = await connectQwpNodeWebSocket({
+        url: `ws://127.0.0.1:${port}/write/v4`,
+        connectTimeoutMs: 150,
+      });
+      const started = Date.now();
+      await connection.close();
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      // A paused socket never finishes closing, so the server would wait it out.
+      for (const socket of deaf) socket.destroy();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+    }
+  });
+
   it("lets an explicit connect timeout bound the upgrade too", async () => {
     // Opening a connection is two deadlines, and the upgrade runs under the
     // second one. A caller who set only connectTimeoutMs was therefore held

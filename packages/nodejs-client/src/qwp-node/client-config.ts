@@ -133,14 +133,27 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
  * the same reasoning validateUdpUnsupportedOptions() already applies on the
  * ILP side.
  *
- * `lazy_connect`, `target`, `zone`, `failover*`, `drain_orphans` and the
- * store-and-forward keys are deliberately absent: ingress honours all of them.
+ * `lazy_connect`, `target`, `zone`, `drain_orphans` and the store-and-forward
+ * keys are deliberately absent: ingress honours all of them.
+ *
+ * The `failover*` keys are not among those. QWP.md scopes them to egress, and
+ * parseEgressReconnect() is their only reader, so they reach `egressSession`
+ * and nothing else -- the same discarded section `initial_credit` lands in.
+ * Listing them here alongside it was the omission: ingress endpoint sweeping
+ * is unconditional and reads none of them, so a Sender given a cluster string
+ * that tuned or disabled failover applied none of it and said nothing, while
+ * the pool key beside it warned.
  */
 const QWP_CLIENT_ONLY_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "acquire_timeout_ms",
   "buffer_pool_size",
   "compression",
   "compression_level",
+  "failover",
+  "failover_backoff_initial_ms",
+  "failover_backoff_max_ms",
+  "failover_max_attempts",
+  "failover_max_duration_ms",
   "housekeeper_interval_ms",
   "idle_timeout_ms",
   "initial_credit",

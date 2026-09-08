@@ -65,12 +65,31 @@ describe("Sender QWP integration", () => {
     // Ingress-side keys on their own stay silent.
     const quiet: string[] = [];
     const second = await Sender.fromConfig(
-      "ws::addr=localhost:9000;target=primary;zone=eu;failover=off;" +
+      "ws::addr=localhost:9000;target=primary;zone=eu;" +
         "lazy_connect=on;auto_flush_rows=5000;",
       { log: collect(quiet) },
     );
     await second.close();
     expect(quiet).toEqual([]);
+
+    // The failover keys are not among them. They used to ride in the list
+    // above on the premise that ingress honours them, but QWP.md scopes them
+    // to egress and parseEgressReconnect() is their only reader, so a Sender
+    // dropped them with the rest of the egress section -- silently, while the
+    // pool key beside them warned. Ingress endpoint sweeping is unconditional
+    // and reads none of them, so `failover=off` did not disable it either.
+    const failover: string[] = [];
+    const third = await Sender.fromConfig(
+      "ws::addr=a.example:9000,b.example:9000;failover=off;" +
+        "failover_max_attempts=3;auto_flush_rows=5000;",
+      { log: collect(failover) },
+    );
+    await third.close();
+    expect(failover).toEqual([
+      "Sender ignores QWP configuration keys: failover, failover_max_attempts; " +
+        "they configure QWP egress and the connection pools, which only " +
+        "connectQwpNodeClient() builds",
+    ]);
   });
 
   it("applies fail-fast persistent startup from the configuration string", async () => {

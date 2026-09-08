@@ -1549,7 +1549,10 @@ Always close senders and sessions in `finally`. Sender publication plus ACK drai
 bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
 by `closeTimeoutMs`. In Node, `connectTimeoutMs` bounds the transport
 connection and `authTimeoutMs` the authenticated upgrade, the latter inheriting
-the former unless it is set. `sendTimeoutMs`, acknowledgement
+the former unless it is set. `closeTimeoutMs` inherits it too: a peer that accepted the
+upgrade and then stopped answering makes the closing handshake run to its full budget,
+and only `connect_timeout` has a configuration-string key, so an explicit connect budget
+bounds shutdown as well unless `closeTimeoutMs` is set. `sendTimeoutMs`, acknowledgement
 timeouts, and query deadlines cover later lifecycle phases; configure each according
 to the deployment rather than using one very large catch-all value.
 

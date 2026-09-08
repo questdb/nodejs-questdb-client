@@ -185,7 +185,17 @@ export function openQwpWebSocket(
   const authTimeoutMs =
     options.authTimeoutMs ?? options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const sendTimeoutMs = options.sendTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Closing inherits an explicit connect budget for the same reason the
+  // upgrade above does. A caller who narrowed connectTimeoutMs is describing
+  // how long this peer is allowed to take, and a peer that accepted TCP and
+  // then went silent makes close() wait out the whole closing handshake: the
+  // pool's own shutdown deadline does not bound it, because the await that
+  // fires terminate() and releases the socket runs first. A connect string can
+  // set `connect_timeout` but has no key for this one, so without the fallback
+  // a caller who asked for 200ms was held for the 15s default -- the shape
+  // already fixed for authTimeoutMs. Set closeTimeoutMs to decouple them.
+  const closeTimeoutMs =
+    options.closeTimeoutMs ?? options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const messages = new QwpAsyncQueue<Uint8Array>();
   let resolveClosed!: (info: QwpConnectionCloseInfo) => void;
