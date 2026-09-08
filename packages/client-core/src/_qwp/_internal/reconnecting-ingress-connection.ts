@@ -1424,13 +1424,28 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private isRetryableReconnectError(error: unknown): boolean {
-    if (
-      this.backgroundStoreAndForward &&
-      !this.orphanStoreAndForward &&
-      this.hasEverConnected &&
-      isEndpointPolicyFailure(error)
-    ) {
-      return true;
+    if (this.backgroundStoreAndForward && !this.orphanStoreAndForward) {
+      // Once this sender has connected even once, every endpoint policy
+      // failure is retried indefinitely, so a credential can rotate or a
+      // capability can change under a running producer without stranding its
+      // journal.
+      if (this.hasEverConnected && isEndpointPolicyFailure(error)) return true;
+      // Before that, a rejection the whole cluster would repeat -- a bad
+      // credential, an unsupported version -- is the caller's to fix and stays
+      // terminal, which is the documented contract. A rejection the endpoint
+      // scoped to itself is not that: `tryNextEndpoint` is set for exactly the
+      // statuses a healthy peer may still accept, such as the 404 one node
+      // returns mid-deploy, and the orphan drainer already treats those as
+      // transient. Latching the sender terminal on the first of them ended a
+      // producer whose connect() had already resolved and whose first flush()
+      // had already been accepted -- and under the documented `lazy_connect`
+      // default of memory replay, took its buffered frames with it.
+      if (
+        isEndpointPolicyFailure(error) &&
+        !hasClusterWideUpgradeRejection(error)
+      ) {
+        return true;
+      }
     }
     return isRetryableReconnectError(error);
   }
@@ -2710,6 +2725,26 @@ function isEndpointPolicyFailure(error: unknown): boolean {
   return (
     error instanceof QwpFailoverError &&
     error.attempts.some((attempt) => isEndpointPolicyFailure(attempt.error))
+  );
+}
+
+/**
+ * Whether a rejection anywhere in `error` is one every endpoint would repeat.
+ *
+ * `tryNextEndpoint` is the connector's own verdict on that: it is cleared only
+ * for the statuses that describe the cluster rather than the node, so an
+ * upgrade error without it is a configuration fault a peer cannot resolve. A
+ * failover aggregate is cluster-wide as soon as one attempt is, and transport
+ * failures inside it carry no verdict either way -- they are already retryable
+ * on their own account.
+ */
+function hasClusterWideUpgradeRejection(error: unknown): boolean {
+  if (error instanceof QwpUpgradeError) return error.tryNextEndpoint !== true;
+  return (
+    error instanceof QwpFailoverError &&
+    error.attempts.some((attempt) =>
+      hasClusterWideUpgradeRejection(attempt.error),
+    )
   );
 }
 

@@ -16,6 +16,7 @@ import {
 import {
   openQwpWebSocket,
   QwpWebSocketLike,
+  qwpNonRetryable,
   validateQwpWebSocketTimeouts,
 } from "../../client-core/src/_qwp/_internal/websocket-connection";
 import {
@@ -498,8 +499,10 @@ function connectQwpNodeEndpoint(
     clientMaxVersion > QWP_VERSION
   ) {
     return Promise.reject(
-      new RangeError(
-        `maxVersion must be an integer between 1 and ${QWP_VERSION}`,
+      qwpNonRetryable(
+        new RangeError(
+          `maxVersion must be an integer between 1 and ${QWP_VERSION}`,
+        ),
       ),
     );
   }
@@ -512,8 +515,10 @@ function connectQwpNodeEndpoint(
   const userinfo = endpointUserinfo(endpoint);
   if (userinfo) {
     return Promise.reject(
-      new Error(
-        `QWP endpoint URLs must not carry ${userinfo}; pass credentials through the 'authorization' option, or username/password/token on a connect string`,
+      qwpNonRetryable(
+        new Error(
+          `QWP endpoint URLs must not carry ${userinfo}; pass credentials through the 'authorization' option, or username/password/token on a connect string`,
+        ),
       ),
     );
   }
@@ -531,8 +536,10 @@ function connectQwpNodeEndpoint(
   );
   if (options.authorization && headerAuthorization) {
     return Promise.reject(
-      new Error(
-        "an Authorization header cannot be combined with the 'authorization' option; set exactly one of them",
+      qwpNonRetryable(
+        new Error(
+          "an Authorization header cannot be combined with the 'authorization' option; set exactly one of them",
+        ),
       ),
     );
   }

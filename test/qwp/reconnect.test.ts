@@ -82,6 +82,7 @@ import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/a
 import { quarantineQwpNodeReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { QwpReconnectingIngressConnection } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
+import { validateQwpWebSocketTimeouts } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
 import { qwpSegmentMaintenanceWorker } from "../../packages/nodejs-client/src/qwp-node/segment-maintenance-worker";
 import { createQwpEgressFailoverConnectionFactory } from "../../packages/client-core/src/_qwp/_internal/egress-routing";
 import {
@@ -1666,6 +1667,72 @@ describe("QWP ingress reconnect and replay", () => {
     );
     expect(factoryCalls).toBe(1);
     await session.close();
+  });
+
+  it("retries an initial per-endpoint upgrade rejection instead of latching", async () => {
+    // The sibling of the case above, and the line between them is whether the
+    // whole cluster would repeat the rejection. A 404 is the one node mid-
+    // deploy returns while its peers are healthy -- the connector says so by
+    // setting tryNextEndpoint -- so it must not end a producer whose connect()
+    // has already resolved and whose first flush() has already been accepted.
+    // It used to: the retry-forever exemption was gated on having connected
+    // once, so attempt 1 went terminal and, under the documented lazy_connect
+    // default of memory replay, took the buffered frames with it.
+    const replayStore = new TrackingReplayStore();
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        throw new QwpUpgradeError("not found", {
+          kind: QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED,
+          statusCode: 404,
+          retryable: false,
+          tryNextEndpoint: true,
+        });
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 1,
+          maxBackoffMs: 1,
+        },
+        replayStore,
+      },
+    );
+    await vi.waitFor(() => expect(factoryCalls).toBeGreaterThan(3));
+    await session.close();
+  });
+
+  it("fails fast on a configuration fault instead of retrying it", async () => {
+    // Option validation runs inside the per-attempt callback, so the reconnect
+    // loop met a permanently invalid option exactly as it meets a refused
+    // connection: the classifier retries anything carrying no `retryable`
+    // flag, so this burned the whole budget -- five minutes on the shipped
+    // ingress defaults, silently -- and then reported a generic exhaustion
+    // whose cause named the deadline rather than the option.
+    let factoryCalls = 0;
+    await expect(
+      QwpIngressSession.connect(
+        async () => {
+          factoryCalls++;
+          validateQwpWebSocketTimeouts({ connectTimeoutMs: 0 });
+          throw new Error("validation should have rejected this call");
+        },
+        {
+          initialConnectMode: "sync",
+          reconnect: {
+            maxAttempts: 0,
+            maxDurationMs: 2_000,
+            initialBackoffMs: 1,
+            maxBackoffMs: 1,
+          },
+        },
+      ),
+    ).rejects.toThrow(/connectTimeoutMs must be a positive finite number/);
+    expect(factoryCalls).toBe(1);
   });
 
   it("keeps durable-ACK mismatch fail-fast for blocking SF startup", async () => {

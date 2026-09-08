@@ -307,12 +307,16 @@ fail-fast attempt, `"sync"` retries on the caller within the configured reconnec
 budget, and `"async"` returns immediately while
 the background replay loop connects. `Sender.fromConfig()` also accepts
 `initial_connect_retry=off|sync|async` when `qwp.webSocket.storeAndForward` is
-supplied. Initial authentication, upgrade, and capability failures remain terminal.
+supplied. Initial authentication and capability failures remain terminal, as does any
+upgrade rejection the whole cluster would repeat. A rejection scoped to the endpoint
+that returned it — the statuses that keep the sweep walking, `404` among them — is
+retried instead of ending the sender, because a producer under `"async"` has already
+been handed rows by the time the first attempt runs.
 When no mode is explicit, configuring any reconnect duration/backoff key promotes
 the initial connection to `"sync"`, so that budget also governs startup.
-After a foreground persistent sender has connected successfully at least once, the
-same failures are retried indefinitely so credential rotation and rolling capability
-changes cannot strand its journal. The configured reconnect attempt/duration budget
+After a foreground persistent sender has connected successfully at least once, every
+one of these failures is retried indefinitely so credential rotation and rolling
+capability changes cannot strand its journal. The configured reconnect attempt/duration budget
 therefore bounds `"sync"` startup and non-persistent reconnects, not steady-state
 foreground store-and-forward recovery.
 
@@ -964,9 +968,11 @@ Note how this composes with health ranking. A non-orderly close demotes the endp
 it happened on, so a peer that answers `401` can rank ahead of the endpoint that just
 dropped; that sweep then ends without the dropped endpoint being retried at all, and
 the sender stays terminal even after it recovers. Two cases are exempt. A Node
-foreground store-and-forward sender that has already connected once retries these
-failures indefinitely, so a credential can rotate under a running producer without
-losing journaled rows. A browser cannot distinguish them at all, because its upgrade
+foreground store-and-forward sender retries these failures indefinitely once it has
+connected at least once, so a credential can rotate under a running producer without
+losing journaled rows; before that first connection it still retries the statuses
+that keep the sweep walking, and only a cluster-wide verdict such as `401` is
+terminal. A browser cannot distinguish them at all, because its upgrade
 error carries no status; browser authentication failures surface from the REST
 session bootstrap instead.
 

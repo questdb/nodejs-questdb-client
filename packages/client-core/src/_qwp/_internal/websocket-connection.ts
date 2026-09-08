@@ -97,6 +97,24 @@ const WEBSOCKET_CLOSED = 3;
 const BUFFERED_AMOUNT_POLL_MS = 4;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+/**
+ * Marks a client-side configuration fault as never worth retrying.
+ *
+ * These are raised inside the per-attempt connection callback, so the reconnect
+ * loop meets them exactly as it meets a refused connection. Its classifier
+ * reads the structural `retryable` flag and retries anything that carries
+ * none, so a permanently invalid option was retried for the whole budget --
+ * five minutes and ~125 attempts on the shipped ingress defaults, unbounded
+ * under `lazy_connect`, and silently, since the loop logs nothing -- and then
+ * surfaced as a generic exhaustion whose cause named the elapsed deadline
+ * rather than the option. Retrying cannot fix an option, so these say so.
+ */
+export function qwpNonRetryable<E extends Error>(
+  error: E,
+): E & { readonly retryable: false } {
+  return Object.assign(error, { retryable: false as const });
+}
+
 export function validateQwpWebSocketTimeouts(options: {
   connectTimeoutMs?: number;
   authTimeoutMs?: number;
@@ -110,7 +128,9 @@ export function validateQwpWebSocketTimeouts(options: {
     ["closeTimeoutMs", options.closeTimeoutMs],
   ] as const) {
     if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
-      throw new RangeError(`${name} must be a positive finite number`);
+      throw qwpNonRetryable(
+        new RangeError(`${name} must be a positive finite number`),
+      );
     }
   }
 }
