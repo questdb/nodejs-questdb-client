@@ -613,6 +613,15 @@ export interface QwpBinaryConnection {
   /** @internal Physical delivery metrics exposed by replaying transports. */
   getIngressMetrics?(): QwpIngressTransportMetrics;
 
+  /**
+   * @internal Published watermark alone, for the flush path.
+   *
+   * Transports that expose this must keep it consistent with
+   * {@link getIngressMetrics}'s `publishedFrameSequence`; callers fall back to
+   * the full snapshot when it is absent.
+   */
+  getPublishedFrameSequence?(): bigint;
+
   /** @internal Resolves a session sequence to its stable replay FSN. */
   getIngressFrameSequence?(clientSequence: bigint): bigint | undefined;
 

@@ -81,6 +81,7 @@ import {
 import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
 import { quarantineQwpNodeReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
+import { QwpReconnectingIngressConnection } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { qwpSegmentMaintenanceWorker } from "../../packages/nodejs-client/src/qwp-node/segment-maintenance-worker";
 import { createQwpEgressFailoverConnectionFactory } from "../../packages/client-core/src/_qwp/_internal/egress-routing";
 import {
@@ -754,6 +755,102 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("keeps publish cost off the pending-replay backlog", async () => {
+    // getIngressMetrics() summed every pending frame, and the flush path read
+    // it several times per frame -- once per publish through emitProgress even
+    // with no observer, and again per publishedFrameSequence read. That made a
+    // publish O(backlog) and an outage O(n^2). Nothing here may scale with the
+    // number of frames already waiting.
+    const connection = new FakeConnection("primary");
+    const snapshots = vi.spyOn(
+      QwpReconnectingIngressConnection.prototype,
+      "getIngressMetrics",
+    );
+    const session = await QwpIngressSession.connect(async () => connection, {
+      memoryReplayMaxBytes: 1024 * 1024,
+    });
+
+    // FakeConnection answers nothing unless told to, so every frame stays
+    // pending and the backlog grows across the publishes below.
+    const payload = Uint8Array.of(1, 2, 3, 4);
+    snapshots.mockClear();
+    for (let i = 0; i < 64; i++) await session.publishFrame(payload);
+
+    // No onProgress observer is configured, so publishing must not build a
+    // snapshot at all. It used to build one per frame, each scanning the whole
+    // backlog, because `metrics` was an argument evaluated before the
+    // dispatcher could early-return.
+    expect(snapshots).not.toHaveBeenCalled();
+
+    // The incrementally maintained counter still reports what the scan did.
+    expect(session.metrics).toMatchObject({
+      pendingReplayFrames: 64,
+      pendingReplayBytes: 64 * payload.byteLength,
+    });
+
+    snapshots.mockRestore();
+    await session.close();
+  });
+
+  it("keeps sender flushes off the pending-replay backlog", async () => {
+    // flushNow() reads publishedFrameSequence several times per flush. That
+    // getter went through getIngressMetrics(), so each read froze a 25-field
+    // snapshot after scanning every pending frame.
+    const connection = new FakeConnection("primary");
+    const snapshots = vi.spyOn(
+      QwpReconnectingIngressConnection.prototype,
+      "getIngressMetrics",
+    );
+    const session = await QwpIngressSession.connect(async () => connection, {
+      memoryReplayMaxBytes: 1024 * 1024,
+    });
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      // The fake endpoint never acknowledges, so close() must not sit out its
+      // full drain budget waiting for ACKs this test deliberately withholds.
+      closeFlushTimeoutMs: 10,
+    });
+
+    snapshots.mockClear();
+    for (let i = 0; i < 32; i++) {
+      await sender.table("events").longColumn("value", BigInt(i)).atNow();
+      await sender.flush();
+    }
+    expect(connection.sent.length).toBeGreaterThan(0);
+    expect(snapshots).not.toHaveBeenCalled();
+
+    snapshots.mockRestore();
+    await sender.close().catch(() => undefined);
+    await session.close();
+  });
+
+  it("counts pending replay bytes down again as ACKs arrive", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      memoryReplayMaxBytes: 1024 * 1024,
+    });
+
+    const payload = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8);
+    for (let i = 0; i < 5; i++) await session.publishFrame(payload);
+    expect(session.metrics).toMatchObject({
+      pendingReplayFrames: 5,
+      pendingReplayBytes: 5 * payload.byteLength,
+    });
+
+    // ACKs are cumulative: acknowledging frame 2 retires the first three.
+    connection.receive(ingressResponse(QWP_STATUS.OK, 2n));
+    await vi.waitFor(() => expect(session.metrics.pendingReplayFrames).toBe(2));
+    // A drained prefix must debit the counter, not leave a residue that the
+    // old full scan would have recomputed away.
+    expect(session.metrics.pendingReplayBytes).toBe(2 * payload.byteLength);
+
+    connection.receive(ingressResponse(QWP_STATUS.OK, 4n));
+    await vi.waitFor(() => expect(session.metrics.pendingReplayFrames).toBe(0));
+    expect(session.metrics.pendingReplayBytes).toBe(0);
+
+    await session.close();
+  });
+
   it("waits for a late reconnect candidate before close resolves", async () => {
     const first = new FakeConnection("primary");
     const late = new FakeConnection("secondary");

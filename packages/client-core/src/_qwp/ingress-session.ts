@@ -719,7 +719,10 @@ export class QwpIngressSession {
 
   /** Highest stable frame sequence published by this session/transport. */
   get publishedFrameSequence(): bigint {
+    // Read through the narrow accessor when the transport has one: this getter
+    // runs several times per flush, and the full snapshot is O(backlog).
     return (
+      this.connection.getPublishedFrameSequence?.() ??
       this.connection.getIngressMetrics?.().publishedFrameSequence ??
       this.nextSequence - 1n
     );
@@ -1584,7 +1587,12 @@ export class QwpIngressSession {
     sequence?: bigint,
     response?: QwpIngressResponse,
   ): void {
-    this.dispatchProgressCallback(this.options.onProgress, {
+    // The guard has to come first. `metrics` is an argument, so it was built
+    // before dispatchProgressCallback could early-return on a missing
+    // observer -- a metrics snapshot per published frame that nobody read.
+    const callback = this.options.onProgress;
+    if (!callback || !this.progressDispatcher) return;
+    this.dispatchProgressCallback(callback, {
       kind,
       timestampMs: Date.now(),
       sequence,

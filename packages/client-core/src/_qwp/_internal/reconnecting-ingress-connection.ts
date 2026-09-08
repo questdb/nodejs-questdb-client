@@ -506,6 +506,14 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
 export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly messagesQueue = new QwpAsyncQueue<Uint8Array>();
   private readonly frames = new Map<bigint, ReplayFrame>();
+  // Maintained alongside `frames` rather than summed on demand. This is
+  // observability-only, but getIngressMetrics() sits on the flush path -- three
+  // times per flush through publishedFrameSequence, plus once per published
+  // frame through emitProgress -- so summing it made each flush O(backlog) and
+  // an outage O(n^2): 13.4k flush/s at 8k pending frames fell to 0.7k at 70k.
+  // payloadLength is readonly and every frame is inserted under a fresh
+  // sequence, so the counter cannot drift from what the scan reported.
+  private pendingReplayBytes = 0;
   private readonly durableWatermarks = new Map<string, bigint>();
   private readonly symbolDictionary: string[];
   private readonly store: QwpIngressReplayStore;
@@ -682,7 +690,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         ackDelivered: true,
         transmitted: true,
       };
-      this.frames.set(frame.frameSequence, frame);
+      this.trackFrame(frame);
       previous = frame.frameSequence;
     }
     if (records.length > 0) {
@@ -906,11 +914,18 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return this.deltaSymbolDictionaryEnabled;
   }
 
+  /**
+   * The published watermark on its own, without building a metrics snapshot.
+   *
+   * Callers on the flush path want this one field; going through
+   * getIngressMetrics() for it froze a 25-field object per read.
+   */
+  getPublishedFrameSequence(): bigint {
+    return this.publishedFrameSequence;
+  }
+
   getIngressMetrics(): QwpIngressTransportMetrics {
-    let pendingReplayBytes = 0;
-    for (const frame of this.frames.values()) {
-      pendingReplayBytes += frame.payloadLength;
-    }
+    const pendingReplayBytes = this.pendingReplayBytes;
     const memoryMetrics =
       this.store instanceof QwpMemoryReplayStore
         ? this.store.metrics
@@ -1017,7 +1032,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       });
       this.nextFrameSequence = frameSequence + 1n;
       frame.frameSequence = frameSequence;
-      this.frames.set(frame.frameSequence, frame);
+      this.trackFrame(frame);
       this.publishedFrameSequence = frame.frameSequence;
       if (this.backgroundStoreAndForward) {
         if (this.lazyReplayStore) frame.payload = undefined;
@@ -1982,10 +1997,17 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
   }
 
+  /** Inserts a frame and charges its bytes to the pending-backlog counter. */
+  private trackFrame(frame: ReplayFrame): void {
+    this.frames.set(frame.frameSequence, frame);
+    this.pendingReplayBytes += frame.payloadLength;
+  }
+
   private removeFramesThrough(frameSequence: bigint): void {
-    for (const sequence of this.frames.keys()) {
+    for (const [sequence, frame] of this.frames) {
       if (sequence > frameSequence) break;
       this.frames.delete(sequence);
+      this.pendingReplayBytes -= frame.payloadLength;
     }
   }
 
@@ -2358,6 +2380,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private releaseMemoryReplayReferences(): void {
     if (!(this.store instanceof QwpMemoryReplayStore)) return;
     this.frames.clear();
+    this.pendingReplayBytes = 0;
     this.wireFrames = [];
     this.wireFramesBase = 0;
     this.symbolDictionary.length = 0;
