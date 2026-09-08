@@ -11,10 +11,20 @@ export interface QwpNotificationDispatcherMetrics {
 /**
  * Browser-safe, bounded callback mailbox.
  *
- * One notification is delivered per event-loop turn so protocol work already
- * queued by the WebSocket is not performed inside user callback stacks. When
- * the inbox fills, the oldest pending notification is discarded and the most
- * recent state is retained, matching the Java QWP dispatchers.
+ * One notification is delivered at a time, and never in the same event-loop
+ * turn as the protocol work that produced it, so nothing already queued by the
+ * WebSocket runs inside a user callback stack. When the inbox fills, the oldest
+ * pending notification is discarded and the most recent state is retained,
+ * matching the Java QWP dispatchers.
+ *
+ * "One at a time" covers an `async` handler: the next notification waits for
+ * the returned promise to settle. Clearing the in-flight flag as soon as the
+ * synchronous prefix returned meant an async observer was re-entered once per
+ * turn regardless, so a reconnect storm ran an unbounded number of copies of it
+ * concurrently -- the queue never held more than one entry, so `capacity`
+ * bounded nothing and `dropped` stayed zero however far behind the observer
+ * fell. Slow observers now apply backpressure to the inbox and lose the oldest
+ * notifications, which is what the bound is for.
  */
 export class QwpNotificationDispatcher<T> {
   private readonly queue: T[] = [];
@@ -94,7 +104,12 @@ export class QwpNotificationDispatcher<T> {
       this.closeTimer = undefined;
       this.dropped += this.queue.length;
       this.queue.length = 0;
-      if (!this.dispatching) this.finishClose();
+      // A handler still in flight at the deadline is abandoned rather than
+      // awaited. Now that an async observer holds the dispatch open until it
+      // settles, waiting for it here would let one that never settles hold
+      // close() open forever; the drain is best-effort and bounded by
+      // drainDeadlineMs.
+      this.finishClose();
     }, drainDeadlineMs);
     return this.closePromise;
   }
@@ -119,14 +134,30 @@ export class QwpNotificationDispatcher<T> {
     }
     this.dispatching = true;
     this.delivered++;
+    let pending: PromiseLike<unknown> | undefined;
     try {
       const result = this.handler(notification);
-      if (isPromiseLike(result)) void result.then(undefined, () => undefined);
+      if (isPromiseLike(result)) pending = result;
     } catch {
       // Observability callbacks never participate in protocol progress.
-    } finally {
-      this.dispatching = false;
     }
+    if (!pending) {
+      this.finishDispatch();
+      return;
+    }
+    // Both arms settle the dispatch; a rejected observer is contained exactly
+    // like a synchronous throw.
+    pending.then(
+      () => this.finishDispatch(),
+      () => this.finishDispatch(),
+    );
+  }
+
+  private finishDispatch(): void {
+    this.dispatching = false;
+    // close() abandoned this handler at its drain deadline and has already
+    // settled; there is nothing left to schedule.
+    if (this.closed) return;
     if (this.queue.length > 0) {
       this.schedule();
     } else if (this.closing) {

@@ -6,6 +6,7 @@ import {
   connectQwpBrowserIngress,
   connectQwpBrowserWebSocket,
   createQwpBrowserClient,
+  createQwpBrowserConnectionFactory,
   createQwpBrowserSender,
   QwpBrowserSessionBootstrapError,
   QwpWebSocketLike,
@@ -2905,6 +2906,38 @@ describe("QwpIngressSession", () => {
       await session.close();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("observes the first-message promise while nothing is iterating it", async () => {
+    // With ingressNegotiationTimeoutMs: 0 the Promise.race that would have
+    // subscribed to iterator.next() is never built, and nothing else does
+    // until the returned connection's messages are first iterated -- role and
+    // zone checks, replay, then installing the pump all sit in between. A
+    // transport error in that window rejected an unobserved promise, which is
+    // an unhandled rejection in the browser and a process exit under Node's
+    // default.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const socket = new FakeWebSocket();
+      const factory = createQwpBrowserConnectionFactory({
+        url: "ws://localhost:9000/write/v4",
+        ingressNegotiationTimeoutMs: 0,
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      const connecting = factory();
+      socket.open();
+      const connection = await connecting;
+      expect(connection.handshake.qwpVersion).toBe(1);
+      // Nobody is iterating connection.messages yet.
+      socket.error();
+      for (let turn = 0; turn < 20; turn++) await new Promise(setImmediate);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
     }
   });
 

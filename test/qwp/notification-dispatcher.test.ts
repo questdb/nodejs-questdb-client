@@ -118,4 +118,47 @@ describe("QwpNotificationDispatcher", () => {
     expect(dispatcher.offer(3)).toBe(false);
     expect(dispatcher.metrics.closed).toBe(true);
   });
+
+  it("runs an async observer one notification at a time", async () => {
+    // Clearing the in-flight flag when the synchronous prefix returned meant
+    // an async observer was re-entered once per event-loop turn however far
+    // behind it fell: the queue never held more than one entry, so `capacity`
+    // bounded nothing and `dropped` stayed zero. The bound only means
+    // something if a slow observer applies backpressure to the inbox.
+    let live = 0;
+    let peak = 0;
+    const release: (() => void)[] = [];
+    const dispatcher = new QwpNotificationDispatcher<number>(async () => {
+      live++;
+      peak = Math.max(peak, live);
+      await new Promise<void>((resolve) => release.push(resolve));
+      live--;
+    }, 4);
+
+    for (let index = 0; index < 12; index++) dispatcher.offer(index);
+    await vi.waitFor(() => expect(live).toBe(1));
+    // Give the scheduler several turns to re-enter the handler if it would.
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(peak).toBe(1);
+    expect(dispatcher.metrics).toMatchObject({ delivered: 1, dropped: 8 });
+    for (const resolve of release.splice(0)) resolve();
+    await dispatcher.close();
+  });
+
+  it("does not let an unsettled observer hold close() open", async () => {
+    // The drain is best-effort and bounded by drainDeadlineMs. Serialising on
+    // the handler's promise must not turn an observer that never settles into
+    // a close() that never resolves.
+    const dispatcher = new QwpNotificationDispatcher<number>(
+      () => new Promise<void>(() => undefined),
+      4,
+    );
+    dispatcher.offer(1);
+    await vi.waitFor(() => expect(dispatcher.metrics.delivered).toBe(1));
+
+    await expect(dispatcher.close(25)).resolves.toBeUndefined();
+    expect(dispatcher.metrics.closed).toBe(true);
+  });
 });

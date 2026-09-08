@@ -642,6 +642,14 @@ async function applyQwpBrowserIngressHandshake(
 ): Promise<QwpBinaryConnection> {
   const iterator = connection.messages[Symbol.asyncIterator]();
   const pendingFirst = iterator.next();
+  // Nothing consumes this until the generator below is first iterated, and on
+  // the timeoutMs === 0 path the Promise.race that would have subscribed to it
+  // is never built. That window is real -- role and zone checks, replay, then
+  // installing the pump -- and a transport error in it rejects this promise
+  // with no subscriber, which surfaces as an unhandled rejection. Attaching a
+  // handler marks it observed without consuming it: whoever awaits
+  // `pendingResult` still receives the same value or rejection.
+  void pendingFirst.then(undefined, () => undefined);
   const timeout = Symbol("QWP browser ingress negotiation timeout");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const outcome =
