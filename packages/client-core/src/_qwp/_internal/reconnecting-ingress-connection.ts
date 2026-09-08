@@ -1379,14 +1379,20 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
     this.durableAckMismatchAttempts++;
     const episodeMs = Math.max(0, now - this.durableAckMismatchFirstMs);
+    // Both bounds, like the capability-gap episode above. As a disjunction the
+    // fixed 16-attempt cap always fired first -- roughly 26s at the default
+    // backoff -- so the configured duration ceiling, 300s by default, could
+    // never bind and a brief capability gap during a rolling restart
+    // quarantined an orphan slot's journalled rows behind `.failed`. The
+    // attempt cap is not configurable, so it must not be the sole trigger.
     const durationExhausted =
-      this.orphanDurableAckMismatchMaxDurationMs > 0 &&
+      this.orphanDurableAckMismatchMaxDurationMs <= 0 ||
       episodeMs >= this.orphanDurableAckMismatchMaxDurationMs;
     const exhausted =
       this.orphanStoreAndForward &&
-      (this.durableAckMismatchAttempts >=
-        MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS ||
-        durationExhausted);
+      this.durableAckMismatchAttempts >=
+        MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS &&
+      durationExhausted;
     if (exhausted) {
       const persistent = new QwpDurableAckPersistentFailureError(
         this.durableAckMismatchAttempts,

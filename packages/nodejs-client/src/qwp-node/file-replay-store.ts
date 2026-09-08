@@ -184,6 +184,10 @@ export interface QwpNodeFileReplayStoreOptions {
    * Behavior when maxBytes is exhausted. `error` fails immediately; `wait`
    * pauses the append until ACK trimming frees space or its deadline expires.
    * Defaults to `error` for backwards compatibility.
+   *
+   * This decides journal exhaustion only. A transient retryable fault parks
+   * until {@link appendDeadlineMs} under either policy, so the only errors an
+   * append surfaces are exhaustion and that deadline.
    */
   backpressurePolicy?: QwpSfBackpressurePolicy;
   /** Per-append capacity or retryable store-fault deadline. Defaults to 30 seconds. */
@@ -1280,7 +1284,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         if (!(error instanceof QwpReplayStoreError) || !error.retryable) {
           throw error;
         }
-        if (this.backpressurePolicy === QWP_SF_BACKPRESSURE_POLICY.ERROR) {
+        if (failsFastUnderErrorPolicy(this.backpressurePolicy, error)) {
           throw error;
         }
         const requiredBytes =
@@ -1357,7 +1361,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         if (!(error instanceof QwpReplayStoreError) || !error.retryable) {
           throw error;
         }
-        if (this.backpressurePolicy === QWP_SF_BACKPRESSURE_POLICY.ERROR) {
+        if (failsFastUnderErrorPolicy(this.backpressurePolicy, error)) {
           throw error;
         }
         const requiredBytes =
@@ -3582,6 +3586,31 @@ async function syncDirectory(directory: string): Promise<void> {
   } finally {
     await handle?.close();
   }
+}
+
+/**
+ * Whether `error` means this particular fault fails the caller immediately.
+ *
+ * `error` is the journal-exhaustion policy: it "fails immediately" where
+ * `wait` would park until ACK trimming frees space. Applying it to the whole
+ * retryable class also failed a caller's flush() on a transient fault the
+ * journal absorbs a moment later -- a provisioning or checkpoint hiccup --
+ * which is neither journal exhaustion nor an append deadline, the only two
+ * errors an sf_dir producer should ever see. It also split the two
+ * configuration paths, since connect strings pin `wait` while the typed
+ * storeAndForward object inherits this default.
+ *
+ * So the policy decides capacity only; every other retryable fault parks
+ * until appendDeadlineMs under either policy.
+ */
+function failsFastUnderErrorPolicy(
+  policy: QwpSfBackpressurePolicy,
+  error: QwpReplayStoreError,
+): boolean {
+  return (
+    policy === QWP_SF_BACKPRESSURE_POLICY.ERROR &&
+    error instanceof QwpReplayStoreFullError
+  );
 }
 
 function validateDurability(value: string): QwpSfDurability {

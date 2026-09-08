@@ -1878,7 +1878,12 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
-  it("bounds an orphan durable-ACK mismatch episode by duration", async () => {
+  it("holds an orphan durable-ACK episode open for its whole window", async () => {
+    // The attempt cap and the duration window are both required, exactly as
+    // for a capability-gap episode. As alternatives the fixed 16-attempt cap
+    // always won -- about 26s at the default backoff -- so the window could
+    // never bind and a brief gap during a rolling restart quarantined an
+    // orphan slot. The cap is not configurable, so it must not act alone.
     const events: QwpReconnectEvent[] = [];
     let factoryCalls = 0;
     const session = await QwpIngressSession.connect(
@@ -1891,7 +1896,8 @@ describe("QWP ingress reconnect and replay", () => {
         backgroundStoreAndForward: true,
         initialConnectMode: "async",
         orphanStoreAndForward: true,
-        orphanDurableAckMismatchMaxDurationMs: 1,
+        // 16 attempts at ~5ms each land well inside this window.
+        orphanDurableAckMismatchMaxDurationMs: 400,
         reconnect: {
           initialBackoffMs: 0,
           maxBackoffMs: 0,
@@ -1900,6 +1906,16 @@ describe("QWP ingress reconnect and replay", () => {
         replayStore: new TrackingReplayStore(),
       },
     );
+
+    // Reaching the attempt cap alone must not escalate.
+    await vi.waitFor(() => expect(factoryCalls).toBeGreaterThan(16));
+    expect(
+      events.some(
+        (event) =>
+          event.kind ===
+          QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+      ),
+    ).toBe(false);
 
     await session.closed;
     await vi.waitFor(() =>
@@ -1911,8 +1927,8 @@ describe("QWP ingress reconnect and replay", () => {
         ),
       ).toHaveLength(1),
     );
-    expect(factoryCalls).toBeGreaterThanOrEqual(2);
-    expect(factoryCalls).toBeLessThan(16);
+    // Escalation waited for the window, so it took more than the cap's tries.
+    expect(factoryCalls).toBeGreaterThan(16);
     expect(session.metrics.lastError).toMatchObject({
       name: "QwpDurableAckPersistentFailureError",
       attempts: factoryCalls,
@@ -6708,6 +6724,73 @@ describe("QWP Node file replay store", () => {
     await store.close();
   }, 10_000);
 
+  it("waits out a transient fault under the default backpressure policy too", async () => {
+    // `error` is the journal-exhaustion policy, and it is the default the
+    // typed storeAndForward object inherits while connect strings pin `wait`.
+    // Applied to the whole retryable class it rejected the caller's append on
+    // a transient provisioning fault the journal absorbs a moment later --
+    // neither journal exhaustion nor an append deadline, the only two errors
+    // an sf_dir producer should see.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+      // No backpressurePolicy: this is the `error` default under test.
+      appendDeadlineMs: 3_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    const internals = store as unknown as { hotSpare?: unknown };
+    await vi.waitFor(() => expect(internals.hotSpare).toBeDefined());
+    const transient = Object.assign(new Error("EACCES: permission denied"), {
+      code: "EACCES",
+    });
+    const provision = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "provision")
+      .mockRejectedValueOnce(transient)
+      .mockRejectedValueOnce(transient);
+
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+    await vi.waitFor(() => expect(provision).toHaveBeenCalledTimes(1));
+    await expect(
+      store.append({ frameSequence: 2n, payload: Uint8Array.of(3) }),
+    ).resolves.toBeUndefined();
+    expect(store.metrics).toMatchObject({
+      pendingRecords: 3,
+      totalBackpressureStalls: 1,
+      totalAppendTimeouts: 0,
+    });
+
+    provision.mockRestore();
+    await store.close();
+  }, 10_000);
+
+  it("still fails an exhausted journal fast under the default policy", async () => {
+    // The other half of the contract: `error` must keep failing immediately on
+    // capacity, which is the backwards-compatible behaviour it documents.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 66,
+      maxSegmentBytes: 1,
+      // No backpressurePolicy: the `error` default must still fail fast here.
+      appendDeadlineMs: 30_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+
+    const started = Date.now();
+    await expect(
+      store.append({ frameSequence: 2n, payload: Uint8Array.of(3) }),
+    ).rejects.toBeInstanceOf(QwpReplayStoreFullError);
+    // Immediately, not after the 30s deadline a `wait` journal would burn.
+    expect(Date.now() - started).toBeLessThan(5_000);
+
+    await store.close();
+  });
+
   it("does not let a wall-clock step expire a parked append", async () => {
     // monotonic-clock.ts names append deadlines as one of the three budgets it
     // exists for, and the in-memory store measures the identical deadline that
@@ -6910,8 +6993,15 @@ describe("QWP Node file replay store", () => {
     // liveness window that used to surface as QwpReplayStoreLockLostError --
     // retryable: false, and claiming a takeover that never happened -- which
     // terminated the ingress session for a fault that heals on its own.
+    // Classified retryable, the append parks on it and heals; classified as a
+    // takeover it would reject the producer outright. Parking is what proves
+    // the classification, since only exhaustion and the append deadline are
+    // allowed to surface.
     const directory = await trackedDirectory();
-    const store = new QwpNodeFileReplayStore({ directory });
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      appendDeadlineMs: 10_000,
+    });
     await store.load();
     await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
 
@@ -6930,22 +7020,26 @@ describe("QWP Node file replay store", () => {
     };
     internals.slotLock!.provenAtMs = Date.now() - 60_000;
 
-    await expect(
-      store.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
-    ).rejects.toMatchObject({
-      name: "QwpReplayStoreLockUnprovableError",
-      retryable: true,
+    const parked = store.append({
+      frameSequence: 1n,
+      payload: Uint8Array.of(2),
     });
+    // A takeover would have rejected here instead of stalling.
+    await vi.waitFor(() =>
+      expect(store.metrics.totalBackpressureStalls).toBeGreaterThanOrEqual(1),
+    );
 
-    // The fault clears and the store is usable again, so nothing was lost.
+    // The fault clears and the parked append completes, so nothing was lost.
     await rm(recordPath, { recursive: true });
     await writeFile(recordPath, record);
     await utimes(ownerPath, untouched.atime, untouched.mtime);
-    await expect(
-      store.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
-    ).resolves.toBeUndefined();
+    await expect(parked).resolves.toBeUndefined();
+    expect(store.metrics).toMatchObject({
+      pendingRecords: 2,
+      totalAppendTimeouts: 0,
+    });
     await store.close();
-  });
+  }, 15_000);
 
   it("waits for ACK trimming without blocking the acknowledgement queue", async () => {
     const directory = await trackedDirectory();
