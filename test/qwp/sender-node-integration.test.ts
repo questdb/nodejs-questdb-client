@@ -92,6 +92,53 @@ describe("Sender QWP integration", () => {
     ]);
   });
 
+  it("rejects options a programmatic ws/wss Sender cannot honour", () => {
+    // A ws::/wss:: connect string is parsed by the QWP schema, which rejects
+    // every one of these with a relocation hint. The programmatic path runs
+    // none of that parser, so the keys were taken and dropped: a caller
+    // capping memory, pinning a protocol version or sizing a datagram got no
+    // setting and no diagnostic. Both construction paths now agree.
+    for (const protocol of ["ws", "wss"] as const) {
+      const options = { protocol, host: "localhost", port: 9000 };
+
+      for (const key of [
+        "init_buf_size",
+        "max_buf_size",
+        "request_timeout",
+        "request_min_throughput",
+        "retry_timeout",
+      ] as const) {
+        expect(
+          () => new Sender({ ...options, [key]: 1000 } as never),
+          `${protocol} ${key}`,
+        ).toThrow(
+          `'${key}' option is not supported for QWP WebSocket transport`,
+        );
+      }
+      expect(
+        () => new Sender({ ...options, stdlib_http: true } as never),
+        protocol,
+      ).toThrow("'stdlib_http' option is not supported for QWP WebSocket");
+
+      // QWP negotiates its frame version during the upgrade; ws/wss used to
+      // have the ILP version silently defaulted to '1' and then ignored.
+      expect(
+        () => new Sender({ ...options, protocol_version: "2" } as never),
+        protocol,
+      ).toThrow(`'protocol_version' is not used by the ${protocol} transport`);
+
+      // UDP's own keys, meaningless on a WebSocket.
+      for (const key of ["max_datagram_size", "multicast_ttl"] as const) {
+        expect(
+          () => new Sender({ ...options, [key]: 1 } as never),
+          `${protocol} ${key}`,
+        ).toThrow(
+          `'${key}' option is not supported for QWP WebSocket transport, it applies to the udp transport only`,
+        );
+      }
+    }
+  });
+
   it("applies fail-fast persistent startup from the configuration string", async () => {
     const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await new Promise<void>((resolve, reject) => {

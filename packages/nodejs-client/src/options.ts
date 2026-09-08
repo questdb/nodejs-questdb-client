@@ -303,13 +303,15 @@ type DeprecatedOptions = {
  * <li> max_datagram_size: <i>integer</i> - Maximum encoded datagram size in bytes, from 1 to 65507,
  * defaults to 1400. <br>
  * A row that cannot fit a single datagram is rejected before transmission. It is also the default for
- * <i>auto_flush_bytes</i>. Supported by the udp transport only; http, tcp and ws/wss reject it. <br>
+ * <i>auto_flush_bytes</i>. Supported by the udp transport only. A connection string rejects it on
+ * every other transport, and ws/wss reject it however the sender was built. <br>
  * 65507 is the IPv4 maximum, but many hosts refuse well below it, so keep this at or under the path
  * MTU unless the receiver is known to accept more. A datagram the operating system refuses is
  * discarded before transmission and does not advance the published or acknowledged sequence.
  * </li>
  * <li> multicast_ttl: <i>integer</i> - Multicast time-to-live for outgoing datagrams, from 0 to 255, defaults to 0. <br>
- * Supported by the udp transport only; http, tcp and ws/wss reject it.
+ * Supported by the udp transport only. A connection string rejects it on every other transport, and
+ * ws/wss reject it however the sender was built.
  * </li>
  * </ul>
  */
@@ -675,9 +677,19 @@ function parseProtocol(options: SenderOptions, configString: string) {
 }
 
 function parseProtocolVersion(options: SenderOptions) {
-  if (options.protocol === UDP) {
+  if (
+    options.protocol === UDP ||
+    options.protocol === WS ||
+    options.protocol === WSS
+  ) {
+    // QWP negotiates its own frame version on the wire, so the ILP protocol
+    // version is not part of its vocabulary. ws/wss used to fall through to
+    // the default branch below and have '1' stamped on them silently, which
+    // nothing then read.
     if (options.protocol_version !== undefined) {
-      throw new Error("'protocol_version' is not used by the udp transport");
+      throw new Error(
+        `'protocol_version' is not used by the ${options.protocol} transport`,
+      );
     }
     return;
   }
@@ -861,6 +873,26 @@ function validateQwpUnsupportedOptions(options: SenderOptions): void {
       throw new Error(
         `'${key}' option is not supported for QWP ${transport} transport, it applies to the http/tcp transports only`,
       );
+    }
+  }
+  // The keys above are ILP-only. These two classes are transport-scoped
+  // instead: the connect string rejects them through parseProtocolVersion()
+  // and parseUdpOptions() for udp, and through the QWP schema's relocation
+  // hints for ws/wss, but neither runs when the sender is built from an
+  // options object -- so a caller who pinned a protocol version or capped a
+  // datagram on a WebSocket sender got no setting and no diagnostic.
+  if (options.protocol_version !== undefined) {
+    throw new Error(
+      `'protocol_version' is not used by the ${options.protocol} transport`,
+    );
+  }
+  if (transport === "WebSocket") {
+    for (const key of ["max_datagram_size", "multicast_ttl"] as const) {
+      if (options[key] !== undefined) {
+        throw new Error(
+          `'${key}' option is not supported for QWP WebSocket transport, it applies to the udp transport only`,
+        );
+      }
     }
   }
 }

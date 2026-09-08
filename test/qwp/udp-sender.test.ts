@@ -395,6 +395,31 @@ describe("QWP Node UDP sender", () => {
     expect(socketCreations).toBe(0);
   });
 
+  it("rejects a protocol version supplied through programmatic UDP options", () => {
+    // parseProtocolVersion() rejects it for a udp:: connect string, but never
+    // runs when the sender is built from an options object, so the key was
+    // taken and dropped. QWP negotiates its own frame version on the wire.
+    let socketCreations = 0;
+    expect(
+      () =>
+        new Sender({
+          protocol: "udp",
+          host: "localhost",
+          port: 9007,
+          protocol_version: "2",
+          qwp: {
+            udp: {
+              socketFactory: () => {
+                socketCreations++;
+                return new FakeUdpSocket();
+              },
+            },
+          },
+        } as never),
+    ).toThrow("'protocol_version' is not used by the udp transport");
+    expect(socketCreations).toBe(0);
+  });
+
   it("rejects security options supplied through programmatic UDP options", () => {
     let socketCreations = 0;
     const options = {
