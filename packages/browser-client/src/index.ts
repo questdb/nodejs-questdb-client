@@ -210,12 +210,27 @@ function authorizationHeader(
     : `Bearer ${authentication.token}`;
 }
 
+/**
+ * The endpoint as text with any userinfo removed, for an error message.
+ *
+ * A URL carrying userinfo carries a live credential, and these validation
+ * errors are thrown on caller-supplied endpoints. Returns a copy, so the URL
+ * the caller goes on to use is left alone.
+ */
+function redactedUrlText(url: URL): string {
+  if (!url.username && !url.password) return url.href;
+  const safe = new URL(url.href);
+  safe.username = "";
+  safe.password = "";
+  return safe.href;
+}
+
 function resolveHttpUrl(value: string | URL): URL {
   const base = globalThis.location?.href;
   const url = value instanceof URL ? new URL(value) : new URL(value, base);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new TypeError(
-      `browser session bootstrap URL must use HTTP or HTTPS: ${url}`,
+      `browser session bootstrap URL must use HTTP or HTTPS: ${redactedUrlText(url)}`,
     );
   }
   return url;
@@ -236,7 +251,9 @@ function defaultBootstrapUrl(endpoint: string | URL): URL {
   if (url.protocol === "ws:") url.protocol = "http:";
   else if (url.protocol === "wss:") url.protocol = "https:";
   else {
-    throw new TypeError(`QWP browser URL must use WS or WSS: ${url}`);
+    throw new TypeError(
+      `QWP browser URL must use WS or WSS: ${redactedUrlText(url)}`,
+    );
   }
   const suffix = /\/(?:write\/v4|read\/v1)\/?$/;
   url.pathname = suffix.test(url.pathname)
@@ -921,11 +938,13 @@ function browserClusterEndpoint(
       ? new URL(endpoint)
       : new URL(endpoint, globalThis.location?.href);
   if (url.protocol !== "ws:" && url.protocol !== "wss:") {
-    throw new TypeError(`QWP browser cluster URL must use WS or WSS: ${url}`);
+    throw new TypeError(
+      `QWP browser cluster URL must use WS or WSS: ${redactedUrlText(url)}`,
+    );
   }
   if (url.hash) {
     throw new TypeError(
-      `QWP browser cluster URL cannot contain a fragment: ${url}`,
+      `QWP browser cluster URL cannot contain a fragment: ${redactedUrlText(url)}`,
     );
   }
   const qwpRoute = /\/(?:write\/v4|read\/v1)\/?$/;

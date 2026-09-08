@@ -559,9 +559,13 @@ export class QwpRoleMismatchError extends QwpUpgradeError {
 
 /** A requested durable-ACK capability was not confirmed by the server. */
 export class QwpDurableAckUnavailableError extends QwpUpgradeError {
-  constructor(readonly url: string | URL) {
+  constructor(url: string | URL) {
+    // No `readonly url` parameter property here: TypeScript emits that
+    // assignment after super(), which would overwrite the base's redacted
+    // value with the raw endpoint. The message has to be redacted separately,
+    // since it is built before the base constructor runs.
     super(
-      `QWP durable ACK was requested, but the server did not advertise support [url=${url}]`,
+      `QWP durable ACK was requested, but the server did not advertise support [url=${redactQwpEndpoint(url)}]`,
       {
         kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
         retryable: false,

@@ -15,6 +15,8 @@ import {
   connectQwpNodeEgress,
   connectQwpNodeWebSocket,
   QwpDurableAckUnavailableError,
+  QwpFailoverError,
+  QwpRoleMismatchError,
   QwpVersionMismatchError,
 } from "../../packages/nodejs-client/src";
 import {
@@ -313,6 +315,48 @@ function ingressServerInfo(maxBatchSizeBytes: number): Uint8Array {
 type QwpIngressNackMatch = Partial<Omit<QwpIngressNackError, "response">> & {
   response: Partial<QwpIngressResponse>;
 };
+
+describe("QWP endpoint credential redaction", () => {
+  // A URL carrying userinfo carries a live credential, and QwpUpgradeError.url
+  // is the field a connect failure is most often logged through. Nothing
+  // asserted the redaction, so a subclass could -- and did -- defeat it.
+  const CREDENTIALED = "wss://alice:s3cr3t@questdb.example:9000/write/v4";
+  const REDACTED = "wss://questdb.example:9000/write/v4";
+
+  it("strips userinfo from every QwpUpgradeError subclass", () => {
+    const errors = [
+      new QwpUpgradeError("boom", {
+        kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
+        url: CREDENTIALED,
+      }),
+      new QwpRoleMismatchError("primary", "REPLICA", CREDENTIALED),
+      new QwpDurableAckUnavailableError(CREDENTIALED),
+      new QwpVersionMismatchError(2, 1, CREDENTIALED),
+    ];
+    for (const error of errors) {
+      expect(error.url, `${error.name}.url`).toBe(REDACTED);
+      expect(error.message, `${error.name}.message`).not.toContain("s3cr3t");
+    }
+  });
+
+  it("strips userinfo from failover attempts and their message", () => {
+    const failover = new QwpFailoverError([
+      { endpoint: CREDENTIALED, error: new Error("refused") },
+    ]);
+    expect(failover.attempts[0].endpoint).toBe(REDACTED);
+    expect(failover.message).not.toContain("s3cr3t");
+  });
+
+  it("strips userinfo from browser URL validation errors", async () => {
+    // Thrown on a caller-supplied endpoint before any connection is made.
+    const rejection = bootstrapQwpBrowserSession({
+      url: "wss://alice:s3cr3t@questdb.example:9000/exec",
+      authentication: { type: "bearer", token: "t" },
+    });
+    await expect(rejection).rejects.toThrow(/must use HTTP or HTTPS/);
+    await expect(rejection).rejects.not.toThrow(/s3cr3t/);
+  });
+});
 
 describe("QWP WebSocket adapters", () => {
   it.each(["browser", "node"] as const)(
