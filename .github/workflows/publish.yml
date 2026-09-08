@@ -44,10 +44,14 @@ jobs:
         run: pnpm exec vitest run --config vitest.dist.config.ts
 
       # Guards the emitted .d.ts row typing, which no runtime suite can see.
+      # Run the script rather than inlining its commands: hand-copying them
+      # here dropped the TypeScript 4.9 leg, and publish.yml is
+      # workflow_dispatch-only with no dependency on build.yml, so a dispatch
+      # from a branch that never opened a pull request reached npm publish with
+      # no legacy-consumer gate at all. The script re-runs `pnpm build`, which
+      # is idempotent.
       - name: Type-checking (built package consumer)
-        run: |
-          pnpm exec tsc --noEmit -p tsconfig.dist-types.json
-          pnpm exec tsc --noEmit -p tsconfig.dist-types.cjs.json
+        run: pnpm typecheck:dist
 
       # Checks both npm tarballs and follows every exported declaration and
       # runtime module through its relative dependency graph.
