@@ -107,6 +107,44 @@ function resultEnd(requestId = 0n): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array());
 }
 
+describe("QWP Node client identity", () => {
+  it("reports the published package version to the server", async () => {
+    // QWP.md documents client_id as what identifies this client in server-side
+    // diagnostics, and the default is what almost every deployment sends. It
+    // was pinned at typescript/1.0.0 while the package shipped 4.2.0, so every
+    // release looked identical to the server. Asserted on the wire against the
+    // manifest, since nothing else keeps a hardcoded version in step.
+    const manifest = JSON.parse(
+      await readFile(
+        join(import.meta.dirname, "../../packages/nodejs-client/package.json"),
+        "utf8",
+      ),
+    ) as { version: string };
+
+    let clientId: string | undefined;
+    const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    wss.on("headers", (headers) => headers.push("X-QWP-Version: 1"));
+    wss.on("connection", (_socket, request) => {
+      clientId = request.headers["x-qwp-client-id"] as string | undefined;
+    });
+    await new Promise<void>((resolve, reject) => {
+      wss.once("listening", resolve);
+      wss.once("error", reject);
+    });
+    const { port } = wss.address() as AddressInfo;
+
+    const connection = await connectQwpNodeWebSocket({
+      url: `ws://127.0.0.1:${port}/write/v4`,
+    });
+    try {
+      expect(clientId).toBe(`typescript/${manifest.version}`);
+    } finally {
+      await connection.close();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+    }
+  });
+});
+
 describe("QWP Node transport", () => {
   let server: WebSocketServer | undefined;
 

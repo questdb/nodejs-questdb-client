@@ -130,6 +130,17 @@ export type {
 
 export type { QwpWebSocketLike } from "../../client-core/src/_qwp/_internal/websocket-connection";
 
+/**
+ * Default `X-QWP-Client-Id`, which QuestDB records in server-side diagnostics.
+ *
+ * Kept in step with `packages/nodejs-client/package.json` by
+ * `test/qwp/node-transport.test.ts`, rather than imported: a JSON import would
+ * reach the bundled output, and the manifest is not part of the module graph.
+ * Deliberately not exported -- the version is observable on the wire, which is
+ * where the test pins it, so this need not become public API.
+ */
+const QWP_NODE_DEFAULT_CLIENT_ID = "typescript/4.2.0";
+
 export class QwpVersionMismatchError extends QwpUpgradeError {
   constructor(
     readonly serverVersion: number,
@@ -503,7 +514,7 @@ function connectQwpNodeEndpoint(
   }
   const headers: Record<string, string> = {
     "X-QWP-Max-Version": String(clientMaxVersion),
-    "X-QWP-Client-Id": options.clientId ?? "typescript/1.0.0",
+    "X-QWP-Client-Id": options.clientId ?? QWP_NODE_DEFAULT_CLIENT_ID,
     ...options.headers,
   };
   // Resolving this quietly meant the caller's own Authorization header simply
