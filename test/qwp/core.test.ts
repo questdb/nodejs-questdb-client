@@ -809,6 +809,26 @@ describe("QWP egress codec", () => {
     expect(readQwpVarint(reader)).toBe(1n);
     reader.expectEnd();
 
+    // queryFlags is typed `number | bigint`, so both spellings of every value
+    // -- zero included -- have to produce one frame. `0n !== 0`, so testing
+    // against the number zero alone appended a trailing varint for 0n that it
+    // omitted for 0.
+    const omitted = encodeQwpQueryRequest({ requestId: 9n, sql: "select 42" });
+    for (const queryFlags of [0, 0n] as const) {
+      expect(
+        encodeQwpQueryRequest({ requestId: 9n, sql: "select 42", queryFlags }),
+      ).toEqual(omitted);
+    }
+    expect(
+      encodeQwpQueryRequest({
+        requestId: 9n,
+        sql: "select 42",
+        queryFlags: 1n,
+      }),
+    ).toEqual(
+      encodeQwpQueryRequest({ requestId: 9n, sql: "select 42", queryFlags: 1 }),
+    );
+
     expect(encodeQwpCancel(9n)).toEqual(
       Uint8Array.from([QWP_EGRESS_MESSAGE.CANCEL, 9, 0, 0, 0, 0, 0, 0, 0]),
     );

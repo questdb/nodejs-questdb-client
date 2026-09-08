@@ -134,8 +134,14 @@ export function encodeQwpQueryRequest(request: QwpQueryRequest): Uint8Array {
   writeQwpVarint(writer, request.initialCredit ?? 0);
   writeQwpVarint(writer, bindCount);
   writer.writeBytes(bindPayload);
-  if ((request.queryFlags ?? 0) !== 0) {
-    writeQwpVarint(writer, request.queryFlags!);
+  // The field is typed `number | bigint`, and `0n !== 0`, so testing against
+  // the number zero alone made a bigint zero look like a flag: spelling "no
+  // flags" as 0n appended a trailing varint that spelling it as 0 omitted --
+  // two frames for one declared value. Reject both spellings of zero instead.
+  // writeQwpVarint() still validates whatever survives this test.
+  const queryFlags = request.queryFlags ?? 0;
+  if (queryFlags !== 0 && queryFlags !== 0n) {
+    writeQwpVarint(writer, queryFlags);
   }
   return writer.toUint8Array();
 }
