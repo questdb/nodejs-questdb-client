@@ -270,6 +270,26 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
     ).toBe(false);
   });
 
+  it("rejects a root CA combined with verification disabled", () => {
+    // The wss:: connect string calls this combination an error; the
+    // programmatic path resolved it silently in favour of the unsafe half,
+    // leaving the CA inert and the connection unverified. Same config, two
+    // spellings, two answers.
+    expect(() => ingressFor({ tls_ca: CA_PATH, tls_verify: false })).toThrow(
+      /tls_ca cannot be combined with tls_verify=false/,
+    );
+  });
+
+  it("rejects a tls_ca that is not a PEM bundle", () => {
+    // A bare readFileSync installed whatever the path pointed at as a trust
+    // store, so the wrong file surfaced later as an opaque TLS failure at
+    // connect time. The connect string validated the PEM markers; this now
+    // applies the same check.
+    expect(() => ingressFor({ tls_ca: "package.json" })).toThrow(
+      /^tls_ca must contain PEM-encoded CA certificates/,
+    );
+  });
+
   it("keeps a caller https agent for the wss upgrade", () => {
     const agent = new https.Agent();
     expect(ingressFor({ agent }).agent).toBe(agent);

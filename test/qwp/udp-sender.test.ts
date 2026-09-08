@@ -357,6 +357,44 @@ describe("QWP Node UDP sender", () => {
     await configured.close();
   });
 
+  it("rejects ILP-only options supplied through programmatic UDP options", () => {
+    // The connect string rejected these; the programmatic path took them and
+    // dropped them. A caller capping memory with max_buf_size got no cap and
+    // no diagnostic, which is exactly the condition the connect-string check
+    // was written for. The security sibling below was already applied on both
+    // paths -- this one was not.
+    let socketCreations = 0;
+    const options = {
+      protocol: "udp",
+      host: "localhost",
+      port: 9007,
+      qwp: {
+        udp: {
+          socketFactory: () => {
+            socketCreations++;
+            return new FakeUdpSocket();
+          },
+        },
+      },
+    };
+    for (const key of [
+      "init_buf_size",
+      "max_buf_size",
+      "request_timeout",
+      "request_min_throughput",
+      "retry_timeout",
+    ] as const) {
+      expect(
+        () => new Sender({ ...options, [key]: 1000 } as never),
+        key,
+      ).toThrow(`'${key}' option is not supported for QWP UDP transport`);
+    }
+    expect(
+      () => new Sender({ ...options, stdlib_http: true } as never),
+    ).toThrow("'stdlib_http' option is not supported for QWP UDP transport");
+    expect(socketCreations).toBe(0);
+  });
+
   it("rejects security options supplied through programmatic UDP options", () => {
     let socketCreations = 0;
     const options = {

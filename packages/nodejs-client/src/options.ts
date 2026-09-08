@@ -821,23 +821,33 @@ function parseUdpOptions(options: SenderOptions) {
       "max_datagram_size and multicast_ttl are only supported for QWP UDP transport",
     );
   }
-  validateUdpUnsupportedOptions(options);
+  validateQwpUnsupportedOptions(options);
 }
 
 /**
- * Rejects the ILP-only keys a `udp::` connect string used to accept in
- * silence.
+ * Rejects the ILP-only keys a QWP transport used to accept in silence.
  *
- * UDP shares this parser with http/tcp, so every key they accept parsed here
- * too -- but the UDP branch of the Sender returns before createBuffer(), and
- * QwpNodeUdpOptions has no field for any of these, so nothing ever read them.
- * A user capping memory with max_buf_size got no cap and no diagnostic, while
- * the QWP parser's own hint for the same key pointed at udp as a transport
- * that supports it. The parser rejects an unknown key, so accepting a known
- * one that does nothing is the outlier.
+ * UDP and ws/wss share this parser with http/tcp, so every key they accept
+ * parses here too -- but the QWP branches of the Sender return before
+ * createBuffer(), and neither QwpNodeUdpOptions nor the WebSocket sender
+ * options have a field for any of these, so nothing ever read them. A user
+ * capping memory with max_buf_size got no cap and no diagnostic, while the QWP
+ * parser's own hint for the same key pointed at udp as a transport that
+ * supports it.
+ *
+ * The connect string already rejects them on both transports -- `udp::`
+ * through this check, `ws::`/`wss::` because the QWP schema knows no such key
+ * -- so the programmatic path was the one that stayed silent. Applied on both
+ * paths now, the way validateUdpSecurityOptions already is.
  */
-function validateUdpUnsupportedOptions(options: SenderOptions): void {
-  if (options.protocol !== UDP) return;
+function validateQwpUnsupportedOptions(options: SenderOptions): void {
+  const transport =
+    options.protocol === UDP
+      ? "UDP"
+      : options.protocol === WS || options.protocol === WSS
+        ? "WebSocket"
+        : undefined;
+  if (!transport) return;
   const unsupported = [
     "init_buf_size",
     "max_buf_size",
@@ -849,7 +859,7 @@ function validateUdpUnsupportedOptions(options: SenderOptions): void {
   for (const key of unsupported) {
     if (options[key] !== undefined) {
       throw new Error(
-        `'${key}' option is not supported for QWP UDP transport, it applies to the http/tcp transports only`,
+        `'${key}' option is not supported for QWP ${transport} transport, it applies to the http/tcp transports only`,
       );
     }
   }
@@ -989,6 +999,7 @@ export {
   WS,
   WSS,
   UDP,
+  validateQwpUnsupportedOptions,
   validateUdpSecurityOptions,
   validateWebSocketSecurityOptions,
   PROTOCOL_VERSION_AUTO,

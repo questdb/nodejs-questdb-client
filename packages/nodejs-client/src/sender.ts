@@ -1,5 +1,4 @@
 // @ts-check
-import { readFileSync } from "node:fs";
 import * as https from "node:https";
 import { log, Logger } from "./logging";
 import {
@@ -8,6 +7,7 @@ import {
   qwpConfig,
   selectQwpSchemeAgent,
   UDP,
+  validateQwpUnsupportedOptions,
   validateUdpSecurityOptions,
   validateWebSocketSecurityOptions,
   WS,
@@ -17,6 +17,7 @@ import { SenderTransport, createTransport } from "./transport";
 import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
 import * as qwpNode from "./qwp";
+import { readPemTlsRoots } from "./qwp-node/client-config";
 import type { QwpSender } from "./qwp";
 import type { QwpTableWriter } from "../../client-core/src/_qwp/sender";
 import type { QwpWriterSchema } from "../../client-core/src/_qwp/writer";
@@ -624,6 +625,7 @@ function createConfiguredQwpSender(
   logger: Logger,
 ): QwpSender {
   validateWebSocketSecurityOptions(options);
+  validateQwpUnsupportedOptions(options);
   if (!options.host || !options.port) {
     throw new Error("The 'host' and 'port' options are mandatory for QWP");
   }
@@ -647,8 +649,22 @@ function createConfiguredQwpSender(
       );
     }
   } else if (secure) {
+    // Same two rules the wss:: connect string applies to tls_roots/tls_verify.
+    // This path accepted a CA together with verification off -- leaving the CA
+    // inert and the connection unverified where the documented connect string
+    // calls that combination an error -- and read the file with a bare
+    // readFileSync, so a path to something that is not a PEM bundle (a
+    // PKCS#12 store, or simply the wrong file) was installed as a trust store
+    // and only failed later, at connect time, as an opaque TLS error.
+    if (options.tls_ca !== undefined && options.tls_verify === false) {
+      throw new Error(
+        "tls_ca cannot be combined with tls_verify=false; remove tls_verify to use custom roots, or remove tls_ca to disable certificate validation",
+      );
+    }
     agent = new https.Agent({
-      ca: options.tls_ca ? readFileSync(options.tls_ca) : undefined,
+      ca: options.tls_ca
+        ? readPemTlsRoots(options.tls_ca, "tls_ca")
+        : undefined,
       rejectUnauthorized: options.tls_verify ?? true,
     });
   }
@@ -701,6 +717,7 @@ function createConfiguredQwpUdpSender(
   logger: Logger,
 ): QwpSender {
   validateUdpSecurityOptions(options);
+  validateQwpUnsupportedOptions(options);
   if (!options.host || !options.port) {
     throw new Error("The 'host' and 'port' options are mandatory for QWP UDP");
   }

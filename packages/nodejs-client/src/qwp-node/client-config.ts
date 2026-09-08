@@ -680,7 +680,12 @@ function createTlsAgent(parsed: ParsedConfig): HttpsAgent | undefined {
   });
 }
 
-function readPemTlsRoots(path: string): Buffer {
+export function readPemTlsRoots(
+  path: Parameters<typeof readFileSync>[0],
+  // Named so the diagnostic quotes the key the caller actually wrote:
+  // `tls_roots` on a connect string, `tls_ca` on a programmatic Sender.
+  key = "tls_roots",
+): Buffer {
   const roots = readFileSync(path);
   const containsCertificate =
     (roots.includes("-----BEGIN CERTIFICATE-----") &&
@@ -689,7 +694,7 @@ function readPemTlsRoots(path: string): Buffer {
       roots.includes("-----END TRUSTED CERTIFICATE-----"));
   if (!containsCertificate) {
     throw new Error(
-      "tls_roots must contain PEM-encoded CA certificates (CERTIFICATE or TRUSTED CERTIFICATE); PKCS#12 trust stores are not supported by the Node.js QWP client",
+      `${key} must contain PEM-encoded CA certificates (CERTIFICATE or TRUSTED CERTIFICATE); PKCS#12 trust stores are not supported by the Node.js QWP client`,
     );
   }
   return roots;
