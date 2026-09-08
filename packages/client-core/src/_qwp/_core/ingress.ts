@@ -8,6 +8,7 @@ import {
   QWP_FLAG_DURABLE_ACK_POLL,
   QWP_FLAG_GORILLA,
   QWP_HEADER_SIZE,
+  QWP_INGRESS_SERVER_INFO_CAPABILITY,
   QWP_MAX_ARRAY_DIMENSION_LENGTH,
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_MAX_ROWS_PER_TABLE,
@@ -131,12 +132,28 @@ export interface QwpIngressResponse {
   errorMessage?: string;
 }
 
+/** What the browser-requested ingress SERVER_INFO frame reports. */
+export interface QwpIngressServerInfo {
+  maxBatchSizeBytes: number;
+  /**
+   * Whether this connection negotiated durable acknowledgements. This is the
+   * only durable-ACK verdict a browser can read: the confirmation header is
+   * invisible to page JavaScript and the subprotocol echo confirms the
+   * negotiation dialect, not the capability.
+   */
+  durableAckEnabled: boolean;
+}
+
 /** Decodes the browser-requested ingress SERVER_INFO payload when present. */
 export function decodeQwpIngressServerInfo(
   payload: Uint8Array,
-): number | undefined {
+): QwpIngressServerInfo | undefined {
   if (payload[0] !== QWP_STATUS.SERVER_INFO) return undefined;
-  if (payload.byteLength !== 5) {
+  // Exactly six, not "at least six": a five-byte frame is a server from before
+  // the capability byte existed, and silently reading it as "durable ACK off"
+  // would turn a version skew into a wrong answer on the one field that cannot
+  // be re-derived from anywhere else.
+  if (payload.byteLength !== 6) {
     throw new QwpProtocolError("invalid QWP ingress SERVER_INFO length");
   }
   const maxBatchSizeBytes = new DataView(
@@ -147,7 +164,11 @@ export function decodeQwpIngressServerInfo(
   if (maxBatchSizeBytes === 0) {
     throw new QwpProtocolError("invalid QWP ingress SERVER_INFO batch cap");
   }
-  return maxBatchSizeBytes;
+  return {
+    maxBatchSizeBytes,
+    durableAckEnabled:
+      (payload[5]! & QWP_INGRESS_SERVER_INFO_CAPABILITY.DURABLE_ACK) !== 0,
+  };
 }
 
 function symbolText(value: unknown): string {

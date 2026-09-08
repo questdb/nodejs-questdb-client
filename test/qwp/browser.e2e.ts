@@ -103,10 +103,14 @@ function browserServerInfo(compression?: {
   return encodeQwpFrame(payload.toUint8Array());
 }
 
-function browserIngressServerInfo(maxBatchSizeBytes: number): Uint8Array {
+function browserIngressServerInfo(
+  maxBatchSizeBytes: number,
+  durableAckEnabled = false,
+): Uint8Array {
   return new QwpByteWriter()
     .writeUint8(QWP_STATUS.SERVER_INFO)
     .writeUint32(maxBatchSizeBytes)
+    .writeUint8(durableAckEnabled ? 0x01 : 0x00)
     .toUint8Array();
 }
 

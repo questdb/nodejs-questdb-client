@@ -301,11 +301,27 @@ function serverInfoFrame(compression?: {
   return encodeQwpFrame(writer.toUint8Array());
 }
 
-function ingressServerInfo(maxBatchSizeBytes: number): Uint8Array {
+function ingressServerInfo(
+  maxBatchSizeBytes: number,
+  durableAckEnabled = false,
+): Uint8Array {
   return new QwpByteWriter()
     .writeUint8(QWP_STATUS.SERVER_INFO)
     .writeUint32(maxBatchSizeBytes)
+    .writeUint8(durableAckEnabled ? 0x01 : 0x00)
     .toUint8Array();
+}
+
+/**
+ * Opens a fake socket the way a real server answers a durable-ACK browser
+ * upgrade: the subprotocol echo (set by the caller before connecting) confirms
+ * only that the server speaks the browser negotiation, and the SERVER_INFO
+ * capability byte carries the verdict. Sending the echo without the frame is
+ * what a server with durable ACK disabled does, so it must not read as enabled.
+ */
+function openDurableAckBrowserSocket(socket: FakeWebSocket): void {
+  socket.open();
+  socket.message(ingressServerInfo(1_048_576, true));
 }
 
 /**
@@ -747,7 +763,7 @@ describe("QWP WebSocket adapters", () => {
         return asQwpSocket(socket);
       },
     });
-    socket.open();
+    openDurableAckBrowserSocket(socket);
 
     const connection = await connecting;
     expect(capturedProtocols).toEqual([
@@ -757,6 +773,7 @@ describe("QWP WebSocket adapters", () => {
     expect(connection.handshake).toEqual({
       qwpVersion: 1,
       durableAckEnabled: true,
+      maxBatchSizeBytes: 1_048_576,
     });
     await connection.close();
   });
@@ -780,6 +797,31 @@ describe("QWP WebSocket adapters", () => {
     expect(socket.closeCalls).toHaveLength(1);
   });
 
+  it("rejects browser durable ACK when SERVER_INFO reports the capability off", async () => {
+    // The server echoes the subprotocol whenever it was offered, because a
+    // browser drops a handshake whose 101 names no offered subprotocol. So the
+    // echo alone cannot mean "enabled" -- a server with the durable-ack
+    // registry disabled produces exactly this shape, and only the SERVER_INFO
+    // capability byte tells the two apart.
+    const socket = new FakeWebSocket();
+    socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      requestDurableAck: true,
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    socket.message(ingressServerInfo(1_048_576, false));
+
+    await expect(connecting).rejects.toMatchObject({
+      name: "QwpDurableAckUnavailableError",
+      kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+      retryable: false,
+      tryNextEndpoint: true,
+      url: "ws://localhost:9000/write/v4",
+    } satisfies Partial<QwpDurableAckUnavailableError>);
+  });
+
   it("requests browser durable ACKs when the high-level sender awaits them", async () => {
     const socket = new FakeWebSocket();
     socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
@@ -795,7 +837,7 @@ describe("QWP WebSocket adapters", () => {
       { awaitDurableAck: true },
     );
     const connecting = sender.connect();
-    socket.open();
+    openDurableAckBrowserSocket(socket);
 
     await expect(connecting).resolves.toBe(true);
     expect(capturedProtocols).toBe(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL);
@@ -2176,7 +2218,7 @@ describe("QwpIngressSession", () => {
       },
       { durableAckKeepaliveMs: 0 },
     );
-    socket.open();
+    openDurableAckBrowserSocket(socket);
     const session = await connecting;
     socket.onSend = () => {
       socket.message(
@@ -2220,7 +2262,7 @@ describe("QwpIngressSession", () => {
       },
       {},
     );
-    socket.open();
+    openDurableAckBrowserSocket(socket);
     const session = await connecting;
     expect(session.handshake.durableAckEnabled).toBe(true);
     socket.onSend = () => {
@@ -3032,7 +3074,7 @@ describe("QwpIngressSession", () => {
         requestDurableAck: true,
         webSocketFactory: () => asQwpSocket(socket),
       });
-      socket.open();
+      openDurableAckBrowserSocket(socket);
       const session = new QwpIngressSession(await connecting, {
         ackTimeoutMs: 100,
         durableAckKeepaliveMs: 25,
@@ -3140,7 +3182,7 @@ describe("QwpIngressSession", () => {
         {
           url: "ws://localhost:9000/write/v4",
           requestDurableAck: true,
-          ingressNegotiationTimeoutMs: 0,
+          ingressNegotiationTimeoutMs: 1_000,
           webSocketFactory: () => asQwpSocket(socket),
         },
         {
@@ -3148,7 +3190,7 @@ describe("QwpIngressSession", () => {
           durableAckKeepaliveMs: 25,
         },
       );
-      socket.open();
+      openDurableAckBrowserSocket(socket);
       const session = await connecting;
       socket.onSend = () => {
         if (socket.sent.length === 1) {
@@ -3185,7 +3227,7 @@ describe("QwpIngressSession", () => {
         {
           url: "ws://localhost:9000/write/v4",
           requestDurableAck: true,
-          ingressNegotiationTimeoutMs: 0,
+          ingressNegotiationTimeoutMs: 1_000,
           webSocketFactory: () => asQwpSocket(socket),
         },
         {
@@ -3193,7 +3235,7 @@ describe("QwpIngressSession", () => {
           durableAckKeepaliveMs: 5,
         },
       );
-      socket.open();
+      openDurableAckBrowserSocket(socket);
       const session = await connecting;
       socket.onSend = () => {
         if (socket.sent.length === 1) {
@@ -3258,7 +3300,7 @@ describe("QwpIngressSession", () => {
       {
         url: "ws://localhost:9000/write/v4",
         requestDurableAck: true,
-        ingressNegotiationTimeoutMs: 0,
+        ingressNegotiationTimeoutMs: 1_000,
         webSocketFactory: () => asQwpSocket(socket),
       },
       {
@@ -3266,7 +3308,7 @@ describe("QwpIngressSession", () => {
         onSenderError: () => undefined,
       },
     );
-    socket.open();
+    openDurableAckBrowserSocket(socket);
     const session = await connecting;
     socket.onSend = () => {
       socket.message(

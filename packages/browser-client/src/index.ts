@@ -626,12 +626,41 @@ function browserNegotiationUrl(
   return url;
 }
 
+/**
+ * Reads the upgrade's own durable-ACK signal.
+ *
+ * The subprotocol echo confirms that the server speaks the browser durable-ACK
+ * negotiation; it does NOT say the capability is on, because the server echoes
+ * whenever the token was offered. A missing echo therefore means the server
+ * does not speak the negotiation at all -- unreachable through a real browser,
+ * which drops such a handshake before it opens, but reachable through Node and
+ * through an injected `webSocketFactory`. The capability itself is decided by
+ * the SERVER_INFO frame, so this leaves `durableAckEnabled` unset.
+ */
+function browserIngressHandshake(
+  options: QwpBrowserWebSocketOptions,
+  endpoint: string | URL,
+  selectedProtocol: string | undefined,
+): QwpBinaryConnection["handshake"] {
+  if (
+    options.requestDurableAck &&
+    !isQwpDurableAckWebSocketProtocol(selectedProtocol)
+  ) {
+    throw new QwpDurableAckUnavailableError(endpoint);
+  }
+  return { qwpVersion: QWP_VERSION };
+}
+
 function connectQwpBrowserRawEndpoint(
   options: QwpBrowserWebSocketOptions,
   endpoint: string | URL,
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
-  const protocols = options.requestDurableAck
+  // Offering the token makes the server append the SERVER_INFO frame, so this
+  // path has to consume it too -- otherwise the frame reaches the caller as a
+  // data message and the durable-ACK verdict is never read.
+  const requestDurableAck = options.requestDurableAck === true;
+  const protocols = requestDurableAck
     ? addQwpDurableAckWebSocketProtocol(options.protocols)
     : options.protocols;
   return connectQwpBrowserEndpoint(
@@ -640,22 +669,45 @@ function connectQwpBrowserRawEndpoint(
     endpoint,
     protocols,
     signal,
-    (selectedProtocol) => {
-      const durableAckEnabled =
-        isQwpDurableAckWebSocketProtocol(selectedProtocol);
-      if (options.requestDurableAck && !durableAckEnabled) {
-        throw new QwpDurableAckUnavailableError(endpoint);
-      }
-      return durableAckEnabled
-        ? { qwpVersion: QWP_VERSION, durableAckEnabled: true }
-        : { qwpVersion: QWP_VERSION };
-    },
+    (selectedProtocol) =>
+      browserIngressHandshake(options, endpoint, selectedProtocol),
+    requestDurableAck
+      ? async (connection) => {
+          try {
+            return await applyQwpBrowserIngressHandshake(
+              connection,
+              ingressNegotiationTimeoutMs(options),
+              true,
+              endpoint,
+            );
+          } catch (error) {
+            await connection
+              .close(1002, "invalid QWP ingress SERVER_INFO")
+              .catch(() => undefined);
+            throw error;
+          }
+        }
+      : undefined,
   );
 }
 
+/**
+ * Consumes the browser-requested ingress SERVER_INFO frame and folds it into
+ * the handshake.
+ *
+ * When `requestDurableAck` is set the frame is mandatory, because its
+ * capability bit is the only durable-ACK verdict a browser can read. Not
+ * seeing one within the negotiation window -- including a `timeoutMs` of 0,
+ * which asks not to wait at all -- is therefore reported as
+ * {@link QwpDurableAckUnavailableError} rather than assumed either way: a
+ * server with durable ACK on sends the frame with the 101, so its absence is
+ * an answer, not a delay. Callers that want durable ACK must allow the window.
+ */
 async function applyQwpBrowserIngressHandshake(
   connection: QwpBinaryConnection,
   timeoutMs: number,
+  requestDurableAck: boolean,
+  endpoint: string | URL,
 ): Promise<QwpBinaryConnection> {
   const iterator = connection.messages[Symbol.asyncIterator]();
   const pendingFirst = iterator.next();
@@ -691,12 +743,21 @@ async function applyQwpBrowserIngressHandshake(
   } = { ...connection.handshake };
   let firstResult: IteratorResult<Uint8Array> | undefined;
   let pendingResult: Promise<IteratorResult<Uint8Array>> | undefined;
+  let serverInfoSeen = false;
   if (outcome === timeout) {
     pendingResult = pendingFirst;
   } else if (!outcome.done) {
-    const maxBatchSizeBytes = decodeQwpIngressServerInfo(outcome.value);
-    if (maxBatchSizeBytes === undefined) firstResult = outcome;
-    else handshake.maxBatchSizeBytes = maxBatchSizeBytes;
+    const serverInfo = decodeQwpIngressServerInfo(outcome.value);
+    if (serverInfo === undefined) {
+      firstResult = outcome;
+    } else {
+      serverInfoSeen = true;
+      handshake.maxBatchSizeBytes = serverInfo.maxBatchSizeBytes;
+      handshake.durableAckEnabled = serverInfo.durableAckEnabled;
+    }
+  }
+  if (requestDurableAck && !(serverInfoSeen && handshake.durableAckEnabled)) {
+    throw new QwpDurableAckUnavailableError(endpoint);
   }
 
   const messages: AsyncIterable<Uint8Array> = {
@@ -707,9 +768,13 @@ async function applyQwpBrowserIngressHandshake(
           ? await iterator.next()
           : await pendingResult);
       while (!result.done) {
-        const maxBatchSizeBytes = decodeQwpIngressServerInfo(result.value);
-        if (maxBatchSizeBytes === undefined) yield result.value;
-        else handshake.maxBatchSizeBytes = maxBatchSizeBytes;
+        const serverInfo = decodeQwpIngressServerInfo(result.value);
+        if (serverInfo === undefined) {
+          yield result.value;
+        } else {
+          handshake.maxBatchSizeBytes = serverInfo.maxBatchSizeBytes;
+          handshake.durableAckEnabled = serverInfo.durableAckEnabled;
+        }
         result = await iterator.next();
       }
     },
@@ -732,17 +797,24 @@ async function applyQwpBrowserIngressHandshake(
   };
 }
 
-async function connectQwpBrowserIngressEndpoint(
+function ingressNegotiationTimeoutMs(
   options: QwpBrowserWebSocketOptions,
-  endpoint: string | URL,
-  signal?: AbortSignal,
-): Promise<QwpBinaryConnection> {
+): number {
   const timeoutMs = options.ingressNegotiationTimeoutMs ?? 250;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
     throw new RangeError(
       "ingressNegotiationTimeoutMs must be a non-negative finite number",
     );
   }
+  return timeoutMs;
+}
+
+async function connectQwpBrowserIngressEndpoint(
+  options: QwpBrowserWebSocketOptions,
+  endpoint: string | URL,
+  signal?: AbortSignal,
+): Promise<QwpBinaryConnection> {
+  const timeoutMs = ingressNegotiationTimeoutMs(options);
   return connectQwpBrowserEndpoint(
     options,
     endpoint,
@@ -751,19 +823,16 @@ async function connectQwpBrowserIngressEndpoint(
       ? addQwpDurableAckWebSocketProtocol(options.protocols)
       : options.protocols,
     signal,
-    (selectedProtocol) => {
-      const durableAckEnabled =
-        isQwpDurableAckWebSocketProtocol(selectedProtocol);
-      if (options.requestDurableAck && !durableAckEnabled) {
-        throw new QwpDurableAckUnavailableError(endpoint);
-      }
-      return durableAckEnabled
-        ? { qwpVersion: QWP_VERSION, durableAckEnabled: true }
-        : { qwpVersion: QWP_VERSION };
-    },
+    (selectedProtocol) =>
+      browserIngressHandshake(options, endpoint, selectedProtocol),
     async (connection) => {
       try {
-        return await applyQwpBrowserIngressHandshake(connection, timeoutMs);
+        return await applyQwpBrowserIngressHandshake(
+          connection,
+          timeoutMs,
+          options.requestDurableAck === true,
+          endpoint,
+        );
       } catch (error) {
         await connection
           .close(1002, "invalid QWP ingress SERVER_INFO")

@@ -29,6 +29,7 @@ import {
   QWP_FLAG_GORILLA,
   QWP_FLAG_DURABLE_ACK_POLL,
   QWP_HEADER_SIZE,
+  QWP_INGRESS_SERVER_INFO_CAPABILITY,
   QWP_MAGIC,
   QWP_STATUS,
   QwpByteReader,
@@ -147,15 +148,47 @@ describe("QWP browser durable-ACK negotiation", () => {
     });
   });
 
-  it("decodes the browser ingress SERVER_INFO batch cap", () => {
-    const payload = new QwpByteWriter()
-      .writeUint8(QWP_STATUS.SERVER_INFO)
-      .writeUint32(1_048_576)
-      .toUint8Array();
-    expect(decodeQwpIngressServerInfo(payload)).toBe(1_048_576);
+  it("decodes the browser ingress SERVER_INFO batch cap and capabilities", () => {
+    const serverInfo = (capabilities: number): Uint8Array =>
+      new QwpByteWriter()
+        .writeUint8(QWP_STATUS.SERVER_INFO)
+        .writeUint32(1_048_576)
+        .writeUint8(capabilities)
+        .toUint8Array();
+
+    expect(
+      decodeQwpIngressServerInfo(
+        serverInfo(QWP_INGRESS_SERVER_INFO_CAPABILITY.DURABLE_ACK),
+      ),
+    ).toEqual({ maxBatchSizeBytes: 1_048_576, durableAckEnabled: true });
+    // The bit is the browser's only durable-ACK verdict, so an unset one has
+    // to read as a definite "off" rather than as absent.
+    expect(decodeQwpIngressServerInfo(serverInfo(0))).toEqual({
+      maxBatchSizeBytes: 1_048_576,
+      durableAckEnabled: false,
+    });
+    // Unknown capability bits must not disturb the one we understand.
+    expect(
+      decodeQwpIngressServerInfo(
+        serverInfo(QWP_INGRESS_SERVER_INFO_CAPABILITY.DURABLE_ACK | 0x80),
+      )?.durableAckEnabled,
+    ).toBe(true);
+
     expect(
       decodeQwpIngressServerInfo(Uint8Array.from([QWP_STATUS.OK])),
     ).toBeUndefined();
+  });
+
+  it("rejects a SERVER_INFO frame from before the capability byte", () => {
+    // Reading a five-byte frame as "durable ACK off" would turn a version skew
+    // into a wrong answer on the one field nothing else can re-derive.
+    const legacy = new QwpByteWriter()
+      .writeUint8(QWP_STATUS.SERVER_INFO)
+      .writeUint32(1_048_576)
+      .toUint8Array();
+    expect(() => decodeQwpIngressServerInfo(legacy)).toThrow(
+      /invalid QWP ingress SERVER_INFO length/,
+    );
   });
 });
 

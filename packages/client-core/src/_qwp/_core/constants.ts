@@ -57,6 +57,21 @@ export const QWP_STATUS = {
   DICTIONARY_GAP: 0x0d,
 } as const;
 
+/**
+ * Capability bits on the browser-requested ingress `SERVER_INFO` frame.
+ *
+ * The durable-ACK verdict travels here rather than on the handshake because
+ * neither handshake carrier can deliver it to a browser: `X-QWP-Durable-Ack`
+ * is unreadable from page JavaScript, and the `questdb.qwp.durable-ack.v1`
+ * subprotocol cannot carry it either, since a browser fails the whole
+ * connection when it offered a subprotocol and the 101 names none. The server
+ * therefore echoes the subprotocol whenever it was offered -- confirming only
+ * that it speaks the browser negotiation -- and reports the capability here.
+ */
+export const QWP_INGRESS_SERVER_INFO_CAPABILITY = {
+  DURABLE_ACK: 0x01,
+} as const;
+
 export const QWP_EGRESS_MESSAGE = {
   QUERY_REQUEST: 0x10,
   RESULT_BATCH: 0x11,
