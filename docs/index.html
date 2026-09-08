@@ -70,12 +70,17 @@ has no way to encode a row with no fields, so <code>at()</code>/<code>atNow()</c
 &quot;The row must have a symbol or column set before it is closed&quot;. QWP is
 columnar and can express it, so the row is sent with no columns — carrying
 only its designated timestamp.</li>
-<li>A rejected <code>at()</code>/<code>atNow()</code> on ILP discards the row it could not close,
-including its table name, and leaves rows already in the buffer alone. Catch
-the error and start the next row from <code>table()</code>; there is no need to <code>reset()</code>
-and nothing already buffered is lost. The exception is an invalid designated
-timestamp unit: it is rejected before closing begins, leaving the row open so
-<code>at()</code> can be retried with a valid unit. If an ILP auto-flush send fails, the
+<li>ILP discards a row only when it can never be closed -- when every value on it
+was nullish, so it carries no symbol and no column. That discard takes the
+table name with it and leaves rows already in the buffer alone: catch the
+error and start the next row from <code>table()</code>; there is no need to <code>reset()</code>
+and nothing already buffered is lost. Every other rejection leaves the row
+open and the call retryable: an invalid designated timestamp -- either its
+unit or its value, both caught before closing begins -- can be retried with a
+corrected argument; a row that does not fit <code>max_buf_size</code> has its partial
+close rewound, so the same call succeeds once a <code>flush()</code> frees space; and a
+rejected column or symbol call writes nothing at all, leaving the row exactly
+as it was. If an ILP auto-flush send fails, the
 completed batch has already been removed from the sender buffer; applications
 that need to retry must retain and resubmit those rows. QWP keeps successfully
 closed rows for its retry and replay path.</li>
@@ -224,8 +229,10 @@ reject locally when the capability was not negotiated.</p>
 
 <p>Browser durable ACKs are an in-memory delivery confirmation only. Persistent
 store-and-forward remains available exclusively through the Node.js entry
-point. In-memory ingress replay is capped at 128 MiB and waits at most 30 seconds
-for ACK-driven trimming by default; tune <code>memoryReplayMaxBytes</code> and
+point. In-memory ingress replay targets a 128 MiB cap and waits at most 30 seconds
+for ACK-driven trimming by default. A commit-bearing logical batch may temporarily
+raise usage to at most twice that target so a retained deferred prefix cannot deadlock;
+tune <code>memoryReplayMaxBytes</code> and
 <code>memoryReplayAppendDeadlineMs</code> in the ingress session options when needed.</p>
 <h3 id="zstd-compressed-qwp-egress" class="tsd-anchor-link">Zstd-compressed QWP egress<a href="#zstd-compressed-qwp-egress" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3><p>Node.js egress clients can opt into compressed result batches during the
 WebSocket upgrade. Raw batches remain the default for compatibility.</p>

@@ -56,9 +56,7 @@ try {
 ```
 
 `username` plus `password` selects HTTP Basic authentication for the WebSocket
-upgrade; the username cannot contain `:` because that character separates the
-two Basic credential fields. `token` selects Bearer authentication. Use `wss::`
-in production.
+upgrade. `token` selects Bearer authentication. Use `wss::` in production.
 
 `Sender.fromConfig()` uses the same Java-compatible `ws::`/`wss::` vocabulary
 as `connectQwpNodeClient()`. Comma-separated or repeated `addr` values configure
@@ -71,7 +69,7 @@ keys owned only by egress or the pooled facade are accepted as intentional no-op
 Every `ws::`/`wss::` connect string is parsed by one schema, shared with the
 other QuestDB clients, whichever entry point builds the client —
 `Sender.fromConfig()`, `SenderOptions.fromConfig()`, `connectQwpNodeClient()`,
-or `connectQwpNodeEgress()`. An unrecognised key is rejected with
+or `createQwpNodeClient()`. An unrecognised key is rejected with
 `unknown configuration key: <key>`; a legacy ILP key adds a hint pointing at
 where it applies instead.
 
@@ -93,7 +91,7 @@ continues to come from `addr`, because the typed object intentionally omits
 | Key                  | Value              | Default   | Meaning                                                                                  |
 | -------------------- | ------------------ | --------- | ---------------------------------------------------------------------------------------- |
 | `addr`               | `host[:port]`      | port 9000 | Endpoint. Repeat the key, or comma-separate, for ordered failover.                       |
-| `username`, `user`   | string without `:` | —         | HTTP Basic user for the WebSocket upgrade.                                               |
+| `username`, `user`   | string             | —         | HTTP Basic user for the WebSocket upgrade.                                               |
 | `password`, `pass`   | string             | —         | HTTP Basic password.                                                                     |
 | `token`              | string             | —         | Bearer token; alternative to Basic.                                                      |
 | `tls_verify`         | `on`, `unsafe_off` | on        | Certificate verification. `unsafe_off` disables it.                                      |
@@ -115,7 +113,7 @@ continues to come from `addr`, because the typed object intentionally omits
 | `request_durable_ack`                           | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.           |
 | `durable_ack_keepalive_interval_millis`         | integer ms       | —         | Poll interval for durable-ACK progress.                                  |
 | `max_name_len`                                  | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                    |
-| `sender_id`                                     | string           | `default` | Identifies this producer to the server and in the journal.               |
+| `sender_id`                                     | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.      |
 | `max_frame_rejections`                          | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation.   |
 | `poison_min_escalation_window_millis`           | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.              |
 | `catch_up_cap_gap_min_escalation_window_millis` | integer ms       | `300000`  | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. |
@@ -143,28 +141,28 @@ Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
 shown as a dash is applied downstream of the connect string, by the sender or
 session that consumes it.
 
-| Key                         | Value                          | Default       | Meaning                                                                                                              |
-| --------------------------- | ------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `sf_dir`                    | path                           | —             | Journal directory. Enables store-and-forward.                                                                        |
-| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                 |
-| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees.                                                       |
-| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file. Also caps one ingress frame, including without `sf_dir`, since a frame must fit a segment. |
-| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                   |
-| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                     |
-| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Requires `sf_dir`.                                                    |
-| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                  |
-| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                                                                          |
+| Key                         | Value                          | Default       | Meaning                                                                                                                                   |
+| --------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `sf_dir`                    | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                     |
+| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                      |
+| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. Without `sf_dir` it retunes the 128 MiB memory queue.                      |
+| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. Set, it caps a frame without `sf_dir` too. |
+| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                        |
+| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                          |
+| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                 |
+| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                       |
+| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                                                                                               |
 
 ### Egress
 
-| Key                 | Value                 | Default    | Meaning                                            |
-| ------------------- | --------------------- | ---------- | -------------------------------------------------- |
-| `max_batch_rows`    | integer, 1..1048576   | —          | Rows the server puts in one result batch.          |
-| `initial_credit`    | integer ≥ 0           | —          | Starting flow-control credit for a query.          |
-| `buffer_pool_size`  | integer ≥ 1           | —          | Reusable result buffers held per session.          |
-| `compression`       | `raw`, `zstd`, `auto` | negotiated | Result compression to negotiate.                   |
-| `compression_level` | integer, 1..22        | —          | zstd level requested from the server.              |
-| `client_id`         | string                | —          | Identifies this client in server-side diagnostics. |
+| Key                 | Value                 | Default | Meaning                                            |
+| ------------------- | --------------------- | ------- | -------------------------------------------------- |
+| `max_batch_rows`    | integer, 1..1048576   | —       | Rows the server puts in one result batch.          |
+| `initial_credit`    | integer ≥ 0           | —       | Starting flow-control credit for a query.          |
+| `buffer_pool_size`  | integer ≥ 1           | —       | Reusable result buffers held per session.          |
+| `compression`       | `raw`, `zstd`, `auto` | `raw`   | Result compression to negotiate.                   |
+| `compression_level` | integer, 1..22        | —       | zstd level requested; requires `compression`.      |
+| `client_id`         | string                | —       | Identifies this client in server-side diagnostics. |
 
 ### Pool
 
@@ -247,7 +245,9 @@ const sender = await Sender.fromConfig(
         zone: "eu-west-1a",
         senderId: "producer-a",
         storeAndForward: {
-          directory: "/var/lib/my-service/qwp-replay/producer-a",
+          // The slot root. `senderId` names the journal inside it, so this must
+          // not repeat that name or the journal lands in `.../producer-a/producer-a`.
+          directory: "/var/lib/my-service/qwp-replay",
           maxBytes: 512 * 1024 * 1024,
           durability: "periodic",
           checkpointIntervalMs: 5_000,
@@ -275,10 +275,13 @@ const sender = await Sender.fromConfig(
 ```
 
 Node bounds connection establishment in two phases. `connectTimeoutMs` covers
-DNS plus the TCP/TLS connection; after that succeeds, `authTimeoutMs` independently
-covers the authenticated HTTP request and WebSocket upgrade. Both default to 15
-seconds, so one endpoint attempt can take up to their sum. A timeout is reported as
-`QwpUpgradeError` with `timeoutPhase` set to `"connect"` or `"authentication"`.
+DNS plus the TCP/TLS connection; after that succeeds, `authTimeoutMs` covers the
+authenticated HTTP request and WebSocket upgrade. Left unset, `authTimeoutMs`
+inherits `connectTimeoutMs`, so narrowing only the connect deadline bounds the
+whole opening instead of being exceeded by a default nobody chose; set it to give
+the upgrade its own budget, and one endpoint attempt can then take up to the sum
+of the two. Both default to 15 seconds. A timeout is reported as `QwpUpgradeError`
+with `timeoutPhase` set to `"connect"` or `"authentication"`.
 Browsers cannot observe the transport boundary, so their `connectTimeoutMs` continues
 to cover the complete WebSocket opening lifecycle and they do not expose
 `authTimeoutMs`.
@@ -293,7 +296,10 @@ drainer then sends it in order. The default `"append"` boundary is locally durab
 while `"periodic"` and `"memory"` trade that immediate guarantee for throughput.
 Applications can therefore keep publishing during an outage until the configured
 `maxBytes` applies backpressure. A failed journal publication leaves the high-level
-rows staged so the caller can retry.
+rows staged so the caller can retry. When one logical flush is split across multiple
+deferred frames, the client checks that every frame can fit before journalling the
+prefix; an undersized journal therefore rejects without leaving an unacknowledgeable
+partial transaction behind.
 
 `initialConnectMode` selects persistent startup behavior: `"off"` (the default)
 makes one
@@ -363,9 +369,7 @@ the surviving frames.
 
 The journal takes an exclusive lock when it is loaded and holds it until the sender
 or session closes. A second live Node.js process using the same directory fails with
-`QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents,
-unless the first has stopped heartbeating long enough to be reclaimed — in which case
-it is the first that stops writing, as described under the heartbeat below.
+`QwpReplayStoreLockedError` before recovery or cleanup can mutate journal contents.
 Ownership is held by a `.lock.owner` directory created next to the slot: `mkdir` is
 the only exclusive-by-construction filesystem operation available on every supported
 platform without a native addon, so exactly one process can create it. The holder PID
@@ -384,27 +388,25 @@ concurrent access is unsupported, and only between runtimes — two Node.js proc
 still exclude each other correctly.
 
 A kernel lock disappears the instant its holder dies; a directory does not. The holder
-therefore refreshes the owner directory's mtime every 5 seconds, and a contender
-reclaims a slot whose mtime has not advanced for 15 seconds. A contender also reclaims
-immediately when the owner record names a process that no longer exists on the same
-host, which is the common case after a crash. A stale owner directory is renamed aside
-before removal, so two contenders racing to reclaim one slot cannot both win it. Each
-acquisition also writes a token into the owner record and checks it before removing
-anything, so a release can never take away a directory that has since been handed to
-somebody else.
+therefore refreshes the owner directory's mtime every 5 seconds, but a lapsed timestamp
+alone never authorizes takeover: the process may be suspended inside a filesystem
+write and later resume through an open descriptor. A contender reclaims immediately
+only when the owner record names a same-host process that no longer exists (including
+a recorded prior process instance whose PID was reused), which is the common case after
+a crash. Remote-host or otherwise ambiguous owners require an operator to confirm that
+the process is gone and remove `.lock.owner`. A defunct owner directory is renamed
+aside before removal, so two contenders racing to reclaim one slot cannot both win it.
+Each acquisition also writes a token into the owner record and checks it before
+removing anything, so a release can never take away a directory that has since been
+handed to somebody else.
 
 If a holder is paused long enough for its heartbeat to lapse — `SIGSTOP`, a suspended
 VM, a stalled filesystem, or any synchronous section that blocks the event loop for
-more than 15 seconds — its lock can be reclaimed while it still believes it holds it.
-Such a holder stops writing: once it can no longer vouch for its own lock, every
-append, checkpoint and acknowledgement on that journal fails with
-`QwpReplayStoreLockLostError`, and the sender falls back to whatever its durability
-policy does when the journal is unavailable. This is deliberately conservative — the
-holder fails as soon as a contender _could_ have taken the slot, not only once one
-demonstrably has — because the alternative is writing at offsets the new owner now
-owns. A frame's sequence is derived from its position in the segment, so a same-width
-overwrite would otherwise reopen as a complete journal with the new owner's
-acknowledged frames missing and nothing reported.
+more than 15 seconds — contenders continue to refuse the slot while its recorded
+process is alive. The holder fences its first mutation after resuming, revalidates its
+acquisition token, and refreshes the heartbeat before continuing. This conservative
+rule avoids a proof-to-write race: a successor cannot accept a frame while an older
+process still has a writable descriptor for the same journal inode.
 
 New journals use the cross-client SFA persistence layout. Fixed-size
 `sf-<generation>.sfa` files have the Java/Rust 24-byte `SF01` header and
@@ -427,9 +429,15 @@ A background provisioning, checkpoint or trim failure is parked on the store and
 raised from the next journal call, then cleared by the next successful batch. Because
 such a fault is transient — a briefly full, read-only or descriptor-starved volume —
 reaching one while applying a server acknowledgement reconnects and replays rather
-than ending the sender: a filesystem hiccup must not cost a running producer. Failures
+than ending the sender: a filesystem hiccup must not cost a running producer. The same
+applies to the advisory lock. Reading its owner record is the only heartbeat step that
+needs a file descriptor, so descriptor pressure anywhere in the host process, an `EIO`,
+or an NFS `ESTALE` can leave a holder temporarily unable to prove ownership without
+anything having taken it; that is reported as `QwpReplayStoreLockUnprovableError`,
+which is retryable and parks the same way. Failures
 that are verdicts on the journal itself carry `retryable: false` and stay terminal;
-today those are `QwpReplayStoreCorruptionError` and `QwpReplayStoreLockLostError`. The
+today those are `QwpReplayStoreCorruptionError` and `QwpReplayStoreLockLostError`, the
+latter only once a takeover has actually been established. The
 store persists its acknowledgement cursor before it mutates anything, so a fault at
 that moment leaves exactly the state a crash at that moment would leave, and replay
 resumes from the persisted watermark.
@@ -443,6 +451,11 @@ therefore scales with the active encoding/send window rather than total disk bac
 
 Recovery also handles the canonical creation crash window in which a valid SFA
 segment becomes durable before its manifest.
+
+A partial final append is repaired only when no valid record follows it. If the
+scanner finds an intact CRC-verified record after a damaged record, the slot is
+treated as structurally corrupt and preserved through the quarantine path below;
+recovery never erases that intact suffix in place.
 
 On startup, a dictionary sidecar truncated at a complete-block boundary is rebuilt
 from the ordered symbol deltas embedded in surviving committed frames and healed
@@ -468,8 +481,11 @@ uses an independent QWP connection per slot, bounded by `maxBackgroundDrainers` 
 default). The scanner runs immediately and then every 30 seconds; set
 `orphanScanIntervalMs: 0` for a startup-only scan. Terminal recovery failures create
 `.failed` in the slot so a corrupt or permanently rejected head cannot cause a hot
-retry loop. After inspection or repair, call `retryQwpNodeOrphanSlot(slotDirectory)`
-to make it eligible again. `onOrphanDrainEvent` reports discovery, drain, lock
+retry loop. If that marker cannot be written, the drainer retains the slot in memory
+and retries only the marker on later scans; it does not report abandonment or replay
+the terminal head again. After inspection or repair, call
+`retryQwpNodeOrphanSlot(slotDirectory)` to make it eligible again.
+`onOrphanDrainEvent` reports discovery, drain, lock
 contention, quarantine, scanner failures, durable-ACK capability gaps, and transient
 all-replica windows through a bounded asynchronous inbox. An abandoned slot also
 reports a typed `data-loss` sender error. Callback exceptions cannot interrupt
@@ -706,10 +722,19 @@ of `awaitServerAck`, and returns the highest stable frame sequence published by 
 call. It returns `-1n` when there was nothing to publish. `publishedSequence` and
 `acknowledgedSequence` expose the current immutable watermarks. ACK waits are
 cumulative, so one later acknowledgement resolves all covered waits and callers may
-wait for different sequences concurrently. When durable ACK was negotiated, the
+wait for different sequences concurrently. When durable ACK is being tracked, the
 acknowledged watermark advances only after QuestDB reports durable progress;
-otherwise it follows ordinary protocol OK responses. A deadline failure raises
+otherwise it follows ordinary protocol OK responses. Tracking needs both halves:
+the caller has to ask for durable progress (`requestDurableAck`, or
+`durableAckKeepaliveMs` directly) and the server has to confirm it. Negotiation
+alone is not enough, because nothing polls for durable progress that was never
+requested — a server that offers the capability unasked leaves the watermark on
+ordinary OK ACKs rather than stalling it. A deadline failure raises
 `QwpIngressAckTimeoutError` without closing an otherwise healthy session.
+If crash recovery retires an incomplete deferred transaction that QuestDB never
+received, its frame range does not advance this watermark. Waiting on one of those
+frames rejects with `QwpIngressAckAbandonedError`; later frames can still be sent and
+acknowledged normally.
 
 Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` or
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to
@@ -870,13 +895,12 @@ the most recent successful same-zone endpoint remains sticky. Background orphan
 drainers publish health observations but never reset foreground classifications.
 Ingress reconnect is enabled by default for factory-created browser and Node sessions.
 Unacknowledged frames are retained in memory and replayed at least once after a
-transport failure. The built-in memory replay queue targets a 128 MiB cap. When the
+transport failure. The built-in memory replay queue is capped at 128 MiB. When the
 cap is full, publication waits for ACK-driven trimming for at most 30 seconds, then
 rejects with `QwpMemoryReplayAppendTimeoutError`; a single frame that can never fit
-is rejected immediately with `QwpMemoryReplayFrameTooLargeError`. A logical batch
-that closes an already-open transaction may temporarily take the queue to at most twice
-the configured cap: QuestDB cannot ACK the deferred prefix until it receives that
-commit-bearing suffix, so waiting at the cap would deadlock the transaction. Set
+is rejected immediately with `QwpMemoryReplayFrameTooLargeError`, and a split logical
+batch that can never fit is rejected before its first frame with
+`QwpMemoryReplayBatchTooLargeError`. Set
 `memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on ingress session options
 to tune these bounds. The accounting includes a fixed per-frame allowance so many
 small frames cannot bypass the byte cap.
@@ -981,7 +1005,8 @@ console.info(sender.metrics);
 ```
 
 Callbacks are placed on bounded asynchronous inboxes and never invoked inside ACK,
-reconnect, or orphan-recovery protocol stacks. Connection events default to 64 retained
+reconnect, or orphan-recovery protocol stacks, on ingress and egress alike; the
+drop counters below are reported in the ingress metrics snapshot. Connection events default to 64 retained
 entries and errors to 256; `connectionListenerInboxCapacity` and
 `errorInboxCapacity` (or their snake-case unified-string keys) tune those bounds.
 Overflow drops the oldest pending entry and retains the newest state. Inspect
@@ -1082,6 +1107,11 @@ const query = await session.queryViews(
 );
 await query.completion;
 ```
+
+The callback receives bounded control operations such as `cancel()`,
+`grantCredit()`, and `awaitCompletion(timeoutMs)`. The unbounded `completion`
+promise is available only on the returned query handle and must be awaited
+outside the callback, after its current batch has been released.
 
 For conventional row-major processing, the same batch also owns one reusable
 `QwpResultRowView`:
@@ -1322,11 +1352,16 @@ For unified strings with `sf_dir`, Java-compatible defaults apply: memory
 durability, a 10 GiB total journal cap, 4 MiB journal segments, a 30-second
 capacity wait, a 5-second close drain, and fail-fast initial connection. Set
 `sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
-The 4 MiB default sizes journal segments only; it does not install an ingress
-frame cap. Set `sf_max_segment_bytes` explicitly, or `qwp.session.maxBatchSizeBytes`,
-to bound frames before the first publication tells the client the server's cap.
-Without `sf_dir`, `sf_max_total_bytes` and `sf_append_deadline_millis` tune the
-built-in memory replay queue instead, and `sf_max_segment_bytes` still caps a frame.
+A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
+the ingress frame cap from the first publication onward, before the server has
+advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.
+Raise `sf_max_segment_bytes`, or lower the cap with
+`qwp.session.maxBatchSizeBytes`, to choose a different bound. Without `sf_dir`
+there is no default frame cap, and `sf_max_total_bytes`,
+`sf_append_deadline_millis` and `sf_max_segment_bytes` retune the built-in
+memory replay queue instead -- note that queue's own ceiling is 128 MiB, not the
+10 GiB the journal defaults to, while the 30-second append deadline is the same
+on both.
 The parser also supports `max_name_len` and the Java listener/error inbox
 capacity keys. Those capacities actively bound asynchronous connection and
 typed-error delivery and are reflected in ingress drop counters.
@@ -1471,35 +1506,39 @@ root.
 
 The public error classes preserve enough context for policy decisions:
 
-| Error                              | Meaning                                                                                                     |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `QwpUpgradeError`                  | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
-| `QwpRoleMismatchError`             | A connected endpoint's advertised role does not satisfy the requested egress target                         |
-| `QwpPoolAcquireTimeoutError`       | Every pooled connection is leased beyond the configured acquisition deadline                                |
-| `QwpPoolResourceError`             | Creating a new pooled sender or query connection failed                                                     |
-| `QwpClientClosedError`             | The pooled client or an individual returned lease is already closed                                         |
-| `QwpDurableAckUnavailableError`    | Durable acknowledgement was required but not negotiated                                                     |
-| `QwpSendTimeoutError`              | A send did not drain before its deadline; delivery is unknown                                               |
-| `QwpSenderCloseTimeoutError`       | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
-| `QwpIngressNackError`              | QuestDB rejected an ingress frame                                                                           |
-| `QwpIngressAckTimeoutError`        | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
-| `QwpBatchTooLargeError`            | One encoded row cannot fit the effective ingress cap                                                        |
-| `QwpReconnectExhaustedError`       | The configured reconnect boundary was reached                                                               |
-| `QwpReplayRejectedError`           | A replayed frame was rejected and retained for inspection                                                   |
-| `QwpReplayStoreFullError`          | The Node.js replay journal reached its configured size                                                      |
-| `QwpReplayStoreAppendTimeoutError` | The Node.js replay journal did not regain capacity before the configured append deadline                    |
-| `QwpReplayStoreCheckpointError`    | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
-| `QwpReplayStoreLockedError`        | Another process owns the configured Node.js replay directory                                                |
-| `QwpEgressQueryError`              | QuestDB returned a terminal query error                                                                     |
-| `QwpEgressQueryAbandonedError`     | Result iteration ended before the server completed the query                                                |
-| `QwpEgressQueryTimeoutError`       | The client deadline expired and cancellation began                                                          |
-| `QwpEgressQueryCancelTimeoutError` | A cancelled query did not produce a terminal server response before the drain deadline                      |
-| `QwpEgressReplayRequiredError`     | Deprecated compatibility type from the former explicit replay opt-in                                        |
+| Error                               | Meaning                                                                                                     |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `QwpUpgradeError`                   | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
+| `QwpRoleMismatchError`              | A connected endpoint's advertised role does not satisfy the requested egress target                         |
+| `QwpPoolAcquireTimeoutError`        | Every pooled connection is leased beyond the configured acquisition deadline                                |
+| `QwpPoolResourceError`              | Creating a new pooled sender or query connection failed                                                     |
+| `QwpClientClosedError`              | The pooled client or an individual returned lease is already closed                                         |
+| `QwpDurableAckUnavailableError`     | Durable acknowledgement was required but not negotiated                                                     |
+| `QwpSendTimeoutError`               | A send did not drain before its deadline; delivery is unknown                                               |
+| `QwpSenderCloseTimeoutError`        | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
+| `QwpIngressNackError`               | QuestDB rejected an ingress frame                                                                           |
+| `QwpIngressAckTimeoutError`         | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
+| `QwpBatchTooLargeError`             | One encoded row cannot fit the effective ingress cap                                                        |
+| `QwpMemoryReplayFrameTooLargeError` | One frame cannot fit the in-memory replay budget                                                            |
+| `QwpMemoryReplayBatchTooLargeError` | One split logical batch cannot fit the in-memory replay budget                                              |
+| `QwpMemoryReplayAppendTimeoutError` | The in-memory replay queue did not regain capacity before its append deadline                               |
+| `QwpReconnectExhaustedError`        | The configured reconnect boundary was reached                                                               |
+| `QwpReplayRejectedError`            | A replayed frame was rejected and retained for inspection                                                   |
+| `QwpReplayStoreFullError`           | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreAppendTimeoutError`  | The Node.js replay journal did not regain capacity before the configured append deadline                    |
+| `QwpReplayStoreCheckpointError`     | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
+| `QwpReplayStoreLockedError`         | Another process owns the configured Node.js replay directory                                                |
+| `QwpEgressQueryError`               | QuestDB returned a terminal query error                                                                     |
+| `QwpEgressQueryAbandonedError`      | Result iteration ended before the server completed the query                                                |
+| `QwpEgressQueryTimeoutError`        | The client deadline expired and cancellation began                                                          |
+| `QwpEgressQueryCancelTimeoutError`  | A cancelled query did not produce a terminal server response before the drain deadline                      |
+| `QwpEgressReplayRequiredError`      | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
 Always close senders and sessions in `finally`. Sender publication plus ACK draining is
 bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
-by `closeTimeoutMs`. In Node, `connectTimeoutMs` and `authTimeoutMs` independently
-bound transport connection and authenticated upgrade. `sendTimeoutMs`, acknowledgement
+by `closeTimeoutMs`. In Node, `connectTimeoutMs` bounds the transport
+connection and `authTimeoutMs` the authenticated upgrade, the latter inheriting
+the former unless it is set. `sendTimeoutMs`, acknowledgement
 timeouts, and query deadlines cover later lifecycle phases; configure each according
 to the deployment rather than using one very large catch-all value.
 
@@ -1548,6 +1587,11 @@ Code that manually creates `QwpTableBuffer` and calls
 `connectQwpBrowserSender()`. Keep low-level sessions only when an application needs
 to produce encoded table buffers itself. The high-level sender owns batching, symbol
 deltas, ACK tracking, auto-flush, transactions, and durable waits.
+
+Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
+signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
+every element. Coercible values such as booleans and numeric strings, unsafe or
+fractional numbers, and out-of-range bigints are rejected before encoding.
 
 ### Java client concepts
 
