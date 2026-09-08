@@ -782,6 +782,10 @@ when server acceptance is also required. If a split logical batch cannot be full
 journaled, its unattempted suffix is suppressed and the operation's publication
 promise rejects.
 
+Leaving `acknowledgement` unawaited is safe. The session observes it, so an ACK
+deadline or a `close()` that rejects a frame still in flight cannot surface as an
+unhandled rejection, and both still reach `onError` and the metrics snapshot.
+
 ### Browser ingress
 
 Browser applications must use the browser entry point and a same-origin WebSocket

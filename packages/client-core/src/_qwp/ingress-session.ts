@@ -970,10 +970,13 @@ export class QwpIngressSession {
       this.deltaSymbolsPublished = successfullyPublishedDelta;
       throw error;
     });
-    const acknowledgement = Promise.all([
-      publication,
-      sending.acknowledgement,
-    ]).then(([, response]) => response);
+    // Another new promise, and this one also carries the publication
+    // rejection, so it needs the same containment.
+    const acknowledgement = this.observeAcknowledgement(
+      Promise.all([publication, sending.acknowledgement]).then(
+        ([, response]) => response,
+      ),
+    );
     return { sequence: sending.sequence, publication, acknowledgement };
   }
 
@@ -1189,8 +1192,35 @@ export class QwpIngressSession {
     return {
       sequence,
       publication: sending,
-      acknowledgement: response,
+      acknowledgement: this.observeAcknowledgement(response),
     };
+  }
+
+  /**
+   * Marks an acknowledgement promise as observed and returns it unchanged.
+   *
+   * `acknowledgement` is optional by contract: QWP.md tells callers to await
+   * `publication` before releasing retryable source rows and to await
+   * `acknowledgement` only when server acceptance is also required. The
+   * session nevertheless rejects it from paths the caller never asked about --
+   * the ACK deadline in startFrameWithPublication() and rejectAll() in
+   * closeNow() -- and under Node's default unhandled-rejection mode an
+   * unobserved rejection terminates the process. Following the documented
+   * pattern therefore killed the producer roughly ackTimeoutMs into any
+   * outage, and again on close() with a frame still in flight.
+   *
+   * Attaching a handler settles that tracking without consuming anything: the
+   * same promise is returned, so a caller who does await it still receives the
+   * rejection, and both rejecting paths already report through recordError()
+   * and the onError observer. QwpSender applies this to its own use of these
+   * methods and clearDurablePoll()'s poll does the same; the public API is
+   * simply held to the same rule.
+   */
+  private observeAcknowledgement(
+    acknowledgement: Promise<QwpIngressResponse>,
+  ): Promise<QwpIngressResponse> {
+    void acknowledgement.catch(() => undefined);
+    return acknowledgement;
   }
 
   private sendPlannedFramesWithPublication(
@@ -1224,9 +1254,13 @@ export class QwpIngressSession {
     // The final barrier settles only after every suffix has either published
     // or been deliberately suppressed and had its sequence slot reserved.
     const publication = publicationBarrier;
-    const acknowledgement = Promise.all(
-      sends.map((send) => send.acknowledgement),
-    ).then(mergeIngressResponses);
+    // Promise.all() builds a new promise, so the per-frame containment above
+    // does not reach it.
+    const acknowledgement = this.observeAcknowledgement(
+      Promise.all(sends.map((send) => send.acknowledgement)).then(
+        mergeIngressResponses,
+      ),
+    );
     return {
       sequence: sends[sends.length - 1].sequence,
       publication,

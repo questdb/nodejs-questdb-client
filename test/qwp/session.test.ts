@@ -2415,6 +2415,105 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
+  it("contains an acknowledgement nobody awaited", async () => {
+    // QWP.md documents `acknowledgement` as optional: await `publication`
+    // before releasing retryable source rows, and `acknowledgement` only when
+    // server acceptance is also required. The session rejects it anyway, from
+    // paths the caller never asked about -- the ACK deadline, and rejectAll()
+    // in close() -- and under Node's default unhandled-rejection mode that
+    // terminated the producer roughly ackTimeoutMs into any outage, and again
+    // on close() with a frame still in flight. Following the documented
+    // pattern must not kill the process.
+    const unhandled: unknown[] = [];
+    const collect = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", collect);
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      // The server accepts the frames and never answers them.
+      const session = new QwpIngressSession(await connecting, {
+        ackTimeoutMs: 5,
+      });
+
+      const timedOut = session.sendFrameWithPublication(
+        encodeQwpIngressFrame([longTable("trades", [1n])]),
+      );
+      await timedOut.publication;
+      // Trigger one: the ACK deadline elapses with nothing observing it.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(unhandled).toEqual([]);
+
+      const closed = session.sendFrameWithPublication(
+        encodeQwpIngressFrame([longTable("trades", [2n])]),
+      );
+      await closed.publication;
+      // Trigger two: close() rejects whatever is still pending.
+      await session.close();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+
+      // Containment must not swallow: a caller who does await still sees it.
+      await expect(timedOut.acknowledgement).rejects.toThrow(
+        /timed out waiting for QWP ACK/,
+      );
+      await expect(closed.acknowledgement).rejects.toBeInstanceOf(
+        QwpIngressSessionClosedError,
+      );
+    } finally {
+      process.off("unhandledRejection", collect);
+    }
+  });
+
+  it("contains the aggregate acknowledgements the same way", async () => {
+    // A split batch and the delta-dictionary path each build a fresh promise
+    // with Promise.all(), so the per-frame containment above does not reach
+    // them. The delta aggregate also carries the publication rejection.
+    const unhandled: unknown[] = [];
+    const collect = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", collect);
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const cap = encodeQwpIngressFrame([longTable("trades", [1n])], {
+        gorilla: false,
+      }).byteLength;
+      const session = new QwpIngressSession(await connecting, {
+        maxBatchSizeBytes: cap,
+      });
+
+      const split = session.sendTablesWithPublication(
+        [longTable("trades", [1n, 2n])],
+        { gorilla: false },
+      );
+      const delta = session.sendTablesDeltaWithPublication([
+        symbolTable("events", ["a"]),
+      ]);
+      await Promise.all([split.publication, delta.publication]);
+      expect(socket.sent.length).toBeGreaterThan(2);
+
+      await session.close();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+
+      await expect(split.acknowledgement).rejects.toBeInstanceOf(
+        QwpIngressSessionClosedError,
+      );
+      await expect(delta.acknowledgement).rejects.toBeInstanceOf(
+        QwpIngressSessionClosedError,
+      );
+    } finally {
+      process.off("unhandledRejection", collect);
+    }
+  });
+
   it("splits a table over the row cap instead of failing the whole batch", async () => {
     // QWP_MAX_ROWS_PER_TABLE is enforced inside encodeQwpIngressFrame(), which
     // planIngressFrames() calls before its size test and its bisection -- so
