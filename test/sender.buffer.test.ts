@@ -938,6 +938,37 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
+  it("keeps the symbol section open when a column value overflows the buffer", async function () {
+    // The sibling test above stops at writeColumn()'s own checkCapacity(),
+    // which rejects before hasColumnCall is set. A value encoder reserves its
+    // own bytes and throws one step later, with the flag already set, so the
+    // catch has to put it back: a caller who handled the overflow and fell
+    // back to a symbol otherwise hit a second, unrelated "Symbol can be added
+    // only after table name is set and before any column added" -- on a row
+    // where nothing had been written and base allowed the symbol.
+    const sender = new Sender({
+      protocol: "http",
+      protocol_version: "1",
+      host: "host",
+      auto_flush: false,
+      init_buf_size: 32,
+      max_buf_size: 32,
+    });
+
+    sender.table("t");
+    const positionBefore = bufferPosition(sender);
+    // Short name, so the separator and name fit and writeValue() is reached.
+    expect(() => sender.stringColumn("b", "x".repeat(200))).toThrow(
+      "Max buffer size is 32 bytes",
+    );
+    expect(bufferPosition(sender)).toBe(positionBefore);
+
+    // The rejected call contributed nothing, so symbols are still legal.
+    await sender.symbol("s", "v").intColumn("v", 1).atNow();
+    expect(bufferContent(sender)).toBe("t,s=v v=1i\n");
+    await sender.close();
+  });
+
   it("omits decimal columns with null or undefined value", async function () {
     const sender = new Sender({
       protocol: "tcp",
