@@ -8,6 +8,9 @@ import { log, Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 import * as qwpNode from "./qwp";
+// Imported directly rather than through ./qwp: this is a Sender-side guard, and
+// ./qwp is re-exported wholesale by the package root.
+import { warnUnsupportedQwpSenderKeys } from "./qwp-node/client-config";
 import type {
   QwpNodeClientOptions,
   QwpNodeIngressOptions,
@@ -86,6 +89,11 @@ function resolveQwpConfig(
     ...webSocketOverrides
   } = configuredWebSocket ?? {};
   const logger = options.log ?? options.qwp?.sender?.log ?? log;
+  // A Sender is ingress-only, so the egress and pool sections this string may
+  // configure have nothing to act on. One connect string is meant to serve both
+  // entry points, so this is not an error -- but it was applied to nothing
+  // without a word, and every other unusable key in this vocabulary says so.
+  warnUnsupportedQwpSenderKeys(configString, logger);
   const agent =
     webSocketOverrides.agent ??
     selectQwpSchemeAgent(options.agent, options.protocol === WSS, logger);

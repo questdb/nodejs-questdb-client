@@ -38,6 +38,41 @@ describe("Sender QWP integration", () => {
     server = undefined;
   });
 
+  it("warns about QWP keys a Sender cannot honour", async () => {
+    // One connect string is meant to serve both entry points, so a client-only
+    // key here is not an error -- the failover test below deliberately passes a
+    // full cluster vocabulary to a Sender. But a Sender consumes only the
+    // ingress, sender and ingress-session sections, so the egress and pool keys
+    // used to be parsed, validated and then applied to nothing without a word.
+    const warnings: string[] = [];
+    const collect = (target: string[]) =>
+      ((level: string, message: string | Error) => {
+        if (level === "warn") target.push(String(message));
+      }) as never;
+
+    const sender = await Sender.fromConfig(
+      "ws::addr=localhost:9000;compression=zstd;query_pool_min=4;" +
+        "target=primary;auto_flush_rows=5000;",
+      { log: collect(warnings) },
+    );
+    await sender.close();
+    expect(warnings).toEqual([
+      "Sender ignores QWP configuration keys: compression, query_pool_min; " +
+        "they configure QWP egress and the connection pools, which only " +
+        "connectQwpNodeClient() builds",
+    ]);
+
+    // Ingress-side keys on their own stay silent.
+    const quiet: string[] = [];
+    const second = await Sender.fromConfig(
+      "ws::addr=localhost:9000;target=primary;zone=eu;failover=off;" +
+        "lazy_connect=on;auto_flush_rows=5000;",
+      { log: collect(quiet) },
+    );
+    await second.close();
+    expect(quiet).toEqual([]);
+  });
+
   it("applies fail-fast persistent startup from the configuration string", async () => {
     const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await new Promise<void>((resolve, reject) => {

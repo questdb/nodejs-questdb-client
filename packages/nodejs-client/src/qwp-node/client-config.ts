@@ -7,6 +7,7 @@ import type {
   QwpNodeIngressOptions,
   QwpNodeStoreAndForwardOptions,
 } from "../qwp";
+import type { Logger } from "../logging";
 import type { QwpClientPoolOptions } from "../../../client-core/src/_qwp/client";
 import type { QwpEgressSessionOptions } from "../../../client-core/src/_qwp/egress-session";
 import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
@@ -120,6 +121,63 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "on_server_error",
   "on_write_error",
 ]);
+
+/**
+ * Keys only the combined client can act on. They configure the egress session
+ * and the connection pools, and a `Sender` builds neither.
+ *
+ * `Sender.fromConfig("ws::...")` parses and validates the whole shared QWP
+ * vocabulary and then consumes three of the seven resolved sections, so every
+ * one of these used to be accepted and silently dropped. The parser rejects an
+ * unknown key, so accepting a known one that does nothing is the outlier --
+ * the same reasoning validateUdpUnsupportedOptions() already applies on the
+ * ILP side.
+ *
+ * `lazy_connect`, `target`, `zone`, `failover*`, `drain_orphans` and the
+ * store-and-forward keys are deliberately absent: ingress honours all of them.
+ */
+const QWP_CLIENT_ONLY_CONFIG_KEYS: ReadonlySet<string> = new Set([
+  "acquire_timeout_ms",
+  "buffer_pool_size",
+  "compression",
+  "compression_level",
+  "housekeeper_interval_ms",
+  "idle_timeout_ms",
+  "initial_credit",
+  "max_batch_rows",
+  "max_lifetime_ms",
+  "query_close_timeout_ms",
+  "query_pool_max",
+  "query_pool_min",
+  "sender_pool_max",
+  "sender_pool_min",
+]);
+
+/**
+ * Warns about connect-string keys a standalone `Sender` cannot honour.
+ *
+ * Warned rather than rejected on purpose. One connect string is meant to be
+ * usable with both entry points -- that is what the shared vocabulary is for,
+ * and `Sender.fromConfig` is tested against a full-vocabulary cluster string --
+ * so a client-only key here is not a mistake the way an unknown key is. It was
+ * still applied to nothing without a word, which is the part worth fixing.
+ */
+export function warnUnsupportedQwpSenderKeys(
+  configurationString: string,
+  logger: Logger,
+): void {
+  const unsupported = [
+    ...parseConfigurationString(configurationString).values.keys(),
+  ]
+    .filter((key) => QWP_CLIENT_ONLY_CONFIG_KEYS.has(key))
+    .sort();
+  if (unsupported.length === 0) return;
+  logger(
+    "warn",
+    `Sender ignores QWP configuration key${unsupported.length > 1 ? "s" : ""}: ${unsupported.join(", ")}; ` +
+      "they configure QWP egress and the connection pools, which only connectQwpNodeClient() builds",
+  );
+}
 
 interface ParsedConfig {
   readonly schema: "ws" | "wss";
