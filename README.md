@@ -142,6 +142,14 @@ NULL array marker. Supported column methods now omit the column instead. If your
 code relied on the throw as a data-quality guard, validate before calling the
 sender.
 
+`decimalColumn(name, unscaled, scale)` also tightened its scale check on ILP
+protocol v3. `scale` is typed `number`, and a non-integer one used to reach
+`Buffer.writeInt8`, which coerces rather than rejects: `2.5` was written as
+scale `2`, and `NaN` or `undefined` as scale `0`, so the row was sent with a
+scale the caller never asked for. Such a call now throws a `RangeError`. A
+computed scale -- from a division, a `Math.log10`, or a parsed float -- has to
+be rounded to an integer before it is passed.
+
 ### QWP ingress from Node.js or a browser
 
 See the [complete QWP guide](./QWP.md) for ingress and egress APIs, the combined

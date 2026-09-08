@@ -3,9 +3,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
+  QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE,
+  QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
   QwpSender,
   type QwpSenderSession,
 } from "../../packages/client-core/src/qwp";
+import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
+import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-egress-connection";
+import { createQwpNodeClient } from "../../packages/nodejs-client/src";
 import { resolveQwpNodeClientConfig } from "../../packages/nodejs-client/src/qwp-node/client-config";
 import { QWP_SUPPORTED_CONFIG_KEYS } from "../../packages/nodejs-client/src/qwp-node/client-config";
 import * as nodeClient from "../../packages/nodejs-client/src";
@@ -83,6 +88,107 @@ describe("QWP configuration-string reference", () => {
     expect(unknown).toEqual([]);
     // Guard against the extraction silently matching nothing.
     expect(listed.size).toBeGreaterThan(50);
+  });
+
+  it("documents the pool, egress and reconnect defaults the code applies", async () => {
+    // Twelve rows read "—" while the code applied a concrete value, so a
+    // reader had no way to learn what `initial_credit` or `sender_pool_max`
+    // does when omitted. Pin every documented number to its source constant.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = (key: string): string => {
+      const row = new RegExp(
+        `^\\| \`${key}\`\\s*\\|[^|]*\\|\\s*(.+?)\\s*\\|`,
+        "m",
+      ).exec(doc);
+      if (!row) throw new Error(`no row documented for ${key}`);
+      return row[1];
+    };
+    const documentedNumber = (key: string): number => {
+      const cell = documented(key);
+      const value = /^`(\d+)`$/.exec(cell);
+      if (!value) throw new Error(`no numeric default for ${key}: ${cell}`);
+      return Number(value[1]);
+    };
+
+    expect(documentedNumber("initial_credit")).toBe(
+      QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
+    );
+    expect(documentedNumber("buffer_pool_size")).toBe(
+      QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE,
+    );
+
+    // The pool constants are module-private, so assert against the values a
+    // default client really reports.
+    const client = createQwpNodeClient({
+      ingress: { url: "ws://127.0.0.1:1/write/v4" },
+      egress: { url: "ws://127.0.0.1:1/read/v1" },
+    });
+    try {
+      const metrics = client.metrics;
+      expect(documentedNumber("sender_pool_min")).toBe(metrics.senders.minimum);
+      expect(documentedNumber("sender_pool_max")).toBe(metrics.senders.maximum);
+      expect(documentedNumber("query_pool_min")).toBe(metrics.queries.minimum);
+      expect(documentedNumber("query_pool_max")).toBe(metrics.queries.maximum);
+    } finally {
+      await client.close();
+    }
+
+    // Ingress and egress disagree on the reconnect defaults, so those cells
+    // carry both, in that order.
+    for (const [key, ingress, egress] of [
+      ["reconnect_initial_backoff_millis", "initialBackoffMs"],
+      ["reconnect_max_backoff_millis", "maxBackoffMs"],
+      ["reconnect_max_duration_millis", "maxDurationMs"],
+    ].map(([key, field]) => [
+      key,
+      QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS[
+        field as keyof typeof QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS
+      ],
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS[
+        field as keyof typeof QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS
+      ],
+    ]) as [string, number, number][]) {
+      expect(documented(key), key).toBe(`\`${ingress}\` / \`${egress}\``);
+    }
+    // The failover keys share the egress reconnect defaults.
+    expect(documentedNumber("failover_max_attempts")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxAttempts,
+    );
+    expect(documentedNumber("failover_backoff_initial_ms")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.initialBackoffMs,
+    );
+    expect(documentedNumber("failover_backoff_max_ms")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxBackoffMs,
+    );
+    expect(documentedNumber("failover_max_duration_ms")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxDurationMs,
+    );
+  });
+
+  it("documents every error class the packages export", async () => {
+    // QWP.md's policy says the compatibility contract covers "errors", but the
+    // table listed 25 of 44 exported classes. Eight of them -- QwpSendClosedError
+    // among them, constructed on 39 paths including the browser entry point --
+    // appeared in neither the table nor public-api-contract.ts, so a consumer
+    // writing catch policy from this document had no entry for errors the
+    // client really throws. Keep the table exact in both directions.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = new Set(
+      [...doc.matchAll(/^\| `(Qwp\w+Error)`/gm)].map((match) => match[1]),
+    );
+    const exported = new Set(
+      [...Object.keys(nodeClient), ...Object.keys(browserClient)].filter(
+        (name) => /^Qwp\w+Error$/.test(name),
+      ),
+    );
+
+    expect(
+      [...exported].filter((name) => !documented.has(name)).sort(),
+    ).toEqual([]);
+    expect(
+      [...documented].filter((name) => !exported.has(name)).sort(),
+    ).toEqual([]);
+    expect(exported.size).toBeGreaterThan(40);
   });
 
   it("documents the auto-flush defaults the sender actually applies", async () => {

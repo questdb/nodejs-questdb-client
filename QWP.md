@@ -117,23 +117,28 @@ continues to come from `addr`, because the typed object intentionally omits
 | `max_frame_rejections`                          | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation.   |
 | `poison_min_escalation_window_millis`           | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.              |
 | `catch_up_cap_gap_min_escalation_window_millis` | integer ms       | `300000`  | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. |
-| `connection_listener_inbox_capacity`            | integer          | —         | Bound on the connection-event inbox before events are dropped.           |
-| `error_inbox_capacity`                          | integer          | —         | Bound on the `onSenderError` inbox before events are dropped.            |
+| `connection_listener_inbox_capacity`            | integer          | `64`      | Bound on the connection-event inbox before events are dropped.           |
+| `error_inbox_capacity`                          | integer          | `256`     | Bound on the `onSenderError` inbox before events are dropped.            |
 
 ### Reconnect and failover
 
-| Key                                | Value                       | Default | Meaning                                                                                |
-| ---------------------------------- | --------------------------- | ------- | -------------------------------------------------------------------------------------- |
-| `reconnect_initial_backoff_millis` | integer ms                  | —       | First reconnect delay; grows exponentially with jitter.                                |
-| `reconnect_max_backoff_millis`     | integer ms                  | —       | Ceiling for one reconnect delay.                                                       |
-| `reconnect_max_duration_millis`    | integer ms                  | —       | Budget for a reconnect episode. This is the QWP replacement for ILP's `retry_timeout`. |
-| `failover`                         | `on`, `off`                 | —       | Enables endpoint failover for egress.                                                  |
-| `failover_max_attempts`            | integer ≥ 1                 | —       | Failover attempts before giving up.                                                    |
-| `failover_backoff_initial_ms`      | integer ms                  | —       | First failover delay.                                                                  |
-| `failover_backoff_max_ms`          | integer ms                  | —       | Ceiling for one failover delay.                                                        |
-| `failover_max_duration_ms`         | integer ms                  | —       | Budget for a failover episode.                                                         |
-| `target`                           | `any`, `primary`, `replica` | —       | Server role this client will accept, on both ingress and egress.                       |
-| `zone`                             | string                      | —       | Preferred topology zone when ranking endpoints, on both ingress and egress.            |
+| Key                                | Value                       | Default            | Meaning                                                                                |
+| ---------------------------------- | --------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
+| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                |
+| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                       |
+| `reconnect_max_duration_millis`    | integer ms                  | `300000` / `30000` | Budget for a reconnect episode. This is the QWP replacement for ILP's `retry_timeout`. |
+| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                  |
+| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                    |
+| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                  |
+| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                        |
+| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                         |
+| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                       |
+| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.            |
+
+The three `reconnect_*` defaults differ by side, shown here as ingress / egress.
+Ingress additionally defaults to unlimited attempts, because a running producer
+must outlast any outage; egress stops after 8. The `failover_*` keys configure
+egress only and share the egress reconnect defaults.
 
 ### Store-and-forward (Node only)
 
@@ -158,8 +163,8 @@ session that consumes it.
 | Key                 | Value                 | Default | Meaning                                            |
 | ------------------- | --------------------- | ------- | -------------------------------------------------- |
 | `max_batch_rows`    | integer, 1..1048576   | —       | Rows the server puts in one result batch.          |
-| `initial_credit`    | integer ≥ 0           | —       | Starting flow-control credit for a query.          |
-| `buffer_pool_size`  | integer ≥ 1           | —       | Reusable result buffers held per session.          |
+| `initial_credit`    | integer ≥ 0           | `0`     | Starting flow-control credit for a query.          |
+| `buffer_pool_size`  | integer ≥ 1           | `4`     | Reusable result buffers held per session.          |
 | `compression`       | `raw`, `zstd`, `auto` | `raw`   | Result compression to negotiate.                   |
 | `compression_level` | integer, 1..22        | —       | zstd level requested; requires `compression`.      |
 | `client_id`         | string                | —       | Identifies this client in server-side diagnostics. |
@@ -169,18 +174,18 @@ session that consumes it.
 Applied by the pooled facade. A standalone sender or query client ignores
 them, with one exception noted in the table.
 
-| Key                       | Value       | Default | Meaning                                                                                                                         |
-| ------------------------- | ----------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `sender_pool_min`         | integer     | —       | Senders kept warm.                                                                                                              |
-| `sender_pool_max`         | integer     | —       | Sender ceiling.                                                                                                                 |
-| `query_pool_min`          | integer     | —       | Query sessions kept warm.                                                                                                       |
-| `query_pool_max`          | integer     | —       | Query-session ceiling.                                                                                                          |
-| `acquire_timeout_ms`      | integer ms  | —       | How long `acquire()` waits for a free entry.                                                                                    |
-| `query_close_timeout_ms`  | integer ms  | —       | Bound on the CANCEL drain when a query session closes. Also honoured by a standalone egress session built from `egressSession`. |
-| `idle_timeout_ms`         | integer ms  | —       | Idle time before a pooled entry is reaped.                                                                                      |
-| `max_lifetime_ms`         | integer ms  | —       | Absolute lifetime of a pooled entry.                                                                                            |
-| `housekeeper_interval_ms` | integer ms  | —       | How often the pool reaps aged entries.                                                                                          |
-| `lazy_connect`            | `on`, `off` | off     | Start without blocking on a first connection.                                                                                   |
+| Key                       | Value       | Default   | Meaning                                                                                                                         |
+| ------------------------- | ----------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `sender_pool_min`         | integer     | `1`       | Senders kept warm.                                                                                                              |
+| `sender_pool_max`         | integer     | `4`       | Sender ceiling.                                                                                                                 |
+| `query_pool_min`          | integer     | `1`       | Query sessions kept warm.                                                                                                       |
+| `query_pool_max`          | integer     | `4`       | Query-session ceiling.                                                                                                          |
+| `acquire_timeout_ms`      | integer ms  | `5000`    | How long `acquire()` waits for a free entry.                                                                                    |
+| `query_close_timeout_ms`  | integer ms  | `5000`    | Bound on the CANCEL drain when a query session closes. Also honoured by a standalone egress session built from `egressSession`. |
+| `idle_timeout_ms`         | integer ms  | `60000`   | Idle time before a pooled entry is reaped.                                                                                      |
+| `max_lifetime_ms`         | integer ms  | `1800000` | Absolute lifetime of a pooled entry.                                                                                            |
+| `housekeeper_interval_ms` | integer ms  | `5000`    | How often the pool reaps aged entries.                                                                                          |
+| `lazy_connect`            | `on`, `off` | off       | Start without blocking on a first connection.                                                                                   |
 
 ### Reserved
 
@@ -1521,33 +1526,53 @@ root.
 
 The public error classes preserve enough context for policy decisions:
 
-| Error                               | Meaning                                                                                                     |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `QwpUpgradeError`                   | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
-| `QwpRoleMismatchError`              | A connected endpoint's advertised role does not satisfy the requested egress target                         |
-| `QwpPoolAcquireTimeoutError`        | Every pooled connection is leased beyond the configured acquisition deadline                                |
-| `QwpPoolResourceError`              | Creating a new pooled sender or query connection failed                                                     |
-| `QwpClientClosedError`              | The pooled client or an individual returned lease is already closed                                         |
-| `QwpDurableAckUnavailableError`     | Durable acknowledgement was required but not negotiated                                                     |
-| `QwpSendTimeoutError`               | A send did not drain before its deadline; delivery is unknown                                               |
-| `QwpSenderCloseTimeoutError`        | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
-| `QwpIngressNackError`               | QuestDB rejected an ingress frame                                                                           |
-| `QwpIngressAckTimeoutError`         | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
-| `QwpBatchTooLargeError`             | One encoded row cannot fit the effective ingress cap                                                        |
-| `QwpMemoryReplayFrameTooLargeError` | One frame cannot fit the in-memory replay budget                                                            |
-| `QwpMemoryReplayBatchTooLargeError` | One split logical batch cannot fit the in-memory replay budget                                              |
-| `QwpMemoryReplayAppendTimeoutError` | The in-memory replay queue did not regain capacity before its append deadline                               |
-| `QwpReconnectExhaustedError`        | The configured reconnect boundary was reached                                                               |
-| `QwpReplayRejectedError`            | A replayed frame was rejected and retained for inspection                                                   |
-| `QwpReplayStoreFullError`           | The Node.js replay journal reached its configured size                                                      |
-| `QwpReplayStoreAppendTimeoutError`  | The Node.js replay journal did not regain capacity before the configured append deadline                    |
-| `QwpReplayStoreCheckpointError`     | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
-| `QwpReplayStoreLockedError`         | Another process owns the configured Node.js replay directory                                                |
-| `QwpEgressQueryError`               | QuestDB returned a terminal query error                                                                     |
-| `QwpEgressQueryAbandonedError`      | Result iteration ended before the server completed the query                                                |
-| `QwpEgressQueryTimeoutError`        | The client deadline expired and cancellation began                                                          |
-| `QwpEgressQueryCancelTimeoutError`  | A cancelled query did not produce a terminal server response before the drain deadline                      |
-| `QwpEgressReplayRequiredError`      | Deprecated compatibility type from the former explicit replay opt-in                                        |
+| Error                                   | Meaning                                                                                                     |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `QwpUpgradeError`                       | Classified authentication, role, version, capability, timeout, transport, or browser-opaque upgrade failure |
+| `QwpRoleMismatchError`                  | A connected endpoint's advertised role does not satisfy the requested egress target                         |
+| `QwpVersionMismatchError`               | The server advertised a QWP version this client does not support                                            |
+| `QwpFailoverError`                      | Every eligible endpoint in one connection sweep failed                                                      |
+| `QwpBrowserSessionBootstrapError`       | The browser REST session bootstrap was rejected; carries the HTTP status and body                           |
+| `QwpPoolAcquireTimeoutError`            | Every pooled connection is leased beyond the configured acquisition deadline                                |
+| `QwpPoolResourceError`                  | Creating a new pooled sender or query connection failed                                                     |
+| `QwpClientClosedError`                  | The pooled client or an individual returned lease is already closed                                         |
+| `QwpDurableAckUnavailableError`         | Durable acknowledgement was required but not negotiated                                                     |
+| `QwpProtocolError`                      | A QWP payload is malformed, truncated, or unsupported                                                       |
+| `QwpSendError`                          | Base class for a frame that could not be handed to the transport                                            |
+| `QwpSendClosedError`                    | The WebSocket was closed, or not open, when a frame was sent                                                |
+| `QwpSendTimeoutError`                   | A send did not drain before its deadline; delivery is unknown                                               |
+| `QwpSenderCloseTimeoutError`            | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
+| `QwpIngressNackError`                   | QuestDB rejected an ingress frame                                                                           |
+| `QwpIngressAckTimeoutError`             | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
+| `QwpIngressAckAbandonedError`           | A recovered frame was deliberately retired without a server ACK                                             |
+| `QwpIngressSessionClosedError`          | The ingress session is closed; frames still in flight are rejected with it                                  |
+| `QwpBatchTooLargeError`                 | One encoded row cannot fit the effective ingress cap                                                        |
+| `QwpWriterRowError`                     | A compiled object-row writer rejected a value, naming its table, column and row                             |
+| `QwpUdpDatagramTooLargeError`           | One encoded row exceeds `max_datagram_size` and is rejected before transmission                             |
+| `QwpMemoryReplayFrameTooLargeError`     | One frame cannot fit the in-memory replay budget                                                            |
+| `QwpMemoryReplayBatchTooLargeError`     | One split logical batch cannot fit the in-memory replay budget                                              |
+| `QwpMemoryReplayAppendTimeoutError`     | The in-memory replay queue did not regain capacity before its append deadline                               |
+| `QwpReconnectExhaustedError`            | The configured reconnect boundary was reached                                                               |
+| `QwpReplayRejectedError`                | A replayed frame was rejected and retained for inspection                                                   |
+| `QwpReplayDictionaryError`              | A replay store cannot preserve the dictionary its delta frames require                                      |
+| `QwpReplayDictionaryPersistenceError`   | A dictionary sidecar append failed before its delta frame was published; retrying the batch is safe         |
+| `QwpUnrecoverableReplayDictionaryError` | The persisted dictionary cannot be restored, so recovered delta frames cannot be replayed                   |
+| `QwpReplayStoreFullError`               | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreAppendTimeoutError`      | The Node.js replay journal did not regain capacity before the configured append deadline                    |
+| `QwpReplayStoreCheckpointError`         | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
+| `QwpReplayStoreLockedError`             | Another process owns the configured Node.js replay directory                                                |
+| `QwpReplayStoreError`                   | Base class for every Node.js replay-journal failure                                                         |
+| `QwpReplayStoreSegmentTooLargeError`    | One frame exceeds `sf_max_segment_bytes` and can never be journaled                                         |
+| `QwpReplayStoreCorruptionError`         | Durable journal bytes are structurally corrupt and cannot be replayed                                       |
+| `QwpReplayStoreQuarantinedError`        | Recovery preserved an unreplayable slot and continued on a fresh one                                        |
+| `QwpReplayStoreLockLostError`           | The directory lock token changed, so appending could overwrite the new owner's frames                       |
+| `QwpReplayStoreLockUnprovableError`     | The lock owner record is unreadable, so ownership could not be re-proved                                    |
+| `QwpEgressQueryError`                   | QuestDB returned a terminal query error                                                                     |
+| `QwpEgressSessionClosedError`           | The egress session or its connection is closed                                                              |
+| `QwpEgressQueryAbandonedError`          | Result iteration ended before the server completed the query                                                |
+| `QwpEgressQueryTimeoutError`            | The client deadline expired and cancellation began                                                          |
+| `QwpEgressQueryCancelTimeoutError`      | A cancelled query did not produce a terminal server response before the drain deadline                      |
+| `QwpEgressReplayRequiredError`          | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
 Always close senders and sessions in `finally`. Sender publication plus ACK draining is
 bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
