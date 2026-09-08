@@ -174,7 +174,7 @@ Treat submodule gitlink changes as opaque. Detect mode `160000` pointer moves, r
 the path and old/new hashes, and classify each as exactly:
 
 ```bash
-git diff --raw "$BASE"${HEAD:+"...$HEAD"} | awk '$1 ~ /^:160000/ || $2 == "160000"'
+git diff --raw "$BASE"${HEAD:+"...$HEAD"} | grep -E '^:160000 |^:[0-7]{6} 160000 '
 ```
 
 - **OPAQUE** — the superproject changes only the gitlink. Do not enter the submodule,
