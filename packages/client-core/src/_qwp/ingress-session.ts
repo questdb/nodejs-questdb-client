@@ -561,8 +561,18 @@ export class QwpIngressSession {
   private closePromise?: Promise<void>;
   private readonly closeHooks: (() => void | Promise<void>)[] = [];
   private readonly receiveLoop: Promise<void>;
-  private readonly progressDispatcher?: QwpNotificationDispatcher<() => void>;
-  private readonly errorDispatcher?: QwpNotificationDispatcher<() => void>;
+  // The queued thunks hand back whatever safelyInvoke() contained, so an
+  // `async` observer's promise reaches the dispatcher and the inbox serializes
+  // on it. Typing these `() => void` swallowed that promise at the call
+  // boundary, which left both inboxes re-entering a slow observer once per
+  // drain turn -- the exact behaviour QwpNotificationDispatcher documents that
+  // it prevents.
+  private readonly progressDispatcher?: QwpNotificationDispatcher<
+    () => PromiseLike<void> | undefined
+  >;
+  private readonly errorDispatcher?: QwpNotificationDispatcher<
+    () => PromiseLike<unknown> | undefined
+  >;
 
   constructor(
     private readonly connection: QwpBinaryConnection,
@@ -1621,19 +1631,31 @@ export class QwpIngressSession {
       senderError,
       metrics: this.metrics,
     };
-    const notify = (): void => {
-      safelyInvoke(this.options.onError, event);
+    // Up to two observers run per notification, so the inbox only serializes
+    // correctly if it waits for both. Returning one and dropping the other
+    // would leave the second re-entered while the first is still running.
+    const notify = (): PromiseLike<unknown> | undefined => {
+      const pending: PromiseLike<unknown>[] = [];
+      const observe = (observer?: PromiseLike<unknown>): void => {
+        if (observer) pending.push(observer);
+      };
+      observe(safelyInvoke(this.options.onError, event));
       if (senderError && !this.connection.managesIngressSenderErrors) {
-        safelyInvoke(
-          this.options.onSenderError ?? defaultQwpSenderErrorHandler,
-          senderError,
+        observe(
+          safelyInvoke(
+            this.options.onSenderError ?? defaultQwpSenderErrorHandler,
+            senderError,
+          ),
         );
       } else if (!senderError && !this.options.onError) {
-        safelyInvoke(
-          defaultQwpIngressErrorHandler,
-          Object.freeze({ terminal, error: observed }),
+        observe(
+          safelyInvoke(
+            defaultQwpIngressErrorHandler,
+            Object.freeze({ terminal, error: observed }),
+          ),
         );
       }
+      return pending.length > 0 ? Promise.all(pending) : undefined;
     };
     if (this.errorDispatcher) this.errorDispatcher.offer(notify);
     else notify();

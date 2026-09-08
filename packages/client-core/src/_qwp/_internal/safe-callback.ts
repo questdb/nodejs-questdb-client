@@ -16,21 +16,31 @@
  * rejected promise (from an `async` callback) escape. On either failure the
  * optional {@link onFailure} handler runs; it is itself guarded so it can never
  * re-escape the containment it backs.
+ *
+ * Returns the callback's work as an already-contained promise when the callback
+ * was `async`, and `undefined` when it finished synchronously or threw. The
+ * returned promise settles when the callback does and never rejects, so a
+ * caller that ignores it keeps exactly the containment this helper has always
+ * given, while a caller that needs to know when the observer finished -- a
+ * notification inbox serializing its handler, say -- can await it. Discarding
+ * the promise here instead left every such caller unable to tell an `async`
+ * observer apart from a finished one.
  */
 export function safelyInvoke<T>(
   callback: ((event: T) => unknown) | undefined,
   event: T,
   onFailure?: (error: unknown) => void,
-): void {
-  if (!callback) return;
+): PromiseLike<void> | undefined {
+  if (!callback) return undefined;
   try {
     const result = callback(event);
     if (isPromiseLike(result)) {
-      void result.then(undefined, (error) => reportFailure(onFailure, error));
+      return result.then(undefined, (error) => reportFailure(onFailure, error));
     }
   } catch (error) {
     reportFailure(onFailure, error);
   }
+  return undefined;
 }
 
 function reportFailure(

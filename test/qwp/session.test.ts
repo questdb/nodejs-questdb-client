@@ -2721,6 +2721,53 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
+  it("serializes an async progress observer instead of re-entering it", async () => {
+    // QwpNotificationDispatcher waits for an `async` handler's promise before
+    // it dispatches the next notification, so a slow observer applies
+    // backpressure to its inbox. Both of this session's inboxes queued thunks
+    // that discarded that promise, so the dispatcher saw every notification
+    // finish synchronously and re-entered the observer once per drain turn.
+    // Concurrent copies then accumulated without bound while
+    // `droppedProgressNotifications` stayed at zero -- the counter QWP.md
+    // tells operators to read as "an observer is not keeping up".
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    let live = 0;
+    let peak = 0;
+    let entered = 0;
+    let release: (() => void) | undefined;
+    const session = new QwpIngressSession(await connecting, {
+      durableAckKeepaliveMs: 0,
+      onProgress: async () => {
+        entered++;
+        live++;
+        peak = Math.max(peak, live);
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        live--;
+      },
+    });
+
+    for (let frame = 0; frame < 8; frame++) {
+      await session.publishFrame(Uint8Array.of(frame));
+    }
+    // Give the inbox far more drain turns than it has notifications; an
+    // unserialized observer re-enters on each one.
+    for (let turn = 0; turn < 16; turn++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(entered).toBe(1);
+    expect(peak).toBe(1);
+    release?.();
+    await session.close();
+  });
+
   it("reports immutable ingress metrics, progress, and protected error callbacks", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
