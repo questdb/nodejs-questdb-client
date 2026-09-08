@@ -5787,6 +5787,90 @@ describe("QWP Node file replay store", () => {
     }
   });
 
+  it("retires an empty active segment that outlived its sequence origin", async () => {
+    // activateHotSpare() writes a segment's base, fsyncs the manifest that
+    // names it, and only then stamps the manifest-required flag. A crash in
+    // that window leaves a real segment carrying a non-zero base, no records
+    // and no flag -- and recovery is required to retain exactly that shape
+    // (see the test above) rather than forge the flag.
+    //
+    // Retaining the base was the problem. Once the journal has drained, the
+    // ACK watermark is gone and a reconnecting transport restarts its frame
+    // numbering at 0, so the retained base belonged to a numbering nothing
+    // else remembered. appendOnce()'s segment contiguity check then rejected
+    // every frame, non-retryably and identically after each restart, while
+    // load() went on resolving successfully with no data loss reported.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 8192,
+      durability: "memory",
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 8; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    // Drain it: the caught-up steady state, where trimming retires the spent
+    // segments and drops the watermark. The next frame then activates a fresh
+    // segment at a base above zero, which is what makes this state reachable.
+    await first.acknowledgeThrough(7n);
+    await first.append({
+      frameSequence: 8n,
+      payload: new Uint8Array(600).fill(9),
+    });
+    await first.close();
+
+    const segments = await assignedReplaySegments(directory);
+    expect(segments).toHaveLength(1);
+    const path = join(directory, segments[0]);
+    const size = (await stat(path)).size;
+    const file = await open(path, "r+");
+    try {
+      await file.write(Buffer.alloc(size - 24, 0), 0, size - 24, 24);
+      await file.write(Buffer.of(0), 0, 1, 5);
+      await file.sync();
+      // Guard the premise: a zero base would let this pass without the fix,
+      // because the transport also restarts at zero.
+      const header = Buffer.alloc(24);
+      await file.read(header, 0, 24, 0);
+      expect(header.readBigUInt64LE(8)).toBeGreaterThan(0n);
+      expect(header.readUInt8(5)).toBe(0);
+    } finally {
+      await file.close();
+    }
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const reopened = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 8192,
+      durability: "memory",
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    await expect(reopened.load()).resolves.toEqual([]);
+    expect(reports).toEqual([]);
+    // The frame the restarted transport actually offers.
+    await reopened.append({
+      frameSequence: 0n,
+      payload: new Uint8Array(600).fill(1),
+    });
+    await reopened.close();
+
+    // ...and the journal is genuinely usable again, not merely accepting one
+    // append: the frame comes back on the next restart.
+    const replayed = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 8192,
+      durability: "memory",
+    });
+    await expect(replayed.load()).resolves.toEqual([
+      { frameSequence: 0n, payload: new Uint8Array(600).fill(1) },
+    ]);
+    await replayed.close();
+  });
+
   it("reports an undetermined-extent loss as such through onSenderError", async () => {
     // The store's own logger words this correctly; the onSenderError bridge
     // interpolated discardedBytes instead, so a whole lost segment reached an

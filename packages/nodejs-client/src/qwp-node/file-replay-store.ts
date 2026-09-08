@@ -808,6 +808,39 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             this.activeSegment = segment;
           }
         }
+        // Every segment that survived the scan above carries live records,
+        // except the single empty active one recovery is allowed to retain. So
+        // no recovered entries means the journal drained completely and the
+        // only thing still remembering a frame sequence is that segment's
+        // base -- the numbering of the session that died. A reconnecting
+        // transport restarts at 0 after an empty recovery, so the base outlived
+        // the sequence origin it belonged to, and appendOnce()'s segment
+        // contiguity check then rejected every frame the producer offered,
+        // non-retryably and identically after each restart, while recovery went
+        // on reporting success and no data loss. Nothing healed it: quarantine
+        // only fires on a corrupt load, and the orphan drainer skips both live
+        // slots and flagless empty segments.
+        //
+        // The segment is provably record-free -- that is what retaining it
+        // means -- and carries no manifest-required flag, so retiring it drops
+        // the stale origin without discarding a frame or forging the evidence
+        // that the flag stands for. Re-basing it in place is not the
+        // alternative: the manifest pins each segment's base (see
+        // validateManifestBoundaries) and writeManifest() refuses to move a
+        // boundary backwards, so a rewritten base would fail the next load as
+        // corruption.
+        if (recoveredEntries.length === 0 && this.segments.size > 0) {
+          for (const segment of this.segments.values()) {
+            if (segment.handle) await segment.handle.close();
+            segment.handle = undefined;
+            this.totalBytes -= segment.size;
+            removalPaths.push(segment.path);
+          }
+          this.segments.clear();
+          this.segmentOrder.length = 0;
+          this.activeSegment = undefined;
+          changedDirectory = true;
+        }
         if (this.segments.size > 0) {
           await this.rewriteManifestForCurrentSegments();
           for (const segment of this.segments.values()) {
