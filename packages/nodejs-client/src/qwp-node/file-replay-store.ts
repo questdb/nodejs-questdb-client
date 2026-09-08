@@ -959,16 +959,16 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   }
 
   acknowledgeThrough(frameSequence: bigint): Promise<void> {
-    return this.removeThrough(frameSequence, true);
+    return this.removeThrough(frameSequence, "acknowledge");
   }
 
   discardThrough(frameSequence: bigint): Promise<void> {
-    return this.removeThrough(frameSequence, false);
+    return this.removeThrough(frameSequence, "discard");
   }
 
   private removeThrough(
     frameSequence: bigint,
-    persistAcknowledgement: boolean,
+    reason: "acknowledge" | "discard",
   ): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
     return this.enqueue(async () => {
@@ -979,12 +979,24 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         acknowledged.push(entry);
       }
       if (acknowledged.length === 0) return;
-      if (persistAcknowledgement) {
-        // Persist the logical cursor before mutating files or in-memory state.
-        // A crash after this point can leave extra bytes, but never resurrects
-        // an acknowledged prefix from a partially-live segment.
-        await this.persistAcknowledgedThrough(frameSequence);
-      }
+      // Persist the logical cursor before mutating files or in-memory state.
+      // A crash after this point can leave extra bytes, but never resurrects
+      // an acknowledged prefix from a partially-live segment.
+      //
+      // A discard persists it too. This watermark is *this store's* recovery
+      // cursor -- load() replays only what sits above it -- and not the
+      // transport's public ACK watermark, which lives on the connection and is
+      // advanced solely by acknowledgeStoredFramesThrough(). Skipping it here
+      // removed a discarded prefix from `records` and nothing else: its bytes
+      // stayed in a segment the surviving records keep alive, so the next
+      // process start recovered and retransmitted frames this client had
+      // already reported abandoned through a DATA_LOSS QwpSenderError -- and a
+      // retired deferred tail went back on the wire still flagged
+      // DEFER_COMMIT, to be committed by whatever unrelated frame followed it.
+      // That is the half-transaction retireRecoveredDiscardTailIfReady() exists
+      // to prevent. The compatibility path for stores without discardThrough
+      // already calls acknowledgeThrough(), which always persisted.
+      await this.persistAcknowledgedThrough(frameSequence);
       const emptiedSegments = new Set<StoredSegment>();
       for (const [sequence, record] of acknowledged) {
         if (record.segment) {
@@ -997,7 +1009,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             await ignoreMissing(unlink(record.path));
           } catch (error) {
             throw new QwpReplayStoreError(
-              `could not ${persistAcknowledgement ? "acknowledge" : "discard"} QWP store-and-forward record [frameSequence=${sequence}]`,
+              `could not ${reason} QWP store-and-forward record [frameSequence=${sequence}]`,
               error,
             );
           }

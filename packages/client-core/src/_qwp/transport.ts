@@ -225,6 +225,12 @@ export interface QwpIngressReplayStore {
   /**
    * @internal Removes a local prefix without representing it as a server ACK.
    * Persistent stores should provide this when recovery can abandon frames.
+   *
+   * "Without representing it as a server ACK" is about the transport's public
+   * watermark, which the caller leaves alone. The removal itself must be as
+   * durable as `acknowledgeThrough`'s: a discarded prefix that a later `load()`
+   * can still see is a prefix this client reported abandoned and then sent
+   * anyway.
    */
   discardThrough?(frameSequence: bigint): Promise<void>;
   /** Loads the durable, dense symbol prefix used by persisted delta frames. */

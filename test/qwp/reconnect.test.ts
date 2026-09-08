@@ -3966,6 +3966,73 @@ describe("QWP ingress reconnect and replay", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("does not resurrect a retired deferred tail on the next process start", async () => {
+    // The two tests above retire the tail while `records` is already empty, so
+    // the segment is unlinked and removeAcknowledgedThrough() runs -- which
+    // hides the actual durability question. Publishing one frame *before* the
+    // ACK keeps a live record in that segment, so nothing unlinks it, and the
+    // retired tail's bytes stay on disk. discardThrough() must therefore
+    // persist the recovery watermark: without it the next process start
+    // recovered frames this client had already reported abandoned through a
+    // DATA_LOSS QwpSenderError, and re-sent them still flagged DEFER_COMMIT so
+    // the following frame committed half a transaction the server had rolled
+    // back.
+    const directory = await createTemporaryDirectory();
+    const committed = encodeQwpIngressFrame([symbolTable("ETH-USD")]);
+    const firstDeferred = encodeQwpIngressFrame([symbolTable("BTC-USD")], {
+      deferCommit: true,
+    });
+    const secondDeferred = encodeQwpIngressFrame([symbolTable("SOL-USD")], {
+      deferCommit: true,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({ frameSequence: 5n, payload: committed });
+    await seed.append({ frameSequence: 6n, payload: firstDeferred });
+    await seed.append({ frameSequence: 7n, payload: secondDeferred });
+    await seed.close();
+
+    const connection = new FakeConnection("primary");
+    const senderErrors: QwpSenderError[] = [];
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: { maxAttempts: 1 },
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    expect(connection.sent).toEqual([committed]);
+
+    // Store-and-forward send() returns at the journal boundary, so a producer
+    // reaches this point long before the recovered prefix is acknowledged.
+    // Frame 8 is deliberately left unacknowledged: it is the live record that
+    // keeps the tail's segment from being unlinked, which is the whole point.
+    const currentFrame = encodeQwpIngressFrame([symbolTable("BTC-ETH")]);
+    const current = session.sendFrame(currentFrame);
+    const currentSettled = current.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.waitFor(() =>
+      expect(connection.sent).toEqual([committed, currentFrame]),
+    );
+
+    connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["trades", 42n]]));
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+    });
+    await session.close();
+    await currentSettled;
+
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    const recovered = await reopened.load();
+    await reopened.close();
+    // Frame 8 is the only one still owed to the server. The abandoned tail was
+    // reported lost, so it must not come back.
+    expect(recovered.map((record) => record.frameSequence)).toEqual([8n]);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("replays deferred recovery frames when a commit frame covers them", async () => {
     const directory = await createTemporaryDirectory();
     const deferred = encodeQwpIngressFrame([symbolTable("ETH-USD")], {
