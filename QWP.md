@@ -275,10 +275,13 @@ const sender = await Sender.fromConfig(
 ```
 
 Node bounds connection establishment in two phases. `connectTimeoutMs` covers
-DNS plus the TCP/TLS connection; after that succeeds, `authTimeoutMs` independently
-covers the authenticated HTTP request and WebSocket upgrade. Both default to 15
-seconds, so one endpoint attempt can take up to their sum. A timeout is reported as
-`QwpUpgradeError` with `timeoutPhase` set to `"connect"` or `"authentication"`.
+DNS plus the TCP/TLS connection; after that succeeds, `authTimeoutMs` covers the
+authenticated HTTP request and WebSocket upgrade. Left unset, `authTimeoutMs`
+inherits `connectTimeoutMs`, so narrowing only the connect deadline bounds the
+whole opening instead of being exceeded by a default nobody chose; set it to give
+the upgrade its own budget, and one endpoint attempt can then take up to the sum
+of the two. Both default to 15 seconds. A timeout is reported as `QwpUpgradeError`
+with `timeoutPhase` set to `"connect"` or `"authentication"`.
 Browsers cannot observe the transport boundary, so their `connectTimeoutMs` continues
 to cover the complete WebSocket opening lifecycle and they do not expose
 `authTimeoutMs`.
@@ -1533,8 +1536,9 @@ The public error classes preserve enough context for policy decisions:
 
 Always close senders and sessions in `finally`. Sender publication plus ACK draining is
 bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
-by `closeTimeoutMs`. In Node, `connectTimeoutMs` and `authTimeoutMs` independently
-bound transport connection and authenticated upgrade. `sendTimeoutMs`, acknowledgement
+by `closeTimeoutMs`. In Node, `connectTimeoutMs` bounds the transport
+connection and `authTimeoutMs` the authenticated upgrade, the latter inheriting
+the former unless it is set. `sendTimeoutMs`, acknowledgement
 timeouts, and query deadlines cover later lifecycle phases; configure each according
 to the deployment rather than using one very large catch-all value.
 

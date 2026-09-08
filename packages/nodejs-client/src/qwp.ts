@@ -237,7 +237,12 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   agent?: Agent;
   /**
    * Time allowed after TCP/TLS connection for HTTP authentication and the
-   * WebSocket upgrade. Defaults to 15s.
+   * WebSocket upgrade.
+   *
+   * Defaults to {@link QwpWebSocketConnectOptions.connectTimeoutMs} when that
+   * is set, and to 15s otherwise, so narrowing only the connect deadline
+   * bounds the whole opening rather than being exceeded by a default nobody
+   * chose. Set this to give the slower phase its own budget.
    */
   authTimeoutMs?: number;
   authorization?: string;
