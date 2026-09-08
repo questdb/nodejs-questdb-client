@@ -559,13 +559,7 @@ function writeColumn(
     case QWP_COLUMN_TYPE.INT:
       for (const value of column.values)
         writer.writeInt32(
-          checkedCellRange(
-            value,
-            -0x80000000,
-            0x7fffffff,
-            "INT",
-            column.name,
-          ),
+          checkedCellRange(value, -0x80000000, 0x7fffffff, "INT", column.name),
         );
       return;
     case QWP_COLUMN_TYPE.IPV4:
@@ -696,8 +690,8 @@ function writeColumn(
       // One bigint per column, not per cell. geohashColumn() and the compiled
       // writers already enforce this range; unchecked here, a negative value
       // sign-extended into the stray high bits of the last byte and an
-      // over-precision one overflowed into them, so the same input encoded
-      // differently than the bind encoder, which masks it.
+      // over-precision one overflowed into them. QwpBindValues.setGeohash
+      // raises for the same input, so every geohash entry point agrees.
       const limit = 1n << BigInt(precision);
       for (const value of column.values) {
         let remaining = BigInt(value as bigint);

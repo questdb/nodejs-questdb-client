@@ -296,8 +296,19 @@ export class QwpBindValues {
       GEOHASH_MAX_BITS,
       "GEOHASH precision",
     );
-    const mask = (1n << BigInt(precision)) - 1n;
-    let bits = checkedInt64(value, "GEOHASH bind") & mask;
+    // Reject rather than mask. Masking turned a caller's out-of-range value
+    // into a different, valid one -- setGeohash(i, 5, 100n) bound geohash 4 --
+    // so the query silently filtered on something the caller never asked for,
+    // with nothing on the wire or in the result to show it had happened. Every
+    // other geohash entry point (the ingress cell writer, writerGeohashBits,
+    // QwpTableBuffer.setGeohashPrecision) raises for the same input.
+    const limit = 1n << BigInt(precision);
+    let bits = checkedInt64(value, "GEOHASH bind");
+    if (bits < 0n || bits >= limit) {
+      throw new RangeError(
+        `GEOHASH bind value ${bits} must be between 0 and ${limit - 1n} for ${precision} bits`,
+      );
+    }
     this.advance(index);
     this.writeHeader(QWP_COLUMN_TYPE.GEOHASH, false);
     writeQwpVarint(this.writer, precision);

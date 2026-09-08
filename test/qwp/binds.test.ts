@@ -39,7 +39,7 @@ describe("QWP typed query binds", () => {
         .setVarchar(11, "café")
         .setUuid(12, "123e4567-e89b-12d3-a456-426614174000")
         .setLong256(13, 1n, 2n, 3n, 4n)
-        .setGeohash(14, 5, 0xffn)
+        .setGeohash(14, 5, 0x1fn)
         .setDecimal64(15, 4, 123_456_789n)
         .setDecimal128(16, 6, 123_456_789_123_456n, 0n)
         .setDecimal256(17, 10, 420_000_000_000n, 0n, 0n, 0n),
@@ -176,6 +176,19 @@ describe("QWP typed query binds", () => {
     expect(() =>
       encodeQwpBinds((binds) => binds.setGeohash(0, 61, 1n)),
     ).toThrow(/GEOHASH precision/);
+    // Masking an out-of-range value silently bound a different geohash, so the
+    // query filtered on something the caller never asked for. Every other
+    // geohash entry point rejects the same input.
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setGeohash(0, 5, 100n)),
+    ).toThrow(/GEOHASH bind value 100 must be between 0 and 31 for 5 bits/);
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setGeohash(0, 5, -1n)),
+    ).toThrow(/GEOHASH bind value -1 must be between 0 and 31 for 5 bits/);
+    // The widest in-range value for the precision is still accepted.
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setGeohash(0, 5, 31n)),
+    ).not.toThrow();
     expect(() =>
       encodeQwpBinds((binds) => binds.setDecimal64(0, 19, 1n)),
     ).toThrow(/DECIMAL64 scale/);
