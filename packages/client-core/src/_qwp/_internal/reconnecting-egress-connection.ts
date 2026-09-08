@@ -19,6 +19,7 @@ import {
   QwpSendClosedError,
   QwpUpgradeError,
 } from "../transport";
+import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
@@ -540,13 +541,15 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     }
     if (this.onReplayReset) {
       try {
-        await this.onReplayReset({
-          requestId,
-          serverInfo,
-          previousEndpoint,
-          endpoint: connection.endpoint,
-          cause,
-        });
+        await this.onReplayReset(
+          redactQwpEndpointFields({
+            requestId,
+            serverInfo,
+            previousEndpoint,
+            endpoint: connection.endpoint,
+            cause,
+          }),
+        );
       } catch (error) {
         throw new ReplayResetCallbackError(error);
       }
@@ -727,10 +730,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     // could exhaust a budget and turn a recoverable outage into a terminal
     // QwpReconnectExhaustedError. An async observer also had nothing bounding
     // or counting its concurrent invocations.
-    this.connectionDispatcher?.offer({
-      ...event,
-      timestampMs: Date.now(),
-    });
+    this.connectionDispatcher?.offer(
+      redactQwpEndpointFields({
+        ...event,
+        timestampMs: Date.now(),
+      }),
+    );
   }
 
   private throwIfUnavailable(): void {

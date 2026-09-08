@@ -1,5 +1,6 @@
 import type { QwpNegotiatedEgressCompression } from "./_core/compression";
 import type { QwpServerInfoMessage } from "./_core/egress";
+import { redactQwpEndpoint } from "./_internal/redact-endpoint";
 
 export interface QwpConnectionCloseInfo {
   code: number;
@@ -93,34 +94,6 @@ export class QwpMemoryReplayAppendTimeoutError extends Error {
 export interface QwpFailoverAttempt {
   readonly endpoint: string | URL;
   readonly error: unknown;
-}
-
-/**
- * Strips userinfo from an endpoint before it reaches an error message, an
- * event, or a log line.
- *
- * A URL carrying userinfo carries a live credential: `ws` turns
- * `wss://user:pass@host/...` into an `Authorization: Basic` header. Endpoints
- * are interpolated into {@link QwpFailoverError}'s message and retained on
- * {@link QwpUpgradeError.url}, which is precisely what a caller's
- * connect-failure logging writes out. The Node entry point rejects userinfo
- * outright, as the connect-string parser already did; this is the second line
- * of defence for endpoints reaching the shared failover machinery from a
- * custom connection factory.
- */
-function redactQwpEndpoint(endpoint: string | URL): string {
-  const text = typeof endpoint === "string" ? endpoint : endpoint.href;
-  let url: URL;
-  try {
-    url = new URL(text);
-  } catch {
-    // Not an absolute URL, so it has no userinfo component to carry a secret.
-    return text;
-  }
-  if (!url.username && !url.password) return text;
-  url.username = "";
-  url.password = "";
-  return url.href;
 }
 
 /** Every eligible QWP endpoint in one connection sweep failed. */

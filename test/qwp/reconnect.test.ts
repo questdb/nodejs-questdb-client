@@ -1794,6 +1794,34 @@ describe("QWP ingress reconnect and replay", () => {
     expect(factoryCalls).toBe(5);
   });
 
+  it("strips endpoint credentials from events handed to onEvent", async () => {
+    // QwpUpgradeError and QwpFailoverError scrub the identical endpoint, and
+    // test/qwp/session.test.ts pins that. The reconnect events did not, and
+    // the documented use of onEvent is to log the whole event -- so a
+    // credential-bearing endpoint, which the browser entry point accepts and
+    // which any custom connection factory can supply on either runtime,
+    // reached the console and whatever telemetry follows it.
+    const credentialed = "wss://alice:s3cr3t@questdb.example:9000/write/v4";
+    const redacted = "wss://questdb.example:9000/write/v4";
+    const events: QwpReconnectEvent[] = [];
+    const connection = new FakeConnection(credentialed);
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: {
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        onEvent: (event) => events.push(event),
+      },
+    });
+    await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
+    for (const event of events) {
+      expect(JSON.stringify(event), event.kind).not.toContain("s3cr3t");
+      if (event.endpoint !== undefined) {
+        expect(event.endpoint, event.kind).toBe(redacted);
+      }
+    }
+    await session.close();
+  });
+
   it("retries durable-ACK mismatch during asynchronous foreground startup", async () => {
     const connection = new FakeConnection("primary", {
       qwpVersion: 1,

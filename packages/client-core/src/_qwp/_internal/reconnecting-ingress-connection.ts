@@ -40,6 +40,7 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../transport";
+import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import { monotonicNowMs } from "./monotonic-clock";
 import { jitterReconnectDelayMs } from "./reconnect-backoff";
@@ -2340,10 +2341,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private emitEvent(event: Omit<QwpReconnectEvent, "timestampMs">): void {
-    this.connectionDispatcher?.offer({
-      ...event,
-      timestampMs: Date.now(),
-    });
+    // Redacted here rather than at each call site: every endpoint on these
+    // events originates from the connection factory's URL, and the sibling
+    // error types scrub the identical string.
+    this.connectionDispatcher?.offer(
+      redactQwpEndpointFields({
+        ...event,
+        timestampMs: Date.now(),
+      }),
+    );
   }
 
   private emitSenderError(error: QwpSenderError): void {
