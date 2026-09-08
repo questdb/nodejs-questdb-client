@@ -775,7 +775,16 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             logicalSize: decoded.logicalSize,
             liveRecords: liveRecords.length,
             frameCount: decoded.records.length,
-            manifestFlagPending: false,
+            // An empty active segment reaching here is one recovery proved
+            // carries no records *and* no manifest-required flag -- had it
+            // been flagged, the loss above would have been reported and it
+            // would have been retired instead. Stamping it now would forge
+            // exactly the evidence the loss verdict reads, so the next
+            // recovery would report a loss that never happened. Defer the
+            // stamp to the next append, which writes it one syscall before
+            // the first record lands: the same ordering activateHotSpare
+            // establishes, and the reason the flag means what it means.
+            manifestFlagPending: retainEmptyActive,
             handle,
           };
           this.segments.set(path, segment);
@@ -802,6 +811,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         if (this.segments.size > 0) {
           await this.rewriteManifestForCurrentSegments();
           for (const segment of this.segments.values()) {
+            // Skips the retained empty active segment, whose stamp the next
+            // append owns. See manifestFlagPending above.
+            if (segment.manifestFlagPending) continue;
             await markSegmentManifestRequired(segment.path);
           }
         } else if (
@@ -869,30 +881,62 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         return recovered;
       } finally {
         if (!loadSucceeded) {
-          try {
-            await Promise.all([
-              this.closeSegmentHandles(),
-              ...[...recoveryHandles].map((handle) =>
-                handle.close().catch(() => undefined),
-              ),
-            ]);
-          } finally {
-            // A watermark the scan proved is stranded -- the journal kept no
-            // record above it, so every frame it covers was already unlinked
-            // -- is dropped here so a second attempt can recover the slot
-            // instead of quarantining it. It has to happen while the lock is
-            // still held: past releaseDirectoryLock() the pathname may belong
-            // to a successor, and this unlink would resurrect *its*
-            // acknowledged frames. A load that failed before the scan
-            // completed knows nothing about the watermark and leaves it alone.
-            if (this.recoveryScanCompleted && this.records.size === 0) {
-              await this.removeAcknowledgedThrough().catch(() => undefined);
-            }
-            await this.releaseDirectoryLock();
-          }
+          await this.teardownFailedLoad(recoveryHandles);
         }
       }
     });
+  }
+
+  /**
+   * Unwinds a load that is already failing, without disturbing its error.
+   *
+   * That error is the one the caller acts on: `connectQwpNodeIngressSession`
+   * reads the recovery verdict off it through
+   * `isQuarantinableReplayRecoveryError` to decide whether the slot may be
+   * moved aside behind its `.failed` sentinel and retried once. Everything
+   * here runs for its side effects only, so a fault in the unwind must not
+   * replace that verdict -- an EMFILE, an EIO, or an NFS ESTALE out of the
+   * lock release, which is the exact fault class
+   * `QwpReplayStoreLockUnprovableError` exists for, used to turn a
+   * quarantinable corruption into a generic error, so the slot was never
+   * quarantined and the producer could not start on any later restart.
+   * `close()` captures its own teardown failures for the same reason.
+   */
+  private async teardownFailedLoad(
+    recoveryHandles: Iterable<FileHandle>,
+  ): Promise<void> {
+    try {
+      await Promise.all([
+        this.closeSegmentHandles(),
+        ...[...recoveryHandles].map((handle) =>
+          handle.close().catch(() => undefined),
+        ),
+      ]);
+    } catch {
+      // Surfaced through the load failure the caller already receives.
+    }
+    try {
+      // A watermark the scan proved is stranded -- the journal kept no record
+      // above it, so every frame it covers was already unlinked -- is dropped
+      // here so a second attempt can recover the slot instead of quarantining
+      // it. It has to happen while the lock is still held: past
+      // releaseDirectoryLock() the pathname may belong to a successor, and
+      // this unlink would resurrect *its* acknowledged frames. A load that
+      // failed before the scan completed knows nothing about the watermark
+      // and leaves it alone.
+      if (this.recoveryScanCompleted && this.records.size === 0) {
+        await this.removeAcknowledgedThrough().catch(() => undefined);
+      }
+    } catch {
+      // As above.
+    }
+    try {
+      await this.releaseDirectoryLock();
+    } catch {
+      // As above. releaseDirectoryLock() keeps `slotLock` set when it cannot
+      // prove the release, so the lock stays on the fail-closed retry list
+      // that every later acquisition drains first.
+    }
   }
 
   readPayload(frameSequence: bigint): Promise<Uint8Array> {

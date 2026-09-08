@@ -5293,6 +5293,65 @@ describe("QWP Node file replay store", () => {
     await recovered.close();
   });
 
+  it("keeps the corruption verdict when the failed load's unwind also fails", async () => {
+    // A failing load unwinds by closing handles and releasing the directory
+    // lock. Both ran unguarded in a finally, so a fault there -- EMFILE, EIO,
+    // an NFS ESTALE, exactly what QwpReplayStoreLockUnprovableError exists for
+    // -- replaced the corruption verdict with a generic error.
+    // isQuarantinableReplayRecoveryError then said no, so the slot was never
+    // moved aside and the producer could not start on any later restart.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    await first.load();
+    for (let sequence = 0n; sequence < 3n; sequence++) {
+      await first.append({
+        frameSequence: sequence,
+        payload: Uint8Array.of(Number(sequence)),
+      });
+    }
+    await first.acknowledgeThrough(0n);
+    await first.close();
+
+    const segments = await assignedReplaySegments(directory);
+    const path = join(directory, segments[segments.length - 1]);
+    const file = await open(path, "r+");
+    try {
+      const sequence = Buffer.alloc(8);
+      sequence.writeBigUInt64LE(3n);
+      await file.write(sequence, 0, sequence.byteLength, 8);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const originalRelease = QwpNodeAdvisoryLock.prototype.release;
+    let releases = 0;
+    const release = vi
+      .spyOn(QwpNodeAdvisoryLock.prototype, "release")
+      .mockImplementation(function (this: QwpNodeAdvisoryLock) {
+        // load() releases the parent-anchored logical lock first, as part of
+        // its own lock protocol; faulting that is a genuine acquisition
+        // failure and a different case. Only the slot lock released by the
+        // teardown -- every release after the first -- is faulted here.
+        return ++releases === 1
+          ? originalRelease.call(this)
+          : Promise.reject(
+              Object.assign(new Error("stale NFS handle"), { code: "ESTALE" }),
+            );
+      });
+    try {
+      const recovered = new QwpNodeFileReplayStore({ directory });
+      // The verdict the caller acts on, not the teardown's complaint.
+      await expect(recovered.load()).rejects.toMatchObject({
+        name: "QwpReplayStoreCorruptionError",
+        retryable: false,
+      });
+      expect(release).toHaveBeenCalled();
+    } finally {
+      release.mockRestore();
+    }
+  });
+
   it("coalesces many replay frames into bounded segment files", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
@@ -5580,6 +5639,57 @@ describe("QWP Node file replay store", () => {
     await expect(reopened.load()).resolves.toEqual([]);
     expect(repeatedReports).toEqual([]);
     await reopened.close();
+  });
+
+  it("does not invent a loss on the restart after an empty active segment", async () => {
+    // Recovery stamped MANIFEST_REQUIRED_FLAG onto every surviving segment,
+    // including the empty active one it had just proved carries no flag -- and
+    // that flag is the whole basis for reading "empty" as "records were lost".
+    // The next restart therefore read back evidence recovery had forged and
+    // reported a data loss that never happened. The stamp now belongs to the
+    // next append, one syscall before the first record, as it does after
+    // activateHotSpare.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 8192,
+      durability: "memory",
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 8; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    await first.close();
+
+    // A crash inside activateHotSpare's window: the manifest already names
+    // this segment, but no record and no flag ever reached it.
+    const [segment] = await assignedReplaySegments(directory);
+    const path = join(directory, segment);
+    const size = (await stat(path)).size;
+    const file = await open(path, "r+");
+    try {
+      await file.write(Buffer.alloc(size - 24, 0), 0, size - 24, 24);
+      await file.write(Buffer.of(0), 0, 1, 5);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    for (const pass of ["first", "second"]) {
+      const reports: QwpNodeReplayDataLossReport[] = [];
+      const reopened = new QwpNodeFileReplayStore({
+        directory,
+        maxSegmentBytes: 8192,
+        durability: "memory",
+        onRecoveryDataLoss: (report) => reports.push(report),
+      });
+      await expect(reopened.load()).resolves.toEqual([]);
+      expect(reports, `${pass} recovery reported a loss`).toEqual([]);
+      await reopened.close();
+    }
   });
 
   it("reports an undetermined-extent loss as such through onSenderError", async () => {
@@ -6443,9 +6553,10 @@ describe("QWP Node file replay store", () => {
     await mkdir(ownerPath);
     // A producer SIGKILLed and restarted into the same PID -- the container
     // shape where the app is always PID 1, or PID wraparound. isPidAlive()
-    // answers "yes" because the successor *is* that PID now. The record's
-    // instance is what separates a dead predecessor from a live self without
-    // treating an old timestamp as proof.
+    // answers "yes" because the successor *is* that PID now. A foreign
+    // instance narrows it to "some other module registry wrote this", and the
+    // lapsed heartbeat is what makes it a dead predecessor rather than a live
+    // sibling worker thread.
     await writeFile(
       join(ownerPath, "owner"),
       JSON.stringify({
@@ -6454,11 +6565,41 @@ describe("QWP Node file replay store", () => {
         instance: "00000000-0000-4000-8000-000000000000",
       }),
     );
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(ownerPath, longAgo, longAgo);
 
     const store = new QwpNodeFileReplayStore({ directory });
     await expect(store.load()).resolves.toEqual([]);
     await store.close();
     await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("leaves a heartbeating same-PID holder from another registry alone", async () => {
+    // The worker-thread shape. PROCESS_INSTANCE is minted per module registry,
+    // and every worker loads its own copy of this module, so a live sibling
+    // presents our PID, alive, with an instance we did not mint -- exactly the
+    // shape of a dead predecessor. Only the heartbeat separates them, and
+    // reclaiming a live holder let two threads append to one journal.
+    const directory = await trackedDirectory();
+    const ownerPath = join(directory, ".lock.owner");
+    await mkdir(ownerPath);
+    await writeFile(
+      join(ownerPath, "owner"),
+      JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        instance: "00000000-0000-4000-8000-000000000000",
+      }),
+    );
+    // Current mtime: the holder is still heartbeating.
+    const now = new Date();
+    await utimes(ownerPath, now, now);
+
+    const store = new QwpNodeFileReplayStore({ directory });
+    await expect(store.load()).rejects.toMatchObject({
+      name: "QwpReplayStoreLockedError",
+      directory,
+    } satisfies Partial<QwpReplayStoreLockedError>);
   });
 
   it("leaves a slot held by this process's own live acquisition alone", async () => {
