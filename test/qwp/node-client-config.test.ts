@@ -7,6 +7,7 @@ import {
   createQwpNodeClient,
   QwpNodeFileReplayStore,
   parseQwpNodeClientConfig,
+  Sender,
   type QwpNodeClientOptions,
   type QwpWebSocketLike,
 } from "../../packages/nodejs-client/src";
@@ -687,5 +688,44 @@ describe("QWP unified Node client configuration", () => {
         /Invalid QWP cluster address/,
       );
     }
+  });
+
+  it("keeps endpoint credentials out of the address rejection", async () => {
+    // `addr` is host[:port], so userinfo in it is always rejected -- but the
+    // rejection interpolated the whole entry, and a connect string is parsed
+    // at startup, where that message is what configuration logging writes out.
+    // The client already strips userinfo from endpoints reaching failover
+    // errors, reconnect events and the browser bootstrap's own validation
+    // errors; this is the connect-string half of the same rule.
+    const secret = "sup3rs3cr3t";
+    for (const [address, survives] of [
+      [`admin:${secret}@localhost:9000`, "localhost:9000"],
+      [`admin:${secret}@localhost`, "localhost"],
+      // The rejected entry is the one named, not the healthy one beside it.
+      [`localhost:9000,admin:${secret}@other:9000`, "other:9000"],
+      [` admin:${secret}@localhost:9000`, "localhost:9000"],
+    ] as const) {
+      let thrown: unknown;
+      try {
+        parseQwpNodeClientConfig(`ws::addr=${address};`);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown, `${address} was accepted`).toBeInstanceOf(Error);
+      const message = (thrown as Error).message;
+      expect(message).toMatch(/Invalid QWP cluster address/);
+      expect(message, `leaked through ${address}`).not.toContain(secret);
+      // The part that makes the error actionable survives.
+      expect(message).toContain(survives);
+    }
+
+    // A Sender reaches the same parser, so the same message reaches its caller.
+    await expect(
+      Sender.fromConfig(`ws::addr=admin:${secret}@localhost:9000;`),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        message: expect.not.stringContaining(secret),
+      }),
+    );
   });
 });

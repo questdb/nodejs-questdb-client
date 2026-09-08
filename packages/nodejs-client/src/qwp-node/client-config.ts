@@ -546,12 +546,35 @@ function validateConfigText(key: string, value: string): void {
   }
 }
 
+/**
+ * The address entry as written, with any userinfo removed.
+ *
+ * `addr` is `host[:port]`, so userinfo in it is always a rejected value -- but
+ * rejecting it interpolated the credential it carried into the thrown message,
+ * and a connect string is parsed at startup, where that message is exactly
+ * what a caller's configuration logging writes out. `@` cannot appear in a
+ * valid entry, so everything before the last one goes; the host and port that
+ * follow are what make the error actionable and carry nothing secret.
+ *
+ * This is the connect-string half of the rule the rest of the client already
+ * follows: redactQwpEndpoint() for endpoints reaching failover errors and
+ * events, redactedUrlText() for the browser bootstrap's validation errors, and
+ * endpointUserinfo(), which names the kind of credential it found rather than
+ * its value.
+ */
+function redactAddressUserinfo(address: string): string {
+  const userinfo = address.lastIndexOf("@");
+  return userinfo < 0 ? address : `<redacted>@${address.slice(userinfo + 1)}`;
+}
+
 function parseEndpoints(parsed: ParsedConfig): URL[] {
   const endpoints: URL[] = [];
   for (const addressList of parsed.values.get("addr") ?? []) {
     for (const address of addressList.split(",")) {
       if (!address || address.trim() !== address) {
-        throw new Error(`Invalid QWP cluster address entry: '${address}'`);
+        throw new Error(
+          `Invalid QWP cluster address entry: '${redactAddressUserinfo(address)}'`,
+        );
       }
       const authority = addressHasPort(address)
         ? address
@@ -560,7 +583,9 @@ function parseEndpoints(parsed: ParsedConfig): URL[] {
       try {
         endpoint = new URL(`${parsed.schema}://${authority}`);
       } catch {
-        throw new Error(`Invalid QWP cluster address: '${address}'`);
+        throw new Error(
+          `Invalid QWP cluster address: '${redactAddressUserinfo(address)}'`,
+        );
       }
       if (
         !endpoint.hostname ||
@@ -570,7 +595,9 @@ function parseEndpoints(parsed: ParsedConfig): URL[] {
         endpoint.search ||
         endpoint.hash
       ) {
-        throw new Error(`Invalid QWP cluster address: '${address}'`);
+        throw new Error(
+          `Invalid QWP cluster address: '${redactAddressUserinfo(address)}'`,
+        );
       }
       endpoints.push(endpoint);
     }
@@ -582,11 +609,15 @@ function addressHasPort(address: string): boolean {
   if (address.startsWith("[")) {
     const closingBracket = address.indexOf("]");
     if (closingBracket < 0) {
-      throw new Error(`Invalid QWP cluster address: '${address}'`);
+      throw new Error(
+        `Invalid QWP cluster address: '${redactAddressUserinfo(address)}'`,
+      );
     }
     if (closingBracket === address.length - 1) return false;
     if (address[closingBracket + 1] !== ":") {
-      throw new Error(`Invalid QWP cluster address: '${address}'`);
+      throw new Error(
+        `Invalid QWP cluster address: '${redactAddressUserinfo(address)}'`,
+      );
     }
     validateAddressPort(address, address.slice(closingBracket + 2));
     return true;
@@ -594,7 +625,7 @@ function addressHasPort(address: string): boolean {
   const colons = address.match(/:/g)?.length ?? 0;
   if (colons > 1) {
     throw new Error(
-      `Invalid QWP cluster address: '${address}'; IPv6 addresses must be enclosed in brackets`,
+      `Invalid QWP cluster address: '${redactAddressUserinfo(address)}'; IPv6 addresses must be enclosed in brackets`,
     );
   }
   if (colons === 0) return false;
@@ -604,7 +635,9 @@ function addressHasPort(address: string): boolean {
 
 function validateAddressPort(address: string, port: string): void {
   if (!/^\d+$/.test(port)) {
-    throw new Error(`Invalid QWP cluster address: '${address}'`);
+    throw new Error(
+      `Invalid QWP cluster address: '${redactAddressUserinfo(address)}'`,
+    );
   }
   const parsed = Number(port);
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65_535) {
