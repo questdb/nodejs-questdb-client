@@ -1,5 +1,6 @@
 import type { AddressInfo, Socket } from "node:net";
 import { createServer as createTcpServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import {
   chmod,
   mkdtemp,
@@ -30,6 +31,7 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,
   QwpByteWriter,
+  QwpFailoverError,
   QwpNodeFileReplayStore,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreQuarantinedError,
@@ -114,6 +116,101 @@ describe("QWP Node transport", () => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
     server = undefined;
+  });
+
+  it("refuses to authenticate with credentials embedded in the endpoint URL", async () => {
+    // `ws` turns URL userinfo into an Authorization: Basic header, so this is
+    // a live credential -- and it used to be echoed straight back out in
+    // QwpFailoverError's message, in every attempts[].endpoint, and on
+    // QwpUpgradeError.url, which is what a caller's connect-failure logging
+    // writes to disk. The connect-string parser already rejected the same
+    // shape.
+    const seen: string[] = [];
+    const httpServer = createHttpServer((request, response) => {
+      seen.push(String(request.headers.authorization ?? "(none)"));
+      response.writeHead(500);
+      response.end("no");
+    });
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once("error", reject);
+      httpServer.listen(0, "127.0.0.1", resolve);
+    });
+
+    try {
+      const { port } = httpServer.address() as AddressInfo;
+      const secret = "hunter2-do-not-log-me";
+      const url = `ws://admin:${secret}@127.0.0.1:${port}/write/v4`;
+      const failure = await connectQwpNodeWebSocket({
+        url,
+        failoverUrls: [url],
+      }).then(
+        () => undefined,
+        (error: unknown) => error as QwpFailoverError,
+      );
+
+      // Nothing reached the wire, so no credential was ever presented.
+      expect(seen).toEqual([]);
+      expect(String(failure?.cause)).toContain("must not carry a password");
+      // The aggregate walks every endpoint, so neither its message nor the
+      // per-attempt record may carry the secret back to the caller's log.
+      expect(failure?.message).not.toContain(secret);
+      expect(JSON.stringify(failure?.attempts)).not.toContain(secret);
+      // Second line of defence: whatever an endpoint carried, the aggregate
+      // failure must not repeat it back.
+      const aggregate = await connectQwpNodeWebSocket({
+        url: `ws://127.0.0.1:${port}/write/v4`,
+        failoverUrls: [`ws://127.0.0.1:${port}/write/v4`],
+      }).then(
+        () => undefined,
+        (error: unknown) => error as QwpFailoverError,
+      );
+      expect(aggregate?.message).not.toContain(secret);
+      expect(JSON.stringify(aggregate?.attempts)).not.toContain(secret);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it("rejects an Authorization header combined with the authorization option", async () => {
+    // The typed field conflicting with connect-string credentials is rejected
+    // "rather than doing either quietly"; the same conflict spelled through
+    // the headers escape hatch used to be resolved quietly, and the caller's
+    // own header simply never went on the wire.
+    const seen: string[] = [];
+    const httpServer = createHttpServer((request, response) => {
+      seen.push(String(request.headers.authorization ?? "(none)"));
+      response.writeHead(500);
+      response.end("no");
+    });
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once("error", reject);
+      httpServer.listen(0, "127.0.0.1", resolve);
+    });
+
+    try {
+      const { port } = httpServer.address() as AddressInfo;
+      await expect(
+        connectQwpNodeWebSocket({
+          url: `ws://127.0.0.1:${port}/write/v4`,
+          headers: { Authorization: "Negotiate caller-value" },
+          authorization: "Bearer option-value",
+        }),
+      ).rejects.toThrow(/cannot be combined with the 'authorization' option/);
+      expect(seen).toEqual([]);
+
+      // Either one on its own still reaches the server unchanged.
+      await connectQwpNodeWebSocket({
+        url: `ws://127.0.0.1:${port}/write/v4`,
+        headers: { authorization: "Negotiate caller-value" },
+      }).catch(() => undefined);
+      expect(seen).toEqual(["Negotiate caller-value"]);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it("times out authentication separately after a real TCP connection", async () => {

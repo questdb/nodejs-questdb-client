@@ -453,6 +453,22 @@ function createQwpNodeConnectionFactoryInternal(
   );
 }
 
+/**
+ * Names the userinfo an endpoint carries, or undefined when it carries none.
+ * An unparseable endpoint is left alone; `ws` rejects it on its own terms.
+ */
+function endpointUserinfo(endpoint: string | URL): string | undefined {
+  let url: URL;
+  try {
+    url = typeof endpoint === "string" ? new URL(endpoint) : endpoint;
+  } catch {
+    return undefined;
+  }
+  if (url.password) return "a password";
+  if (url.username) return "a username";
+  return undefined;
+}
+
 function connectQwpNodeEndpoint(
   options: QwpNodeWebSocketOptions,
   endpoint: string | URL,
@@ -471,11 +487,39 @@ function connectQwpNodeEndpoint(
       ),
     );
   }
+  // `ws` turns userinfo into an Authorization: Basic header, so this is a live
+  // credential the client never manages: it does not interact with
+  // `authorization`, and it is not carried to a failover endpoint that has none.
+  // It also ends up in QwpFailoverError's message and on QwpUpgradeError.url.
+  // The connect-string parser already rejects the same shape, so accepting it
+  // here was the outlier. Use `authorization`, or username/password/token.
+  const userinfo = endpointUserinfo(endpoint);
+  if (userinfo) {
+    return Promise.reject(
+      new Error(
+        `QWP endpoint URLs must not carry ${userinfo}; pass credentials through the 'authorization' option, or username/password/token on a connect string`,
+      ),
+    );
+  }
   const headers: Record<string, string> = {
     "X-QWP-Max-Version": String(clientMaxVersion),
     "X-QWP-Client-Id": options.clientId ?? "typescript/1.0.0",
     ...options.headers,
   };
+  // Resolving this quietly meant the caller's own Authorization header simply
+  // never went on the wire. The typed `authorization` field conflicting with
+  // connect-string credentials is rejected rather than resolved either way, and
+  // the same conflict spelled through the headers escape hatch has to be too.
+  const headerAuthorization = Object.keys(headers).find(
+    (name) => name.toLowerCase() === "authorization",
+  );
+  if (options.authorization && headerAuthorization) {
+    return Promise.reject(
+      new Error(
+        "an Authorization header cannot be combined with the 'authorization' option; set exactly one of them",
+      ),
+    );
+  }
   if (options.authorization) headers.Authorization = options.authorization;
   if (options.requestDurableAck) {
     headers["X-QWP-Request-Durable-Ack"] = "true";

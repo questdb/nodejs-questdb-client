@@ -95,18 +95,55 @@ export interface QwpFailoverAttempt {
   readonly error: unknown;
 }
 
+/**
+ * Strips userinfo from an endpoint before it reaches an error message, an
+ * event, or a log line.
+ *
+ * A URL carrying userinfo carries a live credential: `ws` turns
+ * `wss://user:pass@host/...` into an `Authorization: Basic` header. Endpoints
+ * are interpolated into {@link QwpFailoverError}'s message and retained on
+ * {@link QwpUpgradeError.url}, which is precisely what a caller's
+ * connect-failure logging writes out. The Node entry point rejects userinfo
+ * outright, as the connect-string parser already did; this is the second line
+ * of defence for endpoints reaching the shared failover machinery from a
+ * custom connection factory.
+ */
+function redactQwpEndpoint(endpoint: string | URL): string {
+  const text = typeof endpoint === "string" ? endpoint : endpoint.href;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    // Not an absolute URL, so it has no userinfo component to carry a secret.
+    return text;
+  }
+  if (!url.username && !url.password) return text;
+  url.username = "";
+  url.password = "";
+  return url.href;
+}
+
 /** Every eligible QWP endpoint in one connection sweep failed. */
 export class QwpFailoverError extends Error {
+  readonly attempts: readonly QwpFailoverAttempt[];
   readonly cause?: unknown;
 
-  constructor(readonly attempts: readonly QwpFailoverAttempt[]) {
-    const last = attempts[attempts.length - 1];
+  constructor(attempts: readonly QwpFailoverAttempt[]) {
+    // Redact before the endpoints are stored, not only before they are
+    // formatted: `attempts` is public, and serialising it is as ordinary a way
+    // to log a connect failure as printing the message.
+    const redacted = attempts.map((attempt) => ({
+      endpoint: redactQwpEndpoint(attempt.endpoint),
+      error: attempt.error,
+    }));
+    const last = redacted[redacted.length - 1];
     super(
-      `all QWP endpoints failed [count=${attempts.length}]${
+      `all QWP endpoints failed [count=${redacted.length}]${
         last ? `; last endpoint=${last.endpoint}` : ""
       }`,
     );
     this.name = "QwpFailoverError";
+    this.attempts = redacted;
     this.cause = last?.error;
   }
 }
@@ -467,7 +504,10 @@ export class QwpUpgradeError extends Error {
     this.kind = details.kind;
     this.retryable = details.retryable;
     this.tryNextEndpoint = details.tryNextEndpoint;
-    this.url = details.url;
+    // See redactQwpEndpoint(): this field is the one an upgrade failure most
+    // often gets logged through.
+    this.url =
+      details.url === undefined ? undefined : redactQwpEndpoint(details.url);
     this.statusCode = details.statusCode;
     this.statusMessage = details.statusMessage;
     this.serverRole = details.serverRole;
