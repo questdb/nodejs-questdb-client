@@ -16,6 +16,7 @@ import {
   QwpReplayStoreLockedError,
 } from "./file-replay-store";
 import { QwpProtocolError } from "../../../client-core/src/_qwp/_core/errors";
+import { monotonicNowMs } from "../../../client-core/src/_qwp/_internal/monotonic-clock";
 import {
   QwpCatchUpCapGapError,
   QwpDurableAckPersistentFailureError,
@@ -536,9 +537,13 @@ export class QwpNodeOrphanDrainer {
     session: QwpNodeOrphanDrainSession,
   ): Promise<void> {
     const terminal = session.closed.then(() => "closed" as const);
+    // Elapsed time. On the wall clock a backward correction suspended the
+    // keepalive for the size of the step while the drain went on holding the
+    // slot's advisory lock and one of its worker slots, waiting for durable
+    // ACKs it had stopped prompting for.
     let nextDurablePoll =
       this.durableAckPollIntervalMs > 0
-        ? Date.now() + this.durableAckPollIntervalMs
+        ? monotonicNowMs() + this.durableAckPollIntervalMs
         : Number.POSITIVE_INFINITY;
     while (!this.closing) {
       if (session.metrics.pendingReplayFrames === 0) return;
@@ -557,7 +562,7 @@ export class QwpNodeOrphanDrainer {
       if (
         session.pollDurableAck &&
         this.durableAckPollIntervalMs > 0 &&
-        Date.now() >= nextDurablePoll
+        monotonicNowMs() >= nextDurablePoll
       ) {
         // A poll is a keepalive prompt, not a drain step, so a not-yet answer
         // must not end the attempt. An adopted session connects in the
@@ -583,7 +588,7 @@ export class QwpNodeOrphanDrainer {
           const failure = toError(error, "QWP durable ACK poll failed");
           if (isTerminalDrainFailure(failure)) throw failure;
         });
-        nextDurablePoll = Date.now() + this.durableAckPollIntervalMs;
+        nextDurablePoll = monotonicNowMs() + this.durableAckPollIntervalMs;
       }
     }
   }

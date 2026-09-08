@@ -24,6 +24,7 @@ import {
 import { qwpSegmentMaintenanceWorker } from "./segment-maintenance-worker";
 import { log } from "../logging";
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
+import { monotonicNowMs } from "../../../client-core/src/_qwp/_internal/monotonic-clock";
 
 const FORMAT_VERSION = 1;
 const MAX_FRAME_SEQUENCE = 0x7fffffffffffffffn;
@@ -1288,10 +1289,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             : bytes.byteLength;
         if (!stalled) {
           stalled = true;
-          deadline = Date.now() + this.appendDeadlineMs;
+          // Elapsed time, not a point in time: monotonic-clock.ts names append
+          // deadlines as one of the three budgets it exists for, and the
+          // in-memory store measures the identical deadline the same way. On
+          // the wall clock an NTP correction or a VM resume expired a wait that
+          // had barely started -- surfacing QwpReplayStoreAppendTimeoutError,
+          // one of the only two errors allowed to reach a producer -- or
+          // extended one past the bound the caller configured.
+          deadline = monotonicNowMs() + this.appendDeadlineMs;
           this.totalBackpressureStalls++;
         }
-        const remainingMs = deadline - Date.now();
+        const remainingMs = deadline - monotonicNowMs();
         if (remainingMs <= 0) {
           this.totalAppendTimeouts++;
           throw new QwpReplayStoreAppendTimeoutError(
@@ -1358,10 +1366,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             : recordSizes.reduce((total, size) => total + size, 0);
         if (!stalled) {
           stalled = true;
-          deadline = Date.now() + this.appendDeadlineMs;
+          // Elapsed time, not a point in time: monotonic-clock.ts names append
+          // deadlines as one of the three budgets it exists for, and the
+          // in-memory store measures the identical deadline the same way. On
+          // the wall clock an NTP correction or a VM resume expired a wait that
+          // had barely started -- surfacing QwpReplayStoreAppendTimeoutError,
+          // one of the only two errors allowed to reach a producer -- or
+          // extended one past the bound the caller configured.
+          deadline = monotonicNowMs() + this.appendDeadlineMs;
           this.totalBackpressureStalls++;
         }
-        const remainingMs = deadline - Date.now();
+        const remainingMs = deadline - monotonicNowMs();
         if (remainingMs <= 0) {
           this.totalAppendTimeouts++;
           throw new QwpReplayStoreAppendTimeoutError(

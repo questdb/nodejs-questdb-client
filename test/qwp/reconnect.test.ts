@@ -6611,6 +6611,67 @@ describe("QWP Node file replay store", () => {
     await store.close();
   }, 10_000);
 
+  it("does not let a wall-clock step expire a parked append", async () => {
+    // monotonic-clock.ts names append deadlines as one of the three budgets it
+    // exists for, and the in-memory store measures the identical deadline that
+    // way. Measured on Date.now(), an NTP correction or a VM resume expired a
+    // wait that had barely started: the transient-fault path re-enters on a
+    // fixed cadence and re-reads the deadline on every pass, so the very next
+    // poll after the step rejected with QwpReplayStoreAppendTimeoutError --
+    // one of the only two errors allowed to reach a producer.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 5_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+
+    const internals = store as unknown as { hotSpare?: unknown };
+    await vi.waitFor(() => expect(internals.hotSpare).toBeDefined());
+    const transient = Object.assign(new Error("EACCES: permission denied"), {
+      code: "EACCES",
+    });
+    const provision = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "provision")
+      .mockRejectedValueOnce(transient)
+      .mockRejectedValueOnce(transient);
+
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+    await vi.waitFor(() => expect(provision).toHaveBeenCalledTimes(1));
+    const recovering = store.append({
+      frameSequence: 2n,
+      payload: Uint8Array.of(3),
+    });
+    await vi.waitFor(() =>
+      expect(store.metrics.totalBackpressureStalls).toBe(1),
+    );
+
+    // The wall clock jumps past appendDeadlineMs while barely any real time
+    // has elapsed. The step stays under the advisory lock's STALE_AFTER_MS,
+    // which compares against a filesystem mtime and is wall-clock by design, so
+    // this isolates the append deadline. Measured in elapsed time, the wait
+    // survives the step and is released when maintenance self-heals.
+    const realNow = Date.now;
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => realNow.call(Date) + 8_000);
+    try {
+      await expect(recovering).resolves.toBeUndefined();
+    } finally {
+      clock.mockRestore();
+    }
+    expect(store.metrics).toMatchObject({
+      waitingAppends: 0,
+      totalAppendTimeouts: 0,
+    });
+
+    provision.mockRestore();
+    await store.close();
+  }, 10_000);
+
   it("keeps a parked append waiting across a transient trim fault", async () => {
     // The permanent checkpoint failure above reaches the append deadline.
     // Maintenance retries and self-heals, so a parked append must instead be
