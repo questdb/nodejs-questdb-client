@@ -1754,9 +1754,7 @@ export class QwpIngressSession {
     }
   }
 
-  private acknowledgementFailure(
-    targetSequence: bigint,
-  ): Error | undefined {
+  private acknowledgementFailure(targetSequence: bigint): Error | undefined {
     const abandoned = this.connection
       .getIngressMetrics?.()
       .abandonedFrameRanges?.find(

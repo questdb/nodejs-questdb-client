@@ -20,6 +20,7 @@
     "lint:bench": "eslint 'benchmarks/**/*.ts' vitest.bench-e2e.config.ts",
     "format:bench": "prettier --write 'benchmarks/**/*.{ts,md}' tsconfig.bench.json vitest.bench-e2e.config.ts",
     "format": "prettier --write '{packages,test}/**/*.{ts,js,json}'",
+    "format:check": "prettier --check '{packages,test}/**/*.{ts,js,json}'",
     "check:packages": "node scripts/check-build-artifacts.mjs",
     "docs": "typedoc",
     "preview:docs": "serve docs"

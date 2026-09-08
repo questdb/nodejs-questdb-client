@@ -301,14 +301,10 @@ describe("QWP ingress codec", () => {
 
   it("removes columns introduced by an aborted row", () => {
     const table = new QwpTableBuffer("events");
-    table
-      .getOrCreateColumn("kept", QWP_COLUMN_TYPE.LONG)!
-      .values.push(1n);
+    table.getOrCreateColumn("kept", QWP_COLUMN_TYPE.LONG)!.values.push(1n);
     table.nextRow();
 
-    table
-      .getOrCreateColumn("kept", QWP_COLUMN_TYPE.LONG)!
-      .values.push(2n);
+    table.getOrCreateColumn("kept", QWP_COLUMN_TYPE.LONG)!.values.push(2n);
     table
       .getOrCreateColumn("discarded", QWP_COLUMN_TYPE.VARCHAR)!
       .values.push("not committed");

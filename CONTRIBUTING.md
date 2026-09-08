@@ -87,6 +87,7 @@ does not cover the type-checking, packaging, or browser-bundle gates.
 | Command                             | Covers                                                        |
 | ----------------------------------- | ------------------------------------------------------------- |
 | `pnpm eslint`                       | `packages/*/src`                                               |
+| `pnpm format:check`                 | Prettier style across `packages/**` and `test/**`              |
 | `pnpm typecheck`                    | Package sources plus the QWP public API contract               |
 | `pnpm typecheck:qwp-browser`        | The browser source graph, with DOM libs and no `@types/node`   |
 | `pnpm typecheck:test`               | `test/**`, which `pnpm typecheck` does not reach               |

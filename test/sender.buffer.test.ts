@@ -1907,9 +1907,9 @@ describe("Sender message builder test suite (anything not covered in client inte
       init_buf_size: 1024,
     });
     for (const scale of [-1, 77, 1.5, Number.NaN]) {
-      expect(() =>
-        sender.table("fx").decimalColumn("mid", 1n, scale),
-      ).toThrow("Scale must be between 0 and 76");
+      expect(() => sender.table("fx").decimalColumn("mid", 1n, scale)).toThrow(
+        "Scale must be between 0 and 76",
+      );
       sender.reset();
     }
     await sender.close();

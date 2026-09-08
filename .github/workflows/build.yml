@@ -38,6 +38,11 @@ jobs:
       - name: Linting
         run: pnpm eslint
 
+      # `pnpm format` writes; nothing verified the result, so formatting drifted
+      # into files no other gate reads.
+      - name: Formatting
+        run: pnpm format:check
+
       - name: Type-checking
         run: pnpm typecheck
 
