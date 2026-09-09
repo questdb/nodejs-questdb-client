@@ -6491,14 +6491,7 @@ describe("QWP Node file replay store", () => {
     await successor.close();
   });
 
-  it("stops trimming when ownership lapses part-way through a batch", async () => {
-    // A maintenance batch trims up to TRIM_BATCH_SIZE segments, each with a
-    // handle close, an fsynced manifest write and an unlink, and `lost` turns
-    // true on a timer: a heartbeat that cannot read the owner record lets
-    // provenAtMs go stale, and an event-loop stall past the liveness window
-    // does the same. Testing ownership only on entry let the rest of the batch
-    // keep deleting segments while writeManifest() silently skipped its write,
-    // so the manifest was left naming a file that no longer existed.
+  it("retries queued trims after a transient ownership lapse", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
     await store.load();
@@ -6511,6 +6504,7 @@ describe("QWP Node file replay store", () => {
     const internals = store as unknown as {
       slotLock: QwpNodeAdvisoryLock;
       pendingTrimSegments: unknown[];
+      runMaintenanceBatch(): Promise<void>;
     };
     const lock = internals.slotLock;
     const realUnlink = qwpSegmentMaintenanceWorker.unlink.bind(
@@ -6522,45 +6516,44 @@ describe("QWP Node file replay store", () => {
       .mockImplementation(async (path: string) => {
         unlinked.push(path);
         await realUnlink(path);
-        // The lease lapses immediately after the first trim, which is the
-        // window the entry-only check could not see.
-        Object.defineProperty(lock, "lost", {
-          configurable: true,
-          get: () => true,
-        });
+        if (unlinked.length === 1) {
+          // Model a stale but still matching acquisition immediately after the
+          // first trim. ownership() cannot refresh while this getter is pinned.
+          Object.defineProperty(lock, "lost", {
+            configurable: true,
+            get: () => true,
+          });
+        }
       });
 
-    // Five segments become fully acknowledged, so one batch would trim them all.
-    await store.acknowledgeThrough(4n);
-    await vi.waitFor(() => expect(unlink).toHaveBeenCalled());
-    await vi.waitFor(() =>
-      expect(internals.pendingTrimSegments).toHaveLength(0),
-    );
+    try {
+      // Five segments become fully acknowledged in one maintenance batch.
+      await store.acknowledgeThrough(4n);
+      await vi.waitFor(() => expect(unlinked).toHaveLength(1));
+      await vi.waitFor(() =>
+        expect(internals.pendingTrimSegments).toHaveLength(4),
+      );
 
-    // Only the trim that still held the lease may have deleted anything.
-    expect(unlinked).toHaveLength(1);
+      // Re-proving the same token resumes the preserved queue. Calling the
+      // batch directly avoids making this regression test wait for its 1s timer.
+      delete (lock as unknown as Record<string, unknown>).lost;
+      await internals.runMaintenanceBatch();
+      expect(unlinked).toHaveLength(5);
+      expect(internals.pendingTrimSegments).toHaveLength(0);
+      expect(store.metrics.pendingSegments).toBe(1);
+    } finally {
+      delete (lock as unknown as Record<string, unknown>).lost;
+      unlink.mockRestore();
+      await store.close().catch(() => undefined);
+    }
 
-    // Restore the real lease so close() releases the lock it genuinely holds,
-    // modelling a stall that passed rather than a takeover.
-    delete (lock as unknown as Record<string, unknown>).lost;
-    unlink.mockRestore();
-    await store.close();
-
-    // The decisive assertion: the journal the lapse left behind is still
-    // readable. A manifest naming a deleted segment fails
-    // validateRecoveredManifest(), which runs before
-    // rewriteManifestForCurrentSegments() can repair anything, so the whole
-    // slot would be quarantined and every unacknowledged frame abandoned.
     const reopened = new QwpNodeFileReplayStore({ directory });
-    await expect(reopened.load()).resolves.toBeDefined();
+    const recovered = await reopened.load();
+    expect(recovered.map((record) => record.frameSequence)).toEqual([5n]);
     await reopened.close();
   });
 
-  it("does not unlink a segment whose manifest write was skipped", async () => {
-    // The same invariant at the inner boundary, for the trimSegment() call
-    // activateHotSpare() makes directly -- it never passes through the batch
-    // guard above. writeManifest() returns false when ownership lapsed, and
-    // deleting on that answer is what strands the manifest.
+  it("does not unlink a segment while ownership is unprovable", async () => {
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
     await store.load();
@@ -6581,18 +6574,113 @@ describe("QWP Node file replay store", () => {
       get: () => true,
     });
 
-    await internals.trimSegment(head);
+    try {
+      await expect(internals.trimSegment(head)).rejects.toMatchObject({
+        name: "QwpReplayStoreLockUnprovableError",
+      });
+      expect(await assignedReplaySegments(directory)).toContain(
+        basename(head.path),
+      );
+    } finally {
+      delete (internals.slotLock as unknown as Record<string, unknown>).lost;
+      await store.close().catch(() => undefined);
+    }
 
-    expect(await assignedReplaySegments(directory)).toContain(
-      basename(head.path),
-    );
-    delete (internals.slotLock as unknown as Record<string, unknown>).lost;
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    const recovered = await reopened.load();
+    expect(recovered.map((record) => record.frameSequence)).toEqual([
+      0n,
+      1n,
+      2n,
+      3n,
+    ]);
+    await reopened.close();
+  });
+
+  it("retries activation after manifest ownership becomes unprovable", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(0) });
+    const internals = store as unknown as {
+      slotLock: QwpNodeAdvisoryLock;
+      activateHotSpare(firstSequence: bigint): Promise<unknown>;
+    };
+    const ownership = vi
+      .spyOn(internals.slotLock, "ownership")
+      .mockResolvedValueOnce("owned")
+      .mockResolvedValueOnce("owned")
+      .mockResolvedValueOnce("owned")
+      // The spare has its final manifest-optional pathname at this point.
+      .mockResolvedValueOnce("unprovable");
+
+    try {
+      await expect(internals.activateHotSpare(1n)).rejects.toMatchObject({
+        name: "QwpReplayStoreLockUnprovableError",
+      });
+    } finally {
+      ownership.mockRestore();
+    }
+
+    // The retry must reuse the renamed spare, publish its manifest boundary,
+    // and append normally rather than depending on rename(path, path).
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(1) });
     await store.close();
 
     const reopened = new QwpNodeFileReplayStore({ directory });
-    await expect(reopened.load()).resolves.toBeDefined();
+    const recovered = await reopened.load();
+    expect(recovered.map((record) => record.frameSequence)).toEqual([0n, 1n]);
     await reopened.close();
   });
+
+  it.each([
+    { acknowledgedThrough: 0n, expectedSequences: [1n, 2n] },
+    { acknowledgedThrough: 2n, expectedSequences: [] },
+  ])(
+    "leaves recovery files intact when manifest ownership lapses after ACK $acknowledgedThrough",
+    async ({ acknowledgedThrough, expectedSequences }) => {
+      const directory = await trackedDirectory();
+      const seed = new QwpNodeFileReplayStore({
+        directory,
+        maxSegmentBytes: 1,
+      });
+      await seed.load();
+      for (let sequence = 0n; sequence < 3n; sequence++) {
+        await seed.append({
+          frameSequence: sequence,
+          payload: Uint8Array.of(Number(sequence)),
+        });
+      }
+      await (
+        seed as unknown as {
+          persistAcknowledgedThrough(frameSequence: bigint): Promise<void>;
+        }
+      ).persistAcknowledgedThrough(acknowledgedThrough);
+      await seed.close();
+      const before = await assignedReplaySegments(directory);
+
+      const recovering = new QwpNodeFileReplayStore({ directory });
+      const ownership = vi
+        .spyOn(QwpNodeAdvisoryLock.prototype, "ownership")
+        .mockResolvedValueOnce("unprovable");
+      try {
+        await expect(recovering.load()).rejects.toMatchObject({
+          name: "QwpReplayStoreLockUnprovableError",
+        });
+      } finally {
+        ownership.mockRestore();
+        await recovering.close().catch(() => undefined);
+      }
+      expect(await assignedReplaySegments(directory)).toEqual(before);
+
+      const reopened = new QwpNodeFileReplayStore({ directory });
+      const recovered = await reopened.load();
+      expect(recovered.map((record) => record.frameSequence)).toEqual(
+        expectedSequences,
+      );
+      await reopened.close();
+    },
+  );
 
   it("survives a transient failure to read its own owner record", async () => {
     // Reading the record needs a descriptor; stat() and utimes() do not. So

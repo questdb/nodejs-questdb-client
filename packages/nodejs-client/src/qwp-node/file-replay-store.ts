@@ -20,6 +20,7 @@ import {
 import {
   QwpNodeAdvisoryLock,
   QwpNodeAdvisoryLockBusyError,
+  type QwpNodeAdvisoryLockOwnership,
 } from "./advisory-lock";
 import { qwpSegmentMaintenanceWorker } from "./segment-maintenance-worker";
 import { log } from "../logging";
@@ -847,6 +848,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             // Skips the retained empty active segment, whose stamp the next
             // append owns. See manifestFlagPending above.
             if (segment.manifestFlagPending) continue;
+            await this.assertDirectoryOwned();
             await markSegmentManifestRequired(segment.path);
           }
         } else if (
@@ -859,7 +861,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
               : (this.manifestActiveBase ?? this.manifestHeadBase);
           await this.writeManifest(collapsed, collapsed);
         }
-        for (const path of removalPaths) await ignoreMissing(unlink(path));
+        for (const path of removalPaths) {
+          await this.assertDirectoryOwned();
+          await ignoreMissing(unlink(path));
+        }
         if (this.segments.size === 0) await this.removeManifest();
         if (changedDirectory) await syncDirectory(this.directory);
         // Past every read and every unlink: from here on the segment set and
@@ -1629,17 +1634,26 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       // before the manifest update, recovery can safely adopt this file. Once
       // the durable boundary names it, flip the header flag so future recovery
       // must fail closed if the manifest disappears.
+      await this.assertDirectoryOwned();
       await writeFully(
         spare.handle,
         encodeSegmentHeader(firstSequence, false),
         0,
       );
       await spare.handle.sync();
-      await rename(spare.path, finalPath);
-      spare.path = finalPath;
-      await syncDirectory(this.directory);
+      await this.assertDirectoryOwned();
+      // A retry after an ownership fence may already have published the
+      // manifest-optional file under its final name. Do not depend on
+      // platform-specific same-path rename behavior.
+      if (spare.path !== finalPath) {
+        await rename(spare.path, finalPath);
+        spare.path = finalPath;
+        await syncDirectory(this.directory);
+      }
+      await this.assertDirectoryOwned();
       await this.advanceManifestForActivation(firstSequence);
     } catch (error) {
+      if (isLockFenceError(error)) throw error;
       throw new QwpReplayStoreError(
         `could not activate QWP store-and-forward hot spare [frameSequence=${firstSequence}]`,
         error,
@@ -1673,7 +1687,21 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       );
     }
     if (previous && previous.liveRecords === 0) {
-      await this.trimSegment(previous);
+      try {
+        await this.trimSegment(previous);
+      } catch (error) {
+        // Rotation trims this segment directly, outside the maintenance queue.
+        // Preserve retryable work if the manifest or unlink was fenced.
+        if (error instanceof QwpReplayStoreLockLostError) {
+          this.rejectCapacityWaiters(error);
+        } else {
+          if (!this.pendingTrimSegments.includes(previous)) {
+            this.pendingTrimSegments.push(previous);
+          }
+          this.scheduleMaintenanceRetry();
+        }
+        throw error;
+      }
     }
     return segment;
   }
@@ -1799,44 +1827,84 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   private async runMaintenanceBatch(): Promise<void> {
     this.maintenanceScheduled = false;
-    if (!this.ownsDirectory) {
-      this.pendingTrimSegments.length = 0;
+    const initialOwnership = await this.directoryOwnership();
+    if (initialOwnership !== "owned") {
+      if (initialOwnership === "lost") {
+        this.pendingTrimSegments.length = 0;
+        this.rejectCapacityWaiters(
+          new QwpReplayStoreLockLostError(this.directory),
+        );
+      } else {
+        this.scheduleMaintenanceRetry();
+      }
       return;
     }
+
     let trimmed = 0;
+    let retryAfterOwnershipLapse = false;
+    let failure: unknown;
     while (trimmed < TRIM_BATCH_SIZE && this.pendingTrimSegments.length > 0) {
-      // Re-checked per trim, not only on entry. A batch runs up to
-      // TRIM_BATCH_SIZE trims, each with a handle close, an fsynced manifest
-      // write and an unlink, and `lost` turns true on a timer -- a heartbeat
-      // that cannot read the owner record lets `provenAtMs` go stale, and an
-      // event-loop stall past the liveness window does the same. Testing once
-      // on entry let the rest of the batch keep mutating a directory this
-      // store no longer owns.
-      if (!this.ownsDirectory) {
-        this.pendingTrimSegments.length = 0;
-        return;
+      // Re-prove a stale same-token lease instead of treating it as a takeover.
+      // An unreadable owner record defers this queue; a foreign token abandons
+      // only the old store's in-memory work and lets the successor recover disk.
+      const ownership = await this.directoryOwnership();
+      if (ownership !== "owned") {
+        if (ownership === "lost") {
+          this.pendingTrimSegments.length = 0;
+          this.rejectCapacityWaiters(
+            new QwpReplayStoreLockLostError(this.directory),
+          );
+        } else {
+          retryAfterOwnershipLapse = true;
+        }
+        break;
       }
       const segment = this.pendingTrimSegments[0];
-      await this.trimSegment(segment);
+      try {
+        await this.trimSegment(segment);
+      } catch (error) {
+        if (error instanceof QwpReplayStoreLockLostError) {
+          this.pendingTrimSegments.length = 0;
+          this.rejectCapacityWaiters(error);
+        } else if (error instanceof QwpReplayStoreLockUnprovableError) {
+          retryAfterOwnershipLapse = true;
+        } else {
+          failure = error;
+        }
+        break;
+      }
       this.pendingTrimSegments.shift();
       trimmed++;
     }
     if (trimmed > 0) {
-      if (this.durability === QWP_SF_DURABILITY.APPEND) {
-        await qwpSegmentMaintenanceWorker.syncDirectory(this.directory);
-      } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
-        this.directoryDirty = true;
+      try {
+        if (this.ownsDirectory) {
+          if (this.durability === QWP_SF_DURABILITY.APPEND) {
+            await qwpSegmentMaintenanceWorker.syncDirectory(this.directory);
+          } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+            this.directoryDirty = true;
+          }
+          this.scheduleHotSpare();
+        }
+      } finally {
+        // Completed unlinks free live capacity even if a later ownership check
+        // or directory sync interrupts the rest of this batch.
+        this.signalCapacity();
       }
-      this.signalCapacity();
-      this.scheduleHotSpare();
     }
+    if (failure) throw failure;
     if (this.records.size === 0 && this.pendingTrimSegments.length === 0) {
       await this.removeAcknowledgedThrough();
     }
-    if (this.pendingTrimSegments.length > 0) this.scheduleMaintenance();
-    // The batch completed, so whatever made the previous one fail is gone.
-    // Mirrors checkpointDirty(), which clears checkpointFailure on success.
-    this.maintenanceFailure = undefined;
+    if (this.pendingTrimSegments.length > 0) {
+      if (retryAfterOwnershipLapse) this.scheduleMaintenanceRetry();
+      else this.scheduleMaintenance();
+    }
+    if (!retryAfterOwnershipLapse) {
+      // The batch completed, so whatever made the previous one fail is gone.
+      // Mirrors checkpointDirty(), which clears checkpointFailure on success.
+      this.maintenanceFailure = undefined;
+    }
   }
 
   private scheduleMaintenanceRetry(): void {
@@ -1858,14 +1926,21 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   private async drainPendingMaintenance(): Promise<void> {
     this.maintenanceFailure = undefined;
-    if (!this.ownsDirectory) {
-      // Nothing here is ours to trim any more. Drop the queue so close() can
-      // finish instead of retrying against the new owner's files.
+    if ((await this.directoryOwnership()) !== "owned") {
+      // Close cannot wait on the retry timer it has already disabled. Leave
+      // disk untouched for recovery and discard only this store's queue.
       this.pendingTrimSegments.length = 0;
       return;
     }
     while (this.pendingTrimSegments.length > 0) {
+      const before = this.pendingTrimSegments.length;
       await this.runMaintenanceBatch();
+      if (this.pendingTrimSegments.length === before) {
+        // Ownership is still unprovable. Closing must remain bounded; the next
+        // owner recovers these fully acknowledged segments from disk.
+        this.pendingTrimSegments.length = 0;
+        return;
+      }
     }
     // Only meaningful once recovery established what is on disk. After a load
     // that failed mid-scan this map is empty because nothing was ever read,
@@ -1886,7 +1961,6 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           `QWP store-and-forward segment is absent from the ordered ring [firstSequence=${segment.firstSequence}]`,
         );
       }
-      let published: boolean;
       if (this.segmentOrder.length > 1) {
         const head =
           segmentIndex === 0 ? this.segmentOrder[1] : this.segmentOrder[0];
@@ -1894,30 +1968,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           segmentIndex === this.segmentOrder.length - 1
             ? this.segmentOrder[this.segmentOrder.length - 2]
             : this.segmentOrder[this.segmentOrder.length - 1];
-        published = await this.writeManifest(
-          head.firstSequence,
-          active.firstSequence,
-        );
+        await this.writeManifest(head.firstSequence, active.firstSequence);
       } else {
         const collapsed = segment.firstSequence + BigInt(segment.frameCount);
-        published = await this.writeManifest(collapsed, collapsed);
+        await this.writeManifest(collapsed, collapsed);
       }
-      // The unlink is only safe once the manifest has stopped naming this
-      // segment. writeManifest() skips the write when ownership lapsed, and
-      // deleting anyway left `sf-manifest.bin` pointing at a file that no
-      // longer exists: validateRecoveredManifest() rejects that pair, and
-      // because it runs before rewriteManifestForCurrentSegments() neither
-      // this process nor a successor can repair it. The load then fails
-      // twice, isQuarantinableReplayRecoveryError() sends the whole slot to
-      // quarantine, and every frame the server had not acknowledged yet is
-      // abandoned -- over a segment that was fully acknowledged and whose
-      // deletion mattered to nobody. Leave the file, the ring and the queue
-      // entry alone; the batch above stops on the same condition, and the
-      // next owner reclaims the segment through ordinary recovery.
-      if (!published) return;
+      // Publication can fsync for long enough that the lease needs proving
+      // again. Never unlink through a stale or foreign ownership token.
+      await this.assertDirectoryOwned();
       await qwpSegmentMaintenanceWorker.unlink(segment.path);
       if (this.segmentOrder.length === 1) await this.removeManifest();
     } catch (error) {
+      if (isLockFenceError(error)) throw error;
       throw new QwpReplayStoreError(
         `could not trim QWP store-and-forward segment [firstSequence=${segment.firstSequence}]`,
         error,
@@ -2240,20 +2302,14 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   }
 
   /**
-   * Persists the manifest boundaries, and reports whether the on-disk manifest
-   * now describes them.
-   *
-   * `false` means the write was skipped because this store no longer owns the
-   * directory, so the manifest still names whatever it named before. A caller
-   * that is about to delete something the manifest points at -- {@link
-   * trimSegment} -- has to stop on that answer. Returning `true` for an
-   * unchanged manifest is deliberate: the boundaries already hold, which is
-   * exactly the condition the caller needs.
+   * Persists manifest boundaries after proving this acquisition still owns the
+   * directory. Ownership is required even when the boundaries are unchanged:
+   * callers may unlink a segment immediately after this method returns.
    */
   private async writeManifest(
     headBase: bigint,
     activeBase: bigint,
-  ): Promise<boolean> {
+  ): Promise<void> {
     if (this.manifestGeneration > 0n) {
       if (
         this.manifestHeadBase !== undefined &&
@@ -2267,23 +2323,26 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       ) {
         activeBase = this.manifestActiveBase;
       }
-      if (
-        headBase === this.manifestHeadBase &&
-        activeBase === this.manifestActiveBase
-      ) {
-        return true;
-      }
     }
     if (headBase < 0n || activeBase < headBase) {
       throw new QwpReplayStoreCorruptionError(
         `invalid QWP store-and-forward manifest boundaries [headBase=${headBase}, activeBase=${activeBase}]`,
       );
     }
-    if (!this.ownsDirectory) return false;
+    await this.assertDirectoryOwned();
+    if (
+      headBase === this.manifestHeadBase &&
+      activeBase === this.manifestActiveBase
+    ) {
+      return;
+    }
     // The manifest below is fsynced unconditionally, so a watermark still
     // sitting in the page cache would be overtaken by the head that trimming it
     // justified. Make the watermark durable first: recovery reads the pair.
     await this.syncAcknowledgement();
+    // syncAcknowledgement() may have outlived the lease. Do not publish a
+    // boundary whose dependent unlink would run under an unproved token.
+    await this.assertDirectoryOwned();
     const path = join(this.directory, MANIFEST_FILE);
     const nextGeneration = this.manifestGeneration + 1n;
     const file = await openMetadataFile(path);
@@ -2308,7 +2367,6 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.manifestHeadBase = headBase;
     this.manifestActiveBase = activeBase;
     this.manifestInvalid = false;
-    return true;
   }
 
   private async removeManifest(): Promise<void> {
@@ -2619,6 +2677,21 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     return this.slotLock !== undefined && !this.slotLock.lost;
   }
 
+  private directoryOwnership(): Promise<QwpNodeAdvisoryLockOwnership> {
+    return this.slotLock?.ownership() ?? Promise.resolve("lost");
+  }
+
+  /** Re-proves the acquisition token without requiring a completed load. */
+  private async assertDirectoryOwned(): Promise<void> {
+    const ownership = await this.directoryOwnership();
+    if (ownership === "lost") {
+      throw new QwpReplayStoreLockLostError(this.directory);
+    }
+    if (ownership === "unprovable") {
+      throw new QwpReplayStoreLockUnprovableError(this.directory);
+    }
+  }
+
   /** Re-proves ownership before work and after any async syscall waits. */
   private async assertReadyAfterWait(): Promise<void> {
     this.assertOpen();
@@ -2627,17 +2700,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         "QWP store-and-forward journal must be loaded before use",
       );
     }
-    if (!this.slotLock) throw new QwpReplayStoreLockLostError(this.directory);
     // "Cannot prove it right now" is not "somebody took it". Only the latter
     // is terminal; the former parks and retries like any other transient
     // journal fault.
-    const ownership = await this.slotLock.ownership();
-    if (ownership === "lost") {
-      throw new QwpReplayStoreLockLostError(this.directory);
-    }
-    if (ownership === "unprovable") {
-      throw new QwpReplayStoreLockUnprovableError(this.directory);
-    }
+    await this.assertDirectoryOwned();
     if (this.checkpointFailure) throw this.checkpointFailure;
     if (this.maintenanceFailure) throw this.maintenanceFailure;
   }
