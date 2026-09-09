@@ -656,17 +656,20 @@ function connectQwpBrowserRawEndpoint(
   endpoint: string | URL,
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
-  // Offering the token makes the server append the SERVER_INFO frame, so this
-  // path has to consume it too -- otherwise the frame reaches the caller as a
-  // data message and the durable-ACK verdict is never read.
+  // Durable raw ingress needs both browser-visible negotiation signals: the
+  // subprotocol carries the durable-ACK request, while the query parameter asks
+  // the server to send the SERVER_INFO capability verdict this path consumes.
   const requestDurableAck = options.requestDurableAck === true;
+  const requestEndpoint = requestDurableAck
+    ? browserNegotiationUrl(endpoint, "qwp_browser_handshake", "v1")
+    : endpoint;
   const protocols = requestDurableAck
     ? addQwpDurableAckWebSocketProtocol(options.protocols)
     : options.protocols;
   return connectQwpBrowserEndpoint(
     options,
     endpoint,
-    endpoint,
+    requestEndpoint,
     protocols,
     signal,
     (selectedProtocol) =>

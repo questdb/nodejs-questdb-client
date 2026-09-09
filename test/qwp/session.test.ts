@@ -753,12 +753,14 @@ describe("QWP WebSocket adapters", () => {
   it("negotiates durable ACKs through a browser WebSocket subprotocol", async () => {
     const socket = new FakeWebSocket();
     socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+    let capturedUrl: string | URL | undefined;
     let capturedProtocols: string | string[] | undefined;
     const connecting = connectQwpBrowserWebSocket({
-      url: "ws://localhost:9000/write/v4",
+      url: "ws://localhost:9000/write/v4?tenant=blue",
       protocols: ["application.v1"],
       requestDurableAck: true,
-      webSocketFactory: (_url, protocols) => {
+      webSocketFactory: (url, protocols) => {
+        capturedUrl = url;
         capturedProtocols = protocols;
         return asQwpSocket(socket);
       },
@@ -766,6 +768,9 @@ describe("QWP WebSocket adapters", () => {
     openDurableAckBrowserSocket(socket);
 
     const connection = await connecting;
+    const requestUrl = new URL(capturedUrl!);
+    expect(requestUrl.searchParams.get("tenant")).toBe("blue");
+    expect(requestUrl.searchParams.get("qwp_browser_handshake")).toBe("v1");
     expect(capturedProtocols).toEqual([
       "application.v1",
       QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
