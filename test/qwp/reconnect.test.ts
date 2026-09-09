@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeIngress,
@@ -5250,6 +5251,108 @@ describe("QWP Node file replay store", () => {
     await store.close();
   }, 15_000);
 
+  it("retries append-mode maintenance finalization after its directory sync fails", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    await store.load();
+    for (let sequence = 0n; sequence < 3n; sequence++) {
+      await store.append({
+        frameSequence: sequence,
+        payload: Uint8Array.of(Number(sequence)),
+      });
+    }
+    const syncDirectory = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "syncDirectory")
+      .mockRejectedValueOnce(new Error("transient directory sync failure"));
+    const internals = store as unknown as {
+      pendingTrimSegments: unknown[];
+      maintenanceFinalizationPending: boolean;
+      maintenanceFailure?: unknown;
+    };
+
+    await store.acknowledgeThrough(2n);
+    await vi.waitFor(() => {
+      expect(internals.pendingTrimSegments).toHaveLength(0);
+      expect(internals.maintenanceFinalizationPending).toBe(true);
+      expect(internals.maintenanceFailure).toBeDefined();
+    });
+    await vi.waitFor(
+      () => {
+        expect(syncDirectory.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(internals.maintenanceFinalizationPending).toBe(false);
+        expect(internals.maintenanceFailure).toBeUndefined();
+      },
+      { timeout: 4_000, interval: 100 },
+    );
+    await expect(
+      store.append({ frameSequence: 3n, payload: Uint8Array.of(3) }),
+    ).resolves.toBeUndefined();
+
+    syncDirectory.mockRestore();
+    await store.close();
+  }, 10_000);
+
+  it.each([
+    QWP_SF_DURABILITY.APPEND,
+    QWP_SF_DURABILITY.PERIODIC,
+    QWP_SF_DURABILITY.MEMORY,
+  ])(
+    "retries empty-queue %s ACK finalization",
+    async (durability) => {
+      const directory = await trackedDirectory();
+      const store = new QwpNodeFileReplayStore({
+        directory,
+        maxSegmentBytes: 1,
+        durability,
+      });
+      await store.load();
+      for (let sequence = 0n; sequence < 3n; sequence++) {
+        await store.append({
+          frameSequence: sequence,
+          payload: Uint8Array.of(Number(sequence)),
+        });
+      }
+      const internals = store as unknown as {
+        pendingTrimSegments: unknown[];
+        maintenanceFinalizationPending: boolean;
+        maintenanceFailure?: unknown;
+        removeAcknowledgedThrough(): Promise<void>;
+      };
+      const removeAcknowledgedThrough = vi
+        .spyOn(internals, "removeAcknowledgedThrough")
+        .mockRejectedValueOnce(new Error("transient ACK cleanup failure"));
+
+      await store.acknowledgeThrough(2n);
+      await vi.waitFor(() => {
+        expect(internals.pendingTrimSegments).toHaveLength(0);
+        expect(internals.maintenanceFinalizationPending).toBe(true);
+        expect(internals.maintenanceFailure).toBeDefined();
+      });
+      await vi.waitFor(
+        () => {
+          expect(removeAcknowledgedThrough.mock.calls.length).toBeGreaterThan(
+            1,
+          );
+          expect(internals.maintenanceFinalizationPending).toBe(false);
+          expect(internals.maintenanceFailure).toBeUndefined();
+        },
+        { timeout: 4_000, interval: 100 },
+      );
+      await expect(
+        stat(join(directory, ".ack-watermark")),
+      ).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        store.append({ frameSequence: 3n, payload: Uint8Array.of(3) }),
+      ).resolves.toBeUndefined();
+
+      removeAcknowledgedThrough.mockRestore();
+      await store.close();
+    },
+    10_000,
+  );
+
   it("keeps the producer alive when that failure surfaces while applying an ACK", async () => {
     // The test above proves the store self-heals. Nothing connected that to
     // the connection, which reached the parked failure through
@@ -5305,6 +5408,53 @@ describe("QWP Node file replay store", () => {
     await session.close().catch(() => undefined);
     await store.close().catch(() => undefined);
   }, 20_000);
+
+  it.each([
+    QWP_SF_DURABILITY.APPEND,
+    QWP_SF_DURABILITY.PERIODIC,
+    QWP_SF_DURABILITY.MEMORY,
+  ])(
+    "preserves a possibly published %s hot spare for recovery",
+    async (durability) => {
+      const directory = await trackedDirectory();
+      const store = new QwpNodeFileReplayStore({
+        directory,
+        durability,
+      });
+      await store.load();
+      await store.append({ frameSequence: 0n, payload: Uint8Array.of(7) });
+      const internals = store as unknown as {
+        hotSpare?: { path: string };
+        activateHotSpare(firstSequence: bigint): Promise<unknown>;
+        advanceManifestForActivation(firstSequence: bigint): Promise<void>;
+      };
+      await vi.waitFor(() => expect(internals.hotSpare).toBeDefined());
+      const advance = internals.advanceManifestForActivation.bind(internals);
+      vi.spyOn(
+        internals,
+        "advanceManifestForActivation",
+      ).mockImplementationOnce(async (firstSequence) => {
+        await advance(firstSequence);
+        throw new Error("fault after manifest publication");
+      });
+
+      await expect(internals.activateHotSpare(1n)).rejects.toThrow(
+        /could not activate/,
+      );
+      const publishedPath = internals.hotSpare!.path;
+      await store.close();
+      await expect(stat(publishedPath)).resolves.toBeDefined();
+
+      const recovered = new QwpNodeFileReplayStore({
+        directory,
+        durability,
+      });
+      await expect(recovered.load()).resolves.toMatchObject([
+        { frameSequence: 0n },
+      ]);
+      await recovered.close();
+    },
+  );
 
   it("closes segment handles even when the hot spare cannot be discarded", async () => {
     // discardHotSpare() rethrows anything but ENOENT from the spare's unlink
@@ -6917,16 +7067,14 @@ describe("QWP Node file replay store", () => {
     await expectOnlyJavaSlotLockMetadata(directory);
   });
 
-  it("reclaims a slot from a predecessor whose PID this process now has", async () => {
+  it("does not reclaim an ambiguous predecessor whose PID this process now has", async () => {
     const directory = await trackedDirectory();
     const ownerPath = join(directory, ".lock.owner");
     await mkdir(ownerPath);
     // A producer SIGKILLed and restarted into the same PID -- the container
     // shape where the app is always PID 1, or PID wraparound. isPidAlive()
-    // answers "yes" because the successor *is* that PID now. A foreign
-    // instance narrows it to "some other module registry wrote this", and the
-    // lapsed heartbeat is what makes it a dead predecessor rather than a live
-    // sibling worker thread.
+    // answers "yes" because the successor *is* that PID now. Neither a stale
+    // heartbeat nor the retired instance spelling proves the old holder dead.
     await writeFile(
       join(ownerPath, "owner"),
       JSON.stringify({
@@ -6939,9 +7087,51 @@ describe("QWP Node file replay store", () => {
     await utimes(ownerPath, longAgo, longAgo);
 
     const store = new QwpNodeFileReplayStore({ directory });
-    await expect(store.load()).resolves.toEqual([]);
-    await store.close();
-    await expectOnlyJavaSlotLockMetadata(directory);
+    await expect(store.load()).rejects.toMatchObject({
+      name: "QwpReplayStoreLockedError",
+      directory,
+    } satisfies Partial<QwpReplayStoreLockedError>);
+  });
+
+  it("does not reclaim a stalled worker-thread owner with the shared PID", async () => {
+    const directory = await trackedDirectory();
+    const ownerPath = join(directory, ".lock.owner");
+    const worker = new Worker(
+      `
+        const fs = require("node:fs");
+        const { hostname } = require("node:os");
+        const { parentPort, workerData } = require("node:worker_threads");
+        fs.mkdirSync(workerData.ownerPath);
+        fs.writeFileSync(
+          workerData.ownerPath + "/owner",
+          JSON.stringify({
+            pid: process.pid,
+            host: hostname(),
+            token: "worker-owner",
+            instance: "legacy-worker-registry"
+          })
+        );
+        parentPort.postMessage("ready");
+        setInterval(() => {}, 1_000);
+      `,
+      { eval: true, workerData: { ownerPath } },
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        worker.once("message", () => resolve());
+        worker.once("error", reject);
+      });
+      const longAgo = new Date(Date.now() - 60_000);
+      await utimes(ownerPath, longAgo, longAgo);
+
+      const store = new QwpNodeFileReplayStore({ directory });
+      await expect(store.load()).rejects.toMatchObject({
+        name: "QwpReplayStoreLockedError",
+        directory,
+      } satisfies Partial<QwpReplayStoreLockedError>);
+    } finally {
+      await worker.terminate();
+    }
   });
 
   it("leaves a heartbeating same-PID holder from another registry alone", async () => {

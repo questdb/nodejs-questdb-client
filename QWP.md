@@ -401,14 +401,11 @@ therefore refreshes the owner directory's mtime every 5 seconds, but a lapsed ti
 alone never authorizes takeover: the process may be suspended inside a filesystem
 write and later resume through an open descriptor. A contender reclaims immediately
 only when the owner record names a same-host process that no longer exists, which is
-the common case after a crash. A record naming a PID that is alive because the
-contender itself now has it — a container where the app is always PID 1, PID
-wraparound, or another module registry such as a `worker_threads` worker in this very
-process — is not proof of a dead predecessor on its own, so it is reclaimed only once
-its heartbeat has also lapsed. That costs a same-PID successor one staleness window
-before it may adopt the slot, and it is what stops two worker threads sharing one
-`sf_dir` from reclaiming each other. Remote-host or otherwise ambiguous owners require an operator to confirm that
-the process is gone and remove `.lock.owner`. A defunct owner directory is renamed
+the common case after a crash. A record naming a live PID is never reclaimed automatically, even after its heartbeat
+lapses. PID reuse, a container where the app is always PID 1, and `worker_threads`
+registries are indistinguishable from a stalled live holder while that PID remains
+alive. As with remote-host owners, an operator must confirm that the prior holder is
+gone and remove `.lock.owner` before a same-PID restart can adopt the slot. A defunct owner directory is renamed
 aside before removal, so two contenders racing to reclaim one slot cannot both win it.
 Each acquisition also writes a token into the owner record and checks it before
 removing anything, so a release can never take away a directory that has since been

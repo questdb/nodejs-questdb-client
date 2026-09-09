@@ -107,6 +107,7 @@ interface HotSpareSegment {
   readonly generation: bigint;
   readonly size: number;
   readonly handle: FileHandle;
+  manifestPublicationAttempted: boolean;
 }
 
 interface ScannedRecord extends QwpIngressReplayReference {
@@ -449,6 +450,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private checkpointTimer?: ReturnType<typeof setTimeout>;
   private checkpointFailure?: QwpReplayStoreCheckpointError;
   private maintenanceFailure?: QwpReplayStoreError;
+  private maintenanceFinalizationPending = false;
   private maintenanceRetryTimer?: ReturnType<typeof setTimeout>;
   private totalCheckpoints = 0;
   private totalCheckpointFailures = 0;
@@ -1651,6 +1653,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         await syncDirectory(this.directory);
       }
       await this.assertDirectoryOwned();
+      // A failure from manifest publication can occur after the manifest has
+      // become durable. Preserve the final spare for recovery from that point.
+      spare.manifestPublicationAttempted = true;
       await this.advanceManifestForActivation(firstSequence);
     } catch (error) {
       if (isLockFenceError(error)) throw error;
@@ -1761,6 +1766,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         generation,
         size: this.segmentFileSize,
         handle,
+        manifestPublicationAttempted: false,
       };
       handle = undefined;
     } catch (error) {
@@ -1791,7 +1797,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private scheduleMaintenance(): void {
     if (
       this.maintenanceScheduled ||
-      this.pendingTrimSegments.length === 0 ||
+      !this.hasPendingMaintenance ||
       this.closing ||
       this.closed
     ) {
@@ -1830,8 +1836,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     const initialOwnership = await this.directoryOwnership();
     if (initialOwnership !== "owned") {
       if (initialOwnership === "lost") {
-        this.pendingTrimSegments.length = 0;
-        this.rejectCapacityWaiters(
+        this.abandonPendingMaintenance(
           new QwpReplayStoreLockLostError(this.directory),
         );
       } else {
@@ -1850,8 +1855,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       const ownership = await this.directoryOwnership();
       if (ownership !== "owned") {
         if (ownership === "lost") {
-          this.pendingTrimSegments.length = 0;
-          this.rejectCapacityWaiters(
+          this.abandonPendingMaintenance(
             new QwpReplayStoreLockLostError(this.directory),
           );
         } else {
@@ -1864,8 +1868,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         await this.trimSegment(segment);
       } catch (error) {
         if (error instanceof QwpReplayStoreLockLostError) {
-          this.pendingTrimSegments.length = 0;
-          this.rejectCapacityWaiters(error);
+          this.abandonPendingMaintenance(error);
         } else if (error instanceof QwpReplayStoreLockUnprovableError) {
           retryAfterOwnershipLapse = true;
         } else {
@@ -1874,37 +1877,75 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         break;
       }
       this.pendingTrimSegments.shift();
+      this.maintenanceFinalizationPending = true;
       trimmed++;
     }
     if (trimmed > 0) {
-      try {
-        if (this.ownsDirectory) {
-          if (this.durability === QWP_SF_DURABILITY.APPEND) {
-            await qwpSegmentMaintenanceWorker.syncDirectory(this.directory);
-          } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
-            this.directoryDirty = true;
-          }
-          this.scheduleHotSpare();
-        }
-      } finally {
-        // Completed unlinks free live capacity even if a later ownership check
-        // or directory sync interrupts the rest of this batch.
-        this.signalCapacity();
-      }
+      // Completed unlinks free live capacity even if a later ownership check
+      // or directory sync interrupts the rest of this batch.
+      this.signalCapacity();
     }
     if (failure) throw failure;
-    if (this.records.size === 0 && this.pendingTrimSegments.length === 0) {
-      await this.removeAcknowledgedThrough();
+
+    if (this.maintenanceFinalizationPending) {
+      const ownership = await this.directoryOwnership();
+      if (ownership !== "owned") {
+        if (ownership === "lost") {
+          this.abandonPendingMaintenance(
+            new QwpReplayStoreLockLostError(this.directory),
+          );
+        } else {
+          retryAfterOwnershipLapse = true;
+        }
+      } else {
+        if (this.durability === QWP_SF_DURABILITY.APPEND) {
+          await qwpSegmentMaintenanceWorker.syncDirectory(this.directory);
+        } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+          this.directoryDirty = true;
+        }
+        const afterBarrier = await this.directoryOwnership();
+        if (afterBarrier === "lost") {
+          this.abandonPendingMaintenance(
+            new QwpReplayStoreLockLostError(this.directory),
+          );
+          return;
+        }
+        if (afterBarrier === "unprovable") {
+          retryAfterOwnershipLapse = true;
+        } else {
+          this.scheduleHotSpare();
+          if (
+            this.records.size === 0 &&
+            this.pendingTrimSegments.length === 0
+          ) {
+            await this.removeAcknowledgedThrough();
+          }
+          this.maintenanceFinalizationPending = false;
+        }
+      }
     }
-    if (this.pendingTrimSegments.length > 0) {
+    if (this.hasPendingMaintenance) {
       if (retryAfterOwnershipLapse) this.scheduleMaintenanceRetry();
       else this.scheduleMaintenance();
     }
-    if (!retryAfterOwnershipLapse) {
-      // The batch completed, so whatever made the previous one fail is gone.
-      // Mirrors checkpointDirty(), which clears checkpointFailure on success.
+    if (!retryAfterOwnershipLapse && !this.hasPendingMaintenance) {
+      // The batch and its durability finalization completed, so whatever made
+      // the previous attempt fail is gone.
       this.maintenanceFailure = undefined;
+      this.signalCapacity();
     }
+  }
+
+  private get hasPendingMaintenance(): boolean {
+    return (
+      this.pendingTrimSegments.length > 0 || this.maintenanceFinalizationPending
+    );
+  }
+
+  private abandonPendingMaintenance(error?: QwpReplayStoreError): void {
+    this.pendingTrimSegments.length = 0;
+    this.maintenanceFinalizationPending = false;
+    if (error) this.rejectCapacityWaiters(error);
   }
 
   private scheduleMaintenanceRetry(): void {
@@ -1912,7 +1953,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       this.maintenanceRetryTimer ||
       this.closing ||
       this.closed ||
-      this.pendingTrimSegments.length === 0
+      !this.hasPendingMaintenance
     ) {
       return;
     }
@@ -1928,26 +1969,23 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.maintenanceFailure = undefined;
     if ((await this.directoryOwnership()) !== "owned") {
       // Close cannot wait on the retry timer it has already disabled. Leave
-      // disk untouched for recovery and discard only this store's queue.
-      this.pendingTrimSegments.length = 0;
+      // disk untouched for recovery and discard only this store's work.
+      this.abandonPendingMaintenance();
       return;
     }
-    while (this.pendingTrimSegments.length > 0) {
-      const before = this.pendingTrimSegments.length;
+    while (this.hasPendingMaintenance) {
+      const beforeSegments = this.pendingTrimSegments.length;
+      const beforeFinalization = this.maintenanceFinalizationPending;
       await this.runMaintenanceBatch();
-      if (this.pendingTrimSegments.length === before) {
+      if (
+        this.pendingTrimSegments.length === beforeSegments &&
+        this.maintenanceFinalizationPending === beforeFinalization
+      ) {
         // Ownership is still unprovable. Closing must remain bounded; the next
-        // owner recovers these fully acknowledged segments from disk.
-        this.pendingTrimSegments.length = 0;
+        // owner recovers acknowledged segments and metadata from disk.
+        this.abandonPendingMaintenance();
         return;
       }
-    }
-    // Only meaningful once recovery established what is on disk. After a load
-    // that failed mid-scan this map is empty because nothing was ever read,
-    // not because nothing survives -- dropping the watermark on that reading
-    // replayed frames the server had already acknowledged.
-    if (this.recoveryScanCompleted && this.records.size === 0) {
-      await this.removeAcknowledgedThrough();
     }
   }
 
@@ -2022,6 +2060,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.hotSpare = undefined;
     try {
       await spare.handle.close();
+      // Once manifest publication was attempted, a failure may mean the final
+      // segment is already durable and named by the manifest. Recovery must
+      // reconcile it; close must not erase that evidence.
+      if (spare.manifestPublicationAttempted) return;
       // The descriptor is ours either way, but the file is not once the owner
       // token changed: a successor may have re-created that name.
       if (!this.ownsDirectory) return;
@@ -2492,16 +2534,20 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private async removeAcknowledgedThrough(): Promise<void> {
     if (this.acknowledgedThrough < 0n) return;
     if (!this.ownsDirectory) return;
+    await this.assertDirectoryOwned();
     await ignoreMissing(unlink(join(this.directory, ACK_FILE)));
-    this.acknowledgedThrough = -1n;
-    this.ackGeneration = 0n;
-    this.acknowledgementDirty = false;
-    this.acknowledgementUnsynced = false;
     if (this.durability === QWP_SF_DURABILITY.APPEND) {
       await syncDirectory(this.directory);
     } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
       this.directoryDirty = true;
     }
+    // Retain the generation and dirty state until the directory mutation has
+    // reached the durability boundary, so an unlink-success/sync-failure can
+    // safely retry the same cleanup.
+    this.acknowledgedThrough = -1n;
+    this.ackGeneration = 0n;
+    this.acknowledgementDirty = false;
+    this.acknowledgementUnsynced = false;
   }
 
   /**

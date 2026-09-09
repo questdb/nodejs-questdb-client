@@ -61,31 +61,7 @@ interface OwnerRecord {
    * acquisition happens to occupy that path now.
    */
   readonly token?: string;
-  /**
-   * Identifies the writing module registry, not the acquisition and not the
-   * process.
-   *
-   * `pid` alone cannot separate a successor from its predecessor: a producer
-   * that is SIGKILLed and restarted into the same PID -- the container shape
-   * where the app is always PID 1, or PID wraparound -- leaves a record whose
-   * PID is alive again, as the successor itself. This field narrows that, but
-   * a `worker_threads` worker has its own registry and so its own value, so it
-   * cannot separate a dead predecessor from a live sibling thread either. See
-   * {@link isReusedPid}, which pairs it with the heartbeat. Absent on records
-   * written before this field existed, which remain fail-closed when their PID
-   * is alive.
-   */
-  readonly instance?: string;
 }
-
-/**
- * Minted once per module registry, which is not once per process: each
- * `worker_threads` worker loads its own copy of this module and mints its own.
- * A differing value therefore proves only that some other registry wrote the
- * record -- possibly a live sibling thread -- so {@link isReusedPid} pairs it
- * with the heartbeat before treating a record as a dead predecessor's.
- */
-const PROCESS_INSTANCE = randomUUID();
 
 /** @internal Advisory-lock contention with Java-compatible diagnostics. */
 export class QwpNodeAdvisoryLockBusyError extends Error {
@@ -220,7 +196,6 @@ export class QwpNodeAdvisoryLock {
           pid: process.pid,
           host: hostname(),
           token,
-          instance: PROCESS_INSTANCE,
         }),
         { encoding: "utf8", mode: 0o600 },
       );
@@ -615,7 +590,7 @@ async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
   } else if (
     owner.state !== "present" ||
     owner.record.host !== hostname() ||
-    (isPidAlive(owner.record.pid) && !isReusedPid(owner.record, mtimeMs))
+    isPidAlive(owner.record.pid)
   ) {
     // A holder that is merely suspended keeps a readable record, so it never
     // reaches the mtime path above and is still never reclaimed by time.
@@ -631,40 +606,6 @@ async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
   }
   await rm(abandoned, { recursive: true, force: true }).catch(() => undefined);
   return true;
-}
-
-/**
- * Whether a record names a PID that is alive only because this process is now
- * that PID.
- *
- * `isPidAlive` answers "yes" for our own PID, so a producer SIGKILLed and
- * restarted into the same PID -- a container where the app is always PID 1, or
- * PID wraparound -- could not adopt its predecessor's slot through the
- * ordinary PID liveness check.
- *
- * A differing `instance` is a necessary condition and not a sufficient one.
- * `PROCESS_INSTANCE` is minted per module registry, and every `worker_threads`
- * worker loads its own copy of this module, so a live sibling worker holding
- * the slot presents exactly the shape a dead predecessor does: our PID, alive,
- * and an instance we did not mint. Treating that as proof let two threads
- * reclaim one another's lock and append to one journal.
- *
- * The heartbeat is what separates them. A live holder -- in any thread of any
- * process -- keeps the owner directory's mtime current; only a holder that is
- * gone stops touching it. So the same staleness the absent/corrupt path uses
- * is required here too, which costs a same-PID successor `STALE_AFTER_MS`
- * before it may adopt the slot instead of adopting it immediately.
- *
- * Records written before `instance` existed return false; an operator must
- * remove an ambiguous live-PID owner rather than risking concurrent writes.
- */
-function isReusedPid(record: OwnerRecord, ownerMtimeMs: number): boolean {
-  return (
-    record.pid === process.pid &&
-    record.instance !== undefined &&
-    record.instance !== PROCESS_INSTANCE &&
-    Date.now() - ownerMtimeMs > STALE_AFTER_MS
-  );
 }
 
 /**
@@ -705,7 +646,7 @@ async function readOwnerFile(ownerPath: string): Promise<OwnerRead> {
   try {
     const parsed: unknown = JSON.parse(contents);
     if (parsed && typeof parsed === "object") {
-      const { pid, host, token, instance } = parsed as Partial<OwnerRecord>;
+      const { pid, host, token } = parsed as Partial<OwnerRecord>;
       if (typeof pid === "number" && typeof host === "string") {
         return {
           state: "present",
@@ -713,7 +654,6 @@ async function readOwnerFile(ownerPath: string): Promise<OwnerRead> {
             pid,
             host,
             token: typeof token === "string" ? token : undefined,
-            instance: typeof instance === "string" ? instance : undefined,
           },
         };
       }
