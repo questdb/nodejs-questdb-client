@@ -37,8 +37,11 @@ jobs:
       - name: Tests
         run: pnpm test
 
-      - name: Build
-        run: pnpm build
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser bundle tests
+        run: pnpm test:qwp-browser
 
       - name: Built package tests
         run: pnpm exec vitest run --config vitest.dist.config.ts
