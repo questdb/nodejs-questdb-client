@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeIngress,
@@ -6489,6 +6489,109 @@ describe("QWP Node file replay store", () => {
     // The successor is still healthy, and still owns the lock it took.
     await successor.append({ frameSequence: 3n, payload: Uint8Array.of(11) });
     await successor.close();
+  });
+
+  it("stops trimming when ownership lapses part-way through a batch", async () => {
+    // A maintenance batch trims up to TRIM_BATCH_SIZE segments, each with a
+    // handle close, an fsynced manifest write and an unlink, and `lost` turns
+    // true on a timer: a heartbeat that cannot read the owner record lets
+    // provenAtMs go stale, and an event-loop stall past the liveness window
+    // does the same. Testing ownership only on entry let the rest of the batch
+    // keep deleting segments while writeManifest() silently skipped its write,
+    // so the manifest was left naming a file that no longer existed.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    await store.load();
+    for (let sequence = 0n; sequence < 6n; sequence++) {
+      await store.append({
+        frameSequence: sequence,
+        payload: Uint8Array.of(Number(sequence)),
+      });
+    }
+    const internals = store as unknown as {
+      slotLock: QwpNodeAdvisoryLock;
+      pendingTrimSegments: unknown[];
+    };
+    const lock = internals.slotLock;
+    const realUnlink = qwpSegmentMaintenanceWorker.unlink.bind(
+      qwpSegmentMaintenanceWorker,
+    );
+    const unlinked: string[] = [];
+    const unlink = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "unlink")
+      .mockImplementation(async (path: string) => {
+        unlinked.push(path);
+        await realUnlink(path);
+        // The lease lapses immediately after the first trim, which is the
+        // window the entry-only check could not see.
+        Object.defineProperty(lock, "lost", {
+          configurable: true,
+          get: () => true,
+        });
+      });
+
+    // Five segments become fully acknowledged, so one batch would trim them all.
+    await store.acknowledgeThrough(4n);
+    await vi.waitFor(() => expect(unlink).toHaveBeenCalled());
+    await vi.waitFor(() =>
+      expect(internals.pendingTrimSegments).toHaveLength(0),
+    );
+
+    // Only the trim that still held the lease may have deleted anything.
+    expect(unlinked).toHaveLength(1);
+
+    // Restore the real lease so close() releases the lock it genuinely holds,
+    // modelling a stall that passed rather than a takeover.
+    delete (lock as unknown as Record<string, unknown>).lost;
+    unlink.mockRestore();
+    await store.close();
+
+    // The decisive assertion: the journal the lapse left behind is still
+    // readable. A manifest naming a deleted segment fails
+    // validateRecoveredManifest(), which runs before
+    // rewriteManifestForCurrentSegments() can repair anything, so the whole
+    // slot would be quarantined and every unacknowledged frame abandoned.
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    await expect(reopened.load()).resolves.toBeDefined();
+    await reopened.close();
+  });
+
+  it("does not unlink a segment whose manifest write was skipped", async () => {
+    // The same invariant at the inner boundary, for the trimSegment() call
+    // activateHotSpare() makes directly -- it never passes through the batch
+    // guard above. writeManifest() returns false when ownership lapsed, and
+    // deleting on that answer is what strands the manifest.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    await store.load();
+    for (let sequence = 0n; sequence < 4n; sequence++) {
+      await store.append({
+        frameSequence: sequence,
+        payload: Uint8Array.of(Number(sequence)),
+      });
+    }
+    const internals = store as unknown as {
+      slotLock: QwpNodeAdvisoryLock;
+      segmentOrder: { path: string }[];
+      trimSegment(segment: { path: string }): Promise<void>;
+    };
+    const head = internals.segmentOrder[0];
+    Object.defineProperty(internals.slotLock, "lost", {
+      configurable: true,
+      get: () => true,
+    });
+
+    await internals.trimSegment(head);
+
+    expect(await assignedReplaySegments(directory)).toContain(
+      basename(head.path),
+    );
+    delete (internals.slotLock as unknown as Record<string, unknown>).lost;
+    await store.close();
+
+    const reopened = new QwpNodeFileReplayStore({ directory });
+    await expect(reopened.load()).resolves.toBeDefined();
+    await reopened.close();
   });
 
   it("survives a transient failure to read its own owner record", async () => {

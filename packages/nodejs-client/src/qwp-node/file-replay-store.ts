@@ -1805,6 +1805,17 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     let trimmed = 0;
     while (trimmed < TRIM_BATCH_SIZE && this.pendingTrimSegments.length > 0) {
+      // Re-checked per trim, not only on entry. A batch runs up to
+      // TRIM_BATCH_SIZE trims, each with a handle close, an fsynced manifest
+      // write and an unlink, and `lost` turns true on a timer -- a heartbeat
+      // that cannot read the owner record lets `provenAtMs` go stale, and an
+      // event-loop stall past the liveness window does the same. Testing once
+      // on entry let the rest of the batch keep mutating a directory this
+      // store no longer owns.
+      if (!this.ownsDirectory) {
+        this.pendingTrimSegments.length = 0;
+        return;
+      }
       const segment = this.pendingTrimSegments[0];
       await this.trimSegment(segment);
       this.pendingTrimSegments.shift();
@@ -1875,6 +1886,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           `QWP store-and-forward segment is absent from the ordered ring [firstSequence=${segment.firstSequence}]`,
         );
       }
+      let published: boolean;
       if (this.segmentOrder.length > 1) {
         const head =
           segmentIndex === 0 ? this.segmentOrder[1] : this.segmentOrder[0];
@@ -1882,11 +1894,27 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           segmentIndex === this.segmentOrder.length - 1
             ? this.segmentOrder[this.segmentOrder.length - 2]
             : this.segmentOrder[this.segmentOrder.length - 1];
-        await this.writeManifest(head.firstSequence, active.firstSequence);
+        published = await this.writeManifest(
+          head.firstSequence,
+          active.firstSequence,
+        );
       } else {
         const collapsed = segment.firstSequence + BigInt(segment.frameCount);
-        await this.writeManifest(collapsed, collapsed);
+        published = await this.writeManifest(collapsed, collapsed);
       }
+      // The unlink is only safe once the manifest has stopped naming this
+      // segment. writeManifest() skips the write when ownership lapsed, and
+      // deleting anyway left `sf-manifest.bin` pointing at a file that no
+      // longer exists: validateRecoveredManifest() rejects that pair, and
+      // because it runs before rewriteManifestForCurrentSegments() neither
+      // this process nor a successor can repair it. The load then fails
+      // twice, isQuarantinableReplayRecoveryError() sends the whole slot to
+      // quarantine, and every frame the server had not acknowledged yet is
+      // abandoned -- over a segment that was fully acknowledged and whose
+      // deletion mattered to nobody. Leave the file, the ring and the queue
+      // entry alone; the batch above stops on the same condition, and the
+      // next owner reclaims the segment through ordinary recovery.
+      if (!published) return;
       await qwpSegmentMaintenanceWorker.unlink(segment.path);
       if (this.segmentOrder.length === 1) await this.removeManifest();
     } catch (error) {
@@ -2211,10 +2239,21 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     );
   }
 
+  /**
+   * Persists the manifest boundaries, and reports whether the on-disk manifest
+   * now describes them.
+   *
+   * `false` means the write was skipped because this store no longer owns the
+   * directory, so the manifest still names whatever it named before. A caller
+   * that is about to delete something the manifest points at -- {@link
+   * trimSegment} -- has to stop on that answer. Returning `true` for an
+   * unchanged manifest is deliberate: the boundaries already hold, which is
+   * exactly the condition the caller needs.
+   */
   private async writeManifest(
     headBase: bigint,
     activeBase: bigint,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (this.manifestGeneration > 0n) {
       if (
         this.manifestHeadBase !== undefined &&
@@ -2232,7 +2271,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         headBase === this.manifestHeadBase &&
         activeBase === this.manifestActiveBase
       ) {
-        return;
+        return true;
       }
     }
     if (headBase < 0n || activeBase < headBase) {
@@ -2240,7 +2279,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         `invalid QWP store-and-forward manifest boundaries [headBase=${headBase}, activeBase=${activeBase}]`,
       );
     }
-    if (!this.ownsDirectory) return;
+    if (!this.ownsDirectory) return false;
     // The manifest below is fsynced unconditionally, so a watermark still
     // sitting in the page cache would be overtaken by the head that trimming it
     // justified. Make the watermark durable first: recovery reads the pair.
@@ -2269,6 +2308,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.manifestHeadBase = headBase;
     this.manifestActiveBase = activeBase;
     this.manifestInvalid = false;
+    return true;
   }
 
   private async removeManifest(): Promise<void> {
