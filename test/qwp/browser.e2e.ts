@@ -241,7 +241,10 @@ describe("QWP in a real browser", () => {
     });
     server.on("connection", (socket, request) => {
       requestedPath = request.url;
-      socket.send(browserIngressServerInfo(1_048_576));
+      // The echoed subprotocol only confirms the server speaks the browser
+      // negotiation; the capability bit on this frame is the durable-ACK
+      // verdict itself, so a server with durable ACK on must set it.
+      socket.send(browserIngressServerInfo(1_048_576, true));
     });
     await waitForWebSocketServer(server);
     const address = server.address() as AddressInfo;
