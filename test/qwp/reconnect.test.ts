@@ -182,12 +182,16 @@ function undecodableResultBatch(requestId = 0n): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), 0, 1);
 }
 
-function resultEnd(requestId = 0n): Uint8Array {
+function resultEnd(
+  requestId = 0n,
+  finalSequence = 0n,
+  totalRows = 0n,
+): Uint8Array {
   const payload = new QwpByteWriter()
     .writeUint8(QWP_EGRESS_MESSAGE.RESULT_END)
     .writeBigUint64(requestId);
-  writeQwpVarint(payload, 1);
-  writeQwpVarint(payload, 0);
+  writeQwpVarint(payload, finalSequence);
+  writeQwpVarint(payload, totalRows);
   return encodeQwpFrame(payload.toUint8Array());
 }
 
@@ -4771,7 +4775,7 @@ describe("QWP egress reconnect and replay", () => {
     await vi.waitFor(() => expect(resets).toEqual([0n]));
     await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
     second.receive(emptyResultBatch());
-    second.receive(resultEnd());
+    second.receive(resultEnd(0n, 1n, 0n));
 
     await expect(iterator.next()).resolves.toMatchObject({ done: false });
     await expect(iterator.next()).resolves.toEqual({
@@ -4831,7 +4835,7 @@ describe("QWP egress reconnect and replay", () => {
     await vi.waitFor(() => expect(second.sent.length).toBeGreaterThan(0));
     expect(second.sent[0]).toEqual(first.sent[0]);
     second.receive(emptyResultBatch());
-    second.receive(resultEnd());
+    second.receive(resultEnd(0n, 1n, 0n));
     await expect(query.completion).resolves.toMatchObject({
       kind: "result-end",
     });
@@ -4907,7 +4911,7 @@ describe("QWP egress reconnect and replay", () => {
 
     await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
     second.receive(emptyResultBatch());
-    second.receive(resultEnd());
+    second.receive(resultEnd(0n, 1n, 0n));
     const iterator = query[Symbol.asyncIterator]();
     await expect(iterator.next()).resolves.toMatchObject({ done: false });
     await expect(iterator.next()).resolves.toEqual({
@@ -4916,6 +4920,46 @@ describe("QWP egress reconnect and replay", () => {
     });
     await expect(query.completion).resolves.toMatchObject({
       kind: "result-end",
+    });
+    await session.close();
+  });
+
+  it("replays after a malformed RESULT_END even when its socket closes", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+    const query = await session.query("select * from x");
+
+    // No batch was decoded, so this terminal's claimed batch count is invalid.
+    // Closing immediately exercises the transport/session verdict handshake:
+    // replay state must survive until finish() accepts the aggregate totals.
+    first.receive(resultEnd(query.requestId, 1n, 0n));
+    first.drop();
+
+    await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
+    second.receive(emptyResultBatch(query.requestId));
+    second.receive(resultEnd(query.requestId, 1n, 0n));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+      finalSequence: 1n,
+      totalRows: 0n,
     });
     await session.close();
   });

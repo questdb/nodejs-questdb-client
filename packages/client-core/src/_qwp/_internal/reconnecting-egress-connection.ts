@@ -59,6 +59,12 @@ type QueryRequestEncoder = (
   requestId: bigint,
 ) => Uint8Array | Promise<Uint8Array>;
 
+interface PendingTerminalVerdict {
+  readonly requestId: bigint;
+  readonly verdict: Promise<boolean>;
+  readonly resolve: (accepted: boolean) => void;
+}
+
 class ReplayResetCallbackError extends Error {
   readonly cause: unknown;
 
@@ -99,6 +105,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   private initialServerInfo?: QwpServerInfoMessage;
   private currentServerInfo?: QwpServerInfoMessage;
   private outboundReplay: Uint8Array[] = [];
+  private pendingTerminal?: PendingTerminalVerdict;
   private protocolRecoveries = 0;
   private protocolRecoveryStartedAt = 0;
   private generation = 0;
@@ -436,7 +443,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           message.kind === "query-error"
         ) {
           const activeRequestId = replayRequestId(this.outboundReplay);
-          if (activeRequestId === message.requestId) this.outboundReplay = [];
+          if (activeRequestId === message.requestId) {
+            this.armTerminalVerdict(message.requestId);
+          }
         }
         this.messagesQueue.push(next.value);
       }
@@ -520,6 +529,17 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     cause: unknown,
     skipQueueBarrier: boolean,
   ): Promise<void> {
+    const pendingTerminal = this.pendingTerminal;
+    if (pendingTerminal) {
+      // A socket can close after queuing a terminal but before the session has
+      // validated its query totals. Do not decide whether to replay until the
+      // session accepts or rejects that terminal.
+      const accepted = await pendingTerminal.verdict;
+      if (accepted) {
+        await this.onConnectionReset(serverInfo);
+        return;
+      }
+    }
     if (this.outboundReplay.length === 0) {
       // A terminal response may already be queued. Let the bounded session
       // consume it before resetting connection-scoped decoder state.
@@ -589,8 +609,18 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     }
   }
 
+  /** @internal Retires replay state after the session accepts a terminal. */
+  acceptTerminal(requestId: bigint): void {
+    const pending = this.pendingTerminal;
+    if (!pending || pending.requestId !== requestId) return;
+    this.outboundReplay = [];
+    this.pendingTerminal = undefined;
+    pending.resolve(true);
+  }
+
   /** @internal Replaces a connection whose server response was invalid. */
   async recoverProtocolFailure(error: QwpProtocolError): Promise<void> {
+    this.rejectPendingTerminal();
     this.throwIfUnavailable();
     const connection = this.connection;
     if (!connection) throw new QwpSendClosedError();
@@ -634,9 +664,26 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     }
   }
 
+  private armTerminalVerdict(requestId: bigint): void {
+    if (this.pendingTerminal?.requestId === requestId) return;
+    let resolve!: (accepted: boolean) => void;
+    const verdict = new Promise<boolean>((settle) => {
+      resolve = settle;
+    });
+    this.pendingTerminal = { requestId, verdict, resolve };
+  }
+
+  private rejectPendingTerminal(): void {
+    const pending = this.pendingTerminal;
+    if (!pending) return;
+    this.pendingTerminal = undefined;
+    pending.resolve(false);
+  }
+
   private trackOutbound(payload: Uint8Array): void {
     switch (payload[0]) {
       case QWP_EGRESS_MESSAGE.QUERY_REQUEST:
+        this.rejectPendingTerminal();
         this.outboundReplay = [payload];
         // A new application query is fresh progress, matching the Java
         // client's per-execute() scoping. Replay does not come through here,

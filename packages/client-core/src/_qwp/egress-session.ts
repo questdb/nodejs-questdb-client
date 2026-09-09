@@ -329,6 +329,8 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private readonly availableViewSlots: number[];
   private readonly viewControl?: QwpEgressViewCallbackControl;
   private viewTail: Promise<void> = Promise.resolve();
+  private decodedBatchCount = 0n;
+  private decodedRowCount = 0n;
   private wireComplete = false;
   private terminal = false;
   private timeoutTimer?: ReturnType<typeof setTimeout>;
@@ -476,6 +478,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       this.releaseBufferedBatches(1);
       return;
     }
+    this.countDecodedBatch(batch.rowCount);
     this.batches.push({ batch, creditBytes });
   }
 
@@ -510,6 +513,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       this.releaseViewSlot(slot);
       return;
     }
+    this.countDecodedBatch(batch.rowCount);
     const generation = this.bufferGeneration;
     this.viewTail = this.viewTail.then(async () => {
       if (this.terminal || generation !== this.bufferGeneration) {
@@ -566,6 +570,16 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.wireComplete = true;
     if (this.viewHandler) await this.viewTail;
     if (this.terminal) return;
+    if (completion.kind === "result-end") {
+      if (
+        completion.finalSequence !== this.decodedBatchCount ||
+        completion.totalRows !== this.decodedRowCount
+      ) {
+        throw new QwpProtocolError(
+          `QWP RESULT_END totals do not match decoded results [requestId=${this.requestId}, finalSequence=${completion.finalSequence}, decodedBatches=${this.decodedBatchCount}, totalRows=${completion.totalRows}, decodedRows=${this.decodedRowCount}]`,
+        );
+      }
+    }
     this.terminal = true;
     this.wakeBufferWaiters();
     this.clearTimeout();
@@ -619,6 +633,8 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   async resetForReplay(): Promise<void> {
     this.deliveredCreditBytes = 0;
     this.bufferGeneration++;
+    this.decodedBatchCount = 0n;
+    this.decodedRowCount = 0n;
     this.wireComplete = false;
     this.releaseBufferedBatches(this.batches.clear().length);
     this.wakeBufferWaiters();
@@ -628,6 +644,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   /** @internal Waits until all callback-scoped views have been released. */
   waitForViewDrain(): Promise<void> {
     return this.viewTail;
+  }
+
+  private countDecodedBatch(rowCount: number): void {
+    this.decodedBatchCount++;
+    this.decodedRowCount += BigInt(rowCount);
   }
 
   private clearTimeout(): void {
@@ -1191,6 +1212,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
               const query = this.requireActive(message.requestId);
               this.clearCancelDrain(message.requestId);
               await query.finish(message);
+              this.acceptReconnectingTerminal(message.requestId);
               this.clearActive(query);
               break;
             }
@@ -1198,6 +1220,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
               const query = this.requireActive(message.requestId);
               this.clearCancelDrain(message.requestId);
               await query.finish(message);
+              this.acceptReconnectingTerminal(message.requestId);
               this.clearActive(query);
               break;
             }
@@ -1211,6 +1234,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
                   message.message,
                 ),
               );
+              this.acceptReconnectingTerminal(message.requestId);
               this.clearActive(query);
               break;
             }
@@ -1240,6 +1264,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
           .close(1002, "invalid QWP egress message")
           .catch(() => undefined);
       }
+    }
+  }
+
+  private acceptReconnectingTerminal(requestId: bigint): void {
+    if (this.connection instanceof QwpReconnectingEgressConnection) {
+      this.connection.acceptTerminal(requestId);
     }
   }
 

@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  fzstd@0.1.1:
+    hash: 07ba1e550e0223e5ef73cd617416a1bff0278e8b6e70ce81c4501f62d5723030
+    path: patches/fzstd@0.1.1.patch
+
 importers:
 
   .:
@@ -69,7 +74,7 @@ importers:
     dependencies:
       fzstd:
         specifier: 0.1.1
-        version: 0.1.1
+        version: 0.1.1(patch_hash=07ba1e550e0223e5ef73cd617416a1bff0278e8b6e70ce81c4501f62d5723030)
 
   packages/nodejs-client:
     dependencies:
@@ -3697,7 +3702,7 @@ snapshots:
 
   function-bind@1.1.2: {}
 
-  fzstd@0.1.1: {}
+  fzstd@0.1.1(patch_hash=07ba1e550e0223e5ef73cd617416a1bff0278e8b6e70ce81c4501f62d5723030): {}
 
   get-caller-file@2.0.5: {}
 

@@ -124,11 +124,15 @@ function browserEmptyResultBatch(requestId: bigint): Uint8Array {
   return encodeQwpFrame(payload.toUint8Array(), 0, 1);
 }
 
-function browserResultEnd(requestId: bigint): Uint8Array {
+function browserResultEnd(
+  requestId: bigint,
+  finalSequence = 0n,
+  totalRows = 0n,
+): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
-  writeQwpVarint(payload, 0);
-  writeQwpVarint(payload, 0);
+  writeQwpVarint(payload, finalSequence);
+  writeQwpVarint(payload, totalRows);
   return encodeQwpFrame(payload.toUint8Array());
 }
 
@@ -561,7 +565,7 @@ describe("QWP in a real browser", () => {
         if (kind === QWP_EGRESS_MESSAGE.QUERY_REQUEST && requestId === 0n) {
           socket.send(resultBatch);
         } else if (kind === QWP_EGRESS_MESSAGE.CREDIT && requestId === 0n) {
-          socket.send(browserResultEnd(requestId));
+          socket.send(browserResultEnd(requestId, 1n));
         } else if (kind === QWP_EGRESS_MESSAGE.CANCEL && requestId === 1n) {
           socket.send(browserCancelled(requestId));
         }

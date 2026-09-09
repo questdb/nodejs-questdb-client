@@ -174,10 +174,14 @@ function emptyResultBatch(
   );
 }
 
-function resultEnd(requestId = 0n, totalRows = 3n): Uint8Array {
+function resultEnd(
+  requestId = 0n,
+  totalRows = 3n,
+  finalSequence = 1n,
+): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
-  writeQwpVarint(payload, 1);
+  writeQwpVarint(payload, finalSequence);
   writeQwpVarint(payload, totalRows);
   return encodeQwpFrame(payload.toUint8Array());
 }
@@ -817,20 +821,26 @@ describe("QWP result batch decoder", () => {
     // bit per cell before Zstd, so a few kilobytes of RLE-compressed bitmap
     // used to declare a grid no heap could hold: 1,727 wire bytes exhausted a
     // 1 GB heap and 6,655 aborted the process outright.
-    for (const columns of [128, 480, 511]) {
-      const wire = compressedAllNullBatch(1_048_576, columns);
-      expect(wire.byteLength).toBeLessThan(8_000);
-      const message = decodeQwpEgressMessage(wire);
-      if (message.kind !== "result-batch")
-        throw new Error("unexpected message");
+    const copyWithin = vi.spyOn(Uint8Array.prototype, "copyWithin");
+    try {
+      for (const columns of [128, 480, 511]) {
+        const wire = compressedAllNullBatch(1_048_576, columns);
+        expect(wire.byteLength).toBeLessThan(8_000);
+        const message = decodeQwpEgressMessage(wire);
+        if (message.kind !== "result-batch")
+          throw new Error("unexpected message");
 
-      const before = process.memoryUsage().heapUsed;
-      expect(() => new QwpResultBatchDecoder().decode(message)).toThrow(
-        /above the client cap/,
-      );
-      // Rejected in prepare(), before a column is read -- reading one is what
-      // allocates.
-      expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+        const before = process.memoryUsage().heapUsed;
+        expect(() => new QwpResultBatchDecoder().decode(message)).toThrow(
+          /above the client cap/,
+        );
+        // Rejected in prepare(), before a column is read -- reading one is what
+        // allocates.
+        expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+      }
+      expect(copyWithin).not.toHaveBeenCalled();
+    } finally {
+      copyWithin.mockRestore();
     }
   });
 
@@ -1045,6 +1055,14 @@ describe("QWP result batch decoder", () => {
     expect(() =>
       decompressQwpZstdFrame(singleSegmentFrame(8, 0x5a, 16)),
     ).toThrow(/exceeds declared content size/i);
+    // Explicit zero is a declared size, not the unknown-size spelling used by
+    // multi-segment frames.
+    expect(decompressQwpZstdFrame(singleSegmentFrame(0, 0, 0))).toEqual(
+      new Uint8Array(0),
+    );
+    expect(() =>
+      decompressQwpZstdFrame(singleSegmentFrame(0, 0x74, 1)),
+    ).toThrow(/exceeds declared content size/i);
     // A frame that means what it says still round-trips.
     expect(decompressQwpZstdFrame(singleSegmentFrame(8, 0x42, 8))).toEqual(
       new Uint8Array(8).fill(0x42),
@@ -1246,7 +1264,7 @@ describe("QwpEgressSession", () => {
       const session = new QwpEgressSession(connection);
       connection.receive(serverInfo(capabilities));
       const query = await session.query("select 1", { resetDictionary });
-      connection.receive(resultEnd(query.requestId, 0n));
+      connection.receive(resultEnd(query.requestId, 0n, 0n));
       await query.completion;
       await session.close();
       return connection.sent[0];
@@ -1338,7 +1356,7 @@ describe("QwpEgressSession", () => {
     expect(readQwpVarint(secondCredit)).toBe(202n);
     expect(secondCredit.remaining).toBe(0);
 
-    connection.receive(resultEnd(query.requestId));
+    connection.receive(resultEnd(query.requestId, 9n, 3n));
     await query.completion;
     await session.close();
   });
@@ -1421,7 +1439,7 @@ describe("QwpEgressSession", () => {
       connection.receive(emptyResultBatch(query.requestId, 0));
       connection.receive(emptyResultBatch(query.requestId, 1));
       connection.receive(emptyResultBatch(query.requestId, 2));
-      connection.receive(resultEnd(query.requestId, 0n));
+      connection.receive(resultEnd(query.requestId, 0n, 3n));
 
       await vi.waitFor(() => expect(decodeView).toHaveBeenCalledTimes(2));
       expect(entered).toEqual([0]);
@@ -1471,7 +1489,7 @@ describe("QwpEgressSession", () => {
     await Promise.resolve();
     await Promise.resolve();
     const next = await session.query("select 2");
-    connection.receive(resultEnd(next.requestId, 0n));
+    connection.receive(resultEnd(next.requestId, 0n, 0n));
     await next.completion;
     await session.close();
   });
@@ -1514,7 +1532,7 @@ describe("QwpEgressSession", () => {
     expect(delivered!.valid).toBe(false);
 
     const next = await session.query("select 2");
-    connection.receive(resultEnd(next.requestId, 0n));
+    connection.receive(resultEnd(next.requestId, 0n, 0n));
     await next.completion;
     await session.close();
   });
@@ -1643,7 +1661,7 @@ describe("QwpEgressSession", () => {
     const boundedSqlLength = Number(readQwpVarint(boundedRequest));
     boundedRequest.readBytes(boundedSqlLength);
     expect(readQwpVarint(boundedRequest)).toBe(64n);
-    boundedConnection.receive(resultEnd(boundedQuery.requestId));
+    boundedConnection.receive(resultEnd(boundedQuery.requestId, 0n, 0n));
     await boundedQuery.completion;
     await bounded.close();
   });
@@ -1659,7 +1677,7 @@ describe("QwpEgressSession", () => {
     connection.receive(emptyResultBatch(query.requestId, 0));
     connection.receive(emptyResultBatch(query.requestId, 1));
     connection.receive(emptyResultBatch(query.requestId, 2));
-    connection.receive(resultEnd(query.requestId, 0n));
+    connection.receive(resultEnd(query.requestId, 0n, 3n));
 
     let completed = false;
     void query.completion.then(() => {
@@ -1785,7 +1803,7 @@ describe("QwpEgressSession", () => {
     await Promise.resolve();
     await Promise.resolve();
     const nextQuery = await session.query("select 2");
-    connection.receive(resultEnd(nextQuery.requestId, 0n));
+    connection.receive(resultEnd(nextQuery.requestId, 0n, 0n));
     await nextQuery.completion;
     await session.close();
   });
@@ -1857,7 +1875,7 @@ describe("QwpEgressSession", () => {
         "a QWP query is already active",
       );
 
-      connection.receive(resultEnd(query.requestId, 0n));
+      connection.receive(resultEnd(query.requestId, 0n, 0n));
       await query.completion;
       expect(query.isDone()).toBe(true);
       await expect(query.awaitCompletion(0)).resolves.toBe(true);
@@ -1935,7 +1953,7 @@ describe("QwpEgressSession", () => {
       await Promise.resolve();
 
       const nextQuery = await session.query("select 2", { timeoutMs: 0 });
-      connection.receive(resultEnd(nextQuery.requestId, 0n));
+      connection.receive(resultEnd(nextQuery.requestId, 0n, 0n));
       await nextQuery.completion;
       expect(vi.getTimerCount()).toBe(0);
       await session.close();
@@ -1983,7 +2001,7 @@ describe("QwpEgressSession", () => {
       const session = new QwpEgressSession(connection);
       connection.receive(serverInfo());
       const query = await session.query("select 1", { timeoutMs: 25 });
-      connection.receive(resultEnd(query.requestId, 0n));
+      connection.receive(resultEnd(query.requestId, 0n, 0n));
       await query.completion;
       expect(vi.getTimerCount()).toBe(0);
 
@@ -2012,6 +2030,35 @@ describe("QwpEgressSession", () => {
     await expect(query.completion).resolves.toMatchObject({ totalRows: 100n });
     await session.close();
   });
+
+  it.each([
+    [0n, 3n, "sequence too low"],
+    [2n, 3n, "sequence too high"],
+    [1n, 2n, "row total too low"],
+    [1n, 4n, "row total too high"],
+  ] as const)(
+    "rejects RESULT_END with $2",
+    async (finalSequence, totalRows, _label) => {
+      const connection = new FakeConnection();
+      const session = new QwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x");
+      connection.receive(firstResultBatch(query.requestId));
+      connection.receive(resultEnd(query.requestId, totalRows, finalSequence));
+
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpProtocolError",
+        message: expect.stringContaining(`requestId=${query.requestId}`),
+      });
+      await vi.waitFor(() =>
+        expect(connection.closeCalls).toContainEqual({
+          code: 1002,
+          reason: "invalid QWP egress message",
+        }),
+      );
+      await session.close();
+    },
+  );
 
   it("surfaces QUERY_ERROR to iteration and completion", async () => {
     const connection = new FakeConnection();
