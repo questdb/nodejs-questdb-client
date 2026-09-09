@@ -18,6 +18,7 @@ import type {
   QwpReconnectOptions,
   QwpTarget,
 } from "../../../client-core/src/_qwp/transport";
+import { validateQwpWebSocketAgent } from "./websocket-agent";
 
 const DEFAULT_QWP_PORT = 9000;
 const MAX_BATCH_ROWS = 1_048_576;
@@ -236,6 +237,9 @@ export function resolveQwpNodeClientConfig(
       "a custom QWP WebSocket agent cannot be combined with tls_verify, tls_roots, or tls_roots_password; configure TLS on the agent itself",
     );
   }
+  const agent =
+    validateQwpWebSocketAgent(callerAgent, parsed.schema === "wss") ??
+    configuredAgent;
 
   // requestDurableAck is ingress-only and the ingress block below sets it
   // explicitly. Leaving it in the shared block spread it into `egress` too,
@@ -253,7 +257,7 @@ export function resolveQwpNodeClientConfig(
       optionalPositiveInteger(value("auth_timeout_ms"), "auth_timeout_ms"),
     clientId: extraOptions.webSocket?.clientId ?? value("client_id"),
     authorization: extraOptions.webSocket?.authorization ?? authorization,
-    agent: callerAgent ?? configuredAgent,
+    agent,
   };
 
   const ingressReconnect = parseIngressReconnect(parsed.values);

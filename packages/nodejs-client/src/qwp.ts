@@ -7,6 +7,7 @@ import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import WebSocket from "ws";
 import { log } from "./logging";
+import { validateQwpWebSocketAgent } from "./qwp-node/websocket-agent";
 import {
   decodeQwpContentEncoding,
   encodeQwpAcceptEncoding,
@@ -492,6 +493,11 @@ function connectQwpNodeEndpoint(
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
+  const endpointUrl = new URL(endpoint);
+  const agent = validateQwpWebSocketAgent(
+    options.agent,
+    endpointUrl.protocol === "wss:",
+  );
   const clientMaxVersion = options.maxVersion ?? QWP_VERSION;
   if (
     !Number.isSafeInteger(clientMaxVersion) ||
@@ -612,7 +618,7 @@ function connectQwpNodeEndpoint(
   });
   const socket = factory(endpoint, {
     protocols: options.protocols,
-    agent: options.agent,
+    agent,
     headers,
     onConnected: resolveConnected,
     onUpgrade: (receivedHeaders) => {

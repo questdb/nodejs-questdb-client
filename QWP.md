@@ -1343,8 +1343,10 @@ A custom `wss://` agent is the WebSocket upgrade's sole TLS channel, so it
 carries its own certificate verification and cannot be combined with
 `tls_verify`, `tls_roots`, or `tls_roots_password` — that combination is
 rejected rather than silently dropping either. Configure verification on the
-agent instead, and pass an `https.Agent` for `wss` (a plain `http.Agent` is for
-`ws`).
+agent instead. Agents are validated per endpoint: pass an `https.Agent` for
+`wss` and a plain `http.Agent` for `ws`. For mixed `ws`/`wss` endpoint sets,
+omit the shared agent or use homogeneous schemes so failover does not skip
+endpoints whose scheme is incompatible with it.
 
 The Node client accepts `tls_roots` only as valid PEM-encoded CA certificates.
 Password-protected PKCS#12 trust stores and `tls_roots_password` are rejected:

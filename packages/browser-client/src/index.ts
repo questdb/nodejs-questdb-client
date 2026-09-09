@@ -244,6 +244,15 @@ function serviceAccountSql(serviceAccount: string | undefined): string {
   return `assume service account '${serviceAccount.replace(/'/g, "''")}'`;
 }
 
+const QWP_BROWSER_HANDSHAKE_PARAM = "qwp_browser_handshake";
+const QWP_ACCEPT_ENCODING_PARAM = "qwp_accept_encoding";
+const QWP_MAX_BATCH_ROWS_PARAM = "qwp_max_batch_rows";
+const QWP_NEGOTIATION_PARAMS = [
+  QWP_BROWSER_HANDSHAKE_PARAM,
+  QWP_ACCEPT_ENCODING_PARAM,
+  QWP_MAX_BATCH_ROWS_PARAM,
+] as const;
+
 function defaultBootstrapUrl(endpoint: string | URL): URL {
   const base = globalThis.location?.href;
   const url =
@@ -259,7 +268,9 @@ function defaultBootstrapUrl(endpoint: string | URL): URL {
   url.pathname = suffix.test(url.pathname)
     ? url.pathname.replace(suffix, "/exec")
     : "/exec";
-  url.search = "";
+  for (const parameter of QWP_NEGOTIATION_PARAMS) {
+    url.searchParams.delete(parameter);
+  }
   url.hash = "";
   return url;
 }
@@ -661,7 +672,7 @@ function connectQwpBrowserRawEndpoint(
   // the server to send the SERVER_INFO capability verdict this path consumes.
   const requestDurableAck = options.requestDurableAck === true;
   const requestEndpoint = requestDurableAck
-    ? browserNegotiationUrl(endpoint, "qwp_browser_handshake", "v1")
+    ? browserNegotiationUrl(endpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1")
     : endpoint;
   const protocols = requestDurableAck
     ? addQwpDurableAckWebSocketProtocol(options.protocols)
@@ -821,7 +832,7 @@ async function connectQwpBrowserIngressEndpoint(
   return connectQwpBrowserEndpoint(
     options,
     endpoint,
-    browserNegotiationUrl(endpoint, "qwp_browser_handshake", "v1"),
+    browserNegotiationUrl(endpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1"),
     options.requestDurableAck
       ? addQwpDurableAckWebSocketProtocol(options.protocols)
       : options.protocols,
@@ -861,14 +872,14 @@ function connectQwpBrowserEgressEndpoint(
   if (acceptEncoding !== undefined) {
     requestEndpoint = browserNegotiationUrl(
       requestEndpoint,
-      "qwp_accept_encoding",
+      QWP_ACCEPT_ENCODING_PARAM,
       acceptEncoding,
     );
   }
   if (maxBatchRows !== undefined) {
     requestEndpoint = browserNegotiationUrl(
       requestEndpoint,
-      "qwp_max_batch_rows",
+      QWP_MAX_BATCH_ROWS_PARAM,
       String(maxBatchRows),
     );
   }

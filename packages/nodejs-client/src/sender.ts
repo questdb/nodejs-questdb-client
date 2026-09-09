@@ -18,6 +18,7 @@ import { SenderBuffer, createBuffer } from "./buffer";
 import { isBoolean, isInteger, TimestampUnit } from "./utils";
 import * as qwpNode from "./qwp";
 import { readPemTlsRoots } from "./qwp-node/client-config";
+import { validateQwpWebSocketAgent } from "./qwp-node/websocket-agent";
 import type { QwpSender } from "./qwp";
 import type { QwpTableWriter } from "../../client-core/src/_qwp/sender";
 import type { QwpWriterSchema } from "../../client-core/src/_qwp/writer";
@@ -632,9 +633,9 @@ function createConfiguredQwpSender(
   const configuredWebSocket = options.qwp?.webSocket ?? {};
   const configuredSender = options.qwp?.sender ?? {};
   const secure = options.protocol === WSS;
+  const explicitAgent = configuredWebSocket.agent;
   let agent =
-    configuredWebSocket.agent ??
-    selectQwpSchemeAgent(options.agent, secure, logger);
+    explicitAgent ?? selectQwpSchemeAgent(options.agent, secure, logger);
   if (agent) {
     // A caller-supplied agent is the WebSocket upgrade's sole TLS channel.
     // Applying tls_verify/tls_ca would silently override the agent the caller
@@ -647,6 +648,9 @@ function createConfiguredQwpSender(
       throw new Error(
         "a custom QWP WebSocket agent cannot be combined with tls_verify or tls_ca; configure TLS on the agent itself",
       );
+    }
+    if (explicitAgent) {
+      agent = validateQwpWebSocketAgent(explicitAgent, secure);
     }
   } else if (secure) {
     // Same two rules the wss:: connect string applies to tls_roots/tls_verify.

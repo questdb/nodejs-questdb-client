@@ -869,7 +869,15 @@ function validateReconnectPolicy(
 }
 
 function isRetryableReconnectError(error: unknown): boolean {
-  if (error instanceof QwpUpgradeError) return error.retryable !== false;
+  if (
+    error &&
+    typeof error === "object" &&
+    "retryable" in error &&
+    error.retryable === false
+  ) {
+    return false;
+  }
+  if (error instanceof QwpUpgradeError) return true;
   if (error instanceof QwpFailoverError) {
     return error.attempts.some((attempt) =>
       isRetryableReconnectError(attempt.error),

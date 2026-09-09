@@ -1,3 +1,5 @@
+import { Agent as HttpAgent } from "node:http";
+import { Agent as HttpsAgent } from "node:https";
 import { describe, expect, it, vi } from "vitest";
 import {
   bootstrapQwpBrowserSession,
@@ -530,7 +532,7 @@ describe("QWP WebSocket adapters", () => {
     const socket = new FakeWebSocket();
     const events: string[] = [];
     const connecting = connectQwpBrowserWebSocket({
-      url: "wss://questdb.example/proxy/write/v4",
+      url: "wss://questdb.example/proxy/write/v4?tenant=blue&query=stale&session=false&qwp_browser_handshake=v1&qwp_accept_encoding=zstd&qwp_max_batch_rows=10",
       sessionBootstrap: {
         authentication: { type: "bearer", token: "rest-token" },
         fetch: async (input) => {
@@ -547,9 +549,14 @@ describe("QWP WebSocket adapters", () => {
 
     const connection = await connecting;
     expect(events).toHaveLength(2);
-    expect(events[0]).toContain(
-      "https://questdb.example/proxy/exec?query=select+1&session=true",
-    );
+    const bootstrapUrl = new URL(events[0].slice("fetch:".length));
+    expect(bootstrapUrl.pathname).toBe("/proxy/exec");
+    expect(bootstrapUrl.searchParams.get("tenant")).toBe("blue");
+    expect(bootstrapUrl.searchParams.get("query")).toBe("select 1");
+    expect(bootstrapUrl.searchParams.get("session")).toBe("true");
+    expect(bootstrapUrl.searchParams.has("qwp_browser_handshake")).toBe(false);
+    expect(bootstrapUrl.searchParams.has("qwp_accept_encoding")).toBe(false);
+    expect(bootstrapUrl.searchParams.has("qwp_max_batch_rows")).toBe(false);
     expect(events[1]).toBe("websocket");
     await connection.close();
   });
@@ -692,6 +699,14 @@ describe("QWP WebSocket adapters", () => {
         "node-b.example/qdb/exec",
         "node-b.example/qdb/exec",
       ]);
+      expect(
+        bootstrapUrls.every(
+          (url) =>
+            url.searchParams.get("tenant") === "blue" &&
+            url.searchParams.get("query") === "select 1" &&
+            url.searchParams.get("session") === "true",
+        ),
+      ).toBe(true);
     } finally {
       await client.close();
     }
@@ -1347,6 +1362,35 @@ describe("QWP WebSocket adapters", () => {
     });
     await sender.close();
   });
+
+  it.each([
+    ["ws://localhost:9000/write/v4", () => new HttpsAgent()],
+    ["wss://localhost:9000/write/v4", () => new HttpAgent()],
+  ] as const)(
+    "rejects an agent incompatible with %s before opening",
+    async (url, createAgent) => {
+      const agent = createAgent();
+      let factoryCalls = 0;
+      try {
+        await expect(
+          connectQwpNodeWebSocket({
+            url,
+            agent,
+            webSocketFactory: () => {
+              factoryCalls++;
+              return asQwpSocket(new FakeWebSocket());
+            },
+          }),
+        ).rejects.toMatchObject({
+          name: "TypeError",
+          retryable: false,
+        });
+        expect(factoryCalls).toBe(0);
+      } finally {
+        agent.destroy();
+      }
+    },
+  );
 
   it("adds Node-only QWP upgrade headers", async () => {
     const socket = new FakeWebSocket();
