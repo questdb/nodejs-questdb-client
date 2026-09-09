@@ -740,14 +740,20 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             // that success.
             //
             // MANIFEST_REQUIRED_FLAG is what separates the two cases. It is
-            // stamped and fsynced as the last step of activateHotSpare, one
-            // write syscall before the first record lands, so a flagged
-            // segment with no readable records almost always means records
-            // were written and lost. The residual ambiguity -- a crash inside
-            // that one-syscall window, where nothing was ever acknowledged to
-            // the producer -- is why this reports an undetermined extent
-            // rather than a byte count. Reporting a loss that may not have
-            // happened is recoverable; silently dropping accepted rows is not.
+            // stamped and fsynced by appendOnce immediately before the first
+            // record's write, so a flagged segment with no readable records
+            // almost always means records were written and lost. The residual
+            // ambiguity is a crash between that fsync and the record write,
+            // where nothing was ever acknowledged to the producer; it is why
+            // this reports an undetermined extent rather than a byte count.
+            // Reporting a loss that may not have happened is recoverable;
+            // silently dropping accepted rows is not.
+            //
+            // Keep the stamp where the record write follows it directly.
+            // activateHotSpare used to do it, which put its own fsync, a whole
+            // trimSegment of the previous segment and an ownership re-prove
+            // inside the window, and a crash in any of that reported abandoned
+            // data to a producer whose first append had not yet returned.
             this.reportRecoveryDataLoss({
               directory: this.directory,
               segmentFile: name,
@@ -1679,18 +1685,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.segments.set(segment.path, segment);
     this.segmentOrder.push(segment);
     this.activeSegment = segment;
-    try {
-      await writeFully(spare.handle, Uint8Array.of(MANIFEST_REQUIRED_FLAG), 5);
-      await spare.handle.sync();
-      segment.manifestFlagPending = false;
-    } catch (error) {
-      // The manifest already durably names this segment, so it must remain in
-      // the ring. The next append retries only the idempotent flag stamp.
-      throw new QwpReplayStoreError(
-        `could not stamp the QWP store-and-forward manifest-required flag [file=${segment.path}]`,
-        error,
-      );
-    }
+    // The stamp belongs to the append that is already in flight, not to
+    // activation. Recovery reads a flagged segment holding no records as proof
+    // that records were written and lost, so every moment the flag is durable
+    // before the first record can be one is a moment a crash forges that proof.
+    // Stamping here left the whole of the rotation between the two: this
+    // handle's own fsync, then trimSegment(previous) with a manifest write, a
+    // second fsync, a directory fsync and a cross-thread unlink, then the
+    // ownership re-prove in appendOnce -- against the "one write syscall" the
+    // load() verdict is justified by. A crash anywhere in it reported abandoned
+    // data to a producer that had never had a single append return. appendOnce stamps it immediately before writevFully, which
+    // is the ordering that flag has always been documented to have, and which
+    // recovery already applies to a retained empty active segment.
     if (previous && previous.liveRecords === 0) {
       try {
         await this.trimSegment(previous);

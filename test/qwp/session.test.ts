@@ -1363,34 +1363,57 @@ describe("QWP WebSocket adapters", () => {
     await sender.close();
   });
 
-  it.each([
-    ["ws://localhost:9000/write/v4", () => new HttpsAgent()],
-    ["wss://localhost:9000/write/v4", () => new HttpAgent()],
-  ] as const)(
-    "rejects an agent incompatible with %s before opening",
-    async (url, createAgent) => {
-      const agent = createAgent();
-      let factoryCalls = 0;
-      try {
-        await expect(
-          connectQwpNodeWebSocket({
-            url,
-            agent,
-            webSocketFactory: () => {
-              factoryCalls++;
-              return asQwpSocket(new FakeWebSocket());
-            },
-          }),
-        ).rejects.toMatchObject({
-          name: "TypeError",
-          retryable: false,
-        });
-        expect(factoryCalls).toBe(0);
-      } finally {
-        agent.destroy();
-      }
-    },
-  );
+  it("rejects an https.Agent on a cleartext ws endpoint before opening", async () => {
+    const agent = new HttpsAgent();
+    let factoryCalls = 0;
+    try {
+      await expect(
+        connectQwpNodeWebSocket({
+          url: "ws://localhost:9000/write/v4",
+          agent,
+          webSocketFactory: () => {
+            factoryCalls++;
+            return asQwpSocket(new FakeWebSocket());
+          },
+        }),
+      ).rejects.toMatchObject({
+        name: "TypeError",
+        retryable: false,
+      });
+      expect(factoryCalls).toBe(0);
+    } finally {
+      agent.destroy();
+    }
+  });
+
+  it("hands a wss agent to the transport rather than testing its class", async () => {
+    // A tunnelling agent extends http.Agent and still opens a TLS connection to
+    // the origin, so an `instanceof https.Agent` test refused every proxy
+    // deployment that `ws` itself accepts. Node compares the agent's protocol
+    // with the URL's inside https.request and reports a genuine mismatch as
+    // ERR_INVALID_PROTOCOL, which wss-tls-security.test.ts covers against the
+    // real transport.
+    const agent = new HttpAgent();
+    const socket = new FakeWebSocket();
+    let receivedAgent: unknown;
+    try {
+      const connecting = connectQwpNodeWebSocket({
+        url: "wss://localhost:9000/write/v4",
+        agent,
+        webSocketFactory: (_url, options) => {
+          receivedAgent = options.agent;
+          options.onUpgrade({ "x-qwp-version": "1" });
+          return asQwpSocket(socket);
+        },
+      });
+      socket.open();
+      const connection = await connecting;
+      expect(receivedAgent).toBe(agent);
+      await connection.close();
+    } finally {
+      agent.destroy();
+    }
+  });
 
   it("adds Node-only QWP upgrade headers", async () => {
     const socket = new FakeWebSocket();

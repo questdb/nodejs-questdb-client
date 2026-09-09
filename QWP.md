@@ -1023,7 +1023,10 @@ console.info(sender.metrics);
 
 Callbacks are placed on bounded asynchronous inboxes and never invoked inside ACK,
 reconnect, or orphan-recovery protocol stacks, on ingress and egress alike; the
-drop counters below are reported in the ingress metrics snapshot. Connection events default to 64 retained
+drop counters below are reported in the ingress metrics snapshot, and
+`QwpEgressSession.metrics` reports the egress connection counters
+(`deliveredConnectionNotifications` and `droppedConnectionNotifications`) the
+same way. Connection events default to 64 retained
 entries and errors to 256; `connectionListenerInboxCapacity` and
 `errorInboxCapacity` (or their snake-case unified-string keys) tune those bounds.
 Overflow drops the oldest pending entry and retains the newest state. Inspect
@@ -1343,10 +1346,15 @@ A custom `wss://` agent is the WebSocket upgrade's sole TLS channel, so it
 carries its own certificate verification and cannot be combined with
 `tls_verify`, `tls_roots`, or `tls_roots_password` — that combination is
 rejected rather than silently dropping either. Configure verification on the
-agent instead. Agents are validated per endpoint: pass an `https.Agent` for
-`wss` and a plain `http.Agent` for `ws`. For mixed `ws`/`wss` endpoint sets,
-omit the shared agent or use homogeneous schemes so failover does not skip
-endpoints whose scheme is incompatible with it.
+agent instead. Agents are validated per endpoint. A `ws` endpoint takes a plain
+`http.Agent`; an `https.Agent` there is rejected. A `wss` endpoint takes any
+agent that can serve the scheme, so a tunnelling agent such as
+`https-proxy-agent`, `socks-proxy-agent` or `proxy-agent` works even though it
+extends `http.Agent` rather than `https.Agent`. Node performs that check itself
+and reports a mismatched agent as `ERR_INVALID_PROTOCOL`, which the client
+treats as a configuration fault and never retries. For mixed `ws`/`wss`
+endpoint sets, omit the shared agent or use homogeneous schemes so failover does
+not skip endpoints whose scheme is incompatible with it.
 
 The Node client accepts `tls_roots` only as valid PEM-encoded CA certificates.
 Password-protected PKCS#12 trust stores and `tls_roots_password` are rejected:

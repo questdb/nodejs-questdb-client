@@ -258,6 +258,20 @@ export interface QwpIngressReplayStore {
   close(): Promise<void>;
 }
 
+/**
+ * @internal Notification-inbox metrics exposed by reconnecting egress transports.
+ *
+ * Egress dispatches reconnect events through the same bounded inbox as ingress,
+ * and it drops the oldest entry the same way. Without a reader the drop counter
+ * was unobservable, so a run of discarded events was indistinguishable from a
+ * healthy one: `attempt` resets on every success, so the delivered stream
+ * carries no gap to infer from.
+ */
+export interface QwpEgressTransportMetrics {
+  readonly deliveredConnectionNotifications: number;
+  readonly droppedConnectionNotifications: number;
+}
+
 /** Physical ingress delivery counters maintained by reconnecting transports. */
 export interface QwpIngressTransportMetrics {
   /** Highest stable replay-frame sequence handed to the transport. */
@@ -589,6 +603,9 @@ export interface QwpBinaryConnection {
 
   /** @internal Physical delivery metrics exposed by replaying transports. */
   getIngressMetrics?(): QwpIngressTransportMetrics;
+
+  /** @internal Notification-inbox metrics exposed by reconnecting transports. */
+  getEgressMetrics?(): QwpEgressTransportMetrics;
 
   /**
    * @internal Published watermark alone, for the flush path.

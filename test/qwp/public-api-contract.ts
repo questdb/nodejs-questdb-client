@@ -2,6 +2,9 @@ import { Sender } from "../../packages/nodejs-client/src";
 import type {
   ExtraOptions,
   QwpExtraOptions,
+  SenderBuffer,
+  SenderTransport,
+  TimestampUnit,
 } from "../../packages/nodejs-client/src";
 import {
   binary,
@@ -357,6 +360,28 @@ function senderSequenceContract(
   void trackedSequence;
 }
 
+/**
+ * The pre-QWP ILP type-only exports.
+ *
+ * `public-api.test.ts` closes the runtime half of both barrels by comparing
+ * `Object.keys` in both directions, but a type-only re-export has no runtime
+ * key, so nothing named these. Deleting their lines from
+ * `packages/nodejs-client/src/index.ts` removed them from the published
+ * declarations while every gate stayed green -- the exact silent loss the
+ * runtime contract exists to prevent. Naming them here puts them behind
+ * `typecheck` and `typecheck:dist`.
+ */
+function ilpTypeExportContract(
+  buffer: SenderBuffer,
+  transport: SenderTransport,
+  unit: TimestampUnit,
+): void {
+  const rowClosed: SenderBuffer = buffer.timestampColumn("ts", 0n, unit);
+  const sent: Promise<boolean> = transport.send(buffer.toBufferNew());
+  void rowClosed;
+  void sent;
+}
+
 function rootSenderSequenceContract(sender: Sender): void {
   const published: Promise<bigint> = sender.flushAndGetSequence();
   const wait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
@@ -531,3 +556,4 @@ void compiledWriterContract;
 void compiledWriterTypeContract;
 void queryViewContract;
 void Sender;
+void ilpTypeExportContract;

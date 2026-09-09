@@ -35,6 +35,12 @@ import {
   QwpSendClosedError,
 } from "./transport";
 
+/** Immutable notification-inbox counters for an egress session. */
+export interface QwpEgressMetrics {
+  readonly deliveredConnectionNotifications: number;
+  readonly droppedConnectionNotifications: number;
+}
+
 export interface QwpEgressSessionOptions {
   /** SERVER_INFO handshake deadline. Defaults to 5 seconds. */
   serverInfoTimeoutMs?: number;
@@ -859,6 +865,27 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   get handshake(): QwpHandshakeMetadata {
     return this.connection.handshake;
+  }
+
+  /**
+   * Immutable notification-inbox counters for this session's reconnect
+   * observer, the egress counterpart of `QwpIngressSession.metrics`.
+   *
+   * A `reconnect.onEvent` observer runs on a bounded inbox that drops its
+   * oldest pending entry under overflow, exactly as ingress does. Nothing
+   * reported those drops, and no gap in the delivered stream reveals them
+   * either, because `attempt` resets to one on every success: six outages that
+   * discarded eleven events were indistinguishable from a healthy two. A
+   * non-zero drop count means the observer is not keeping up.
+   */
+  get metrics(): QwpEgressMetrics {
+    const inbox = this.connection.getEgressMetrics?.();
+    return Object.freeze({
+      deliveredConnectionNotifications:
+        inbox?.deliveredConnectionNotifications ?? 0,
+      droppedConnectionNotifications:
+        inbox?.droppedConnectionNotifications ?? 0,
+    });
   }
 
   /**

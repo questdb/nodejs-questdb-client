@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { QwpNotificationDispatcher } from "../../packages/client-core/src/_qwp/_internal/notification-dispatcher";
+import {
+  QWP_RECONNECT_EVENT_KIND,
+  type QwpReconnectEvent,
+} from "../../packages/client-core/src/qwp";
+import { orphanIngressSessionOptions } from "../../packages/nodejs-client/src/qwp-node/orphan-session-options";
 
 describe("QwpNotificationDispatcher", () => {
   it("delivers outside the protocol call stack in FIFO order", async () => {
@@ -160,5 +165,123 @@ describe("QwpNotificationDispatcher", () => {
 
     await expect(dispatcher.close(25)).resolves.toBeUndefined();
     expect(dispatcher.metrics.closed).toBe(true);
+  });
+});
+
+/**
+ * The inbox serializes an `async` observer only when its handler hands the
+ * observer's promise back. An orphan-drained slot runs the caller's reconnect
+ * observer behind a wrapper that also feeds the drainer's own listener, and
+ * that wrapper used to discard both promises: the same callback was then
+ * serialized on a foreground session and re-entered on an orphan-drained one,
+ * so the behaviour depended on the transport rather than on the caller's code.
+ * The inbox bound never engaged there either, because a queue drained on the
+ * same turn never reaches its capacity.
+ */
+describe("orphan-drained reconnect observers", () => {
+  const event = {
+    kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
+    attempt: 1,
+    timestampMs: 0,
+  } as const;
+
+  function gatedObserver() {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let live = 0;
+    let maxLive = 0;
+    let calls = 0;
+    const observer = async () => {
+      calls++;
+      live++;
+      maxLive = Math.max(maxLive, live);
+      await gate;
+      live--;
+    };
+    return {
+      observer,
+      release,
+      stats: () => ({ calls, maxLive }),
+    };
+  }
+
+  it("serializes the caller's observer behind the orphan wrapper", async () => {
+    const caller = gatedObserver();
+    const drainer = gatedObserver();
+    const options = orphanIngressSessionOptions(
+      { reconnect: { onEvent: caller.observer } },
+      drainer.observer,
+    );
+    const onEvent = (
+      options.reconnect as { onEvent: (event: QwpReconnectEvent) => unknown }
+    ).onEvent;
+    const dispatcher = new QwpNotificationDispatcher<QwpReconnectEvent>(
+      onEvent,
+      8,
+    );
+
+    for (let i = 0; i < 4; i++) dispatcher.offer(event);
+    await vi.waitFor(() => expect(caller.stats().calls).toBe(1));
+    // Three events are still queued behind the outstanding observer, so the
+    // bound is reachable and the drop counter can mean something.
+    expect(dispatcher.metrics).toMatchObject({ pending: 3, dropped: 0 });
+    expect(drainer.stats().calls).toBe(1);
+
+    caller.release();
+    drainer.release();
+    await vi.waitFor(() => expect(caller.stats().calls).toBe(4));
+    expect(caller.stats().maxLive).toBe(1);
+    expect(drainer.stats().maxLive).toBe(1);
+    await dispatcher.close();
+  });
+
+  it("settles the dispatch when neither observer is asynchronous", async () => {
+    const seen: string[] = [];
+    const options = orphanIngressSessionOptions(
+      { reconnect: { onEvent: () => seen.push("caller") } },
+      () => seen.push("drainer"),
+    );
+    const onEvent = (
+      options.reconnect as { onEvent: (event: QwpReconnectEvent) => unknown }
+    ).onEvent;
+    expect(onEvent(event)).toBeUndefined();
+    expect(seen).toEqual(["caller", "drainer"]);
+  });
+
+  it("contains a rejecting observer instead of orphaning it", async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const options = orphanIngressSessionOptions(
+        {
+          reconnect: {
+            onEvent: async () => {
+              throw new Error("observer failed");
+            },
+          },
+        },
+        undefined,
+      );
+      const onEvent = (
+        options.reconnect as { onEvent: (event: QwpReconnectEvent) => unknown }
+      ).onEvent;
+      const dispatcher = new QwpNotificationDispatcher<QwpReconnectEvent>(
+        onEvent,
+        4,
+      );
+      dispatcher.offer(event);
+      dispatcher.offer(event);
+      await vi.waitFor(() =>
+        expect(dispatcher.metrics).toMatchObject({ delivered: 2, pending: 0 }),
+      );
+      await dispatcher.close();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

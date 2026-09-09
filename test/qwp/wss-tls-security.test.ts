@@ -481,3 +481,54 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
     }
   });
 });
+
+/**
+ * The upgrade agent is validated per endpoint, so a shared agent has to suit
+ * whichever scheme a failover sweep reaches. For `wss` that check is Node's:
+ * `https.request` compares the agent's protocol with the URL's. Testing
+ * `instanceof https.Agent` instead refused every tunnelling agent, which is
+ * what `https-proxy-agent`, `socks-proxy-agent` and `proxy-agent` produce --
+ * they extend `http.Agent` and still open a TLS connection to the origin.
+ */
+describe("QWP wss accepts a tunnelling upgrade agent", () => {
+  /** The agent-base shape those proxy libraries share. */
+  class TunnellingAgent extends http.Agent {}
+
+  it("passes a non-https.Agent through to the wss upgrade", () => {
+    const agent = new TunnellingAgent();
+    expect(agent).toBeInstanceOf(http.Agent);
+    expect(agent).not.toBeInstanceOf(https.Agent);
+
+    const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;", {
+      webSocket: { agent },
+    });
+    expect(options.ingress.agent).toBe(agent);
+  });
+
+  it("still rejects an https.Agent on a cleartext ws endpoint", () => {
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig("ws::addr=localhost;", {
+        webSocket: { agent: new https.Agent() },
+      }),
+    ).toThrow(/must be a plain Node\.js http\.Agent/);
+  });
+
+  it("reports an incompatible wss agent through node, and never retries it", async () => {
+    // Deferring to node means the diagnostic is ERR_INVALID_PROTOCOL rather
+    // than a client TypeError. The reconnect classifier retries anything that
+    // carries no `retryable` flag, so the flag is what keeps a permanently
+    // incompatible agent from being retried for the whole budget.
+    const error = await qwpNode
+      .connectQwpNodeWebSocket({
+        url: "wss://localhost:1/write/v4",
+        agent: new http.Agent(),
+      })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as { code?: string }).code).toBe("ERR_INVALID_PROTOCOL");
+    expect((error as { retryable?: unknown }).retryable).toBe(false);
+  });
+});

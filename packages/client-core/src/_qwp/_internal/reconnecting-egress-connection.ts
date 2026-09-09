@@ -11,6 +11,7 @@ import {
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
   QwpEgressReplayResetEvent,
+  QwpEgressTransportMetrics,
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpReconnectEvent,
@@ -202,6 +203,14 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
 
   get endpoint(): string | URL | undefined {
     return this.lastEndpoint;
+  }
+
+  getEgressMetrics(): QwpEgressTransportMetrics {
+    const inbox = this.connectionDispatcher?.metrics;
+    return {
+      deliveredConnectionNotifications: inbox?.delivered ?? 0,
+      droppedConnectionNotifications: inbox?.dropped ?? 0,
+    };
   }
 
   send(payload: Uint8Array): Promise<void> {

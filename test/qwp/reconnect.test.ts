@@ -4351,6 +4351,59 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  it("counts reconnect notifications the observer could not keep up with", async () => {
+    // The inbox drops its oldest pending entry under overflow, and nothing
+    // reported that. `attempt` resets to one on every success, so a delivered
+    // stream that lost events reads exactly like a healthy one. Ingress has
+    // published these counters all along; egress incremented them and exposed
+    // no reader.
+    const handed: FakeConnection[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = 0;
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = new FakeConnection("primary");
+        handed.push(connection);
+        queueMicrotask(() => connection.receive(serverInfo("primary")));
+        return connection;
+      },
+      {
+        connectionListenerInboxCapacity: 1,
+        reconnect: {
+          maxAttempts: 8,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          onEvent: async () => {
+            entered++;
+            await gate;
+          },
+        },
+      },
+    );
+
+    expect(session.metrics).toEqual({
+      deliveredConnectionNotifications: 0,
+      droppedConnectionNotifications: 0,
+    });
+
+    // The first event occupies the gated observer; the rest queue into a
+    // single slot, so each new one discards the entry before it.
+    handed[handed.length - 1].drop();
+    await vi.waitFor(() => expect(entered).toBe(1));
+    await vi.waitFor(() => expect(handed.length).toBeGreaterThan(1));
+    handed[handed.length - 1].drop();
+    await vi.waitFor(() =>
+      expect(session.metrics.droppedConnectionNotifications).toBeGreaterThan(0),
+    );
+    expect(session.metrics.deliveredConnectionNotifications).toBe(1);
+
+    release();
+    await session.close();
+  });
+
   it("waits for a late reconnect candidate before close resolves", async () => {
     const first = new FakeConnection("primary");
     const late = new FakeConnection("secondary");
@@ -5930,14 +5983,64 @@ describe("QWP Node file replay store", () => {
     await reopened.close();
   });
 
+  it("leaves a freshly activated segment unflagged until its first record", async () => {
+    // MANIFEST_REQUIRED_FLAG is the entire basis for reading an empty active
+    // segment as "records were written and lost", so any moment in which the
+    // flag is durable and no record is forges that verdict. activateHotSpare
+    // used to stamp and fsync it, then run a whole trimSegment of the previous
+    // segment -- a manifest write, its fsync, a directory fsync and a
+    // cross-thread unlink -- and only then return to appendOnce for the record.
+    // A kill anywhere in that stretch reported abandoned data to a producer
+    // whose first append had not returned. The stamp belongs to the append.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "append",
+    });
+    await store.load();
+    await store.append({
+      frameSequence: 0n,
+      payload: new Uint8Array(512).fill(1),
+    });
+
+    const rotate = store as unknown as {
+      activateHotSpare(firstSequence: bigint): Promise<unknown>;
+    };
+    await rotate.activateHotSpare(1n);
+
+    const flagOf = async (segment: string): Promise<number> => {
+      const file = await open(join(directory, segment), "r");
+      try {
+        const byte = Buffer.alloc(1);
+        await file.read(byte, 0, 1, 5);
+        return byte.readUInt8(0);
+      } finally {
+        await file.close();
+      }
+    };
+    const segments = await assignedReplaySegments(directory);
+    const activated = segments[segments.length - 1];
+    expect(await flagOf(activated), "activation must not stamp the flag").toBe(
+      0,
+    );
+
+    await store.append({
+      frameSequence: 1n,
+      payload: new Uint8Array(512).fill(2),
+    });
+    expect(await flagOf(activated), "the first record stamps it").toBe(1);
+    await store.close();
+  });
+
   it("does not invent a loss on the restart after an empty active segment", async () => {
     // Recovery stamped MANIFEST_REQUIRED_FLAG onto every surviving segment,
     // including the empty active one it had just proved carries no flag -- and
     // that flag is the whole basis for reading "empty" as "records were lost".
     // The next restart therefore read back evidence recovery had forged and
     // reported a data loss that never happened. The stamp now belongs to the
-    // next append, one syscall before the first record, as it does after
-    // activateHotSpare.
+    // next append, immediately before the first record, which is also where
+    // activateHotSpare now leaves it.
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({
       directory,

@@ -8,6 +8,7 @@ import { basename, dirname, join } from "node:path";
 import WebSocket from "ws";
 import { log } from "./logging";
 import { validateQwpWebSocketAgent } from "./qwp-node/websocket-agent";
+import { orphanIngressSessionOptions } from "./qwp-node/orphan-session-options";
 import {
   decodeQwpContentEncoding,
   encodeQwpAcceptEncoding,
@@ -38,7 +39,6 @@ import {
   QwpEgressRoutingOptions,
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
-  type QwpReconnectEvent,
   QwpSendClosedError,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
@@ -616,18 +616,34 @@ function connectQwpNodeEndpoint(
   const openingFailure = new Promise<never>((_resolve, reject) => {
     rejectOpening = reject;
   });
-  const socket = factory(endpoint, {
-    protocols: options.protocols,
-    agent,
-    headers,
-    onConnected: resolveConnected,
-    onUpgrade: (receivedHeaders) => {
-      upgradeHeaders = receivedHeaders;
-    },
-    onUpgradeRejected: (rejection) => {
-      rejectOpening(classifyUpgradeRejection(endpoint, rejection));
-    },
-  });
+  let socket: QwpWebSocketLike;
+  try {
+    socket = factory(endpoint, {
+      protocols: options.protocols,
+      agent,
+      headers,
+      onConnected: resolveConnected,
+      onUpgrade: (receivedHeaders) => {
+        upgradeHeaders = receivedHeaders;
+      },
+      onUpgradeRejected: (rejection) => {
+        rejectOpening(classifyUpgradeRejection(endpoint, rejection));
+      },
+    });
+  } catch (error) {
+    // `ws` builds the upgrade request inside its constructor, so an agent that
+    // cannot serve the endpoint's scheme surfaces here, synchronously, as
+    // ERR_INVALID_PROTOCOL from https.request. That is Node's own agent check,
+    // and validateQwpWebSocketAgent defers to it for wss rather than testing
+    // the agent's class. It has to be marked: the reconnect classifier retries
+    // anything carrying no `retryable` flag, so an incompatible agent would be
+    // retried for the whole budget -- unbounded under store-and-forward -- and
+    // then reported as a deadline rather than as the agent.
+    if ((error as { code?: unknown } | null)?.code === "ERR_INVALID_PROTOCOL") {
+      return Promise.reject(qwpNonRetryable(error as Error));
+    }
+    return Promise.reject(error);
+  }
   return openQwpWebSocket(socket, {
     url: endpoint,
     signal,
@@ -1430,46 +1446,6 @@ class QwpPooledSfaSlotCoordinator implements QwpPoolSlotReservation {
   private notifyAvailable(): void {
     for (const listener of this.listeners) listener();
   }
-}
-
-function orphanIngressSessionOptions(
-  options: QwpIngressSessionOptions,
-  onReconnectEvent?: (event: QwpReconnectEvent) => void,
-): QwpIngressSessionOptions {
-  const configuredReconnect =
-    options.reconnect === false ? undefined : options.reconnect;
-  const configuredOnEvent = configuredReconnect?.onEvent;
-  return {
-    ...options,
-    // No foreground caller remains to retry orphan bytes, so transport
-    // outages stay retryable for the drainer's lifetime. Authentication,
-    // protocol, and poison-frame failures remain terminal and quarantined.
-    reconnect: {
-      ...configuredReconnect,
-      maxAttempts: 0,
-      maxDurationMs: 0,
-      onEvent: (event) => {
-        // This wrapper is the dispatcher's handler, so a rejected promise it
-        // returned would orphan through the very inbox meant to contain it.
-        // Contain both observers here: a reconnect observer cannot interrupt
-        // orphan recovery, and the orphan lifecycle observer stays bounded.
-        safelyInvoke(configuredOnEvent, event);
-        safelyInvoke(onReconnectEvent, event);
-      },
-    },
-    replayStore: undefined,
-    backgroundStoreAndForward: undefined,
-    initialConnectMode: undefined,
-    orphanStoreAndForward: true,
-    orphanDurableAckMismatchMaxDurationMs:
-      options.orphanDurableAckMismatchMaxDurationMs ??
-      configuredReconnect?.maxDurationMs ??
-      300_000,
-    onResponse: undefined,
-    onDurableAck: undefined,
-    onProgress: undefined,
-    onError: undefined,
-  };
 }
 
 function parseCanonicalSenderSlot(
