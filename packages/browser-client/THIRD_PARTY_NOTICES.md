@@ -1,6 +1,8 @@
 # Third-party notices
 
-This product bundles `fzstd` 0.1.1, which is available under the MIT License:
+This product bundles `fzstd` 0.1.1, modified to enforce the decompressed
+size declared by a Zstandard frame header, which is available under the MIT
+License:
 
 Copyright (c) 2020 Arjun Barrett
 

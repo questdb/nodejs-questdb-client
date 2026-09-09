@@ -94,6 +94,14 @@ export class QwpNodeUdpSession implements QwpSenderSession {
   private readonly socket: QwpNodeUdpSocketLike;
   private bindReject?: (error: Error) => void;
   private closePromise?: Promise<void>;
+  /**
+   * Completion callbacks for datagrams handed to the socket but not yet
+   * reported. `dgram.Socket.close()` discards the callbacks of sends still
+   * queued in the handle, so without this a `sendTables()` racing a `close()`
+   * returned a promise that never settled -- and `sendDatagrams()` awaits each
+   * datagram in turn, so one dropped callback stranded the whole call.
+   */
+  private readonly pendingSends = new Set<() => void>();
   private bound = false;
   private closing = false;
   private closed = false;
@@ -239,6 +247,11 @@ export class QwpNodeUdpSession implements QwpSenderSession {
         resolve();
       }
     });
+    // The executor above has already asked the socket to close, and node:dgram
+    // drops the completion callbacks of the sends it had queued. Settle them
+    // here rather than from the close callback, which arrives a turn later and
+    // is not guaranteed to arrive at all on a socket that never bound.
+    this.abandonPendingSends();
     return this.closePromise;
   }
 
@@ -264,7 +277,14 @@ export class QwpNodeUdpSession implements QwpSenderSession {
   private send(datagram: Uint8Array): Promise<void> {
     this.assertOpen();
     return new Promise<void>((resolve) => {
+      const abandon = (): void => resolve();
+      this.pendingSends.add(abandon);
       const complete = (error: Error | null, bytes = 0): void => {
+        // A close() that ran first already settled this send and dropped its
+        // registration; the socket may still report the datagram afterwards,
+        // and counting it then would advance the watermark past a session the
+        // caller has closed.
+        if (!this.pendingSends.delete(abandon)) return;
         if (error) {
           // The watermark deliberately does not advance here. `sequence` backs
           // both publishedFrameSequence and acknowledgedFrameSequence, so
@@ -310,6 +330,20 @@ export class QwpNodeUdpSession implements QwpSenderSession {
     // Contain synchronous throws and rejected promises alike: a UDP error
     // observer must never participate in sender progress or crash the host.
     safelyInvoke(this.onError, error);
+  }
+
+  /**
+   * Settles every send the socket will no longer report. The datagram may or
+   * may not have left the host, which is what fire-and-forget means, so these
+   * resolve rather than reject -- the same policy `send()` applies to a
+   * datagram the kernel refused. The watermark is deliberately not advanced:
+   * an abandoned datagram was never confirmed.
+   */
+  private abandonPendingSends(): void {
+    if (this.pendingSends.size === 0) return;
+    const abandoned = [...this.pendingSends];
+    this.pendingSends.clear();
+    for (const settle of abandoned) settle();
   }
 
   private assertOpen(): void {

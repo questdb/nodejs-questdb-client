@@ -175,20 +175,54 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     expect(qwpConfig(options)?.ingress.agent).toBe(agent);
   });
 
-  it("does not promote a plain http agent onto wss", async () => {
-    // https.Agent extends http.Agent, so the old instanceof http.Agent test
-    // admitted a bare http.Agent that fails a wss upgrade with
-    // ERR_INVALID_PROTOCOL. It is ignored now, leaving node's verifying default.
+  it("promotes a tunnelling agent onto wss, like qwp.webSocket.agent does", async () => {
+    // The shape https-proxy-agent, socks-proxy-agent and proxy-agent share:
+    // it extends http.Agent, not https.Agent, and still opens a TLS connection
+    // to the origin. Gating this path on `instanceof https.Agent` dropped it
+    // and connected direct, while the very same object handed to
+    // qwp.webSocket.agent was accepted -- see "QWP wss accepts a tunnelling
+    // upgrade agent" below, which pins that other half of the contract.
+    class TunnellingAgent extends http.Agent {}
+    const agent = new TunnellingAgent();
+    expect(agent).not.toBeInstanceOf(https.Agent);
+
     const logger = vi.fn();
     const options = await SenderOptions.fromConfig("wss::addr=localhost;", {
-      agent: new http.Agent(),
+      agent,
+      log: logger,
+    });
+    expect(qwpConfig(options)?.ingress.agent).toBe(agent);
+    expect(logger).not.toHaveBeenCalledWith(
+      "warn",
+      expect.stringMatching(/Ignoring/),
+    );
+  });
+
+  it("promotes a plain http agent onto wss and lets node reject it", async () => {
+    // A bare http.Agent cannot serve wss, but the class cannot tell it apart
+    // from a tunnelling agent that can. Node applies the real check and raises
+    // ERR_INVALID_PROTOCOL, which connectQwpNodeEndpoint marks non-retryable,
+    // so this fails fast and by name instead of being silently ignored.
+    const logger = vi.fn();
+    const agent = new http.Agent();
+    const options = await SenderOptions.fromConfig("wss::addr=localhost;", {
+      agent,
+      log: logger,
+    });
+    expect(qwpConfig(options)?.ingress.agent).toBe(agent);
+  });
+
+  it("still refuses an https agent on a cleartext ws connect string", async () => {
+    const logger = vi.fn();
+    const options = await SenderOptions.fromConfig("ws::addr=localhost;", {
+      agent: new https.Agent(),
       log: logger,
     });
     expect(qwpConfig(options)?.ingress.agent).toBeUndefined();
     expect(logger).toHaveBeenCalledWith(
       "warn",
       expect.stringMatching(
-        /Ignoring Node\.js http\.Agent.*QWP wss.*https\.Agent/,
+        /Ignoring Node\.js https\.Agent.*QWP ws.*plain Node\.js http\.Agent/,
       ),
     );
   });
@@ -204,7 +238,9 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
       expect(qwpConfig(options)?.ingress.agent).toBeUndefined();
       expect(logger).toHaveBeenCalledWith(
         "warn",
-        expect.stringMatching(/Ignoring undici\.Agent.*QWP wss.*https\.Agent/),
+        expect.stringMatching(
+          /Ignoring undici\.Agent.*QWP wss.*http\.Agent or https\.Agent/,
+        ),
       );
     } finally {
       await agent.close();
@@ -295,18 +331,40 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
     expect(ingressFor({ agent }).agent).toBe(agent);
   });
 
-  it("does not admit a plain http agent to a wss upgrade", () => {
-    // A bare http.Agent would fail the wss upgrade with ERR_INVALID_PROTOCOL
-    // after at()/atNow() already accepted rows. It is ignored, leaving the
-    // verifying default agent in place instead.
+  it("keeps a caller tunnelling agent for the wss upgrade", () => {
+    // Programmatic parity with the connect string: a proxy agent extends
+    // http.Agent, so a class check on https.Agent dropped it and connected
+    // direct out of a proxy-only deployment.
+    class TunnellingAgent extends http.Agent {}
+    const agent = new TunnellingAgent();
     const logger = vi.fn();
-    const ingress = ingressFor({ agent: new http.Agent(), log: logger });
-    expect(ingress.agent).toBeInstanceOf(https.Agent);
-    expect(agentTlsOptions(ingress.agent).rejectUnauthorized).toBe(true);
+    expect(ingressFor({ agent, log: logger }).agent).toBe(agent);
+    expect(logger).not.toHaveBeenCalledWith(
+      "warn",
+      expect.stringMatching(/Ignoring/),
+    );
+  });
+
+  it("admits a plain http agent and lets node reject it on the upgrade", () => {
+    // Indistinguishable from a tunnelling agent by class. Node compares the
+    // agent's own protocol with the URL's and raises ERR_INVALID_PROTOCOL,
+    // which connectQwpNodeEndpoint marks non-retryable.
+    const agent = new http.Agent();
+    expect(ingressFor({ agent }).agent).toBe(agent);
+  });
+
+  it("does not admit an https agent to a cleartext ws upgrade", () => {
+    const logger = vi.fn();
+    const ingress = ingressFor({
+      protocol: "ws",
+      agent: new https.Agent(),
+      log: logger,
+    });
+    expect(ingress.agent).toBeUndefined();
     expect(logger).toHaveBeenCalledWith(
       "warn",
       expect.stringMatching(
-        /Ignoring Node\.js http\.Agent.*QWP wss.*https\.Agent/,
+        /Ignoring Node\.js https\.Agent.*QWP ws.*plain Node\.js http\.Agent/,
       ),
     );
   });

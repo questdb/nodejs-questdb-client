@@ -307,13 +307,19 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     }
 
     while (!this.closing) {
-      if (attempt > 0 && backoffMs > 0) {
+      if (attempt > 0) {
+        // Runs on every retry, zero backoff included: this is the loop's only
+        // macrotask, and without it a factory that rejects inside a microtask
+        // starved the event loop outright. See the same guard in
+        // reconnecting-ingress-connection.ts.
         await this.waitForBackoffWithinDeadline(
-          jitterReconnectDelayMs(backoffMs),
+          backoffMs > 0 ? jitterReconnectDelayMs(backoffMs) : 0,
           reconnectDeadlineMs,
           attempt,
         );
-        backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
+        if (backoffMs > 0) {
+          backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
+        }
       }
       this.throwIfUnavailable();
       attempt++;

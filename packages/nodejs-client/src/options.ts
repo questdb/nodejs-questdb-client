@@ -36,12 +36,26 @@ function qwpConfig(options: SenderOptions): QwpNodeClientOptions | undefined {
 
 /**
  * @ignore
- * Selects a caller-supplied ILP-style agent for a QWP WebSocket upgrade only
- * when it matches the scheme: an https.Agent for wss, a plain http.Agent (not
- * an https.Agent, which extends it) for ws. A bare http.Agent would fail a wss
- * upgrade with ERR_INVALID_PROTOCOL and an https.Agent would attempt TLS on a
- * plain ws socket, so a mismatch -- or a non-http agent such as an undici Agent
- * -- yields undefined and the caller falls back to the scheme's default.
+ * Selects a caller-supplied ILP-style agent for a QWP WebSocket upgrade when
+ * it can serve the endpoint's scheme, and drops anything that is not a Node
+ * http/https agent at all -- an undici Agent, say -- because that would never
+ * reach `ws`.
+ *
+ * `wss` deliberately admits any `http.Agent`, matching
+ * `validateQwpWebSocketAgent`, which is the rule the same agent object meets
+ * when it arrives through `qwp.webSocket.agent`. Testing
+ * `instanceof https.Agent` here instead refused every tunnelling agent --
+ * the shape `https-proxy-agent`, `socks-proxy-agent` and `proxy-agent` all
+ * build on, which extends `http.Agent` and still produces a TLS connection to
+ * the origin -- so a proxy-only deployment silently connected direct. Node
+ * applies the real check: `https.request` compares the agent's own protocol
+ * with the URL's and raises `ERR_INVALID_PROTOCOL` for a bare `http.Agent`,
+ * which `connectQwpNodeEndpoint` marks non-retryable, so an incompatible
+ * agent fails fast and by name rather than being ignored.
+ *
+ * The `ws` branch keeps its shape check: an `https.Agent` there would attempt
+ * TLS on a cleartext socket, and naming it in the client's own vocabulary is
+ * more useful than the failure it would otherwise produce.
  */
 export function selectQwpSchemeAgent(
   agent: unknown,
@@ -49,14 +63,14 @@ export function selectQwpSchemeAgent(
   logger?: Logger,
 ): http.Agent | undefined {
   if (secure) {
-    if (agent instanceof https.Agent) return agent;
+    if (agent instanceof http.Agent) return agent;
   } else if (agent instanceof http.Agent && !(agent instanceof https.Agent)) {
     return agent;
   }
   if (agent !== undefined) {
     const scheme = secure ? WSS : WS;
     const expected = secure
-      ? "a Node.js https.Agent"
+      ? "a Node.js http.Agent or https.Agent"
       : "a plain Node.js http.Agent";
     const received =
       agent instanceof Agent
@@ -171,7 +185,11 @@ type ExtraOptions = {
   log?: Logger;
   /**
    * Transport-specific connection agent. Undici agents apply to the default
-   * HTTP(S) transport; QWP ws/wss requires a Node http/https agent.
+   * HTTP(S) transport. QWP `wss` takes any Node `http.Agent`, which includes
+   * an `https.Agent` and the tunnelling agents `https-proxy-agent`,
+   * `socks-proxy-agent` and `proxy-agent` produce; QWP `ws` takes a plain
+   * `http.Agent`. An agent that cannot serve the scheme is reported by Node as
+   * `ERR_INVALID_PROTOCOL` when the upgrade is attempted.
    */
   agent?: Agent | http.Agent | https.Agent;
   qwp?: QwpExtraOptions;

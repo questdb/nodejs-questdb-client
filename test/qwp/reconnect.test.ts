@@ -761,6 +761,59 @@ describe("QWP endpoint failover", () => {
 });
 
 describe("QWP ingress reconnect and replay", () => {
+  it("yields the event loop between zero-backoff reconnect attempts", async () => {
+    // The backoff wait is the reconnect loop's only macrotask, and it used to
+    // sit behind `backoffMs > 0`. With initialBackoffMs 0 -- a value this
+    // suite passes everywhere and validateReconnectPolicy accepts -- a factory
+    // that rejects without an I/O turn then spun the loop in microtasks and
+    // starved timers, I/O and close() for as long as connecting kept failing.
+    // A caller-supplied webSocketFactory produces that shape, and so does a
+    // browser WebSocket constructor throwing SecurityError on mixed content.
+    // Counts macrotask turns. A self-rescheduling zero-delay timer interleaves
+    // with the loop's own backoff timer, so it advances once per retry when
+    // the loop yields and not at all while it spins.
+    let turns = 0;
+    let pumping = true;
+    const pump = (): void => {
+      if (!pumping) return;
+      turns++;
+      setTimeout(pump, 0);
+    };
+    setTimeout(pump, 0);
+
+    const connections: FakeConnection[] = [];
+    const turnsPerRefusal: number[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        if (connections.length > 0 && turnsPerRefusal.length < 10) {
+          turnsPerRefusal.push(turns);
+          // Rejects in a microtask, exactly like a constructor that throws.
+          throw new Error("connect refused");
+        }
+        const connection = new FakeConnection("primary");
+        connections.push(connection);
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        memoryReplayMaxBytes: 1024 * 1024,
+        reconnect: { maxAttempts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+      },
+    );
+
+    try {
+      connections[0].drop();
+      await vi.waitFor(() => expect(connections).toHaveLength(2));
+      expect(turnsPerRefusal).toHaveLength(10);
+      // No two attempts share a macrotask turn. Every refusal used to land in
+      // the same one, because the loop never returned to the event loop.
+      expect(new Set(turnsPerRefusal).size).toBe(turnsPerRefusal.length);
+    } finally {
+      pumping = false;
+      await session.close();
+    }
+  });
+
   it("keeps publish cost off the pending-replay backlog", async () => {
     // getIngressMetrics() summed every pending frame, and the flush path read
     // it several times per frame -- once per publish through emitProgress even

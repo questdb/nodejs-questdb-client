@@ -1168,13 +1168,22 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
 
     while (!this.closing) {
-      if (attempt > 0 && backoffMs > 0) {
+      if (attempt > 0) {
+        // The wait runs on every retry, including a zero backoff. It is the
+        // loop's only macrotask, and a factory that rejects without an I/O
+        // turn -- a caller-supplied webSocketFactory, or a browser WebSocket
+        // constructor that throws SecurityError on mixed content -- otherwise
+        // left the loop spinning in microtasks with initialBackoffMs 0, which
+        // starves timers, I/O and close() for as long as connecting fails.
+        // A zero delay still means "retry immediately"; it just yields first.
         await this.waitForBackoffWithinDeadline(
-          jitterReconnectDelayMs(backoffMs),
+          backoffMs > 0 ? jitterReconnectDelayMs(backoffMs) : 0,
           reconnectDeadlineMs,
           attempt,
         );
-        backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
+        if (backoffMs > 0) {
+          backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
+        }
       }
       this.throwIfUnavailable();
       attempt++;

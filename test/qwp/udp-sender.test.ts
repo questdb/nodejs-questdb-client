@@ -22,6 +22,9 @@ class FakeUdpSocket implements QwpNodeUdpSocketLike {
   sendError?: Error;
   closed = false;
   private errorListener?: (error: Error) => void;
+  private readonly pendingSends = new Set<
+    (error: Error | null, bytes: number) => void
+  >();
 
   bindError?: Error;
 
@@ -43,11 +46,20 @@ class FakeUdpSocket implements QwpNodeUdpSocketLike {
   ): void {
     this.packets.push(message.slice());
     this.destinations.push({ host, port });
-    queueMicrotask(() => callback(this.sendError ?? null, message.byteLength));
+    this.pendingSends.add(callback);
+    queueMicrotask(() => {
+      if (!this.pendingSends.delete(callback)) return;
+      callback(this.sendError ?? null, message.byteLength);
+    });
   }
 
   close(callback: () => void): void {
     this.closed = true;
+    // node:dgram discards the completion callbacks of sends still queued in
+    // the handle when close() runs. A fake that reported them anyway made the
+    // one failure mode that matters here -- a send promise that never settles
+    // -- impossible to reach from a test.
+    this.pendingSends.clear();
     queueMicrotask(callback);
   }
 
@@ -305,6 +317,47 @@ describe("QWP Node UDP sender", () => {
       /has not been published/,
     );
     await session.close();
+  });
+
+  it("settles an in-flight send when close races it", async () => {
+    // node:dgram drops the completion callbacks of sends still queued in the
+    // handle when close() runs, and send() resolves only from that callback,
+    // so `const p = session.sendTables(rows); await session.close(); await p;`
+    // never returned. No error, no rejection, just a promise that never
+    // settled -- and sendDatagrams() awaits each datagram, so one dropped
+    // callback stranded the whole call.
+    const socket = new FakeUdpSocket();
+    const session = await connectQwpNodeUdp({
+      host: "localhost",
+      socketFactory: () => socket,
+    });
+
+    const sending = session.sendTables([longTable(1)]);
+    await session.close();
+    await expect(sending).resolves.toMatchObject({
+      status: 0,
+      // Abandoned rather than confirmed, so the watermark stays put.
+      sequence: -1n,
+    });
+    expect(session.udpMetrics).toMatchObject({
+      publishedDatagramSequence: -1n,
+      totalDatagramsSent: 0,
+    });
+  });
+
+  it("fails the remaining datagrams of a batch that close interrupts", async () => {
+    const socket = new FakeUdpSocket();
+    const session = await connectQwpNodeUdp({
+      host: "localhost",
+      maxDatagramSize: 80,
+      socketFactory: () => socket,
+    });
+
+    const sending = session.sendTables([longTable(40)]);
+    expect(socket.packets.length).toBeGreaterThan(0);
+    await session.close();
+    // The caller is told the batch stopped, instead of waiting on it forever.
+    await expect(sending).rejects.toThrow(/QWP UDP sender is closed/);
   });
 
   it("rejects a datagram size no IPv4 host can transmit", async () => {
