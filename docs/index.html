@@ -90,6 +90,13 @@ nullish values, and protocol v2 encoded <code>arrayColumn(name, null)</code> as 
 NULL array marker. Supported column methods now omit the column instead. If your
 code relied on the throw as a data-quality guard, validate before calling the
 sender.</p>
+<p><code>decimalColumn(name, unscaled, scale)</code> also tightened its scale check on ILP
+protocol v3. <code>scale</code> is typed <code>number</code>, and a non-integer one used to reach
+<code>Buffer.writeInt8</code>, which coerces rather than rejects: <code>2.5</code> was written as
+scale <code>2</code>, and <code>NaN</code> or <code>undefined</code> as scale <code>0</code>, so the row was sent with a
+scale the caller never asked for. Such a call now throws a <code>RangeError</code>. A
+computed scale -- from a division, a <code>Math.log10</code>, or a parsed float -- has to
+be rounded to an integer before it is passed.</p>
 <h3 id="qwp-ingress-from-nodejs-or-a-browser" class="tsd-anchor-link">QWP ingress from Node.js or a browser<a href="#qwp-ingress-from-nodejs-or-a-browser" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3><p>See the <a href="media/QWP.md">complete QWP guide</a> for ingress and egress APIs, the combined
 pooled client, browser authentication, delivery semantics, migration guidance, and
 the public API policy.</p>
