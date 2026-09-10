@@ -835,8 +835,18 @@ describe("QWP result batch decoder", () => {
           /above the client cap/,
         );
         // Rejected in prepare(), before a column is read -- reading one is what
-        // allocates.
-        expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+        // allocates. The budget has to clear the decompressed body itself,
+        // which for this frame is an all-NULL bitmap just under
+        // QWP_MAX_ZSTD_DECOMPRESSED_SIZE and is produced before the grid cap
+        // can be read at all; the decompressor now materializes it into one
+        // buffer sized from the declared content size rather than accumulating
+        // it in chunks, which moved the same bytes into heapUsed. What this
+        // guards against is column materialization: two rowCount-length arrays
+        // per column would be ~8 MB for one of these columns and gigabytes for
+        // all of them, so the bound below still fails immediately if any
+        // column is read. `copyWithin` below is the structural form of the
+        // same assertion.
+        expect(process.memoryUsage().heapUsed - before).toBeLessThan(150e6);
       }
       expect(copyWithin).not.toHaveBeenCalled();
     } finally {
@@ -1066,6 +1076,54 @@ describe("QWP result batch decoder", () => {
     // A frame that means what it says still round-trips.
     expect(decompressQwpZstdFrame(singleSegmentFrame(8, 0x42, 8))).toEqual(
       new Uint8Array(8).fill(0x42),
+    );
+  });
+
+  it("bounds a Zstd frame that declares no usable content size", () => {
+    // Every frame above sets the single-segment bit, which is the one case
+    // where the decompressor sizes its own buffer from the declared content
+    // size and therefore enforces it. Clear that bit and it sizes from the
+    // *window* instead and accumulates output in chunks, so the declared size
+    // stops bounding anything: a declared zero passed the cap check, because
+    // `0 > cap` is false, and the chunk path never compared what it produced
+    // against it. 16 KB of RLE blocks regenerated 500 MB.
+    const multiSegmentRle = (blocks: number, blockSize = 131072) => {
+      const bytes = [
+        0x28,
+        0xb5,
+        0x2f,
+        0xfd, // magic
+        0x80, // 4-byte content size, single segment CLEAR, no checksum
+        0x80, // window descriptor: 2^26, the largest the cap admits
+        0,
+        0,
+        0,
+        0, // declared content size: zero
+      ];
+      for (let index = 0; index < blocks; index++) {
+        const header =
+          (blockSize << 3) | (1 << 1) | (index === blocks - 1 ? 1 : 0);
+        bytes.push(
+          header & 0xff,
+          (header >>> 8) & 0xff,
+          (header >>> 16) & 0xff,
+        );
+        bytes.push(0x41); // RLE payload byte
+      }
+      return Uint8Array.from(bytes);
+    };
+
+    // 2 KB in, 78 MB out before the fix; 16 KB in, 500 MB out.
+    expect(multiSegmentRle(600).byteLength).toBeLessThan(3_000);
+    expect(() => decompressQwpZstdFrame(multiSegmentRle(600))).toThrow(
+      /exceeds declared content size/i,
+    );
+    expect(() => decompressQwpZstdFrame(multiSegmentRle(4_000))).toThrow(
+      /exceeds declared content size/i,
+    );
+    // A single block is enough; the bound does not depend on the block count.
+    expect(() => decompressQwpZstdFrame(multiSegmentRle(1))).toThrow(
+      /exceeds declared content size/i,
     );
   });
 });

@@ -728,4 +728,41 @@ describe("QWP unified Node client configuration", () => {
       }),
     );
   });
+
+  it("rejects a millisecond option above the timer ceiling", () => {
+    // setTimeout clamps anything above 2^31-1 to 1 ms and warns, so an
+    // over-large value did not merely fail to apply -- it inverted into an
+    // immediate timeout. Every one of these reaches a raw timer.
+    const timerKeys = [
+      "connect_timeout",
+      "auth_timeout_ms",
+      "auto_flush_interval",
+      "close_flush_timeout_millis",
+      "durable_ack_keepalive_interval_millis",
+      "query_close_timeout_ms",
+      "acquire_timeout_ms",
+      "idle_timeout_ms",
+      "max_lifetime_ms",
+      "housekeeper_interval_ms",
+    ];
+    for (const key of timerKeys) {
+      expect(
+        () =>
+          parseQwpNodeClientConfig(`wss::addr=host:9000;${key}=2147483648;`),
+        `${key} was accepted above the timer ceiling`,
+      ).toThrow(/must be an integer between .* and 2147483647/);
+    }
+    // The ceiling itself still parses.
+    expect(
+      parseQwpNodeClientConfig(
+        "wss::addr=host:9000;auth_timeout_ms=2147483647;",
+      ).ingress.authTimeoutMs,
+    ).toBe(2147483647);
+    // A byte-count option is not a timer and keeps its own, larger range.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "wss::addr=host:9000;sf_dir=/tmp/qwp;sender_id=p1;sf_max_total_bytes=4294967296;",
+      ),
+    ).not.toThrow();
+  });
 });

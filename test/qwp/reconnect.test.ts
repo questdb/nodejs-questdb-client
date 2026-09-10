@@ -2932,6 +2932,59 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("deprioritizes an endpoint whose cap cannot fit dictionary catch-up", async () => {
+    // The sibling test above covers a *data* frame that a small-cap endpoint
+    // refuses. The dictionary catch-up path threw without deprioritizing, so
+    // the endpoint stayed HEALTHY -- its connect had succeeded -- and outranked
+    // the untried larger-cap node on every later sweep. Measured before the
+    // fix: 301 reconnect attempts, all to the small-cap node, zero rotations.
+    const symbol = "S".repeat(200);
+    const attempted: string[] = [];
+    const large: FakeConnection[] = [];
+    let seed!: FakeConnection;
+    const factory = createQwpFailoverConnectionFactory(
+      "seed",
+      ["small-cap", "large-cap"],
+      async (endpoint) => {
+        attempted.push(String(endpoint));
+        if (endpoint === "seed") {
+          seed = new FakeConnection("seed");
+          return seed;
+        }
+        const connection = new FakeConnection(String(endpoint), {
+          qwpVersion: 1,
+          // 64 bytes cannot hold the 200-byte entry's catch-up frame; 4096 can.
+          maxBatchSizeBytes: endpoint === "small-cap" ? 64 : 4096,
+        });
+        if (endpoint === "large-cap") large.push(connection);
+        return connection;
+      },
+    );
+
+    const session = await QwpIngressSession.connect(factory, {
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 4, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+
+    const pending = session.sendTablesDelta([symbolTable(symbol)]);
+    await vi.waitFor(() => expect(seed.sent).toHaveLength(1));
+    seed.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await pending;
+
+    seed.drop();
+
+    // The large-cap endpoint is reached, and it receives the catch-up frame
+    // the small-cap one could not take.
+    await vi.waitFor(() => expect(large).toHaveLength(1));
+    await vi.waitFor(() => expect(large[0].sent.length).toBeGreaterThan(0));
+    expect(attempted).toContain("small-cap");
+    expect(decodeQwpIngressSymbolDictionaryDelta(large[0].sent[0])).toEqual({
+      startId: 0,
+      entries: [symbol],
+    });
+    await session.close();
+  });
+
   it("chunks reconnect dictionary catch-up under the negotiated batch cap", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary", {
@@ -4894,6 +4947,60 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  it("does not replay credit grants a reset has already zeroed", async () => {
+    // Replay restarts the request from row zero and resetForReplay() zeroes
+    // the session's own `deliveredCreditBytes` with it, so the grants issued
+    // against the dead connection are no longer counted by either side. QWP
+    // credit is additive, so replaying them re-opened a window the session had
+    // forgotten -- and with autoCredit on, one payload per consumed batch was
+    // retained for the whole life of a streaming query with nothing to prune
+    // it. The QUERY_REQUEST being replayed carries initialCredit itself.
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(
+            serverInfo(connection.endpoint === "primary" ? "one" : "two"),
+          ),
+        );
+        return connection;
+      },
+      {
+        reconnect: { maxAttempts: 1, initialBackoffMs: 0, maxBackoffMs: 0 },
+      },
+    );
+    const query = await session.query("select * from x");
+    const iterator = query[Symbol.asyncIterator]();
+
+    // Grants against the live connection, the way a consuming reader produces
+    // them one per batch.
+    for (let grant = 0; grant < 25; grant++) await query.grantCredit(4096);
+    const creditKind = QWP_EGRESS_MESSAGE.CREDIT;
+    await vi.waitFor(() =>
+      expect(first.sent.filter((frame) => frame[0] === creditKind).length).toBe(
+        25,
+      ),
+    );
+
+    first.drop();
+    await vi.waitFor(() => expect(second.sent.length).toBeGreaterThan(0));
+
+    // Exactly the request, and no carried-over credit.
+    expect(second.sent[0][0]).toBe(QWP_EGRESS_MESSAGE.QUERY_REQUEST);
+    expect(second.sent.filter((frame) => frame[0] === creditKind)).toEqual([]);
+
+    second.receive(resultEnd(0n, 0n, 0n));
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+    await session.close();
+  });
+
   it("waits for an active reusable view before resetting it for replay", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
@@ -5986,6 +6093,152 @@ describe("QWP Node file replay store", () => {
     await recovered.close();
   });
 
+  it("reports trailing records that never reached disk", async () => {
+    // The one silent shape. A lost trailing page reads back as zeros, exactly
+    // like a segment's unwritten reservation, so it leaves no torn record, no
+    // CRC mismatch and no bytes to count -- while every other damage shape
+    // reports. The durable append high-water mark in the ACK record is the
+    // only witness that those sequences ever existed.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 12; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    // Persists the watermark, and with it the high-water mark of 11.
+    await first.acknowledgeThrough(2n);
+    await first.close();
+
+    const segments = await assignedReplaySegments(directory);
+    const tail = segments[segments.length - 1];
+    const path = join(directory, tail);
+    const size = (await stat(path)).size;
+    const file = await open(path, "r+");
+    try {
+      // Only the final record's bytes: the rest of the segment survives, so
+      // nothing in the file itself hints that anything is missing.
+      await file.write(Buffer.alloc(size - 24, 0), 0, size - 24, 24);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    const frames = await recovered.load();
+    expect(frames.length).toBeLessThan(12);
+    expect(
+      reports.some((report) => /never reached disk/.test(report.reason)),
+    ).toBe(true);
+    await recovered.close();
+  });
+
+  it("does not report a loss when the journal drains cleanly", async () => {
+    // The false-positive guard for the check above: a fully acknowledged and
+    // trimmed journal has nothing left to read back, and must not be mistaken
+    // for one whose tail went missing.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    await store.load();
+    for (let sequence = 0; sequence < 8; sequence++) {
+      await store.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    await store.acknowledgeThrough(7n);
+    await store.close();
+
+    const reports: QwpNodeReplayDataLossReport[] = [];
+    const reopened = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+      onRecoveryDataLoss: (report) => reports.push(report),
+    });
+    await reopened.load();
+    expect(reports).toEqual([]);
+    await reopened.close();
+  });
+
+  it("reopens a multi-segment journal after retiring its manifest active base", async () => {
+    // The reopen the test above stops short of. Recovery retires the flagged,
+    // record-free active segment, but the manifest still named it as the
+    // active base and the monotonic clamp in writeManifest() would not let the
+    // boundary retract, so nothing was rewritten. The next load then rejected
+    // the whole journal as a chain mismatch and abandoned the frames in the
+    // segments that were intact. Blind SIGKILL trials hit this on 7.8% of
+    // crashes. The single-segment sibling below passes because the store
+    // removes the manifest outright when no segment is left.
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    await first.load();
+    for (let sequence = 0; sequence < 12; sequence++) {
+      await first.append({
+        frameSequence: BigInt(sequence),
+        payload: new Uint8Array(600).fill(sequence + 1),
+      });
+    }
+    await first.close();
+
+    const segments = await assignedReplaySegments(directory);
+    expect(segments.length).toBeGreaterThan(1);
+    const tail = segments[segments.length - 1];
+    const path = join(directory, tail);
+    const size = (await stat(path)).size;
+    const file = await open(path, "r+");
+    try {
+      await file.write(Buffer.alloc(size - 24, 0), 0, size - 24, 24);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+      onRecoveryDataLoss: () => undefined,
+    });
+    const firstLoad = await recovered.load();
+    expect(firstLoad.length).toBeGreaterThan(0);
+    await recovered.close();
+
+    // The frames the first load recovered are still on disk and must still be
+    // replayable. Before the fix this threw a corruption error naming the
+    // boundary recovery had just invalidated.
+    const reopened = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 4096,
+      durability: "memory",
+    });
+    const secondLoad = await reopened.load();
+    expect(secondLoad.map((frame) => frame.frameSequence)).toEqual(
+      firstLoad.map((frame) => frame.frameSequence),
+    );
+    await reopened.close();
+  });
+
   it("retires an empty lost segment after reporting it once", async () => {
     const directory = await trackedDirectory();
     const first = new QwpNodeFileReplayStore({
@@ -6854,6 +7107,7 @@ describe("QWP Node file replay store", () => {
     const internals = store as unknown as {
       slotLock: QwpNodeAdvisoryLock;
       pendingTrimSegments: unknown[];
+      maintenanceRetryTimer?: ReturnType<typeof setTimeout>;
       runMaintenanceBatch(): Promise<void>;
     };
     const lock = internals.slotLock;
@@ -6887,6 +7141,15 @@ describe("QWP Node file replay store", () => {
       // Re-proving the same token resumes the preserved queue. Calling the
       // batch directly avoids making this regression test wait for its 1s timer.
       delete (lock as unknown as Record<string, unknown>).lost;
+      // Production only ever reaches runMaintenanceBatch() through the store's
+      // serializing queue. Calling it directly races the retry timer that the
+      // ownership lapse just armed: both batches read pendingTrimSegments[0],
+      // both unlink it, and both shift. Disarm it so this stays a test of the
+      // preserved queue rather than an intermittent double-unlink.
+      if (internals.maintenanceRetryTimer) {
+        clearTimeout(internals.maintenanceRetryTimer);
+        internals.maintenanceRetryTimer = undefined;
+      }
       await internals.runMaintenanceBatch();
       expect(unlinked).toHaveLength(5);
       expect(internals.pendingTrimSegments).toHaveLength(0);

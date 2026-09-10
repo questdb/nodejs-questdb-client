@@ -102,23 +102,22 @@ continues to come from `addr`, because the typed object intentionally omits
 
 ### Ingress
 
-| Key                                             | Value            | Default   | Meaning                                                                  |
-| ----------------------------------------------- | ---------------- | --------- | ------------------------------------------------------------------------ |
-| `auto_flush`                                    | `on`, `off`      | on        | Master switch for all auto-flush triggers.                               |
-| `auto_flush_rows`                               | integer          | `1000`    | Flush after this many staged rows.                                       |
-| `auto_flush_bytes`                              | integer or `off` | off       | Flush once staged rows reach this estimated size.                        |
-| `auto_flush_interval`                           | integer ms       | `100`     | Flush when this long has passed. Checked as rows are added.              |
-| `close_flush_timeout_millis`                    | integer ms       | `5000`    | Bound on `close()`'s ACK drain. `0` or negative is a fast close.         |
-| `transaction`                                   | `on`, `off`      | off       | Group each flush into a per-table transaction.                           |
-| `request_durable_ack`                           | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.           |
-| `durable_ack_keepalive_interval_millis`         | integer ms       | —         | Poll interval for durable-ACK progress.                                  |
-| `max_name_len`                                  | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                    |
-| `sender_id`                                     | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.      |
-| `max_frame_rejections`                          | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation.   |
-| `poison_min_escalation_window_millis`           | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.              |
-| `catch_up_cap_gap_min_escalation_window_millis` | integer ms       | `300000`  | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. |
-| `connection_listener_inbox_capacity`            | integer          | `64`      | Bound on the connection-event inbox before events are dropped.           |
-| `error_inbox_capacity`                          | integer          | `256`     | Bound on the `onSenderError` inbox before events are dropped.            |
+| Key                                     | Value            | Default   | Meaning                                                                |
+| --------------------------------------- | ---------------- | --------- | ---------------------------------------------------------------------- |
+| `auto_flush`                            | `on`, `off`      | on        | Master switch for all auto-flush triggers.                             |
+| `auto_flush_rows`                       | integer          | `1000`    | Flush after this many staged rows.                                     |
+| `auto_flush_bytes`                      | integer or `off` | off       | Flush once staged rows reach this estimated size.                      |
+| `auto_flush_interval`                   | integer ms       | `100`     | Flush when this long has passed. Checked as rows are added.            |
+| `close_flush_timeout_millis`            | integer ms       | `5000`    | Bound on `close()`'s ACK drain. `0` or negative is a fast close.       |
+| `transaction`                           | `on`, `off`      | off       | Group each flush into a per-table transaction.                         |
+| `request_durable_ack`                   | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.         |
+| `durable_ack_keepalive_interval_millis` | integer ms       | —         | Poll interval for durable-ACK progress.                                |
+| `max_name_len`                          | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                  |
+| `sender_id`                             | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.    |
+| `max_frame_rejections`                  | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation. |
+| `poison_min_escalation_window_millis`   | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.            |
+| `connection_listener_inbox_capacity`    | integer          | `64`      | Bound on the connection-event inbox before events are dropped.         |
+| `error_inbox_capacity`                  | integer          | `256`     | Bound on the `onSenderError` inbox before events are dropped.          |
 
 ### Reconnect and failover
 
@@ -146,17 +145,18 @@ Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
 shown as a dash is applied downstream of the connect string, by the sender or
 session that consumes it.
 
-| Key                         | Value                          | Default       | Meaning                                                                                                                                   |
-| --------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `sf_dir`                    | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                     |
-| `sf_durability`             | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                      |
-| `sf_max_total_bytes`        | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. Without `sf_dir` it retunes the 128 MiB memory queue.                      |
-| `sf_max_segment_bytes`      | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. Set, it caps a frame without `sf_dir` too. |
-| `sf_sync_interval_millis`   | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                        |
-| `sf_append_deadline_millis` | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                          |
-| `initial_connect_retry`     | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                 |
-| `drain_orphans`             | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                       |
-| `max_background_drainers`   | integer                        | —             | Concurrent orphan drainers.                                                                                                               |
+| Key                                             | Value                          | Default       | Meaning                                                                                                                                   |
+| ----------------------------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `sf_dir`                                        | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                     |
+| `sf_durability`                                 | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                      |
+| `sf_max_total_bytes`                            | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. Without `sf_dir` it retunes the 128 MiB memory queue.                      |
+| `sf_max_segment_bytes`                          | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. Set, it caps a frame without `sf_dir` too. |
+| `sf_sync_interval_millis`                       | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                        |
+| `sf_append_deadline_millis`                     | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                          |
+| `initial_connect_retry`                         | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                 |
+| `drain_orphans`                                 | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                       |
+| `max_background_drainers`                       | integer                        | —             | Concurrent orphan drainers.                                                                                                               |
+| `catch_up_cap_gap_min_escalation_window_millis` | integer ms                     | `300000`      | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. Requires `sf_dir`.                                               |
 
 ### Egress
 
@@ -166,7 +166,7 @@ session that consumes it.
 | `initial_credit`    | integer ≥ 0           | `0`     | Starting flow-control credit for a query.          |
 | `buffer_pool_size`  | integer ≥ 1           | `4`     | Reusable result buffers held per session.          |
 | `compression`       | `raw`, `zstd`, `auto` | `raw`   | Result compression to negotiate.                   |
-| `compression_level` | integer, 1..22        | —       | zstd level requested; requires `compression`.      |
+| `compression_level` | integer, 1..22        | —       | zstd level; requires `compression=zstd` or `auto`. |
 | `client_id`         | string                | —       | Identifies this client in server-side diagnostics. |
 
 ### Pool
@@ -180,7 +180,7 @@ them, with one exception noted in the table.
 | `sender_pool_max`         | integer     | `4`       | Sender ceiling.                                                                                                                 |
 | `query_pool_min`          | integer     | `1`       | Query sessions kept warm.                                                                                                       |
 | `query_pool_max`          | integer     | `4`       | Query-session ceiling.                                                                                                          |
-| `acquire_timeout_ms`      | integer ms  | `5000`    | How long `acquire()` waits for a free entry.                                                                                    |
+| `acquire_timeout_ms`      | integer ms  | `5000`    | How long `borrowSender()` and `borrowQuery()` wait for a free entry.                                                            |
 | `query_close_timeout_ms`  | integer ms  | `5000`    | Bound on the CANCEL drain when a query session closes. Also honoured by a standalone egress session built from `egressSession`. |
 | `idle_timeout_ms`         | integer ms  | `60000`   | Idle time before a pooled entry is reaped.                                                                                      |
 | `max_lifetime_ms`         | integer ms  | `1800000` | Absolute lifetime of a pooled entry.                                                                                            |
@@ -340,6 +340,16 @@ The connect-string key
   checkpoint. A power failure can lose the most recent checkpoint window.
 - `"memory"` relies on operating-system writeback. It survives an orderly close and
   normally a process failure, but it makes no power-loss durability promise.
+
+Recovery reports what it had to abandon through `onRecoveryDataLoss`, and logs it when
+no handler is supplied, so journal loss is never silent. Trailing records that never
+reached disk leave no trace in the segment itself -- a lost page reads back exactly like
+the reservation a segment was created with -- so they are detected by comparing what
+recovery could read against the append high-water mark in the journal's own metadata.
+That mark advances whenever an acknowledgement is persisted, which bounds detection to
+what has been acknowledged at least once: a slot whose very first frames are lost before
+any ACK has nothing to compare against. `sf_durability=append` avoids the shape
+altogether by making each append durable before it is reported as accepted.
 
 The two surfaces do not share a default. `storeAndForward.durability` above
 defaults to `"append"`, while the `sf_durability` connect-string key defaults to
@@ -1581,9 +1591,14 @@ The public error classes preserve enough context for policy decisions:
 | `QwpEgressQueryCancelTimeoutError`      | A cancelled query did not produce a terminal server response before the drain deadline                      |
 | `QwpEgressReplayRequiredError`          | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
-Always close senders and sessions in `finally`. Sender publication plus ACK draining is
-bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing handshake is bounded
-by `closeTimeoutMs`. In Node, `connectTimeoutMs` bounds the transport
+Always close senders and sessions in `finally`. For a standalone sender, publication
+plus ACK draining is bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing
+handshake is bounded by `closeTimeoutMs`. A sender from `borrowSender()` is a _lease_:
+its `close()` flushes and returns the slot rather than closing the socket, so it is
+bounded by the session's `ackTimeoutMs` (15 seconds by default, and programmatic-only)
+rather than by `closeFlushTimeoutMs`. To bound a pooled hand-back yourself, use
+`flushAndGetSequence()` followed by `waitForAcknowledged(sequence, timeoutMs)` before
+returning the lease. In Node, `connectTimeoutMs` bounds the transport
 connection and `authTimeoutMs` the authenticated upgrade, the latter inheriting
 the former unless it is set. `closeTimeoutMs` inherits it too: a peer that accepted the
 upgrade and then stopped answering makes the closing handshake run to its full budget,

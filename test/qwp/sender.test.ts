@@ -681,6 +681,30 @@ describe("QWP high-level sender", () => {
     expect(sender.metrics.closed).toBe(true);
   });
 
+  it("finishes closing even when the caller's logger throws", async () => {
+    // `log` is user code, and closeNow() calls it between the last catch and
+    // `closed = true`. A throwing sink used to abort the close there, leaving
+    // the sender at closing-but-not-closed with the logger's error masking the
+    // real one, and the memoized close promise replayed that rejection for
+    // good -- while the transport underneath was already closed.
+    const session = new WatermarkSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+      log: () => {
+        throw new Error("logger exploded");
+      },
+    });
+    // An unfinished row is what makes closeNow() reach the warning.
+    sender.table("events").longColumn("value", 42n);
+
+    await expect(sender.close()).resolves.toBeUndefined();
+    expect(sender.metrics.closed).toBe(true);
+    // A second close is still a no-op rather than a replayed rejection.
+    await expect(sender.close()).resolves.toBeUndefined();
+    expect(sender.metrics.closed).toBe(true);
+  });
+
   it("closes and reports when the close ACK drain times out", async () => {
     const session = new WatermarkSession();
     const sender = new QwpSender(async () => session, {

@@ -242,6 +242,32 @@ const DEFAULT_AUTO_FLUSH_INTERVAL_MS = 100;
 const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
+/**
+ * Wraps the caller's logger so a throwing sink cannot decide whether the
+ * sender finished closing.
+ *
+ * `log` is user code on the same footing as `onError` and `onProgress`, which
+ * already run behind safelyInvoke, but it was called bare. Two of those calls
+ * sit in closeNow() between the last catch and `closed = true`, so a logger
+ * that threw left the sender at `closing: true, closed: false` with the real
+ * failure masked by the logger's own error, and the memoized close promise
+ * replayed that rejection for the rest of the process -- while the transport
+ * underneath had in fact already closed.
+ *
+ * Failures are swallowed rather than reported: the sink is the thing that
+ * failed, so there is nowhere left to report them to.
+ */
+function containedLogger(log: QwpSenderLogger | undefined): QwpSenderLogger {
+  if (!log) return () => undefined;
+  return (level, message) => {
+    try {
+      log(level, message);
+    } catch {
+      // Intentionally ignored; see above.
+    }
+  };
+}
+
 function validateNonNegativeInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new RangeError(`${name} must be a non-negative safe integer`);
@@ -1063,7 +1089,7 @@ export class QwpSender {
         "awaitDurableAck requires awaitServerAck to be enabled",
       );
     }
-    this.log = options.log ?? (() => undefined);
+    this.log = containedLogger(options.log);
   }
 
   async connect(): Promise<boolean> {

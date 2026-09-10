@@ -1287,7 +1287,17 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         if (
           capGapError &&
           !this.orphanStoreAndForward &&
-          attemptPolicy !== "unbounded"
+          attemptPolicy !== "unbounded" &&
+          // A cap gap is only terminal when no endpoint could ever take the
+          // frame, which means it also exceeds this client's own cap. A gap
+          // against the *endpoint's* cap is transient by definition: the
+          // byte-identical frame is accepted by a larger-cap node, so failing
+          // here abandons producer data over a rejection that replay can
+          // satisfy -- the one thing this client's error policy says must not
+          // go terminal. Falling through hands it to the normal retry loop,
+          // which now deprioritizes the endpoint in replayInto() and stays
+          // bounded by the configured attempt and duration budgets.
+          !this.canAnotherEndpointAcceptCatchUp(capGapError.error.frameLength)
         ) {
           throw capGapError.error;
         }
@@ -1469,7 +1479,27 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       this.localMaxBatchSizeBytes,
     );
     this.durableWatermarks.clear();
-    for (const payload of dictionaryCatchupFrames(this.symbolDictionary, cap)) {
+    // Same rule the persisted-frame branch below applies, and for the same
+    // reason: a catch-up frame only this endpoint refuses is an endpoint
+    // problem, not a data problem. Without the deprioritize the endpoint stayed
+    // ranked HEALTHY -- its connect succeeded, and a client-initiated close
+    // records no mid-stream failure -- so it outranked every untried endpoint
+    // on each later sweep and a cluster holding a larger-cap node never reached
+    // it. Measured before this: 301 reconnect attempts, all to the small-cap
+    // node, zero rotations.
+    let catchUpFrames: Uint8Array[];
+    try {
+      catchUpFrames = dictionaryCatchupFrames(this.symbolDictionary, cap);
+    } catch (error) {
+      if (
+        error instanceof QwpCatchUpCapGapError &&
+        this.isEndpointSpecificCap(connection, error.frameLength)
+      ) {
+        connection.deprioritizeEndpoint?.();
+      }
+      throw error;
+    }
+    for (const payload of catchUpFrames) {
       const frame: ReplayFrame = {
         frameSequence: -1n,
         payload,
@@ -2222,8 +2252,21 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return (
       endpointCap !== undefined &&
       payloadLength > endpointCap &&
-      (this.localMaxBatchSizeBytes === undefined ||
-        payloadLength <= this.localMaxBatchSizeBytes)
+      this.canAnotherEndpointAcceptCatchUp(payloadLength)
+    );
+  }
+
+  /**
+   * Whether a frame this endpoint refused could still be taken elsewhere. The
+   * client's own cap applies to every endpoint, so a frame above it is refused
+   * by all of them and the rejection is deterministic under replay; below it,
+   * only this endpoint's negotiated cap stood in the way and another node may
+   * be larger.
+   */
+  private canAnotherEndpointAcceptCatchUp(payloadLength: number): boolean {
+    return (
+      this.localMaxBatchSizeBytes === undefined ||
+      payloadLength <= this.localMaxBatchSizeBytes
     );
   }
 

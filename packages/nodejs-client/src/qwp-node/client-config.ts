@@ -1081,11 +1081,38 @@ function optionalBoolean(
   );
 }
 
+/**
+ * `setTimeout` and `setInterval` silently clamp a delay above this to 1 ms and
+ * warn, so an over-large millisecond option does not merely fail to take
+ * effect -- it inverts into an immediate one. The store and the reconnect
+ * deadline already guard the same ceiling
+ * (`file-replay-store.ts`, `_internal/reconnect-deadline.ts`,
+ * `ingress-session.ts`); the connect-string parser was the way in that did not.
+ */
+const MAX_TIMER_DELAY_MS = 0x7fffffff;
+
+/**
+ * Millisecond keys whose names do not end in `_ms` or `_millis`. Listed rather
+ * than inferred so a new one has to be considered rather than silently missed.
+ */
+const UNSUFFIXED_TIMER_KEYS: ReadonlySet<string> = new Set([
+  "connect_timeout",
+  "auto_flush_interval",
+]);
+
+function isTimerKey(key: string): boolean {
+  return (
+    key.endsWith("_ms") ||
+    key.endsWith("_millis") ||
+    UNSUFFIXED_TIMER_KEYS.has(key)
+  );
+}
+
 function optionalInteger(
   value: string | undefined,
   key: string,
   minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER,
+  maximum = isTimerKey(key) ? MAX_TIMER_DELAY_MS : Number.MAX_SAFE_INTEGER,
 ): number | undefined {
   if (value === undefined) return undefined;
   if (!/^-?\d+$/.test(value)) throw new Error(`Invalid ${key}: '${value}'`);

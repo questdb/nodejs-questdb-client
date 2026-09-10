@@ -143,11 +143,17 @@ interface ZstdSizeError {
 export function decompressQwpZstdFrame(frame: Uint8Array): Uint8Array {
   const info = inspectZstdFrame(frame);
   validateSingleZstdFrame(frame, info);
+  // Supplying the output buffer is what makes the bound real. Left to allocate
+  // for itself the decoder sizes its buffer from the frame's *window*, not its
+  // declared content size, and falls back to an unbounded chunk-accumulating
+  // path whenever the two disagree -- exactly the case a hostile frame arranges.
+  // On that path the patched size assertions, which all guard on writing into a
+  // caller buffer, never run. Passing one sized to the content size validated
+  // above keeps the allocation at or below QWP_MAX_ZSTD_DECOMPRESSED_SIZE by
+  // construction and puts every write back under those assertions.
+  const output = new Uint8Array(info.contentSize);
   try {
-    // The patched one-shot decoder writes directly into its bounded output and
-    // verifies its exact write offset without the streaming decoder's window
-    // shifts or a caller-provided output buffer.
-    return decompress(frame);
+    return decompress(frame, output);
   } catch (error) {
     const sizeError = error as ZstdSizeError;
     if (

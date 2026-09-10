@@ -126,6 +126,10 @@ describe("QWP typed query binds", () => {
 
     expectNullHeader(reader, QWP_COLUMN_TYPE.BOOLEAN);
     expectNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
+    // VARCHAR is the only variable-width bind type, so it is the only null
+    // that still carries an offset table: one entry, value zero, exactly as
+    // the non-null form and the ingress column writer emit it.
+    expect(reader.readUint32()).toBe(0);
     expectNullHeader(reader, QWP_COLUMN_TYPE.UUID);
     expectNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL64);
     expect(reader.readUint8()).toBe(4);
@@ -136,6 +140,37 @@ describe("QWP typed query binds", () => {
     expectNullHeader(reader, QWP_COLUMN_TYPE.GEOHASH);
     expect(readQwpVarint(reader)).toBe(60n);
     reader.expectEnd();
+  });
+
+  it("keeps a bind after a null VARCHAR readable at the right offset", () => {
+    // Binds carry no length prefix and no delimiter, so a reader walking the
+    // section relies entirely on each bind being self-describing. A null
+    // VARCHAR that skipped its offset table made the *next* bind's type byte
+    // and null flag look like the first four bytes of that table, so
+    // everything after it -- here the INT, and in a real QUERY_REQUEST the
+    // trailing queryFlags varint too -- was read against the wrong boundary.
+    const encoded = encodeQwpBinds((binds) =>
+      binds.setVarchar(0, null).setInt(1, 0x01020304),
+    );
+    expect(encoded.count).toBe(2);
+
+    const reader = new QwpByteReader(encoded.payload);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
+    expect(reader.readUint32()).toBe(0);
+    expect(reader.readUint8()).toBe(QWP_COLUMN_TYPE.INT);
+    expect(reader.readUint8()).toBe(0);
+    expect(reader.readInt32()).toBe(0x01020304);
+    reader.expectEnd();
+
+    // An empty VARCHAR and a null VARCHAR differ only in the null flag and the
+    // absent value bytes; both carry the leading offset.
+    const empty = encodeQwpBinds((binds) => binds.setVarchar(0, ""));
+    const emptyReader = new QwpByteReader(empty.payload);
+    expect(emptyReader.readUint8()).toBe(QWP_COLUMN_TYPE.VARCHAR);
+    expect(emptyReader.readUint8()).toBe(0);
+    expect(emptyReader.readUint32()).toBe(0);
+    expect(emptyReader.readUint32()).toBe(0);
+    emptyReader.expectEnd();
   });
 
   it("places typed binds into QUERY_REQUEST without exposing raw bytes", () => {

@@ -419,6 +419,18 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     report: QwpNodeReplayDataLossReport,
   ) => void;
   private readonly records = new Map<bigint, StoredRecord>();
+  /**
+   * Highest sequence in `records`, maintained alongside the map rather than
+   * scanned for. appendOnce() needs it on every append to check contiguity,
+   * and reading it by walking the map made each append O(backlog) and an
+   * outage O(n^2): 31.1k append/s at 20k pending frames fell to 0.5k at 1.1M.
+   * That is the same defect, and the same remedy, as `pendingReplayBytes` in
+   * reconnecting-ingress-connection.ts. Inserts only ever add a higher
+   * sequence and acknowledgement only ever removes a prefix, so the counter
+   * cannot drift from what the scan reported; releaseRecordSequence() keeps it
+   * honest if that ever stops being true.
+   */
+  private lastRecordSequence?: bigint;
   private readonly segments = new Map<string, StoredSegment>();
   private readonly segmentOrder: StoredSegment[] = [];
   private readonly symbols: string[] = [];
@@ -431,6 +443,15 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private dictionaryFileSize = 0;
   private dictionaryLoadError?: unknown;
   private acknowledgedThrough = -1n;
+  /**
+   * Highest sequence a durable ACK record says had been appended, or -1n when
+   * no record names one. Recovery compares it with what it could actually read
+   * back: a clean trailing-page loss leaves the tail indistinguishable from
+   * space that was never written, so this is the only thing that can tell the
+   * two apart. It rides along in the ACK watermark's unused second field --
+   * a Node-private file -- so the cross-client segment format is untouched.
+   */
+  private durableAppendedThrough = -1n;
   private dictionaryDirty = false;
   private acknowledgementDirty = false;
   /**
@@ -900,11 +921,47 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             );
           }
           this.records.set(record.frameSequence, stored);
+          this.trackRecordSequence(record.frameSequence);
           recovered.push({
             frameSequence: record.frameSequence,
             payloadLength: record.payloadLength,
           });
           previous = record.frameSequence;
+        }
+        // A trailing page that never reached disk reads back as zeros, which
+        // is byte-for-byte what a segment's unwritten reservation looks like:
+        // no torn record, no CRC mismatch, no bytes to count. Every other
+        // damage shape leaves residue and is reported, so this one used to be
+        // the single way accepted rows could disappear in silence -- and the
+        // producer had already been told they were journalled. The durable
+        // append high-water mark is the only witness. Compare against the
+        // acknowledged watermark too, so a fully drained and trimmed journal
+        // is not mistaken for a loss.
+        const highestRecovered =
+          recovered.length > 0
+            ? recovered[recovered.length - 1].frameSequence
+            : -1n;
+        const highestAccountedFor =
+          highestRecovered > acknowledgedThrough
+            ? highestRecovered
+            : acknowledgedThrough;
+        if (
+          this.durableAppendedThrough > highestAccountedFor &&
+          this.durableAppendedThrough >= 0n
+        ) {
+          this.reportRecoveryDataLoss({
+            directory: this.directory,
+            segmentFile:
+              this.segmentOrder.length > 0
+                ? basename(this.segmentOrder[this.segmentOrder.length - 1].path)
+                : "(none)",
+            // The extent is unmeasurable: the bytes left no trace.
+            discardedBytes: 0,
+            reason:
+              `the journal recorded frame sequences through ` +
+              `${this.durableAppendedThrough} but only ${highestAccountedFor} ` +
+              `could be read back; the trailing records never reached disk`,
+          });
         }
         if (recovered.length === 0 && acknowledgedThrough >= 0n) {
           await this.removeAcknowledgedThrough();
@@ -1113,6 +1170,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         }
         this.records.delete(sequence);
       }
+      this.releaseRecordSequence();
       for (const segment of emptiedSegments) {
         if (this.activeSegment === segment) this.activeSegment = undefined;
         this.pendingTrimSegments.push(segment);
@@ -1541,7 +1599,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       );
     }
     const lastSequence =
-      lastMapKey(this.records) ??
+      this.lastRecordSequence ??
       (this.acknowledgedThrough >= 0n ? this.acknowledgedThrough : undefined);
     if (
       lastSequence !== undefined &&
@@ -1615,6 +1673,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       crc32c: bytes.header.readUInt32LE(0),
       segment,
     });
+    this.trackRecordSequence(record.frameSequence);
     this.scheduleHotSpare();
   }
 
@@ -2338,6 +2397,53 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     await this.writeManifest(head, firstSequence);
   }
 
+  /**
+   * Republishes the boundaries of the segment set recovery actually kept.
+   *
+   * This is the one caller allowed to move a boundary backwards. Recovery
+   * retires a flagged, record-free active segment, so the pair it computes here
+   * can name an earlier base than the manifest on disk -- and the monotonic
+   * clamp in writeManifest() raised it straight back, after which the equality
+   * check found nothing to write. The manifest went on naming a segment the
+   * very next statement unlinked, and the following load rejected the whole
+   * journal as a chain mismatch, abandoning every intact frame in the segments
+   * that survived. The single-segment case hid it, because the store removes
+   * the manifest outright when nothing is left.
+   *
+   * Retracting is safe precisely here: this runs inside recovery, after every
+   * segment has been scanned, so `segmentOrder` is the directory as it will
+   * stand once the pending unlinks complete. Every other writer publishes a
+   * boundary it is about to advance to, which is what the clamp protects.
+   */
+  /** Records a newly stored sequence as the highest one held. */
+  private trackRecordSequence(frameSequence: bigint): void {
+    if (
+      this.lastRecordSequence === undefined ||
+      frameSequence > this.lastRecordSequence
+    ) {
+      this.lastRecordSequence = frameSequence;
+    }
+  }
+
+  /**
+   * Keeps {@link lastRecordSequence} correct after records are removed.
+   * Acknowledgement removes a prefix, so the common cases are "nothing left"
+   * and "the highest is untouched"; the rescan is the safety net for a removal
+   * pattern that takes the highest while leaving others behind.
+   */
+  private releaseRecordSequence(): void {
+    if (this.records.size === 0) {
+      this.lastRecordSequence = undefined;
+      return;
+    }
+    if (
+      this.lastRecordSequence !== undefined &&
+      !this.records.has(this.lastRecordSequence)
+    ) {
+      this.lastRecordSequence = lastMapKey(this.records);
+    }
+  }
+
   private async rewriteManifestForCurrentSegments(): Promise<void> {
     if (this.segmentOrder.length === 0) {
       await this.removeManifest();
@@ -2346,6 +2452,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     await this.writeManifest(
       this.segmentOrder[0].firstSequence,
       this.segmentOrder[this.segmentOrder.length - 1].firstSequence,
+      true,
     );
   }
 
@@ -2357,8 +2464,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private async writeManifest(
     headBase: bigint,
     activeBase: bigint,
+    allowRetraction = false,
   ): Promise<void> {
-    if (this.manifestGeneration > 0n) {
+    if (this.manifestGeneration > 0n && !allowRetraction) {
       if (
         this.manifestHeadBase !== undefined &&
         headBase < this.manifestHeadBase
@@ -2459,6 +2567,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.ackGeneration = record.generation;
     this.acknowledgedThrough = record.first;
+    // Only a record this implementation wrote carries a high-water mark, and
+    // it only ever writes one alongside a real acknowledgement, so the second
+    // field is meaningful exactly when the first is non-negative. A record
+    // that predates the field, or one written by something else, leaves the
+    // mark absent rather than reading its zero as "sequence 0".
+    this.durableAppendedThrough = record.first >= 0n ? record.second : -1n;
     return this.acknowledgedThrough;
   }
 
@@ -2468,11 +2582,19 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     if (frameSequence <= this.acknowledgedThrough) return;
     const finalPath = join(this.directory, ACK_FILE);
     const nextGeneration = this.ackGeneration + 1n;
+    // The second slot carries the append high-water mark. It costs nothing
+    // here -- the record is being written anyway -- and it is what lets
+    // recovery notice records that never reached disk.
+    const appendedThrough =
+      this.lastRecordSequence !== undefined &&
+      this.lastRecordSequence > frameSequence
+        ? this.lastRecordSequence
+        : frameSequence;
     const record = encodeMetadataRecord(
       ACK_MAGIC,
       nextGeneration,
       frameSequence,
-      0n,
+      appendedThrough,
     );
     try {
       const file = await openMetadataFile(finalPath);
@@ -2496,6 +2618,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       }
       this.ackGeneration = nextGeneration;
       this.acknowledgedThrough = frameSequence;
+      this.durableAppendedThrough = appendedThrough;
     } catch (error) {
       throw new QwpReplayStoreError(
         `could not persist QWP store-and-forward ACK watermark [frameSequence=${frameSequence}]`,

@@ -377,11 +377,33 @@ export class QwpBindValues {
         return this.setNullDecimal256(index, 0);
       case QWP_COLUMN_TYPE.GEOHASH:
         return this.setNullGeohash(index, GEOHASH_MIN_BITS);
+      case QWP_COLUMN_TYPE.VARCHAR:
+        return this.setNullVarchar(index);
       default:
         this.advance(index);
         this.writeHeader(type, true);
         return this;
     }
+  }
+
+  /**
+   * A bind is one row of the variable-width column layout, so VARCHAR carries
+   * an offset table of `nonNullCount + 1` entries whether or not the value is
+   * null. That is the same `writeUint32(0)` the non-null path above emits, and
+   * the reader in result-batch.ts requires it even at a count of zero.
+   *
+   * Omitting it made a null VARCHAR three bytes long. Binds carry no length
+   * prefix and no delimiter, so the next bind's type byte and null flag were
+   * consumed as that missing offset and everything after it in the section --
+   * including the trailing queryFlags varint -- was read against the wrong
+   * boundary. VARCHAR is the only variable-width bind type, which is why it is
+   * the only one the shared `default:` arm above got wrong.
+   */
+  private setNullVarchar(index: number): this {
+    this.advance(index);
+    this.writeHeader(QWP_COLUMN_TYPE.VARCHAR, true);
+    this.writer.writeUint32(0);
+    return this;
   }
 
   setNullDecimal64(index: number, scale: number): this {
