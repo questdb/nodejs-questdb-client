@@ -766,3 +766,42 @@ describe("QWP unified Node client configuration", () => {
     ).not.toThrow();
   });
 });
+
+/**
+ * `directory` is a required string on the options type, so only a JavaScript
+ * caller can omit it, and the connect string cannot reach this at all: without
+ * `sf_dir` there is no store-and-forward section. Omitting it produced an
+ * unnamed `TypeError: Cannot read properties of undefined (reading 'trim')`
+ * from whichever internal dereference ran first, at connect time, while the
+ * empty string a line below already had a diagnostic naming the option.
+ */
+describe("store-and-forward requires a directory", () => {
+  it("names the option when the replay store is built without one", () => {
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({
+          maxBytes: 1024 * 1024,
+        } as unknown as ConstructorParameters<
+          typeof QwpNodeFileReplayStore
+        >[0]),
+    ).toThrow(/requires a 'directory'/);
+  });
+
+  it("names the option when a Sender connects without one", async () => {
+    const sender = new Sender({
+      protocol: "ws",
+      host: "127.0.0.1",
+      port: 1,
+      log: () => undefined,
+      qwp: { webSocket: { storeAndForward: { maxBytes: 1024 * 1024 } } },
+    } as never);
+    await expect(sender.connect()).rejects.toThrow(/requires a 'directory'/);
+    await sender.close().catch(() => undefined);
+  });
+
+  it("keeps the separate message for a blank directory", () => {
+    expect(() => new QwpNodeFileReplayStore({ directory: "   " })).toThrow(
+      /must not be empty/,
+    );
+  });
+});

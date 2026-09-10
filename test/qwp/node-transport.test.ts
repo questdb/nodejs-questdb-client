@@ -780,6 +780,11 @@ describe("QWP Node transport", () => {
         await expect(
           session.sendFrame(Uint8Array.of(2)),
         ).resolves.toMatchObject({ sequence: 0n });
+        // Recovery delivers this one before the session exists, so it cannot
+        // pass through the inbox the session owns. The documented counter read
+        // zero for it, which is the one data-loss event an operator polling
+        // the metrics snapshot most needs to see.
+        expect(session.metrics.deliveredErrorNotifications).toBe(1);
       } finally {
         await session.close();
       }

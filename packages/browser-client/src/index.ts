@@ -9,7 +9,10 @@ import {
   QwpWebSocketLike,
   validateQwpWebSocketTimeouts,
 } from "../../client-core/src/_qwp/_internal/websocket-connection";
-import { createQwpFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/failover";
+import {
+  assertUniformQwpEndpointScheme,
+  createQwpFailoverConnectionFactory,
+} from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
 import {
@@ -1062,6 +1065,11 @@ function resolveQwpBrowserClientOptions(
         browserClusterEndpoint(endpoint, "read/v1"),
       ),
     };
+    // browserClusterEndpoint() checks each URL on its own; only comparing them
+    // catches a cleartext entry under a `wss` cluster, which a failover sweep
+    // would hand this client's session credentials and rows.
+    assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
+    assertUniformQwpEndpointScheme(egress.url, egress.failoverUrls);
     return {
       ingress,
       egress,

@@ -1481,13 +1481,17 @@ export class QwpSender {
     try {
       const words: bigint[] = [];
       for (const [index, word] of given.entries()) {
-        if (typeof word !== "bigint") {
-          throw new TypeError(`LONG256 word ${index} must be a bigint`);
-        }
-        if (BigInt.asIntN(64, word) !== word) {
-          throw new RangeError(`LONG256 word ${index} exceeds signed int64`);
-        }
-        words.push(word);
+        // Same limb rule as the compiled writer's checkedLimb64 and as
+        // QwpBindValues.setLong256: a word is 64 bits, so the signed and the
+        // unsigned spelling of one bit pattern are both accepted. Requiring
+        // the signed one split the three sibling APIs on the same client --
+        // the writer staged a word this setter rejected -- with nothing in the
+        // signatures or QWP.md to say a conversion was needed. Narrowed back
+        // to the signed representation for littleEndianWords, exactly as
+        // long256WordBytes does; the bytes are the same either way.
+        words.push(
+          BigInt.asIntN(64, checkedLimb64(word, `LONG256 word ${index}`)),
+        );
       }
       return this.addColumn(
         name,

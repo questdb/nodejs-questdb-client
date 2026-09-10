@@ -280,12 +280,18 @@ export class QwpBindValues {
     word2: QwpInt64,
     word3: QwpInt64,
   ): this {
+    // A 64-bit limb, not a signed integer, so both spellings of one bit
+    // pattern are accepted -- the rule setUuid already applies to its limbs
+    // and the compiled writer's checkedLimb64 applies to these very words.
+    // checkedInt64 here rejected the natural unsigned split of a 256-bit
+    // value, BigInt.asUintN(64, v >> 64n*i), so a hash the compiled writer had
+    // just ingested could not be used to build the bind that queries it.
     const words = [word0, word1, word2, word3].map((word, wordIndex) =>
-      checkedInt64(word, `LONG256 word ${wordIndex}`),
+      checkedUint64Bits(word, `LONG256 word ${wordIndex}`),
     );
     this.advance(index);
     this.writeHeader(QWP_COLUMN_TYPE.LONG256, false);
-    for (const word of words) this.writer.writeBigInt64(word);
+    for (const word of words) this.writer.writeBigUint64(word);
     return this;
   }
 

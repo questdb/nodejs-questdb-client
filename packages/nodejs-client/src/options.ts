@@ -11,6 +11,9 @@ import * as qwpNode from "./qwp";
 // Imported directly rather than through ./qwp: this is a Sender-side guard, and
 // ./qwp is re-exported wholesale by the package root.
 import { warnUnsupportedQwpSenderKeys } from "./qwp-node/client-config";
+// Imported directly for the same reason: a Sender-side guard on routing the
+// QWP schema never saw, kept out of the package root's re-export.
+import { assertUniformQwpEndpointScheme } from "../../client-core/src/_qwp/_internal/failover";
 import type {
   QwpNodeClientOptions,
   QwpNodeIngressOptions,
@@ -131,16 +134,20 @@ function resolveQwpConfig(
   // not expose. Fields available in both forms are applied only after the
   // complete connect string has been parsed and validated, so typed ingress
   // routing and producer identity cannot be overwritten by URL defaults.
-  return {
-    ...resolved,
-    ingress: {
-      ...resolved.ingress,
-      ...(failoverUrls === undefined ? {} : { failoverUrls }),
-      ...(target === undefined ? {} : { target }),
-      ...(zone === undefined ? {} : { zone }),
-      ...(senderId === undefined ? {} : { senderId }),
-    },
+  const ingress = {
+    ...resolved.ingress,
+    ...(failoverUrls === undefined ? {} : { failoverUrls }),
+    ...(target === undefined ? {} : { target }),
+    ...(zone === undefined ? {} : { zone }),
+    ...(senderId === undefined ? {} : { senderId }),
   };
+  // These endpoints arrive after the QWP schema has finished, so they are the
+  // one routing input the connect string never validated. A `ws` entry under a
+  // `wss` string used to send this sender's credentials over a cleartext
+  // socket; the failover factory enforces the same rule, but reporting it here
+  // names the option while the sender is still being built.
+  assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
+  return { ...resolved, ingress };
 }
 
 const HTTP_PORT = 9000;

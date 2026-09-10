@@ -1,5 +1,49 @@
 import { isPromiseLike } from "./safe-callback";
 
+/**
+ * Carries a count of `onSenderError` deliveries that were made before an
+ * ingress session existed, so its metrics can include them.
+ *
+ * Node store-and-forward recovery reports an abandoned or quarantined journal
+ * while the session is still being built, so those deliveries cannot pass
+ * through the inbox the session owns; `deliveredErrorNotifications` read zero
+ * for exactly the data-loss events the counter exists to surface.
+ *
+ * Keyed by a symbol rather than declared on QwpIngressSessionOptions: that
+ * interface is published by both packages, and this is an internal handoff
+ * between the Node entry point and the session, not something a caller sets.
+ * `Symbol.for` rather than a module-private symbol because the two public
+ * bundles each emit their own copy of this module.
+ */
+export const QWP_PRIOR_SENDER_ERROR_DELIVERIES = Symbol.for(
+  "questdb.qwp.priorSenderErrorDeliveries.v1",
+);
+
+/** Attaches the pre-session delivery count to an options object in place. */
+export function withPriorQwpSenderErrorDeliveries<T extends object>(
+  options: T,
+  source: () => number,
+): T {
+  // Enumerable so object spread carries it: the recovery path rebuilds the
+  // session options as `{ ...effectiveSessionOptions, replayStore }` before
+  // each retry, and spread copies only enumerable own properties. A symbol key
+  // stays out of Object.keys, JSON.stringify and for...in regardless.
+  Object.defineProperty(options, QWP_PRIOR_SENDER_ERROR_DELIVERIES, {
+    value: source,
+    enumerable: true,
+    configurable: true,
+  });
+  return options;
+}
+
+/** Reads the pre-session delivery count carried by an options object. */
+export function priorQwpSenderErrorDeliveries(options: object): number {
+  const source = (options as Record<symbol, unknown>)[
+    QWP_PRIOR_SENDER_ERROR_DELIVERIES
+  ];
+  return typeof source === "function" ? Number(source()) || 0 : 0;
+}
+
 export interface QwpNotificationDispatcherMetrics {
   readonly pending: number;
   readonly delivered: number;

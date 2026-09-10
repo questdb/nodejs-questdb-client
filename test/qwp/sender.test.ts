@@ -2833,3 +2833,60 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 });
+
+/**
+ * The fluent setter, the compiled writer and QwpBindValues all take the same
+ * four 64-bit words, so they must agree on what a word is. long256Column
+ * demanded the signed spelling while the writer's checkedLimb64 accepted
+ * either, so a hash split the natural unsigned way could be ingested through
+ * one API and not the other, and could not be used to build the bind that
+ * queries it back.
+ */
+describe("QWP long256 words accept either 64-bit spelling", () => {
+  const staged = async (
+    word0: bigint,
+  ): Promise<ReturnType<typeof column>["values"]> => {
+    const session = new PublishingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.connect();
+    sender.table("t").long256Column("hash", word0, 0n, 0n, 0n);
+    await sender.atNow();
+    await sender.flush();
+    await sender.close();
+    return column(session.sends[0].tables[0], "hash").values;
+  };
+
+  it("stages the unsigned and signed spellings alike", async () => {
+    expect(await staged(0xffffffffffffffffn)).toEqual(await staged(-1n));
+  });
+
+  it("matches what the compiled writer accepts for the same words", async () => {
+    const session = new PublishingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.connect();
+    const writer = sender.writer("t", {
+      hash: long256(),
+      ts: designatedTimestamp("ns"),
+    });
+    // Unsigned in both, which is what BigInt.asUintN(64, …) produces.
+    expect(() =>
+      writer.row({
+        hash: { words: [0xffffffffffffffffn, 0n, 0n, 0n] },
+        ts: 1n,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      sender.table("t").long256Column("hash", 0xffffffffffffffffn, 0n, 0n, 0n),
+    ).not.toThrow();
+    await sender.close();
+  });
+
+  it("still rejects a word wider than 64 bits", () => {
+    const sender = new QwpSender(async () => new PublishingSession(), {
+      autoFlush: false,
+    });
+    expect(() =>
+      sender.table("t").long256Column("hash", 1n << 64n, 0n, 0n, 0n),
+    ).toThrow(/64 bits/);
+  });
+});

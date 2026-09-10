@@ -590,3 +590,151 @@ describe("QWP wss accepts a tunnelling upgrade agent", () => {
     expect((error as { retryable?: unknown }).retryable).toBe(false);
   });
 });
+
+/**
+ * A failover sweep applies one connection configuration to every endpoint in
+ * turn, so the scheme of the entry it reaches decides whether this sender's
+ * credentials and rows travel encrypted. The connect string cannot express a
+ * mixture -- every `addr` entry inherits the string's own schema -- and the
+ * programmatic `wss` path already refused one, because the https.Agent it
+ * builds is rejected for a cleartext endpoint. Typed `qwp.webSocket.failoverUrls`
+ * were applied after the QWP schema had finished, so they were the one routing
+ * input nothing validated, and only when no tls_verify/tls_roots key made that
+ * agent exist: the exposure was limited to the configuration that verifies
+ * against the system trust store.
+ */
+describe("QWP failover endpoints share the preferred scheme", () => {
+  const cleartextPeer = async (): Promise<{
+    port: number;
+    upgrades: http.IncomingHttpHeaders[];
+    close: () => Promise<void>;
+  }> => {
+    const upgrades: http.IncomingHttpHeaders[] = [];
+    const server = http.createServer();
+    server.on("upgrade", (request, socket) => {
+      upgrades.push({ ...request.headers });
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    return {
+      port: (server.address() as AddressInfo).port,
+      upgrades,
+      close: () =>
+        new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  };
+
+  it("rejects a ws failover under a wss connect string", async () => {
+    await expect(
+      SenderOptions.fromConfig(
+        "wss::addr=primary.example:9000;username=alice;password=secret;",
+        {
+          qwp: {
+            webSocket: {
+              failoverUrls: ["ws://backup.example:9000/write/v4"],
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow(/uses 'ws' but the preferred endpoint uses 'wss'/);
+  });
+
+  it("never opens the cleartext upgrade it used to send credentials on", async () => {
+    const peer = await cleartextPeer();
+    try {
+      await expect(
+        Sender.fromConfig(
+          `wss::addr=127.0.0.1:1;username=alice;password=secret;`,
+          {
+            qwp: {
+              webSocket: {
+                failoverUrls: [`ws://127.0.0.1:${peer.port}/write/v4`],
+              },
+            },
+            log: () => undefined,
+          },
+        ),
+      ).rejects.toThrow(RangeError);
+      expect(peer.upgrades).toHaveLength(0);
+    } finally {
+      await peer.close();
+    }
+  });
+
+  it("rejects the mixture on the programmatic path too", () => {
+    expect(
+      () =>
+        new Sender({
+          protocol: "wss",
+          host: "primary.example",
+          port: 9000,
+          username: "alice",
+          password: "secret",
+          qwp: {
+            webSocket: {
+              failoverUrls: ["ws://backup.example:9000/write/v4"],
+            },
+          },
+        } as never),
+    ).toThrow(/must share a scheme/);
+  });
+
+  it("still accepts a uniform cluster of either scheme", async () => {
+    for (const [schema, failover] of [
+      ["wss", "wss://backup.example:9000/write/v4"],
+      ["ws", "ws://backup.example:9000/write/v4"],
+    ] as const) {
+      const options = await SenderOptions.fromConfig(
+        `${schema}::addr=primary.example:9000;`,
+        { qwp: { webSocket: { failoverUrls: [failover] } } },
+      );
+      expect(qwpConfig(options)?.ingress.failoverUrls?.map(String)).toEqual([
+        failover,
+      ]);
+    }
+  });
+});
+
+/**
+ * `ws` builds the whole upgrade request inside its constructor and performs no
+ * I/O there, so everything it throws describes the arguments. The reconnect
+ * classifier retries anything carrying no `retryable` flag, so marking only
+ * ERR_INVALID_PROTOCOL left every sibling fault -- a credential carrying a
+ * control character, most often a token read from a file with its trailing
+ * newline -- retried for the whole budget and then reported as an elapsed
+ * deadline naming nothing, indistinguishable from an unreachable server.
+ */
+describe("QWP reports a permanent upgrade-argument fault immediately", () => {
+  it("surfaces a control character in a token instead of retrying it", async () => {
+    const sender = new Sender({
+      protocol: "ws",
+      host: "127.0.0.1",
+      port: 1,
+      token: "header.payload.signature\n",
+      log: () => undefined,
+      qwp: { session: { reconnect: { maxDurationMs: 30_000 } } },
+    } as never);
+    const started = Date.now();
+    await expect(sender.connect()).rejects.toThrow(/Authorization/);
+    // The point of the fix: it fails on the first attempt rather than after
+    // the reconnect budget, which is unbounded under store-and-forward.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await sender.close().catch(() => undefined);
+  });
+
+  it("still retries a genuinely unreachable endpoint", async () => {
+    const sender = new Sender({
+      protocol: "ws",
+      host: "127.0.0.1",
+      port: 1,
+      log: () => undefined,
+      qwp: { session: { reconnect: { maxDurationMs: 600 } } },
+    } as never);
+    const started = Date.now();
+    await expect(sender.connect()).rejects.toThrow(/reconnect/i);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(500);
+    await sender.close().catch(() => undefined);
+  });
+});

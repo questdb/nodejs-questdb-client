@@ -303,3 +303,52 @@ describe("QWP typed query binds", () => {
     ).toThrow(/too many binds/);
   });
 });
+
+/**
+ * A LONG256 word is a 64-bit limb, not a signed integer, so the two spellings
+ * of one bit pattern must be interchangeable everywhere. They were not: the
+ * compiled writer accepted the unsigned form through checkedLimb64, while this
+ * bind and QwpSender.long256Column demanded the signed one. Splitting a
+ * 256-bit value the natural way, BigInt.asUintN(64, value >> 64n * i), then
+ * produced words the writer had just ingested but no bind could carry, with
+ * nothing in the signatures or QWP.md to say a conversion was required.
+ */
+describe("LONG256 binds accept either 64-bit spelling", () => {
+  const long256Payload = (word0: bigint): string =>
+    Buffer.from(
+      encodeQwpBinds((binds) => {
+        binds.setLong256(0, word0, 0n, 0n, 0n);
+      }).payload,
+    ).toString("hex");
+
+  it("encodes the unsigned and signed spellings identically", () => {
+    expect(long256Payload(0xffffffffffffffffn)).toBe(long256Payload(-1n));
+  });
+
+  it("accepts every word position unsigned", () => {
+    expect(() =>
+      encodeQwpBinds((binds) => {
+        binds.setLong256(
+          0,
+          0xffffffffffffffffn,
+          0xfffffffffffffffen,
+          0x8000000000000000n,
+          0n,
+        );
+      }),
+    ).not.toThrow();
+  });
+
+  it("still rejects a word that does not fit 64 bits", () => {
+    expect(() =>
+      encodeQwpBinds((binds) => {
+        binds.setLong256(0, 1n << 64n, 0n, 0n, 0n);
+      }),
+    ).toThrow(/64 bits/);
+    expect(() =>
+      encodeQwpBinds((binds) => {
+        binds.setLong256(0, -(1n << 63n) - 1n, 0n, 0n, 0n);
+      }),
+    ).toThrow(/64 bits/);
+  });
+});

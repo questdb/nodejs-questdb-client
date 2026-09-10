@@ -346,10 +346,16 @@ no handler is supplied, so journal loss is never silent. Trailing records that n
 reached disk leave no trace in the segment itself -- a lost page reads back exactly like
 the reservation a segment was created with -- so they are detected by comparing what
 recovery could read against the append high-water mark in the journal's own metadata.
-That mark advances whenever an acknowledgement is persisted, which bounds detection to
-what has been acknowledged at least once: a slot whose very first frames are lost before
-any ACK has nothing to compare against. `sf_durability=append` avoids the shape
-altogether by making each append durable before it is reported as accepted.
+That mark lives beside the acknowledgement watermark and advances whenever one is
+persisted, so detection is bounded by what that pair currently records. Two shapes fall
+outside it. A slot whose very first frames are lost before any ACK has nothing to
+compare against. So does a slot that has fully drained: an empty journal keeps no
+watermark, both values reset, and the records appended after the last acknowledgement
+are again undetectable until the next one is persisted. A healthy producer drains
+continuously, so this is the steady state rather than an edge case, and it is why
+`onRecoveryDataLoss` reporting nothing is not by itself proof that nothing was lost.
+`sf_durability=append` avoids the shape altogether by making each append durable before
+it is reported as accepted.
 
 The two surfaces do not share a default. `storeAndForward.durability` above
 defaults to `"append"`, while the `sf_durability` connect-string key defaults to

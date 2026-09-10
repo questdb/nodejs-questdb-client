@@ -22,6 +22,7 @@ import {
   validateQwpWebSocketTimeouts,
 } from "../../client-core/src/_qwp/_internal/websocket-connection";
 import {
+  assertUniformQwpEndpointScheme,
   createQwpFailoverConnectionFactory,
   createQwpFailoverHealthTracker,
   QwpFailoverHealthTracker,
@@ -29,6 +30,7 @@ import {
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
+import { withPriorQwpSenderErrorDeliveries } from "../../client-core/src/_qwp/_internal/notification-dispatcher";
 import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
 import {
   QWP_INITIAL_CONNECT_MODE,
@@ -631,18 +633,25 @@ function connectQwpNodeEndpoint(
       },
     });
   } catch (error) {
-    // `ws` builds the upgrade request inside its constructor, so an agent that
-    // cannot serve the endpoint's scheme surfaces here, synchronously, as
-    // ERR_INVALID_PROTOCOL from https.request. That is Node's own agent check,
-    // and validateQwpWebSocketAgent defers to it for wss rather than testing
-    // the agent's class. It has to be marked: the reconnect classifier retries
-    // anything carrying no `retryable` flag, so an incompatible agent would be
-    // retried for the whole budget -- unbounded under store-and-forward -- and
-    // then reported as a deadline rather than as the agent.
-    if ((error as { code?: unknown } | null)?.code === "ERR_INVALID_PROTOCOL") {
-      return Promise.reject(qwpNonRetryable(error as Error));
-    }
-    return Promise.reject(error);
+    // `ws` builds the whole upgrade request inside its constructor, and that
+    // constructor performs no I/O: everything it can throw describes the
+    // arguments, not the network. ERR_INVALID_PROTOCOL from https.request is
+    // one such case -- Node's own agent check, which validateQwpWebSocketAgent
+    // defers to for wss rather than testing the agent's class -- but it is not
+    // the only one. ERR_INVALID_CHAR from a credential carrying a control
+    // character is the common one: a token read with readFileSync keeps the
+    // file's trailing newline, and the connect string rejects that by name
+    // while this path did not.
+    //
+    // Marking the class rather than one code is what matters. The reconnect
+    // classifier retries anything carrying no `retryable` flag, so a permanent
+    // local fault was retried for the whole budget -- unbounded under
+    // store-and-forward -- and then reported as an elapsed deadline naming
+    // nothing, indistinguishable from an unreachable server. A network failure
+    // cannot reach this catch, so nothing retryable is caught by widening it.
+    return Promise.reject(
+      error instanceof Error ? qwpNonRetryable(error) : error,
+    );
   }
   return openQwpWebSocket(socket, {
     url: endpoint,
@@ -738,7 +747,7 @@ async function connectQwpNodeIngressInternal(
   const storeAndForward = resolveNodeStoreAndForwardOptions(connectionOptions);
   if (storeAndForward) {
     await warnAboutUnreachableJournal(
-      connectionOptions.storeAndForward!.directory.trim(),
+      storeAndForwardRoot(connectionOptions.storeAndForward!),
       storeAndForward.directory,
       connectionOptions.senderId,
     );
@@ -748,11 +757,19 @@ async function connectQwpNodeIngressInternal(
       "storeAndForward and a custom replayStore cannot both be configured",
     );
   }
+  // Recovery reports abandoned or quarantined journal bytes while the session
+  // is still being built, so those onSenderError deliveries cannot pass
+  // through the inbox the session owns. Counting them here and handing the
+  // total to the session keeps deliveredErrorNotifications a true count of the
+  // stream the caller observed; it read zero before, for exactly the data-loss
+  // events the counter exists to surface.
+  const recoveryDeliveries = { count: 0 };
   let replayStore = storeAndForward
     ? new QwpNodeFileReplayStore(
         withRecoveryDataLossReporter(
           storeAndForward,
           sessionOptions.onSenderError,
+          recoveryDeliveries,
         ),
       )
     : sessionOptions.replayStore;
@@ -790,6 +807,12 @@ async function connectQwpNodeIngressInternal(
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : sessionOptions.durableAckKeepaliveMs,
   };
+  // Not a field on QwpIngressSessionOptions: that interface is published by
+  // both packages, and this is an internal handoff, not a caller option.
+  withPriorQwpSenderErrorDeliveries(
+    effectiveSessionOptions,
+    () => recoveryDeliveries.count,
+  );
   const orphanDrainer =
     startOrphanDrainer && storeAndForward?.drainOrphans === true
       ? createStandaloneOrphanDrainer(
@@ -833,6 +856,7 @@ async function connectQwpNodeIngressInternal(
       withRecoveryDataLossReporter(
         storeAndForward,
         effectiveSessionOptions.onSenderError,
+        recoveryDeliveries,
       ),
     );
     try {
@@ -855,11 +879,13 @@ async function connectQwpNodeIngressInternal(
         storeAndForward,
         recoveryError,
         effectiveSessionOptions.onSenderError,
+        recoveryDeliveries,
       );
       replayStore = new QwpNodeFileReplayStore(
         withRecoveryDataLossReporter(
           storeAndForward,
           effectiveSessionOptions.onSenderError,
+          recoveryDeliveries,
         ),
       );
       session = await QwpIngressSession.connect(
@@ -884,6 +910,7 @@ async function connectQwpNodeIngressInternal(
 function withRecoveryDataLossReporter(
   options: QwpNodeStoreAndForwardOptions,
   onSenderError?: (error: QwpSenderError) => void,
+  deliveries?: { count: number },
 ): QwpNodeStoreAndForwardOptions {
   if (options.onRecoveryDataLoss || !onSenderError) return options;
   return {
@@ -892,6 +919,7 @@ function withRecoveryDataLossReporter(
       const senderError = createQwpDataLossSenderError(
         formatQwpNodeReplayDataLoss(report),
       );
+      if (deliveries) deliveries.count++;
       // A rejected promise from an async onSenderError must fall back to the
       // default handler, exactly as a synchronous throw does.
       safelyInvoke(onSenderError, senderError, () =>
@@ -912,6 +940,7 @@ function emitReplayRecoveryQuarantine(
   options: QwpNodeStoreAndForwardOptions,
   error: QwpReplayStoreQuarantinedError,
   onSenderError?: (error: QwpSenderError) => void,
+  deliveries?: { count: number },
 ): void {
   const senderError = createQwpDataLossSenderError(
     error.message,
@@ -938,6 +967,7 @@ function emitReplayRecoveryQuarantine(
     log("error", error);
   };
   safelyInvoke(options.onRecoveryQuarantine, event, reportCallbackFailure);
+  if (onSenderError && deliveries) deliveries.count++;
   safelyInvoke(onSenderError, senderError, reportCallbackFailure);
 }
 
@@ -955,6 +985,11 @@ export function createQwpNodeSender(
       "awaitDurableAck cannot be combined with requestDurableAck=false",
     );
   }
+  // This factory is lazy, so without a check here the failover factory's own
+  // one would not run until the first connect. Routing is configuration, and
+  // a mixed scheme decides which socket carries the credentials below, so it
+  // belongs with the other construction-time rejections.
+  assertUniformQwpEndpointScheme(options.url, options.failoverUrls);
   return new QwpSender(
     (signal) =>
       connectQwpNodeIngress(
@@ -1180,6 +1215,18 @@ function resolveNodeClientOptions(
 function normalizeQwpNodeClientOptions(
   options: QwpNodeClientOptions,
 ): QwpNodeClientOptions {
+  // Both sweeps carry one connection configuration across every endpoint, so a
+  // mixed scheme sends this client's credentials and rows over whichever
+  // socket a sweep reaches. Checked here as well as in the failover factory so
+  // a typed override is reported before the client exists.
+  assertUniformQwpEndpointScheme(
+    options.ingress.url,
+    options.ingress.failoverUrls,
+  );
+  assertUniformQwpEndpointScheme(
+    options.egress.url,
+    options.egress.failoverUrls,
+  );
   const storeAndForward = options.ingress.storeAndForward;
   const storeInitialConnectMode = storeAndForward?.initialConnectMode;
   const sessionInitialConnectMode = options.ingressSession?.initialConnectMode;
@@ -1237,10 +1284,7 @@ function pooledNodeIngressOptions(
   slot: number,
 ): QwpNodeIngressOptions {
   if (!options.storeAndForward) return options;
-  const rootDirectory = options.storeAndForward.directory.trim();
-  if (!rootDirectory) {
-    throw new RangeError("storeAndForward directory must not be empty");
-  }
+  const rootDirectory = storeAndForwardRoot(options.storeAndForward);
   return {
     ...options,
     senderId: undefined,
@@ -1264,7 +1308,7 @@ function createStandaloneOrphanDrainer(
   slotIsNamed: boolean,
 ): QwpNodeOrphanDrainer {
   const storeAndForward = options.storeAndForward!;
-  const ownDirectory = storeAndForward.directory.trim();
+  const ownDirectory = storeAndForwardRoot(storeAndForward);
   if (!slotIsNamed) {
     // Without a senderId the journal is the configured directory itself, so
     // its parent is the application's, not a store-and-forward group -- and
@@ -1298,10 +1342,7 @@ function createPooledOrphanDrainer(
 ): QwpNodeOrphanDrainer | undefined {
   const storeAndForward = options.ingress.storeAndForward;
   if (!storeAndForward) return undefined;
-  const rootDirectory = storeAndForward.directory.trim();
-  if (!rootDirectory) {
-    throw new RangeError("storeAndForward directory must not be empty");
-  }
+  const rootDirectory = storeAndForwardRoot(storeAndForward);
   const managedSlotCount = options.pool?.senderPoolMax ?? 4;
   const senderId = validateQwpSenderId(options.ingress.senderId ?? "sender");
   const healthTracker = createQwpFailoverHealthTracker(
@@ -1459,16 +1500,40 @@ function parseCanonicalSenderSlot(
   return Number.isSafeInteger(index) ? index : undefined;
 }
 
-function resolveNodeStoreAndForwardOptions(
-  options: QwpNodeIngressOptions,
-): QwpNodeStoreAndForwardOptions | undefined {
-  const storeAndForward = options.storeAndForward;
-  if (!storeAndForward || options.senderId === undefined)
-    return storeAndForward;
+/**
+ * Reads a store-and-forward slot root, naming the option when it is missing.
+ *
+ * `directory` is a required string on the options type, so only a JavaScript
+ * caller can omit it -- and omitting it produced an unnamed
+ * `TypeError: Cannot read properties of undefined (reading 'trim')` from
+ * whichever of these call sites ran first, at connect time, while the empty
+ * string had a diagnostic of its own a line below. The connect string cannot
+ * reach this: without `sf_dir` there is no store-and-forward section at all.
+ */
+function storeAndForwardRoot(
+  storeAndForward: QwpNodeStoreAndForwardOptions,
+): string {
+  if (typeof storeAndForward.directory !== "string") {
+    throw new RangeError(
+      `storeAndForward requires a 'directory' (sf_dir), received ${storeAndForward.directory === undefined ? "undefined" : typeof storeAndForward.directory}`,
+    );
+  }
   const rootDirectory = storeAndForward.directory.trim();
   if (!rootDirectory) {
     throw new RangeError("storeAndForward directory must not be empty");
   }
+  return rootDirectory;
+}
+
+function resolveNodeStoreAndForwardOptions(
+  options: QwpNodeIngressOptions,
+): QwpNodeStoreAndForwardOptions | undefined {
+  const storeAndForward = options.storeAndForward;
+  if (!storeAndForward) return storeAndForward;
+  // Validated even when no senderId makes this function rewrite the path, so
+  // the diagnostic does not depend on an unrelated option being set.
+  const rootDirectory = storeAndForwardRoot(storeAndForward);
+  if (options.senderId === undefined) return storeAndForward;
   return {
     ...storeAndForward,
     directory: join(rootDirectory, validateQwpSenderId(options.senderId)),

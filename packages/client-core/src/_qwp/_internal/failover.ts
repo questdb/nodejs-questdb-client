@@ -10,6 +10,7 @@ import {
   QwpTarget,
   QwpUpgradeError,
 } from "../transport";
+import { redactQwpEndpoint } from "./redact-endpoint";
 
 const HOST_STATE = {
   HEALTHY: 0,
@@ -225,6 +226,11 @@ export function createQwpFailoverConnectionFactory(
   ) => Promise<QwpBinaryConnection>,
   options: QwpFailoverSelectionOptions = {},
 ): QwpConnectionFactory {
+  // Every ingress and egress walker, in both runtimes, builds its endpoint
+  // list here, so this is the one place the rule cannot be bypassed. The Node
+  // and browser entry points repeat it earlier so the error names the option
+  // at construction rather than at the first connect.
+  assertUniformQwpEndpointScheme(preferredUrl, failoverUrls);
   const endpoints = [preferredUrl, ...(failoverUrls ?? [])];
   const target = normalizeTarget(options.target);
   const configuredZone = normalizeZone(options.zone);
@@ -456,4 +462,54 @@ function endpointKeys(
   failoverUrls: readonly (string | URL)[] | undefined,
 ): readonly string[] {
   return [preferredUrl, ...(failoverUrls ?? [])].map(String);
+}
+
+function endpointScheme(endpoint: string | URL): string | undefined {
+  try {
+    return typeof endpoint === "string"
+      ? new URL(endpoint).protocol
+      : endpoint.protocol;
+  } catch {
+    // Not an absolute URL. Shape validation belongs to whichever entry point
+    // accepted it; this check only compares schemes it can read.
+    return undefined;
+  }
+}
+
+/**
+ * Rejects a failover endpoint whose scheme differs from the preferred one.
+ *
+ * A sweep applies one connection configuration to every endpoint in turn: the
+ * `Authorization` header built for the preferred URL, and the rows themselves,
+ * go to whichever entry the sweep reaches. A `wss` primary with a `ws` entry
+ * therefore put Basic and Bearer credentials, and all subsequent data, on a
+ * cleartext socket with no error and no warning.
+ *
+ * The connect string cannot express the mixture -- every `addr` entry inherits
+ * the string's own schema -- and the programmatic `wss` Sender path already
+ * refused it, because the `https.Agent` it builds is rejected for a cleartext
+ * endpoint. Typed `failoverUrls` were the one way in, and only when no
+ * `tls_verify`/`tls_roots` key made that agent exist, so the exposure was
+ * limited to the configuration that verifies with the system trust store.
+ *
+ * Uniformity, rather than a downgrade-only rule, is what `addr=a,b,c` already
+ * guarantees; a genuinely mixed deployment needs one client per scheme.
+ */
+export function assertUniformQwpEndpointScheme(
+  preferredUrl: string | URL,
+  failoverUrls: readonly (string | URL)[] | undefined,
+): void {
+  const preferredScheme = endpointScheme(preferredUrl);
+  if (preferredScheme === undefined) return;
+  for (const failoverUrl of failoverUrls ?? []) {
+    const scheme = endpointScheme(failoverUrl);
+    if (scheme === undefined || scheme === preferredScheme) continue;
+    throw new RangeError(
+      `QWP failover endpoint '${redactQwpEndpoint(failoverUrl)}' uses '${scheme.replace(
+        ":",
+        "",
+      )}' but the preferred endpoint uses '${preferredScheme.replace(":", "")}'; ` +
+        `every endpoint in one client must share a scheme, because the same credentials and rows are sent to whichever one a failover sweep reaches`,
+    );
+  }
 }

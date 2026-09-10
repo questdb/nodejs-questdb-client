@@ -28,7 +28,10 @@ import {
   QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
   QwpReconnectingIngressConnection,
 } from "./_internal/reconnecting-ingress-connection";
-import { QwpNotificationDispatcher } from "./_internal/notification-dispatcher";
+import {
+  priorQwpSenderErrorDeliveries,
+  QwpNotificationDispatcher,
+} from "./_internal/notification-dispatcher";
 import { safelyInvoke } from "./_internal/safe-callback";
 import {
   createQwpSenderError,
@@ -813,7 +816,10 @@ export class QwpIngressSession {
         transport?.droppedConnectionNotifications ?? 0,
       deliveredErrorNotifications:
         (transport?.deliveredErrorNotifications ?? 0) +
-        (this.errorDispatcher?.metrics.delivered ?? 0),
+        (this.errorDispatcher?.metrics.delivered ?? 0) +
+        // Deliveries recovery made before this session existed. See
+        // QWP_PRIOR_SENDER_ERROR_DELIVERIES.
+        priorQwpSenderErrorDeliveries(this.options),
       droppedErrorNotifications:
         (transport?.droppedErrorNotifications ?? 0) +
         (this.errorDispatcher?.metrics.dropped ?? 0),

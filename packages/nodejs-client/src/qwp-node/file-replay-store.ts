@@ -506,6 +506,15 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private maintenanceScheduled = false;
 
   constructor(options: QwpNodeFileReplayStoreOptions) {
+    // `directory` is a required string in the type, so only a JavaScript
+    // caller reaches this -- and it reached it as an unnamed TypeError from
+    // the trim() below, naming nothing a caller could act on, while the empty
+    // string a line further down already had a diagnostic of its own.
+    if (typeof options.directory !== "string") {
+      throw new RangeError(
+        `store-and-forward requires a 'directory' (sf_dir), received ${options.directory === undefined ? "undefined" : typeof options.directory}`,
+      );
+    }
     const directory = options.directory.trim();
     if (!directory) {
       throw new RangeError("store-and-forward directory must not be empty");
