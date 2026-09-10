@@ -1,9 +1,12 @@
 // @ts-check
 import { describe, it, expect } from "vitest";
 
-import { Sender } from "../src";
-import { DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFER_SIZE } from "../src/buffer";
-import { log } from "../src/logging";
+import { int64, Sender } from "../packages/nodejs-client/src";
+import {
+  DEFAULT_BUFFER_SIZE,
+  DEFAULT_MAX_BUFFER_SIZE,
+} from "../packages/nodejs-client/src/buffer";
+import { log } from "../packages/client-core/src/logging";
 
 describe("Sender configuration options suite", function () {
   it("creates a sender from a configuration string", async function () {
@@ -467,6 +470,81 @@ describe("Sender auth config checks suite", function () {
       "Please, specify the 'token' property of the 'auth' config option as a string. " +
         "For example: new Sender({protocol: 'tcp', host: 'host', auth: {keyId: 'username', token: 'private key'}})",
     );
+  });
+});
+
+/**
+ * The QWP-shaped members on the root `Sender` all have an ILP fallback, and
+ * every existing test drives them through a `ws::` sender, so the fallback was
+ * reachable by every HTTP/TCP user and asserted by nothing. Mutating each
+ * branch -- dropping the `flush()`, resolving `waitForAcknowledged()`, moving
+ * the sentinels off `-1n`, removing the `writer()` guard -- left the whole CI
+ * matrix green, including `test:dist` and all three `typecheck:dist` configs.
+ */
+describe("Sender QWP members on ILP transports", function () {
+  async function ilpSender(sent: Buffer[]) {
+    const sender = await Sender.fromConfig(
+      "http::addr=hostname;protocol_version=2;auto_flush=off;",
+    );
+    // @ts-expect-error - Replacing the private transport with a recording stub
+    sender.transport = {
+      send: async (data: Buffer) => {
+        sent.push(Buffer.from(data));
+        return true;
+      },
+      connect: async () => true,
+      close: async () => undefined,
+      getDefaultAutoFlushRows: () => 600,
+    };
+    return sender;
+  }
+
+  it("flushes and reports no frame sequence from flushAndGetSequence()", async function () {
+    const sent: Buffer[] = [];
+    const sender = await ilpSender(sent);
+    await sender.table("t").intColumn("i", 1).atNow();
+
+    // -1n is the documented "unavailable" sentinel, and the flush is the half
+    // a regression can drop silently: the call still resolves, so the caller
+    // believes the rows were sent.
+    await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].toString()).toBe("t i=1i\n");
+    await sender.close();
+  });
+
+  it("reports no published or acknowledged sequence", async function () {
+    const sender = await ilpSender([]);
+    expect(sender.publishedSequence).toBe(-1n);
+    expect(sender.acknowledgedSequence).toBe(-1n);
+    await sender.close();
+  });
+
+  it("rejects an ACK watermark wait, but validates its arguments first", async function () {
+    const sender = await ilpSender([]);
+    await expect(
+      // @ts-expect-error - Testing an invalid argument type
+      sender.waitForAcknowledged(0),
+    ).rejects.toThrow("QWP ACK target sequence must be a bigint");
+    await expect(sender.waitForAcknowledged(1n, 0)).rejects.toThrow(
+      "QWP ACK watermark timeout must be positive and finite",
+    );
+    // A negative target is already satisfied, so it resolves on every
+    // transport -- this is what lets transport-agnostic code pass the -1n
+    // sentinel straight back.
+    await expect(sender.waitForAcknowledged(-1n)).resolves.toBeUndefined();
+    await expect(sender.waitForAcknowledged(1n)).rejects.toThrow(
+      "ACK sequence watermarks are available only with the QWP WebSocket transport",
+    );
+    await sender.close();
+  });
+
+  it("refuses to compile a table writer", async function () {
+    const sender = await ilpSender([]);
+    expect(() => sender.writer("t", { i: int64() })).toThrow(
+      "compiled table writers are available only with QWP transports",
+    );
+    await sender.close();
   });
 });
 

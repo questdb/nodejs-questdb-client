@@ -1,10 +1,10 @@
 {
   "$schema": "https://typedoc.org/schema.json",
-  "entryPoints": ["./src/index.ts"],
+  "entryPoints": ["./packages/nodejs-client", "./packages/browser-client"],
+  "entryPointStrategy": "packages",
   "out": "docs",
-  "name": "QuestDB Node.js Client",
+  "name": "QuestDB JavaScript Client",
   "readme": "./README.md",
-  "tsconfig": "./tsconfig.json",
   "exclude": ["**/test/**/*", "**/examples/**/*", "**/node_modules/**/*"],
   "excludePrivate": true,
   "excludeProtected": false,

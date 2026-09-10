@@ -1,0 +1,178 @@
+diff --git a/esm/index.mjs b/esm/index.mjs
+index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f36604fa43 100644
+--- a/esm/index.mjs
++++ b/esm/index.mjs
+@@ -63,6 +63,12 @@ var err = function (ind, msg, nt) {
+         throw e;
+     return e;
+ };
++var sze = function (actual, declared) {
++    var e = err(0, 'decompressed size ' + actual + ' does not match declared content size ' + declared, true);
++    e.actual = actual;
++    e.declared = declared;
++    throw e;
++};
+ var rb = function (d, b, n) {
+     var i = 0, o = 0;
+     for (; i < n; ++i)
+@@ -111,6 +117,7 @@ var rzfh = function (dat, w) {
+             e: ws,
+             o: new i32(buf.buffer, 0, 3),
+             u: fss,
++            v: fsb > 0,
+             c: cc,
+             m: Math.min(131072, ws)
+         };
+@@ -403,6 +410,8 @@ var rzb = function (dat, st, out) {
+             return;
+         st.b = bt + 1;
+         if (out) {
++            if (st.v && st.y + sz > st.u)
++                sze(st.y + sz, st.u);
+             fill(out, dat[bt], st.y, st.y += sz);
+             return out;
+         }
+@@ -413,6 +422,8 @@ var rzb = function (dat, st, out) {
+     if (btype == 0) {
+         st.b = ebt;
+         if (out) {
++            if (st.v && st.y + sz > st.u)
++                sze(st.y + sz, st.u);
+             out.set(dat.subarray(bt, ebt), st.y);
+             st.y += sz;
+             return out;
+@@ -569,13 +580,18 @@ var rzb = function (dat, st, out) {
+             }
+             else
+                 oubt = buf.length;
+-            if (out)
++            if (out) {
+                 st.y += oubt;
++                if (st.v && st.y > st.u)
++                    sze(st.y, st.u);
++            }
+             else
+                 buf = slc(buf, 0, oubt);
+         }
+         else if (out) {
+             st.y += lss;
++            if (st.v && st.y > st.u)
++                sze(st.y, st.u);
+             if (spl) {
+                 for (var i = 0; i < lss; ++i) {
+                     buf[i] = buf[spl + i];
+@@ -640,6 +656,8 @@ export function decompress(dat, buf) {
+                     st.w.set(blk, st.w.length - blk.length);
+                 }
+             }
++            if (st.v && st.y != st.u)
++                sze(st.y, st.u);
+             bt = st.b + (st.c * 4);
+         }
+         else
+@@ -733,11 +751,16 @@ var Decompress = /*#__PURE__*/ (function () {
+                     return;
+                 }
+                 else {
++                    this.s.y += blk.length;
++                    if (this.s.v && this.s.y > this.s.u)
++                        sze(this.s.y, this.s.u);
+                     this.ondata(blk, false);
+                     cpw(this.s.w, 0, blk.length);
+                     this.s.w.set(blk, this.s.w.length - blk.length);
+                 }
+                 if (this.s.l) {
++                    if (this.s.v && this.s.y != this.s.u)
++                        sze(this.s.y, this.s.u);
+                     var rest = chunk.subarray(this.s.b);
+                     this.s = this.s.c * 4;
+                     this.push(rest, final);
+diff --git a/lib/index.js b/lib/index.js
+index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..bfe263ae62c8b2eb2fd0bf6ea22f1f2915e33e52 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -64,6 +64,12 @@ var err = function (ind, msg, nt) {
+         throw e;
+     return e;
+ };
++var sze = function (actual, declared) {
++    var e = err(0, 'decompressed size ' + actual + ' does not match declared content size ' + declared, true);
++    e.actual = actual;
++    e.declared = declared;
++    throw e;
++};
+ var rb = function (d, b, n) {
+     var i = 0, o = 0;
+     for (; i < n; ++i)
+@@ -112,6 +118,7 @@ var rzfh = function (dat, w) {
+             e: ws,
+             o: new i32(buf.buffer, 0, 3),
+             u: fss,
++            v: fsb > 0,
+             c: cc,
+             m: Math.min(131072, ws)
+         };
+@@ -404,6 +411,8 @@ var rzb = function (dat, st, out) {
+             return;
+         st.b = bt + 1;
+         if (out) {
++            if (st.v && st.y + sz > st.u)
++                sze(st.y + sz, st.u);
+             fill(out, dat[bt], st.y, st.y += sz);
+             return out;
+         }
+@@ -414,6 +423,8 @@ var rzb = function (dat, st, out) {
+     if (btype == 0) {
+         st.b = ebt;
+         if (out) {
++            if (st.v && st.y + sz > st.u)
++                sze(st.y + sz, st.u);
+             out.set(dat.subarray(bt, ebt), st.y);
+             st.y += sz;
+             return out;
+@@ -570,13 +581,18 @@ var rzb = function (dat, st, out) {
+             }
+             else
+                 oubt = buf.length;
+-            if (out)
++            if (out) {
+                 st.y += oubt;
++                if (st.v && st.y > st.u)
++                    sze(st.y, st.u);
++            }
+             else
+                 buf = slc(buf, 0, oubt);
+         }
+         else if (out) {
+             st.y += lss;
++            if (st.v && st.y > st.u)
++                sze(st.y, st.u);
+             if (spl) {
+                 for (var i = 0; i < lss; ++i) {
+                     buf[i] = buf[spl + i];
+@@ -641,6 +657,8 @@ function decompress(dat, buf) {
+                     st.w.set(blk, st.w.length - blk.length);
+                 }
+             }
++            if (st.v && st.y != st.u)
++                sze(st.y, st.u);
+             bt = st.b + (st.c * 4);
+         }
+         else
+@@ -735,11 +753,16 @@ var Decompress = /*#__PURE__*/ (function () {
+                     return;
+                 }
+                 else {
++                    this.s.y += blk.length;
++                    if (this.s.v && this.s.y > this.s.u)
++                        sze(this.s.y, this.s.u);
+                     this.ondata(blk, false);
+                     cpw(this.s.w, 0, blk.length);
+                     this.s.w.set(blk, this.s.w.length - blk.length);
+                 }
+                 if (this.s.l) {
++                    if (this.s.v && this.s.y != this.s.u)
++                        sze(this.s.y, this.s.u);
+                     var rest = chunk.subarray(this.s.b);
+                     this.s = this.s.c * 4;
+                     this.push(rest, final);

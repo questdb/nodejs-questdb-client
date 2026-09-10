@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import { Proxy } from "./util/proxy";
-import { Sender, SenderOptions } from "../src";
+import { Sender, SenderOptions } from "../packages/nodejs-client/src";
 
 const PROXY_PORT = 9099;
 const PORT = 9009;

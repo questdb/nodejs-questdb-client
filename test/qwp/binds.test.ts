@@ -1,0 +1,373 @@
+import { describe, expect, it } from "vitest";
+import {
+  encodeQwpBinds,
+  encodeQwpQueryRequest,
+  QWP_COLUMN_TYPE,
+  QWP_EGRESS_MESSAGE,
+  QWP_MAX_COLUMNS_PER_TABLE,
+  QwpBindValues,
+  QwpByteReader,
+  readQwpVarint,
+} from "../../packages/client-core/src/qwp";
+
+function expectNonNullHeader(reader: QwpByteReader, type: number): void {
+  expect(reader.readUint8()).toBe(type);
+  expect(reader.readUint8()).toBe(0);
+}
+
+function expectNullHeader(reader: QwpByteReader, type: number): void {
+  expect(reader.readUint8()).toBe(type);
+  expect(reader.readUint8()).toBe(1);
+  expect(reader.readUint8()).toBe(1);
+}
+
+describe("QWP typed query binds", () => {
+  it("encodes every supported non-null scalar in positional order", () => {
+    const encoded = encodeQwpBinds((binds) =>
+      binds
+        .setBoolean(0, true)
+        .setByte(1, -128)
+        .setShort(2, -1234)
+        .setChar(3, "Q")
+        .setInt(4, -2_000_000)
+        .setLong(5, 9_000_000_000n)
+        .setFloat(6, 3.25)
+        .setDouble(7, -2.5)
+        .setDate(8, 1_700_000_000_000n)
+        .setTimestampMicros(9, 1_700_000_000_000_000n)
+        .setTimestampNanos(10, 1_700_000_000_123_456_789n)
+        .setVarchar(11, "café")
+        .setUuid(12, "123e4567-e89b-12d3-a456-426614174000")
+        .setLong256(13, 1n, 2n, 3n, 4n)
+        .setGeohash(14, 5, 0x1fn)
+        .setDecimal64(15, 4, 123_456_789n)
+        .setDecimal128(16, 6, 123_456_789_123_456n, 0n)
+        .setDecimal256(17, 10, 420_000_000_000n, 0n, 0n, 0n),
+    );
+
+    expect(encoded.count).toBe(18);
+    const reader = new QwpByteReader(encoded.payload);
+
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.BOOLEAN);
+    expect(reader.readUint8()).toBe(1);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.BYTE);
+    expect(reader.readInt8()).toBe(-128);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.SHORT);
+    expect(reader.readInt16()).toBe(-1234);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.CHAR);
+    expect(reader.readUint16()).toBe("Q".charCodeAt(0));
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.INT);
+    expect(reader.readInt32()).toBe(-2_000_000);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.LONG);
+    expect(reader.readBigInt64()).toBe(9_000_000_000n);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.FLOAT);
+    expect(reader.readFloat32()).toBe(3.25);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.DOUBLE);
+    expect(reader.readFloat64()).toBe(-2.5);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.DATE);
+    expect(reader.readBigInt64()).toBe(1_700_000_000_000n);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.TIMESTAMP);
+    expect(reader.readBigInt64()).toBe(1_700_000_000_000_000n);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.TIMESTAMP_NANOS);
+    expect(reader.readBigInt64()).toBe(1_700_000_000_123_456_789n);
+
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
+    expect(reader.readUint32()).toBe(0);
+    const varcharLength = reader.readUint32();
+    expect(varcharLength).toBe(5);
+    expect(reader.readUtf8(varcharLength)).toBe("café");
+
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.UUID);
+    expect(reader.readBigUint64()).toBe(0xa456426614174000n);
+    expect(reader.readBigUint64()).toBe(0x123e4567e89b12d3n);
+
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.LONG256);
+    expect([
+      reader.readBigInt64(),
+      reader.readBigInt64(),
+      reader.readBigInt64(),
+      reader.readBigInt64(),
+    ]).toEqual([1n, 2n, 3n, 4n]);
+
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.GEOHASH);
+    expect(readQwpVarint(reader)).toBe(5n);
+    expect(reader.readUint8()).toBe(0x1f);
+
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL64);
+    expect(reader.readUint8()).toBe(4);
+    expect(reader.readBigInt64()).toBe(123_456_789n);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL128);
+    expect(reader.readUint8()).toBe(6);
+    expect(reader.readBigInt64()).toBe(123_456_789_123_456n);
+    expect(reader.readBigInt64()).toBe(0n);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL256);
+    expect(reader.readUint8()).toBe(10);
+    expect([
+      reader.readBigInt64(),
+      reader.readBigInt64(),
+      reader.readBigInt64(),
+      reader.readBigInt64(),
+    ]).toEqual([420_000_000_000n, 0n, 0n, 0n]);
+    reader.expectEnd();
+  });
+
+  it("preserves explicit null types and decimal/geohash metadata", () => {
+    const encoded = encodeQwpBinds((binds) =>
+      binds
+        .setNull(0, QWP_COLUMN_TYPE.BOOLEAN)
+        .setVarchar(1, null)
+        .setUuid(2, null)
+        .setNullDecimal64(3, 4)
+        .setNullDecimal128(4, 18)
+        .setNullDecimal256(5, 76)
+        .setNullGeohash(6, 60),
+    );
+    const reader = new QwpByteReader(encoded.payload);
+
+    expectNullHeader(reader, QWP_COLUMN_TYPE.BOOLEAN);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
+    // VARCHAR is the only variable-width bind type, so it is the only null
+    // that still carries an offset table: one entry, value zero, exactly as
+    // the non-null form and the ingress column writer emit it.
+    expect(reader.readUint32()).toBe(0);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.UUID);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL64);
+    expect(reader.readUint8()).toBe(4);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL128);
+    expect(reader.readUint8()).toBe(18);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL256);
+    expect(reader.readUint8()).toBe(76);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.GEOHASH);
+    expect(readQwpVarint(reader)).toBe(60n);
+    reader.expectEnd();
+  });
+
+  it("keeps a bind after a null VARCHAR readable at the right offset", () => {
+    // Binds carry no length prefix and no delimiter, so a reader walking the
+    // section relies entirely on each bind being self-describing. A null
+    // VARCHAR that skipped its offset table made the *next* bind's type byte
+    // and null flag look like the first four bytes of that table, so
+    // everything after it -- here the INT, and in a real QUERY_REQUEST the
+    // trailing queryFlags varint too -- was read against the wrong boundary.
+    const encoded = encodeQwpBinds((binds) =>
+      binds.setVarchar(0, null).setInt(1, 0x01020304),
+    );
+    expect(encoded.count).toBe(2);
+
+    const reader = new QwpByteReader(encoded.payload);
+    expectNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
+    expect(reader.readUint32()).toBe(0);
+    expect(reader.readUint8()).toBe(QWP_COLUMN_TYPE.INT);
+    expect(reader.readUint8()).toBe(0);
+    expect(reader.readInt32()).toBe(0x01020304);
+    reader.expectEnd();
+
+    // An empty VARCHAR and a null VARCHAR differ only in the null flag and the
+    // absent value bytes; both carry the leading offset.
+    const empty = encodeQwpBinds((binds) => binds.setVarchar(0, ""));
+    const emptyReader = new QwpByteReader(empty.payload);
+    expect(emptyReader.readUint8()).toBe(QWP_COLUMN_TYPE.VARCHAR);
+    expect(emptyReader.readUint8()).toBe(0);
+    expect(emptyReader.readUint32()).toBe(0);
+    expect(emptyReader.readUint32()).toBe(0);
+    emptyReader.expectEnd();
+  });
+
+  it("places typed binds into QUERY_REQUEST without exposing raw bytes", () => {
+    const request = encodeQwpQueryRequest({
+      requestId: 7,
+      sql: "select $1::long, $2::varchar",
+      binds: (binds) => binds.setLong(0, 42n).setVarchar(1, "browser"),
+    });
+    const reader = new QwpByteReader(request);
+    expect(reader.readUint8()).toBe(QWP_EGRESS_MESSAGE.QUERY_REQUEST);
+    expect(reader.readBigUint64()).toBe(7n);
+    const sqlLength = Number(readQwpVarint(reader));
+    expect(reader.readUtf8(sqlLength)).toBe("select $1::long, $2::varchar");
+    expect(readQwpVarint(reader)).toBe(0n);
+    expect(readQwpVarint(reader)).toBe(2n);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.LONG);
+    expect(reader.readBigInt64()).toBe(42n);
+    expectNonNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
+    expect(reader.readUint32()).toBe(0);
+    const length = reader.readUint32();
+    expect(reader.readUtf8(length)).toBe("browser");
+    reader.expectEnd();
+  });
+
+  it("rejects invalid order, ranges, types, UUIDs, and raw/typed mixing", () => {
+    expect(() => encodeQwpBinds((binds) => binds.setLong(1, 1n))).toThrow(
+      /expected 0, got 1/,
+    );
+    expect(() => encodeQwpBinds((binds) => binds.setByte(0, 128))).toThrow(
+      /BYTE/,
+    );
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setLong(0, Number.MAX_SAFE_INTEGER + 1)),
+    ).toThrow(/safe integer/);
+    expect(() => encodeQwpBinds((binds) => binds.setChar(0, "😀"))).toThrow(
+      /UTF-16/,
+    );
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setGeohash(0, 61, 1n)),
+    ).toThrow(/GEOHASH precision/);
+    // Masking an out-of-range value silently bound a different geohash, so the
+    // query filtered on something the caller never asked for. Every other
+    // geohash entry point rejects the same input.
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setGeohash(0, 5, 100n)),
+    ).toThrow(/GEOHASH bind value 100 must be between 0 and 31 for 5 bits/);
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setGeohash(0, 5, -1n)),
+    ).toThrow(/GEOHASH bind value -1 must be between 0 and 31 for 5 bits/);
+    // The widest in-range value for the precision is still accepted.
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setGeohash(0, 5, 31n)),
+    ).not.toThrow();
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setDecimal64(0, 19, 1n)),
+    ).toThrow(/DECIMAL64 scale/);
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setDecimal128(0, 39, 1n, 0n)),
+    ).toThrow(/DECIMAL128 scale/);
+    expect(() =>
+      encodeQwpBinds((binds) => binds.setUuid(0, "not-a-uuid")),
+    ).toThrow(/canonical UUID/);
+    expect(() =>
+      encodeQwpBinds(async (binds) => {
+        binds.setInt(0, 1);
+      }),
+    ).toThrow(/synchronous/);
+    expect(() =>
+      new QwpBindValues().setNull(0, QWP_COLUMN_TYPE.BINARY as never),
+    ).toThrow(/unsupported QWP bind type/);
+    expect(() =>
+      encodeQwpQueryRequest({
+        requestId: 0,
+        sql: "select $1",
+        binds: (binds) => binds.setInt(0, 1),
+        bindCount: 1,
+      }),
+    ).toThrow(/cannot be mixed/);
+    expect(() =>
+      encodeQwpQueryRequest({
+        requestId: 0,
+        sql: "select 1",
+        bindCount: QWP_MAX_COLUMNS_PER_TABLE + 1,
+      }),
+    ).toThrow(/bindCount/);
+    // bindCount and bindPayload are one escape hatch, so neither is usable
+    // alone. Only the payload-without-count direction was rejected; a count
+    // without its payload encoded a QUERY_REQUEST declaring binds it did not
+    // carry, leaving the server to read the trailing queryFlags varint as the
+    // first bind's type byte.
+    expect(() =>
+      encodeQwpQueryRequest({
+        requestId: 0,
+        sql: "select $1",
+        bindPayload: Uint8Array.of(1, 2, 3),
+      }),
+    ).toThrow(/bindPayload requires a non-zero bindCount/);
+    expect(() =>
+      encodeQwpQueryRequest({
+        requestId: 0,
+        sql: "select $1",
+        bindCount: 3,
+      }),
+    ).toThrow(/bindCount requires a non-empty bindPayload/);
+
+    const reusable = new QwpBindValues();
+    expect(() => reusable.setInt(0, 0x80000000)).toThrow(/INT/);
+    expect(() => reusable.setInt(0, 7)).not.toThrow();
+  });
+
+  it("observes a rejected async callback before reporting it as unsupported", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      expect(() =>
+        encodeQwpBinds(async () => {
+          await Promise.resolve();
+          throw new Error("late bind failure");
+        }),
+      ).toThrow(/synchronous/);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("can be reset and enforces the server bind-count cap", () => {
+    const binds = new QwpBindValues().setInt(0, 1).reset().setLong(0, 2n);
+    expect(binds.count).toBe(1);
+
+    const uuidBits = encodeQwpBinds((values) =>
+      values.setUuid(0, 0xffffffffffffffffn, 0x8000000000000000n),
+    );
+    const uuidReader = new QwpByteReader(uuidBits.payload);
+    expectNonNullHeader(uuidReader, QWP_COLUMN_TYPE.UUID);
+    expect(uuidReader.readBigUint64()).toBe(0xffffffffffffffffn);
+    expect(uuidReader.readBigUint64()).toBe(0x8000000000000000n);
+
+    expect(() =>
+      encodeQwpBinds((values) => {
+        for (let index = 0; index <= QWP_MAX_COLUMNS_PER_TABLE; index++) {
+          values.setBoolean(index, true);
+        }
+      }),
+    ).toThrow(/too many binds/);
+  });
+});
+
+/**
+ * A LONG256 word is a 64-bit limb, not a signed integer, so the two spellings
+ * of one bit pattern must be interchangeable everywhere. They were not: the
+ * compiled writer accepted the unsigned form through checkedLimb64, while this
+ * bind and QwpSender.long256Column demanded the signed one. Splitting a
+ * 256-bit value the natural way, BigInt.asUintN(64, value >> 64n * i), then
+ * produced words the writer had just ingested but no bind could carry, with
+ * nothing in the signatures or QWP.md to say a conversion was required.
+ */
+describe("LONG256 binds accept either 64-bit spelling", () => {
+  const long256Payload = (word0: bigint): string =>
+    Buffer.from(
+      encodeQwpBinds((binds) => {
+        binds.setLong256(0, word0, 0n, 0n, 0n);
+      }).payload,
+    ).toString("hex");
+
+  it("encodes the unsigned and signed spellings identically", () => {
+    expect(long256Payload(0xffffffffffffffffn)).toBe(long256Payload(-1n));
+  });
+
+  it("accepts every word position unsigned", () => {
+    expect(() =>
+      encodeQwpBinds((binds) => {
+        binds.setLong256(
+          0,
+          0xffffffffffffffffn,
+          0xfffffffffffffffen,
+          0x8000000000000000n,
+          0n,
+        );
+      }),
+    ).not.toThrow();
+  });
+
+  it("still rejects a word that does not fit 64 bits", () => {
+    expect(() =>
+      encodeQwpBinds((binds) => {
+        binds.setLong256(0, 1n << 64n, 0n, 0n, 0n);
+      }),
+    ).toThrow(/64 bits/);
+    expect(() =>
+      encodeQwpBinds((binds) => {
+        binds.setLong256(0, -(1n << 63n) - 1n, 0n, 0n, 0n);
+      }),
+    ).toThrow(/64 bits/);
+  });
+});

@@ -1,0 +1,20 @@
+{
+  "include": ["test/dist-types"],
+  "compilerOptions": {
+    "moduleResolution": "bundler",
+    "module": "ESNext",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "strict": true,
+    "noEmit": true,
+    "paths": {
+      "@questdb/nodejs-client": [
+        "./packages/nodejs-client/dist/es/index.d.mts"
+      ],
+      "@questdb/browser-client": [
+        "./packages/browser-client/dist/es/index.d.mts"
+      ]
+    }
+  }
+}

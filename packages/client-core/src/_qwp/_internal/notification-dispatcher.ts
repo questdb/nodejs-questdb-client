@@ -1,0 +1,226 @@
+import { isPromiseLike } from "./safe-callback";
+
+/**
+ * Carries a count of `onSenderError` deliveries that were made before an
+ * ingress session existed, so its metrics can include them.
+ *
+ * Node store-and-forward recovery reports an abandoned or quarantined journal
+ * while the session is still being built, so those deliveries cannot pass
+ * through the inbox the session owns; `deliveredErrorNotifications` read zero
+ * for exactly the data-loss events the counter exists to surface.
+ *
+ * Keyed by a symbol rather than declared on QwpIngressSessionOptions: that
+ * interface is published by both packages, and this is an internal handoff
+ * between the Node entry point and the session, not something a caller sets.
+ * `Symbol.for` rather than a module-private symbol because the two public
+ * bundles each emit their own copy of this module.
+ */
+export const QWP_PRIOR_SENDER_ERROR_DELIVERIES = Symbol.for(
+  "questdb.qwp.priorSenderErrorDeliveries.v1",
+);
+
+/** Attaches the pre-session delivery count to an options object in place. */
+export function withPriorQwpSenderErrorDeliveries<T extends object>(
+  options: T,
+  source: () => number,
+): T {
+  // Enumerable so object spread carries it: the recovery path rebuilds the
+  // session options as `{ ...effectiveSessionOptions, replayStore }` before
+  // each retry, and spread copies only enumerable own properties. A symbol key
+  // stays out of Object.keys, JSON.stringify and for...in regardless.
+  Object.defineProperty(options, QWP_PRIOR_SENDER_ERROR_DELIVERIES, {
+    value: source,
+    enumerable: true,
+    configurable: true,
+  });
+  return options;
+}
+
+/** Reads the pre-session delivery count carried by an options object. */
+export function priorQwpSenderErrorDeliveries(options: object): number {
+  const source = (options as Record<symbol, unknown>)[
+    QWP_PRIOR_SENDER_ERROR_DELIVERIES
+  ];
+  return typeof source === "function" ? Number(source()) || 0 : 0;
+}
+
+export interface QwpNotificationDispatcherMetrics {
+  readonly pending: number;
+  readonly delivered: number;
+  readonly dropped: number;
+  readonly closing: boolean;
+  readonly closed: boolean;
+}
+
+/**
+ * Browser-safe, bounded callback mailbox.
+ *
+ * One notification is delivered at a time, and never in the same event-loop
+ * turn as the protocol work that produced it, so nothing already queued by the
+ * WebSocket runs inside a user callback stack. When the inbox fills, the oldest
+ * pending notification is discarded and the most recent state is retained,
+ * matching the Java QWP dispatchers.
+ *
+ * "One at a time" covers an `async` handler: the next notification waits for
+ * the returned promise to settle. Clearing the in-flight flag as soon as the
+ * synchronous prefix returned meant an async observer was re-entered once per
+ * turn regardless, so a reconnect storm ran an unbounded number of copies of it
+ * concurrently -- the queue never held more than one entry, so `capacity`
+ * bounded nothing and `dropped` stayed zero however far behind the observer
+ * fell. Slow observers now apply backpressure to the inbox and lose the oldest
+ * notifications, which is what the bound is for.
+ */
+export class QwpNotificationDispatcher<T> {
+  private readonly queue: T[] = [];
+  private timer?: ReturnType<typeof setTimeout>;
+  private closeTimer?: ReturnType<typeof setTimeout>;
+  private closePromise?: Promise<void>;
+  private resolveClose?: () => void;
+  private dispatching = false;
+  private closing = false;
+  private closed = false;
+  private delivered = 0;
+  private dropped = 0;
+
+  constructor(
+    private readonly handler: (notification: T) => unknown,
+    private readonly capacity: number,
+  ) {
+    if (!Number.isSafeInteger(capacity) || capacity < 1) {
+      throw new RangeError(
+        "QWP notification inbox capacity must be a positive safe integer",
+      );
+    }
+  }
+
+  get metrics(): QwpNotificationDispatcherMetrics {
+    return Object.freeze({
+      pending: this.queue.length,
+      delivered: this.delivered,
+      dropped: this.dropped,
+      closing: this.closing,
+      closed: this.closed,
+    });
+  }
+
+  /** Non-blocking enqueue with drop-oldest overflow. */
+  offer(notification: T): boolean {
+    if (this.closing || this.closed) return false;
+    if (this.queue.length >= this.capacity) {
+      this.queue.shift();
+      this.dropped++;
+    }
+    this.queue.push(notification);
+    this.schedule();
+    return true;
+  }
+
+  /**
+   * Stops accepting new notifications and best-effort drains the retained
+   * tail. Any entries still pending at the deadline are counted as dropped.
+   */
+  close(drainDeadlineMs = 100): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    if (!Number.isFinite(drainDeadlineMs) || drainDeadlineMs < 0) {
+      return Promise.reject(
+        new RangeError(
+          "QWP notification drain deadline must be non-negative and finite",
+        ),
+      );
+    }
+    this.closing = true;
+    this.closePromise = new Promise((resolve) => {
+      this.resolveClose = resolve;
+    });
+    if (this.queue.length === 0 && !this.dispatching) {
+      this.finishClose();
+      return this.closePromise;
+    }
+    this.schedule();
+    // Deliberately ref'd, unlike the idle timer below. close() resolves only
+    // from this timer or from the drain finishing, so unref'ing it made the
+    // returned promise unsettleable whenever the QWP client held the last
+    // ref'd handle: the loop emptied, neither timer fired, and Node exited
+    // with everything sequenced after `await close()` skipped. The wait is
+    // bounded by drainDeadlineMs, and close() is an explicit caller action, so
+    // holding the loop open for that window is the correct trade.
+    this.closeTimer = setTimeout(() => {
+      this.closeTimer = undefined;
+      this.dropped += this.queue.length;
+      this.queue.length = 0;
+      // A handler still in flight at the deadline is abandoned rather than
+      // awaited. Now that an async observer holds the dispatch open until it
+      // settles, waiting for it here would let one that never settles hold
+      // close() open forever; the drain is best-effort and bounded by
+      // drainDeadlineMs.
+      this.finishClose();
+    }, drainDeadlineMs);
+    return this.closePromise;
+  }
+
+  private schedule(): void {
+    if (this.timer || this.dispatching || this.closed) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.dispatchOne();
+    }, 0);
+    // An idle observer must never hold the process open, but once closing has
+    // started this timer is one of the two things that can settle close().
+    if (!this.closing) unrefTimer(this.timer);
+  }
+
+  private dispatchOne(): void {
+    if (this.closed || this.dispatching) return;
+    const notification = this.queue.shift();
+    if (notification === undefined) {
+      if (this.closing) this.finishClose();
+      return;
+    }
+    this.dispatching = true;
+    this.delivered++;
+    let pending: PromiseLike<unknown> | undefined;
+    try {
+      const result = this.handler(notification);
+      if (isPromiseLike(result)) pending = result;
+    } catch {
+      // Observability callbacks never participate in protocol progress.
+    }
+    if (!pending) {
+      this.finishDispatch();
+      return;
+    }
+    // Both arms settle the dispatch; a rejected observer is contained exactly
+    // like a synchronous throw.
+    pending.then(
+      () => this.finishDispatch(),
+      () => this.finishDispatch(),
+    );
+  }
+
+  private finishDispatch(): void {
+    this.dispatching = false;
+    // close() abandoned this handler at its drain deadline and has already
+    // settled; there is nothing left to schedule.
+    if (this.closed) return;
+    if (this.queue.length > 0) {
+      this.schedule();
+    } else if (this.closing) {
+      this.finishClose();
+    }
+  }
+
+  private finishClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.closeTimer) clearTimeout(this.closeTimer);
+    this.timer = undefined;
+    this.closeTimer = undefined;
+    this.resolveClose?.();
+    this.resolveClose = undefined;
+  }
+}
+
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+}

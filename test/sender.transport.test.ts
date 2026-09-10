@@ -4,7 +4,14 @@ import { readFileSync } from "fs";
 import { Agent } from "undici";
 import http from "http";
 
-import { Sender, SenderOptions, UndiciTransport, HttpTransport } from "../src";
+import crypto from "node:crypto";
+
+import {
+  Sender,
+  SenderOptions,
+  UndiciTransport,
+  HttpTransport,
+} from "../packages/nodejs-client/src";
 import { MockProxy } from "./util/mockproxy";
 import { MockHttp } from "./util/mockhttp";
 
@@ -355,6 +362,52 @@ describe("Sender TCP suite", function () {
       resolve(`data assert failed [expected=${expected}, actual=${actual}]`),
     );
   }
+
+  const tcpJwk = (auth: SenderOptions["auth"]) => {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      port: PROXY_PORT,
+      host: PROXY_HOST,
+      auth,
+    });
+    return (sender as unknown as { transport: { jwk: Record<string, string> } })
+      .transport.jwk;
+  };
+
+  it("derives a public point that matches the configured private key", () => {
+    // The JWK built from `auth` used to carry a fixed placeholder x/y unrelated
+    // to the private scalar. Node accepted that up to v24 without checking, so
+    // the authentication tests below pass either way; only comparing the point
+    // against the key catches a regression before Node v26 rejects it outright.
+    for (const auth of [
+      AUTH,
+      { keyId: "user1", token: "zhPiK3BkYMYJvRf5sqyrWNJwjDKHOWHnRbmQggUll6A" },
+    ]) {
+      const jwk = tcpJwk(auth);
+      const ecdh = crypto.createECDH("prime256v1");
+      ecdh.setPrivateKey(Buffer.from(auth!.token, "base64url"));
+      const point = ecdh.getPublicKey();
+
+      expect(jwk.x).toBe(point.subarray(1, 33).toString("base64url"));
+      expect(jwk.y).toBe(point.subarray(33, 65).toString("base64url"));
+      // Node v26 raises ERR_CRYPTO_INVALID_JWK here for an inconsistent pair.
+      expect(() =>
+        crypto.createPrivateKey({ key: jwk, format: "jwk" }),
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects a private key outside the P-256 scalar range", () => {
+    // 32 zero bytes. Short tokens are left-padded into a valid scalar, so an
+    // out-of-range one is what actually reaches the wrapped error path.
+    expect(() =>
+      tcpJwk({
+        keyId: "user1",
+        token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      }),
+    ).toThrow(/must be a base64url-encoded P-256 private key/);
+  });
 
   it("can authenticate", async function () {
     const proxy = await createProxy(true);

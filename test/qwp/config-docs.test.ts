@@ -1,0 +1,304 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it, vi } from "vitest";
+import {
+  QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE,
+  QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
+  QwpSender,
+  type QwpSenderSession,
+} from "../../packages/client-core/src/qwp";
+import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
+import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-egress-connection";
+import { createQwpNodeClient } from "../../packages/nodejs-client/src";
+import { resolveQwpNodeClientConfig } from "../../packages/nodejs-client/src/qwp-node/client-config";
+import { QWP_SUPPORTED_CONFIG_KEYS } from "../../packages/nodejs-client/src/qwp-node/client-config";
+import * as nodeClient from "../../packages/nodejs-client/src";
+import * as browserClient from "../../packages/browser-client/src";
+
+const ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../..",
+);
+
+describe("QWP configuration-string reference", () => {
+  it("only names entry points the package actually exports", async () => {
+    // config-docs checked key names but never function names, so QWP.md could
+    // -- and did -- point readers at a connectQwpNodeQuery() that has never
+    // existed. Every backticked connect/create entry point it names has to
+    // resolve against the Node package's public surface.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const named = new Set(
+      [...doc.matchAll(/`((?:connect|create)Qwp[A-Za-z0-9]*)\(\)`/g)].map(
+        (match) => match[1],
+      ),
+    );
+    expect(named.size).toBeGreaterThan(3);
+
+    // QWP.md documents both distributions, so an entry point may live in
+    // either package root.
+    const exported = new Set([
+      ...Object.keys(nodeClient),
+      ...Object.keys(browserClient),
+    ]);
+    const missing = [...named].filter((name) => !exported.has(name)).sort();
+    expect(missing).toEqual([]);
+  });
+
+  it("names only supported configuration-string entry points", async () => {
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const start = doc.indexOf("## Configuration-string keys");
+    const introduction = doc.slice(start, doc.indexOf("\n| Key", start));
+
+    expect(introduction).toContain("`createQwpNodeClient()`");
+    expect(introduction).not.toContain("`connectQwpNodeEgress()`");
+  });
+
+  it("documents every key the parser accepts", async () => {
+    // A key the parser takes but QWP.md never names is undiscoverable: the
+    // connect string is the portable spelling shared with the other QuestDB
+    // clients, so the reference has to track the schema.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const undocumented = [...QWP_SUPPORTED_CONFIG_KEYS]
+      .filter((key) => !doc.includes(`\`${key}\``))
+      .sort();
+
+    expect(undocumented).toEqual([]);
+  });
+
+  it("does not document keys the parser rejects", async () => {
+    // The reference tables are the only place these back-ticked snake_case
+    // names appear, so anything listed there must really be accepted.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const start = doc.indexOf("## Configuration-string keys");
+    const section = doc.slice(
+      start,
+      doc.indexOf("\n### Node.js fire-and-forget UDP", start),
+    );
+    const listed = new Set(
+      [
+        ...section.matchAll(/^\| `([a-z0-9_]+)`(?:, `([a-z0-9_]+)`)?/gm),
+      ].flatMap((match) => [match[1], match[2]].filter(Boolean) as string[]),
+    );
+
+    const unknown = [...listed]
+      .filter((key) => !QWP_SUPPORTED_CONFIG_KEYS.has(key))
+      .sort();
+
+    expect(unknown).toEqual([]);
+    // Guard against the extraction silently matching nothing.
+    expect(listed.size).toBeGreaterThan(50);
+  });
+
+  it("documents the pool, egress and reconnect defaults the code applies", async () => {
+    // Twelve rows read "—" while the code applied a concrete value, so a
+    // reader had no way to learn what `initial_credit` or `sender_pool_max`
+    // does when omitted. Pin every documented number to its source constant.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = (key: string): string => {
+      const row = new RegExp(
+        `^\\| \`${key}\`\\s*\\|[^|]*\\|\\s*(.+?)\\s*\\|`,
+        "m",
+      ).exec(doc);
+      if (!row) throw new Error(`no row documented for ${key}`);
+      return row[1];
+    };
+    const documentedNumber = (key: string): number => {
+      const cell = documented(key);
+      const value = /^`(\d+)`$/.exec(cell);
+      if (!value) throw new Error(`no numeric default for ${key}: ${cell}`);
+      return Number(value[1]);
+    };
+
+    expect(documentedNumber("initial_credit")).toBe(
+      QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
+    );
+    expect(documentedNumber("buffer_pool_size")).toBe(
+      QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE,
+    );
+
+    // The pool constants are module-private, so assert against the values a
+    // default client really reports.
+    const client = createQwpNodeClient({
+      ingress: { url: "ws://127.0.0.1:1/write/v4" },
+      egress: { url: "ws://127.0.0.1:1/read/v1" },
+    });
+    try {
+      const metrics = client.metrics;
+      expect(documentedNumber("sender_pool_min")).toBe(metrics.senders.minimum);
+      expect(documentedNumber("sender_pool_max")).toBe(metrics.senders.maximum);
+      expect(documentedNumber("query_pool_min")).toBe(metrics.queries.minimum);
+      expect(documentedNumber("query_pool_max")).toBe(metrics.queries.maximum);
+    } finally {
+      await client.close();
+    }
+
+    // Ingress and egress disagree on the reconnect defaults, so those cells
+    // carry both, in that order.
+    for (const [key, ingress, egress] of [
+      ["reconnect_initial_backoff_millis", "initialBackoffMs"],
+      ["reconnect_max_backoff_millis", "maxBackoffMs"],
+      ["reconnect_max_duration_millis", "maxDurationMs"],
+    ].map(([key, field]) => [
+      key,
+      QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS[
+        field as keyof typeof QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS
+      ],
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS[
+        field as keyof typeof QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS
+      ],
+    ]) as [string, number, number][]) {
+      expect(documented(key), key).toBe(`\`${ingress}\` / \`${egress}\``);
+    }
+    // The failover keys share the egress reconnect defaults.
+    expect(documentedNumber("failover_max_attempts")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxAttempts,
+    );
+    expect(documentedNumber("failover_backoff_initial_ms")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.initialBackoffMs,
+    );
+    expect(documentedNumber("failover_backoff_max_ms")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxBackoffMs,
+    );
+    expect(documentedNumber("failover_max_duration_ms")).toBe(
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxDurationMs,
+    );
+  });
+
+  it("documents every error class the packages export", async () => {
+    // QWP.md's policy says the compatibility contract covers "errors", but the
+    // table listed 25 of 44 exported classes. Eight of them -- QwpSendClosedError
+    // among them, constructed on 39 paths including the browser entry point --
+    // appeared in neither the table nor public-api-contract.ts, so a consumer
+    // writing catch policy from this document had no entry for errors the
+    // client really throws. Keep the table exact in both directions.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = new Set(
+      [...doc.matchAll(/^\| `(Qwp\w+Error)`/gm)].map((match) => match[1]),
+    );
+    const exported = new Set(
+      [...Object.keys(nodeClient), ...Object.keys(browserClient)].filter(
+        (name) => /^Qwp\w+Error$/.test(name),
+      ),
+    );
+
+    expect(
+      [...exported].filter((name) => !documented.has(name)).sort(),
+    ).toEqual([]);
+    expect(
+      [...documented].filter((name) => !exported.has(name)).sort(),
+    ).toEqual([]);
+    expect(exported.size).toBeGreaterThan(40);
+  });
+
+  it("documents the auto-flush defaults the sender actually applies", async () => {
+    // These two rows read "—" while every sibling gave a number, so a reader
+    // had no way to learn that ws:: batches 75x smaller and flushes 10x more
+    // often than http::. Pin the documented values to real behavior.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = (key: string): number => {
+      const row = new RegExp(
+        `^\\| \`${key}\`\\s*\\|[^|]*\\|\\s*\`?(\\d+)\`?\\s*\\|`,
+        "m",
+      ).exec(doc);
+      if (!row) throw new Error(`no numeric default documented for ${key}`);
+      return Number(row[1]);
+    };
+    const rows = documented("auto_flush_rows");
+    const intervalMs = documented("auto_flush_interval");
+
+    const sends: number[] = [];
+    const session = {
+      publishedFrameSequence: -1n,
+      acknowledgedFrameSequence: -1n,
+      async publishTables(tables: readonly { rowCount: number }[]) {
+        sends.push(tables[0].rowCount);
+      },
+      async publishTablesDelta(tables: readonly { rowCount: number }[]) {
+        sends.push(tables[0].rowCount);
+      },
+      async sendTables() {
+        return { status: 0, sequence: 0n, tables: [] };
+      },
+      async waitForDurable() {},
+      async close() {},
+    } as unknown as QwpSenderSession;
+
+    // Freeze the clock while the row trigger is under test, so the interval
+    // trigger cannot fire instead. Staging 999 rows is ~2ms of work but 999
+    // awaits, and on a loaded CI runner the event loop can take longer than
+    // the 100ms interval to get through them -- which flushed mid-loop and
+    // failed this assertion with a partial row count. Only Date is faked, so
+    // the flush machinery's own timers keep working.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const byRows = new QwpSender(async () => session);
+      for (let row = 0; row < rows - 1; row++) {
+        await byRows.table("t").intColumn("a", row).atNow();
+      }
+      expect(sends).toEqual([]);
+      await byRows.table("t").intColumn("a", rows).atNow();
+      expect(sends).toEqual([rows]);
+      await byRows.close();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    sends.length = 0;
+    vi.useFakeTimers();
+    try {
+      const byInterval = new QwpSender(async () => session);
+      await byInterval.table("t").intColumn("a", 1).atNow();
+      vi.advanceTimersByTime(intervalMs - 1);
+      await byInterval.table("t").intColumn("a", 2).atNow();
+      expect(sends).toEqual([]);
+      vi.advanceTimersByTime(1);
+      await byInterval.table("t").intColumn("a", 3).atNow();
+      expect(sends).toEqual([3]);
+      await byInterval.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("documents the store-and-forward defaults the parser actually resolves", async () => {
+    // Nothing checked the Default column beyond the two auto-flush rows, so a
+    // number in this table could drift from the parser -- and did: the
+    // segment size was documented as sizing segments only when it also caps an
+    // ingress frame, and initial_connect_retry was documented as requiring
+    // sf_dir when it applies to the memory replay queue too.
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const documented = (key: string): number => {
+      const row = new RegExp(
+        `^\\| \`${key}\`\\s*\\|[^|]*\\|\\s*\`?(\\d+)\`?\\s*\\|`,
+        "m",
+      ).exec(doc);
+      if (!row) throw new Error(`no numeric default documented for ${key}`);
+      return Number(row[1]);
+    };
+
+    const resolved = resolveQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp-config-docs;",
+    );
+    expect(resolved.ingress.storeAndForward).toMatchObject({
+      maxBytes: documented("sf_max_total_bytes"),
+      maxSegmentBytes: documented("sf_max_segment_bytes"),
+      appendDeadlineMs: documented("sf_append_deadline_millis"),
+    });
+
+    // The row says a segment default is also the frame cap; that only holds
+    // if the ingress session really receives it.
+    expect(
+      resolved.ingressSession?.maxBatchSizeBytes ??
+        resolved.ingress.storeAndForward?.maxSegmentBytes,
+    ).toBe(documented("sf_max_segment_bytes"));
+
+    // ...and that initial_connect_retry is accepted without sf_dir, as the
+    // row now says.
+    expect(
+      resolveQwpNodeClientConfig(
+        "ws::addr=localhost;initial_connect_retry=async;",
+      ).ingressSession?.initialConnectMode,
+    ).toBe("async");
+  });
+});

@@ -1,0 +1,22 @@
+{
+  "include": ["test/dist-types"],
+  "compilerOptions": {
+    "moduleResolution": "node",
+    "module": "CommonJS",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@questdb/nodejs-client": [
+        "./packages/nodejs-client/dist/cjs/index.d.ts"
+      ],
+      "@questdb/browser-client": [
+        "./packages/browser-client/dist/cjs/index.d.ts"
+      ]
+    }
+  }
+}

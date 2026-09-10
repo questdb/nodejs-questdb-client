@@ -1,0 +1,9 @@
+{
+  "name": "@questdb/client-core",
+  "version": "4.2.0",
+  "private": true,
+  "description": "Private shared implementation for the QuestDB JavaScript clients",
+  "dependencies": {
+    "fzstd": "0.1.1"
+  }
+}
