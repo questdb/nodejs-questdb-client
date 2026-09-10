@@ -124,6 +124,15 @@ export function encodeQwpQueryRequest(request: QwpQueryRequest): Uint8Array {
   if (bindCount === 0 && bindPayload.length !== 0) {
     throw new Error("bindPayload requires a non-zero bindCount");
   }
+  // The mirror of the check above. Only one direction was guarded, so a count
+  // supplied without its payload encoded a QUERY_REQUEST declaring N binds and
+  // carrying none: the server then read whatever follows the bind section --
+  // the queryFlags varint -- as the first bind's type byte, and answered with
+  // a parse error where the symmetric mistake was caught here. The two fields
+  // are documented as one escape hatch, so neither is usable on its own.
+  if (bindCount !== 0 && bindPayload.length === 0) {
+    throw new Error("bindCount requires a non-empty bindPayload");
+  }
 
   const sql = encodeUtf8(request.sql);
   const writer = new QwpByteWriter(32 + sql.length + bindPayload.length);

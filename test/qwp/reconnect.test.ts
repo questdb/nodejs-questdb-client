@@ -969,6 +969,37 @@ describe("QWP ingress reconnect and replay", () => {
     expect(attemptSignal?.aborted).toBe(true);
   });
 
+  it("reports the last attempt failure when the reconnect deadline expires", async () => {
+    // awaitReconnectDeadline() cannot see the attempt failures, so it builds a
+    // synthetic "deadline elapsed" cause. That error escapes connectLoop from
+    // the backoff waits, which sit outside its try, and from the verbatim
+    // rethrow inside it -- both bypassing the exhaustion branch that already
+    // carries lastError. An expired duration budget therefore named nothing,
+    // while an exhausted attempt budget named the real failure. Ingress
+    // defaults to unlimited attempts, so duration is the only exhaustion most
+    // senders can reach.
+    const attemptFailure = new Error("upgrade refused by the endpoint");
+    const connecting = QwpIngressSession.connect(
+      () => Promise.reject(attemptFailure),
+      {
+        reconnect: {
+          maxAttempts: 0,
+          initialBackoffMs: 1,
+          maxBackoffMs: 1,
+          maxDurationMs: 25,
+        },
+        initialConnectMode: "sync",
+      },
+    );
+
+    const error = await connecting.then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(QwpReconnectExhaustedError);
+    expect((error as QwpReconnectExhaustedError).cause).toBe(attemptFailure);
+  });
+
   it("disowns the eager first connect when the attempt is aborted", async () => {
     // connect() starts the first transport eagerly and nothing observes that
     // promise until connectLoop's first attempt awaits it. An abort leaves
@@ -8144,6 +8175,48 @@ describe("QWP Node file replay store", () => {
     await expect(
       store.prepareAppendBatch([Uint8Array.of(3)]),
     ).resolves.toBeUndefined();
+    expect(store.metrics).toMatchObject({ totalAppendTimeouts: 0 });
+
+    unlink.mockRestore();
+    await store.close();
+  }, 15_000);
+
+  it("waits out a transient trim fault on the symbol dictionary too", async () => {
+    // The dictionary writes went straight to assertReady(), so one parked trim
+    // fault rejected exactly the flushes that introduced a new symbol value
+    // while every other flush in the same window was parked and succeeded a
+    // moment later. That reached at()/atNow(), not only an explicit flush(),
+    // with an error that is neither journal exhaustion nor an append deadline
+    // -- and the ingress connection answered it by disabling delta symbol
+    // dictionaries for the rest of the connection's life.
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: 66,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 5_000,
+    });
+    await store.load();
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await store.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+
+    const unlink = vi
+      .spyOn(qwpSegmentMaintenanceWorker, "unlink")
+      .mockRejectedValueOnce(
+        Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        }),
+      );
+    await store.acknowledgeThrough(0n);
+    await vi.waitFor(() => expect(unlink).toHaveBeenCalled());
+
+    // Both dictionary entry points meet the parked failure at assertReady(),
+    // exactly where a fresh append meets it, and must wait it out the same way.
+    await expect(
+      store.appendSymbolDictionary(0, ["new-symbol"]),
+    ).resolves.toBeUndefined();
+    await expect(store.loadSymbolDictionary()).resolves.toEqual(["new-symbol"]);
     expect(store.metrics).toMatchObject({ totalAppendTimeouts: 0 });
 
     unlink.mockRestore();

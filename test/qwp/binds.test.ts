@@ -256,6 +256,25 @@ describe("QWP typed query binds", () => {
         bindCount: QWP_MAX_COLUMNS_PER_TABLE + 1,
       }),
     ).toThrow(/bindCount/);
+    // bindCount and bindPayload are one escape hatch, so neither is usable
+    // alone. Only the payload-without-count direction was rejected; a count
+    // without its payload encoded a QUERY_REQUEST declaring binds it did not
+    // carry, leaving the server to read the trailing queryFlags varint as the
+    // first bind's type byte.
+    expect(() =>
+      encodeQwpQueryRequest({
+        requestId: 0,
+        sql: "select $1",
+        bindPayload: Uint8Array.of(1, 2, 3),
+      }),
+    ).toThrow(/bindPayload requires a non-zero bindCount/);
+    expect(() =>
+      encodeQwpQueryRequest({
+        requestId: 0,
+        sql: "select $1",
+        bindCount: 3,
+      }),
+    ).toThrow(/bindCount requires a non-empty bindPayload/);
 
     const reusable = new QwpBindValues();
     expect(() => reusable.setInt(0, 0x80000000)).toThrow(/INT/);

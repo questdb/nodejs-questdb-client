@@ -1167,186 +1167,211 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
     }
 
-    while (!this.closing) {
-      if (attempt > 0) {
-        // The wait runs on every retry, including a zero backoff. It is the
-        // loop's only macrotask, and a factory that rejects without an I/O
-        // turn -- a caller-supplied webSocketFactory, or a browser WebSocket
-        // constructor that throws SecurityError on mixed content -- otherwise
-        // left the loop spinning in microtasks with initialBackoffMs 0, which
-        // starves timers, I/O and close() for as long as connecting fails.
-        // A zero delay still means "retry immediately"; it just yields first.
-        await this.waitForBackoffWithinDeadline(
-          backoffMs > 0 ? jitterReconnectDelayMs(backoffMs) : 0,
-          reconnectDeadlineMs,
-          attempt,
-        );
-        if (backoffMs > 0) {
-          backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
-        }
-      }
-      this.throwIfUnavailable();
-      attempt++;
-      if (reconnecting) this.totalReconnectAttempts++;
-      let candidate: QwpBinaryConnection | undefined;
-      try {
-        if (attempt === 1 && initialConnection) {
-          candidate = await awaitReconnectDeadline(
-            initialConnection,
+    try {
+      while (!this.closing) {
+        if (attempt > 0) {
+          // The wait runs on every retry, including a zero backoff. It is the
+          // loop's only macrotask, and a factory that rejects without an I/O
+          // turn -- a caller-supplied webSocketFactory, or a browser WebSocket
+          // constructor that throws SecurityError on mixed content -- otherwise
+          // left the loop spinning in microtasks with initialBackoffMs 0, which
+          // starves timers, I/O and close() for as long as connecting fails.
+          // A zero delay still means "retry immediately"; it just yields first.
+          await this.waitForBackoffWithinDeadline(
+            backoffMs > 0 ? jitterReconnectDelayMs(backoffMs) : 0,
             reconnectDeadlineMs,
             attempt,
-            () => undefined,
-            (opened) => void opened.close().catch(() => undefined),
           );
-        } else {
-          const abort = new AbortController();
-          this.connectAbort = abort;
-          try {
-            candidate = await awaitReconnectDeadline(
-              this.factory(abort.signal),
-              reconnectDeadlineMs,
-              attempt,
-              () => abort.abort(),
-              (opened) => void opened.close().catch(() => undefined),
-            );
-          } finally {
-            if (this.connectAbort === abort) this.connectAbort = undefined;
+          if (backoffMs > 0) {
+            backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
           }
         }
-        this.hasEverConnected = true;
-        this.connectingCandidate = candidate;
-        if (this.closing) {
-          await candidate.close().catch(() => undefined);
-          throw new QwpSendClosedError();
-        }
-        const replayed = await awaitReconnectDeadline(
-          this.replayInto(candidate),
-          reconnectDeadlineMs,
-          attempt,
-          () => void candidate?.close().catch(() => undefined),
-        );
-        if (this.closing) throw new QwpSendClosedError();
-        this.install(candidate, replayed);
-        // The server is reachable again, so the escalation window resumes.
-        this.endPoisonOutage();
-        this.resetCatchUpCapGapEpisode();
-        this.resetDurableAckMismatchEpisode();
-        this.connectingCandidate = undefined;
-        if (reconnecting) {
-          this.totalReconnectsSucceeded++;
-          const failedOver =
-            previousEndpoint !== undefined &&
-            String(previousEndpoint) !== String(candidate.endpoint);
-          if (failedOver) this.totalFailovers++;
-          this.emitEvent({
-            kind: failedOver
-              ? QWP_RECONNECT_EVENT_KIND.FAILED_OVER
-              : QWP_RECONNECT_EVENT_KIND.RECONNECTED,
+        this.throwIfUnavailable();
+        attempt++;
+        if (reconnecting) this.totalReconnectAttempts++;
+        let candidate: QwpBinaryConnection | undefined;
+        try {
+          if (attempt === 1 && initialConnection) {
+            candidate = await awaitReconnectDeadline(
+              initialConnection,
+              reconnectDeadlineMs,
+              attempt,
+              () => undefined,
+              (opened) => void opened.close().catch(() => undefined),
+            );
+          } else {
+            const abort = new AbortController();
+            this.connectAbort = abort;
+            try {
+              candidate = await awaitReconnectDeadline(
+                this.factory(abort.signal),
+                reconnectDeadlineMs,
+                attempt,
+                () => abort.abort(),
+                (opened) => void opened.close().catch(() => undefined),
+              );
+            } finally {
+              if (this.connectAbort === abort) this.connectAbort = undefined;
+            }
+          }
+          this.hasEverConnected = true;
+          this.connectingCandidate = candidate;
+          if (this.closing) {
+            await candidate.close().catch(() => undefined);
+            throw new QwpSendClosedError();
+          }
+          const replayed = await awaitReconnectDeadline(
+            this.replayInto(candidate),
+            reconnectDeadlineMs,
             attempt,
-            endpoint: candidate.endpoint,
-            previousEndpoint,
-          });
-        } else {
-          this.emitEvent({
-            kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
-            attempt: 0,
-            endpoint: candidate.endpoint,
-          });
-        }
-        return;
-      } catch (error) {
-        // A poison frame is meant to identify a connection that repeatedly
-        // accepts the same replay head and then rejects it or disappears. A
-        // failed connection/replay attempt breaks that sequence, so the
-        // outage must not supply the escalation dwell time -- but the strikes
-        // already earned have to survive it. Wiping the episode here made the
-        // canonical poison case unreachable: a frame that takes the server
-        // down guarantees the next connect fails, which reset the count
-        // before it could ever reach maxFrameRejections.
-        this.beginPoisonOutage();
-        if (reconnecting) this.totalReconnectErrors++;
-        lastError = error;
-        if (this.connectingCandidate === candidate) {
-          this.connectingCandidate = undefined;
-        }
-        if (candidate) await candidate.close().catch(() => undefined);
-        this.emitEvent({
-          kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
-          attempt,
-          endpoint: candidate?.endpoint,
-          previousEndpoint,
-          cause: error,
-        });
-        if (error instanceof QwpReconnectExhaustedError) throw error;
-        const capGapError =
-          error instanceof QwpCatchUpCapGapError
-            ? this.applyCatchUpCapGapPolicy(error)
-            : undefined;
-        if (!capGapError) this.resetCatchUpCapGapEpisode();
-        if (capGapError?.exhausted) throw capGapError.error;
-        if (
-          capGapError &&
-          !this.orphanStoreAndForward &&
-          attemptPolicy !== "unbounded" &&
-          // A cap gap is only terminal when no endpoint could ever take the
-          // frame, which means it also exceeds this client's own cap. A gap
-          // against the *endpoint's* cap is transient by definition: the
-          // byte-identical frame is accepted by a larger-cap node, so failing
-          // here abandons producer data over a rejection that replay can
-          // satisfy -- the one thing this client's error policy says must not
-          // go terminal. Falling through hands it to the normal retry loop,
-          // which now deprioritizes the endpoint in replayInto() and stays
-          // bounded by the configured attempt and duration budgets.
-          !this.canAnotherEndpointAcceptCatchUp(capGapError.error.frameLength)
-        ) {
-          throw capGapError.error;
-        }
-        const durableAckMismatch = durableAckUnavailableCause(error);
-        if (
-          durableAckMismatch &&
-          (!this.backgroundStoreAndForward || attemptPolicy !== "unbounded")
-        ) {
+            () => void candidate?.close().catch(() => undefined),
+          );
+          if (this.closing) throw new QwpSendClosedError();
+          this.install(candidate, replayed);
+          // The server is reachable again, so the escalation window resumes.
+          this.endPoisonOutage();
+          this.resetCatchUpCapGapEpisode();
           this.resetDurableAckMismatchEpisode();
-          throw durableAckMismatch;
-        }
-        const durableAckPolicy =
-          durableAckMismatch &&
-          this.backgroundStoreAndForward &&
-          attemptPolicy === "unbounded"
-            ? this.applyDurableAckMismatchPolicy(durableAckMismatch)
-            : undefined;
-        if (!durableAckPolicy) this.resetDurableAckMismatchEpisode();
-        if (durableAckPolicy?.exhausted) throw durableAckPolicy.error;
-        if (
-          this.orphanStoreAndForward &&
-          attemptPolicy === "unbounded" &&
-          isPrimaryUnavailableError(error)
-        ) {
-          primaryUnavailableAttempts++;
+          this.connectingCandidate = undefined;
+          if (reconnecting) {
+            this.totalReconnectsSucceeded++;
+            const failedOver =
+              previousEndpoint !== undefined &&
+              String(previousEndpoint) !== String(candidate.endpoint);
+            if (failedOver) this.totalFailovers++;
+            this.emitEvent({
+              kind: failedOver
+                ? QWP_RECONNECT_EVENT_KIND.FAILED_OVER
+                : QWP_RECONNECT_EVENT_KIND.RECONNECTED,
+              attempt,
+              endpoint: candidate.endpoint,
+              previousEndpoint,
+            });
+          } else {
+            this.emitEvent({
+              kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
+              attempt: 0,
+              endpoint: candidate.endpoint,
+            });
+          }
+          return;
+        } catch (error) {
+          // A poison frame is meant to identify a connection that repeatedly
+          // accepts the same replay head and then rejects it or disappears. A
+          // failed connection/replay attempt breaks that sequence, so the
+          // outage must not supply the escalation dwell time -- but the strikes
+          // already earned have to survive it. Wiping the episode here made the
+          // canonical poison case unreachable: a frame that takes the server
+          // down guarantees the next connect fails, which reset the count
+          // before it could ever reach maxFrameRejections.
+          this.beginPoisonOutage();
+          if (reconnecting) this.totalReconnectErrors++;
+          // An expired deadline is not an attempt failure, and letting it
+          // land here overwrote the real cause with the synthetic error the
+          // deadline helper builds -- which is exactly the cause the catch
+          // below has to restore.
+          if (!(error instanceof QwpReconnectExhaustedError)) lastError = error;
+          if (this.connectingCandidate === candidate) {
+            this.connectingCandidate = undefined;
+          }
+          if (candidate) await candidate.close().catch(() => undefined);
           this.emitEvent({
-            kind: QWP_RECONNECT_EVENT_KIND.PRIMARY_UNAVAILABLE,
-            attempt: primaryUnavailableAttempts,
+            kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
+            attempt,
+            endpoint: candidate?.endpoint,
             previousEndpoint,
             cause: error,
           });
-        }
-        if (!durableAckPolicy && !this.isRetryableReconnectError(error)) {
-          throw error;
-        }
-        const attemptsExhausted =
-          attemptPolicy === "single" ||
-          (attemptPolicy === "configured" &&
-            this.maxAttempts > 0 &&
-            attempt >= this.maxAttempts);
-        const durationExhausted =
-          attemptPolicy === "configured" &&
-          this.maxDurationMs > 0 &&
-          monotonicNowMs() - outageStarted >= this.maxDurationMs;
-        if (attemptsExhausted || durationExhausted) {
-          if (attemptPolicy === "single") throw error;
-          throw new QwpReconnectExhaustedError(attempt, lastError);
+          if (error instanceof QwpReconnectExhaustedError) throw error;
+          const capGapError =
+            error instanceof QwpCatchUpCapGapError
+              ? this.applyCatchUpCapGapPolicy(error)
+              : undefined;
+          if (!capGapError) this.resetCatchUpCapGapEpisode();
+          if (capGapError?.exhausted) throw capGapError.error;
+          if (
+            capGapError &&
+            !this.orphanStoreAndForward &&
+            attemptPolicy !== "unbounded" &&
+            // A cap gap is only terminal when no endpoint could ever take the
+            // frame, which means it also exceeds this client's own cap. A gap
+            // against the *endpoint's* cap is transient by definition: the
+            // byte-identical frame is accepted by a larger-cap node, so failing
+            // here abandons producer data over a rejection that replay can
+            // satisfy -- the one thing this client's error policy says must not
+            // go terminal. Falling through hands it to the normal retry loop,
+            // which now deprioritizes the endpoint in replayInto() and stays
+            // bounded by the configured attempt and duration budgets.
+            !this.canAnotherEndpointAcceptCatchUp(capGapError.error.frameLength)
+          ) {
+            throw capGapError.error;
+          }
+          const durableAckMismatch = durableAckUnavailableCause(error);
+          if (
+            durableAckMismatch &&
+            (!this.backgroundStoreAndForward || attemptPolicy !== "unbounded")
+          ) {
+            this.resetDurableAckMismatchEpisode();
+            throw durableAckMismatch;
+          }
+          const durableAckPolicy =
+            durableAckMismatch &&
+            this.backgroundStoreAndForward &&
+            attemptPolicy === "unbounded"
+              ? this.applyDurableAckMismatchPolicy(durableAckMismatch)
+              : undefined;
+          if (!durableAckPolicy) this.resetDurableAckMismatchEpisode();
+          if (durableAckPolicy?.exhausted) throw durableAckPolicy.error;
+          if (
+            this.orphanStoreAndForward &&
+            attemptPolicy === "unbounded" &&
+            isPrimaryUnavailableError(error)
+          ) {
+            primaryUnavailableAttempts++;
+            this.emitEvent({
+              kind: QWP_RECONNECT_EVENT_KIND.PRIMARY_UNAVAILABLE,
+              attempt: primaryUnavailableAttempts,
+              previousEndpoint,
+              cause: error,
+            });
+          }
+          if (!durableAckPolicy && !this.isRetryableReconnectError(error)) {
+            throw error;
+          }
+          const attemptsExhausted =
+            attemptPolicy === "single" ||
+            (attemptPolicy === "configured" &&
+              this.maxAttempts > 0 &&
+              attempt >= this.maxAttempts);
+          const durationExhausted =
+            attemptPolicy === "configured" &&
+            this.maxDurationMs > 0 &&
+            monotonicNowMs() - outageStarted >= this.maxDurationMs;
+          if (attemptsExhausted || durationExhausted) {
+            if (attemptPolicy === "single") throw error;
+            throw new QwpReconnectExhaustedError(attempt, lastError);
+          }
         }
       }
+    } catch (error) {
+      // awaitReconnectDeadline() builds its own cause because it cannot see the
+      // attempt failures, and that synthetic error escapes here from the backoff
+      // waits above -- which sit outside the try -- and from the verbatim
+      // rethrow inside it. Both bypassed the exhaustion branch that already
+      // carries lastError, so an expired duration budget reported "QWP
+      // reconnect deadline elapsed" and nothing else: a bad certificate, a
+      // wrong port and a DNS failure were indistinguishable.
+      // Ingress defaults to unlimited attempts, so the duration budget is
+      // the only exhaustion most senders reach and the attempts branch that
+      // does carry lastError never runs.
+      if (
+        error instanceof QwpReconnectExhaustedError &&
+        lastError !== undefined &&
+        error.cause !== lastError
+      ) {
+        throw new QwpReconnectExhaustedError(attempt, lastError);
+      }
+      throw error;
     }
     throw new QwpSendClosedError();
   }

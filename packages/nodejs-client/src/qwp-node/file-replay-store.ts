@@ -1190,11 +1190,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
 
   loadSymbolDictionary(): Promise<readonly string[]> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
-    return this.enqueue(async () => {
-      await this.assertReadyAfterWait();
-      if (this.dictionaryLoadError) throw this.dictionaryLoadError;
-      return this.symbols.slice();
-    });
+    return this.withDictionaryBackpressure(() =>
+      this.enqueue(async () => {
+        await this.assertReadyAfterWait();
+        if (this.dictionaryLoadError) throw this.dictionaryLoadError;
+        return this.symbols.slice();
+      }),
+    );
   }
 
   appendSymbolDictionary(
@@ -1202,91 +1204,93 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     entries: readonly string[],
   ): Promise<void> {
     if (this.closing || this.closed) return Promise.reject(this.closedError());
-    return this.enqueue(async () => {
-      await this.assertReadyAfterWait();
-      if (this.dictionaryLoadError) throw this.dictionaryLoadError;
-      if (startId !== this.symbols.length) {
-        throw new QwpReplayStoreError(
-          `QWP symbol dictionary is not dense [expected=${this.symbols.length}, received=${startId}]`,
-        );
-      }
-      if (startId + entries.length > QWP_MAX_SYMBOL_DICTIONARY_SIZE) {
-        throw new QwpReplayStoreError(
-          `QWP symbol dictionary exceeds maximum size ${QWP_MAX_SYMBOL_DICTIONARY_SIZE}`,
-        );
-      }
-      if (entries.length === 0) return;
-      const additions = new Set<string>();
-      for (const entry of entries) {
-        if (this.symbolValues.has(entry) || additions.has(entry)) {
+    return this.withDictionaryBackpressure(() =>
+      this.enqueue(async () => {
+        await this.assertReadyAfterWait();
+        if (this.dictionaryLoadError) throw this.dictionaryLoadError;
+        if (startId !== this.symbols.length) {
           throw new QwpReplayStoreError(
-            `QWP symbol dictionary contains a duplicate value: '${entry}'`,
+            `QWP symbol dictionary is not dense [expected=${this.symbols.length}, received=${startId}]`,
           );
         }
-        additions.add(entry);
-      }
-      const block = encodeDictionaryBlock(startId, entries);
-      const initial = this.dictionaryFileSize === 0;
-      const addedBytes =
-        block.byteLength + (initial ? DICTIONARY_HEADER_SIZE : 0);
-      const requiredBytes = this.totalBytes + addedBytes;
-      const finalPath = join(this.directory, DICTIONARY_FILE);
-      if (initial) {
-        const temporaryPath = join(
-          this.directory,
-          `${DICTIONARY_FILE}${TEMP_MARKER}${process.pid}-${randomUUID()}`,
-        );
-        try {
-          const file = await open(temporaryPath, "wx", 0o600);
-          try {
-            await file.writeFile(
-              Buffer.concat([encodeDictionaryHeader(), block]),
+        if (startId + entries.length > QWP_MAX_SYMBOL_DICTIONARY_SIZE) {
+          throw new QwpReplayStoreError(
+            `QWP symbol dictionary exceeds maximum size ${QWP_MAX_SYMBOL_DICTIONARY_SIZE}`,
+          );
+        }
+        if (entries.length === 0) return;
+        const additions = new Set<string>();
+        for (const entry of entries) {
+          if (this.symbolValues.has(entry) || additions.has(entry)) {
+            throw new QwpReplayStoreError(
+              `QWP symbol dictionary contains a duplicate value: '${entry}'`,
             );
-            if (this.durability === QWP_SF_DURABILITY.APPEND) {
-              await file.sync();
-            }
-          } finally {
-            await file.close();
           }
-          await rename(temporaryPath, finalPath);
-          if (this.durability === QWP_SF_DURABILITY.APPEND) {
-            await syncDirectory(this.directory);
-          } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
-            this.dictionaryDirty = true;
-            this.directoryDirty = true;
-          }
-        } catch (error) {
-          await ignoreMissing(unlink(temporaryPath));
-          throw new QwpReplayStoreError(
-            `could not create QWP symbol dictionary [startId=${startId}]`,
-            error,
-          );
+          additions.add(entry);
         }
-      } else {
-        try {
-          const file = await open(finalPath, "a", 0o600);
+        const block = encodeDictionaryBlock(startId, entries);
+        const initial = this.dictionaryFileSize === 0;
+        const addedBytes =
+          block.byteLength + (initial ? DICTIONARY_HEADER_SIZE : 0);
+        const requiredBytes = this.totalBytes + addedBytes;
+        const finalPath = join(this.directory, DICTIONARY_FILE);
+        if (initial) {
+          const temporaryPath = join(
+            this.directory,
+            `${DICTIONARY_FILE}${TEMP_MARKER}${process.pid}-${randomUUID()}`,
+          );
           try {
-            await file.writeFile(block);
+            const file = await open(temporaryPath, "wx", 0o600);
+            try {
+              await file.writeFile(
+                Buffer.concat([encodeDictionaryHeader(), block]),
+              );
+              if (this.durability === QWP_SF_DURABILITY.APPEND) {
+                await file.sync();
+              }
+            } finally {
+              await file.close();
+            }
+            await rename(temporaryPath, finalPath);
             if (this.durability === QWP_SF_DURABILITY.APPEND) {
-              await file.sync();
+              await syncDirectory(this.directory);
             } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
               this.dictionaryDirty = true;
+              this.directoryDirty = true;
             }
-          } finally {
-            await file.close();
+          } catch (error) {
+            await ignoreMissing(unlink(temporaryPath));
+            throw new QwpReplayStoreError(
+              `could not create QWP symbol dictionary [startId=${startId}]`,
+              error,
+            );
           }
-        } catch (error) {
-          throw new QwpReplayStoreError(
-            `could not append QWP symbol dictionary [startId=${startId}]`,
-            error,
-          );
+        } else {
+          try {
+            const file = await open(finalPath, "a", 0o600);
+            try {
+              await file.writeFile(block);
+              if (this.durability === QWP_SF_DURABILITY.APPEND) {
+                await file.sync();
+              } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
+                this.dictionaryDirty = true;
+              }
+            } finally {
+              await file.close();
+            }
+          } catch (error) {
+            throw new QwpReplayStoreError(
+              `could not append QWP symbol dictionary [startId=${startId}]`,
+              error,
+            );
+          }
         }
-      }
-      this.symbols.push(...entries);
-      for (const entry of entries) this.symbolValues.add(entry);
-      this.dictionaryFileSize += addedBytes;
-      this.totalBytes = requiredBytes;
-    });
+        this.symbols.push(...entries);
+        for (const entry of entries) this.symbolValues.add(entry);
+        this.dictionaryFileSize += addedBytes;
+        this.totalBytes = requiredBytes;
+      }),
+    );
   }
 
   replaceSymbolDictionary(entries: readonly string[]): Promise<void> {
@@ -1422,6 +1426,65 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       if (failure) throw failure;
     });
     return this.closePromise;
+  }
+
+  /**
+   * Runs a symbol-dictionary operation under the contract frame appends
+   * already follow: a parked retryable journal fault is waited out on the
+   * append deadline rather than surfaced to the producer.
+   *
+   * Without this, one background trim or checkpoint fault rejected exactly the
+   * flushes that introduced a new symbol value, while every other flush in the
+   * same window was parked by appendWithBackpressure() and succeeded a moment
+   * later. Those faults are the ones scheduleMaintenance() parks and clears on
+   * its own retry, so surfacing them here contradicted the invariant stated
+   * there -- the one error an sf_dir producer should see is its append
+   * deadline elapsing -- and it did so through at()/atNow(), not only an
+   * explicit flush(). A fault that outlives the deadline, or one the store
+   * calls non-retryable, still reaches the caller, which is what lets the
+   * ingress connection fall back to inline dictionaries.
+   */
+  private async withDictionaryBackpressure<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let deadline = 0;
+    let stalled = false;
+    for (;;) {
+      if (this.closing || this.closed) throw this.closedError();
+      const capacityGeneration = this.capacityGeneration;
+      try {
+        return await operation();
+      } catch (error) {
+        if (this.closing || this.closed) throw this.closedError();
+        if (!(error instanceof QwpReplayStoreError) || !error.retryable) {
+          throw error;
+        }
+        if (failsFastUnderErrorPolicy(this.backpressurePolicy, error)) {
+          throw error;
+        }
+        if (!stalled) {
+          stalled = true;
+          // Monotonic, for the reason appendWithBackpressure() gives: a clock
+          // step must not expire a wait that has barely started.
+          deadline = monotonicNowMs() + this.appendDeadlineMs;
+          this.totalBackpressureStalls++;
+        }
+        const remainingMs = deadline - monotonicNowMs();
+        // Rethrow the fault itself rather than an append timeout: no bytes
+        // were waiting on capacity, so naming the journal ceiling here would
+        // describe the wrong problem.
+        if (remainingMs <= 0) throw error;
+        // A dictionary write never waits on capacity, so there is no ACK or
+        // trim wake-up for it. Retry on the same bounded cadence a generic
+        // retryable store fault uses on the append path.
+        await this.waitForCapacity(
+          capacityGeneration,
+          remainingMs,
+          0,
+          TRANSIENT_STORE_RETRY_DELAY_MS,
+        );
+      }
+    }
   }
 
   private async appendWithBackpressure(

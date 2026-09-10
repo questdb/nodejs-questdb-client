@@ -121,6 +121,14 @@ refuses a dispatch whose version either package has already published, because
 the publish action skips an existing version silently and would otherwise
 release only the other half.
 
+`check-release-versions.mjs` decides *whether* to bump, never by how much.
+Pick the level from the changes the release carries: a change that alters the
+behaviour of a published API, its emitted wire bytes, or the errors it throws
+is breaking and needs a major bump, even when the new behaviour is a fix. The
+signal comes from the commits, so mark a breaking change where Conventional
+Commits puts it (see below) rather than leaving it for the release to
+rediscover.
+
 ## Making Changes
 
 1. Create a new branch for your changes:
@@ -137,6 +145,11 @@ git commit -m "feat: add new feature"
 ```
 
 We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification for commit messages.
+
+A commit that breaks a published API marks it, either as `!` after the
+type/scope (`feat(qwp)!: ...`) or as a `BREAKING CHANGE:` footer. That marker
+is what tells a release it has to be a major one, so a pull request carrying
+such a change needs it on the pull request title too.
 
 3. Push your changes to your fork:
 

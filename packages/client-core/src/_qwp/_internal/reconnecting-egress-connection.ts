@@ -306,124 +306,146 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       }
     }
 
-    while (!this.closing) {
-      if (attempt > 0) {
-        // Runs on every retry, zero backoff included: this is the loop's only
-        // macrotask, and without it a factory that rejects inside a microtask
-        // starved the event loop outright. See the same guard in
-        // reconnecting-ingress-connection.ts.
-        await this.waitForBackoffWithinDeadline(
-          backoffMs > 0 ? jitterReconnectDelayMs(backoffMs) : 0,
-          reconnectDeadlineMs,
-          attempt,
-        );
-        if (backoffMs > 0) {
-          backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
-        }
-      }
-      this.throwIfUnavailable();
-      attempt++;
-      let candidate: QwpBinaryConnection | undefined;
-      try {
-        const abort = new AbortController();
-        this.connectAbort = abort;
-        try {
-          candidate = await awaitReconnectDeadline(
-            this.factory(abort.signal),
+    try {
+      while (!this.closing) {
+        if (attempt > 0) {
+          // Runs on every retry, zero backoff included: this is the loop's only
+          // macrotask, and without it a factory that rejects inside a microtask
+          // starved the event loop outright. See the same guard in
+          // reconnecting-ingress-connection.ts.
+          await this.waitForBackoffWithinDeadline(
+            backoffMs > 0 ? jitterReconnectDelayMs(backoffMs) : 0,
             reconnectDeadlineMs,
             attempt,
-            () => abort.abort(),
-            (opened) => void opened.close().catch(() => undefined),
           );
-        } finally {
-          if (this.connectAbort === abort) this.connectAbort = undefined;
+          if (backoffMs > 0) {
+            backoffMs = Math.min(Math.max(backoffMs * 2, 1), this.maxBackoffMs);
+          }
         }
-        this.connectingCandidate = candidate;
-        if (this.closing) {
-          await candidate.close().catch(() => undefined);
-          throw new QwpSendClosedError();
-        }
-        const iterator = candidate.messages[Symbol.asyncIterator]();
-        const serverInfoPayload = await awaitReconnectDeadline(
-          this.readServerInfo(iterator, candidate),
-          reconnectDeadlineMs,
-          attempt,
-          () => void candidate?.close().catch(() => undefined),
-        );
-        const serverInfo = decodeQwpEgressMessage(serverInfoPayload);
-        if (serverInfo.kind !== "server-info") {
-          throw new QwpProtocolError(
-            "QWP egress connection did not begin with SERVER_INFO",
-          );
-        }
-        if (reconnecting) {
-          this.validateServerInfo(serverInfo, candidate);
-          await awaitReconnectDeadline(
-            this.replayInto(
-              candidate,
-              serverInfo,
-              previousEndpoint,
-              initialCause,
-              skipQueueBarrier,
-            ),
+        this.throwIfUnavailable();
+        attempt++;
+        let candidate: QwpBinaryConnection | undefined;
+        try {
+          const abort = new AbortController();
+          this.connectAbort = abort;
+          try {
+            candidate = await awaitReconnectDeadline(
+              this.factory(abort.signal),
+              reconnectDeadlineMs,
+              attempt,
+              () => abort.abort(),
+              (opened) => void opened.close().catch(() => undefined),
+            );
+          } finally {
+            if (this.connectAbort === abort) this.connectAbort = undefined;
+          }
+          this.connectingCandidate = candidate;
+          if (this.closing) {
+            await candidate.close().catch(() => undefined);
+            throw new QwpSendClosedError();
+          }
+          const iterator = candidate.messages[Symbol.asyncIterator]();
+          const serverInfoPayload = await awaitReconnectDeadline(
+            this.readServerInfo(iterator, candidate),
             reconnectDeadlineMs,
             attempt,
             () => void candidate?.close().catch(() => undefined),
           );
-        } else {
-          this.initialServerInfo = serverInfo;
+          const serverInfo = decodeQwpEgressMessage(serverInfoPayload);
+          if (serverInfo.kind !== "server-info") {
+            throw new QwpProtocolError(
+              "QWP egress connection did not begin with SERVER_INFO",
+            );
+          }
+          if (reconnecting) {
+            this.validateServerInfo(serverInfo, candidate);
+            await awaitReconnectDeadline(
+              this.replayInto(
+                candidate,
+                serverInfo,
+                previousEndpoint,
+                initialCause,
+                skipQueueBarrier,
+              ),
+              reconnectDeadlineMs,
+              attempt,
+              () => void candidate?.close().catch(() => undefined),
+            );
+          } else {
+            this.initialServerInfo = serverInfo;
+            this.currentServerInfo = serverInfo;
+            this.messagesQueue.push(serverInfoPayload);
+          }
+          if (this.closing) throw new QwpSendClosedError();
           this.currentServerInfo = serverInfo;
-          this.messagesQueue.push(serverInfoPayload);
-        }
-        if (this.closing) throw new QwpSendClosedError();
-        this.currentServerInfo = serverInfo;
-        this.install(candidate, iterator);
-        this.connectingCandidate = undefined;
-        if (reconnecting) {
-          this.emitEvent({
-            kind:
-              previousEndpoint !== undefined &&
-              String(previousEndpoint) !== String(candidate.endpoint)
-                ? QWP_RECONNECT_EVENT_KIND.FAILED_OVER
-                : QWP_RECONNECT_EVENT_KIND.RECONNECTED,
-            attempt,
-            endpoint: candidate.endpoint,
-            previousEndpoint,
-          });
-        } else {
-          this.emitEvent({
-            kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
-            attempt: 0,
-            endpoint: candidate.endpoint,
-          });
-        }
-        return;
-      } catch (error) {
-        lastError = error;
-        if (this.connectingCandidate === candidate) {
+          this.install(candidate, iterator);
           this.connectingCandidate = undefined;
-        }
-        if (candidate) await candidate.close().catch(() => undefined);
-        if (this.closing) return;
-        this.emitEvent({
-          kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
-          attempt,
-          endpoint: candidate?.endpoint,
-          previousEndpoint,
-          cause: error,
-        });
-        if (error instanceof QwpReconnectExhaustedError) throw error;
-        if (!isRetryableReconnectError(error)) throw error;
-        if (!reconnecting && !this.retryInitialConnection) throw error;
-        const attemptsExhausted =
-          this.maxAttempts > 0 && attempt >= this.maxAttempts;
-        const durationExhausted =
-          this.maxDurationMs > 0 &&
-          monotonicNowMs() - outageStarted >= this.maxDurationMs;
-        if (attemptsExhausted || durationExhausted) {
-          throw new QwpReconnectExhaustedError(attempt, lastError);
+          if (reconnecting) {
+            this.emitEvent({
+              kind:
+                previousEndpoint !== undefined &&
+                String(previousEndpoint) !== String(candidate.endpoint)
+                  ? QWP_RECONNECT_EVENT_KIND.FAILED_OVER
+                  : QWP_RECONNECT_EVENT_KIND.RECONNECTED,
+              attempt,
+              endpoint: candidate.endpoint,
+              previousEndpoint,
+            });
+          } else {
+            this.emitEvent({
+              kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
+              attempt: 0,
+              endpoint: candidate.endpoint,
+            });
+          }
+          return;
+        } catch (error) {
+          // An expired deadline is not an attempt failure, and letting it
+          // land here overwrote the real cause with the synthetic error the
+          // deadline helper builds -- which is exactly the cause the catch
+          // below has to restore.
+          if (!(error instanceof QwpReconnectExhaustedError)) lastError = error;
+          if (this.connectingCandidate === candidate) {
+            this.connectingCandidate = undefined;
+          }
+          if (candidate) await candidate.close().catch(() => undefined);
+          if (this.closing) return;
+          this.emitEvent({
+            kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
+            attempt,
+            endpoint: candidate?.endpoint,
+            previousEndpoint,
+            cause: error,
+          });
+          if (error instanceof QwpReconnectExhaustedError) throw error;
+          if (!isRetryableReconnectError(error)) throw error;
+          if (!reconnecting && !this.retryInitialConnection) throw error;
+          const attemptsExhausted =
+            this.maxAttempts > 0 && attempt >= this.maxAttempts;
+          const durationExhausted =
+            this.maxDurationMs > 0 &&
+            monotonicNowMs() - outageStarted >= this.maxDurationMs;
+          if (attemptsExhausted || durationExhausted) {
+            throw new QwpReconnectExhaustedError(attempt, lastError);
+          }
         }
       }
+    } catch (error) {
+      // awaitReconnectDeadline() builds its own cause because it cannot see the
+      // attempt failures, and that synthetic error escapes here from the backoff
+      // waits above -- which sit outside the try -- and from the verbatim
+      // rethrow inside it. Both bypassed the exhaustion branch that already
+      // carries lastError, so an expired duration budget reported "QWP
+      // reconnect deadline elapsed" and nothing else: a bad certificate, a
+      // wrong port and a DNS failure were indistinguishable.
+      if (
+        error instanceof QwpReconnectExhaustedError &&
+        lastError !== undefined &&
+        error.cause !== lastError
+      ) {
+        throw new QwpReconnectExhaustedError(attempt, lastError);
+      }
+      throw error;
     }
     throw new QwpSendClosedError();
   }
