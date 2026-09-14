@@ -2966,6 +2966,120 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("sweeps past a cap-incompatible endpoint during fail-fast startup", async () => {
+    // These options are exactly what connectQwpNodeIngress({ storeAndForward })
+    // selects when the caller sets neither `reconnect` nor `initialConnectMode`:
+    // background replay, fail-fast startup and the default reconnect policy.
+    // Fail-fast means one *endpoint* verdict, not one sweep: the first endpoint
+    // connects and then refuses the recovered frame on its own cap, which says
+    // nothing about the configured larger-cap node. Ending startup there failed
+    // construction with the frame still journalled and the second endpoint
+    // never opened.
+    const payload = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8);
+    const store = new TrackingReplayStore();
+    store.records.set(0n, payload);
+    const attempted: string[] = [];
+    const connections = new Map<string, FakeConnection>();
+    const factory = createQwpFailoverConnectionFactory(
+      "small-cap",
+      ["large-cap"],
+      async (endpoint) => {
+        attempted.push(String(endpoint));
+        const connection = new FakeConnection(String(endpoint), {
+          qwpVersion: 1,
+          maxBatchSizeBytes: endpoint === "small-cap" ? 4 : 64,
+        });
+        connections.set(String(endpoint), connection);
+        return connection;
+      },
+    );
+
+    const session = await QwpIngressSession.connect(factory, {
+      backgroundStoreAndForward: true,
+      initialConnectMode: "off",
+      replayStore: store,
+      ackTimeoutMs: 1_000,
+    });
+
+    expect(attempted).toEqual(["small-cap", "large-cap"]);
+    expect(connections.get("small-cap")!.sent).toHaveLength(0);
+    const large = connections.get("large-cap")!;
+    expect(large.sent).toEqual([payload]);
+    expect(store.records.has(0n)).toBe(true);
+    large.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(store.records.size).toBe(0));
+    await session.close();
+  });
+
+  it("fails fail-fast startup once every endpoint refuses the frame", async () => {
+    // The extra sweep the sibling test relies on is bought per endpoint, so a
+    // cluster that refuses the recovered frame everywhere still terminates --
+    // on the first endpoint that repeats -- rather than sweeping forever.
+    const payload = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8);
+    const store = new TrackingReplayStore();
+    store.records.set(0n, payload);
+    const attempted: string[] = [];
+    const connections: FakeConnection[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "small-a",
+      ["small-b"],
+      async (endpoint) => {
+        attempted.push(String(endpoint));
+        const connection = new FakeConnection(String(endpoint), {
+          qwpVersion: 1,
+          maxBatchSizeBytes: 4,
+        });
+        connections.push(connection);
+        return connection;
+      },
+    );
+
+    await expect(
+      QwpIngressSession.connect(factory, {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "off",
+        replayStore: store,
+        ackTimeoutMs: 1_000,
+        reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 },
+      }),
+    ).rejects.toThrow(
+      "persisted QWP frame exceeds reconnect target batch cap [size=8, max=4]",
+    );
+
+    expect(attempted).toEqual(["small-a", "small-b", "small-a"]);
+    for (const connection of connections) expect(connection.sent).toEqual([]);
+    expect(store.records.get(0n)).toEqual(payload);
+  });
+
+  it("keeps one fail-fast attempt when the frame exceeds the client cap", async () => {
+    // The client's own cap applies to every endpoint, so this rejection is
+    // deterministic under replay and must not buy the extra endpoint sweep.
+    const store = new TrackingReplayStore();
+    store.records.set(0n, Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8));
+    let factoryCalls = 0;
+
+    await expect(
+      QwpIngressSession.connect(
+        async () => {
+          factoryCalls++;
+          return new FakeConnection(`endpoint-${factoryCalls}`);
+        },
+        {
+          backgroundStoreAndForward: true,
+          initialConnectMode: "off",
+          replayStore: store,
+          maxBatchSizeBytes: 4,
+          ackTimeoutMs: 1_000,
+          reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 },
+        },
+      ),
+    ).rejects.toThrow(
+      "persisted QWP frame exceeds reconnect target batch cap [size=8, max=4]",
+    );
+
+    expect(factoryCalls).toBe(1);
+  });
+
   it("deprioritizes an endpoint whose cap cannot fit dictionary catch-up", async () => {
     // The sibling test above covers a *data* frame that a small-cap endpoint
     // refuses. The dictionary catch-up path threw without deprioritizing, so

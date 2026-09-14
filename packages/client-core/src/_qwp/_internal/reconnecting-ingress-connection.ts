@@ -121,6 +121,25 @@ export class QwpCatchUpCapGapError extends RangeError {
   }
 }
 
+/**
+ * A recovered frame refused by the connected endpoint's own negotiated cap.
+ *
+ * Separated from the plain RangeError the same check throws for a frame above
+ * this client's cap, because only this one is transient: the byte-identical
+ * frame is accepted by a larger-cap node, so the endpoint has been
+ * deprioritized and a further failover sweep can still place it. The message is
+ * the one both cases have always reported, so the failure that finally escapes
+ * still names the cap mismatch.
+ */
+class QwpEndpointReplayCapError extends RangeError {
+  constructor(payloadLength: number, maxBatchSizeBytes: number) {
+    super(
+      `persisted QWP frame exceeds reconnect target batch cap [size=${payloadLength}, max=${maxBatchSizeBytes}]`,
+    );
+    this.name = "QwpEndpointReplayCapError";
+  }
+}
+
 export class QwpDurableAckPersistentFailureError extends Error {
   constructor(
     readonly attempts: number,
@@ -1124,6 +1143,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     let backoffMs = this.initialBackoffMs;
     let lastError = initialCause;
     let primaryUnavailableAttempts = 0;
+    // Endpoints whose own batch cap refused the recovered frame in this loop.
+    // Bounds the extra sweeps granted below to one per endpoint.
+    const endpointCapRejections = new Set<string>();
     if (reconnecting) {
       this.emitEvent({
         kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
@@ -1320,8 +1342,28 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           if (!durableAckPolicy && !this.isRetryableReconnectError(error)) {
             throw error;
           }
+          // A single-attempt startup -- the Node store-and-forward default --
+          // spends its one attempt on one endpoint. An endpoint that connected
+          // and then refused the recovered frame on its own cap has reported
+          // nothing about the rest of the cluster: replayInto() has already
+          // deprioritized it, so the next factory sweep opens a different node
+          // that may take the byte-identical frame. Exhausting here left a
+          // configured larger-cap endpoint unopened and failed construction
+          // with the frame still pending. Each endpoint buys at most one extra
+          // sweep, so a cluster that refuses the frame everywhere terminates on
+          // the first endpoint that repeats, with the cap error as its cause.
+          let sweepsAnotherEndpointForCap = false;
+          if (
+            attemptPolicy === "single" &&
+            error instanceof QwpEndpointReplayCapError
+          ) {
+            const capRejectedEndpoint = String(candidate?.endpoint);
+            sweepsAnotherEndpointForCap =
+              !endpointCapRejections.has(capRejectedEndpoint);
+            endpointCapRejections.add(capRejectedEndpoint);
+          }
           const attemptsExhausted =
-            attemptPolicy === "single" ||
+            (attemptPolicy === "single" && !sweepsAnotherEndpointForCap) ||
             (attemptPolicy === "configured" &&
               this.maxAttempts > 0 &&
               attempt >= this.maxAttempts);
@@ -1525,9 +1567,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (cap !== undefined && frame.payloadLength > cap) {
         // The frame is valid for the journal but not for this endpoint. Keep the
         // endpoint usable for smaller work while making the shared failover
-        // tracker try a different node on the next reconnect attempt.
+        // tracker try a different node on the next reconnect attempt, and report
+        // the rejection as the transient class so a single-attempt startup
+        // reaches that node instead of ending on this endpoint's verdict.
         if (this.isEndpointSpecificCap(connection, frame.payloadLength)) {
           connection.deprioritizeEndpoint?.();
+          throw new QwpEndpointReplayCapError(frame.payloadLength, cap);
         }
         throw new RangeError(
           `persisted QWP frame exceeds reconnect target batch cap [size=${frame.payloadLength}, max=${cap}]`,
