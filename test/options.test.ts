@@ -983,6 +983,77 @@ describe("Configuration string parser suite", function () {
     }
   });
 
+  it("rejects QWP extra-option sections that the selected transport cannot use", function () {
+    const mismatches = [
+      [
+        "http::addr=host:9000;protocol_version=1;",
+        { webSocket: {} },
+        "'qwp.webSocket' option is supported only for the ws/wss transports",
+      ],
+      [
+        "https::addr=host:9000;protocol_version=1;",
+        { session: {} },
+        "'qwp.session' option is supported only for the ws/wss transports",
+      ],
+      [
+        "tcp::addr=host:9009;",
+        { sender: {} },
+        "'qwp.sender' option is supported only for the ws/wss and udp transports",
+      ],
+      [
+        "tcps::addr=host:9009;",
+        { udp: {} },
+        "'qwp.udp' option is supported only for the udp transport",
+      ],
+      [
+        "ws::addr=host:9000;",
+        { udp: {} },
+        "'qwp.udp' option is supported only for the udp transport",
+      ],
+      [
+        "wss::addr=host:9000;",
+        { udp: {} },
+        "'qwp.udp' option is supported only for the udp transport",
+      ],
+      [
+        "udp::addr=host:9007;",
+        { webSocket: {} },
+        "'qwp.webSocket' option is supported only for the ws/wss transports",
+      ],
+      [
+        "udp::addr=host:9007;",
+        { session: {} },
+        "'qwp.session' option is supported only for the ws/wss transports",
+      ],
+    ] as const;
+
+    for (const [configuration, qwp, message] of mismatches) {
+      expect(
+        () => new SenderOptions(configuration, { qwp }),
+        configuration,
+      ).toThrow(message);
+    }
+
+    expect(
+      () =>
+        new SenderOptions("ws::addr=host:9000;", {
+          qwp: { webSocket: {}, session: {}, sender: {} },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new SenderOptions("udp::addr=host:9007;", {
+          qwp: { udp: {}, sender: {} },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new SenderOptions("tcp::addr=host:9009;", {
+          qwp: {},
+        }),
+    ).not.toThrow();
+  });
+
   it("applies typed QWP ingress overrides after URL parsing", async function () {
     const options = await SenderOptions.fromConfig(
       "ws::addr=url-primary:9000,url-secondary:9001;" +

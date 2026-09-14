@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { builtinModules, createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -18,6 +18,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_PACKAGE = path.join(ROOT, "packages/nodejs-client");
 const BROWSER_PACKAGE = path.join(ROOT, "packages/browser-client");
+const PUBLIC_TYPE_CONTRACT = path.join(
+  ROOT,
+  "test/dist-types/public-api-types.ts",
+);
 const require_ = createRequire(import.meta.url);
 interface PackageManifest {
   name: string;
@@ -67,6 +71,19 @@ function exportTarget(
   return path.join(directory, target);
 }
 
+function exportTypeTarget(
+  directory: string,
+  packageManifest: PackageManifest,
+  subpath: string,
+  format: "import" | "require",
+): string {
+  const target = packageManifest.exports[subpath]?.[format]?.types;
+  if (!target) {
+    throw new Error(`${packageManifest.name} ${subpath} ${format} types`);
+  }
+  return path.join(directory, target);
+}
+
 async function filesBelow(directory: string): Promise<string[]> {
   const result: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -77,35 +94,115 @@ async function filesBelow(directory: string): Promise<string[]> {
   return result;
 }
 
-function moduleSpecifiers(source: string, file: string): string[] {
+interface ModuleReferences {
+  readonly specifiers: string[];
+  readonly nonLiteralLoads: string[];
+}
+
+function moduleReferences(source: string, file: string): ModuleReferences {
   const sourceFile = ts.createSourceFile(
     file,
     source,
     ts.ScriptTarget.Latest,
     false,
   );
-  const result: string[] = [];
+  const specifiers: string[] = [];
+  const nonLiteralLoads: string[] = [];
   const visit = (node: ts.Node): void => {
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier &&
       ts.isStringLiteral(node.moduleSpecifier)
     ) {
-      result.push(node.moduleSpecifier.text);
-    } else if (
-      ts.isCallExpression(node) &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteral(node.arguments[0]) &&
-      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (ts.isCallExpression(node)) {
+      const moduleLoad =
+        node.expression.kind === ts.SyntaxKind.ImportKeyword ||
         (ts.isIdentifier(node.expression) &&
-          node.expression.text === "require"))
-    ) {
-      result.push(node.arguments[0].text);
+          node.expression.text === "require");
+      if (moduleLoad) {
+        if (
+          node.arguments.length === 1 &&
+          ts.isStringLiteral(node.arguments[0])
+        ) {
+          specifiers.push(node.arguments[0].text);
+        } else {
+          nonLiteralLoads.push(node.getText(sourceFile));
+        }
+      }
     }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return result;
+  return { specifiers, nonLiteralLoads };
+}
+
+function moduleSpecifiers(source: string, file: string): string[] {
+  return moduleReferences(source, file).specifiers;
+}
+
+function packageName(specifier: string): string {
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+}
+
+function portablePath(file: string): string {
+  return file.split(path.sep).join("/");
+}
+
+function typeOnlyModuleExports(file: string): string[] {
+  const program = ts.createProgram([file], {
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ESNext,
+    types: [],
+  });
+  const checker = program.getTypeChecker();
+  const sourceFile = program.getSourceFile(file);
+  const module = sourceFile && checker.getSymbolAtLocation(sourceFile);
+  if (!module) throw new Error(`cannot inspect declaration exports: ${file}`);
+
+  return checker
+    .getExportsOfModule(module)
+    .filter((symbol) => {
+      const target =
+        symbol.flags & ts.SymbolFlags.Alias
+          ? checker.getAliasedSymbol(symbol)
+          : symbol;
+      return (
+        (target.flags & ts.SymbolFlags.Type) !== 0 &&
+        (target.flags & ts.SymbolFlags.Value) === 0
+      );
+    })
+    .map((symbol) => symbol.name)
+    .sort();
+}
+
+function contractedTypeNames(packageName: string): string[] {
+  const source = ts.createSourceFile(
+    PUBLIC_TYPE_CONTRACT,
+    readFileSync(PUBLIC_TYPE_CONTRACT, "utf8"),
+    ts.ScriptTarget.Latest,
+    false,
+  );
+  const result: string[] = [];
+  for (const statement of source.statements) {
+    if (
+      !ts.isExportDeclaration(statement) ||
+      !statement.exportClause ||
+      !ts.isNamedExports(statement.exportClause) ||
+      !statement.moduleSpecifier ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== packageName
+    ) {
+      continue;
+    }
+    for (const element of statement.exportClause.elements) {
+      result.push((element.propertyName ?? element.name).text);
+    }
+  }
+  return result.sort();
 }
 
 beforeAll(async () => {
@@ -250,6 +347,73 @@ describe("public npm package boundaries", () => {
         { cwd: consumerDirectory, encoding: "utf8" },
       );
       expect(output.trim()).toBe("function");
+    },
+  );
+
+  it.each(["import", "require"] as const)(
+    "keeps Node bundle externals declared and package-safe with %s",
+    async (format) => {
+      const file = exportTarget(NODE_PACKAGE, nodeManifest, ".", format);
+      const references = moduleReferences(await readFile(file, "utf8"), file);
+      expect(references.nonLiteralLoads, file).toEqual([]);
+
+      const builtins = new Set(
+        builtinModules.map((name) => name.replace(/^node:/, "")),
+      );
+      const dependencies = new Set(
+        Object.keys(nodeManifest.dependencies ?? {}),
+      );
+      const externalPackages = new Set<string>();
+
+      for (const specifier of references.specifiers) {
+        if (specifier.startsWith(".") || specifier.startsWith("/")) {
+          expect(specifier.startsWith("."), `${file}: ${specifier}`).toBe(true);
+          const resolved = path.resolve(path.dirname(file), specifier);
+          expect(existsSync(resolved), `${file}: unresolved ${specifier}`).toBe(
+            true,
+          );
+          expect(
+            nodePackedFiles.has(
+              portablePath(path.relative(NODE_PACKAGE, resolved)),
+            ),
+            `${file}: unpacked ${specifier}`,
+          ).toBe(true);
+          continue;
+        }
+
+        if (builtins.has(specifier.replace(/^node:/, ""))) continue;
+        const dependency = packageName(specifier);
+        expect(dependencies.has(dependency), `${file}: ${specifier}`).toBe(
+          true,
+        );
+        externalPackages.add(dependency);
+      }
+
+      // The Node build deliberately leaves its two runtime dependencies
+      // external. Everything else from the private workspace package -- fzstd
+      // included -- must remain bundled into this self-contained npm package.
+      expect([...externalPackages].sort()).toEqual([...dependencies].sort());
+    },
+  );
+
+  it.each(["import", "require"] as const)(
+    "ships the complete type-only contract in the %s declarations",
+    (format) => {
+      const packages = [
+        [NODE_PACKAGE, nodeManifest],
+        [BROWSER_PACKAGE, browserManifest],
+      ] as const;
+      for (const [directory, packageManifest] of packages) {
+        const declaration = exportTypeTarget(
+          directory,
+          packageManifest,
+          ".",
+          format,
+        );
+        expect(typeOnlyModuleExports(declaration), declaration).toEqual(
+          contractedTypeNames(packageManifest.name),
+        );
+      }
     },
   );
 

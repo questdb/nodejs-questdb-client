@@ -175,16 +175,16 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
 
 type QwpExtraOptions = {
   /**
-   * Node ingress overrides. Values are applied after the connect string has
+   * WS/WSS ingress overrides. Values are applied after the connect string has
    * been fully parsed and validated; typed values win when both forms set the
    * same option.
    */
   webSocket?: Omit<QwpNodeIngressOptions, "url">;
-  /** Ingress ACK, durable-ACK, and reconnect options. */
+  /** WS/WSS ingress ACK, durable-ACK, and reconnect options. */
   session?: QwpIngressSessionOptions;
-  /** High-level buffering and auto-flush options. */
+  /** High-level buffering and auto-flush options for WS, WSS, and UDP. */
   sender?: QwpSenderOptions;
-  /** Node-only QWP-over-UDP socket overrides. */
+  /** UDP-only socket overrides. */
   udp?: Omit<QwpNodeUdpOptions, "host" | "port">;
 };
 
@@ -421,6 +421,7 @@ class SenderOptions {
         throw new Error("Invalid HTTP agent");
       }
       this.agent = extraOptions.agent;
+      validateQwpExtraOptions(this.protocol, extraOptions.qwp);
       this.qwp = extraOptions.qwp;
     }
 
@@ -553,6 +554,34 @@ class SenderOptions {
       process.env.QDB_CLIENT_CONF,
       extraOptions,
     );
+  }
+}
+
+function validateQwpExtraOptions(
+  protocol: string,
+  options: QwpExtraOptions | undefined,
+): void {
+  if (!options) return;
+  const webSocket = protocol === WS || protocol === WSS;
+  const udp = protocol === UDP;
+
+  if (options.webSocket !== undefined && !webSocket) {
+    throw new Error(
+      "'qwp.webSocket' option is supported only for the ws/wss transports",
+    );
+  }
+  if (options.session !== undefined && !webSocket) {
+    throw new Error(
+      "'qwp.session' option is supported only for the ws/wss transports",
+    );
+  }
+  if (options.sender !== undefined && !webSocket && !udp) {
+    throw new Error(
+      "'qwp.sender' option is supported only for the ws/wss and udp transports",
+    );
+  }
+  if (options.udp !== undefined && !udp) {
+    throw new Error("'qwp.udp' option is supported only for the udp transport");
   }
 }
 

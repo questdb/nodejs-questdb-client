@@ -1033,19 +1033,23 @@ export function createQwpNodeUdpSender(
   senderOptions: QwpSenderOptions = {},
 ): QwpSender {
   validateUdpSenderOptions(senderOptions);
-  return new QwpSender(() => connectQwpNodeUdp(options), {
-    ...senderOptions,
-    autoFlushBytes:
-      senderOptions.autoFlushBytes ?? options.maxDatagramSize ?? 1_400,
-    transactional: false,
-    awaitServerAck: true,
-    awaitDurableAck: false,
-    encode: {
-      ...senderOptions.encode,
-      gorilla: false,
-      symbolDictionary: "full",
+  return new QwpSender(
+    () => connectQwpNodeUdp(options),
+    {
+      ...senderOptions,
+      autoFlushBytes:
+        senderOptions.autoFlushBytes ?? options.maxDatagramSize ?? 1_400,
+      transactional: false,
+      awaitServerAck: true,
+      awaitDurableAck: false,
+      encode: {
+        ...senderOptions.encode,
+        gorilla: false,
+        symbolDictionary: "full",
+      },
     },
-  });
+    { rejectZeroColumnRows: true },
+  );
 }
 
 /** Opens a Node UDP socket and returns a fluent fire-and-forget QWP sender. */

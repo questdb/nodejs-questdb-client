@@ -11,6 +11,7 @@ import {
   decodeQwpFrame,
   QWP_COLUMN_TYPE,
   QwpTableBuffer,
+  varchar,
 } from "../../packages/client-core/src/qwp";
 import { QwpUdpDatagramTooLargeError } from "../../packages/nodejs-client/src";
 
@@ -379,6 +380,67 @@ describe("QWP Node UDP sender", () => {
       socketFactory: () => new FakeUdpSocket(),
     });
     await session.close();
+  });
+
+  it("rejects a zero-column row on a fresh table like the Java UDP sender", async () => {
+    const socket = new FakeUdpSocket();
+    const sender = await connectQwpNodeUdpSender(
+      { host: "localhost", socketFactory: () => socket },
+      { autoFlush: false },
+    );
+
+    // Nullish values are omitted. On a table for which this sender has never
+    // seen a real column, atNow() would therefore produce the degenerate
+    // columnCount=0 datagram that Java's QwpUdpSender rejects with this exact
+    // message. Reject before staging so the sender remains usable.
+    await expect(
+      sender
+        .table("events")
+        .symbol("sym", null)
+        .stringColumn("value", undefined)
+        .atNow(),
+    ).rejects.toThrow("no columns were provided");
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 0,
+      totalRowsStaged: 0,
+    });
+    expect(socket.packets).toEqual([]);
+
+    // An explicit timestamp is a real wire column, so at() remains valid and
+    // also proves that rejecting the previous row released its table state.
+    await sender.table("events").at(1_700_000_000_000_000_000n, "ns");
+    await sender.flush();
+    expect(socket.packets).toHaveLength(1);
+
+    // Match Java's precise scope: once the sender knows a column for this
+    // table, a later all-nullish row is legal.
+    await expect(
+      sender.table("events").stringColumn("value", null).atNow(),
+    ).resolves.toBeUndefined();
+    await sender.flush();
+    expect(socket.packets).toHaveLength(2);
+
+    await sender.close();
+  });
+
+  it("applies the zero-column UDP guard to compiled writers", async () => {
+    const socket = new FakeUdpSocket();
+    const sender = await connectQwpNodeUdpSender(
+      { host: "localhost", socketFactory: () => socket },
+      { autoFlush: false },
+    );
+    const events = sender.writer("events", { value: varchar() });
+
+    await expect(events.row({ value: null })).rejects.toThrow(
+      "no columns were provided",
+    );
+    expect(sender.metrics.pendingRows).toBe(0);
+    expect(socket.packets).toEqual([]);
+
+    await expect(events.row({ value: "present" })).resolves.toBeUndefined();
+    await sender.flush();
+    expect(socket.packets).toHaveLength(1);
+    await sender.close();
   });
 
   it("integrates UDP with the fluent sender and top-level config API", async () => {

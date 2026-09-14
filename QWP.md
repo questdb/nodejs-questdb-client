@@ -86,6 +86,12 @@ particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls`,
 continues to come from `addr`, because the typed object intentionally omits
 `url`.
 
+Typed `ExtraOptions.qwp` sections are transport-specific and a mismatched section
+is rejected rather than ignored: `webSocket` and `session` apply only to
+`ws::`/`wss::`, `udp` applies only to `udp::`, and `sender` applies to all three
+QWP ingress schemes. HTTP(S) and TCP(S) reject every present `qwp` section; an
+empty `qwp: {}` remains valid for callers that build the object conditionally.
+
 ### Connection
 
 | Key                  | Value              | Default   | Meaning                                                                                  |
@@ -772,6 +778,23 @@ Java client). Set it to `0` or a negative value for a fast close, which publishe
 without the ACK drain; publication itself stays bounded, so `close()` always
 returns. An unfinished row is still discarded with a warning.
 The configuration-string equivalent is `close_flush_timeout_millis`.
+
+QWP is columnar, so a row whose values were all nullish is still a row, and
+QuestDB can store it with NULL in every column. What reaches the wire depends on
+the closer: `at(value, unit)` carries the designated timestamp as a column, so a
+row closed that way always has at least one column, while `atNow()` leaves the
+timestamp to the server and can encode the row with a **column count of zero**.
+That shape is deliberate and is accepted by WebSocket QWP.
+
+Node UDP matches Java's `QwpUdpSender`: `atNow()` rejects with
+`no columns were provided` when this sender currently knows no non-null column
+for the selected table. An explicit `at()` row, or a later all-nullish row after the
+table schema is known, remains valid. Compiled writers enforce the same UDP rule.
+ILP senders reject every field-less row with
+`The row must have a symbol or column set before it is closed` -- see the nullish
+section of `README.md` for the full per-protocol comparison. Call `cancelRow()`
+before the closer when a permitted all-nullish row should be dropped instead of
+stored.
 
 `autoFlushBytes` is a soft threshold over estimated raw column-buffer storage and is
 disabled by default (`0`). It combines with `autoFlushRows` and

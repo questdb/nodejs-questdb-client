@@ -119,8 +119,16 @@ Three consequences are worth knowing:
 - A row in which _every_ value is nullish behaves differently per protocol. ILP
   has no way to encode a row with no fields, so `at()`/`atNow()` rejects it with
   "The row must have a symbol or column set before it is closed". QWP is
-  columnar and can express it, so the row is sent with no columns — carrying
-  only its designated timestamp.
+  columnar and can express it, so WebSocket QWP sends the row and QuestDB stores
+  it with NULL in every column. Which bytes that produces depends on the closer:
+  `at(value, unit)` carries the designated timestamp as a column, so its row
+  always has at least one; `atNow()` leaves the timestamp to the server and can
+  send the row with a column count of zero. Node UDP matches Java's
+  `QwpUdpSender`: `atNow()` rejects with "no columns were provided" when this
+  sender currently knows no non-null column for the table. An explicit `at()` row,
+  or an all-nullish row after the table schema is known, remains valid. Call
+  `cancelRow()` before the closer when a permitted all-nullish QWP row should be
+  dropped rather than stored.
 - ILP discards a row only when it can never be closed -- when every value on it
   was nullish, so it carries no symbol and no column. That discard takes the
   table name with it and leaves rows already in the buffer alone: catch the

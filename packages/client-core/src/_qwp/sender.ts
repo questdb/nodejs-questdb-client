@@ -157,6 +157,12 @@ export type QwpSenderSessionFactory = (
   signal?: AbortSignal,
 ) => Promise<QwpSenderSession>;
 
+/** Transport-specific row constraints supplied by a QWP runtime adapter. */
+interface QwpSenderTransportConstraints {
+  /** Reject an atNow row while its table has no known columns. */
+  readonly rejectZeroColumnRows?: boolean;
+}
+
 /** Immutable high-level sender counters plus the active ingress snapshot. */
 export interface QwpSenderMetrics {
   readonly totalRowsStaged: number;
@@ -1048,12 +1054,14 @@ export class QwpSender {
   private readonly closeFlushTimeoutMs: number;
   private readonly maxNameLength: number;
   private readonly log: QwpSenderLogger;
+  private readonly rejectZeroColumnRows: boolean;
 
   private readonly connectAbort = new AbortController();
 
   constructor(
     private readonly sessionFactory: QwpSenderSessionFactory,
     private readonly options: QwpSenderOptions = {},
+    constraints: QwpSenderTransportConstraints = {},
   ) {
     this.autoFlush = options.autoFlush ?? true;
     this.autoFlushRows = options.autoFlushRows ?? DEFAULT_AUTO_FLUSH_ROWS;
@@ -1066,6 +1074,7 @@ export class QwpSender {
     this.closeFlushTimeoutMs =
       options.closeFlushTimeoutMs ?? DEFAULT_CLOSE_FLUSH_TIMEOUT_MS;
     this.maxNameLength = options.maxNameLength ?? DEFAULT_MAX_NAME_LENGTH;
+    this.rejectZeroColumnRows = constraints.rejectZeroColumnRows ?? false;
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
     validateNonNegativeInteger(this.autoFlushBytes, "autoFlushBytes");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
@@ -1707,7 +1716,14 @@ export class QwpSender {
 
   async atNow(): Promise<void> {
     this.throwIfUnavailable();
-    this.requireTable();
+    const table = this.requireTable();
+    if (
+      this.rejectZeroColumnRows &&
+      this.currentRow.size === 0 &&
+      table.knownColumnNames.size === 0
+    ) {
+      return this.failRow(new Error("no columns were provided"));
+    }
     this.finishRow();
     await this.tryFlush();
   }
@@ -2249,6 +2265,14 @@ export class QwpSender {
         new Error(
           `column count exceeds maximum ${QWP_MAX_COLUMNS_PER_TABLE} for table '${schema.tableName}'`,
         ),
+      );
+    }
+    if (this.rejectZeroColumnRows && mergedColumnCount === 0) {
+      throw new QwpWriterRowError(
+        schema.tableName,
+        undefined,
+        rowIndex,
+        new Error("no columns were provided"),
       );
     }
 

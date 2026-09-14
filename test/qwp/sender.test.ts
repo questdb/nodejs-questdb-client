@@ -384,6 +384,49 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("sends an all-nullish row, with a zero column count under atNow()", async () => {
+    // Omitting every column is deliberate, not an oversight, so the shape it
+    // puts on the wire is pinned here. QWP is columnar and can express a row of
+    // NULLs; the ILP senders cannot encode a field-less line and reject the same
+    // program with "The row must have a symbol or column set before it is
+    // closed" (test/sender.buffer.test.ts). README.md and QWP.md both document
+    // that divergence, and this test is what keeps them honest -- nothing else
+    // asserts a columnCount of zero, so the encoder could start rejecting it,
+    // or at() could stop carrying its timestamp column, without a failure.
+    const published = async (
+      close: (sender: QwpSender) => Promise<void>,
+    ): Promise<QwpTableBuffer> => {
+      const session = new RecordingSession();
+      const sender = new QwpSender(async () => session, { autoFlush: false });
+      sender.table("t").symbol("sym", null).stringColumn("v", undefined);
+      await close(sender);
+      await sender.flush();
+      expect(session.sends).toHaveLength(1);
+      expect(session.sends[0].tables).toHaveLength(1);
+      await sender.close();
+      return session.sends[0].tables[0];
+    };
+
+    // atNow() leaves the designated timestamp to the server, so nothing at all
+    // is left to encode: one row, no columns.
+    const assigned = await published((sender) => sender.atNow());
+    expect(assigned.rowCount).toBe(1);
+    expect(assigned.columns).toHaveLength(0);
+    // Pin the bytes too: a zero column count is the whole point of this case.
+    const frame = encodeQwpIngressFrame([assigned], {});
+    expect(Buffer.from(frame).toString("hex")).toBe(
+      "51575031010401000400000001740100",
+    );
+
+    // at() adds the designated timestamp as a column, so its row is never empty.
+    const explicit = await published((sender) =>
+      sender.at(1_700_000_000_000_000_000n, "ns"),
+    );
+    expect(explicit.rowCount).toBe(1);
+    expect(explicit.columns).toHaveLength(1);
+    expect(explicit.columns[0].name).toBe("");
+  });
+
   it("uses the Java-compatible local-publication flush boundary by default", async () => {
     const session = new PublishingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });
