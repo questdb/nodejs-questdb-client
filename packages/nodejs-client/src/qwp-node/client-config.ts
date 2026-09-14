@@ -762,9 +762,18 @@ function parseIngressReconnect(
       values.get("reconnect_max_backoff_millis")?.[0],
       "reconnect_max_backoff_millis",
     ),
-    maxDurationMs: optionalPositiveInteger(
+    // Zero is the documented "no reconnect deadline" state on the typed side --
+    // QwpReconnectOptions.maxDurationMs spells it out, both reconnecting
+    // connections gate their deadline on `maxDurationMs > 0`, and the egress
+    // failover_max_duration_ms key already accepts it. Requiring a positive
+    // value here left that supported state reachable only by dropping the
+    // portable connection-string spelling QWP.md presents as equivalent.
+    // The backoff keys above stay positive-only on purpose: a zero backoff is
+    // a hot retry loop, not a documented mode.
+    maxDurationMs: optionalInteger(
       values.get("reconnect_max_duration_millis")?.[0],
       "reconnect_max_duration_millis",
+      0,
     ),
     maxFrameRejections: optionalInteger(
       values.get("max_frame_rejections")?.[0],

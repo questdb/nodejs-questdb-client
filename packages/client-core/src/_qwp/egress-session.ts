@@ -129,6 +129,8 @@ export const QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS = 5_000;
 export const QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE = 4;
 
 const MAX_UINT64 = 0xffffffffffffffffn;
+/** No RESULT_BATCH has been decoded yet; batch sequences start at zero. */
+const NO_DECODED_BATCH = -1n;
 function validateOptionalTimeout(
   value: number | undefined,
   name: string,
@@ -336,6 +338,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private readonly viewControl?: QwpEgressViewCallbackControl;
   private viewTail: Promise<void> = Promise.resolve();
   private decodedBatchCount = 0n;
+  // Sequences are zero-based, so a one-batch response ends at 0 and the count
+  // is 1. Comparing RESULT_END.finalSequence with the count rejected every
+  // ordinary response: QuestDB sends the sequence of the last RESULT_BATCH it
+  // emitted, not how many it emitted.
+  private lastDecodedBatchSequence = NO_DECODED_BATCH;
   private decodedRowCount = 0n;
   private wireComplete = false;
   private terminal = false;
@@ -484,7 +491,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       this.releaseBufferedBatches(1);
       return;
     }
-    this.countDecodedBatch(batch.rowCount);
+    this.countDecodedBatch(batch.batchSequence, batch.rowCount);
     this.batches.push({ batch, creditBytes });
   }
 
@@ -519,7 +526,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       this.releaseViewSlot(slot);
       return;
     }
-    this.countDecodedBatch(batch.rowCount);
+    this.countDecodedBatch(batch.batchSequence, batch.rowCount);
     const generation = this.bufferGeneration;
     this.viewTail = this.viewTail.then(async () => {
       if (this.terminal || generation !== this.bufferGeneration) {
@@ -578,11 +585,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     if (this.terminal) return;
     if (completion.kind === "result-end") {
       if (
-        completion.finalSequence !== this.decodedBatchCount ||
+        completion.finalSequence !== this.expectedFinalSequence ||
         completion.totalRows !== this.decodedRowCount
       ) {
         throw new QwpProtocolError(
-          `QWP RESULT_END totals do not match decoded results [requestId=${this.requestId}, finalSequence=${completion.finalSequence}, decodedBatches=${this.decodedBatchCount}, totalRows=${completion.totalRows}, decodedRows=${this.decodedRowCount}]`,
+          `QWP RESULT_END totals do not match decoded results [requestId=${this.requestId}, finalSequence=${completion.finalSequence}, expectedFinalSequence=${this.expectedFinalSequence}, decodedBatches=${this.decodedBatchCount}, totalRows=${completion.totalRows}, decodedRows=${this.decodedRowCount}]`,
         );
       }
     }
@@ -640,6 +647,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.deliveredCreditBytes = 0;
     this.bufferGeneration++;
     this.decodedBatchCount = 0n;
+    this.lastDecodedBatchSequence = NO_DECODED_BATCH;
     this.decodedRowCount = 0n;
     this.wireComplete = false;
     this.releaseBufferedBatches(this.batches.clear().length);
@@ -652,8 +660,24 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     return this.viewTail;
   }
 
-  private countDecodedBatch(rowCount: number): void {
+  /**
+   * The sequence RESULT_END must carry for the batches decoded so far.
+   *
+   * Every query response carries at least one RESULT_BATCH -- batch 0 holds the
+   * schema, so the server's empty-cursor shortcut is guarded on a sequence
+   * above zero -- but a peer that ends a stream without one has no negative
+   * sequence to send. Zero is the only value it can spell, so accept it there
+   * and let the row totals below carry the integrity check.
+   */
+  private get expectedFinalSequence(): bigint {
+    return this.lastDecodedBatchSequence === NO_DECODED_BATCH
+      ? 0n
+      : this.lastDecodedBatchSequence;
+  }
+
+  private countDecodedBatch(batchSequence: bigint, rowCount: number): void {
     this.decodedBatchCount++;
+    this.lastDecodedBatchSequence = batchSequence;
     this.decodedRowCount += BigInt(rowCount);
   }
 

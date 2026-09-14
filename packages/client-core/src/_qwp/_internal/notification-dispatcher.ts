@@ -178,23 +178,36 @@ export class QwpNotificationDispatcher<T> {
     }
     this.dispatching = true;
     this.delivered++;
-    let pending: PromiseLike<unknown> | undefined;
+    // Exactly-once settlement for this notification. A foreign thenable may
+    // invoke a callback and then throw from the same then() call, so both the
+    // asynchronous arms and the synchronous fallback below have to be safe to
+    // run twice.
+    let settled = false;
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      this.finishDispatch();
+    };
     try {
       const result = this.handler(notification);
-      if (isPromiseLike(result)) pending = result;
+      if (isPromiseLike(result)) {
+        // then() is the observer's own code as much as the call above is: a
+        // thenable whose then() throws on invocation escaped this try, and
+        // dispatch runs on a detached timer, so that escape became an uncaught
+        // exception that terminated the host process instead of a contained
+        // observability failure. Both arms settle the dispatch; a rejected
+        // observer is contained exactly like a synchronous throw.
+        result.then(settle, settle);
+        return;
+      }
     } catch {
       // Observability callbacks never participate in protocol progress.
     }
-    if (!pending) {
-      this.finishDispatch();
-      return;
-    }
-    // Both arms settle the dispatch; a rejected observer is contained exactly
-    // like a synchronous throw.
-    pending.then(
-      () => this.finishDispatch(),
-      () => this.finishDispatch(),
-    );
+    // Reached when the handler returned a non-thenable, threw, or handed back a
+    // thenable whose then() threw before either arm could settle the dispatch.
+    // Without this the inbox would stall with dispatching latched true and
+    // every later notification would be dropped by its capacity bound.
+    settle();
   }
 
   private finishDispatch(): void {

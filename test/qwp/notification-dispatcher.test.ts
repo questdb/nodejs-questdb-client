@@ -152,6 +152,82 @@ describe("QwpNotificationDispatcher", () => {
     await dispatcher.close();
   });
 
+  it("contains a thenable whose then() throws on invocation", async () => {
+    // isPromiseLike() only proves the value has a then method, and invoking a
+    // foreign then() runs the observer's code. That call sat outside the
+    // containment try, on a detached dispatch timer, so a throw from it became
+    // an uncaught exception that terminated the host process -- an
+    // observability callback taking down the producer it was only watching.
+    const uncaught: unknown[] = [];
+    const listener = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on("uncaughtException", listener);
+    try {
+      const delivered: number[] = [];
+      const dispatcher = new QwpNotificationDispatcher<number>((value) => {
+        delivered.push(value);
+        if (value !== 1) return undefined;
+        return {
+          then() {
+            throw new Error("then() failed");
+          },
+        } as unknown as PromiseLike<void>;
+      }, 4);
+
+      dispatcher.offer(1);
+      dispatcher.offer(2);
+      // The second notification proves the inbox did not latch: a dispatch that
+      // never settles leaves `dispatching` true and silently drops the rest.
+      await vi.waitFor(() => expect(delivered).toEqual([1, 2]));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(uncaught).toEqual([]);
+      expect(dispatcher.metrics.delivered).toBe(2);
+      await dispatcher.close();
+    } finally {
+      process.off("uncaughtException", listener);
+    }
+  });
+
+  it("settles a dispatch exactly once when then() resolves and then throws", async () => {
+    // A thenable is free to invoke a callback and still throw from the same
+    // then() call. The synchronous fallback must not settle that dispatch a
+    // second time and let two notifications run concurrently.
+    let live = 0;
+    let peak = 0;
+    const release: (() => void)[] = [];
+    const dispatcher = new QwpNotificationDispatcher<number>((value) => {
+      if (value !== 1) {
+        live++;
+        peak = Math.max(peak, live);
+        return new Promise<void>((resolve) =>
+          release.push(() => {
+            live--;
+            resolve();
+          }),
+        );
+      }
+      return {
+        then(onFulfilled?: () => void) {
+          onFulfilled?.();
+          throw new Error("then() failed after settling");
+        },
+      } as unknown as PromiseLike<void>;
+    }, 4);
+
+    dispatcher.offer(1);
+    dispatcher.offer(2);
+    dispatcher.offer(3);
+    await vi.waitFor(() => expect(live).toBe(1));
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(peak).toBe(1);
+
+    for (const resolve of release.splice(0)) resolve();
+    await vi.waitFor(() => expect(dispatcher.metrics.delivered).toBe(3));
+    await dispatcher.close();
+  });
+
   it("does not let an unsettled observer hold close() open", async () => {
     // The drain is best-effort and bounded by drainDeadlineMs. Serialising on
     // the handler's promise must not turn an observer that never settles into

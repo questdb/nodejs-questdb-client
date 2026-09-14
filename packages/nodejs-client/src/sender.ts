@@ -21,7 +21,10 @@ import * as qwpNode from "./qwp";
 import { readPemTlsRoots } from "./qwp-node/client-config";
 import { validateQwpWebSocketAgent } from "./qwp-node/websocket-agent";
 import type { QwpSender } from "./qwp";
-import type { QwpTableWriter } from "../../client-core/src/_qwp/sender";
+import type {
+  QwpSenderLogger,
+  QwpTableWriter,
+} from "../../client-core/src/_qwp/sender";
 import type { QwpWriterSchema } from "../../client-core/src/_qwp/writer";
 
 const QWP_INGRESS_PATH = "/write/v4";
@@ -623,6 +626,26 @@ class Sender {
   }
 }
 
+/**
+ * Resolves the logger a programmatically constructed QWP sender receives.
+ *
+ * Same order as the ws/wss connect-string resolver in options.ts: an explicit
+ * top-level logger first, then the QWP-specific one, then the module default.
+ * Writing `log: logger` after spreading `options.qwp.sender` discarded a
+ * supported `qwp.sender.log` callback whenever the caller left the top-level
+ * logger unset, so the sink that asked for the sender's lifecycle warnings --
+ * unfinished rows, an abandoned open transaction -- silently received none of
+ * them while the default console sink got them instead.
+ */
+function qwpConfiguredLogger(
+  options: SenderOptions,
+  logger: Logger,
+): QwpSenderLogger {
+  return typeof options.log === "function"
+    ? options.log
+    : (options.qwp?.sender?.log ?? logger);
+}
+
 function createConfiguredQwpSender(
   options: SenderOptions,
   logger: Logger,
@@ -712,7 +735,7 @@ function createConfiguredQwpSender(
       maxNameLength: isInteger(options.max_name_len, 1)
         ? options.max_name_len
         : configuredSender.maxNameLength,
-      log: logger,
+      log: qwpConfiguredLogger(options, logger),
     },
     options.qwp?.session,
   );
@@ -729,15 +752,20 @@ function createConfiguredQwpUdpSender(
   }
   const configuredUdp = options.qwp?.udp ?? {};
   const configuredSender = options.qwp?.sender ?? {};
+  // Typed overrides win over the connection string, the rule QWP.md states for
+  // every ExtraOptions.qwp section. Reading max_datagram_size first inverted
+  // it for the one transport where the string key exists, so a caller who
+  // raised the datagram size through the typed udp section still had rows
+  // rejected locally with QwpUdpDatagramTooLargeError at the string's cap.
   const maxDatagramSize =
-    options.max_datagram_size ?? configuredUdp.maxDatagramSize ?? 1_400;
+    configuredUdp.maxDatagramSize ?? options.max_datagram_size ?? 1_400;
   return qwpNode.createQwpNodeUdpSender(
     {
       ...configuredUdp,
       host: options.host,
       port: options.port,
       maxDatagramSize,
-      multicastTtl: options.multicast_ttl ?? configuredUdp.multicastTtl,
+      multicastTtl: configuredUdp.multicastTtl ?? options.multicast_ttl,
       onError: configuredUdp.onError ?? ((error) => logger("warn", error)),
     },
     {
@@ -757,7 +785,7 @@ function createConfiguredQwpUdpSender(
       maxNameLength: isInteger(options.max_name_len, 1)
         ? options.max_name_len
         : configuredSender.maxNameLength,
-      log: logger,
+      log: qwpConfiguredLogger(options, logger),
     },
   );
 }

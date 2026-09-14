@@ -177,7 +177,10 @@ function emptyResultBatch(
 function resultEnd(
   requestId = 0n,
   totalRows = 3n,
-  finalSequence = 1n,
+  // The sequence of the last RESULT_BATCH, not how many batches were sent, so
+  // a one-batch response ends at zero. QuestDB numbers batches from zero and
+  // sends that same number in RESULT_END.
+  finalSequence = 0n,
 ): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
@@ -1414,7 +1417,9 @@ describe("QwpEgressSession", () => {
     expect(readQwpVarint(secondCredit)).toBe(202n);
     expect(secondCredit.remaining).toBe(0);
 
-    connection.receive(resultEnd(query.requestId, 9n, 3n));
+    // The same decoded batch is pushed three times through the internal
+    // reservation API, so the last sequence the query saw is still batch 0.
+    connection.receive(resultEnd(query.requestId, 9n, 0n));
     await query.completion;
     await session.close();
   });
@@ -1497,7 +1502,7 @@ describe("QwpEgressSession", () => {
       connection.receive(emptyResultBatch(query.requestId, 0));
       connection.receive(emptyResultBatch(query.requestId, 1));
       connection.receive(emptyResultBatch(query.requestId, 2));
-      connection.receive(resultEnd(query.requestId, 0n, 3n));
+      connection.receive(resultEnd(query.requestId, 0n, 2n));
 
       await vi.waitFor(() => expect(decodeView).toHaveBeenCalledTimes(2));
       expect(entered).toEqual([0]);
@@ -1735,7 +1740,7 @@ describe("QwpEgressSession", () => {
     connection.receive(emptyResultBatch(query.requestId, 0));
     connection.receive(emptyResultBatch(query.requestId, 1));
     connection.receive(emptyResultBatch(query.requestId, 2));
-    connection.receive(resultEnd(query.requestId, 0n, 3n));
+    connection.receive(resultEnd(query.requestId, 0n, 2n));
 
     let completed = false;
     void query.completion.then(() => {
@@ -2089,11 +2094,58 @@ describe("QwpEgressSession", () => {
     await session.close();
   });
 
+  it("accepts a one-batch RESULT_END whose finalSequence is the last batch sequence", async () => {
+    // QuestDB numbers RESULT_BATCH sequences from zero and puts the sequence of
+    // the last batch it emitted in RESULT_END, so the ordinary one-batch
+    // response ends at zero. Comparing that against the decoded batch COUNT
+    // rejected every non-empty result as a protocol violation and closed the
+    // connection with 1002.
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x");
+    connection.receive(firstResultBatch(query.requestId));
+    connection.receive(resultEnd(query.requestId, 3n, 0n));
+
+    const batches = [];
+    for await (const batch of query) batches.push(batch);
+    expect(batches).toHaveLength(1);
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+      finalSequence: 0n,
+      totalRows: 3n,
+    });
+    expect(connection.closeCalls).not.toContainEqual({
+      code: 1002,
+      reason: "invalid QWP egress message",
+    });
+    await session.close();
+  });
+
+  it("accepts a multi-batch RESULT_END ending at the last batch sequence", async () => {
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x");
+    connection.receive(emptyResultBatch(query.requestId, 0));
+    connection.receive(emptyResultBatch(query.requestId, 1));
+    connection.receive(emptyResultBatch(query.requestId, 2));
+    connection.receive(resultEnd(query.requestId, 0n, 2n));
+
+    const batches = [];
+    for await (const batch of query) batches.push(batch);
+    expect(batches).toHaveLength(3);
+    await expect(query.completion).resolves.toMatchObject({
+      finalSequence: 2n,
+    });
+    await session.close();
+  });
+
   it.each([
-    [0n, 3n, "sequence too low"],
-    [2n, 3n, "sequence too high"],
-    [1n, 2n, "row total too low"],
-    [1n, 4n, "row total too high"],
+    [1n, 3n, "sequence too high"],
+    [2n, 3n, "sequence far too high"],
+    [0n, 2n, "row total too low"],
+    [0n, 4n, "row total too high"],
   ] as const)(
     "rejects RESULT_END with $2",
     async (finalSequence, totalRows, _label) => {

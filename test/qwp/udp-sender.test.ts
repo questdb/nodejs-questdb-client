@@ -472,6 +472,55 @@ describe("QWP Node UDP sender", () => {
     await configured.close();
   });
 
+  it("lets typed UDP overrides win over the connection string", async () => {
+    // QWP.md states that a typed ExtraOptions.qwp section wins when the
+    // connection string sets the same option. UDP read max_datagram_size
+    // first, so a caller who raised the datagram cap through the typed section
+    // still had every row rejected locally at the string's smaller cap --
+    // before a single packet reached the socket.
+    const socket = new FakeUdpSocket();
+    const sender = await Sender.fromConfig(
+      "udp::addr=localhost;max_datagram_size=64;multicast_ttl=1;auto_flush=off;",
+      {
+        qwp: {
+          udp: {
+            socketFactory: () => socket,
+            maxDatagramSize: 2048,
+            multicastTtl: 4,
+          },
+        },
+      },
+    );
+    await sender.connect();
+    sender
+      .table("trades")
+      .stringColumn("payload", "x".repeat(96))
+      .intColumn("price", 7);
+    await sender.atNow();
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.packets).toHaveLength(1);
+    expect(socket.packets[0].byteLength).toBeGreaterThan(64);
+    expect(socket.multicastTtl).toBe(4);
+    await sender.close();
+  });
+
+  it("still applies the connection-string datagram size without a typed override", async () => {
+    const socket = new FakeUdpSocket();
+    const sender = await Sender.fromConfig(
+      "udp::addr=localhost;max_datagram_size=64;auto_flush=off;",
+      { qwp: { udp: { socketFactory: () => socket } } },
+    );
+    await sender.connect();
+    sender.table("trades").stringColumn("payload", "x".repeat(96));
+    await sender.atNow();
+
+    await expect(sender.flush()).rejects.toThrow(QwpUdpDatagramTooLargeError);
+    expect(socket.packets).toHaveLength(0);
+    // The rejected row stays staged, so the close-time flush repeats it.
+    await expect(sender.close()).rejects.toThrow(QwpUdpDatagramTooLargeError);
+  });
+
   it("rejects ILP-only options supplied through programmatic UDP options", () => {
     // The connect string rejected these; the programmatic path took them and
     // dropped them. A caller capping memory with max_buf_size got no cap and

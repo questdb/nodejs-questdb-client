@@ -8,6 +8,7 @@ import {
   QwpNodeFileReplayStore,
   parseQwpNodeClientConfig,
   Sender,
+  SenderOptions,
   type QwpNodeClientOptions,
   type QwpWebSocketLike,
 } from "../../packages/nodejs-client/src";
@@ -177,6 +178,30 @@ describe("QWP unified Node client configuration", () => {
     );
     expect(tunedMemory.ingress.storeAndForward).toBeUndefined();
     expect(tunedMemory.ingressSession?.initialConnectMode).toBe("sync");
+  });
+
+  it("accepts reconnect_max_duration_millis=0 as the disabled deadline", async () => {
+    // Zero is the documented "no reconnect deadline" state: both reconnecting
+    // connections gate their deadline on maxDurationMs > 0, and the egress
+    // failover_max_duration_ms key already accepts it. Requiring a positive
+    // value here made the documented state unreachable from the portable
+    // connection-string spelling, on both public entry points.
+    const disabled = parseQwpNodeClientConfig(
+      "ws::addr=localhost;reconnect_max_duration_millis=0;",
+    ).ingressSession?.reconnect;
+    expect(disabled).toBeTruthy();
+    expect(disabled ? disabled.maxDurationMs : -1).toBe(0);
+    await expect(
+      SenderOptions.fromConfig(
+        "ws::addr=localhost:9000;reconnect_max_duration_millis=0;",
+      ),
+    ).resolves.toBeDefined();
+    // A negative budget is still a configuration error.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;reconnect_max_duration_millis=-1;",
+      ),
+    ).toThrow(/reconnect_max_duration_millis must be an integer between 0 and/);
   });
 
   it("preserves failover=off as an explicit programmatic opt-out", () => {
