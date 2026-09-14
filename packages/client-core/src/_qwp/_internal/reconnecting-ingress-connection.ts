@@ -40,6 +40,7 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../transport";
+import { defersCommit, isDurableAckPoll } from "./frame-flags";
 import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import { monotonicNowMs } from "./monotonic-clock";
@@ -80,25 +81,6 @@ export const QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<
   maxFrameRejections: 4,
   poisonMinEscalationWindowMs: 300_000,
 };
-
-/** Byte offset of the flags field inside the 12-byte QWP frame header. */
-const QWP_FLAGS_OFFSET = 5;
-
-/** Peeks the deferred-commit flag without decoding or copying the payload. */
-function defersCommit(payload: Uint8Array): boolean {
-  return (
-    payload.byteLength > QWP_FLAGS_OFFSET &&
-    (payload[QWP_FLAGS_OFFSET] & QWP_FLAG_DEFER_COMMIT) !== 0
-  );
-}
-
-/** Durable-ACK polls do not change the server-side ingress transaction. */
-function isDurableAckPoll(payload: Uint8Array): boolean {
-  return (
-    payload.byteLength > QWP_FLAGS_OFFSET &&
-    (payload[QWP_FLAGS_OFFSET] & QWP_FLAG_DURABLE_ACK_POLL) !== 0
-  );
-}
 
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
