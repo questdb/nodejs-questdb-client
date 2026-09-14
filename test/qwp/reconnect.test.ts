@@ -5082,7 +5082,8 @@ describe("QWP egress reconnect and replay", () => {
     await vi.waitFor(() => expect(resets).toEqual([0n]));
     await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
     second.receive(emptyResultBatch());
-    second.receive(resultEnd(0n, 1n, 0n));
+    // One replayed batch, so the terminal ends at batch sequence 0.
+    second.receive(resultEnd(0n, 0n, 0n));
 
     await expect(iterator.next()).resolves.toMatchObject({ done: false });
     await expect(iterator.next()).resolves.toEqual({
@@ -5196,7 +5197,7 @@ describe("QWP egress reconnect and replay", () => {
     await vi.waitFor(() => expect(second.sent.length).toBeGreaterThan(0));
     expect(second.sent[0]).toEqual(first.sent[0]);
     second.receive(emptyResultBatch());
-    second.receive(resultEnd(0n, 1n, 0n));
+    second.receive(resultEnd(0n, 0n, 0n));
     await expect(query.completion).resolves.toMatchObject({
       kind: "result-end",
     });
@@ -5272,7 +5273,7 @@ describe("QWP egress reconnect and replay", () => {
 
     await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
     second.receive(emptyResultBatch());
-    second.receive(resultEnd(0n, 1n, 0n));
+    second.receive(resultEnd(0n, 0n, 0n));
     const iterator = query[Symbol.asyncIterator]();
     await expect(iterator.next()).resolves.toMatchObject({ done: false });
     await expect(iterator.next()).resolves.toEqual({
@@ -5308,18 +5309,19 @@ describe("QWP egress reconnect and replay", () => {
     );
     const query = await session.query("select * from x");
 
-    // No batch was decoded, so this terminal's claimed batch count is invalid.
-    // Closing immediately exercises the transport/session verdict handshake:
-    // replay state must survive until finish() accepts the aggregate totals.
+    // No batch was decoded, so a terminal naming batch sequence 1 cannot be
+    // consistent with this stream. Closing immediately exercises the
+    // transport/session verdict handshake: replay state must survive until
+    // finish() accepts the aggregate totals.
     first.receive(resultEnd(query.requestId, 1n, 0n));
     first.drop();
 
     await vi.waitFor(() => expect(second.sent).toEqual(first.sent));
     second.receive(emptyResultBatch(query.requestId));
-    second.receive(resultEnd(query.requestId, 1n, 0n));
+    second.receive(resultEnd(query.requestId, 0n, 0n));
     await expect(query.completion).resolves.toMatchObject({
       kind: "result-end",
-      finalSequence: 1n,
+      finalSequence: 0n,
       totalRows: 0n,
     });
     await session.close();
