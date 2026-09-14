@@ -7,6 +7,7 @@ import {
   qwpConfig,
   selectQwpSchemeAgent,
   UDP,
+  validateQwpExtraOptions,
   validateQwpUnsupportedOptions,
   validateUdpSecurityOptions,
   validateWebSocketSecurityOptions,
@@ -139,6 +140,7 @@ class Sender {
    */
   constructor(options: SenderOptions) {
     this.log = options && typeof options.log === "function" ? options.log : log;
+    if (options) validateQwpExtraOptions(options.protocol, options.qwp);
     if (
       options?.protocol === WS ||
       options?.protocol === WSS ||

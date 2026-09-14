@@ -639,7 +639,6 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           readonly name: string;
           readonly path: string;
           readonly decoded: DecodedSegment;
-          readonly handle: FileHandle;
         }> = [];
         const scanScratch: SegmentScanScratch = {
           segmentHeader: Buffer.allocUnsafe(SEGMENT_HEADER_SIZE),
@@ -649,19 +648,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         for (const name of segmentNames) {
           const path = join(this.directory, name);
           let handle: FileHandle | undefined;
+          let decoded: DecodedSegment;
           try {
             handle = await open(path, "r+");
-            const decoded = await scanSegment(handle, name, scanScratch);
-            const generation = parseSegmentGeneration(name);
-            if (generation !== undefined) {
-              this.nextSegmentGeneration = maxBigInt(
-                this.nextSegmentGeneration,
-                generation + 1n,
-              );
-            }
-            recoveredSegments.push({ name, path, decoded, handle });
-            recoveryHandles.add(handle);
-            handle = undefined;
+            decoded = await scanSegment(handle, name, scanScratch);
           } catch (error) {
             await handle?.close().catch(() => undefined);
             if (error instanceof QwpReplayStoreError) throw error;
@@ -670,6 +660,22 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
               error,
             );
           }
+          try {
+            await handle.close();
+          } catch (error) {
+            throw new QwpReplayStoreError(
+              `could not close scanned QWP store-and-forward segment [file=${name}]`,
+              error,
+            );
+          }
+          const generation = parseSegmentGeneration(name);
+          if (generation !== undefined) {
+            this.nextSegmentGeneration = maxBigInt(
+              this.nextSegmentGeneration,
+              generation + 1n,
+            );
+          }
+          recoveredSegments.push({ name, path, decoded });
         }
         recoveredSegments.sort((left, right) =>
           compareBigInt(
@@ -688,10 +694,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         let changedDirectory = false;
         const removalPaths: string[] = [];
         for (let index = 0; index < recoveredSegments.length; index++) {
-          const { name, path, decoded, handle } = recoveredSegments[index];
+          const { name, path, decoded } = recoveredSegments[index];
           if (manifestStalePaths.has(path)) {
-            await handle.close();
-            recoveryHandles.delete(handle);
             removalPaths.push(path);
             changedDirectory = true;
             continue;
@@ -800,11 +804,22 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             retainEmptyActive = false;
           }
           if (liveRecords.length === 0 && !retainEmptyActive) {
-            await handle.close();
-            recoveryHandles.delete(handle);
             removalPaths.push(path);
             changedDirectory = true;
             continue;
+          }
+          const selectedActive = path === selectedActivePath;
+          let activeHandle: FileHandle | undefined;
+          if (selectedActive) {
+            try {
+              activeHandle = await open(path, "r+");
+              recoveryHandles.add(activeHandle);
+            } catch (error) {
+              throw new QwpReplayStoreError(
+                `could not reopen active QWP store-and-forward segment [file=${name}]`,
+                error,
+              );
+            }
           }
           const segment: StoredSegment = {
             path,
@@ -824,11 +839,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
             // the first record lands: the same ordering activateHotSpare
             // establishes, and the reason the flag means what it means.
             manifestFlagPending: retainEmptyActive,
-            handle,
+            // Only the appendable segment needs a persistent descriptor.
+            // Replay opens inactive segments for the duration of one read.
+            handle: activeHandle,
           };
           this.segments.set(path, segment);
           this.segmentOrder.push(segment);
-          recoveryHandles.delete(handle);
+          if (activeHandle) recoveryHandles.delete(activeHandle);
           this.totalBytes += segment.size;
           for (const record of liveRecords) {
             recoveredEntries.push({
@@ -843,7 +860,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
               },
             });
           }
-          if (path === selectedActivePath) {
+          if (selectedActive) {
             this.activeSegment = segment;
           }
         }
@@ -1065,21 +1082,39 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           `QWP store-and-forward frame is not available [frameSequence=${frameSequence}]`,
         );
       }
-      let handle = stored.segment.handle;
-      if (!handle) {
-        handle = await open(stored.segment.path, "r+");
-        stored.segment.handle = handle;
+      const retainedHandle = stored.segment.handle;
+      const handle = retainedHandle ?? (await open(stored.segment.path, "r"));
+      const readAndValidate = async (): Promise<Uint8Array> => {
+        const payload = new Uint8Array(stored.payloadLength);
+        await readFully(handle, payload, stored.payloadOffset);
+        const length = Buffer.allocUnsafe(4);
+        length.writeUInt32LE(stored.payloadLength);
+        if (
+          stored.crc32c === undefined ||
+          crc32cParts([length, payload]) !== stored.crc32c
+        ) {
+          throw new QwpReplayStoreCorruptionError(
+            `QWP store-and-forward payload CRC32C does not match [frameSequence=${frameSequence}]`,
+          );
+        }
+        return payload;
+      };
+      if (retainedHandle) return readAndValidate();
+
+      let payload: Uint8Array;
+      try {
+        payload = await readAndValidate();
+      } catch (error) {
+        // Preserve the primary read or CRC verdict even if cleanup also fails.
+        await handle.close().catch(() => undefined);
+        throw error;
       }
-      const payload = new Uint8Array(stored.payloadLength);
-      await readFully(handle, payload, stored.payloadOffset);
-      const length = Buffer.allocUnsafe(4);
-      length.writeUInt32LE(stored.payloadLength);
-      if (
-        stored.crc32c === undefined ||
-        crc32cParts([length, payload]) !== stored.crc32c
-      ) {
-        throw new QwpReplayStoreCorruptionError(
-          `QWP store-and-forward payload CRC32C does not match [frameSequence=${frameSequence}]`,
+      try {
+        await handle.close();
+      } catch (error) {
+        throw new QwpReplayStoreError(
+          `could not close lazily opened QWP store-and-forward segment [file=${stored.segment.path}]`,
+          error,
         );
       }
       return payload;
@@ -1267,9 +1302,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           }
         } else {
           try {
-            const file = await open(finalPath, "a", 0o600);
+            const file = await open(finalPath, "r+", 0o600);
             try {
-              await file.writeFile(block);
+              // Write at the committed dictionary boundary rather than through
+              // O_APPEND. If the write completes but sync fails, the bounded
+              // retry overwrites the same logical block instead of appending a
+              // duplicate that makes the next recovery reject the sidecar.
+              await writeFully(file, block, this.dictionaryFileSize);
               if (this.durability === QWP_SF_DURABILITY.APPEND) {
                 await file.sync();
               } else if (this.durability === QWP_SF_DURABILITY.PERIODIC) {
@@ -1816,6 +1855,20 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.segments.set(segment.path, segment);
     this.segmentOrder.push(segment);
     this.activeSegment = segment;
+    // A rotated segment is immutable. Keeping its descriptor only makes open
+    // files grow with the outage backlog; replay opens it briefly when needed.
+    if (previous?.handle) {
+      const previousHandle = previous.handle;
+      previous.handle = undefined;
+      try {
+        await previousHandle.close();
+      } catch (error) {
+        throw new QwpReplayStoreError(
+          `could not close rotated QWP store-and-forward segment [file=${previous.path}]`,
+          error,
+        );
+      }
+    }
     // The stamp belongs to the append that is already in flight, not to
     // activation. Recovery reads a flagged segment holding no records as proof
     // that records were written and lost, so every moment the flag is durable

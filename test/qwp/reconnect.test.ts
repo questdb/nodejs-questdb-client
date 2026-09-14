@@ -84,7 +84,10 @@ import { quarantineQwpNodeReplayStore } from "../../packages/nodejs-client/src/q
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { QwpReconnectingIngressConnection } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { validateQwpWebSocketTimeouts } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
-import { qwpSegmentMaintenanceWorker } from "../../packages/nodejs-client/src/qwp-node/segment-maintenance-worker";
+import {
+  isIgnorableQwpDirectorySyncError,
+  qwpSegmentMaintenanceWorker,
+} from "../../packages/nodejs-client/src/qwp-node/segment-maintenance-worker";
 import { createQwpEgressFailoverConnectionFactory } from "../../packages/client-core/src/_qwp/_internal/egress-routing";
 import {
   createQwpFailoverConnectionFactory,
@@ -5357,6 +5360,162 @@ describe("QWP Node file replay store", () => {
     await defaults.close();
   });
 
+  it("bounds retained segment handles during rotation and recovery", async () => {
+    const directory = await trackedDirectory();
+    const first = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+    });
+    const openSegmentHandles = (store: QwpNodeFileReplayStore) =>
+      [
+        ...(
+          store as unknown as {
+            segments: Map<unknown, { handle?: unknown }>;
+          }
+        ).segments.values(),
+      ].filter((segment) => segment.handle !== undefined).length;
+
+    await first.loadReferences();
+    for (let sequence = 0n; sequence < 12n; sequence++) {
+      await first.append({
+        frameSequence: sequence,
+        payload: Uint8Array.of(Number(sequence)),
+      });
+      expect(openSegmentHandles(first)).toBeLessThanOrEqual(1);
+    }
+    expect(first.metrics.pendingSegments).toBe(12);
+    await first.close();
+
+    const probe = await open(join(directory, ".handle-prototype"), "w+");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read(...args: unknown[]): Promise<unknown>;
+    };
+    await probe.close();
+    await unlink(join(directory, ".handle-prototype"));
+    const observedScanHandles = new Set<object>();
+    const patchedHandles = new WeakSet<object>();
+    let peakScanHandles = 0;
+    const originalRead = fileHandlePrototype.read;
+    const read = vi
+      .spyOn(fileHandlePrototype, "read")
+      .mockImplementation(function (this: object, ...args: unknown[]) {
+        const handle = this as object & { close(): Promise<void> };
+        observedScanHandles.add(handle);
+        if (!patchedHandles.has(handle)) {
+          patchedHandles.add(handle);
+          const originalClose = handle.close.bind(handle);
+          handle.close = async () => {
+            try {
+              await originalClose();
+            } finally {
+              observedScanHandles.delete(handle);
+            }
+          };
+        }
+        peakScanHandles = Math.max(peakScanHandles, observedScanHandles.size);
+        return originalRead.apply(this, args);
+      });
+
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+    });
+    let references: readonly QwpIngressReplayReference[] = [];
+    try {
+      references = await recovered.loadReferences();
+    } finally {
+      read.mockRestore();
+    }
+    expect(references).toHaveLength(12);
+    // The lock plus the one segment currently being scanned stay bounded; the
+    // previous implementation retained all twelve scan handles until this
+    // method had finished scanning the complete backlog.
+    expect(peakScanHandles).toBeLessThanOrEqual(3);
+    expect(openSegmentHandles(recovered)).toBeLessThanOrEqual(1);
+    for (const reference of references) {
+      await expect(
+        recovered.readPayload(reference.frameSequence),
+      ).resolves.toEqual(Uint8Array.of(Number(reference.frameSequence)));
+      expect(openSegmentHandles(recovered)).toBeLessThanOrEqual(1);
+    }
+    await recovered.close();
+  });
+
+  it("retries a post-write dictionary sync at the same file offset", async () => {
+    const directory = await trackedDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      durability: QWP_SF_DURABILITY.APPEND,
+      appendDeadlineMs: 2_500,
+    });
+    await store.loadReferences();
+    await store.appendSymbolDictionary(0, ["alpha"]);
+
+    const probe = await open(join(directory, ".sync-prototype"), "w+");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>;
+    };
+    await probe.close();
+    await unlink(join(directory, ".sync-prototype"));
+    const sync = vi
+      .spyOn(fileHandlePrototype, "sync")
+      .mockRejectedValueOnce(
+        Object.assign(new Error("sync interrupted"), { code: "EIO" }),
+      );
+    try {
+      await expect(
+        store.appendSymbolDictionary(1, ["beta"]),
+      ).resolves.toBeUndefined();
+      expect(sync).toHaveBeenCalledTimes(2);
+    } finally {
+      sync.mockRestore();
+    }
+    await store.append({ frameSequence: 0n, payload: Uint8Array.of(7) });
+    await store.close();
+
+    const recovered = new QwpNodeFileReplayStore({ directory });
+    await expect(recovered.loadReferences()).resolves.toEqual([
+      { frameSequence: 0n, payloadLength: 1 },
+    ]);
+    await expect(recovered.loadSymbolDictionary()).resolves.toEqual([
+      "alpha",
+      "beta",
+    ]);
+    await expect(recovered.readPayload(0n)).resolves.toEqual(Uint8Array.of(7));
+    await recovered.close();
+  });
+
+  it("shares portable directory-sync error handling with the maintenance worker", async () => {
+    for (const platform of ["linux", "win32"]) {
+      for (const code of ["EINVAL", "ENOTSUP", "EISDIR"]) {
+        expect(
+          isIgnorableQwpDirectorySyncError(
+            Object.assign(new Error(code), { code }),
+            platform,
+          ),
+        ).toBe(true);
+      }
+      for (const code of ["ENOENT", "EIO"]) {
+        expect(
+          isIgnorableQwpDirectorySyncError(
+            Object.assign(new Error(code), { code }),
+            platform,
+          ),
+        ).toBe(false);
+      }
+    }
+
+    const directory = await trackedDirectory();
+    await expect(
+      qwpSegmentMaintenanceWorker.syncDirectory(join(directory, "missing")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    // A failed request is isolated; the shared worker still processes the next
+    // maintenance barrier rather than fencing all later store operations.
+    await expect(
+      qwpSegmentMaintenanceWorker.syncDirectory(directory),
+    ).resolves.toBeUndefined();
+  });
+
   it("refuses to quarantine a slot acquired by a successor", async () => {
     const directory = await trackedDirectory();
     const successor = new QwpNodeFileReplayStore({ directory });
@@ -5450,6 +5609,58 @@ describe("QWP Node file replay store", () => {
     await expect(recovered.readPayload(0n)).rejects.toBeInstanceOf(
       QwpReplayStoreCorruptionError,
     );
+    await recovered.close();
+  });
+
+  it("preserves lazy-read corruption when closing its handle also fails", async () => {
+    const directory = await trackedDirectory();
+    const seed = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+    });
+    await seed.loadReferences();
+    await seed.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
+    await seed.append({ frameSequence: 1n, payload: Uint8Array.of(2) });
+    await seed.close();
+
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+    });
+    await recovered.loadReferences();
+    const [inactiveSegment] = await assignedReplaySegments(directory);
+    const file = await open(join(directory, inactiveSegment), "r+");
+    const fileHandlePrototype = Object.getPrototypeOf(file) as {
+      read(...args: unknown[]): Promise<unknown>;
+    };
+    await file.write(Uint8Array.of(0xff), 0, 1, 24 + 8);
+    await file.sync();
+    await file.close();
+
+    const originalRead = fileHandlePrototype.read;
+    let patched = false;
+    const read = vi
+      .spyOn(fileHandlePrototype, "read")
+      .mockImplementation(function (this: object, ...args: unknown[]) {
+        const handle = this as object & { close(): Promise<void> };
+        if (!patched) {
+          patched = true;
+          const originalClose = handle.close.bind(handle);
+          handle.close = async () => {
+            await originalClose();
+            throw Object.assign(new Error("close failed"), { code: "EIO" });
+          };
+        }
+        return originalRead.apply(this, args);
+      });
+    try {
+      await expect(recovered.readPayload(0n)).rejects.toMatchObject({
+        name: "QwpReplayStoreCorruptionError",
+        retryable: false,
+      });
+    } finally {
+      read.mockRestore();
+    }
     await recovered.close();
   });
 

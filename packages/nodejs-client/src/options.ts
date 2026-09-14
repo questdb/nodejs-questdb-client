@@ -557,7 +557,7 @@ class SenderOptions {
   }
 }
 
-function validateQwpExtraOptions(
+export function validateQwpExtraOptions(
   protocol: string,
   options: QwpExtraOptions | undefined,
 ): void {

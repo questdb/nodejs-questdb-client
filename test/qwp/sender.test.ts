@@ -1,3 +1,4 @@
+import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 import {
   QWP_COLUMN_TYPE,
@@ -1244,6 +1245,52 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("releases a published decimal scale while unrelated rows remain staged", async () => {
+    const session = new HeldPublicationSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("fx").decimalColumnText("price", "1").atNow();
+    const flushing = sender.flush();
+    await session.publishCalled;
+
+    // This row is staged after the flush snapshot and keeps the table non-empty
+    // when that snapshot is retired, but it does not depend on price's scale.
+    await sender.table("fx").stringColumn("note", "pending").atNow();
+    session.unblock();
+    await flushing;
+
+    // The next frame may choose a new scale even though the unrelated row was
+    // already staged. Retaining scale 0 here rejected 1.5 as non-rescalable and
+    // discarded this otherwise valid row.
+    expect(() =>
+      sender.table("fx").decimalColumnText("price", "1.5").atNow(),
+    ).not.toThrow();
+    expect(sender.metrics.pendingRows).toBe(2);
+
+    sender.reset();
+    await sender.close();
+  });
+
+  it("releases a decimal scale retained only by a cancelled open row", async () => {
+    const session = new HeldPublicationSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    await sender.table("fx").decimalColumnText("price", "1").atNow();
+    sender.table("fx").decimalColumnText("price", "2");
+    const flushing = sender.flush();
+    await session.publishCalled;
+    session.unblock();
+    await flushing;
+
+    sender.cancelRow();
+    expect(() =>
+      sender.table("fx").decimalColumnText("price", "1.5").atNow(),
+    ).not.toThrow();
+
+    sender.reset();
+    await sender.close();
+  });
+
   it("keeps a decimal column's type after releasing its frame scale", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });
@@ -1370,6 +1417,56 @@ describe("QWP high-level sender", () => {
     await sender.flush();
     const [table] = session.sends[0].tables;
     expect(table.columns.map((candidate) => candidate.name)).toEqual(["kept"]);
+    await sender.close();
+  });
+
+  it("accepts and copies a Uint8Array created in another realm", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const foreign = runInNewContext("new Uint8Array([1, 2, 3])") as Uint8Array;
+    const foreignUuid = runInNewContext(
+      "Uint8Array.from({ length: 16 }, (_, index) => index)",
+    ) as Uint8Array;
+    expect(foreign instanceof Uint8Array).toBe(false);
+    expect(foreignUuid instanceof Uint8Array).toBe(false);
+
+    const wrongView = new Uint8ClampedArray([1, 2, 3]);
+    Object.defineProperty(wrongView, Symbol.toStringTag, {
+      value: "Uint8Array",
+    });
+    expect(() =>
+      sender
+        .table("events")
+        .binaryColumn("payload", wrongView as unknown as Uint8Array),
+    ).toThrow(/only Uint8Array/);
+
+    await sender
+      .table("events")
+      .binaryColumn("payload", foreign)
+      .uuidColumn("fluent_uuid", foreignUuid)
+      .atNow();
+    const writer = sender.writer("events", {
+      compiled_binary: binary(),
+      compiled_uuid: uuid(),
+    });
+    await writer.row({
+      compiled_binary: foreign,
+      compiled_uuid: foreignUuid,
+    });
+    foreign[0] = 9;
+    foreignUuid.fill(9);
+    await sender.flush();
+
+    const table = session.sends[0].tables[0];
+    expect(column(table, "payload").values).toEqual([Uint8Array.of(1, 2, 3)]);
+    expect(column(table, "compiled_binary").values).toEqual([
+      Uint8Array.of(1, 2, 3),
+    ]);
+    const expectedUuid = Uint8Array.from([
+      15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+    ]);
+    expect(column(table, "fluent_uuid").values).toEqual([expectedUuid]);
+    expect(column(table, "compiled_uuid").values).toEqual([expectedUuid]);
     await sender.close();
   });
 

@@ -247,6 +247,17 @@ const DEFAULT_AUTO_FLUSH_INTERVAL_MS = 100;
 // same everywhere.
 const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_NAME_LENGTH = 127;
+const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  Symbol.toStringTag,
+)?.get;
+
+function isUint8Array(value: unknown): value is Uint8Array {
+  return (
+    ArrayBuffer.isView(value) &&
+    TYPED_ARRAY_TAG_GETTER?.call(value) === "Uint8Array"
+  );
+}
 
 /**
  * Wraps the caller's logger so a throwing sink cannot decide whether the
@@ -494,7 +505,7 @@ function littleEndianWords(words: readonly bigint[]): Uint8Array {
 }
 
 function uuidBytes(value: string | Uint8Array): Uint8Array {
-  if (value instanceof Uint8Array) {
+  if (isUint8Array(value)) {
     if (value.length !== 16) {
       throw new RangeError("UUID byte value must contain exactly 16 bytes");
     }
@@ -587,7 +598,7 @@ function uuidLimbBytes(low: bigint, high: bigint): Uint8Array {
 }
 
 function writerUuidBytes(value: unknown): Uint8Array {
-  if (typeof value === "string" || value instanceof Uint8Array) {
+  if (typeof value === "string" || isUint8Array(value)) {
     return uuidBytes(value);
   }
   if (isRecord(value) && "low" in value && "high" in value) {
@@ -926,7 +937,7 @@ function encodeQwpWriterValue(
       }
       return value;
     case "binary":
-      if (!(value instanceof Uint8Array)) {
+      if (!isUint8Array(value)) {
         throw new TypeError("binary accepts only Uint8Array values");
       }
       return new Uint8Array(value);
@@ -1416,7 +1427,12 @@ export class QwpSender {
 
   binaryColumn(name: string, value: Uint8Array | null | undefined): QwpSender {
     if (this.omitsNullish(name, value)) return this;
-    if (!(value instanceof Uint8Array)) {
+    // `instanceof` rejects genuine typed arrays created by another realm
+    // (for example, a same-origin iframe). The intrinsic typed-array tag getter
+    // crosses realms and cannot be spoofed with a custom Symbol.toStringTag;
+    // it also distinguishes Uint8Array from DataView, Uint8ClampedArray, and
+    // the other typed-array kinds. Buffer remains valid as a Uint8Array subclass.
+    if (!isUint8Array(value)) {
       return this.failRow(
         new TypeError("binaryColumn accepts only Uint8Array values"),
       );
@@ -2458,6 +2474,17 @@ export class QwpSender {
       for (const key of this.currentRowNewColumnKeys) {
         table.knownColumnNames.delete(key);
       }
+      // releaseStagedRows() retains a decimal lock used by an open row. If the
+      // row is then cancelled or rejected, that frame-local scale has no owner
+      // and must not constrain the next frame.
+      for (const [key, column] of table.schema) {
+        if (
+          isDecimalType(column.type) &&
+          !table.rows.some((row) => row.columns.has(key))
+        ) {
+          table.schema.delete(key);
+        }
+      }
       // A table this row brought into being, and that nothing else has staged
       // or learned from, goes with it. Otherwise a loop that keeps rejecting
       // rows on fresh table names accumulates empty StagedTables forever.
@@ -2527,12 +2554,14 @@ export class QwpSender {
       // landed in one frame, where QwpTableBuffer.setDecimalScale() keeps only
       // the first -- writing the later value at the earlier scale, off by a
       // power of ten, with no error.
-      if (table.rows.length === 0) {
-        const openRow = this.current === table ? this.currentRow : undefined;
-        for (const [key, column] of table.schema) {
-          if (isDecimalType(column.type) && !openRow?.has(key)) {
-            table.schema.delete(key);
-          }
+      const openRow = this.current === table ? this.currentRow : undefined;
+      for (const [key, column] of table.schema) {
+        if (
+          isDecimalType(column.type) &&
+          !openRow?.has(key) &&
+          !table.rows.some((row) => row.columns.has(key))
+        ) {
+          table.schema.delete(key);
         }
       }
     }

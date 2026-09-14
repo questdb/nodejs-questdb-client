@@ -1054,6 +1054,50 @@ describe("Configuration string parser suite", function () {
     ).not.toThrow();
   });
 
+  it("rejects incompatible QWP sections on direct Sender options", function () {
+    const mismatches = [
+      [
+        "http",
+        { webSocket: {} },
+        "'qwp.webSocket' option is supported only for the ws/wss transports",
+      ],
+      [
+        "http",
+        { sender: {} },
+        "'qwp.sender' option is supported only for the ws/wss and udp transports",
+      ],
+      [
+        "ws",
+        { udp: {} },
+        "'qwp.udp' option is supported only for the udp transport",
+      ],
+      [
+        "udp",
+        { webSocket: {} },
+        "'qwp.webSocket' option is supported only for the ws/wss transports",
+      ],
+      [
+        "udp",
+        { session: {} },
+        "'qwp.session' option is supported only for the ws/wss transports",
+      ],
+    ] as const;
+
+    for (const [protocol, qwp, message] of mismatches) {
+      expect(
+        () =>
+          new Sender({
+            protocol,
+            host: "localhost",
+            port: protocol === "udp" ? 9007 : 9000,
+            protocol_version: "1",
+            qwp,
+          } as SenderOptions),
+        protocol,
+      ).toThrow(message);
+    }
+  });
+
   it("applies typed QWP ingress overrides after URL parsing", async function () {
     const options = await SenderOptions.fromConfig(
       "ws::addr=url-primary:9000,url-secondary:9001;" +

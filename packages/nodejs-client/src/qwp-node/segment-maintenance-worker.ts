@@ -12,6 +12,24 @@ interface WorkerReply {
   readonly error?: WorkerFailure;
 }
 
+const QWP_IGNORABLE_DIRECTORY_SYNC_CODES = [
+  "EINVAL",
+  "ENOTSUP",
+  "EISDIR",
+] as const;
+
+/** Matches directory-fsync portability handling in the main replay-store thread. */
+export function isIgnorableQwpDirectorySyncError(
+  error: unknown,
+  _platform = process.platform,
+): boolean {
+  void _platform;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return QWP_IGNORABLE_DIRECTORY_SYNC_CODES.some(
+    (candidate) => candidate === code,
+  );
+}
+
 type MaintenanceRequest =
   | {
       readonly operation: "provision";
@@ -41,6 +59,9 @@ interface PendingRequest {
 const WORKER_SOURCE = String.raw`
 const { parentPort } = require("node:worker_threads");
 const { open, unlink } = require("node:fs/promises");
+const ignorableDirectorySyncCodes = new Set(${JSON.stringify(
+  QWP_IGNORABLE_DIRECTORY_SYNC_CODES,
+)});
 
 async function syncDirectory(directory) {
   let handle;
@@ -48,7 +69,7 @@ async function syncDirectory(directory) {
     handle = await open(directory, "r");
     await handle.sync();
   } catch (error) {
-    if (process.platform !== "win32") throw error;
+    if (!ignorableDirectorySyncCodes.has(error?.code)) throw error;
   } finally {
     await handle?.close().catch(() => undefined);
   }
