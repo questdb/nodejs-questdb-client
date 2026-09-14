@@ -182,9 +182,18 @@ type QwpExtraOptions = {
   webSocket?: Omit<QwpNodeIngressOptions, "url">;
   /** WS/WSS ingress ACK, durable-ACK, and reconnect options. */
   session?: QwpIngressSessionOptions;
-  /** High-level buffering and auto-flush options for WS, WSS, and UDP. */
+  /**
+   * High-level buffering and auto-flush options for WS, WSS, and UDP. A `log`
+   * here is used when no top-level logger is supplied; the top-level one wins
+   * when both are set.
+   */
   sender?: QwpSenderOptions;
-  /** UDP-only socket overrides. */
+  /**
+   * UDP-only socket overrides. Like every other section here, these are applied
+   * after the connect string is parsed and win over the equivalent connect
+   * string key -- `maxDatagramSize` over `max_datagram_size`, `multicastTtl`
+   * over `multicast_ttl`.
+   */
   udp?: Omit<QwpNodeUdpOptions, "host" | "port">;
 };
 

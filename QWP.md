@@ -127,23 +127,26 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 
 ### Reconnect and failover
 
-| Key                                | Value                       | Default            | Meaning                                                                                |
-| ---------------------------------- | --------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
-| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                |
-| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                       |
-| `reconnect_max_duration_millis`    | integer ms                  | `300000` / `30000` | Budget for a reconnect episode. This is the QWP replacement for ILP's `retry_timeout`. |
-| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                  |
-| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                    |
-| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                  |
-| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                        |
-| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                         |
-| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                       |
-| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.            |
+| Key                                | Value                       | Default            | Meaning                                                                                                   |
+| ---------------------------------- | --------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                                   |
+| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                                          |
+| `reconnect_max_duration_millis`    | integer ms ≥ 0              | `300000` / `30000` | Budget for a reconnect episode; `0` disables the deadline. The QWP replacement for ILP's `retry_timeout`. |
+| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                                     |
+| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                                       |
+| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                                     |
+| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                                           |
+| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                                            |
+| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                                          |
+| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.                               |
 
 The three `reconnect_*` defaults differ by side, shown here as ingress / egress.
 Ingress additionally defaults to unlimited attempts, because a running producer
 must outlast any outage; egress stops after 8. The `failover_*` keys configure
-egress only and share the egress reconnect defaults.
+egress only and share the egress reconnect defaults. Zero disables a duration
+budget on both sides, matching `QwpReconnectOptions.maxDurationMs`; the backoff
+keys require a positive value, because a zero delay is a hot retry loop rather
+than a documented mode.
 
 ### Store-and-forward (Node only)
 
@@ -221,7 +224,10 @@ await sender.close();
 ```
 
 The default port is 9007, the maximum datagram size (`max_datagram_size`) is 1400
-bytes, and the multicast TTL (`multicast_ttl`) is zero. `max_datagram_size` accepts
+bytes, and the multicast TTL (`multicast_ttl`) is zero. Both have typed
+equivalents in `ExtraOptions.qwp.udp` -- `maxDatagramSize` and `multicastTtl` --
+and, like every other typed QWP section, they win when the connect string sets
+the same option. `max_datagram_size` accepts
 1 through 65507, the IPv4 payload maximum; a larger value is rejected when the sender
 is created. Many hosts refuse datagrams well below that ceiling — macOS defaults
 `net.inet.udp.maxdgram` to 9216 — so keep the value at or under the path MTU unless
