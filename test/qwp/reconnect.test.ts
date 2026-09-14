@@ -5486,23 +5486,22 @@ describe("QWP Node file replay store", () => {
   });
 
   it("shares portable directory-sync error handling with the maintenance worker", async () => {
-    for (const platform of ["linux", "win32"]) {
-      for (const code of ["EINVAL", "ENOTSUP", "EISDIR"]) {
-        expect(
-          isIgnorableQwpDirectorySyncError(
-            Object.assign(new Error(code), { code }),
-            platform,
-          ),
-        ).toBe(true);
-      }
-      for (const code of ["ENOENT", "EIO"]) {
-        expect(
-          isIgnorableQwpDirectorySyncError(
-            Object.assign(new Error(code), { code }),
-            platform,
-          ),
-        ).toBe(false);
-      }
+    // One platform-independent allowlist: a directory handle that cannot be
+    // synced at all is not a durability failure, but ENOENT and EIO are, and
+    // the worker used to swallow every error on win32.
+    for (const code of ["EINVAL", "ENOTSUP", "EISDIR"]) {
+      expect(
+        isIgnorableQwpDirectorySyncError(
+          Object.assign(new Error(code), { code }),
+        ),
+      ).toBe(true);
+    }
+    for (const code of ["ENOENT", "EIO", undefined]) {
+      expect(
+        isIgnorableQwpDirectorySyncError(
+          Object.assign(new Error(String(code)), { code }),
+        ),
+      ).toBe(false);
     }
 
     const directory = await trackedDirectory();

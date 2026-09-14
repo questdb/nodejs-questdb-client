@@ -22,7 +22,10 @@ import {
   QwpNodeAdvisoryLockBusyError,
   type QwpNodeAdvisoryLockOwnership,
 } from "./advisory-lock";
-import { qwpSegmentMaintenanceWorker } from "./segment-maintenance-worker";
+import {
+  isIgnorableQwpDirectorySyncError,
+  qwpSegmentMaintenanceWorker,
+} from "./segment-maintenance-worker";
 import { log } from "../logging";
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
 import { monotonicNowMs } from "../../../client-core/src/_qwp/_internal/monotonic-clock";
@@ -4062,10 +4065,9 @@ async function syncDirectory(directory: string): Promise<void> {
     handle = await open(directory, "r");
     await handle.sync();
   } catch (error) {
-    const code = nodeErrorCode(error);
-    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EISDIR") {
-      throw error;
-    }
+    // One policy object, so the worker barrier and this one cannot drift: a
+    // code the worker swallows must be one this thread swallows too.
+    if (!isIgnorableQwpDirectorySyncError(error)) throw error;
   } finally {
     await handle?.close();
   }

@@ -18,12 +18,13 @@ const QWP_IGNORABLE_DIRECTORY_SYNC_CODES = [
   "EISDIR",
 ] as const;
 
-/** Matches directory-fsync portability handling in the main replay-store thread. */
-export function isIgnorableQwpDirectorySyncError(
-  error: unknown,
-  _platform = process.platform,
-): boolean {
-  void _platform;
+/**
+ * Directory-fsync portability policy shared by the main replay-store thread
+ * and the maintenance worker. The three codes mean the filesystem cannot sync
+ * a directory handle at all, which is not a durability failure; every other
+ * code -- including ENOENT and EIO -- is a real fault on every platform.
+ */
+export function isIgnorableQwpDirectorySyncError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return QWP_IGNORABLE_DIRECTORY_SYNC_CODES.some(
     (candidate) => candidate === code,
