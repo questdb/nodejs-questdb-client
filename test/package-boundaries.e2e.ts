@@ -326,6 +326,50 @@ describe("public npm package boundaries", () => {
     },
   );
 
+  it.each(["eval", "stdin"] as const)(
+    "provisions a store-and-forward hot spare from an ESM %s entry point",
+    (entry) => {
+      // The segment-maintenance worker is launched with `eval: true`, so it
+      // inherits the parent's execArgv. Its source is CommonJS, so an ESM
+      // input mode -- `--input-type=module --eval`, or the same flag with the
+      // script piped on stdin -- used to make the worker throw `require is not
+      // defined in ES module scope` before installing its message listener,
+      // and every QwpNodeFileReplayStore.load() in the process then failed to
+      // provision its first hot spare.
+      const script = [
+        'import { mkdtemp, rm } from "node:fs/promises";',
+        'import { tmpdir } from "node:os";',
+        'import path from "node:path";',
+        'const { QwpNodeFileReplayStore } = await import("@questdb/nodejs-client");',
+        'const directory = await mkdtemp(path.join(tmpdir(), "questdb-sf-esm-"));',
+        "const store = new QwpNodeFileReplayStore({",
+        "  directory,",
+        "  maxSegmentBytes: 64,",
+        "  maxBytes: 4096,",
+        "});",
+        "try {",
+        "  await store.load();",
+        '  console.log("loaded");',
+        "} finally {",
+        "  await store.close();",
+        "  await rm(directory, { recursive: true, force: true });",
+        "}",
+      ].join("\n");
+      const output = execFileSync(
+        process.execPath,
+        entry === "eval"
+          ? ["--input-type=module", "--eval", script]
+          : ["--input-type=module"],
+        {
+          cwd: consumerDirectory,
+          encoding: "utf8",
+          input: entry === "stdin" ? script : undefined,
+        },
+      );
+      expect(output.trim()).toBe("loaded");
+    },
+  );
+
   it.each(["import", "require"] as const)(
     "resolves the browser package under the browser condition with %s",
     (format) => {

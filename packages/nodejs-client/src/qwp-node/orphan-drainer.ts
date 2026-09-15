@@ -29,6 +29,7 @@ import {
 } from "../../../client-core/src/_qwp/sender-error";
 
 const SEGMENT_SUFFIX = ".sfa";
+const MANIFEST_FILE = "sf-manifest.bin";
 const SEGMENT_HEADER_SIZE = 24;
 const FRAME_HEADER_SIZE = 8;
 const SEGMENT_HEADER_PROBE_SIZE = SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE;
@@ -182,12 +183,22 @@ export async function scanQwpNodeOrphanSlots(
     ) {
       continue;
     }
-    let hasAssignedSegment = false;
-    for (const child of children) {
-      if (!child.isFile() || !child.name.endsWith(SEGMENT_SUFFIX)) continue;
-      if (await isAssignedSegmentOrInvalid(join(directory, child.name))) {
-        hasAssignedSegment = true;
-        break;
+    // A durable manifest is only published for a segment the journal intends
+    // to write records into, so its presence marks a slot a producer owned.
+    // A process killed between that publication and the first record write
+    // leaves a flag-0, record-free segment the header probe below calls
+    // unassigned; without this the residue -- manifest included -- stayed on
+    // disk and no later scan ever offered the slot for adoption again.
+    let hasAssignedSegment = children.some(
+      (child) => child.isFile() && child.name === MANIFEST_FILE,
+    );
+    if (!hasAssignedSegment) {
+      for (const child of children) {
+        if (!child.isFile() || !child.name.endsWith(SEGMENT_SUFFIX)) continue;
+        if (await isAssignedSegmentOrInvalid(join(directory, child.name))) {
+          hasAssignedSegment = true;
+          break;
+        }
       }
     }
     if (hasAssignedSegment) {

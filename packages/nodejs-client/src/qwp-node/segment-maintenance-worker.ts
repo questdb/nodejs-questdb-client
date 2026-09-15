@@ -180,6 +180,14 @@ class QwpSegmentMaintenanceWorker {
     const worker = new Worker(WORKER_SOURCE, {
       eval: true,
       name: "questdb-qwp-segment-maintenance",
+      // An eval worker inherits the parent's execArgv, and WORKER_SOURCE is
+      // CommonJS. Under `node --input-type=module --eval` or a piped ESM stdin
+      // script the inherited `--input-type=module` made the worker throw
+      // `require is not defined in ES module scope` before it could install
+      // its message listener, so every QwpNodeFileReplayStore.load() in such a
+      // process failed to provision its first hot spare. Clearing execArgv
+      // pins the worker to the module system its source is written in.
+      execArgv: [],
     });
     worker.on("message", (reply: WorkerReply) => this.onReply(reply));
     worker.on("error", (error) => this.onWorkerFailure(worker, error));

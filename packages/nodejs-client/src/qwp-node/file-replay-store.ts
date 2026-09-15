@@ -27,6 +27,10 @@ import {
   qwpSegmentMaintenanceWorker,
 } from "./segment-maintenance-worker";
 import { log } from "../logging";
+import {
+  defersCommit,
+  isDurableAckPoll,
+} from "../../../client-core/src/_qwp/_internal/frame-flags";
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
 import { monotonicNowMs } from "../../../client-core/src/_qwp/_internal/monotonic-clock";
 
@@ -116,6 +120,23 @@ interface HotSpareSegment {
 interface ScannedRecord extends QwpIngressReplayReference {
   readonly payloadOffset: number;
   readonly crc32c: number;
+  /** Whether the frame leaves a server-side ingress transaction open. */
+  readonly deferCommit: boolean;
+  /** Durable-ACK polls carry no rows and do not change that transaction. */
+  readonly durableAckPoll: boolean;
+}
+
+/**
+ * One preflighted logical batch whose suffix closes an already-open
+ * transaction, admitted above {@link QwpNodeFileReplayStoreOptions.maxBytes}
+ * because its retained deferred prefix cannot be acknowledged until it is sent.
+ */
+interface PreparedTransactionCloseBatch {
+  readonly frames: readonly {
+    readonly payloadLength: number;
+    readonly deferCommit: boolean;
+  }[];
+  nextFrame: number;
 }
 
 interface RecoveredStoredRecord {
@@ -497,6 +518,16 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private recoveryScanCompleted = false;
   private closing = false;
   private closed = false;
+  /**
+   * Whether the most recently appended frame left a server-side ingress
+   * transaction open. QuestDB withholds a deferred frame's ACK until the
+   * commit that closes it arrives, so a journal filled by that deferred prefix
+   * can never be trimmed into a shape where the commit fits: the append waits
+   * for an ACK the unsent commit is the only thing that can produce.
+   * QwpMemoryReplayStore tracks the same state for the same reason.
+   */
+  private transactionOpen = false;
+  private preparedTransactionClose?: PreparedTransactionCloseBatch;
   private activeSegment?: StoredSegment;
   private hotSpare?: HotSpareSegment;
   private hotSpareTask?: Promise<void>;
@@ -951,6 +982,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           }
           this.records.set(record.frameSequence, stored);
           this.trackRecordSequence(record.frameSequence);
+          // Recovery replays this prefix on the next connection, so the store
+          // reopens in whatever transaction state its tail left behind. A
+          // journal whose last row-bearing frame still defers its commit is
+          // mid-transaction, and the commit that closes it must be admitted
+          // even though the recovered prefix already fills the journal.
+          if (!record.durableAckPoll) this.transactionOpen = record.deferCommit;
           recovered.push({
             frameSequence: record.frameSequence,
             payloadLength: record.payloadLength,
@@ -1154,7 +1191,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       }
       return FRAME_HEADER_SIZE + payload.byteLength;
     });
-    await this.prepareAppendBatchWithBackpressure(recordSizes);
+    await this.prepareAppendBatchWithBackpressure(payloads, recordSizes);
   }
 
   acknowledgeThrough(frameSequence: bigint): Promise<void> {
@@ -1222,8 +1259,34 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         if (this.activeSegment === segment) this.activeSegment = undefined;
         this.pendingTrimSegments.push(segment);
       }
+      if (this.records.size === 0) this.retireRecordFreeSegments();
       this.scheduleMaintenance();
     });
+  }
+
+  /**
+   * Queues every segment that holds no record for the ordinary trim path.
+   *
+   * Only records empty a segment, so a segment that never received one is
+   * never queued by {@link removeThrough}. Recovery retains exactly such a
+   * segment when a process dies between activateHotSpare()'s manifest
+   * publication and the first record write, and once the older record-bearing
+   * segment is acknowledged away, that residue plus sf-manifest.bin survived
+   * close() with nothing left to retire it -- and the orphan scanner used to
+   * read a valid flag-0 header with a zeroed record region as "not assigned",
+   * so no later scan offered the slot for adoption either. Retiring it once
+   * the journal is empty again mirrors the load-time cleanup, and trimming the
+   * last segment removes the manifest with it.
+   */
+  private retireRecordFreeSegments(): void {
+    // A drained journal can hold thousands of just-emptied segments, so match
+    // them against the queue in one pass rather than scanning it per segment.
+    const queued = new Set(this.pendingTrimSegments);
+    for (const segment of this.segmentOrder) {
+      if (segment.liveRecords > 0 || queued.has(segment)) continue;
+      if (this.activeSegment === segment) this.activeSegment = undefined;
+      this.pendingTrimSegments.push(segment);
+    }
   }
 
   loadSymbolDictionary(): Promise<readonly string[]> {
@@ -1591,6 +1654,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   }
 
   private async prepareAppendBatchWithBackpressure(
+    payloads: readonly Uint8Array[],
     recordSizes: readonly number[],
   ): Promise<void> {
     let deadline = 0;
@@ -1606,7 +1670,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
           // but do not create filesystem state merely to perform a preflight.
           await this.hotSpareTask?.catch(() => undefined);
           await this.assertReadyAfterWait();
-          this.assertBatchCapacity(recordSizes);
+          this.assertBatchCapacity(payloads, recordSizes);
         });
         return;
       } catch (error) {
@@ -1665,7 +1729,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
   }
 
-  private assertBatchCapacity(recordSizes: readonly number[]): void {
+  private assertBatchCapacity(
+    payloads: readonly Uint8Array[],
+    recordSizes: readonly number[],
+  ): void {
     const segmentCapacity = this.segmentFileSize - SEGMENT_HEADER_SIZE;
     let remaining = this.activeSegment
       ? this.activeSegment.capacity - this.activeSegment.logicalSize
@@ -1690,6 +1757,23 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         this.dictionaryFileSize > 0 &&
         (projectedFrameBytes < this.liveFrameBytes || projectedSegments === 0);
       if (requiredBytes > this.maxBytes && !preservesLiveness) {
+        // A deferred prefix already in the journal receives no server ACK, so
+        // waiting for ACK-driven trimming before its commit-bearing suffix is
+        // journalled can never make progress. Record the batch instead, so the
+        // frames appendOnce() is about to publish are admitted over the target
+        // one by one. The exception lasts only while a transaction is open and
+        // covers only the frames that close it, which is the same bound
+        // QwpMemoryReplayStore applies to a prepared transaction close.
+        if (closesOpenTransaction(this.transactionOpen, payloads)) {
+          this.preparedTransactionClose = {
+            frames: payloads.map((payload) => ({
+              payloadLength: payload.byteLength,
+              deferCommit: defersCommit(payload),
+            })),
+            nextFrame: 0,
+          };
+          return;
+        }
         throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
       }
       projectedTotalBytes = requiredBytes;
@@ -1723,9 +1807,27 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         `QWP store-and-forward sequence must be contiguous [previous=${lastSequence}, received=${record.frameSequence}]`,
       );
     }
+    const changesTransaction = !isDurableAckPoll(record.payload);
+    const deferCommit = defersCommit(record.payload);
+    const preparedCloseFrame = this.matchesPreparedTransactionClose(
+      record.payload,
+    );
+    // QuestDB withholds the ACK of a deferred frame until the commit that
+    // closes its transaction arrives. Once that deferred prefix fills the
+    // journal, refusing the commit a new segment parks it on ACK-driven
+    // trimming that only the unsent commit could trigger, so the append hit
+    // its deadline and the transaction never closed. Admit the closing frame
+    // over the target instead; the overshoot ends with the ACK the commit
+    // unblocks, exactly as QwpMemoryReplayStore bounds the same case.
+    const admitOverTarget =
+      preparedCloseFrame ||
+      (this.transactionOpen && changesTransaction && !deferCommit);
     let segment = this.activeSegment;
     if (!segment || segment.logicalSize + bytes.byteLength > segment.capacity) {
-      segment = await this.activateHotSpare(record.frameSequence);
+      segment = await this.activateHotSpare(
+        record.frameSequence,
+        admitOverTarget,
+      );
       await this.assertReadyAfterWait();
     }
     const expectedSequence = segment.firstSequence + BigInt(segment.frameCount);
@@ -1788,11 +1890,37 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       segment,
     });
     this.trackRecordSequence(record.frameSequence);
+    if (changesTransaction) this.transactionOpen = deferCommit;
+    if (preparedCloseFrame) {
+      const prepared = this.preparedTransactionClose!;
+      prepared.nextFrame++;
+      if (prepared.nextFrame === prepared.frames.length) {
+        this.preparedTransactionClose = undefined;
+      }
+    }
     this.scheduleHotSpare();
+  }
+
+  /**
+   * Reports whether `payload` is the next frame of the batch a preflight
+   * admitted over the target, forgetting the batch as soon as the publication
+   * diverges from what was preflighted.
+   */
+  private matchesPreparedTransactionClose(payload: Uint8Array): boolean {
+    const prepared = this.preparedTransactionClose;
+    if (!prepared) return false;
+    const expected = prepared.frames[prepared.nextFrame];
+    const matches =
+      expected !== undefined &&
+      expected.payloadLength === payload.byteLength &&
+      expected.deferCommit === defersCommit(payload);
+    if (!matches) this.preparedTransactionClose = undefined;
+    return matches;
   }
 
   private async activateHotSpare(
     firstSequence: bigint,
+    admitOverTarget: boolean,
   ): Promise<StoredSegment> {
     const previous = this.activeSegment;
     if (previous?.handle) {
@@ -1801,7 +1929,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         this.dirtyRecordPaths.delete(previous.path);
       }
     }
-    await this.ensureHotSpare(true);
+    await this.ensureHotSpare(true, admitOverTarget);
     const spare = this.hotSpare;
     if (!spare) {
       throw new QwpReplayStoreFullError(
@@ -1904,14 +2032,20 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     return segment;
   }
 
-  private async ensureHotSpare(required: boolean): Promise<void> {
+  private async ensureHotSpare(
+    required: boolean,
+    admitOverTarget = false,
+  ): Promise<void> {
     if (this.hotSpare) return;
     if (this.hotSpareTask) {
       await this.hotSpareTask;
-      return;
+      // A speculative spare declines silently when the journal is at its
+      // target, so a transaction-closing frame that arrives while one is in
+      // flight would otherwise inherit that refusal and deadlock.
+      if (this.hotSpare || !admitOverTarget) return;
     }
     if (this.closing || this.closed) return;
-    const provisioning = this.provisionHotSpare(required);
+    const provisioning = this.provisionHotSpare(required, admitOverTarget);
     this.hotSpareTask = provisioning;
     try {
       await provisioning;
@@ -1920,12 +2054,16 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
   }
 
-  private async provisionHotSpare(required: boolean): Promise<void> {
+  private async provisionHotSpare(
+    required: boolean,
+    admitOverTarget = false,
+  ): Promise<void> {
     const requiredBytes = this.totalBytes + this.segmentFileSize;
     const frameBytes = this.totalBytes - this.dictionaryFileSize;
     const preservesLiveness =
-      this.dictionaryFileSize > 0 &&
-      (frameBytes < this.liveFrameBytes || this.segments.size === 0);
+      admitOverTarget ||
+      (this.dictionaryFileSize > 0 &&
+        (frameBytes < this.liveFrameBytes || this.segments.size === 0));
     if (requiredBytes > this.maxBytes && !preservesLiveness) {
       if (required) {
         throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
@@ -3223,10 +3361,23 @@ async function scanSegment(
     let crc = crc32cUpdate(0xffffffff, frameHeader.subarray(4));
     let payloadOffset = offset + FRAME_HEADER_SIZE;
     let payloadRemaining = payloadLength;
+    let firstChunk = true;
+    let recordDefersCommit = false;
+    let recordIsDurableAckPoll = false;
     while (payloadRemaining > 0) {
       const chunkLength = Math.min(payloadRemaining, scanBuffer.byteLength);
       const chunk = scanBuffer.subarray(0, chunkLength);
       await readFully(handle, chunk, payloadOffset);
+      if (firstChunk) {
+        // The header flags sit in the first six payload bytes, so the chunk
+        // the CRC pass already read answers them without a second read. A
+        // reopened journal whose tail still defers its commit is inside an
+        // open transaction, and the store has to know that to admit the frame
+        // that closes it.
+        recordDefersCommit = defersCommit(chunk);
+        recordIsDurableAckPoll = isDurableAckPoll(chunk);
+        firstChunk = false;
+      }
       crc = crc32cUpdate(crc, chunk);
       payloadOffset += chunkLength;
       payloadRemaining -= chunkLength;
@@ -3266,6 +3417,8 @@ async function scanSegment(
       payloadLength,
       payloadOffset: offset + FRAME_HEADER_SIZE,
       crc32c: storedCrc,
+      deferCommit: recordDefersCommit,
+      durableAckPoll: recordIsDurableAckPoll,
     });
     offset = recordEnd;
   }
@@ -4096,6 +4249,20 @@ function failsFastUnderErrorPolicy(
     policy === QWP_SF_BACKPRESSURE_POLICY.ERROR &&
     error instanceof QwpReplayStoreFullError
   );
+}
+
+/**
+ * Reports whether a logical batch ends the ingress transaction that
+ * `transactionOpen` says is already open. A durable-ACK poll carries no rows,
+ * so it leaves the transaction exactly as it found it.
+ */
+function closesOpenTransaction(
+  transactionOpen: boolean,
+  payloads: readonly Uint8Array[],
+): boolean {
+  if (!transactionOpen || payloads.length === 0) return false;
+  const last = payloads[payloads.length - 1];
+  return !isDurableAckPoll(last) && !defersCommit(last);
 }
 
 function validateDurability(value: string): QwpSfDurability {
