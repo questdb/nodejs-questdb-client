@@ -87,6 +87,14 @@ function manifestRequiredEmptySfaSegment(): Buffer {
   return bytes;
 }
 
+/** The flag-0, record-free shape activateHotSpare() publishes before its first write. */
+function manifestOptionalEmptySfaSegment(): Buffer {
+  const bytes = Buffer.alloc(24 + 8);
+  bytes.write("SF01", 0, "ascii");
+  bytes.writeUInt8(1, 4);
+  return bytes;
+}
+
 describe("QWP Node orphan drainer", () => {
   const roots: string[] = [];
 
@@ -150,6 +158,29 @@ describe("QWP Node orphan drainer", () => {
     await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
       directory,
     ]);
+  });
+
+  it("finds a slot whose only residue is a manifest and an empty segment", async () => {
+    // A process killed between activateHotSpare()'s manifest publication and
+    // the first record write leaves exactly this pair. The header probe reads
+    // the flag-0 segment as unassigned, so without consulting the manifest the
+    // scanner skipped the slot and nothing ever cleaned it up again.
+    const rootDirectory = await root();
+    const directory = join(rootDirectory, "manifest-residue");
+    await mkdir(directory);
+    await writeFile(
+      join(directory, "sf-0000000000000001.sfa"),
+      manifestOptionalEmptySfaSegment(),
+    );
+    await writeFile(join(directory, "sf-manifest.bin"), Buffer.alloc(8192));
+
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([
+      directory,
+    ]);
+
+    // The .failed sentinel and quarantine-slot exclusions still win.
+    await writeFile(join(directory, QWP_ORPHAN_FAILED_SENTINEL), "inspect me");
+    await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
   });
 
   it("adopts and drains discovered slots with bounded background workers", async () => {
