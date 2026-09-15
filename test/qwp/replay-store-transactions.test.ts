@@ -7,8 +7,10 @@ import {
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
+  QwpReplayStoreFullError,
 } from "../../packages/nodejs-client/src";
 import {
+  QWP_COLUMN_TYPE,
   QWP_FLAG_DEFER_COMMIT,
   QWP_STATUS,
   QwpBinaryConnection,
@@ -17,6 +19,7 @@ import {
   QwpHandshakeMetadata,
   QwpIngressSession,
   QwpSender,
+  QwpTableBuffer,
 } from "../../packages/client-core/src/qwp";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 
@@ -68,6 +71,45 @@ class DeferredAckConnection implements QwpBinaryConnection {
   }
 }
 
+/**
+ * A server that accepts every frame and answers none, which is the shape an
+ * overloaded or partitioned node presents to a store-and-forward producer:
+ * the journal keeps growing and nothing ever trims it.
+ */
+class SilentConnection implements QwpBinaryConnection {
+  readonly endpoint = "primary";
+  readonly handshake: QwpHandshakeMetadata = { qwpVersion: 1 };
+  readonly messages: AsyncIterable<Uint8Array>;
+  readonly sent: Uint8Array[] = [];
+  readonly closed: Promise<QwpConnectionCloseInfo>;
+  private readonly incoming = new QwpAsyncQueue<Uint8Array>();
+  private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
+  private closedSettled = false;
+
+  constructor() {
+    this.messages = this.incoming;
+    let resolveClosed!: (info: QwpConnectionCloseInfo) => void;
+    this.closed = new Promise((resolve) => {
+      resolveClosed = resolve;
+    });
+    this.resolveClosed = resolveClosed;
+  }
+
+  send(payload: Uint8Array): Promise<void> {
+    this.sent.push(payload.slice());
+    return Promise.resolve();
+  }
+
+  close(code = 1000, reason = ""): Promise<void> {
+    if (!this.closedSettled) {
+      this.closedSettled = true;
+      this.incoming.end();
+      this.resolveClosed({ code, reason, wasClean: code === 1000 });
+    }
+    return Promise.resolve();
+  }
+}
+
 function okResponse(
   sequence: bigint,
   tables: readonly [string, bigint][],
@@ -98,6 +140,28 @@ function transactionalSender(session: QwpIngressSession): QwpSender {
 async function publishOneRowTransaction(sender: QwpSender): Promise<boolean> {
   await sender.table("events").longColumn("value", 42n).atNow();
   return sender.commit();
+}
+
+/**
+ * A frame the journal reads exactly as it reads a real one: only the flags
+ * byte decides whether it opens, continues or closes a transaction.
+ */
+function transactionFrame(payloadLength: number, deferCommit: boolean) {
+  const payload = new Uint8Array(payloadLength).fill(7);
+  payload[5] = deferCommit ? QWP_FLAG_DEFER_COMMIT : 0;
+  return payload;
+}
+
+/** Rows large enough that `maxBatchSizeBytes` splits them into 2+ frames. */
+function splittableTable(rows: number): QwpTableBuffer {
+  const table = new QwpTableBuffer("events");
+  for (let row = 0; row < rows; row++) {
+    table
+      .getOrCreateColumn("value", QWP_COLUMN_TYPE.VARCHAR)!
+      .values.push(String.fromCharCode(97 + row).repeat(60));
+    table.nextRow();
+  }
+  return table;
 }
 
 describe("QWP file replay store transaction liveness", () => {
@@ -187,6 +251,220 @@ describe("QWP file replay store transaction liveness", () => {
       expect(store.metrics.totalAppendTimeouts).toBe(0);
     } finally {
       await sender.close();
+      await session.close();
+    }
+  });
+
+  it("stops admitting transaction commits at the liveness ceiling", async () => {
+    // Two records per segment, one segment of target. A transaction whose
+    // deferred prefix fills the journal then needs exactly one more segment
+    // for its commit, and the segment it lands in has a free slot the next
+    // transaction's deferred frame fits into -- so every later commit rotates
+    // again. Granting each of them the liveness exception grew the journal by
+    // a segment per transaction, forever, with no append ever timing out.
+    const payloadLength = 32;
+    const recordSize = FRAME_HEADER_SIZE + payloadLength;
+    const maxSegmentBytes = 2 * recordSize - FRAME_HEADER_SIZE;
+    const segmentFileSize =
+      SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
+    const directory = await temporaryDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes,
+      maxBytes: segmentFileSize,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 50,
+    });
+    await store.load();
+    let sequence = 0n;
+    const append = (deferCommit: boolean) =>
+      store.append({
+        frameSequence: sequence++,
+        payload: transactionFrame(payloadLength, deferCommit),
+      });
+
+    try {
+      // Fill the journal with a deferred prefix, then close it.
+      await append(true);
+      await append(true);
+      await append(false);
+      expect(store.metrics).toMatchObject({
+        pendingSegments: 2,
+        totalBytes: 2 * segmentFileSize,
+      });
+
+      // The commit landed in a segment with a free slot, so the next
+      // transaction opens without needing one of its own.
+      await append(true);
+      expect(store.metrics.totalBytes).toBe(2 * segmentFileSize);
+
+      // Nothing acknowledges, so that transaction -- and every attempt after
+      // it -- is backpressured instead of buying another segment.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await expect(append(false)).rejects.toBeInstanceOf(
+          QwpReplayStoreAppendTimeoutError,
+        );
+        // A refused frame never entered the journal, so the next attempt must
+        // reuse its sequence to stay contiguous.
+        sequence--;
+        expect(store.metrics.totalBytes).toBe(2 * segmentFileSize);
+      }
+      expect(store.metrics).toMatchObject({
+        pendingSegments: 2,
+        totalAppendTimeouts: 4,
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("does not admit a commit over target once the journal is record-free", async () => {
+    // A journal holding no record has no deferred prefix to release, so a
+    // commit that arrives while its acknowledged segments are still being
+    // trimmed has earned no exception: it must wait for that trimming like any
+    // other frame instead of adding a segment beyond the target.
+    const payloadLength = 32;
+    const segmentFileSize =
+      SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + payloadLength;
+    // More segments than one trim batch retires, so trimming is still in
+    // flight when the append below is queued behind the acknowledgement.
+    const segmentCount = 20;
+    const maxBytes = segmentCount * segmentFileSize;
+    const directory = await temporaryDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: payloadLength,
+      maxBytes,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 2_000,
+    });
+    await store.load();
+    let sequence = 0n;
+
+    try {
+      for (let frame = 0; frame < segmentCount; frame++) {
+        await store.append({
+          frameSequence: sequence++,
+          // The last frame leaves a transaction open, so the journal drains
+          // while it still believes one is in flight.
+          payload: transactionFrame(payloadLength, frame === segmentCount - 1),
+        });
+      }
+      expect(store.metrics.totalBytes).toBe(maxBytes);
+
+      const acknowledging = store.acknowledgeThrough(sequence - 1n);
+      const appending = store.append({
+        frameSequence: sequence++,
+        payload: transactionFrame(payloadLength, false),
+      });
+      await acknowledging;
+      await expect(appending).resolves.toBeUndefined();
+      expect(store.metrics.totalBackpressureStalls).toBe(1);
+      expect(store.metrics.totalBytes).toBeLessThanOrEqual(maxBytes);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("refuses a transaction-closing split batch larger than the journal", async () => {
+    // The whole-batch preflight admits every frame of a batch that closes an
+    // open transaction. Without a bound on the batch itself, one split commit
+    // was journalled in full however large it was: each frame then matched the
+    // prepared batch and skipped the capacity gate in turn.
+    const maxBytes = SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + 128;
+    const directory = await temporaryDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 128,
+      maxBytes,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      appendDeadlineMs: 50,
+    });
+    const preflights = vi.spyOn(store, "prepareAppendBatch");
+    const connection = new SilentConnection();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 5_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore: store,
+      backgroundStoreAndForward: true,
+      maxBatchSizeBytes: 128,
+    });
+
+    try {
+      // Open a transaction the journal must keep until its commit arrives.
+      await session.publishFrame(transactionFrame(60, true));
+      const sending = session.sendTablesWithPublication([splittableTable(3)]);
+      const acknowledged = sending.acknowledgement.catch(
+        (error: unknown) => error,
+      );
+      await expect(sending.publication).rejects.toBeInstanceOf(
+        QwpReplayStoreFullError,
+      );
+      await acknowledged;
+      // The rejection came from the split-batch preflight, not from a
+      // per-frame append that only this shape of flush can reach.
+      expect((preflights.mock.calls[0]?.[0] ?? []).length).toBeGreaterThan(1);
+      // Rejected as a batch: nothing of it entered the journal or the wire.
+      expect(store.metrics).toMatchObject({
+        pendingRecords: 1,
+        pendingSegments: 1,
+        totalBytes: maxBytes,
+      });
+      expect(connection.sent).toHaveLength(1);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("admits a transaction-closing split batch that fits the journal", async () => {
+    // The other half of the same preflight: a split commit whose own footprint
+    // fits the configured journal still releases the deferred prefix that
+    // fills it, and the ACK that commit unblocks trims the overshoot away.
+    const maxSegmentBytes = 128;
+    const segmentFileSize =
+      SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
+    const directory = await temporaryDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes,
+      maxBytes: 2 * segmentFileSize,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 200,
+    });
+    const preflights = vi.spyOn(store, "prepareAppendBatch");
+    const connection = new DeferredAckConnection();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 5_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore: store,
+      maxBatchSizeBytes: 128,
+    });
+
+    try {
+      // Two deferred frames, one per segment: the journal is at its target and
+      // neither frame can be acknowledged before the commit below.
+      await session.publishFrame(transactionFrame(100, true));
+      await session.publishFrame(transactionFrame(100, true));
+      expect(store.metrics).toMatchObject({
+        pendingSegments: 2,
+        totalBytes: 2 * segmentFileSize,
+      });
+
+      const sending = session.sendTablesWithPublication([splittableTable(2)]);
+      await expect(sending.publication).resolves.toBeUndefined();
+      expect(preflights.mock.calls[0][0].length).toBe(2);
+      expect(connection.sent).toHaveLength(4);
+      expect(store.metrics.totalBytes).toBeLessThanOrEqual(4 * segmentFileSize);
+
+      await expect(sending.acknowledgement).resolves.toMatchObject({
+        sequence: sending.sequence,
+      });
+      await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
+      expect(store.metrics.totalAppendTimeouts).toBe(0);
+    } finally {
       await session.close();
     }
   });
