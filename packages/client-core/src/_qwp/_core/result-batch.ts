@@ -4,6 +4,7 @@ import {
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_FLAG_GORILLA,
   QWP_FLAG_ZSTD,
+  QWP_MAX_ARRAY_DIMENSION_LENGTH,
   QWP_MAX_CELLS_PER_BATCH,
   QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_IDENTIFIER_BYTES,
@@ -15,7 +16,10 @@ import { QwpProtocolError } from "./errors";
 import { readQwpVarint } from "./varint";
 import { decompressQwpZstdFrame } from "./zstd";
 
-const MAX_ARRAY_DIMENSION_LENGTH = (1 << 28) - 1;
+// One axis bound for both directions: a decoder that accepted an axis the
+// encoder refuses -- or the reverse -- is exactly how the ingress cap drifted
+// to int32 while this file already used QuestDB's 28-bit limit.
+const MAX_ARRAY_DIMENSION_LENGTH = QWP_MAX_ARRAY_DIMENSION_LENGTH;
 const MAX_ARRAY_ELEMENTS = 268_435_327;
 // Matches QuestDB's connection-scoped symbol dictionary limit.
 const MAX_CONNECTION_SYMBOLS = 2_000_000;

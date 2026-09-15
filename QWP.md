@@ -701,8 +701,9 @@ Current QuestDB servers accept only DOUBLE arrays for ingestion. `longArrayColum
 and `longArray()` remain available for Java-client and protocol parity and encode the
 QWP LONG_ARRAY type, but flushing one is rejected by the server with `long arrays are
 not supported, only double arrays`. Decoding LONG_ARRAY values in query results remains
-supported. QWP arrays may have between 1 and 32 dimensions; the client rejects a larger
-rank before encoding a frame.
+supported. QWP arrays may have between 1 and 32 dimensions, and each axis is limited to
+268,435,455 elements, the length QuestDB can materialise; the client rejects a larger
+rank or axis before encoding a frame, on both ingress and egress.
 
 QuestDB reserves the minimum signed value as NULL for INT, LONG, and DATE. Both the
 fluent setters (`int32Column()`, `longColumn()`, and `dateColumn()`) and the compiled
@@ -724,6 +725,10 @@ for the rest of the frame; the lock is released once those rows are published, s
 next frame's first value sets it afresh. Decimal text and `{ unscaled, scale }` values are rescaled to the
 column's scale when that is exact, and rejected when it would round: at
 `decimal64(2)`, `"1.50"` stages as `150n` and `"1.005"` raises `QwpWriterRowError`.
+Decimal text accepts scientific notation on the same terms as ILP, so `"1e3"`,
+`"-2.5e2"` and `"1.5E-3"` are all valid spellings; an exponent beyond ±1024 is
+rejected, because no DECIMAL256 value can name one and expanding it would be an
+unbounded string allocation.
 Base-32 geohash text carries five bits per character, so `geohash(20)` accepts
 `"u33d"` and rejects `"u33"`.
 
@@ -784,6 +789,14 @@ Java client). Set it to `0` or a negative value for a fast close, which publishe
 without the ACK drain; publication itself stays bounded, so `close()` always
 returns. An unfinished row is still discarded with a warning.
 The configuration-string equivalent is `close_flush_timeout_millis`.
+
+These warnings, and the other sender-level diagnostics, go to `QwpSenderOptions.log`
+when it is supplied and to the same console-backed default logger the rest of the
+client uses when it is not, on every entry point: `Sender`, the direct
+`createQwpNodeSender()`/`createQwpBrowserSender()` factories, and pooled leases. A
+top-level `log` wins over `qwp.sender.log`; pass an explicit no-op to silence them.
+`debug` messages stay below the default level, so the per-row staging diagnostics
+are not printed unless a supplied logger records them.
 
 QWP is columnar, so a row whose values were all nullish is still a row, and
 QuestDB can store it with NULL in every column. What reaches the wire depends on
