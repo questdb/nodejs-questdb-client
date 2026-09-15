@@ -189,10 +189,17 @@ describe("QwpNotificationDispatcher", () => {
     }
   });
 
-  it("settles a dispatch exactly once when then() resolves and then throws", async () => {
-    // A thenable is free to invoke a callback and still throw from the same
-    // then() call. The synchronous fallback must not settle that dispatch a
-    // second time and let two notifications run concurrently.
+  it("settles a dispatch exactly once when then() schedules a callback and throws", async () => {
+    // A thenable is free to register a callback and still throw from the same
+    // then() call, so the dispatch can be settled twice: once by the
+    // synchronous fallback below the throw, and again when the registered
+    // callback finally runs. The late one is the dangerous one -- by then the
+    // NEXT notification is already in flight, and clearing the in-flight flag
+    // under it starts a third concurrently, which is exactly the
+    // one-at-a-time guarantee the inbox exists to provide. A thenable that
+    // invokes its callback synchronously cannot show this: both settlements
+    // land before the next dispatch timer fires, and the second is absorbed by
+    // schedule()'s own timer check.
     let live = 0;
     let peak = 0;
     const release: (() => void)[] = [];
@@ -209,8 +216,9 @@ describe("QwpNotificationDispatcher", () => {
       }
       return {
         then(onFulfilled?: () => void) {
-          onFulfilled?.();
-          throw new Error("then() failed after settling");
+          // Lands after the next notification has started dispatching.
+          setTimeout(() => onFulfilled?.(), 10);
+          throw new Error("then() failed after scheduling");
         },
       } as unknown as PromiseLike<void>;
     }, 4);
@@ -218,10 +226,13 @@ describe("QwpNotificationDispatcher", () => {
     dispatcher.offer(1);
     dispatcher.offer(2);
     dispatcher.offer(3);
+
     await vi.waitFor(() => expect(live).toBe(1));
-    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Outlive the late callback so a second settlement would be observable.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
     expect(peak).toBe(1);
+    expect(dispatcher.metrics.delivered).toBe(2);
 
     for (const resolve of release.splice(0)) resolve();
     await vi.waitFor(() => expect(dispatcher.metrics.delivered).toBe(3));

@@ -1518,6 +1518,39 @@ describe("Configuration string parser suite", function () {
     ).rejects.toThrow("Invalid logging function");
   });
 
+  it("rejects a non-function qwp.sender.log like the top-level one", async function () {
+    // A QWP sender contains every log call, because the sink is the thing that
+    // can fail and there is nowhere left to report that to. So an unvalidated
+    // non-function here does not fall back to the console: it throws on every
+    // call and is swallowed, and the sender goes completely silent -- including
+    // the close-time warning that staged rows are being discarded. The
+    // top-level logger has always been validated; this is the same check.
+    for (const log of [1234, "hoppa", {}, null as unknown as number]) {
+      if (log === null) continue;
+      await expect(
+        async () =>
+          await SenderOptions.fromConfig("ws::addr=host:9000;", {
+            // @ts-expect-error - Testing invalid input
+            qwp: { sender: { log } },
+          }),
+      ).rejects.toThrow("Invalid logging function");
+      expect(
+        () =>
+          new Sender({
+            protocol: "udp",
+            host: "127.0.0.1",
+            port: 9009,
+            qwp: { sender: { log } },
+          } as never),
+      ).toThrow("Invalid logging function");
+    }
+
+    // An omitted logger is still valid and still reaches the default sink.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=host:9000;", { qwp: { sender: {} } }),
+    ).resolves.toBeDefined();
+  });
+
   it("keeps a QWP logger supplied without a top-level one", async function () {
     // resolveQwpConfig() set `log` after spreading qwp.sender, and the QWP
     // config resolver spreads that object last, so an explicit undefined beat

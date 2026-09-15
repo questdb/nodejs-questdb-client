@@ -592,6 +592,15 @@ export function validateQwpExtraOptions(
   if (options.udp !== undefined && !udp) {
     throw new Error("'qwp.udp' option is supported only for the udp transport");
   }
+  // Same check the top-level logger gets, for the same reason. A QWP sender
+  // contains every log call in a try/catch -- the sink is the thing that
+  // failed, so there is nowhere to report its failure to -- which means a
+  // non-function here is not merely ignored: it throws on every call and is
+  // swallowed, so the sender falls silent instead of falling back. The row-loss
+  // and open-transaction warnings at close() are exactly what goes missing.
+  if (options.sender?.log && typeof options.sender.log !== "function") {
+    throw new Error("Invalid logging function");
+  }
 }
 
 function parseConfigurationString(

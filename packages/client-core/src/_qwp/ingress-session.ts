@@ -32,6 +32,7 @@ import {
   priorQwpSenderErrorDeliveries,
   QwpNotificationDispatcher,
 } from "./_internal/notification-dispatcher";
+import { defersCommit, QWP_FLAGS_OFFSET } from "./_internal/frame-flags";
 import { safelyInvoke } from "./_internal/safe-callback";
 import {
   createQwpSenderError,
@@ -41,7 +42,6 @@ import {
 } from "./sender-error";
 import { log } from "../logging";
 
-const QWP_FLAGS_OFFSET = 5;
 const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
 const DEFAULT_ERROR_INBOX_CAPACITY = 256;
 const DEFAULT_PROGRESS_INBOX_CAPACITY = 256;
@@ -1116,9 +1116,7 @@ export class QwpIngressSession {
     ackTimeoutEnabled = true,
   ): QwpIngressSendResult {
     this.throwIfUnavailable();
-    const ackDeferredUntilCommit =
-      frame.byteLength > QWP_FLAGS_OFFSET &&
-      (frame[QWP_FLAGS_OFFSET] & QWP_FLAG_DEFER_COMMIT) !== 0;
+    const ackDeferredUntilCommit = defersCommit(frame);
     if (
       this.maxBatchSizeBytes !== undefined &&
       frame.byteLength > this.maxBatchSizeBytes
