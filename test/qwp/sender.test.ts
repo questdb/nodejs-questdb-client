@@ -2300,6 +2300,124 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("rejects over-width decimal text before constructing a large BigInt", async () => {
+    const overWidth = "9".repeat(100_000);
+    const allZero = "0".repeat(100_000);
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const writers = [
+      [sender.writer("decimal64", { value: decimal64(0) }), 64],
+      [sender.writer("decimal128", { value: decimal128(0) }), 128],
+      [sender.writer("decimal256", { value: decimal256(0) }), 256],
+    ] as const;
+    const originalBigInt = globalThis.BigInt;
+    const stringArgumentLengths: number[] = [];
+    const sentinel = new Error("large BigInt construction reached");
+    const guardedBigInt = function (value?: unknown): bigint {
+      if (typeof value === "string") {
+        stringArgumentLengths.push(value.length);
+        if (value.length > 100) throw sentinel;
+      }
+      return originalBigInt(value as string | number | bigint | boolean);
+    } as BigIntConstructor;
+    guardedBigInt.asIntN = originalBigInt.asIntN;
+    guardedBigInt.asUintN = originalBigInt.asUintN;
+
+    Object.defineProperty(globalThis, "BigInt", {
+      configurable: true,
+      writable: true,
+      value: guardedBigInt,
+    });
+    try {
+      for (const [writer, bits] of writers) {
+        await expect(writer.row({ value: overWidth })).rejects.toThrow(
+          `decimal value exceeds signed int${bits}`,
+        );
+      }
+      sender.table("fluent_decimal");
+      expect(() => sender.decimalColumnText("value", overWidth)).toThrow(
+        "decimal value or scale exceeds DECIMAL256 capacity",
+      );
+      expect(sender.metrics).toMatchObject({
+        totalRowsStaged: 0,
+        pendingRows: 0,
+        pendingBytes: 0,
+        connected: false,
+      });
+      await writers[0][0].row({ value: allZero });
+      expect(stringArgumentLengths.every((length) => length <= 100)).toBe(true);
+    } finally {
+      Object.defineProperty(globalThis, "BigInt", {
+        configurable: true,
+        writable: true,
+        value: originalBigInt,
+      });
+    }
+
+    await writers[0][0].row({ value: "1" });
+    await sender.flush();
+    expect(session.sends).toHaveLength(1);
+    await sender.close();
+  });
+
+  it("accepts only the exact signed boundaries for decimal text", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const boundaries = [
+      {
+        bits: 64,
+        writer: sender.writer("decimal64", { value: decimal64(0) }),
+        positive: "9223372036854775807",
+        negative: "9223372036854775808",
+      },
+      {
+        bits: 128,
+        writer: sender.writer("decimal128", { value: decimal128(0) }),
+        positive: "170141183460469231731687303715884105727",
+        negative: "170141183460469231731687303715884105728",
+      },
+      {
+        bits: 256,
+        writer: sender.writer("decimal256", { value: decimal256(0) }),
+        positive:
+          "57896044618658097711785492504343953926634992332820282019728792003956564819967",
+        negative:
+          "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+      },
+    ] as const;
+
+    for (const { bits, writer, positive, negative } of boundaries) {
+      await writer.row({ value: `+000${positive}` });
+      await writer.row({ value: `-${negative}` });
+      await expect(
+        writer.row({ value: (BigInt(positive) + 1n).toString() }),
+      ).rejects.toThrow(`decimal value exceeds signed int${bits}`);
+      await expect(
+        writer.row({ value: (-BigInt(negative) - 1n).toString() }),
+      ).rejects.toThrow(`decimal value exceeds signed int${bits}`);
+    }
+
+    const positive256 = boundaries[2].positive;
+    const negative256 = boundaries[2].negative;
+    await sender
+      .table("fluent_decimal")
+      .decimalColumnText("positive", `+000${positive256}`)
+      .decimalColumnText("negative", `-${negative256}`)
+      .atNow();
+    sender.table("fluent_positive_overflow");
+    expect(() =>
+      sender.decimalColumnText("value", (BigInt(positive256) + 1n).toString()),
+    ).toThrow("decimal value or scale exceeds DECIMAL256 capacity");
+    sender.table("fluent_negative_overflow");
+    expect(() =>
+      sender.decimalColumnText("value", (-BigInt(negative256) - 1n).toString()),
+    ).toThrow("decimal value or scale exceeds DECIMAL256 capacity");
+
+    await sender.flush();
+    expect(sender.metrics.totalRowsStaged).toBe(7);
+    await sender.close();
+  });
+
   it("accepts decimal text with no integer part or no fraction part", async () => {
     // ".5" and "5." are what this client's own ILP validator
     // (validateDecimalText) accepts, what a QuestDB server ingests over ILP,

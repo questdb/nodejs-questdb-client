@@ -44,7 +44,10 @@ import { defersCommit, isDurableAckPoll } from "./frame-flags";
 import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import { monotonicNowMs } from "./monotonic-clock";
-import { jitterReconnectDelayMs } from "./reconnect-backoff";
+import {
+  jitterReconnectDelayMs,
+  validateQwpReconnectBackoffs,
+} from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 import {
@@ -2783,9 +2786,8 @@ function validateReconnectPolicy(
       "reconnect maxAttempts must be a non-negative safe integer",
     );
   }
+  validateQwpReconnectBackoffs({ initialBackoffMs, maxBackoffMs });
   for (const [name, value] of [
-    ["initialBackoffMs", initialBackoffMs],
-    ["maxBackoffMs", maxBackoffMs],
     ["maxDurationMs", maxDurationMs],
     ["poisonMinEscalationWindowMs", poisonMinEscalationWindowMs],
     ["catchUpCapGapMinEscalationWindowMs", catchUpCapGapMinEscalationWindowMs],

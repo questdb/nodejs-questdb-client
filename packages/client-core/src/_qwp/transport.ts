@@ -370,13 +370,13 @@ export interface QwpReconnectOptions {
    */
   maxAttempts?: number;
   /**
-   * Full-jitter ceiling before the first failed sweep is retried.
-   * Ingress defaults to 100ms, egress to 50ms.
+   * Full-jitter ceiling before the first failed sweep is retried. Must not
+   * exceed 2_147_483_647ms. Ingress defaults to 100ms, egress to 50ms.
    */
   initialBackoffMs?: number;
   /**
-   * Full-jitter exponential-backoff ceiling.
-   * Ingress defaults to 5s, egress to 1s.
+   * Full-jitter exponential-backoff ceiling. Must not exceed
+   * 2_147_483_647ms. Ingress defaults to 5s, egress to 1s.
    */
   maxBackoffMs?: number;
   /**

@@ -25,6 +25,7 @@ import {
   QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
   QwpReconnectingEgressConnection,
 } from "./_internal/reconnecting-egress-connection";
+import { validateQwpReconnectBackoffs } from "./_internal/reconnect-backoff";
 import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
@@ -145,6 +146,7 @@ function validateOptionalTimeout(
 function validateEgressSessionOptions(
   options: QwpEgressSessionOptions,
 ): QwpValidatedEgressSessionOptions {
+  validateQwpReconnectBackoffs(options.reconnect);
   const serverInfoTimeoutMs =
     options.serverInfoTimeoutMs ?? QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS;
   if (!Number.isFinite(serverInfoTimeoutMs) || serverInfoTimeoutMs <= 0) {

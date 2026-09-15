@@ -440,11 +440,61 @@ function stagedRowBytes(columns: ReadonlyMap<string, StagedColumn>): number {
   return bytes;
 }
 
-const DECIMAL_WIDTH = new Map<QwpColumnType, number>([
+type DecimalSignedBits = 64 | 128 | 256;
+
+const DECIMAL_WIDTH = new Map<QwpColumnType, DecimalSignedBits>([
   [QWP_COLUMN_TYPE.DECIMAL64, 64],
   [QWP_COLUMN_TYPE.DECIMAL128, 128],
   [QWP_COLUMN_TYPE.DECIMAL256, 256],
 ]);
+
+const SIGNED_DECIMAL_LIMITS: Record<
+  DecimalSignedBits,
+  { readonly positive: string; readonly negative: string }
+> = {
+  64: {
+    positive: "9223372036854775807",
+    negative: "9223372036854775808",
+  },
+  128: {
+    positive: "170141183460469231731687303715884105727",
+    negative: "170141183460469231731687303715884105728",
+  },
+  256: {
+    positive:
+      "57896044618658097711785492504343953926634992332820282019728792003956564819967",
+    negative:
+      "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+  },
+};
+
+function boundedSignedDecimalMagnitude(
+  digits: string,
+  negative: boolean,
+  signedBits: DecimalSignedBits,
+  overflowMessage: string,
+): bigint {
+  let firstSignificant = 0;
+  while (
+    firstSignificant < digits.length &&
+    digits.charCodeAt(firstSignificant) === 48
+  ) {
+    firstSignificant++;
+  }
+  if (firstSignificant === digits.length) return 0n;
+
+  const limit =
+    SIGNED_DECIMAL_LIMITS[signedBits][negative ? "negative" : "positive"];
+  const significantLength = digits.length - firstSignificant;
+  if (
+    significantLength > limit.length ||
+    (significantLength === limit.length &&
+      digits.slice(firstSignificant) > limit)
+  ) {
+    throw new RangeError(overflowMessage);
+  }
+  return BigInt(digits.slice(firstSignificant));
+}
 
 function isDecimalType(type: QwpColumnType): boolean {
   return DECIMAL_WIDTH.has(type);
@@ -495,7 +545,11 @@ const MAX_DECIMAL_EXPONENT = 1024;
 
 function parseDecimal(
   value: string | number,
-  exactScale?: number,
+  options: {
+    readonly exactScale?: number;
+    readonly signedBits: DecimalSignedBits;
+    readonly overflowMessage: string;
+  },
 ): {
   unscaled: bigint;
   scale: number;
@@ -527,7 +581,7 @@ function parseDecimal(
     digits += "0".repeat(-scale);
     scale = 0;
   }
-  if (exactScale !== undefined && scale > exactScale) {
+  if (options.exactScale !== undefined && scale > options.exactScale) {
     // Compiled writers know their target scale before parsing. Strip only the
     // fractional zeroes that exact rescaling would remove, so arbitrarily long
     // caller-supplied text never becomes an equally large power of ten. The
@@ -538,22 +592,28 @@ function parseDecimal(
     }
     if (lastNonZero < 0) {
       digits = "0";
-      scale = exactScale;
+      scale = options.exactScale;
     } else {
-      const removable = scale - exactScale;
+      const removable = scale - options.exactScale;
       const trailingZeroes = digits.length - lastNonZero - 1;
       if (trailingZeroes < removable) {
         throw new RangeError(
-          `decimal value is not exactly representable at scale ${exactScale}`,
+          `decimal value is not exactly representable at scale ${options.exactScale}`,
         );
       }
       digits = digits.slice(0, -removable);
-      scale = exactScale;
+      scale = options.exactScale;
     }
   }
-  const magnitude = BigInt(digits);
+  const negative = match[1] === "-";
+  const magnitude = boundedSignedDecimalMagnitude(
+    digits,
+    negative,
+    options.signedBits,
+    options.overflowMessage,
+  );
   return {
-    unscaled: match[1] === "-" ? -magnitude : magnitude,
+    unscaled: negative ? -magnitude : magnitude,
     scale,
   };
 }
@@ -797,13 +857,17 @@ function rescaleDecimal(
 function writerDecimalUnscaled(
   value: unknown,
   scale: number,
-  bits: number,
+  bits: DecimalSignedBits,
 ): bigint {
   let unscaled: bigint;
   if (typeof value === "bigint") {
     unscaled = value;
   } else if (typeof value === "string" || typeof value === "number") {
-    const parsed = parseDecimal(value, scale);
+    const parsed = parseDecimal(value, {
+      exactScale: scale,
+      signedBits: bits,
+      overflowMessage: `decimal value exceeds signed int${bits}`,
+    });
     unscaled = rescaleDecimal(parsed.unscaled, parsed.scale, scale);
   } else if (isRecord(value) && "unscaled" in value) {
     if (typeof value.unscaled !== "bigint") {
@@ -1633,7 +1697,10 @@ export class QwpSender {
   ): QwpSender {
     if (this.omitsNullish(name, value)) return this;
     try {
-      const decimal = parseDecimal(value);
+      const decimal = parseDecimal(value, {
+        signedBits: 256,
+        overflowMessage: "decimal value or scale exceeds DECIMAL256 capacity",
+      });
       if (decimal.scale > 76 || !fitsSigned(decimal.unscaled, 256)) {
         throw new RangeError(
           "decimal value or scale exceeds DECIMAL256 capacity",

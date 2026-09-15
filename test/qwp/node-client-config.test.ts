@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeClient,
   createQwpNodeClient,
@@ -754,6 +754,91 @@ describe("QWP unified Node client configuration", () => {
     );
   });
 
+  it("bounds typed reconnect backoffs across config and client paths", () => {
+    const timerCeiling = 0x7fffffff;
+    const overTimerCeiling = timerCeiling + 1;
+
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        ingressSession: {
+          reconnect: { initialBackoffMs: overTimerCeiling },
+        },
+      }),
+    ).toThrow(
+      `reconnect initialBackoffMs must be no greater than ${timerCeiling}`,
+    );
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        egressSession: {
+          reconnect: { maxBackoffMs: overTimerCeiling },
+        },
+      }),
+    ).toThrow(`reconnect maxBackoffMs must be no greater than ${timerCeiling}`);
+
+    const parsed = parseQwpNodeClientConfig("ws::addr=localhost;", {
+      ingressSession: {
+        reconnect: {
+          initialBackoffMs: timerCeiling,
+          maxBackoffMs: timerCeiling,
+          maxDurationMs: overTimerCeiling,
+          poisonMinEscalationWindowMs: overTimerCeiling,
+        },
+      },
+      egressSession: {
+        reconnect: {
+          initialBackoffMs: timerCeiling,
+          maxBackoffMs: timerCeiling,
+          maxDurationMs: overTimerCeiling,
+        },
+      },
+    });
+    expect(parsed.ingressSession?.reconnect).toMatchObject({
+      initialBackoffMs: timerCeiling,
+      maxBackoffMs: timerCeiling,
+      maxDurationMs: overTimerCeiling,
+      poisonMinEscalationWindowMs: overTimerCeiling,
+    });
+    expect(parsed.egressSession?.reconnect).toMatchObject({
+      initialBackoffMs: timerCeiling,
+      maxBackoffMs: timerCeiling,
+      maxDurationMs: overTimerCeiling,
+    });
+
+    const webSocketFactory = vi.fn(
+      () => new PendingWebSocket() as unknown as QwpWebSocketLike,
+    );
+    const baseOptions: QwpNodeClientOptions = {
+      ingress: {
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory,
+      },
+      egress: {
+        url: "ws://localhost:9000/read/v1",
+        webSocketFactory,
+      },
+      lazyConnect: true,
+    };
+    expect(() =>
+      createQwpNodeClient({
+        ...baseOptions,
+        ingressSession: {
+          reconnect: { initialBackoffMs: overTimerCeiling },
+        },
+      }),
+    ).toThrow(
+      `reconnect initialBackoffMs must be no greater than ${timerCeiling}`,
+    );
+    expect(() =>
+      createQwpNodeClient({
+        ...baseOptions,
+        egressSession: {
+          reconnect: { maxBackoffMs: overTimerCeiling },
+        },
+      }),
+    ).toThrow(`reconnect maxBackoffMs must be no greater than ${timerCeiling}`);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
   it("rejects a millisecond option above the timer ceiling", () => {
     // setTimeout clamps anything above 2^31-1 to 1 ms and warns, so an
     // over-large value did not merely fail to apply -- it inverted into an
@@ -764,6 +849,10 @@ describe("QWP unified Node client configuration", () => {
       "auto_flush_interval",
       "close_flush_timeout_millis",
       "durable_ack_keepalive_interval_millis",
+      "reconnect_initial_backoff_millis",
+      "reconnect_max_backoff_millis",
+      "failover_backoff_initial_ms",
+      "failover_backoff_max_ms",
       "query_close_timeout_ms",
       "acquire_timeout_ms",
       "idle_timeout_ms",
@@ -783,6 +872,36 @@ describe("QWP unified Node client configuration", () => {
         "wss::addr=host:9000;auth_timeout_ms=2147483647;",
       ).ingress.authTimeoutMs,
     ).toBe(2147483647);
+    expect(
+      parseQwpNodeClientConfig(
+        "wss::addr=host:9000;reconnect_initial_backoff_millis=2147483647;reconnect_max_backoff_millis=2147483647;",
+      ).ingressSession?.reconnect,
+    ).toMatchObject({
+      initialBackoffMs: 2147483647,
+      maxBackoffMs: 2147483647,
+    });
+    expect(
+      parseQwpNodeClientConfig(
+        "wss::addr=host:9000;failover_backoff_initial_ms=2147483647;failover_backoff_max_ms=2147483647;",
+      ).egressSession?.reconnect,
+    ).toMatchObject({
+      initialBackoffMs: 2147483647,
+      maxBackoffMs: 2147483647,
+    });
+    // Elapsed-duration budgets and escalation windows do not feed raw timers.
+    const longWindow = parseQwpNodeClientConfig(
+      "wss::addr=host:9000;sf_dir=/tmp/qwp;reconnect_max_duration_millis=2147483648;poison_min_escalation_window_millis=2147483648;failover_max_duration_ms=2147483648;catch_up_cap_gap_min_escalation_window_millis=2147483648;",
+    );
+    expect(longWindow.ingressSession?.reconnect).toMatchObject({
+      maxDurationMs: 2147483648,
+      poisonMinEscalationWindowMs: 2147483648,
+    });
+    expect(longWindow.egressSession?.reconnect).toMatchObject({
+      maxDurationMs: 2147483648,
+    });
+    expect(longWindow.ingress.storeAndForward).toMatchObject({
+      catchUpCapGapMinEscalationWindowMs: 2147483648,
+    });
     // A byte-count option is not a timer and keeps its own, larger range.
     expect(() =>
       parseQwpNodeClientConfig(

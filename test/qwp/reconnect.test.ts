@@ -22,6 +22,8 @@ import {
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
   QwpNodeOrphanDrainer,
+  QwpEgressSession,
+  QwpIngressSession,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreCheckpointError,
   QwpReplayStoreCorruptionError,
@@ -50,9 +52,7 @@ import {
   QwpDurableAckUnavailableError,
   QwpFailoverError,
   type QwpSenderError,
-  QwpEgressSession,
   QwpEgressSessionClosedError,
-  QwpIngressSession,
   QwpIngressAckAbandonedError,
   QwpIngressSessionClosedError,
   QwpIngressReplayRecord,
@@ -760,6 +760,93 @@ describe("QWP endpoint failover", () => {
 
     await expect(factory()).rejects.toBe(authenticationError);
     expect(attempts).toEqual(["primary"]);
+  });
+});
+
+describe("QWP reconnect timer bounds", () => {
+  const timerCeiling = 0x7fffffff;
+  const overTimerCeiling = timerCeiling + 1;
+
+  it.each([
+    ["initialBackoffMs", { initialBackoffMs: overTimerCeiling }],
+    ["maxBackoffMs", { initialBackoffMs: 1, maxBackoffMs: overTimerCeiling }],
+  ] as const)(
+    "rejects an ingress %s above the host timer ceiling before ownership transfer",
+    async (name, reconnect) => {
+      const factory = vi.fn(async () => new FakeConnection("primary"));
+      const replayStore = new TrackingReplayStore();
+      const load = vi.spyOn(replayStore, "load");
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        await expect(
+          QwpIngressSession.connect(factory, { reconnect, replayStore }),
+        ).rejects.toThrow(
+          `reconnect ${name} must be no greater than ${timerCeiling}`,
+        );
+        expect(factory).not.toHaveBeenCalled();
+        expect(load).not.toHaveBeenCalled();
+        expect(replayStore.closeCount).toBe(0);
+        expect(setTimeoutSpy).not.toHaveBeenCalled();
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ["initialBackoffMs", { initialBackoffMs: overTimerCeiling }],
+    ["maxBackoffMs", { initialBackoffMs: 1, maxBackoffMs: overTimerCeiling }],
+  ] as const)(
+    "rejects an egress %s above the host timer ceiling before connecting",
+    async (name, reconnect) => {
+      const factory = vi.fn(async () => new FakeConnection("primary"));
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        await expect(
+          QwpEgressSession.connect(factory, { reconnect }),
+        ).rejects.toThrow(
+          `reconnect ${name} must be no greater than ${timerCeiling}`,
+        );
+        expect(factory).not.toHaveBeenCalled();
+        expect(setTimeoutSpy).not.toHaveBeenCalled();
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    },
+  );
+
+  it("accepts the timer ceiling and longer non-backoff windows for ingress", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: {
+        initialBackoffMs: timerCeiling,
+        maxBackoffMs: timerCeiling,
+        maxDurationMs: overTimerCeiling,
+        poisonMinEscalationWindowMs: overTimerCeiling,
+      },
+      catchUpCapGapMinEscalationWindowMs: overTimerCeiling,
+    });
+    await session.close();
+    await expect(connection.closed).resolves.toMatchObject({ wasClean: true });
+  });
+
+  it("accepts the timer ceiling and longer maxDuration for egress", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpEgressSession.connect(
+      async () => {
+        queueMicrotask(() => connection.receive(serverInfo("primary")));
+        return connection;
+      },
+      {
+        reconnect: {
+          initialBackoffMs: timerCeiling,
+          maxBackoffMs: timerCeiling,
+          maxDurationMs: overTimerCeiling,
+        },
+      },
+    );
+    await session.close();
+    await expect(connection.closed).resolves.toMatchObject({ wasClean: true });
   });
 });
 

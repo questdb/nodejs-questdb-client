@@ -22,7 +22,10 @@ import {
 } from "../transport";
 import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
-import { jitterReconnectDelayMs } from "./reconnect-backoff";
+import {
+  jitterReconnectDelayMs,
+  validateQwpReconnectBackoffs,
+} from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { monotonicNowMs } from "./monotonic-clock";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
@@ -898,11 +901,8 @@ function validateReconnectPolicy(
       "reconnect maxAttempts must be a non-negative safe integer",
     );
   }
-  for (const [name, value] of [
-    ["initialBackoffMs", initialBackoffMs],
-    ["maxBackoffMs", maxBackoffMs],
-    ["maxDurationMs", maxDurationMs],
-  ] as const) {
+  validateQwpReconnectBackoffs({ initialBackoffMs, maxBackoffMs });
+  for (const [name, value] of [["maxDurationMs", maxDurationMs]] as const) {
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError(
         `reconnect ${name} must be a non-negative finite number`,

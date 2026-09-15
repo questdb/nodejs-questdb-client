@@ -60,12 +60,6 @@ const MAX_QUARANTINE_SLOT_ATTEMPTS = 64;
 // Preserve two default-sized QWP batches, mirroring Java's active+spare
 // liveness floor when the current dictionary generation consumes the cap.
 const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
-// Ceiling on fixed-segment reservations under the transaction-close liveness
-// exception, as a multiple of the configured target. A retained deferred
-// prefix is itself bounded by the target and the batch that closes it is
-// rejected unless it fits the target on its own. The current persisted
-// dictionary is additive because it cannot be trimmed before the close.
-const LIVENESS_CEILING_TARGET_MULTIPLE = 2;
 const DEFAULT_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
 const DEFAULT_APPEND_DEADLINE_MS = 30_000;
@@ -137,8 +131,8 @@ interface ScannedRecord extends QwpIngressReplayReference {
  * transaction, admitted above {@link QwpNodeFileReplayStoreOptions.maxBytes}
  * because its retained deferred prefix cannot be acknowledged until it is sent.
  * Only a batch that fits the configured target on its own is admitted this
- * way, so the fixed-segment reservations for the prefix and batch together
- * stay within twice that target, excluding the retained dictionary.
+ * way. Its fixed-segment reservations are added to the maximum rounded prefix;
+ * the retained dictionary is excluded from that segment ceiling.
  */
 interface PreparedTransactionCloseBatch {
   readonly frames: readonly {
@@ -202,10 +196,12 @@ export interface QwpNodeFileReplayStoreOptions {
    *
    * A commit whose deferred prefix already fills the journal also overshoots
    * it, because QuestDB withholds that prefix's ACK until the commit arrives,
-   * so no amount of trimming could make room first. Fixed-segment reservations
-   * are cumulatively capped at twice this target, and the closing batch must
-   * fit the target on its own. The retained dictionary is additive to that
-   * ceiling; beyond it appends are backpressured as usual.
+   * so no amount of trimming could make room first. For fixed segment size S,
+   * reservations are capped at S * (floor(maxBytes / S) + max(floor(maxBytes / S),
+   * ceil(min(maxBytes, 32 MiB) / S))), saturated at Number.MAX_SAFE_INTEGER. The
+   * closing batch must fit the target on its own.
+   * The retained dictionary is additive; beyond the cap appends backpressure.
+   * When S divides maxBytes exactly, this segment cap is 2 * maxBytes.
    */
   maxBytes?: number;
   /**
@@ -454,12 +450,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
    * stops being granted and ordinary backpressure resumes.
    *
    * The exception skips the {@link maxBytes} gate so a commit whose deferred
-   * prefix already fills the journal can still be journalled. Granted without
-   * a cumulative bound it was not an exception but a ratchet: the gate is
-   * consulted once per segment rotation, so every transaction bought a fresh
-   * segment, filled it for free and repeated -- the journal grew by a segment
-   * per transaction with no append ever timing out, until the volume, not the
-   * configured target, stopped the producer.
+   * prefix already fills the journal can still be journalled. The cap adds the
+   * maximum segment-rounded prefix to the maximum standalone closing batch.
+   * Without that cumulative bound the gate is consulted once per rotation, so
+   * each transaction could ratchet the journal by another segment.
    */
   private readonly livenessSegmentCeilingBytes: number;
   private readonly maxSegmentBytes: number;
@@ -591,10 +585,6 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.directory = directory;
     this.maxBytes = maxBytes;
-    this.livenessSegmentCeilingBytes = Math.min(
-      maxBytes * LIVENESS_CEILING_TARGET_MULTIPLE,
-      Number.MAX_SAFE_INTEGER,
-    );
     this.maxSegmentBytes = validatePositiveSafeInteger(
       options.maxSegmentBytes ?? DEFAULT_MAX_SEGMENT_BYTES,
       "store-and-forward maxSegmentBytes",
@@ -612,6 +602,20 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       );
     }
     this.liveFrameBytes = Math.min(maxBytes, DEFAULT_LIVE_FRAME_BYTES);
+    const targetSegmentCount = Math.floor(maxBytes / this.segmentFileSize);
+    const retainedFloorSegmentCount = Math.ceil(
+      this.liveFrameBytes / this.segmentFileSize,
+    );
+    const preCloseSegmentCount = Math.max(
+      targetSegmentCount,
+      retainedFloorSegmentCount,
+    );
+    const livenessSegmentCount = preCloseSegmentCount + targetSegmentCount;
+    this.livenessSegmentCeilingBytes =
+      livenessSegmentCount >
+      Math.floor(Number.MAX_SAFE_INTEGER / this.segmentFileSize)
+        ? Number.MAX_SAFE_INTEGER
+        : livenessSegmentCount * this.segmentFileSize;
     this.durability = validateDurability(
       options.durability ?? QWP_SF_DURABILITY.APPEND,
     );

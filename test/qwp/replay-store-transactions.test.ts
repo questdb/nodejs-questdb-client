@@ -10,6 +10,7 @@ import {
   QwpReplayStoreFullError,
 } from "../../packages/nodejs-client/src";
 import {
+  decodeQwpFrame,
   QWP_COLUMN_TYPE,
   QWP_FLAG_DEFER_COMMIT,
   QWP_STATUS,
@@ -255,6 +256,115 @@ describe("QWP file replay store transaction liveness", () => {
     }
   });
 
+  it("closes a genuine retained-dictionary transaction at a non-divisible segment cap", async () => {
+    const measureConnection = new DeferredAckConnection();
+    const measureSession = await QwpIngressSession.connect(
+      async () => measureConnection,
+      {
+        ackTimeoutMs: 5_000,
+        reconnect: { maxAttempts: 1 },
+      },
+    );
+    const measureSender = transactionalSender(measureSession);
+    try {
+      await measureSender
+        .table("events")
+        .symbol("kind", "retained-symbol")
+        .atNow();
+      await measureSender.commit();
+      await measureSender
+        .table("events")
+        .stringColumn("payload", "x".repeat(256))
+        .atNow();
+      await measureSender
+        .table("events")
+        .stringColumn("payload", "x".repeat(256))
+        .atNow();
+      await measureSender.commit();
+    } finally {
+      await measureSender.close();
+    }
+
+    expect(
+      measureConnection.sent.map(
+        (frame) => decodeQwpFrame(frame).flags & QWP_FLAG_DEFER_COMMIT,
+      ),
+    ).toEqual([
+      QWP_FLAG_DEFER_COMMIT,
+      0,
+      QWP_FLAG_DEFER_COMMIT,
+      QWP_FLAG_DEFER_COMMIT,
+      0,
+    ]);
+    const maxSegmentBytes = Math.max(
+      ...measureConnection.sent.map((frame) => frame.byteLength),
+    );
+    const segmentFileSize =
+      SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
+    const maxBytes = Math.floor(segmentFileSize * 1.4);
+    // This is the proven encoder shape: two rounded prefix reservations plus
+    // one independently valid close do not fit the old raw 2 * maxBytes cap.
+    expect({ maxSegmentBytes, segmentFileSize, maxBytes }).toEqual({
+      maxSegmentBytes: 297,
+      segmentFileSize: 329,
+      maxBytes: 460,
+    });
+    expect(2 * maxBytes).toBeLessThan(3 * segmentFileSize);
+
+    const directory = await temporaryDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes,
+      maxBytes,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 200,
+    });
+    const connection = new DeferredAckConnection();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 5_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore: store,
+    });
+    const sender = transactionalSender(session);
+
+    try {
+      await sender.table("events").symbol("kind", "retained-symbol").atNow();
+      await sender.commit();
+      await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
+      await expect(store.loadSymbolDictionary()).resolves.toContain(
+        "retained-symbol",
+      );
+
+      await sender
+        .table("events")
+        .stringColumn("payload", "x".repeat(256))
+        .atNow();
+      await sender
+        .table("events")
+        .stringColumn("payload", "x".repeat(256))
+        .atNow();
+      await expect(sender.commit()).resolves.toBe(true);
+
+      expect(
+        connection.sent.map(
+          (frame) => decodeQwpFrame(frame).flags & QWP_FLAG_DEFER_COMMIT,
+        ),
+      ).toEqual([
+        QWP_FLAG_DEFER_COMMIT,
+        0,
+        QWP_FLAG_DEFER_COMMIT,
+        QWP_FLAG_DEFER_COMMIT,
+        0,
+      ]);
+      await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
+      expect(store.metrics.totalAppendTimeouts).toBe(0);
+    } finally {
+      await sender.close();
+      await session.close();
+    }
+  });
+
   it("keeps a retained dictionary additive to a single-frame close ceiling", async () => {
     const maxSegmentBytes = 64;
     const segmentFileSize =
@@ -311,6 +421,60 @@ describe("QWP file replay store transaction liveness", () => {
     await expect(recovered.load()).resolves.toEqual([]);
     await expect(recovered.loadSymbolDictionary()).resolves.toEqual([]);
     await recovered.close();
+  });
+
+  it("admits a split close at a non-divisible retained-dictionary cap", async () => {
+    const maxSegmentBytes = 297;
+    const segmentFileSize =
+      SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
+    const maxBytes = 460;
+    const directory = await temporaryDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes,
+      maxBytes,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 100,
+    });
+    await store.load();
+
+    try {
+      const segmentBytesBeforeDictionary = store.metrics.totalBytes;
+      await store.appendSymbolDictionary(0, ["retained-symbol"]);
+      const dictionaryBytes =
+        store.metrics.totalBytes - segmentBytesBeforeDictionary;
+      await store.append({
+        frameSequence: 0n,
+        payload: transactionFrame(maxSegmentBytes, true),
+      });
+      await store.append({
+        frameSequence: 1n,
+        payload: transactionFrame(maxSegmentBytes, true),
+      });
+      const closing = [
+        transactionFrame(100, true),
+        transactionFrame(100, false),
+      ];
+
+      await expect(store.prepareAppendBatch(closing)).resolves.toBeUndefined();
+      await store.append({ frameSequence: 2n, payload: closing[0] });
+      await store.append({ frameSequence: 3n, payload: closing[1] });
+
+      expect(store.metrics.totalBytes - dictionaryBytes).toBe(
+        3 * segmentFileSize,
+      );
+      expect(store.metrics).toMatchObject({
+        pendingRecords: 4,
+        pendingSegments: 3,
+        totalBackpressureStalls: 0,
+        totalAppendTimeouts: 0,
+      });
+      await store.acknowledgeThrough(3n);
+      await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
+    } finally {
+      await store.close();
+    }
   });
 
   it("keeps a retained dictionary additive to a split close ceiling", async () => {

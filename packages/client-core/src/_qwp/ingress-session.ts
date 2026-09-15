@@ -28,6 +28,7 @@ import {
   QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
   QwpReconnectingIngressConnection,
 } from "./_internal/reconnecting-ingress-connection";
+import { validateQwpReconnectBackoffs } from "./_internal/reconnect-backoff";
 import {
   priorQwpSenderErrorDeliveries,
   QwpNotificationDispatcher,
@@ -442,6 +443,7 @@ export class QwpBatchTooLargeError extends RangeError {
 function validateIngressSessionOptions(
   options: QwpIngressSessionOptions,
 ): void {
+  validateQwpReconnectBackoffs(options.reconnect);
   const timeout = options.ackTimeoutMs ?? 15_000;
   if (!Number.isFinite(timeout) || timeout <= 0) {
     throw new RangeError("ackTimeoutMs must be a positive finite number");

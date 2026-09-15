@@ -29,6 +29,7 @@ import {
 } from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
+import { validateQwpReconnectBackoffs } from "../../client-core/src/_qwp/_internal/reconnect-backoff";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
 import { withPriorQwpSenderErrorDeliveries } from "../../client-core/src/_qwp/_internal/notification-dispatcher";
 import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
@@ -1219,6 +1220,8 @@ function resolveNodeClientOptions(
 function normalizeQwpNodeClientOptions(
   options: QwpNodeClientOptions,
 ): QwpNodeClientOptions {
+  validateQwpReconnectBackoffs(options.ingressSession?.reconnect);
+  validateQwpReconnectBackoffs(options.egressSession?.reconnect);
   // Both sweeps carry one connection configuration across every endpoint, so a
   // mixed scheme sends this client's credentials and rows over whichever
   // socket a sweep reaches. Checked here as well as in the failover factory so

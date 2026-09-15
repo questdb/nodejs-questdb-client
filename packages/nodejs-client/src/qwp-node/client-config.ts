@@ -12,6 +12,7 @@ import type { QwpClientPoolOptions } from "../../../client-core/src/_qwp/client"
 import type { QwpEgressSessionOptions } from "../../../client-core/src/_qwp/egress-session";
 import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-egress-connection";
+import { QWP_MAX_RECONNECT_BACKOFF_MS } from "../../../client-core/src/_qwp/_internal/reconnect-backoff";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 import type {
@@ -774,6 +775,7 @@ function parseIngressReconnect(
       values.get("reconnect_max_duration_millis")?.[0],
       "reconnect_max_duration_millis",
       0,
+      Number.MAX_SAFE_INTEGER,
     ),
     maxFrameRejections: optionalInteger(
       values.get("max_frame_rejections")?.[0],
@@ -784,6 +786,7 @@ function parseIngressReconnect(
       values.get("poison_min_escalation_window_millis")?.[0],
       "poison_min_escalation_window_millis",
       0,
+      Number.MAX_SAFE_INTEGER,
     ),
   };
   return hasDefinedValue(reconnect) ? reconnect : undefined;
@@ -813,6 +816,7 @@ function parseEgressReconnect(
       values.get("failover_max_duration_ms")?.[0],
       "failover_max_duration_ms",
       0,
+      Number.MAX_SAFE_INTEGER,
     ),
   };
   validateReconnectBounds(
@@ -870,6 +874,7 @@ function parseStoreAndForward(
       values.get("catch_up_cap_gap_min_escalation_window_millis")?.[0],
       "catch_up_cap_gap_min_escalation_window_millis",
       0,
+      Number.MAX_SAFE_INTEGER,
     ),
     drainOrphans: optionalBoolean(
       values.get("drain_orphans")?.[0],
@@ -1098,7 +1103,7 @@ function optionalBoolean(
  * (`file-replay-store.ts`, `_internal/reconnect-deadline.ts`,
  * `ingress-session.ts`); the connect-string parser was the way in that did not.
  */
-const MAX_TIMER_DELAY_MS = 0x7fffffff;
+const MAX_TIMER_DELAY_MS = QWP_MAX_RECONNECT_BACKOFF_MS;
 
 /**
  * Millisecond keys whose names do not end in `_ms` or `_millis`. Listed rather
