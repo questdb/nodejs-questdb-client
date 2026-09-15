@@ -125,11 +125,11 @@ describe("QWP typed query binds", () => {
     const reader = new QwpByteReader(encoded.payload);
 
     expectNullHeader(reader, QWP_COLUMN_TYPE.BOOLEAN);
+    // A null VARCHAR is type + flag + bitmap and nothing else: the decoder's
+    // null arm binds the null without ever reading the offset word the
+    // non-null form carries. Only DECIMAL and GEOHASH add a prefix, because
+    // the decoder reads scale/precision before it branches on the null flag.
     expectNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
-    // VARCHAR is the only variable-width bind type, so it is the only null
-    // that still carries an offset table: one entry, value zero, exactly as
-    // the non-null form and the ingress column writer emit it.
-    expect(reader.readUint32()).toBe(0);
     expectNullHeader(reader, QWP_COLUMN_TYPE.UUID);
     expectNullHeader(reader, QWP_COLUMN_TYPE.DECIMAL64);
     expect(reader.readUint8()).toBe(4);
@@ -142,35 +142,52 @@ describe("QWP typed query binds", () => {
     reader.expectEnd();
   });
 
-  it("keeps a bind after a null VARCHAR readable at the right offset", () => {
-    // Binds carry no length prefix and no delimiter, so a reader walking the
-    // section relies entirely on each bind being self-describing. A null
-    // VARCHAR that skipped its offset table made the *next* bind's type byte
-    // and null flag look like the first four bytes of that table, so
-    // everything after it -- here the INT, and in a real QUERY_REQUEST the
-    // trailing queryFlags varint too -- was read against the wrong boundary.
+  it("ends a null VARCHAR bind after its three header bytes", () => {
+    // Binds carry no length prefix and no delimiter, so a padded null VARCHAR
+    // shifts everything that follows. Padding it with the non-null offset word
+    // made the server read that word's first zero byte as the next bind's type
+    // code and reject the request with "bind 1: unsupported wire type 0x0";
+    // when the null was the last bind, the same byte was read as the trailing
+    // queryFlags varint and silently dropped a requested dictionary reset.
+    // Pin the exact bytes so no padding can come back unnoticed.
     const encoded = encodeQwpBinds((binds) =>
       binds.setVarchar(0, null).setInt(1, 0x01020304),
     );
     expect(encoded.count).toBe(2);
+    expect(Array.from(encoded.payload)).toEqual([
+      QWP_COLUMN_TYPE.VARCHAR,
+      0x01,
+      0x01,
+      QWP_COLUMN_TYPE.INT,
+      0x00,
+      0x04,
+      0x03,
+      0x02,
+      0x01,
+    ]);
 
     const reader = new QwpByteReader(encoded.payload);
     expectNullHeader(reader, QWP_COLUMN_TYPE.VARCHAR);
-    expect(reader.readUint32()).toBe(0);
     expect(reader.readUint8()).toBe(QWP_COLUMN_TYPE.INT);
     expect(reader.readUint8()).toBe(0);
     expect(reader.readInt32()).toBe(0x01020304);
     reader.expectEnd();
 
-    // An empty VARCHAR and a null VARCHAR differ only in the null flag and the
-    // absent value bytes; both carry the leading offset.
+    // An empty VARCHAR is not a null VARCHAR: it stays on the non-null arm and
+    // so keeps both offset words, which is where the padding byte came from.
     const empty = encodeQwpBinds((binds) => binds.setVarchar(0, ""));
-    const emptyReader = new QwpByteReader(empty.payload);
-    expect(emptyReader.readUint8()).toBe(QWP_COLUMN_TYPE.VARCHAR);
-    expect(emptyReader.readUint8()).toBe(0);
-    expect(emptyReader.readUint32()).toBe(0);
-    expect(emptyReader.readUint32()).toBe(0);
-    emptyReader.expectEnd();
+    expect(Array.from(empty.payload)).toEqual([
+      QWP_COLUMN_TYPE.VARCHAR,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+    ]);
   });
 
   it("places typed binds into QUERY_REQUEST without exposing raw bytes", () => {
