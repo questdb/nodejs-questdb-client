@@ -2160,6 +2160,14 @@ describe("QWP high-level sender", () => {
       "NaN",
       "Infinity",
       "-Infinity",
+      // A point on its own, with or without a sign or an exponent, carries no
+      // digit -- unlike ".5" and "5.", which do and are accepted.
+      ".",
+      "+",
+      "-",
+      "+.",
+      ".e1",
+      ".5.",
     ]) {
       sender.table("fluent_decimals");
       expect(() => sender.decimalColumnText("whole", text)).toThrow(
@@ -2188,6 +2196,118 @@ describe("QWP high-level sender", () => {
     expect(() => sender.decimalColumnText("whole", Number.MAX_VALUE)).toThrow(
       /decimal value or scale exceeds DECIMAL256 capacity/,
     );
+    await sender.close();
+  });
+
+  it("accepts decimal text with no integer part or no fraction part", async () => {
+    // ".5" and "5." are what this client's own ILP validator
+    // (validateDecimalText) accepts, what a QuestDB server ingests over ILP,
+    // and what the Java client's DecimalParser reads. The QWP grammar required
+    // digits on both sides of the point, so a workload moved from an ILP
+    // connect string to a ws:// one had those rows rejected locally.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const typed = sender.writer("typed_decimals", {
+      half: decimal64(2),
+      signed_half: decimal64(2),
+      negative_half: decimal64(2),
+      five: decimal64(2),
+      half_e1: decimal64(2),
+      five_e1: decimal64(2),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    await typed.row({
+      half: ".5",
+      signed_half: "+.5",
+      negative_half: "-.5",
+      five: "5.",
+      half_e1: ".5e1",
+      five_e1: "5.e1",
+      timestamp: 1n,
+    });
+    await sender
+      .table("fluent_decimals")
+      .decimalColumnText("half", ".5")
+      .decimalColumnText("signed_half", "+.5")
+      .decimalColumnText("negative_half", "-.5")
+      .decimalColumnText("five", "5.")
+      .decimalColumnText("half_e1", ".5e1")
+      .decimalColumnText("five_e1", "5.e1")
+      .atNow();
+    await sender.flush();
+
+    const typedTable = session.sends[0].tables.find(
+      (table) => table.name === "typed_decimals",
+    )!;
+    // Every column is scale 2, so each parsed value is rescaled onto it.
+    for (const [name, unscaled] of [
+      ["half", 50n],
+      ["signed_half", 50n],
+      ["negative_half", -50n],
+      ["five", 500n],
+      ["half_e1", 500n],
+      ["five_e1", 5_000n],
+    ] as const) {
+      expect(column(typedTable, name)).toMatchObject({
+        type: QWP_COLUMN_TYPE.DECIMAL64,
+        decimalScale: 2,
+        values: [unscaled],
+      });
+    }
+
+    // The fluent setter stages the parsed scale itself: ".5" is 5 at scale 1,
+    // "5." is 5 at scale 0, and the exponent forms compose with both.
+    const fluentTable = session.sends[0].tables.find(
+      (table) => table.name === "fluent_decimals",
+    )!;
+    for (const [name, unscaled, scale] of [
+      ["half", 5n, 1],
+      ["signed_half", 5n, 1],
+      ["negative_half", -5n, 1],
+      ["five", 5n, 0],
+      ["half_e1", 5n, 0],
+      ["five_e1", 50n, 0],
+    ] as const) {
+      expect(column(fluentTable, name)).toMatchObject({
+        type: QWP_COLUMN_TYPE.DECIMAL256,
+        decimalScale: scale,
+        values: [unscaled],
+      });
+    }
+    await sender.close();
+  });
+
+  it("rejects an out-of-range {unscaled, scale} decimal without stalling", async () => {
+    // The scale was only checked for being a non-negative safe integer, so one
+    // row could hand 10n ** 1e8 to the rescale and block the event loop for
+    // seconds -- freezing every timer, ACK deadline and sibling sender on it --
+    // before rejecting the row anyway.
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    const typed = sender.writer("typed_decimals", { price: decimal64(2) });
+
+    const started = performance.now();
+    await expect(
+      typed.row({ price: { unscaled: 1n, scale: 100_000_000 } }),
+    ).rejects.toThrow(/decimal scale 100000000 must be between 0 and 76/);
+    // 10n ** 100000000n measured 4.2 seconds; the bounded path is immediate.
+    expect(performance.now() - started).toBeLessThan(1_000);
+
+    await expect(
+      typed.row({ price: { unscaled: 1n, scale: 77 } }),
+    ).rejects.toThrow(/decimal scale 77 must be between 0 and 76/);
+    await expect(
+      typed.row({ price: { unscaled: 1n, scale: -1 } }),
+    ).rejects.toThrow(/decimal scale -1 must be between 0 and 76/);
+    await expect(
+      typed.row({ price: { unscaled: 1n, scale: 1.5 } }),
+    ).rejects.toThrow(/decimal scale 1.5 must be between 0 and 76/);
+
+    // A scale QWP can carry still stages, rescaled onto the column's own.
+    await typed.row({ price: { unscaled: 10n ** 20n, scale: 20 } });
+    await sender.flush();
     await sender.close();
   });
 
