@@ -255,16 +255,8 @@ describe("QWP file replay store transaction liveness", () => {
     }
   });
 
-  it("stops admitting transaction commits at the liveness ceiling", async () => {
-    // Two records per segment, one segment of target. A transaction whose
-    // deferred prefix fills the journal then needs exactly one more segment
-    // for its commit, and the segment it lands in has a free slot the next
-    // transaction's deferred frame fits into -- so every later commit rotates
-    // again. Granting each of them the liveness exception grew the journal by
-    // a segment per transaction, forever, with no append ever timing out.
-    const payloadLength = 32;
-    const recordSize = FRAME_HEADER_SIZE + payloadLength;
-    const maxSegmentBytes = 2 * recordSize - FRAME_HEADER_SIZE;
+  it("keeps a retained dictionary additive to a single-frame close ceiling", async () => {
+    const maxSegmentBytes = 64;
     const segmentFileSize =
       SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
     const directory = await temporaryDirectory();
@@ -274,50 +266,192 @@ describe("QWP file replay store transaction liveness", () => {
       maxBytes: segmentFileSize,
       durability: QWP_SF_DURABILITY.MEMORY,
       backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
-      appendDeadlineMs: 50,
+      appendDeadlineMs: 100,
     });
     await store.load();
-    let sequence = 0n;
-    const append = (deferCommit: boolean) =>
-      store.append({
-        frameSequence: sequence++,
-        payload: transactionFrame(payloadLength, deferCommit),
-      });
 
     try {
-      // Fill the journal with a deferred prefix, then close it.
-      await append(true);
-      await append(true);
-      await append(false);
+      const segmentBytesBeforeDictionary = store.metrics.totalBytes;
+      await store.appendSymbolDictionary(0, ["retained-symbol"]);
+      const dictionaryBytes =
+        store.metrics.totalBytes - segmentBytesBeforeDictionary;
+      expect(dictionaryBytes).toBeGreaterThan(0);
+      await store.append({
+        frameSequence: 0n,
+        payload: transactionFrame(maxSegmentBytes, true),
+      });
+      await expect(
+        store.append({
+          frameSequence: 1n,
+          payload: transactionFrame(maxSegmentBytes, false),
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(store.metrics.totalBytes - dictionaryBytes).toBe(
+        2 * segmentFileSize,
+      );
+      expect(store.metrics.totalBytes).toBeGreaterThan(2 * segmentFileSize);
       expect(store.metrics).toMatchObject({
-        pendingSegments: 2,
-        totalBytes: 2 * segmentFileSize,
+        totalBackpressureStalls: 0,
+        totalAppendTimeouts: 0,
       });
 
-      // The commit landed in a segment with a free slot, so the next
-      // transaction opens without needing one of its own.
-      await append(true);
-      expect(store.metrics.totalBytes).toBe(2 * segmentFileSize);
-
-      // Nothing acknowledges, so that transaction -- and every attempt after
-      // it -- is backpressured instead of buying another segment.
-      for (let attempt = 0; attempt < 4; attempt++) {
-        await expect(append(false)).rejects.toBeInstanceOf(
-          QwpReplayStoreAppendTimeoutError,
-        );
-        // A refused frame never entered the journal, so the next attempt must
-        // reuse its sequence to stay contiguous.
-        sequence--;
-        expect(store.metrics.totalBytes).toBe(2 * segmentFileSize);
-      }
-      expect(store.metrics).toMatchObject({
-        pendingSegments: 2,
-        totalAppendTimeouts: 4,
-      });
+      await store.acknowledgeThrough(1n);
+      await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
     } finally {
       await store.close();
     }
+
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes,
+      maxBytes: segmentFileSize,
+      durability: QWP_SF_DURABILITY.MEMORY,
+    });
+    await expect(recovered.load()).resolves.toEqual([]);
+    await expect(recovered.loadSymbolDictionary()).resolves.toEqual([]);
+    await recovered.close();
   });
+
+  it("keeps a retained dictionary additive to a split close ceiling", async () => {
+    const maxSegmentBytes = 64;
+    const segmentFileSize =
+      SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
+    const maxBytes = 2 * segmentFileSize;
+    const directory = await temporaryDirectory();
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes,
+      maxBytes,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 100,
+    });
+    await store.load();
+
+    try {
+      const segmentBytesBeforeDictionary = store.metrics.totalBytes;
+      await store.appendSymbolDictionary(0, ["retained-symbol"]);
+      const dictionaryBytes =
+        store.metrics.totalBytes - segmentBytesBeforeDictionary;
+      await store.append({
+        frameSequence: 0n,
+        payload: transactionFrame(maxSegmentBytes, true),
+      });
+      await store.append({
+        frameSequence: 1n,
+        payload: transactionFrame(maxSegmentBytes, true),
+      });
+      const closing = [
+        transactionFrame(maxSegmentBytes, true),
+        transactionFrame(maxSegmentBytes, false),
+      ];
+      await expect(store.prepareAppendBatch(closing)).resolves.toBeUndefined();
+      await store.append({ frameSequence: 2n, payload: closing[0] });
+      await store.append({ frameSequence: 3n, payload: closing[1] });
+
+      expect(store.metrics).toMatchObject({
+        pendingRecords: 4,
+        pendingSegments: 4,
+        totalBackpressureStalls: 0,
+        totalAppendTimeouts: 0,
+      });
+      expect(store.metrics.totalBytes - dictionaryBytes).toBe(2 * maxBytes);
+      expect(store.metrics.totalBytes).toBeGreaterThan(2 * maxBytes);
+
+      await store.acknowledgeThrough(3n);
+      await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
+    } finally {
+      await store.close();
+    }
+
+    const recovered = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes,
+      maxBytes,
+      durability: QWP_SF_DURABILITY.MEMORY,
+    });
+    await expect(recovered.load()).resolves.toEqual([]);
+    await expect(recovered.loadSymbolDictionary()).resolves.toEqual([]);
+    await recovered.close();
+  });
+
+  it.each([false, true])(
+    "stops admitting transaction commits at the liveness ceiling (dictionary=%s)",
+    async (withDictionary) => {
+      // Two records per segment, one segment of target. A transaction whose
+      // deferred prefix fills the journal then needs exactly one more segment
+      // for its commit, and the segment it lands in has a free slot the next
+      // transaction's deferred frame fits into -- so every later commit rotates
+      // again. Granting each of them the liveness exception grew the journal by
+      // a segment per transaction, forever, with no append ever timing out.
+      const payloadLength = 32;
+      const recordSize = FRAME_HEADER_SIZE + payloadLength;
+      const maxSegmentBytes = 2 * recordSize - FRAME_HEADER_SIZE;
+      const segmentFileSize =
+        SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
+      const directory = await temporaryDirectory();
+      const store = new QwpNodeFileReplayStore({
+        directory,
+        maxSegmentBytes,
+        maxBytes: segmentFileSize,
+        durability: QWP_SF_DURABILITY.MEMORY,
+        backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+        appendDeadlineMs: 50,
+      });
+      await store.load();
+      const segmentBytesBeforeDictionary = store.metrics.totalBytes;
+      if (withDictionary) {
+        await store.appendSymbolDictionary(0, ["retained-symbol"]);
+      }
+      const dictionaryBytes =
+        store.metrics.totalBytes - segmentBytesBeforeDictionary;
+      let sequence = 0n;
+      const append = (deferCommit: boolean) =>
+        store.append({
+          frameSequence: sequence++,
+          payload: transactionFrame(payloadLength, deferCommit),
+        });
+
+      try {
+        // Fill the journal with a deferred prefix, then close it.
+        await append(true);
+        await append(true);
+        await append(false);
+        expect(store.metrics.pendingSegments).toBe(2);
+        expect(store.metrics.totalBytes - dictionaryBytes).toBe(
+          2 * segmentFileSize,
+        );
+
+        // The commit landed in a segment with a free slot, so the next
+        // transaction opens without needing one of its own.
+        await append(true);
+        expect(store.metrics.totalBytes - dictionaryBytes).toBe(
+          2 * segmentFileSize,
+        );
+
+        // Nothing acknowledges, so that transaction -- and every attempt after
+        // it -- is backpressured instead of buying another segment.
+        for (let attempt = 0; attempt < 4; attempt++) {
+          await expect(append(false)).rejects.toBeInstanceOf(
+            QwpReplayStoreAppendTimeoutError,
+          );
+          // A refused frame never entered the journal, so the next attempt must
+          // reuse its sequence to stay contiguous.
+          sequence--;
+          expect(store.metrics.totalBytes - dictionaryBytes).toBe(
+            2 * segmentFileSize,
+          );
+        }
+        expect(store.metrics).toMatchObject({
+          pendingSegments: 2,
+          totalAppendTimeouts: 4,
+        });
+      } finally {
+        await store.close();
+      }
+    },
+  );
 
   it("does not admit a commit over target once the journal is record-free", async () => {
     // A journal holding no record has no deferred prefix to release, so a

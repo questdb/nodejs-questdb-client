@@ -27,6 +27,7 @@ import {
   QwpSymbolValue,
   QwpTableBuffer,
 } from "./table";
+import { isUint8Array } from "./typed-array-brand";
 import { qwpVarintSize, readQwpVarintNumber, writeQwpVarint } from "./varint";
 
 export interface QwpIngressEncodeOptions {
@@ -287,8 +288,8 @@ function writeQwpString(writer: QwpByteWriter, value: string): void {
 }
 
 function binaryValue(value: unknown, width?: number): Uint8Array {
-  if (!(value instanceof Uint8Array)) {
-    throw new Error("QWP binary values must be Uint8Array instances");
+  if (!isUint8Array(value)) {
+    throw new Error("QWP binary values must be Uint8Array values");
   }
   if (width !== undefined && value.length !== width) {
     throw new Error(

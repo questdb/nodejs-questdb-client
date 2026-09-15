@@ -397,10 +397,12 @@ if dictionary growth uses all remaining headroom. Dictionary persistence itself 
 never rejected by the target, so actual disk usage can exceed it by the current
 dictionary overshoot, and by the frames that close an open transaction: QuestDB
 withholds a deferred frame's ACK until its commit arrives, so the commit is
-journalled even when the deferred prefix already fills the journal. That liveness
-overshoot is capped at twice the target -- a batch that does not fit the target on
-its own is rejected rather than admitted -- and beyond the cap frame growth remains
-backpressured until background ACK trimming frees complete segments.
+journalled even when the deferred prefix already fills the journal. Under that
+liveness exception, fixed-segment reservations are cumulatively capped at twice the
+target, and a closing batch that does not fit the target on its own is rejected.
+The retained dictionary is additive to the segment ceiling, so accounted physical
+use may reach `dictionaryFileSize + 2 * maxBytes`. Beyond the segment cap, frame
+growth remains backpressured until background ACK trimming frees complete segments.
 A partly acknowledged segment remains charged to the disk budget until its last live
 record is acknowledged.
 Once every frame is acknowledged,

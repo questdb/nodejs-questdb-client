@@ -18,6 +18,7 @@ import {
   type QwpIngressMetrics,
 } from "./ingress-session";
 import { qwpColumnNameKey, validateQwpColumnName } from "./_core/identifiers";
+import { isInt8Array, isUint8Array } from "./_core/typed-array-brand";
 import { log as defaultLog } from "../logging";
 import {
   isQwpWriterColumn,
@@ -249,24 +250,6 @@ const DEFAULT_AUTO_FLUSH_INTERVAL_MS = 100;
 // same everywhere.
 const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_NAME_LENGTH = 127;
-const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(Uint8Array.prototype),
-  Symbol.toStringTag,
-)?.get;
-
-function isUint8Array(value: unknown): value is Uint8Array {
-  return (
-    ArrayBuffer.isView(value) &&
-    TYPED_ARRAY_TAG_GETTER?.call(value) === "Uint8Array"
-  );
-}
-
-function isInt8Array(value: unknown): value is Int8Array {
-  return (
-    ArrayBuffer.isView(value) &&
-    TYPED_ARRAY_TAG_GETTER?.call(value) === "Int8Array"
-  );
-}
 
 /**
  * Wraps the caller's logger so a throwing sink cannot decide whether the
@@ -291,7 +274,12 @@ function isInt8Array(value: unknown): value is Int8Array {
  * Failures are swallowed rather than reported: the sink is the thing that
  * failed, so there is nowhere left to report them to.
  */
-function containedLogger(log: QwpSenderLogger | undefined): QwpSenderLogger {
+function containedLogger(
+  log: QwpSenderLogger | null | undefined,
+): QwpSenderLogger {
+  if (log !== null && log !== undefined && typeof log !== "function") {
+    throw new Error("Invalid logging function");
+  }
   return (level, message) => {
     try {
       (log ?? defaultLog)(level, message);
@@ -505,7 +493,10 @@ function rescaleToColumnScale(
  */
 const MAX_DECIMAL_EXPONENT = 1024;
 
-function parseDecimal(value: string | number): {
+function parseDecimal(
+  value: string | number,
+  exactScale?: number,
+): {
   unscaled: bigint;
   scale: number;
 } {
@@ -535,6 +526,30 @@ function parseDecimal(value: string | number): {
   if (scale < 0) {
     digits += "0".repeat(-scale);
     scale = 0;
+  }
+  if (exactScale !== undefined && scale > exactScale) {
+    // Compiled writers know their target scale before parsing. Strip only the
+    // fractional zeroes that exact rescaling would remove, so arbitrarily long
+    // caller-supplied text never becomes an equally large power of ten. The
+    // fluent path omits exactScale and therefore preserves authored scales.
+    let lastNonZero = digits.length - 1;
+    while (lastNonZero >= 0 && digits.charCodeAt(lastNonZero) === 48) {
+      lastNonZero--;
+    }
+    if (lastNonZero < 0) {
+      digits = "0";
+      scale = exactScale;
+    } else {
+      const removable = scale - exactScale;
+      const trailingZeroes = digits.length - lastNonZero - 1;
+      if (trailingZeroes < removable) {
+        throw new RangeError(
+          `decimal value is not exactly representable at scale ${exactScale}`,
+        );
+      }
+      digits = digits.slice(0, -removable);
+      scale = exactScale;
+    }
   }
   const magnitude = BigInt(digits);
   return {
@@ -751,13 +766,10 @@ function writerGeohashBits(value: unknown, precisionBits: number): bigint {
 /**
  * Moves an unscaled value from one scale to another, exactly or not at all.
  *
- * The span is bounded because each step is a factor of ten of a BigInt: a span
- * of a million takes 22 ms of blocked event loop, one of 1e8 takes 4.2 s, and
- * every caller-facing scale is already capped far below MAX_DECIMAL_EXPONENT.
- * Nothing this guard turns away could have been staged anyway -- an exact
- * rescale over that many steps needs an unscaled value of more than 1024
- * digits, which no QWP column carries -- except an exact zero written with
- * more fractional digits than that, and rejecting it beats the stall.
+ * Exponent syntax is bounded before parsing expands it, record-form scales are
+ * restricted to 0..76, and compiled decimal text is lexically reduced to its
+ * target scale before it gets here. Keep the defensive span bound at the
+ * widest scale QWP can carry so every BigInt exponentiation remains bounded.
  */
 function rescaleDecimal(
   unscaled: bigint,
@@ -765,7 +777,7 @@ function rescaleDecimal(
   toScale: number,
 ): bigint {
   if (fromScale === toScale) return unscaled;
-  if (Math.abs(fromScale - toScale) > MAX_DECIMAL_EXPONENT) {
+  if (Math.abs(fromScale - toScale) > QWP_DECIMAL_MAX_SCALE.decimal256) {
     throw new RangeError(
       `decimal cannot be rescaled from scale ${fromScale} to scale ${toScale}`,
     );
@@ -791,7 +803,7 @@ function writerDecimalUnscaled(
   if (typeof value === "bigint") {
     unscaled = value;
   } else if (typeof value === "string" || typeof value === "number") {
-    const parsed = parseDecimal(value);
+    const parsed = parseDecimal(value, scale);
     unscaled = rescaleDecimal(parsed.unscaled, parsed.scale, scale);
   } else if (isRecord(value) && "unscaled" in value) {
     if (typeof value.unscaled !== "bigint") {

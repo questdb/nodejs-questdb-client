@@ -401,7 +401,9 @@ function scalarResultBatch(): Uint8Array {
     .writeBigInt64(4n);
   payload.writeUint8(0);
   writeQwpVarint(payload, 5);
-  payload.writeUint8(0b10101);
+  // Supported server casts may leave storage padding set; only five bits are
+  // semantic and every decoded GEOHASH path must return the canonical value.
+  payload.writeUint8(0b11110101);
   payload.writeUint8(0).writeUint8(0).writeBigInt64(456n); // NANOS raw
   payload
     .writeUint8(0)
@@ -700,6 +702,7 @@ describe("QWP result batch decoder", () => {
     expect(rowView.getUuidLow(8)).toBe(1n);
     expect(rowView.getUuidHigh(8)).toBe(2n);
     expect(rowView.getLong256Word(9, 3)).toBe(4n);
+    expect(rowView.get(10)).toEqual({ bits: 21n, precisionBits: 5 });
     expect(rowView.getGeohashBits(10)).toBe(21n);
     expect(rowView.getArrayDimensionCount(12)).toBe(2);
     expect(rowView.getArrayView(12)).toBeInstanceOf(Uint8Array);

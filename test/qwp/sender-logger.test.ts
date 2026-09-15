@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { QwpSender } from "../../packages/client-core/src/qwp";
+import { createQwpBrowserSender } from "../../packages/browser-client/src";
 import {
   Sender,
+  createQwpNodeSender,
+  createQwpNodeUdpSender,
   type QwpNodeUdpSocketLike,
 } from "../../packages/nodejs-client/src";
 
@@ -50,6 +54,36 @@ describe("programmatic QWP sender logging", () => {
       .filter(([level]) => level === "warn")
       .map(([, message]) => String(message))
       .filter((message) => message.includes("unfinished column"));
+
+  it("validates log centrally across direct and factory construction", () => {
+    const builders = [
+      (log: unknown) =>
+        new QwpSender(
+          async () => {
+            throw new Error("session factory must stay lazy");
+          },
+          { log } as never,
+        ),
+      (log: unknown) =>
+        createQwpNodeSender({ url: "ws://localhost:9000/write/v4" }, {
+          log,
+        } as never),
+      (log: unknown) =>
+        createQwpNodeUdpSender({ host: "localhost" }, { log } as never),
+      (log: unknown) =>
+        createQwpBrowserSender({ url: "ws://localhost:9000/write/v4" }, {
+          log,
+        } as never),
+    ];
+
+    for (const build of builders) {
+      for (const log of [false, 0, "", NaN, {}]) {
+        expect(() => build(log)).toThrow("Invalid logging function");
+      }
+      expect(() => build(null)).not.toThrow();
+      expect(() => build(undefined)).not.toThrow();
+    }
+  });
 
   it("keeps qwp.sender.log on a programmatic ws sender", async () => {
     const records: Array<[string, string | Error]> = [];

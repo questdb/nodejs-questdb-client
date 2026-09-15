@@ -598,7 +598,11 @@ export function validateQwpExtraOptions(
   // non-function here is not merely ignored: it throws on every call and is
   // swallowed, so the sender falls silent instead of falling back. The row-loss
   // and open-transaction warnings at close() are exactly what goes missing.
-  if (options.sender?.log && typeof options.sender.log !== "function") {
+  if (
+    options.sender?.log !== null &&
+    options.sender?.log !== undefined &&
+    typeof options.sender.log !== "function"
+  ) {
     throw new Error("Invalid logging function");
   }
 }

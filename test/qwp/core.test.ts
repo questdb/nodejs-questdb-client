@@ -1,3 +1,4 @@
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   decodeQwpEgressMessage,
@@ -590,6 +591,40 @@ describe("QWP ingress codec", () => {
     expect(cell(QWP_COLUMN_TYPE.LONG, 2n ** 63n - 1n)).not.toThrow();
     expect(cell(QWP_COLUMN_TYPE.FLOAT, 1.25)).not.toThrow();
     expect(cell(QWP_COLUMN_TYPE.DOUBLE, 12.5)).not.toThrow();
+  });
+
+  it("encodes genuine cross-realm binary and fixed-width values", () => {
+    const encode = (values: readonly unknown[]) => {
+      const table = new QwpTableBuffer("events");
+      for (const [name, type, value] of [
+        ["payload", QWP_COLUMN_TYPE.BINARY, values[0]],
+        ["id", QWP_COLUMN_TYPE.UUID, values[1]],
+        ["hash", QWP_COLUMN_TYPE.LONG256, values[2]],
+      ] as const) {
+        table.getOrCreateColumn(name, type)!.values.push(value);
+      }
+      table.nextRow();
+      return encodeQwpIngressFrame([table]);
+    };
+
+    const local = [
+      Uint8Array.of(1, 2, 3),
+      Uint8Array.from({ length: 16 }, (_, index) => index),
+      Uint8Array.from({ length: 32 }, (_, index) => index + 16),
+    ];
+    const foreign = runInNewContext(
+      "[Uint8Array.of(1, 2, 3), Uint8Array.from({length: 16}, (_, i) => i), Uint8Array.from({length: 32}, (_, i) => i + 16)]",
+    ) as Uint8Array[];
+    for (const value of foreign) {
+      expect(value).not.toBeInstanceOf(Uint8Array);
+    }
+    expect(encode(foreign)).toEqual(encode(local));
+
+    const spoofed = new Uint8ClampedArray([1, 2, 3]);
+    Object.defineProperty(spoofed, Symbol.toStringTag, { value: "Uint8Array" });
+    expect(() => encode([spoofed, local[1], local[2]])).toThrow(
+      /must be Uint8Array values/,
+    );
   });
 
   it("slices compacted table rows without losing null positions", () => {

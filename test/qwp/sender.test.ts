@@ -283,7 +283,11 @@ function column(table: QwpTableBuffer, name: string) {
   return result;
 }
 
-function ipv4ResultBatch(value: number): Uint8Array {
+function scalarResultBatch(
+  name: string,
+  type: number,
+  writeValue: (payload: QwpByteWriter) => void,
+): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
   writeQwpVarint(payload, 0); // batch sequence
@@ -292,14 +296,27 @@ function ipv4ResultBatch(value: number): Uint8Array {
   writeQwpVarint(payload, 0); // table name
   writeQwpVarint(payload, 1); // rows
   writeQwpVarint(payload, 1); // columns
-  writeQwpVarint(payload, 2);
-  payload.writeUtf8("ip").writeUint8(QWP_COLUMN_TYPE.IPV4);
-  payload.writeUint8(0).writeInt32(value);
+  writeQwpVarint(payload, name.length);
+  payload.writeUtf8(name).writeUint8(type);
+  writeValue(payload.writeUint8(0));
   return encodeQwpFrame(
     payload.toUint8Array(),
     QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
     1,
   );
+}
+
+function ipv4ResultBatch(value: number): Uint8Array {
+  return scalarResultBatch("ip", QWP_COLUMN_TYPE.IPV4, (payload) =>
+    payload.writeInt32(value),
+  );
+}
+
+function geohashResultBatch(value: number): Uint8Array {
+  return scalarResultBatch("location", QWP_COLUMN_TYPE.GEOHASH, (payload) => {
+    writeQwpVarint(payload, 5);
+    payload.writeUint8(value);
+  });
 }
 
 describe("QWP high-level sender", () => {
@@ -772,6 +789,20 @@ describe("QWP high-level sender", () => {
       await silent.close();
       expect(warn.mock.calls.map(([message]) => message)).toEqual([unfinished]);
 
+      const nullLogger = new FreshQwpSender(
+        async () => new RecordingSession(),
+        {
+          autoFlush: false,
+          log: null as never,
+        },
+      );
+      nullLogger.table("events").longColumn("value", 1n);
+      await nullLogger.close();
+      expect(warn.mock.calls.map(([message]) => message)).toEqual([
+        unfinished,
+        unfinished,
+      ]);
+
       // An explicitly supplied logger still wins outright.
       const supplied: [string, string | Error][] = [];
       const explicit = new FreshQwpSender(async () => new RecordingSession(), {
@@ -781,7 +812,7 @@ describe("QWP high-level sender", () => {
       explicit.table("events").longColumn("value", 1n);
       await explicit.close();
       expect(supplied).toEqual([["warn", unfinished]]);
-      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledTimes(2);
 
       // Staging logs one debug message per row. The shared logger drops debug
       // below the info criticality, so the new default cannot spam a console.
@@ -793,7 +824,7 @@ describe("QWP high-level sender", () => {
       }
       await busy.close();
       expect(debug).not.toHaveBeenCalled();
-      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledTimes(2);
     } finally {
       warn.mockRestore();
       debug.mockRestore();
@@ -1028,6 +1059,43 @@ describe("QWP high-level sender", () => {
     if (!compiled || !fluent) throw new Error("missing round-trip table");
     expect(column(compiled, "ip").values).toEqual([0xc0a80001]);
     expect(column(fluent, "ip").values).toEqual([0xc0a80001]);
+    viewBatch.release();
+  });
+
+  it("round-trips canonical GEOHASH values from padded egress storage", async () => {
+    const message = decodeQwpEgressMessage(geohashResultBatch(0b11110101));
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const materialized = new QwpResultBatchDecoder().decode(message).get(0, 0);
+    const viewBatch = new QwpResultBatchDecoder().decodeView(message);
+    const viewed = viewBatch.column(0).get(0);
+    expect(materialized).toEqual({ bits: 21n, precisionBits: 5 });
+    expect(viewed).toEqual({ bits: 21n, precisionBits: 5 });
+    const decodedGeohash = (
+      value: unknown,
+    ): { bits: bigint; precisionBits: number } => {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        !("bits" in value) ||
+        !("precisionBits" in value) ||
+        typeof value.bits !== "bigint" ||
+        typeof value.precisionBits !== "number"
+      ) {
+        throw new Error("expected decoded GEOHASH value");
+      }
+      return value as { bits: bigint; precisionBits: number };
+    };
+
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const writer = sender.writer("locations", { location: geohash(5) });
+    await writer.row({ location: decodedGeohash(materialized) });
+    await writer.row({ location: decodedGeohash(viewed) });
+    await sender.flush();
+
+    const location = column(session.sends[0].tables[0], "location");
+    expect(location.values).toEqual([21n, 21n]);
+    expect(() => encodeQwpIngressFrame(session.sends[0].tables)).not.toThrow();
     viewBatch.release();
   });
 
@@ -2196,6 +2264,39 @@ describe("QWP high-level sender", () => {
     expect(() => sender.decimalColumnText("whole", Number.MAX_VALUE)).toThrow(
       /decimal value or scale exceeds DECIMAL256 capacity/,
     );
+    await sender.close();
+  });
+
+  it("accepts exact decimal text with more than 1024 removable zeros", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const typed = sender.writer("typed_decimals", {
+      whole: decimal64(0),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    const longFractionDigits = 100_000;
+    await typed.row({ whole: `1.${"0".repeat(1024)}`, timestamp: 1n });
+    await typed.row({
+      whole: `1.${"0".repeat(longFractionDigits)}`,
+      timestamp: 2n,
+    });
+    await typed.row({
+      whole: `0.${"0".repeat(longFractionDigits)}`,
+      timestamp: 3n,
+    });
+    await expect(
+      typed.row({
+        whole: `1.${"0".repeat(longFractionDigits)}1`,
+        timestamp: 4n,
+      }),
+    ).rejects.toThrow(/not exactly representable|without precision loss/);
+    await sender.flush();
+
+    expect(column(session.sends[0].tables[0], "whole")).toMatchObject({
+      decimalScale: 0,
+      values: [1n, 1n, 0n],
+    });
     await sender.close();
   });
 

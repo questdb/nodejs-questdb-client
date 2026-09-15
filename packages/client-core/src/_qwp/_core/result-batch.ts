@@ -508,8 +508,11 @@ export class QwpResultColumnView {
       QWP_COLUMN_TYPE.GEOHASH,
     );
     if (dense < 0) return 0n;
-    const width = Math.ceil(layout.precisionBits! / 8);
-    return unsignedLittleEndianValue(layout.values!, dense * width, width);
+    return geohashLittleEndianValue(
+      layout.values!,
+      dense,
+      layout.precisionBits!,
+    );
   }
 
   /** Zero-copy encoded ARRAY row, including dimension header. */
@@ -600,13 +603,15 @@ export class QwpResultColumnView {
           scale: layout.scale!,
         };
       }
-      case QWP_COLUMN_TYPE.GEOHASH: {
-        const width = Math.ceil(layout.precisionBits! / 8);
+      case QWP_COLUMN_TYPE.GEOHASH:
         return {
-          bits: unsignedLittleEndianValue(layout.values!, dense * width, width),
+          bits: geohashLittleEndianValue(
+            layout.values!,
+            dense,
+            layout.precisionBits!,
+          ),
           precisionBits: layout.precisionBits!,
         };
-      }
       case QWP_COLUMN_TYPE.DOUBLE_ARRAY:
       case QWP_COLUMN_TYPE.LONG_ARRAY:
         return readArrayValue(
@@ -1033,6 +1038,16 @@ function unsignedLittleEndianValue(
     value |= BigInt(bytes[offset + index]) << BigInt(index * 8);
   }
   return value;
+}
+
+function geohashLittleEndianValue(
+  bytes: Uint8Array,
+  denseIndex: number,
+  precisionBits: number,
+): bigint {
+  const width = Math.ceil(precisionBits / 8);
+  const bits = unsignedLittleEndianValue(bytes, denseIndex * width, width);
+  return bits & ((1n << BigInt(precisionBits)) - 1n);
 }
 
 function signedLittleEndianValue(
@@ -1912,11 +1927,10 @@ export class QwpResultBatchDecoder {
         const byteCount = Math.ceil(precisionBits / 8);
         dense = Array.from({ length: count }, () => {
           const bytes = reader.readBytes(byteCount, "geohash value");
-          let bits = 0n;
-          for (let index = 0; index < bytes.length; index++) {
-            bits |= BigInt(bytes[index]) << BigInt(index * 8);
-          }
-          return { bits, precisionBits: precisionBits! };
+          return {
+            bits: geohashLittleEndianValue(bytes, 0, precisionBits!),
+            precisionBits: precisionBits!,
+          };
         });
         break;
       }

@@ -60,11 +60,11 @@ const MAX_QUARANTINE_SLOT_ATTEMPTS = 64;
 // Preserve two default-sized QWP batches, mirroring Java's active+spare
 // liveness floor when the current dictionary generation consumes the cap.
 const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
-// Ceiling on the transaction-close liveness exception, as a multiple of the
-// configured target. A retained deferred prefix is itself bounded by the
-// target and the batch that closes it is rejected unless it fits the target on
-// its own, so their sum is the most the journal can ever need to hold to
-// release the prefix. QwpMemoryReplayStore states the identical bound.
+// Ceiling on fixed-segment reservations under the transaction-close liveness
+// exception, as a multiple of the configured target. A retained deferred
+// prefix is itself bounded by the target and the batch that closes it is
+// rejected unless it fits the target on its own. The current persisted
+// dictionary is additive because it cannot be trimmed before the close.
 const LIVENESS_CEILING_TARGET_MULTIPLE = 2;
 const DEFAULT_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
@@ -137,7 +137,8 @@ interface ScannedRecord extends QwpIngressReplayReference {
  * transaction, admitted above {@link QwpNodeFileReplayStoreOptions.maxBytes}
  * because its retained deferred prefix cannot be acknowledged until it is sent.
  * Only a batch that fits the configured target on its own is admitted this
- * way, so the prefix and the batch together stay within twice that target.
+ * way, so the fixed-segment reservations for the prefix and batch together
+ * stay within twice that target, excluding the retained dictionary.
  */
 interface PreparedTransactionCloseBatch {
   readonly frames: readonly {
@@ -201,8 +202,10 @@ export interface QwpNodeFileReplayStoreOptions {
    *
    * A commit whose deferred prefix already fills the journal also overshoots
    * it, because QuestDB withholds that prefix's ACK until the commit arrives,
-   * so no amount of trimming could make room first. That overshoot is capped
-   * at twice this target; beyond it appends are backpressured as usual.
+   * so no amount of trimming could make room first. Fixed-segment reservations
+   * are cumulatively capped at twice this target, and the closing batch must
+   * fit the target on its own. The retained dictionary is additive to that
+   * ceiling; beyond it appends are backpressured as usual.
    */
   maxBytes?: number;
   /**
@@ -446,8 +449,9 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly directory: string;
   private readonly maxBytes: number;
   /**
-   * Hard ceiling on journal bytes, above which the transaction-close liveness
-   * exception stops being granted and ordinary backpressure resumes.
+   * Hard ceiling on fixed-segment reservation bytes, excluding the current
+   * persisted dictionary, above which the transaction-close liveness exception
+   * stops being granted and ordinary backpressure resumes.
    *
    * The exception skips the {@link maxBytes} gate so a commit whose deferred
    * prefix already fills the journal can still be journalled. Granted without
@@ -457,7 +461,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
    * per transaction with no append ever timing out, until the volume, not the
    * configured target, stopped the producer.
    */
-  private readonly livenessCeilingBytes: number;
+  private readonly livenessSegmentCeilingBytes: number;
   private readonly maxSegmentBytes: number;
   private readonly segmentFileSize: number;
   private readonly liveFrameBytes: number;
@@ -587,7 +591,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.directory = directory;
     this.maxBytes = maxBytes;
-    this.livenessCeilingBytes = Math.min(
+    this.livenessSegmentCeilingBytes = Math.min(
       maxBytes * LIVENESS_CEILING_TARGET_MULTIPLE,
       Number.MAX_SAFE_INTEGER,
     );
@@ -1801,6 +1805,8 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       standaloneSegments * this.segmentFileSize <= this.maxBytes;
     const projectedBatchEndBytes =
       this.totalBytes + Math.max(additionalSegments, 0) * this.segmentFileSize;
+    const projectedBatchEndSegmentBytes =
+      projectedBatchEndBytes - this.dictionaryFileSize;
     let projectedTotalBytes = this.totalBytes;
     let projectedFrameBytes = this.totalBytes - this.dictionaryFileSize;
     let projectedSegments = this.segments.size + hotSpareSegments;
@@ -1825,7 +1831,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         // the prepared batch and skipped the gate in turn.
         if (
           batchFitsJournal &&
-          projectedBatchEndBytes <= this.livenessCeilingBytes &&
+          projectedBatchEndSegmentBytes <= this.livenessSegmentCeilingBytes &&
           closesOpenTransaction(this.transactionOpen, payloads)
         ) {
           this.preparedTransactionClose = {
@@ -2123,12 +2129,14 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   ): Promise<void> {
     const requiredBytes = this.totalBytes + this.segmentFileSize;
     const frameBytes = this.totalBytes - this.dictionaryFileSize;
+    const requiredSegmentBytes = frameBytes + this.segmentFileSize;
     const preservesLiveness =
       // The transaction-close exception is bounded: beyond the ceiling the
       // ordinary full/backpressure path resumes, so a producer that keeps
       // committing into a journal nothing acknowledges is throttled instead
       // of ratcheting one more segment out of every transaction.
-      (admitOverTarget && requiredBytes <= this.livenessCeilingBytes) ||
+      (admitOverTarget &&
+        requiredSegmentBytes <= this.livenessSegmentCeilingBytes) ||
       (this.dictionaryFileSize > 0 &&
         (frameBytes < this.liveFrameBytes || this.segments.size === 0));
     if (requiredBytes > this.maxBytes && !preservesLiveness) {

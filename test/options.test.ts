@@ -1525,8 +1525,7 @@ describe("Configuration string parser suite", function () {
     // call and is swallowed, and the sender goes completely silent -- including
     // the close-time warning that staged rows are being discarded. The
     // top-level logger has always been validated; this is the same check.
-    for (const log of [1234, "hoppa", {}, null as unknown as number]) {
-      if (log === null) continue;
+    for (const log of [false, 0, "", NaN, 1234, "hoppa", {}]) {
       await expect(
         async () =>
           await SenderOptions.fromConfig("ws::addr=host:9000;", {
@@ -1545,10 +1544,23 @@ describe("Configuration string parser suite", function () {
       ).toThrow("Invalid logging function");
     }
 
-    // An omitted logger is still valid and still reaches the default sink.
-    await expect(
-      SenderOptions.fromConfig("ws::addr=host:9000;", { qwp: { sender: {} } }),
-    ).resolves.toBeDefined();
+    // Nullish loggers are still valid and still reach the default sink.
+    for (const log of [null, undefined]) {
+      await expect(
+        SenderOptions.fromConfig("ws::addr=host:9000;", {
+          qwp: { sender: { log } },
+        } as never),
+      ).resolves.toBeDefined();
+      expect(
+        () =>
+          new Sender({
+            protocol: "udp",
+            host: "127.0.0.1",
+            port: 9009,
+            qwp: { sender: { log } },
+          } as never),
+      ).not.toThrow();
+    }
   });
 
   it("keeps a QWP logger supplied without a top-level one", async function () {
