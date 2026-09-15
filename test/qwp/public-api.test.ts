@@ -198,6 +198,7 @@ const nodeRuntimeContract = [
   "QwpNodeOrphanDrainer",
   "QwpNodeUdpSession",
   "QwpReplayStoreAppendTimeoutError",
+  "QwpReplayStoreBatchTooLargeError",
   "QwpReplayStoreCheckpointError",
   "QwpReplayStoreCorruptionError",
   "QwpReplayStoreError",

@@ -16,7 +16,7 @@ import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
 } from "../../../client-core/src/_qwp/_internal/timer-bounds";
-import { qwpSegmentFileSize } from "./file-replay-store";
+import { qwpSegmentFileSize, QWP_MAX_SEGMENT_BYTES } from "./file-replay-store";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 import type {
@@ -927,6 +927,15 @@ function validateStoreAndForwardDependencies(
     const maxBytes = storeAndForward.maxBytes ?? DEFAULT_SF_MAX_TOTAL_BYTES;
     const maxSegmentBytes =
       storeAndForward.maxSegmentBytes ?? DEFAULT_SF_MAX_SEGMENT_BYTES;
+    if (
+      !Number.isSafeInteger(maxSegmentBytes) ||
+      maxSegmentBytes < 1 ||
+      maxSegmentBytes > QWP_MAX_SEGMENT_BYTES
+    ) {
+      throw new RangeError(
+        `QWP sf_max_segment_bytes must be a safe integer between 1 and ${QWP_MAX_SEGMENT_BYTES}`,
+      );
+    }
     const segmentBytes = qwpSegmentFileSize(maxSegmentBytes);
     if (
       Number.isSafeInteger(maxBytes) &&

@@ -408,9 +408,12 @@ ACK advances the checksummed cursor, then a bounded background trimmer deletes f
 drained segments.
 `appendDeadlineMs` bounds each such pause and retries of transient journal faults
 such as a briefly read-only, full, or descriptor-starved filesystem (30 seconds
-by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. Waiting appenders
-do not hold the journal mutation queue, so ACK cleanup and checkpoint recovery
-can continue. Corruption and loss of the journal lock remain immediate failures.
+by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. A split logical
+batch that cannot fit even in an empty journal instead fails immediately with
+`QwpReplayStoreBatchTooLargeError`; no ACK or trim could make that wait succeed.
+Waiting appenders do not hold the journal mutation queue, so ACK cleanup and
+checkpoint recovery can continue. Corruption and loss of the journal lock remain
+immediate failures.
 Direct users of `QwpNodeFileReplayStore` can inspect `metrics` for pending records
 and segments, checkpoint work, checkpoint failures, active waiters, stalls, and
 timeouts.
@@ -1682,6 +1685,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpReplayDictionaryPersistenceError`   | A dictionary sidecar append failed before its delta frame was published; retrying the batch is safe         |
 | `QwpUnrecoverableReplayDictionaryError` | The persisted dictionary cannot be restored, so recovered delta frames cannot be replayed                   |
 | `QwpReplayStoreFullError`               | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreBatchTooLargeError`      | One split logical batch cannot fit in an empty Node.js replay journal                                       |
 | `QwpReplayStoreAppendTimeoutError`      | The Node.js replay journal did not regain capacity before the configured append deadline                    |
 | `QwpReplayStoreCheckpointError`         | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
 | `QwpReplayStoreLockedError`             | Another process owns the configured Node.js replay directory                                                |

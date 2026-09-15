@@ -42,6 +42,9 @@ const SEGMENT_SUFFIX = ".sfa";
 const SEGMENT_HEADER_SIZE = 24;
 const FRAME_HEADER_SIZE = 8;
 
+/** Largest payload a segment header can represent. @internal */
+export const QWP_MAX_SEGMENT_BYTES = 0xffffffff;
+
 /**
  * Bytes one fixed segment reserves, including its SFA and frame headers. The
  * connection-string parser shares this derivation so its minimum-budget check
@@ -398,6 +401,22 @@ export class QwpReplayStoreFullError extends QwpReplayStoreError {
   }
 }
 
+/** One logical batch can never fit in an empty store-and-forward journal. */
+export class QwpReplayStoreBatchTooLargeError extends QwpReplayStoreError {
+  override readonly retryable = false;
+
+  constructor(
+    readonly maxBytes: number,
+    readonly frameCount: number,
+    readonly requiredBytes: number,
+  ) {
+    super(
+      `QWP logical batch exceeds the store-and-forward journal budget [maxBytes=${maxBytes}, frameCount=${frameCount}, requiredBytes=${requiredBytes}]`,
+    );
+    this.name = "QwpReplayStoreBatchTooLargeError";
+  }
+}
+
 export class QwpReplayStoreSegmentTooLargeError extends QwpReplayStoreError {
   constructor(
     readonly maxSegmentBytes: number,
@@ -607,7 +626,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       options.maxSegmentBytes ?? DEFAULT_MAX_SEGMENT_BYTES,
       "store-and-forward maxSegmentBytes",
     );
-    if (this.maxSegmentBytes > 0xffffffff) {
+    if (this.maxSegmentBytes > QWP_MAX_SEGMENT_BYTES) {
       throw new RangeError(
         "store-and-forward maxSegmentBytes must fit in uint32",
       );
@@ -1831,10 +1850,21 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       standaloneRemaining -= size;
     }
 
+    const standaloneBytes =
+      standaloneSegments >
+      Math.floor(Number.MAX_SAFE_INTEGER / this.segmentFileSize)
+        ? Number.MAX_SAFE_INTEGER
+        : standaloneSegments * this.segmentFileSize;
+    if (standaloneBytes > this.maxBytes) {
+      throw new QwpReplayStoreBatchTooLargeError(
+        this.maxBytes,
+        payloads.length,
+        standaloneBytes,
+      );
+    }
+
     const hotSpareSegments = this.hotSpare && newSegments > 0 ? 1 : 0;
     let additionalSegments = newSegments - hotSpareSegments;
-    const batchFitsJournal =
-      standaloneSegments * this.segmentFileSize <= this.maxBytes;
     const projectedBatchEndBytes =
       this.totalBytes + Math.max(additionalSegments, 0) * this.segmentFileSize;
     const projectedBatchEndSegmentBytes =
@@ -1856,13 +1886,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         // covers only the frames that close it, which is the same bound
         // QwpMemoryReplayStore applies to a prepared transaction close.
         //
-        // Both of its limits are checked here, because this preflight admits
-        // every frame of the batch at once. Without them one split commit was
-        // journalled whole however large it was -- a 200-frame batch took a
-        // one-segment journal to 26 segments -- since each frame then matched
-        // the prepared batch and skipped the gate in turn.
+        // Its standalone size was checked above, and its liveness ceiling is
+        // checked here, because this preflight admits every frame of the batch
+        // at once. Without both limits one split commit was journalled whole
+        // however large it was -- a 200-frame batch took a one-segment journal
+        // to 26 segments -- since each frame then matched the prepared batch
+        // and skipped the gate in turn.
         if (
-          batchFitsJournal &&
           projectedBatchEndSegmentBytes <= this.livenessSegmentCeilingBytes &&
           closesOpenTransaction(this.transactionOpen, payloads)
         ) {

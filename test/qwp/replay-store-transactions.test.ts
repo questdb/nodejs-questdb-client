@@ -7,7 +7,7 @@ import {
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
-  QwpReplayStoreFullError,
+  QwpReplayStoreBatchTooLargeError,
 } from "../../packages/nodejs-client/src";
 import {
   decodeQwpFrame,
@@ -698,7 +698,7 @@ describe("QWP file replay store transaction liveness", () => {
         (error: unknown) => error,
       );
       await expect(sending.publication).rejects.toBeInstanceOf(
-        QwpReplayStoreFullError,
+        QwpReplayStoreBatchTooLargeError,
       );
       await acknowledged;
       // The rejection came from the split-batch preflight, not from a

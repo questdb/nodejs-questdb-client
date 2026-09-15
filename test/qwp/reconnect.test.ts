@@ -25,6 +25,7 @@ import {
   QwpEgressSession,
   QwpIngressSession,
   QwpReplayStoreAppendTimeoutError,
+  QwpReplayStoreBatchTooLargeError,
   QwpReplayStoreCheckpointError,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreError,
@@ -980,15 +981,20 @@ describe("QWP reconnect timer bounds", () => {
       ).rejects.toThrow(
         `durable ACK timeout must be a positive finite number no greater than ${timerCeiling}`,
       );
-      // The inclusive ceiling gets past the guard and arms a real wait, so it
-      // stays pending instead of rejecting.
-      const settled = await Promise.race([
-        session
-          .waitForDurable(acknowledged, timerCeiling)
-          .then(() => "resolved" as const)
-          .catch((error: unknown) => error),
-        Promise.resolve("pending" as const),
-      ]);
+      // The inclusive ceiling gets past the guard and arms a real wait. Give
+      // an immediate rejection enough microtask turns to reach either handler;
+      // racing it with Promise.resolve("pending") could not distinguish that
+      // rejection because the fallback always won first.
+      let settled: unknown = "pending";
+      void session.waitForDurable(acknowledged, timerCeiling).then(
+        () => {
+          settled = "resolved";
+        },
+        (error: unknown) => {
+          settled = error;
+        },
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(settled).toBe("pending");
     } finally {
       await session.close();
@@ -2881,10 +2887,10 @@ describe("QWP ingress reconnect and replay", () => {
           (error: unknown) => error,
         );
         await expect(sending.publication).rejects.toBeInstanceOf(
-          QwpReplayStoreFullError,
+          QwpReplayStoreBatchTooLargeError,
         );
         expect(await acknowledgementError).toBeInstanceOf(
-          QwpReplayStoreFullError,
+          QwpReplayStoreBatchTooLargeError,
         );
         expect(replayStore.metrics.pendingRecords).toBe(0);
         expect(connection.sent).toHaveLength(0);
@@ -8371,6 +8377,52 @@ describe("QWP Node file replay store", () => {
         }),
     ).toThrow(RangeError);
     await expect(readdir(uncreated)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("rejects a logical batch that can never fit without waiting", async () => {
+    const segmentFileSize = 33;
+    const store = new QwpNodeFileReplayStore({
+      directory: await trackedDirectory(),
+      maxBytes: 40,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 60_000,
+    });
+    await store.load();
+
+    await expect(
+      store.prepareAppendBatch([Uint8Array.of(1), Uint8Array.of(2)]),
+    ).rejects.toMatchObject({
+      name: "QwpReplayStoreBatchTooLargeError",
+      retryable: false,
+      maxBytes: 40,
+      frameCount: 2,
+      requiredBytes: 2 * segmentFileSize,
+    } satisfies Partial<QwpReplayStoreBatchTooLargeError>);
+    expect(store.metrics).toMatchObject({
+      waitingAppends: 0,
+      totalBackpressureStalls: 0,
+      totalAppendTimeouts: 0,
+      pendingRecords: 0,
+      pendingSegments: 0,
+    });
+    await expect(
+      store.prepareAppendBatch([Uint8Array.of(1)]),
+    ).resolves.toBeUndefined();
+    await store.close();
+
+    const twoSegmentStore = new QwpNodeFileReplayStore({
+      directory: await trackedDirectory(),
+      maxBytes: 2 * segmentFileSize,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 60_000,
+    });
+    await twoSegmentStore.load();
+    await expect(
+      twoSegmentStore.prepareAppendBatch([Uint8Array.of(1), Uint8Array.of(2)]),
+    ).resolves.toBeUndefined();
+    await twoSegmentStore.close();
   });
 
   it("accepts the smallest journal without depending on a symbol dictionary", async () => {

@@ -92,6 +92,7 @@ export {
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
+  QwpReplayStoreBatchTooLargeError,
   QwpReplayStoreCheckpointError,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreError,

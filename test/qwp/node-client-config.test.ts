@@ -962,6 +962,39 @@ describe("QWP unified Node client configuration", () => {
     ).not.toThrow();
   });
 
+  it("rejects an sf_max_segment_bytes that cannot fit in uint32 first", () => {
+    const message =
+      "QWP sf_max_segment_bytes must be a safe integer between 1 and 4294967295";
+    // Diagnose the impossible segment width before suggesting a larger total.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=host:9000;sf_dir=/tmp/qwp;sf_max_segment_bytes=16g;",
+      ),
+    ).toThrow(message);
+    // Raising the total cannot make the segment representation valid.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=host:9000;sf_dir=/tmp/qwp;sf_max_segment_bytes=16g;sf_max_total_bytes=32g;",
+      ),
+    ).toThrow(message);
+    // Typed overrides go through the same merged-options validation.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=host:9000;sf_dir=/tmp/qwp;", {
+        storeAndForward: {
+          directory: "/tmp/qwp",
+          maxSegmentBytes: 0x1_0000_0000,
+        },
+      }),
+    ).toThrow(message);
+    // The largest representable segment remains legal with the default 10 GiB
+    // total, which can reserve it plus the fixed headers.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=host:9000;sf_dir=/tmp/qwp;sf_max_segment_bytes=4294967295;",
+      ),
+    ).not.toThrow();
+  });
+
   it("rejects an sf_max_total_bytes below one sf_max_segment_bytes segment", () => {
     // A journal reserves whole fixed segments, so a target below one segment
     // can never reserve its first: every append stalls its whole deadline and
