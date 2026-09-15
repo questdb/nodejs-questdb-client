@@ -372,6 +372,20 @@ export class QwpBindValues {
     return this;
   }
 
+  /**
+   * Binds a typed NULL.
+   *
+   * A null bind is exactly type + flag + bitmap. The only types that carry
+   * anything more are the ones whose prefix the decoder reads *before* it
+   * branches on the null flag: the DECIMAL scale byte and the GEOHASH
+   * precision varint. Variable-width types add nothing -- the decoder's null
+   * arm binds the null and never reads the offset bytes -- so a null VARCHAR
+   * is three bytes like every other scalar. Binds carry no length prefix and
+   * no delimiter, so padding a null VARCHAR with its non-null offset word made
+   * the server read that word's first byte as the next bind's type code
+   * ("unsupported wire type 0x0"), or, after the last bind, as the trailing
+   * queryFlags varint -- silently dropping a requested dictionary reset.
+   */
   setNull(index: number, type: QwpBindType): this {
     this.assertBindType(type);
     switch (type) {
@@ -383,33 +397,11 @@ export class QwpBindValues {
         return this.setNullDecimal256(index, 0);
       case QWP_COLUMN_TYPE.GEOHASH:
         return this.setNullGeohash(index, GEOHASH_MIN_BITS);
-      case QWP_COLUMN_TYPE.VARCHAR:
-        return this.setNullVarchar(index);
       default:
         this.advance(index);
         this.writeHeader(type, true);
         return this;
     }
-  }
-
-  /**
-   * A bind is one row of the variable-width column layout, so VARCHAR carries
-   * an offset table of `nonNullCount + 1` entries whether or not the value is
-   * null. That is the same `writeUint32(0)` the non-null path above emits, and
-   * the reader in result-batch.ts requires it even at a count of zero.
-   *
-   * Omitting it made a null VARCHAR three bytes long. Binds carry no length
-   * prefix and no delimiter, so the next bind's type byte and null flag were
-   * consumed as that missing offset and everything after it in the section --
-   * including the trailing queryFlags varint -- was read against the wrong
-   * boundary. VARCHAR is the only variable-width bind type, which is why it is
-   * the only one the shared `default:` arm above got wrong.
-   */
-  private setNullVarchar(index: number): this {
-    this.advance(index);
-    this.writeHeader(QWP_COLUMN_TYPE.VARCHAR, true);
-    this.writer.writeUint32(0);
-    return this;
   }
 
   setNullDecimal64(index: number, scale: number): this {
