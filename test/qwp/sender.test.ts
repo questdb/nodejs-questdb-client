@@ -749,6 +749,58 @@ describe("QWP high-level sender", () => {
     expect(sender.metrics.closed).toBe(true);
   });
 
+  it("reports lifecycle warnings through the shared logger by default", async () => {
+    // The fallback used to be a no-op, so the close-time warning about staged
+    // rows being lost -- the only notice an application gets -- went nowhere
+    // unless the caller passed `log`. The shared logger captures the console
+    // methods when logging.ts is evaluated, so the spies have to be in place
+    // before a fresh module graph is imported.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      vi.resetModules();
+      const { QwpSender: FreshQwpSender } = await import(
+        "../../packages/client-core/src/qwp"
+      );
+      const unfinished =
+        "QWP sender contains 0 completed row(s) and 1 unfinished column(s) which will be lost";
+
+      const silent = new FreshQwpSender(async () => new RecordingSession(), {
+        autoFlush: false,
+      });
+      silent.table("events").longColumn("value", 1n);
+      await silent.close();
+      expect(warn.mock.calls.map(([message]) => message)).toEqual([unfinished]);
+
+      // An explicitly supplied logger still wins outright.
+      const supplied: [string, string | Error][] = [];
+      const explicit = new FreshQwpSender(async () => new RecordingSession(), {
+        autoFlush: false,
+        log: (level, message) => supplied.push([level, message]),
+      });
+      explicit.table("events").longColumn("value", 1n);
+      await explicit.close();
+      expect(supplied).toEqual([["warn", unfinished]]);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // Staging logs one debug message per row. The shared logger drops debug
+      // below the info criticality, so the new default cannot spam a console.
+      const busy = new FreshQwpSender(async () => new RecordingSession(), {
+        autoFlush: false,
+      });
+      for (let row = 0; row < 5; row++) {
+        await busy.table("events").longColumn("value", BigInt(row)).atNow();
+      }
+      await busy.close();
+      expect(debug).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      debug.mockRestore();
+      vi.resetModules();
+    }
+  });
+
   it("closes and reports when the close ACK drain times out", async () => {
     const session = new WatermarkSession();
     const sender = new QwpSender(async () => session, {
@@ -1470,6 +1522,48 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("accepts an Int8Array decimal created in another realm", async () => {
+    // decimalColumn() gated all three of its Int8Array checks on `instanceof`,
+    // so a genuine Int8Array from a same-origin iframe threw and discarded the
+    // row -- while binaryColumn() next door accepted a foreign Uint8Array.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const foreign = runInNewContext("new Int8Array([-1, 0, 1])") as Int8Array;
+    const foreignNull = runInNewContext("new Int8Array(0)") as Int8Array;
+    const foreignOversized = runInNewContext("new Int8Array(33)") as Int8Array;
+    expect(foreign instanceof Int8Array).toBe(false);
+    expect(foreignNull instanceof Int8Array).toBe(false);
+
+    // The 32-byte cap and the empty-array NULL spelling read the same way.
+    sender.table("events");
+    expect(() => sender.decimalColumn("amount", foreignOversized, 2)).toThrow(
+      /decimal unscaled value cannot exceed 32 bytes/,
+    );
+    sender.table("events");
+    expect(() => sender.decimalColumn("bad.name", foreignNull, 2)).toThrow(
+      /column name contains illegal characters/,
+    );
+
+    await sender
+      .table("events")
+      .decimalColumn("amount", foreign, 2)
+      .decimalColumn("absent", foreignNull, 2)
+      .atNow();
+    await sender.flush();
+
+    const staged = session.sends[0].tables[0];
+    expect(staged.columns.map((candidate) => candidate.name)).toEqual([
+      "amount",
+    ]);
+    // Two's complement big-endian 0xff0001, read as a signed 24-bit integer.
+    expect(column(staged, "amount")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL256,
+      decimalScale: 2,
+      values: [-65535n],
+    });
+    await sender.close();
+  });
+
   it("discards the row when a binary value cannot be copied", async () => {
     // new Uint8Array(value) was an argument expression, so it ran before
     // addColumn()'s try. A detached buffer therefore threw past failRow() and
@@ -1996,6 +2090,107 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("accepts decimal text written in exponent notation", async () => {
+    // The string form is the documented "decimal text", and this client's own
+    // ILP validator (validateDecimalText) accepts exponent notation there. The
+    // QWP parser used to apply an exponent-less grammar to strings only, so
+    // "1e3" threw and the row was discarded while the equal number 1e3 staged.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const typed = sender.writer("typed_decimals", {
+      whole: decimal64(0),
+      fraction: decimal64(4),
+      timestamp: designatedTimestamp("ns"),
+    });
+
+    // "1e3" shifts the scale below zero; "1.5E-3" and "12.5e-2" raise it.
+    await typed.row({ whole: "1e3", fraction: "1.5E-3", timestamp: 1n });
+    await typed.row({ whole: "-2.5e2", fraction: "12.5e-2", timestamp: 2n });
+    await sender
+      .table("fluent_decimals")
+      .decimalColumnText("whole", "1e3")
+      .decimalColumnText("tiny", "-1.25e-3")
+      .atNow();
+    await sender.flush();
+
+    const typedTable = session.sends[0].tables.find(
+      (table) => table.name === "typed_decimals",
+    )!;
+    expect(column(typedTable, "whole")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL64,
+      decimalScale: 0,
+      values: [1000n, -250n],
+    });
+    expect(column(typedTable, "fraction")).toMatchObject({
+      type: QWP_COLUMN_TYPE.DECIMAL64,
+      decimalScale: 4,
+      values: [15n, 1250n],
+    });
+
+    const fluentTable = session.sends[0].tables.find(
+      (table) => table.name === "fluent_decimals",
+    )!;
+    expect(column(fluentTable, "whole")).toMatchObject({
+      decimalScale: 0,
+      values: [1000n],
+    });
+    expect(column(fluentTable, "tiny")).toMatchObject({
+      decimalScale: 5,
+      values: [-125n],
+    });
+    await sender.close();
+  });
+
+  it("still rejects decimal text that is not a number", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    const typed = sender.writer("typed_decimals", { whole: decimal64(0) });
+
+    for (const text of [
+      "1e",
+      "e3",
+      "1.2.3",
+      "0x10",
+      "",
+      " 1",
+      "1 ",
+      "1e3.5",
+      "--1",
+      "NaN",
+      "Infinity",
+      "-Infinity",
+    ]) {
+      sender.table("fluent_decimals");
+      expect(() => sender.decimalColumnText("whole", text)).toThrow(
+        new RegExp(`invalid decimal value '${text.replace(/\W/g, "\\$&")}'`),
+      );
+      await expect(typed.row({ whole: text })).rejects.toThrow(
+        /invalid decimal value/,
+      );
+    }
+
+    // An exponent is expanded by materialising zeros or by raising the scale,
+    // so an unbounded one turns a short string into a multi-gigabyte digit
+    // string or a 10n ** 2000000000n rescale. Nothing that far out can name a
+    // DECIMAL256 value, so it is refused before either happens.
+    sender.table("fluent_decimals");
+    expect(() => sender.decimalColumnText("whole", "1e2000000000")).toThrow(
+      /decimal exponent out of range in '1e2000000000'/,
+    );
+    sender.table("fluent_decimals");
+    expect(() => sender.decimalColumnText("whole", "1e-2000000000")).toThrow(
+      /decimal exponent out of range in '1e-2000000000'/,
+    );
+    // Everything a JS number can render still parses, and is still judged by
+    // the capacity checks rather than by the exponent bound.
+    sender.table("fluent_decimals");
+    expect(() => sender.decimalColumnText("whole", Number.MAX_VALUE)).toThrow(
+      /decimal value or scale exceeds DECIMAL256 capacity/,
+    );
+    await sender.close();
+  });
+
   it("encodes a UUID identically from text, canonical bytes, and limbs", async () => {
     // The 16-byte form is canonical RFC 4122 order -- what uuid.parse() and
     // java.util.UUID hand back. Passing those bytes through verbatim would
@@ -2378,7 +2573,14 @@ describe("QWP high-level sender", () => {
     );
   });
 
-  it("caps each compiled array dimension at the server's int32 limit", async () => {
+  it("caps each compiled array dimension at the length QuestDB can store", async () => {
+    // QuestDB materialises every axis through MutableArray.setDimLen(), which
+    // rejects anything above ArrayView.DIM_MAX_LEN = (1 << 28) - 1. A longer
+    // axis still fits the uint32 wire field, and a shape like [0, 2 ** 28]
+    // encodes into a 29-byte frame, so no byte or row cap holds it back: the
+    // frame is published and the server NACKs the batch.
+    expect(QWP_MAX_ARRAY_DIMENSION_LENGTH).toBe(268_435_455);
+
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed", { samples: doubleArray() });
@@ -2389,12 +2591,16 @@ describe("QWP high-level sender", () => {
         values: [],
       },
     });
-    for (const dimension of [QWP_MAX_ARRAY_DIMENSION_LENGTH + 1, 2 ** 32]) {
+    for (const dimension of [
+      QWP_MAX_ARRAY_DIMENSION_LENGTH + 1,
+      2 ** 31 - 1,
+      2 ** 32,
+    ]) {
       await expect(
         typed.row({
           samples: { dimensions: [0, dimension], values: [] },
         }),
-      ).rejects.toThrow(/array dimension 1 must be between 0 and 2147483647/);
+      ).rejects.toThrow(/array dimension 1 must be between 0 and 268435455/);
     }
 
     await sender.flush();
@@ -2406,16 +2612,18 @@ describe("QWP high-level sender", () => {
       ).dimensions,
     ).toEqual([0, QWP_MAX_ARRAY_DIMENSION_LENGTH]);
 
-    const raw = new QwpTableBuffer("raw");
-    const rawColumn = raw.getOrCreateColumn(
-      "samples",
-      QWP_COLUMN_TYPE.DOUBLE_ARRAY,
-    )!;
-    rawColumn.values.push({ dimensions: [0, 2 ** 32], values: [] });
-    raw.nextRow();
-    expect(() => encodeQwpIngressFrame([raw])).toThrow(
-      /array dimension 1 must be between 0 and 2147483647/,
-    );
+    for (const dimension of [QWP_MAX_ARRAY_DIMENSION_LENGTH + 1, 2 ** 32]) {
+      const raw = new QwpTableBuffer("raw");
+      const rawColumn = raw.getOrCreateColumn(
+        "samples",
+        QWP_COLUMN_TYPE.DOUBLE_ARRAY,
+      )!;
+      rawColumn.values.push({ dimensions: [0, dimension], values: [] });
+      raw.nextRow();
+      expect(() => encodeQwpIngressFrame([raw])).toThrow(
+        /array dimension 1 must be between 0 and 268435455/,
+      );
+    }
   });
 
   it("sends an all-nullish writer row for a schema without a designated timestamp", async () => {

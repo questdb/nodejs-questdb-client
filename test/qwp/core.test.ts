@@ -353,6 +353,65 @@ describe("QWP ingress codec", () => {
     expect(() => encodeQwpIngressFrame([table])).not.toThrow();
   });
 
+  it("keeps completed values when a row is aborted before it appends one", () => {
+    // getOrCreateColumn() reserves the current cell as non-null before the
+    // caller appends anything. A metadata setter that throws in between leaves
+    // a reserved marker with no value behind it, and rollback used to pop one
+    // value per reserved marker -- deleting the *previous* completed row's
+    // value, which the encoder then rejected as a count mismatch.
+    for (const abort of [
+      (table: QwpTableBuffer, column: QwpColumnBuffer) =>
+        table.setGeohashPrecision(column, 6),
+      (table: QwpTableBuffer, column: QwpColumnBuffer) =>
+        table.setGeohashPrecision(column, 0),
+    ]) {
+      const table = new QwpTableBuffer("events");
+      const first = table.getOrCreateColumn("where", QWP_COLUMN_TYPE.GEOHASH)!;
+      table.setGeohashPrecision(first, 5);
+      first.values.push(31n);
+      table.nextRow();
+
+      const second = table.getOrCreateColumn("where", QWP_COLUMN_TYPE.GEOHASH)!;
+      expect(() => abort(table, second)).toThrow(/geohash precision/);
+      table.rollbackRow();
+
+      expect(table.rowCount).toBe(1);
+      expect(table.columns[0]).toMatchObject({
+        size: 1,
+        nulls: [false],
+        values: [31n],
+        geohashPrecision: 5,
+      });
+      expect(() => encodeQwpIngressFrame([table])).not.toThrow();
+    }
+  });
+
+  it("drops only the aborted row's value when it was already appended", () => {
+    const table = new QwpTableBuffer("events");
+    table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(1n);
+    table.getOrCreateColumn("sparse", QWP_COLUMN_TYPE.LONG)!.values.push(7n);
+    table.nextRow();
+    // Row 2 leaves `sparse` null, so its value list stays shorter than its
+    // null bitmap -- the case a watermark has to survive.
+    table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(2n);
+    table.nextRow();
+
+    table.getOrCreateColumn("value", QWP_COLUMN_TYPE.LONG)!.values.push(3n);
+    table.getOrCreateColumn("sparse", QWP_COLUMN_TYPE.LONG)!.values.push(8n);
+    table.rollbackRow();
+
+    expect(table.rowCount).toBe(2);
+    expect(table.columns.map((column) => column.values)).toEqual([
+      [1n, 2n],
+      [7n],
+    ]);
+    expect(table.columns.map((column) => column.nulls)).toEqual([
+      [false, false],
+      [false, true],
+    ]);
+    expect(() => encodeQwpIngressFrame([table])).not.toThrow();
+  });
+
   it("rejects an array cell whose values do not fill its dimensions", () => {
     // The cell is sized and written from values.length while the peer reads the
     // product of the dimension header, so a mismatch encodes a frame whose
