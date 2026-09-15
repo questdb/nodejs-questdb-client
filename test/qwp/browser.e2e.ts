@@ -565,7 +565,9 @@ describe("QWP in a real browser", () => {
         if (kind === QWP_EGRESS_MESSAGE.QUERY_REQUEST && requestId === 0n) {
           socket.send(resultBatch);
         } else if (kind === QWP_EGRESS_MESSAGE.CREDIT && requestId === 0n) {
-          socket.send(browserResultEnd(requestId, 1n));
+          // One batch was sent, and RESULT_END carries the sequence of the last
+          // batch, so this stream ends at batch 0.
+          socket.send(browserResultEnd(requestId, 0n));
         } else if (kind === QWP_EGRESS_MESSAGE.CANCEL && requestId === 1n) {
           socket.send(browserCancelled(requestId));
         }
