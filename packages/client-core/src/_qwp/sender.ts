@@ -21,6 +21,7 @@ import { qwpColumnNameKey, validateQwpColumnName } from "./_core/identifiers";
 import { log as defaultLog } from "../logging";
 import {
   isQwpWriterColumn,
+  QWP_DECIMAL_MAX_SCALE,
   QwpWriterRowError,
   validateDecimalScale,
   validateGeohashPrecision,
@@ -513,14 +514,23 @@ function parseDecimal(value: string | number): {
   // form, and the ILP validator this client already ships accepts exponent
   // notation there (validateDecimalText). Rejecting "1e3" only in the string
   // branch discarded rows that the same value written as a number staged.
-  const match = /^([+-]?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  //
+  // Either side of the point may be absent, exactly as that ILP validator and
+  // the Java client's DecimalParser allow: a QuestDB server ingests ".5" and
+  // "5." over ILP, so requiring digits on both sides rejected rows here that a
+  // workload moved from an ILP connect string to a ws:// one used to stage.
+  // Both sides absent is still no value at all, so ".", "+" and ".e1" stay out.
+  const match =
+    /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
   if (!match) throw new TypeError(`invalid decimal value '${text}'`);
-  const fraction = match[3] ?? "";
-  const exponent = match[4] === undefined ? 0 : Number(match[4]);
+  const fraction = match[3] ?? match[4] ?? "";
+  const exponent = match[5] === undefined ? 0 : Number(match[5]);
   if (exponent > MAX_DECIMAL_EXPONENT || exponent < -MAX_DECIMAL_EXPONENT) {
     throw new RangeError(`decimal exponent out of range in '${text}'`);
   }
-  let digits = `${match[2]}${fraction}`;
+  // The integer part is absent for ".5", the fraction part for "5."; the
+  // unscaled value is the digits of both, in order, whichever of them is empty.
+  let digits = `${match[2] ?? ""}${fraction}`;
   let scale = fraction.length - exponent;
   if (scale < 0) {
     digits += "0".repeat(-scale);
@@ -738,12 +748,28 @@ function writerGeohashBits(value: unknown, precisionBits: number): bigint {
   return bits;
 }
 
+/**
+ * Moves an unscaled value from one scale to another, exactly or not at all.
+ *
+ * The span is bounded because each step is a factor of ten of a BigInt: a span
+ * of a million takes 22 ms of blocked event loop, one of 1e8 takes 4.2 s, and
+ * every caller-facing scale is already capped far below MAX_DECIMAL_EXPONENT.
+ * Nothing this guard turns away could have been staged anyway -- an exact
+ * rescale over that many steps needs an unscaled value of more than 1024
+ * digits, which no QWP column carries -- except an exact zero written with
+ * more fractional digits than that, and rejecting it beats the stall.
+ */
 function rescaleDecimal(
   unscaled: bigint,
   fromScale: number,
   toScale: number,
 ): bigint {
   if (fromScale === toScale) return unscaled;
+  if (Math.abs(fromScale - toScale) > MAX_DECIMAL_EXPONENT) {
+    throw new RangeError(
+      `decimal cannot be rescaled from scale ${fromScale} to scale ${toScale}`,
+    );
+  }
   if (fromScale < toScale) {
     return unscaled * 10n ** BigInt(toScale - fromScale);
   }
@@ -771,8 +797,21 @@ function writerDecimalUnscaled(
     if (typeof value.unscaled !== "bigint") {
       throw new TypeError("decimal unscaled value must be a bigint");
     }
-    if (!Number.isSafeInteger(value.scale) || (value.scale as number) < 0) {
-      throw new TypeError("decimal scale must be a non-negative safe integer");
+    // Bound the scale before rescaleDecimal() raises ten to the difference
+    // between it and the column's. Accepting any non-negative safe integer let
+    // one row evaluate 10n ** 100000000n: 4.2 s of synchronous work that froze
+    // every timer, ACK deadline and sibling sender on the loop, and then
+    // rejected the row regardless. Every other decimal entry point --
+    // decimalColumn(), fixedDecimalColumn(), the bind setters -- already caps
+    // the scale at the widest a QWP column carries.
+    if (
+      !Number.isSafeInteger(value.scale) ||
+      (value.scale as number) < 0 ||
+      (value.scale as number) > QWP_DECIMAL_MAX_SCALE.decimal256
+    ) {
+      throw new RangeError(
+        `decimal scale ${String(value.scale)} must be between 0 and ${QWP_DECIMAL_MAX_SCALE.decimal256}`,
+      );
     }
     unscaled = rescaleDecimal(value.unscaled, value.scale as number, scale);
   } else {
