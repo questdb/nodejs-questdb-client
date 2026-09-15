@@ -725,10 +725,17 @@ for the rest of the frame; the lock is released once those rows are published, s
 next frame's first value sets it afresh. Decimal text and `{ unscaled, scale }` values are rescaled to the
 column's scale when that is exact, and rejected when it would round: at
 `decimal64(2)`, `"1.50"` stages as `150n` and `"1.005"` raises `QwpWriterRowError`.
-Decimal text accepts scientific notation on the same terms as ILP, so `"1e3"`,
-`"-2.5e2"` and `"1.5E-3"` are all valid spellings; an exponent beyond ±1024 is
-rejected, because no DECIMAL256 value can name one and expanding it would be an
-unbounded string allocation.
+The `scale` of an `{ unscaled, scale }` value must itself be between 0 and 76,
+DECIMAL256's maximum, whatever the column's width; the value is rescaled onto the
+column's scale from there.
+Decimal text follows the same grammar as ILP. Scientific notation is accepted, so
+`"1e3"`, `"-2.5e2"` and `"1.5E-3"` are all valid spellings, and either side of the
+decimal point may be omitted, so `".5"` stages as `5` at scale 1 and `"5."` as `5`
+at scale 0. Text carrying no digit at all -- `"."`, `"+"`, `".e1"` -- is rejected,
+as are `"NaN"` and `"Infinity"`, which ILP accepts but which no
+`{ unscaled, scale }` pair can name. An exponent beyond ±1024 is rejected, because
+no DECIMAL256 value can name one and expanding it would be an unbounded string
+allocation.
 Base-32 geohash text carries five bits per character, so `geohash(20)` accepts
 `"u33d"` and rejects `"u33"`.
 
