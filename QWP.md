@@ -395,8 +395,12 @@ with each complete fixed-segment reservation, including the hot spare. The journ
 preserves up to 32 MiB (or the configured target when smaller) for live frame segments
 if dictionary growth uses all remaining headroom. Dictionary persistence itself is
 never rejected by the target, so actual disk usage can exceed it by the current
-dictionary overshoot and at most one liveness segment. Frame growth beyond that
-allowance remains backpressured until background ACK trimming frees complete segments.
+dictionary overshoot, and by the frames that close an open transaction: QuestDB
+withholds a deferred frame's ACK until its commit arrives, so the commit is
+journalled even when the deferred prefix already fills the journal. That liveness
+overshoot is capped at twice the target -- a batch that does not fit the target on
+its own is rejected rather than admitted -- and beyond the cap frame growth remains
+backpressured until background ACK trimming frees complete segments.
 A partly acknowledged segment remains charged to the disk budget until its last live
 record is acknowledged.
 Once every frame is acknowledged,
