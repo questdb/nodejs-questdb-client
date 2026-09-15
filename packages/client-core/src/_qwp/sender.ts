@@ -18,6 +18,7 @@ import {
   type QwpIngressMetrics,
 } from "./ingress-session";
 import { qwpColumnNameKey, validateQwpColumnName } from "./_core/identifiers";
+import { log as defaultLog } from "../logging";
 import {
   isQwpWriterColumn,
   QwpWriterRowError,
@@ -259,9 +260,17 @@ function isUint8Array(value: unknown): value is Uint8Array {
   );
 }
 
+function isInt8Array(value: unknown): value is Int8Array {
+  return (
+    ArrayBuffer.isView(value) &&
+    TYPED_ARRAY_TAG_GETTER?.call(value) === "Int8Array"
+  );
+}
+
 /**
  * Wraps the caller's logger so a throwing sink cannot decide whether the
- * sender finished closing.
+ * sender finished closing, and falls back to the shared console logger when
+ * none was supplied.
  *
  * `log` is user code on the same footing as `onError` and `onProgress`, which
  * already run behind safelyInvoke, but it was called bare. Two of those calls
@@ -271,14 +280,20 @@ function isUint8Array(value: unknown): value is Uint8Array {
  * replayed that rejection for the rest of the process -- while the transport
  * underneath had in fact already closed.
  *
+ * The fallback used to be a no-op, which sent the close-time warnings about
+ * discarded rows and rolled-back transactions -- the only notice an
+ * application gets that staged data was lost -- nowhere at all unless the
+ * caller happened to pass `log`. defaultLog is the same browser-safe sink
+ * defaultQwpSenderErrorHandler() already writes to, and it drops `debug`
+ * below the info criticality, so the per-row staging messages stay silent.
+ *
  * Failures are swallowed rather than reported: the sink is the thing that
  * failed, so there is nowhere left to report them to.
  */
 function containedLogger(log: QwpSenderLogger | undefined): QwpSenderLogger {
-  if (!log) return () => undefined;
   return (level, message) => {
     try {
-      log(level, message);
+      (log ?? defaultLog)(level, message);
     } catch {
       // Intentionally ignored; see above.
     }
@@ -376,7 +391,12 @@ function validateTimestampUnit(unit: QwpTimestampUnit): void {
 function signedBigEndianToBigInt(bytes: Int8Array): bigint {
   if (bytes.length === 0) return 0n;
   let result = 0n;
-  for (const byte of bytes) result = (result << 8n) | BigInt(byte & 0xff);
+  // Indexed rather than iterated: the caller may hand over an Int8Array from
+  // another realm, and indexing an integer-indexed exotic object reads the
+  // same signed bytes without going through that realm's iterator protocol.
+  for (let index = 0; index < bytes.length; index++) {
+    result = (result << 8n) | BigInt(bytes[index] & 0xff);
+  }
   if ((bytes[0] & 0x80) !== 0) result -= 1n << BigInt(bytes.length * 8);
   return result;
 }
@@ -472,18 +492,34 @@ function rescaleToColumnScale(
   return rescaled;
 }
 
+/**
+ * Widest exponent parseDecimal() expands. A positive exponent is applied by
+ * appending zeros and a negative one by raising the scale, so "1e2000000000"
+ * -- twelve characters of caller input -- would otherwise build a two-gigabyte
+ * digit string, and "1e-2000000000" would make rescaleDecimal() evaluate
+ * 10n ** 2000000000n. Neither can name a value QWP could carry: the widest
+ * column is DECIMAL256, 78 digits at a scale of at most 76. The bound sits far
+ * above that, and above the 324 that String(number) can produce, so every
+ * near-miss value still reaches the capacity errors that name it precisely.
+ */
+const MAX_DECIMAL_EXPONENT = 1024;
+
 function parseDecimal(value: string | number): {
   unscaled: bigint;
   scale: number;
 } {
   const text = String(value);
-  const match =
-    typeof value === "number"
-      ? /^([+-]?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text)
-      : /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(text);
+  // One grammar for both inputs: strings are the documented "decimal text"
+  // form, and the ILP validator this client already ships accepts exponent
+  // notation there (validateDecimalText). Rejecting "1e3" only in the string
+  // branch discarded rows that the same value written as a number staged.
+  const match = /^([+-]?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text);
   if (!match) throw new TypeError(`invalid decimal value '${text}'`);
   const fraction = match[3] ?? "";
   const exponent = match[4] === undefined ? 0 : Number(match[4]);
+  if (exponent > MAX_DECIMAL_EXPONENT || exponent < -MAX_DECIMAL_EXPONENT) {
+    throw new RangeError(`decimal exponent out of range in '${text}'`);
+  }
   let digits = `${match[2]}${fraction}`;
   let scale = fraction.length - exponent;
   if (scale < 0) {
@@ -1581,22 +1617,29 @@ export class QwpSender {
     // availability, row-state and column-name checks -- so this one spelling
     // silently accepted a misspelled name, a non-string name and a call made
     // before table(), exactly the hole omitsNullish() exists to close.
-    if (unscaled instanceof Int8Array && unscaled.length === 0) {
+    //
+    // isInt8Array() rather than `instanceof`, here and in the two checks
+    // below, for the reason binaryColumn() documents: `instanceof` rejects a
+    // genuine Int8Array created by another realm, such as a same-origin
+    // iframe. Reading it stays correct across realms -- the elements a foreign
+    // Int8Array yields are signed bytes like any other.
+    if (isInt8Array(unscaled) && unscaled.length === 0) {
       this.omitsNullish(name, null);
       return this;
     }
     if (this.omitsNullish(name, unscaled)) return this;
     try {
-      if (typeof unscaled !== "bigint" && !(unscaled instanceof Int8Array)) {
-        // signedBigEndianToBigInt() iterates its argument, and a string is
-        // iterable: "12345" would coerce character by character into
-        // 0x0102030405 and store silently, while "x" would store 0. Every
-        // other setter rejects a wrong-typed value at the call site.
+      if (typeof unscaled !== "bigint" && !isInt8Array(unscaled)) {
+        // signedBigEndianToBigInt() reads its argument by index and length,
+        // and a string answers both: "12345" would coerce character by
+        // character into 0x0102030405 and store silently, while "x" would
+        // store 0. Every other setter rejects a wrong-typed value at the call
+        // site.
         throw new TypeError(
           "decimalColumn accepts only bigint or Int8Array values",
         );
       }
-      if (unscaled instanceof Int8Array && unscaled.length > 32) {
+      if (isInt8Array(unscaled) && unscaled.length > 32) {
         throw new RangeError("decimal unscaled value cannot exceed 32 bytes");
       }
       const value =

@@ -35,6 +35,12 @@ export interface QwpColumnBuffer {
   nulls: boolean[];
   /** Rows accounted for so far, including nulls. */
   size: number;
+  /**
+   * Length `values` had when the last row completed -- everything past it
+   * belongs to the row in progress. rollbackRow() truncates to this mark; see
+   * the failure it exists to prevent there. Maintained by QwpTableBuffer.
+   */
+  committedValues: number;
   geohashPrecision?: number;
   decimalScale?: number;
 }
@@ -121,6 +127,7 @@ export class QwpTableBuffer {
       values: [],
       nulls: new Array(this.rows).fill(true),
       size: this.rows,
+      committedValues: 0,
     };
     column.nulls.push(false);
     column.size++;
@@ -137,6 +144,7 @@ export class QwpTableBuffer {
         column.nulls.push(true);
         column.size++;
       }
+      column.committedValues = column.values.length;
     }
     this.rowStartColumnCount = this.columnList.length;
   }
@@ -180,13 +188,26 @@ export class QwpTableBuffer {
     return column.decimalScale;
   }
 
-  /** Truncates every column back to the last completed row. */
+  /**
+   * Truncates every column back to the last completed row.
+   *
+   * Values are truncated to the committed watermark rather than popped once
+   * per non-null marker, because getOrCreateColumn() reserves the current
+   * cell as non-null before the caller appends its value. A setter that threw
+   * in between -- a geohash precision mismatch, an invalid decimal scale --
+   * left a reserved marker with no value behind it, and popping per marker
+   * then deleted the *previous* completed row's value instead. The table kept
+   * that row's non-null marker, so encodeQwpIngressFrame() rejected the whole
+   * buffer with a value/marker count mismatch.
+   */
   rollbackRow(): void {
     for (const column of this.columnList) {
       while (column.size > this.rows) {
-        const wasNull = column.nulls.pop();
+        column.nulls.pop();
         column.size--;
-        if (wasNull === false) column.values.pop();
+      }
+      if (column.values.length > column.committedValues) {
+        column.values.length = column.committedValues;
       }
     }
     for (
@@ -246,6 +267,7 @@ export class QwpTableBuffer {
         values: column.values.slice(valueStart, valueEnd),
         nulls: column.nulls.slice(start, end),
         size: end - start,
+        committedValues: valueEnd - valueStart,
         geohashPrecision: column.geohashPrecision,
         decimalScale: column.decimalScale,
       };
