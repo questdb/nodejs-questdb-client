@@ -6,6 +6,10 @@ import {
   QwpResultBatchViewHandler,
 } from "./egress-session";
 import { QwpSender } from "./sender";
+import {
+  exceedsQwpTimerCeiling,
+  QWP_MAX_TIMER_DELAY_MS,
+} from "./_internal/timer-bounds";
 import { QwpHandshakeMetadata } from "./transport";
 import type {
   QwpNegotiatedEgressCompression,
@@ -31,15 +35,29 @@ export interface QwpClientPoolOptions {
   queryPoolMin?: number;
   /** Maximum concurrently borrowed query connections. Defaults to 4. */
   queryPoolMax?: number;
-  /** Idle time before an excess pooled connection is closed. Defaults to 60s; zero disables. */
+  /**
+   * Idle time before an excess pooled connection is closed. Defaults to 60s;
+   * zero disables. Not capped at the host timer ceiling: compared against
+   * elapsed time only.
+   */
   idleTimeoutMs?: number;
-  /** Maximum pooled connection age before recycling it while idle. Defaults to 30m; zero disables. */
+  /**
+   * Maximum pooled connection age before recycling it while idle. Defaults to
+   * 30m; zero disables. Not capped at the host timer ceiling: compared against
+   * elapsed time only.
+   */
   maxLifetimeMs?: number;
-  /** Idle/lifetime sweep interval. Defaults to 5s and must be at least 100ms. */
+  /**
+   * Idle/lifetime sweep interval. Defaults to 5s and must be at least 100ms.
+   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
+   * a `RangeError`.
+   */
   housekeepingIntervalMs?: number;
   /**
    * Maximum wait for a returned pool slot and for leases during shutdown.
-   * The shutdown wait is capped at 5 seconds. Defaults to 5 seconds.
+   * The shutdown wait is capped at 5 seconds. Defaults to 5 seconds. Capped at
+   * 2,147,483,647ms (the host timer ceiling); a larger value throws a
+   * `RangeError`.
    */
   acquireTimeoutMs?: number;
 }
@@ -884,18 +902,22 @@ function validatePoolOptions(
   validatePoolBounds(validated.queryPoolMin, validated.queryPoolMax, "query");
   if (
     !Number.isFinite(validated.acquireTimeoutMs) ||
-    validated.acquireTimeoutMs < 0
+    validated.acquireTimeoutMs < 0 ||
+    exceedsQwpTimerCeiling(validated.acquireTimeoutMs)
   ) {
-    throw new RangeError("acquireTimeoutMs must be a non-negative number");
+    throw new RangeError(
+      `acquireTimeoutMs must be a non-negative number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
   }
   validateOptionalPoolTimeout(validated.idleTimeoutMs, "idleTimeoutMs");
   validateOptionalPoolTimeout(validated.maxLifetimeMs, "maxLifetimeMs");
   if (
     !Number.isFinite(validated.housekeepingIntervalMs) ||
-    validated.housekeepingIntervalMs < MIN_HOUSEKEEPING_INTERVAL_MS
+    validated.housekeepingIntervalMs < MIN_HOUSEKEEPING_INTERVAL_MS ||
+    exceedsQwpTimerCeiling(validated.housekeepingIntervalMs)
   ) {
     throw new RangeError(
-      `housekeepingIntervalMs must be at least ${MIN_HOUSEKEEPING_INTERVAL_MS}`,
+      `housekeepingIntervalMs must be at least ${MIN_HOUSEKEEPING_INTERVAL_MS} and no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
     );
   }
   return validated;

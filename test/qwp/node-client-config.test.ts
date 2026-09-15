@@ -754,7 +754,7 @@ describe("QWP unified Node client configuration", () => {
     );
   });
 
-  it("bounds typed reconnect backoffs across config and client paths", () => {
+  it("bounds typed reconnect backoffs across config and client paths", async () => {
     const timerCeiling = 0x7fffffff;
     const overTimerCeiling = timerCeiling + 1;
 
@@ -836,7 +836,16 @@ describe("QWP unified Node client configuration", () => {
         },
       }),
     ).toThrow(`reconnect maxBackoffMs must be no greater than ${timerCeiling}`);
+    // A valid client at the inclusive ceiling still constructs, and lazyConnect
+    // defers every socket to the first borrow. Asserting the factory is unused
+    // only means something once construction has actually succeeded.
+    const lazyClient = createQwpNodeClient({
+      ...baseOptions,
+      ingressSession: { reconnect: { initialBackoffMs: timerCeiling } },
+      egressSession: { reconnect: { maxBackoffMs: timerCeiling } },
+    });
     expect(webSocketFactory).not.toHaveBeenCalled();
+    await lazyClient.close();
   });
 
   it("rejects a millisecond option above the timer ceiling", () => {
@@ -909,6 +918,84 @@ describe("QWP unified Node client configuration", () => {
       ),
     ).not.toThrow();
   });
+
+  it("bounds a typed override that wins over a bounded connect-string key", () => {
+    const timerCeiling = 0x7fffffff;
+    const overTimerCeiling = timerCeiling + 1;
+    // The connect-string spelling was already bounded; the typed override is
+    // spread on top of the parsed value, so it must be bounded on the same
+    // terms rather than escaping the parser's ceiling. The four WebSocket
+    // timeouts are deliberately validated per connect attempt instead, so
+    // their over-ceiling rejection is pinned in session.test.ts.
+    // Both keys are present in the string, and legal there, so the typed value
+    // genuinely replaces a parsed one rather than arriving unopposed.
+    const withPoolKeys =
+      "wss::addr=host:9000;housekeeper_interval_ms=5000;acquire_timeout_ms=1000;";
+    expect(() =>
+      parseQwpNodeClientConfig(withPoolKeys, {
+        pool: { housekeepingIntervalMs: overTimerCeiling },
+      }),
+    ).toThrow(
+      `housekeepingIntervalMs must be at least 100 and no greater than ${timerCeiling}`,
+    );
+    expect(() =>
+      parseQwpNodeClientConfig(withPoolKeys, {
+        pool: { acquireTimeoutMs: overTimerCeiling },
+      }),
+    ).toThrow(
+      `acquireTimeoutMs must be a non-negative number no greater than ${timerCeiling}`,
+    );
+    // The parsed values alone are legal, so the rejections above are the
+    // override's doing.
+    expect(() => parseQwpNodeClientConfig(withPoolKeys)).not.toThrow();
+    // The inclusive ceiling is accepted, and the elapsed-clock pool budgets
+    // keep their unbounded range.
+    expect(() =>
+      parseQwpNodeClientConfig("wss::addr=host:9000;", {
+        pool: {
+          housekeepingIntervalMs: timerCeiling,
+          acquireTimeoutMs: timerCeiling,
+          idleTimeoutMs: overTimerCeiling,
+          maxLifetimeMs: overTimerCeiling,
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects an sf_max_total_bytes below one sf_max_segment_bytes segment", () => {
+    // A journal reserves whole fixed segments, so a target below one segment
+    // can never reserve its first: every append stalls its whole deadline and
+    // then fails permanently, having written nothing.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=host:9000;sf_dir=/tmp/qwp;sf_max_total_bytes=1m;",
+      ),
+    ).toThrow(
+      "QWP sf_max_total_bytes must reserve at least one whole sf_max_segment_bytes segment " +
+        "[sf_max_total_bytes=1048576, sf_max_segment_bytes=4194304, segmentBytes=4194336]",
+    );
+    // Equal to the segment size is still 32 header bytes short of a segment.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=host:9000;sf_dir=/tmp/qwp;sf_max_total_bytes=4m;",
+      ),
+    ).toThrow(/sf_max_total_bytes/);
+    // Lowering the segment size makes the same total legal.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=host:9000;sf_dir=/tmp/qwp;sf_max_total_bytes=1m;sf_max_segment_bytes=64k;",
+      ),
+    ).not.toThrow();
+    // Without sf_dir the same key sizes the memory replay queue, which has no
+    // segment to fit, so the relationship must not apply.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=host:9000;sf_max_total_bytes=1m;"),
+    ).not.toThrow();
+    expect(
+      parseQwpNodeClientConfig("ws::addr=host:9000;sf_max_total_bytes=1m;")
+        .ingressSession?.memoryReplayMaxBytes,
+    ).toBe(1024 * 1024);
+  });
 });
 
 /**
@@ -940,6 +1027,36 @@ describe("store-and-forward requires a directory", () => {
       qwp: { webSocket: { storeAndForward: { maxBytes: 1024 * 1024 } } },
     } as never);
     await expect(sender.connect()).rejects.toThrow(/requires a 'directory'/);
+    await sender.close().catch(() => undefined);
+  });
+
+  it("parses past a non-string directory instead of raising an unnamed TypeError", () => {
+    // The one-segment minimum has to read the directory to know whether a
+    // journal is file-backed at all. Calling .trim() on a non-string there
+    // would replace this option's own diagnostic with an unnamed TypeError,
+    // which is exactly what the comment above this block records as fixed.
+    let captured: unknown;
+    try {
+      parseQwpNodeClientConfig("ws::addr=127.0.0.1:9000;sf_dir=/tmp/qwp;", {
+        storeAndForward: { directory: 5 as unknown as string },
+      });
+    } catch (error: unknown) {
+      captured = error;
+    }
+    expect(captured).toBeUndefined();
+  });
+
+  it("names the option when a Sender connects with a non-string directory", async () => {
+    const sender = new Sender({
+      protocol: "ws",
+      host: "127.0.0.1",
+      port: 1,
+      log: () => undefined,
+      qwp: { webSocket: { storeAndForward: { directory: 5 } } },
+    } as never);
+    await expect(sender.connect()).rejects.toThrow(
+      /requires a 'directory' \(sf_dir\), received number/,
+    );
     await sender.close().catch(() => undefined);
   });
 

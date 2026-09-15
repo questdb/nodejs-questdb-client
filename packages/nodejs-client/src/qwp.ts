@@ -247,7 +247,9 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
    * Defaults to {@link QwpWebSocketConnectOptions.connectTimeoutMs} when that
    * is set, and to 15s otherwise, so narrowing only the connect deadline
    * bounds the whole opening rather than being exceeded by a default nobody
-   * chose. Set this to give the slower phase its own budget.
+   * chose. Set this to give the slower phase its own budget. Capped at
+   * 2,147,483,647ms (the host timer ceiling); a larger value throws a
+   * `RangeError`.
    */
   authTimeoutMs?: number;
   authorization?: string;
@@ -326,7 +328,9 @@ export interface QwpNodeStoreAndForwardOptions
   maxBackgroundDrainers?: number;
   /**
    * Periodic rescan cadence; zero disables the timer. Pooled ownership
-   * changes can still trigger a scan. Defaults to 30 seconds.
+   * changes can still trigger a scan. Defaults to 30 seconds. Capped at
+   * 2,147,483,647ms (the host timer ceiling); a larger value throws a
+   * `RangeError`.
    */
   orphanScanIntervalMs?: number;
   /**

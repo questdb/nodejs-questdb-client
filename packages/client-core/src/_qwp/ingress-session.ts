@@ -30,6 +30,10 @@ import {
 } from "./_internal/reconnecting-ingress-connection";
 import { validateQwpReconnectBackoffs } from "./_internal/reconnect-backoff";
 import {
+  exceedsQwpTimerCeiling,
+  QWP_MAX_TIMER_DELAY_MS,
+} from "./_internal/timer-bounds";
+import {
   priorQwpSenderErrorDeliveries,
   QwpNotificationDispatcher,
 } from "./_internal/notification-dispatcher";
@@ -192,6 +196,10 @@ function mergeIngressResponses(
 }
 
 export interface QwpIngressSessionOptions {
+  /**
+   * Per-frame ACK deadline. Defaults to 15 seconds. Capped at 2,147,483,647ms
+   * (the host timer ceiling); a larger value throws a `RangeError`.
+   */
   ackTimeoutMs?: number;
   /**
    * Bounded reconnection and at-least-once replay policy. Reconnection is
@@ -225,9 +233,15 @@ export interface QwpIngressSessionOptions {
   initialConnectMode?: QwpInitialConnectMode;
   /** @internal Orphan sessions may quarantine persistent catch-up cap gaps. */
   orphanStoreAndForward?: boolean;
-  /** @internal Consecutive durable-ACK gap budget retained for orphan SF. */
+  /**
+   * @internal Consecutive durable-ACK gap budget retained for orphan SF.
+   * Not capped at the host timer ceiling: compared against elapsed time only.
+   */
   orphanDurableAckMismatchMaxDurationMs?: number;
-  /** @internal Minimum cap-gap dwell before an orphan can be quarantined. */
+  /**
+   * @internal Minimum cap-gap dwell before an orphan can be quarantined.
+   * Not capped at the host timer ceiling: compared against elapsed time only.
+   */
   catchUpCapGapMinEscalationWindowMs?: number;
   /**
    * Optional local ingress frame cap. Browsers cannot read WebSocket upgrade
@@ -242,7 +256,9 @@ export interface QwpIngressSessionOptions {
    * durable upload, Node transports send WebSocket PING frames and browser
    * transports send table-less QWP poll frames. Zero keeps tracking enabled
    * but disables automatic polling. Factory-created browser sessions require
-   * requestDurableAck=true when this option is supplied.
+   * requestDurableAck=true when this option is supplied. Capped at
+   * 2,147,483,647ms (the host timer ceiling); a larger value throws a
+   * `RangeError`.
    */
   durableAckKeepaliveMs?: number;
   /**
@@ -445,8 +461,14 @@ function validateIngressSessionOptions(
 ): void {
   validateQwpReconnectBackoffs(options.reconnect);
   const timeout = options.ackTimeoutMs ?? 15_000;
-  if (!Number.isFinite(timeout) || timeout <= 0) {
-    throw new RangeError("ackTimeoutMs must be a positive finite number");
+  if (
+    !Number.isFinite(timeout) ||
+    timeout <= 0 ||
+    exceedsQwpTimerCeiling(timeout)
+  ) {
+    throw new RangeError(
+      `ackTimeoutMs must be a positive finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
   }
   const localBatchCap = options.maxBatchSizeBytes;
   if (
@@ -487,10 +509,12 @@ function validateIngressSessionOptions(
   const keepalive = options.durableAckKeepaliveMs;
   if (
     keepalive !== undefined &&
-    (!Number.isFinite(keepalive) || keepalive < 0)
+    (!Number.isFinite(keepalive) ||
+      keepalive < 0 ||
+      exceedsQwpTimerCeiling(keepalive))
   ) {
     throw new RangeError(
-      "durableAckKeepaliveMs must be a non-negative finite number",
+      `durableAckKeepaliveMs must be a non-negative finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
     );
   }
   const orphanDurableAckBudget = options.orphanDurableAckMismatchMaxDurationMs;
@@ -1331,9 +1355,15 @@ export class QwpIngressSession {
         new TypeError("QWP ACK target sequence must be a bigint"),
       );
     }
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    if (
+      !Number.isFinite(timeoutMs) ||
+      timeoutMs <= 0 ||
+      exceedsQwpTimerCeiling(timeoutMs)
+    ) {
       return Promise.reject(
-        new RangeError("QWP ACK watermark timeout must be positive and finite"),
+        new RangeError(
+          `QWP ACK watermark timeout must be positive and finite, and no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+        ),
       );
     }
     const rejection = this.acknowledgementFailure(targetSequence);
@@ -1391,9 +1421,15 @@ export class QwpIngressSession {
         new Error("only a successful QWP ACK can be awaited for durability"),
       );
     }
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    if (
+      !Number.isFinite(timeoutMs) ||
+      timeoutMs <= 0 ||
+      exceedsQwpTimerCeiling(timeoutMs)
+    ) {
       return Promise.reject(
-        new RangeError("durable ACK timeout must be a positive finite number"),
+        new RangeError(
+          `durable ACK timeout must be a positive finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+        ),
       );
     }
     if (

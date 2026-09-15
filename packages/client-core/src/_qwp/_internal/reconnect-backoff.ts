@@ -1,7 +1,12 @@
 import type { QwpReconnectOptions } from "../transport";
+import { QWP_MAX_TIMER_DELAY_MS } from "./timer-bounds";
 
-/** Largest delay Node and browser hosts schedule without timer clamping. */
-export const QWP_MAX_RECONNECT_BACKOFF_MS = 0x7fffffff;
+/**
+ * Reconnect-flavoured spelling of the shared host timer ceiling. Both backoff
+ * ceilings reach a raw `setTimeout`, so they carry the same bound as every
+ * other timer-feeding option.
+ */
+export const QWP_MAX_RECONNECT_BACKOFF_MS = QWP_MAX_TIMER_DELAY_MS;
 
 export function validateQwpReconnectBackoffs(
   reconnect: QwpReconnectOptions | false | undefined,

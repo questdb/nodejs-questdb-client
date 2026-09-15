@@ -533,6 +533,51 @@ describe("QWP high-level sender", () => {
     ).toThrow(/closeFlushTimeoutMs must be a safe integer/);
   });
 
+  it("bounds sender timeouts that arm a host timer, and only those", () => {
+    const timerCeiling = 0x7fffffff;
+    const overTimerCeiling = timerCeiling + 1;
+    const session = new RecordingSession();
+    // Both land in a raw setTimeout, where a larger delay is clamped to ~1ms.
+    expect(
+      () =>
+        new QwpSender(async () => session, {
+          closeFlushTimeoutMs: overTimerCeiling,
+        }),
+    ).toThrow(
+      `closeFlushTimeoutMs must be a safe integer no greater than ${timerCeiling}`,
+    );
+    expect(
+      () =>
+        new QwpSender(async () => session, {
+          durableAckTimeoutMs: overTimerCeiling,
+        }),
+    ).toThrow(
+      `durableAckTimeoutMs must be a positive number no greater than ${timerCeiling}`,
+    );
+    // The inclusive ceiling, and the documented zero/negative "skip the drain"
+    // spellings, all stay legal.
+    expect(
+      () =>
+        new QwpSender(async () => session, {
+          closeFlushTimeoutMs: timerCeiling,
+          durableAckTimeoutMs: timerCeiling,
+        }),
+    ).not.toThrow();
+    expect(
+      () => new QwpSender(async () => session, { closeFlushTimeoutMs: -1 }),
+    ).not.toThrow();
+    expect(
+      () => new QwpSender(async () => session, { closeFlushTimeoutMs: 0 }),
+    ).not.toThrow();
+    // autoFlushIntervalMs is compared against an elapsed clock, never armed.
+    expect(
+      () =>
+        new QwpSender(async () => session, {
+          autoFlushIntervalMs: overTimerCeiling,
+        }),
+    ).not.toThrow();
+  });
+
   it("applies a configurable UTF-8 identifier byte length", async () => {
     const session = new RecordingSession();
     expect(
@@ -2345,7 +2390,11 @@ describe("QWP high-level sender", () => {
         connected: false,
       });
       await writers[0][0].row({ value: allZero });
-      expect(stringArgumentLengths.every((length) => length <= 100)).toBe(true);
+      // The real invariant: none of the four inputs above reached BigInt(string)
+      // at all. Over-width text is rejected lexically and an all-zero
+      // coefficient short-circuits to 0n, so the guard records nothing. An
+      // `every()` over this array would instead pass vacuously when empty.
+      expect(stringArgumentLengths).toEqual([]);
     } finally {
       Object.defineProperty(globalThis, "BigInt", {
         configurable: true,

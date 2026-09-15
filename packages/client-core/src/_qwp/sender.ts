@@ -18,6 +18,10 @@ import {
   type QwpIngressMetrics,
 } from "./ingress-session";
 import { qwpColumnNameKey, validateQwpColumnName } from "./_core/identifiers";
+import {
+  exceedsQwpTimerCeiling,
+  QWP_MAX_TIMER_DELAY_MS,
+} from "./_internal/timer-bounds";
 import { isInt8Array, isUint8Array } from "./_core/typed-array-brand";
 import { log as defaultLog } from "../logging";
 import {
@@ -55,6 +59,9 @@ export interface QwpSenderOptions {
    * cap; exact encoded frames remain subject to the protocol batch limit.
    */
   autoFlushBytes?: number;
+  /**
+   * Not capped at the host timer ceiling: compared against elapsed time only.
+   */
   autoFlushIntervalMs?: number;
   /** Maximum UTF-8 byte length of table and column names. Defaults to 127. */
   maxNameLength?: number;
@@ -76,11 +83,17 @@ export interface QwpSenderOptions {
    * this implies awaitServerAck unless awaitServerAck is explicitly false.
    */
   awaitDurableAck?: boolean;
+  /**
+   * Durable-upload deadline applied after each ingress ACK. Capped at
+   * 2,147,483,647ms (the host timer ceiling); a larger value throws a
+   * `RangeError`.
+   */
   durableAckTimeoutMs?: number;
   /**
    * Maximum time close() spends publishing queued rows and waiting for the
    * server ACK watermark. Zero or a negative value skips the drain. Defaults
-   * to 5 seconds.
+   * to 5 seconds. Capped at 2,147,483,647ms (the host timer ceiling); a larger
+   * value throws a `RangeError`.
    */
   closeFlushTimeoutMs?: number;
   /** QWP frame encoding options supported by the high-level sender. */
@@ -1240,8 +1253,13 @@ export class QwpSender {
     validateNonNegativeInteger(this.autoFlushRows, "autoFlushRows");
     validateNonNegativeInteger(this.autoFlushBytes, "autoFlushBytes");
     validateNonNegativeInteger(this.autoFlushIntervalMs, "autoFlushIntervalMs");
-    if (!Number.isSafeInteger(this.closeFlushTimeoutMs)) {
-      throw new RangeError("closeFlushTimeoutMs must be a safe integer");
+    if (
+      !Number.isSafeInteger(this.closeFlushTimeoutMs) ||
+      exceedsQwpTimerCeiling(this.closeFlushTimeoutMs)
+    ) {
+      throw new RangeError(
+        `closeFlushTimeoutMs must be a safe integer no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+      );
     }
     if (!Number.isSafeInteger(this.maxNameLength) || this.maxNameLength < 16) {
       throw new RangeError(
@@ -1251,9 +1269,12 @@ export class QwpSender {
     if (
       options.durableAckTimeoutMs !== undefined &&
       (!Number.isFinite(options.durableAckTimeoutMs) ||
-        options.durableAckTimeoutMs <= 0)
+        options.durableAckTimeoutMs <= 0 ||
+        exceedsQwpTimerCeiling(options.durableAckTimeoutMs))
     ) {
-      throw new RangeError("durableAckTimeoutMs must be a positive number");
+      throw new RangeError(
+        `durableAckTimeoutMs must be a positive number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+      );
     }
     if (!this.awaitServerAck && options.awaitDurableAck) {
       throw new RangeError(

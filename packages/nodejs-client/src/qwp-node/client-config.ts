@@ -12,7 +12,11 @@ import type { QwpClientPoolOptions } from "../../../client-core/src/_qwp/client"
 import type { QwpEgressSessionOptions } from "../../../client-core/src/_qwp/egress-session";
 import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-egress-connection";
-import { QWP_MAX_RECONNECT_BACKOFF_MS } from "../../../client-core/src/_qwp/_internal/reconnect-backoff";
+import {
+  exceedsQwpTimerCeiling,
+  QWP_MAX_TIMER_DELAY_MS,
+} from "../../../client-core/src/_qwp/_internal/timer-bounds";
+import { qwpSegmentFileSize } from "./file-replay-store";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 import type {
@@ -912,6 +916,29 @@ function validateStoreAndForwardDependencies(
       "QWP sf_sync_interval_millis requires sf_durability=periodic",
     );
   }
+  // Only a file-backed journal reserves fixed segments. Without sf_dir the same
+  // key sizes the in-memory replay queue, which has no segment to fit.
+  // A non-string directory keeps its own diagnostic in storeAndForwardRoot;
+  // calling .trim() on it here would replace that with an unnamed TypeError.
+  if (
+    typeof storeAndForward?.directory === "string" &&
+    storeAndForward.directory.trim()
+  ) {
+    const maxBytes = storeAndForward.maxBytes ?? DEFAULT_SF_MAX_TOTAL_BYTES;
+    const maxSegmentBytes =
+      storeAndForward.maxSegmentBytes ?? DEFAULT_SF_MAX_SEGMENT_BYTES;
+    const segmentBytes = qwpSegmentFileSize(maxSegmentBytes);
+    if (
+      Number.isSafeInteger(maxBytes) &&
+      Number.isSafeInteger(segmentBytes) &&
+      maxBytes < segmentBytes
+    ) {
+      throw new Error(
+        "QWP sf_max_total_bytes must reserve at least one whole sf_max_segment_bytes segment " +
+          `[sf_max_total_bytes=${maxBytes}, sf_max_segment_bytes=${maxSegmentBytes}, segmentBytes=${segmentBytes}]`,
+      );
+    }
+  }
   validateReconnectBounds(
     parseIngressReconnect(values),
     "QWP ingress reconnect",
@@ -1025,8 +1052,9 @@ function validatePool(pool: QwpClientPoolOptions): void {
   const queryPoolMax = pool.queryPoolMax ?? 4;
   validatePoolBounds(senderPoolMin, senderPoolMax, "sender");
   validatePoolBounds(queryPoolMin, queryPoolMax, "query");
+  // idleTimeoutMs and maxLifetimeMs are compared against an elapsed clock, so
+  // they keep accepting any safe integer; acquireTimeoutMs arms a real timer.
   for (const [name, value] of [
-    ["acquireTimeoutMs", pool.acquireTimeoutMs],
     ["idleTimeoutMs", pool.idleTimeoutMs],
     ["maxLifetimeMs", pool.maxLifetimeMs],
   ] as const) {
@@ -1035,11 +1063,24 @@ function validatePool(pool: QwpClientPoolOptions): void {
     }
   }
   if (
+    pool.acquireTimeoutMs !== undefined &&
+    (!Number.isFinite(pool.acquireTimeoutMs) ||
+      pool.acquireTimeoutMs < 0 ||
+      exceedsQwpTimerCeiling(pool.acquireTimeoutMs))
+  ) {
+    throw new RangeError(
+      `acquireTimeoutMs must be a non-negative number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
+  }
+  if (
     pool.housekeepingIntervalMs !== undefined &&
     (!Number.isFinite(pool.housekeepingIntervalMs) ||
-      pool.housekeepingIntervalMs < 100)
+      pool.housekeepingIntervalMs < 100 ||
+      exceedsQwpTimerCeiling(pool.housekeepingIntervalMs))
   ) {
-    throw new RangeError("housekeepingIntervalMs must be at least 100");
+    throw new RangeError(
+      `housekeepingIntervalMs must be at least 100 and no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
   }
 }
 
@@ -1098,12 +1139,30 @@ function optionalBoolean(
 /**
  * `setTimeout` and `setInterval` silently clamp a delay above this to 1 ms and
  * warn, so an over-large millisecond option does not merely fail to take
- * effect -- it inverts into an immediate one. The store and the reconnect
- * deadline already guard the same ceiling
- * (`file-replay-store.ts`, `_internal/reconnect-deadline.ts`,
- * `ingress-session.ts`); the connect-string parser was the way in that did not.
+ * effect -- it inverts into an immediate one: the longest budget a caller can
+ * ask for becomes the shortest one they can get.
+ *
+ * The ceiling itself lives in `_qwp/_internal/timer-bounds.ts` and is applied
+ * by every validator that owns an option feeding a raw timer -- the ingress and
+ * egress sessions, the sender, the client pool, the WebSocket transport, the
+ * browser ingress negotiation, the replay store and the orphan drainer -- as
+ * well as by this parser, so a typed override that wins over a parsed value is
+ * bounded on the same terms as the connect-string spelling it replaced.
+ *
+ * Deliberately exempt here are exactly four keys, each passing an explicit
+ * `Number.MAX_SAFE_INTEGER` maximum below: the two durations re-clamped inside
+ * a rescheduling loop (`reconnect_max_duration_millis` and
+ * `failover_max_duration_ms`, backed by `_internal/reconnect-deadline.ts`) and
+ * the two escalation windows compared against an elapsed clock
+ * (`poison_min_escalation_window_millis` and
+ * `catch_up_cap_gap_min_escalation_window_millis`). Every other key that
+ * reaches `isTimerKey` keeps this ceiling, including `idle_timeout_ms`,
+ * `max_lifetime_ms` and `auto_flush_interval`: their *typed* spellings
+ * (`idleTimeoutMs`, `maxLifetimeMs`, `autoFlushIntervalMs`) are exempt because
+ * they only feed elapsed-time comparisons, but the parser still requires an
+ * integer inside its own range for the connect-string form.
  */
-const MAX_TIMER_DELAY_MS = QWP_MAX_RECONNECT_BACKOFF_MS;
+const MAX_TIMER_DELAY_MS = QWP_MAX_TIMER_DELAY_MS;
 
 /**
  * Millisecond keys whose names do not end in `_ms` or `_millis`. Listed rather

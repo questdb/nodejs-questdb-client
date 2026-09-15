@@ -405,6 +405,104 @@ describe("QWP WebSocket adapters", () => {
     },
   );
 
+  // Each of these is passed straight to setTimeout. Above the host ceiling the
+  // delay is clamped to ~1ms, so a long opening budget becomes an instant one.
+  it.each([
+    "connectTimeoutMs",
+    "authTimeoutMs",
+    "sendTimeoutMs",
+    "closeTimeoutMs",
+  ] as const)(
+    "rejects %s above the host timer ceiling without creating a WebSocket",
+    async (name) => {
+      const timerCeiling = 0x7fffffff;
+      let factoryCalls = 0;
+      await expect(
+        connectQwpBrowserWebSocket({
+          url: "ws://localhost:9000/write/v4",
+          [name]: timerCeiling + 1,
+          webSocketFactory: () => {
+            factoryCalls++;
+            return asQwpSocket(new FakeWebSocket());
+          },
+        }),
+      ).rejects.toThrow(
+        `${name} must be a positive finite number no greater than ${timerCeiling}`,
+      );
+      expect(factoryCalls).toBe(0);
+      // Retrying cannot fix an option, so the reconnect loop must not burn its
+      // budget on this rejection.
+      await expect(
+        connectQwpBrowserWebSocket({
+          url: "ws://localhost:9000/write/v4",
+          [name]: timerCeiling + 1,
+          webSocketFactory: () => asQwpSocket(new FakeWebSocket()),
+        }),
+      ).rejects.toMatchObject({ retryable: false });
+    },
+  );
+
+  // The negotiation budget arms its own setTimeout, so it needs the same
+  // ceiling -- and the same before-the-socket, non-retryable treatment as the
+  // four transport timeouts above. The raw path used to read it inside the
+  // opened-connection callback, which rejected only after a socket existed.
+  it("rejects ingressNegotiationTimeoutMs above the host timer ceiling before opening a socket", async () => {
+    const timerCeiling = 0x7fffffff;
+    const message = `ingressNegotiationTimeoutMs must be a non-negative finite number no greater than ${timerCeiling}`;
+    let factoryCalls = 0;
+    const webSocketFactory = () => {
+      factoryCalls++;
+      return asQwpSocket(new FakeWebSocket());
+    };
+
+    await expect(
+      connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        ingressNegotiationTimeoutMs: timerCeiling + 1,
+        webSocketFactory,
+      }),
+    ).rejects.toThrow(message);
+    await expect(
+      connectQwpBrowserIngress({
+        url: "ws://localhost:9000/write/v4",
+        ingressNegotiationTimeoutMs: timerCeiling + 1,
+        webSocketFactory,
+      }),
+    ).rejects.toThrow(message);
+    expect(factoryCalls).toBe(0);
+
+    // Retrying cannot fix an option, so a reconnecting session must not spend
+    // its whole budget re-throwing this.
+    await expect(
+      connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        ingressNegotiationTimeoutMs: timerCeiling + 1,
+        webSocketFactory: () => asQwpSocket(new FakeWebSocket()),
+      }),
+    ).rejects.toMatchObject({ retryable: false });
+
+    // The inclusive ceiling and zero stay legal, and reach the socket: the
+    // connection then fails for its own reason, never for the option.
+    for (const timeoutMs of [timerCeiling, 0]) {
+      let accepted = 0;
+      const error = await connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        ingressNegotiationTimeoutMs: timeoutMs,
+        webSocketFactory: () => {
+          accepted++;
+          const socket = new FakeWebSocket();
+          queueMicrotask(() => socket.close(1006, "refused"));
+          return asQwpSocket(socket);
+        },
+      }).then(
+        () => undefined,
+        (reason: unknown) => reason as Error,
+      );
+      expect(accepted).toBe(1);
+      expect(error?.message ?? "").not.toContain("ingressNegotiationTimeoutMs");
+    }
+  });
+
   it("bootstraps a browser qdb_session with Basic authentication", async () => {
     let requestedUrl: URL | undefined;
     let requestedInit: RequestInit | undefined;

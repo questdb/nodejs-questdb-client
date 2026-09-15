@@ -183,6 +183,41 @@ describe("QWP Node orphan drainer", () => {
     await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
   });
 
+  it("bounds the rescan cadence at the host timer ceiling, but not the poll cadence", async () => {
+    const timerCeiling = 0x7fffffff;
+    const rootDirectory = await root();
+    const createSession = async () => new FakeDrainSession();
+    // scanIntervalMs is passed straight to setTimeout; above the ceiling the
+    // host clamps it to ~1ms and the drainer rescans the filesystem ~1000x/s.
+    expect(
+      () =>
+        new QwpNodeOrphanDrainer({
+          rootDirectory,
+          scanIntervalMs: timerCeiling + 1,
+          createSession,
+        }),
+    ).toThrow(
+      `QWP orphan-drain scanIntervalMs must be a non-negative finite number no greater than ${timerCeiling}`,
+    );
+    // The inclusive ceiling and the documented zero ("disables the timer").
+    for (const scanIntervalMs of [0, timerCeiling]) {
+      const drainer = new QwpNodeOrphanDrainer({
+        rootDirectory,
+        scanIntervalMs,
+        createSession,
+      });
+      await drainer.close();
+    }
+    // durableAckPollIntervalMs is compared against an elapsed clock.
+    const polling = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: timerCeiling + 1,
+      createSession,
+    });
+    await polling.close();
+  });
+
   it("adopts and drains discovered slots with bounded background workers", async () => {
     const rootDirectory = await root();
     const first = await recordSlot(rootDirectory, "first");

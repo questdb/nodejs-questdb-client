@@ -1,7 +1,10 @@
 import { QwpReconnectExhaustedError } from "../transport";
 import { monotonicNowMs } from "./monotonic-clock";
+import { QWP_MAX_TIMER_DELAY_MS } from "./timer-bounds";
 
-const MAX_TIMER_DELAY_MS = 0x7fffffff;
+// A deadline is chunked rather than rejected: an outage budget legitimately
+// outlives one host timer, so each hop re-arms for the remaining time.
+const MAX_TIMER_DELAY_MS = QWP_MAX_TIMER_DELAY_MS;
 
 /** Runs one reconnect operation inside the outage-wide deadline. */
 export async function awaitReconnectDeadline<T>(

@@ -41,6 +41,17 @@ const SEGMENT_PREFIX = "sf-";
 const SEGMENT_SUFFIX = ".sfa";
 const SEGMENT_HEADER_SIZE = 24;
 const FRAME_HEADER_SIZE = 8;
+
+/**
+ * Bytes one fixed segment reserves, including its SFA and frame headers. The
+ * connection-string parser shares this derivation so its minimum-budget check
+ * cannot drift from the store's.
+ *
+ * @internal
+ */
+export function qwpSegmentFileSize(maxSegmentBytes: number): number {
+  return SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
+}
 const MANIFEST_REQUIRED_FLAG = 1;
 const MANIFEST_MAGIC = Buffer.from("SFM1");
 const MANIFEST_FILE = "sf-manifest.bin";
@@ -202,12 +213,19 @@ export interface QwpNodeFileReplayStoreOptions {
    * closing batch must fit the target on its own.
    * The retained dictionary is additive; beyond the cap appends backpressure.
    * When S divides maxBytes exactly, this segment cap is 2 * maxBytes.
+   *
+   * Must reserve at least one whole segment -- `maxSegmentBytes + 32` for the
+   * 24-byte SFA header and the 8-byte frame header. A smaller target throws a
+   * `RangeError`, because no append could ever reserve its first segment and
+   * no acknowledgement could ever free room for one.
    */
   maxBytes?: number;
   /**
    * Maximum QWP frame payload and target segment data size. Each fixed segment
    * reserves this value plus one record header and its 24-byte SFA header,
-   * so a maximum-sized frame still fits. Defaults to 4 MiB.
+   * so a maximum-sized frame still fits. Defaults to 4 MiB. With a directory,
+   * {@link QwpNodeFileReplayStoreOptions.maxBytes} must leave room for one
+   * whole segment of this size plus those 32 bytes of headers.
    */
   maxSegmentBytes?: number;
   /**
@@ -594,11 +612,21 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         "store-and-forward maxSegmentBytes must fit in uint32",
       );
     }
-    this.segmentFileSize =
-      SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + this.maxSegmentBytes;
+    this.segmentFileSize = qwpSegmentFileSize(this.maxSegmentBytes);
     if (!Number.isSafeInteger(this.segmentFileSize)) {
       throw new RangeError(
         "store-and-forward maxSegmentBytes is too large for a fixed segment",
+      );
+    }
+    // A journal reserves whole fixed segments, so a target that cannot hold even
+    // one is not "full" -- it is unsatisfiable: every reservation needs
+    // segmentFileSize bytes that no acknowledgement or trim could ever free.
+    // Left unchecked the producer stalls its whole append deadline per row and
+    // then fails permanently, having written nothing.
+    if (maxBytes < this.segmentFileSize) {
+      throw new RangeError(
+        "store-and-forward maxBytes (sf_max_total_bytes) must reserve at least one whole segment " +
+          `[maxBytes=${maxBytes}, maxSegmentBytes=${this.maxSegmentBytes}, segmentBytes=${this.segmentFileSize}]`,
       );
     }
     this.liveFrameBytes = Math.min(maxBytes, DEFAULT_LIVE_FRAME_BYTES);

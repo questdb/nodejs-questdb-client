@@ -18,6 +18,10 @@ import {
 import { QwpProtocolError } from "../../../client-core/src/_qwp/_core/errors";
 import { monotonicNowMs } from "../../../client-core/src/_qwp/_internal/monotonic-clock";
 import {
+  exceedsQwpTimerCeiling,
+  QWP_MAX_TIMER_DELAY_MS,
+} from "../../../client-core/src/_qwp/_internal/timer-bounds";
+import {
   QwpCatchUpCapGapError,
   QwpDurableAckPersistentFailureError,
 } from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
@@ -125,10 +129,14 @@ export interface QwpNodeOrphanDrainerOptions {
   maxConcurrent?: number;
   /**
    * Periodic rescan cadence; zero disables the timer. Explicit scanNow()
-   * requests remain available. Defaults to 30s.
+   * requests remain available. Defaults to 30s. Capped at 2,147,483,647ms
+   * (the host timer ceiling); a larger value throws a `RangeError`.
    */
   scanIntervalMs?: number;
-  /** Durable-ACK prompt cadence for adopted sessions. Zero disables it. */
+  /**
+   * Durable-ACK prompt cadence for adopted sessions. Zero disables it.
+   * Not capped at the host timer ceiling: compared against elapsed time only.
+   */
   durableAckPollIntervalMs?: number;
   onEvent?: (event: QwpNodeOrphanDrainEvent) => void;
   /** Java-parity data-loss notification for an abandoned orphan slot. */
@@ -293,9 +301,13 @@ export class QwpNodeOrphanDrainer {
       );
     }
     const scanIntervalMs = options.scanIntervalMs ?? DEFAULT_SCAN_INTERVAL_MS;
-    if (!Number.isFinite(scanIntervalMs) || scanIntervalMs < 0) {
+    if (
+      !Number.isFinite(scanIntervalMs) ||
+      scanIntervalMs < 0 ||
+      exceedsQwpTimerCeiling(scanIntervalMs)
+    ) {
       throw new RangeError(
-        "QWP orphan-drain scanIntervalMs must be a non-negative finite number",
+        `QWP orphan-drain scanIntervalMs must be a non-negative finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
       );
     }
     const durableAckPollIntervalMs =

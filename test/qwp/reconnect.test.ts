@@ -848,6 +848,152 @@ describe("QWP reconnect timer bounds", () => {
     await session.close();
     await expect(connection.closed).resolves.toMatchObject({ wasClean: true });
   });
+
+  // Every option below hands its value straight to a raw setTimeout/setInterval.
+  // Hosts clamp a delay above the ceiling to ~1ms, so accepting one inverts the
+  // request: the longest budget a caller can ask for becomes the shortest.
+  it.each([
+    [
+      "ackTimeoutMs",
+      { ackTimeoutMs: overTimerCeiling },
+      `ackTimeoutMs must be a positive finite number no greater than ${timerCeiling}`,
+    ],
+    [
+      "durableAckKeepaliveMs",
+      { durableAckKeepaliveMs: overTimerCeiling },
+      `durableAckKeepaliveMs must be a non-negative finite number no greater than ${timerCeiling}`,
+    ],
+  ] as const)(
+    "rejects an ingress %s above the host timer ceiling before any timer is armed",
+    async (_name, options, message) => {
+      const factory = vi.fn(async () => new FakeConnection("primary"));
+      const replayStore = new TrackingReplayStore();
+      const load = vi.spyOn(replayStore, "load");
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        await expect(
+          QwpIngressSession.connect(factory, { ...options, replayStore }),
+        ).rejects.toThrow(message);
+        expect(factory).not.toHaveBeenCalled();
+        expect(load).not.toHaveBeenCalled();
+        expect(setTimeoutSpy).not.toHaveBeenCalled();
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    },
+  );
+
+  it("accepts ingress timer options at the inclusive ceiling, and zero", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: timerCeiling,
+      durableAckKeepaliveMs: 0,
+    });
+    await session.close();
+    await expect(connection.closed).resolves.toMatchObject({ wasClean: true });
+  });
+
+  it.each([
+    [
+      "serverInfoTimeoutMs",
+      { serverInfoTimeoutMs: overTimerCeiling },
+      `serverInfoTimeoutMs must be a positive finite number no greater than ${timerCeiling}`,
+    ],
+    [
+      "queryTimeoutMs",
+      { queryTimeoutMs: overTimerCeiling },
+      `queryTimeoutMs must be a non-negative finite number no greater than ${timerCeiling}`,
+    ],
+    [
+      "cancelDrainTimeoutMs",
+      { cancelDrainTimeoutMs: overTimerCeiling },
+      `cancelDrainTimeoutMs must be a positive finite number no greater than ${timerCeiling}`,
+    ],
+  ] as const)(
+    "rejects an egress %s above the host timer ceiling before connecting",
+    async (_name, options, message) => {
+      const factory = vi.fn(async () => new FakeConnection("primary"));
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        await expect(
+          QwpEgressSession.connect(factory, options),
+        ).rejects.toThrow(message);
+        expect(factory).not.toHaveBeenCalled();
+        expect(setTimeoutSpy).not.toHaveBeenCalled();
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    },
+  );
+
+  it("accepts egress timer options at the inclusive ceiling, and zero", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpEgressSession.connect(
+      async () => {
+        queueMicrotask(() => connection.receive(serverInfo("primary")));
+        return connection;
+      },
+      {
+        serverInfoTimeoutMs: timerCeiling,
+        queryTimeoutMs: 0,
+        cancelDrainTimeoutMs: timerCeiling,
+      },
+    );
+    await session.close();
+    await expect(connection.closed).resolves.toMatchObject({ wasClean: true });
+  });
+
+  it("rejects an over-ceiling explicit ACK-wait timeout argument", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {});
+    try {
+      await expect(
+        session.waitForAcknowledged(1n, overTimerCeiling),
+      ).rejects.toThrow(
+        `QWP ACK watermark timeout must be positive and finite, and no greater than ${timerCeiling}`,
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("rejects an over-ceiling explicit durable-wait timeout argument", async () => {
+    // The sibling of waitForAcknowledged, and what backs an explicit
+    // durableAckTimeoutMs. Durable tracking has to be negotiated first, or the
+    // earlier guards would answer instead of the ceiling.
+    const connection = new FakeConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    const session = await QwpIngressSession.connect(async () => connection, {
+      durableAckKeepaliveMs: 50,
+    });
+    const acknowledged = {
+      status: QWP_STATUS.OK,
+      sequence: 7n,
+      tables: [{ name: "trades", sequenceTransaction: 3n }],
+      message: null,
+    } as unknown as Parameters<typeof session.waitForDurable>[0];
+    try {
+      await expect(
+        session.waitForDurable(acknowledged, overTimerCeiling),
+      ).rejects.toThrow(
+        `durable ACK timeout must be a positive finite number no greater than ${timerCeiling}`,
+      );
+      // The inclusive ceiling gets past the guard and arms a real wait, so it
+      // stays pending instead of rejecting.
+      const settled = await Promise.race([
+        session
+          .waitForDurable(acknowledged, timerCeiling)
+          .then(() => "resolved" as const)
+          .catch((error: unknown) => error),
+        Promise.resolve("pending" as const),
+      ]);
+      expect(settled).toBe("pending");
+    } finally {
+      await session.close();
+    }
+  });
 });
 
 describe("QWP ingress reconnect and replay", () => {
@@ -8147,23 +8293,118 @@ describe("QWP Node file replay store", () => {
 
   it("enforces its configured disk budget before writing", async () => {
     const directory = await trackedDirectory();
+    // The smallest budget that can reserve a segment at all: one 33-byte
+    // segment. The old literal (54 against the 4 MiB segment default) could
+    // never reserve its first segment, so it exercised an unsatisfiable gate
+    // rather than a budget verdict, and is now rejected at construction.
     const store = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 54,
+      maxBytes: 33,
+      maxSegmentBytes: 1,
     });
     await store.load();
     await expect(
-      store.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) }),
+      store.append({ frameSequence: 0n, payload: Uint8Array.of(1) }),
+    ).resolves.toBeUndefined();
+    expect(store.metrics.totalBytes).toBe(33);
+    await expect(
+      store.append({ frameSequence: 1n, payload: Uint8Array.of(2) }),
     ).rejects.toBeInstanceOf(QwpReplayStoreFullError);
     // Asserted while the store still holds the slot, so the owner directory is
-    // expected here; nothing journal-shaped may exist alongside it.
+    // expected here; the segment that would exceed the budget was never made.
     expect((await readdir(directory)).sort()).toEqual([
       ".lock",
       ".lock.owner",
       ".lock.pid",
+      "sf-0000000000000000.sfa",
+      "sf-manifest.bin",
     ]);
     await store.close();
-    await expectOnlyJavaSlotLockMetadata(directory);
+  });
+
+  it("rejects a journal budget smaller than one fixed segment", async () => {
+    const directory = await trackedDirectory();
+    // The finding's configuration: 1 MiB total against the 4 MiB segment
+    // default. Every append would stall its whole deadline and then fail
+    // forever, having written nothing.
+    expect(
+      () => new QwpNodeFileReplayStore({ directory, maxBytes: 1024 * 1024 }),
+    ).toThrow(
+      "store-and-forward maxBytes (sf_max_total_bytes) must reserve at least one whole segment " +
+        "[maxBytes=1048576, maxSegmentBytes=4194304, segmentBytes=4194336]",
+    );
+    // One byte short of a segment, and the 32 header bytes nobody budgets for.
+    expect(
+      () => new QwpNodeFileReplayStore({ directory, maxBytes: 4194335 }),
+    ).toThrow(RangeError);
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({ directory, maxBytes: 4 * 1024 * 1024 }),
+    ).toThrow(RangeError);
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({
+          directory,
+          maxBytes: 32,
+          maxSegmentBytes: 1,
+        }),
+    ).toThrow(RangeError);
+    // Exactly one segment is accepted.
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({
+          directory,
+          maxBytes: 33,
+          maxSegmentBytes: 1,
+        }),
+    ).not.toThrow();
+    // The rejection precedes mkdir and the advisory lock, so a directory the
+    // harness never created still does not exist afterwards. Asserting against
+    // the tracked directory could not fail: the harness creates it, and the
+    // constructor never touches the filesystem even when it accepts.
+    const uncreated = join(directory, "never-created");
+    expect(
+      () =>
+        new QwpNodeFileReplayStore({
+          directory: uncreated,
+          maxBytes: 1024 * 1024,
+        }),
+    ).toThrow(RangeError);
+    await expect(readdir(uncreated)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("accepts the smallest journal without depending on a symbol dictionary", async () => {
+    const directory = await trackedDirectory();
+    const segmentFileSize = 33;
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxBytes: segmentFileSize,
+      maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+      appendDeadlineMs: 250,
+    });
+    await store.load();
+    // No appendSymbolDictionary() anywhere: the first reservation must not
+    // depend on the schema happening to contain a SYMBOL column.
+    await expect(
+      store.append({ frameSequence: 0n, payload: Uint8Array.of(1) }),
+    ).resolves.toBeUndefined();
+    expect(store.metrics).toMatchObject({
+      pendingSegments: 1,
+      totalBytes: segmentFileSize,
+      totalBackpressureStalls: 0,
+      totalAppendTimeouts: 0,
+    });
+    // The journal is now full; an ACK -- not luck -- is what releases it.
+    const blocked = store.append({
+      frameSequence: 1n,
+      payload: Uint8Array.of(2),
+    });
+    await vi.waitFor(() => expect(store.metrics.waitingAppends).toBe(1));
+    await store.acknowledgeThrough(0n);
+    await expect(blocked).resolves.toBeUndefined();
+    expect(store.metrics.totalAppendTimeouts).toBe(0);
+    await store.close();
   });
 
   it("does not wait on a non-retryable append invariant", async () => {
@@ -8755,15 +8996,18 @@ describe("QWP Node file replay store", () => {
 
   it("preserves a live frame budget after dictionary growth exhausts the target", async () => {
     const directory = await trackedDirectory();
+    // 33 is one whole segment: the smallest legal budget. The dictionary below
+    // still exceeds it, which is the condition this test exercises.
     const first = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 32,
+      maxBytes: 33,
       maxSegmentBytes: 1,
     });
     await first.load();
     // Header + block metadata + this entry exceed the configured target.
     // Unlike frame bytes, this prefix never shrinks.
     await first.appendSymbolDictionary(0, ["abcdefghijklmnopqrstuvwxyz1234"]);
+    expect(first.metrics.totalBytes).toBeGreaterThan(33);
     await expect(
       first.append({ frameSequence: 0n, payload: Uint8Array.of(1) }),
     ).resolves.toBeUndefined();
@@ -8779,7 +9023,7 @@ describe("QWP Node file replay store", () => {
 
     const recovered = new QwpNodeFileReplayStore({
       directory,
-      maxBytes: 32,
+      maxBytes: 33,
       maxSegmentBytes: 1,
     });
     await expect(recovered.load()).resolves.toEqual([

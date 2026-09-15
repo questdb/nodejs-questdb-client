@@ -11,6 +11,7 @@ import {
   QwpUpgradeError,
 } from "../transport";
 import { QwpAsyncQueue } from "./async-queue";
+import { exceedsQwpTimerCeiling, QWP_MAX_TIMER_DELAY_MS } from "./timer-bounds";
 
 interface QwpWebSocketMessageEvent {
   data: unknown;
@@ -127,9 +128,14 @@ export function validateQwpWebSocketTimeouts(options: {
     ["sendTimeoutMs", options.sendTimeoutMs],
     ["closeTimeoutMs", options.closeTimeoutMs],
   ] as const) {
-    if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+    if (
+      value !== undefined &&
+      (!Number.isFinite(value) || value <= 0 || exceedsQwpTimerCeiling(value))
+    ) {
       throw qwpNonRetryable(
-        new RangeError(`${name} must be a positive finite number`),
+        new RangeError(
+          `${name} must be a positive finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+        ),
       );
     }
   }

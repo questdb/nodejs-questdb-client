@@ -6,6 +6,7 @@ export * from "../../client-core/src/qwp";
 
 import {
   openQwpWebSocket,
+  qwpNonRetryable,
   QwpWebSocketLike,
   validateQwpWebSocketTimeouts,
 } from "../../client-core/src/_qwp/_internal/websocket-connection";
@@ -15,6 +16,10 @@ import {
 } from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
+import {
+  exceedsQwpTimerCeiling,
+  QWP_MAX_TIMER_DELAY_MS,
+} from "../../client-core/src/_qwp/_internal/timer-bounds";
 import {
   addQwpDurableAckWebSocketProtocol,
   decodeQwpIngressServerInfo,
@@ -341,6 +346,8 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
   /**
    * Time allowed for the optional ingress SERVER_INFO message. Defaults to
    * 250ms; zero disables the initial wait while retaining late negotiation.
+   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
+   * a `RangeError`.
    */
   ingressNegotiationTimeoutMs?: number;
   /**
@@ -674,6 +681,11 @@ function connectQwpBrowserRawEndpoint(
   // subprotocol carries the durable-ACK request, while the query parameter asks
   // the server to send the SERVER_INFO capability verdict this path consumes.
   const requestDurableAck = options.requestDurableAck === true;
+  // Validated before the socket is constructed, like the sibling endpoint path
+  // and validateQwpWebSocketTimeouts: reading it inside the opened-connection
+  // callback rejected an unusable option only after a WebSocket had been
+  // opened for it.
+  const negotiationTimeoutMs = ingressNegotiationTimeoutMs(options);
   const requestEndpoint = requestDurableAck
     ? browserNegotiationUrl(endpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1")
     : endpoint;
@@ -693,7 +705,7 @@ function connectQwpBrowserRawEndpoint(
           try {
             return await applyQwpBrowserIngressHandshake(
               connection,
-              ingressNegotiationTimeoutMs(options),
+              negotiationTimeoutMs,
               true,
               endpoint,
             );
@@ -818,9 +830,18 @@ function ingressNegotiationTimeoutMs(
   options: QwpBrowserWebSocketOptions,
 ): number {
   const timeoutMs = options.ingressNegotiationTimeoutMs ?? 250;
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-    throw new RangeError(
-      "ingressNegotiationTimeoutMs must be a non-negative finite number",
+  if (
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs < 0 ||
+    exceedsQwpTimerCeiling(timeoutMs)
+  ) {
+    // Non-retryable for the same reason validateQwpWebSocketTimeouts marks its
+    // rejections: this runs inside the per-attempt connection callback, and
+    // retrying cannot fix an option.
+    throw qwpNonRetryable(
+      new RangeError(
+        `ingressNegotiationTimeoutMs must be a non-negative finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+      ),
     );
   }
   return timeoutMs;

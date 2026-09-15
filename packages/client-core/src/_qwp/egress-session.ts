@@ -27,6 +27,10 @@ import {
 } from "./_internal/reconnecting-egress-connection";
 import { validateQwpReconnectBackoffs } from "./_internal/reconnect-backoff";
 import {
+  exceedsQwpTimerCeiling,
+  QWP_MAX_TIMER_DELAY_MS,
+} from "./_internal/timer-bounds";
+import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
@@ -43,15 +47,27 @@ export interface QwpEgressMetrics {
 }
 
 export interface QwpEgressSessionOptions {
-  /** SERVER_INFO handshake deadline. Defaults to 5 seconds. */
+  /**
+   * SERVER_INFO handshake deadline. Defaults to 5 seconds. Capped at
+   * 2,147,483,647ms (the host timer ceiling); a larger value throws a
+   * `RangeError`.
+   */
   serverInfoTimeoutMs?: number;
   /** Default per-query send-ahead credit. Defaults to zero (unbounded). */
   initialCredit?: number | bigint;
   /** Maximum decoded batches waiting for a consumer. Defaults to 4. */
   bufferPoolSize?: number;
-  /** Default per-query deadline. Zero or undefined disables query deadlines. */
+  /**
+   * Default per-query deadline. Zero or undefined disables query deadlines.
+   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
+   * a `RangeError`.
+   */
   queryTimeoutMs?: number;
-  /** Maximum wait for a terminal response after CANCEL. Defaults to 5 seconds. */
+  /**
+   * Maximum wait for a terminal response after CANCEL. Defaults to 5 seconds.
+   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
+   * a `RangeError`.
+   */
   cancelDrainTimeoutMs?: number;
   /**
    * Rejects a RESULT_BATCH declaring more rows than this. The connect helpers
@@ -88,7 +104,11 @@ export interface QwpEgressQueryOptions {
    * the async iterator advances past that batch. Defaults to true.
    */
   autoCredit?: boolean;
-  /** Per-query deadline overriding the session default. Zero disables it. */
+  /**
+   * Per-query deadline overriding the session default. Zero disables it.
+   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
+   * a `RangeError`.
+   */
   timeoutMs?: number;
   /** Sets typed positional parameters; index 0 maps to SQL placeholder `$1`. */
   binds?: QwpBindSetter;
@@ -137,8 +157,14 @@ function validateOptionalTimeout(
   name: string,
 ): number {
   const timeout = value ?? 0;
-  if (!Number.isFinite(timeout) || timeout < 0) {
-    throw new RangeError(`${name} must be a non-negative finite number`);
+  if (
+    !Number.isFinite(timeout) ||
+    timeout < 0 ||
+    exceedsQwpTimerCeiling(timeout)
+  ) {
+    throw new RangeError(
+      `${name} must be a non-negative finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
   }
   return timeout;
 }
@@ -149,9 +175,13 @@ function validateEgressSessionOptions(
   validateQwpReconnectBackoffs(options.reconnect);
   const serverInfoTimeoutMs =
     options.serverInfoTimeoutMs ?? QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS;
-  if (!Number.isFinite(serverInfoTimeoutMs) || serverInfoTimeoutMs <= 0) {
+  if (
+    !Number.isFinite(serverInfoTimeoutMs) ||
+    serverInfoTimeoutMs <= 0 ||
+    exceedsQwpTimerCeiling(serverInfoTimeoutMs)
+  ) {
     throw new RangeError(
-      "serverInfoTimeoutMs must be a positive finite number",
+      `serverInfoTimeoutMs must be a positive finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
     );
   }
   return {
@@ -211,8 +241,10 @@ function validateInitialCredit(
 }
 
 function validatePositiveTimeout(value: number, name: string): number {
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive finite number`);
+  if (!Number.isFinite(value) || value <= 0 || exceedsQwpTimerCeiling(value)) {
+    throw new RangeError(
+      `${name} must be a positive finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
   }
   return value;
 }

@@ -386,6 +386,48 @@ describe("QWP pooled client", () => {
     ).toThrow("housekeepingIntervalMs must be at least 100");
   });
 
+  it("bounds pool options that arm a host timer, and only those", () => {
+    const timerCeiling = 0x7fffffff;
+    const overTimerCeiling = timerCeiling + 1;
+    const factories = {
+      createSender: () => {
+        throw new Error("sender factory should not run");
+      },
+      createQuerySession: () => {
+        throw new Error("query factory should not run");
+      },
+    };
+    // Both reach a raw setTimeout/setInterval, where a larger delay is clamped
+    // to ~1ms: the pool would sweep ~1000x/s and refuse every borrow at once.
+    expect(
+      () => new QwpClient(factories, { acquireTimeoutMs: overTimerCeiling }),
+    ).toThrow(
+      `acquireTimeoutMs must be a non-negative number no greater than ${timerCeiling}`,
+    );
+    expect(
+      () =>
+        new QwpClient(factories, { housekeepingIntervalMs: overTimerCeiling }),
+    ).toThrow(
+      `housekeepingIntervalMs must be at least 100 and no greater than ${timerCeiling}`,
+    );
+    expect(
+      () =>
+        new QwpClient(factories, {
+          acquireTimeoutMs: timerCeiling,
+          housekeepingIntervalMs: timerCeiling,
+        }),
+    ).not.toThrow();
+    // idleTimeoutMs and maxLifetimeMs are compared against an elapsed clock,
+    // so they must keep accepting any safe integer.
+    expect(
+      () =>
+        new QwpClient(factories, {
+          idleTimeoutMs: overTimerCeiling,
+          maxLifetimeMs: overTimerCeiling,
+        }),
+    ).not.toThrow();
+  });
+
   it("starts and stops runtime background services exactly once", async () => {
     let starts = 0;
     let closes = 0;

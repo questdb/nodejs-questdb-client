@@ -148,24 +148,50 @@ budget on both sides, matching `QwpReconnectOptions.maxDurationMs`; the backoff
 keys require a positive value, because a zero delay is a hot retry loop rather
 than a documented mode.
 
+#### Timer bounds
+
+Every millisecond option that arms a host timer is capped at `2147483647` (about
+24.8 days), the largest delay Node and browsers schedule without clamping. A
+larger value is rejected with a `RangeError` rather than accepted, because hosts
+clamp an over-large delay to about 1 ms — the longest budget you can ask for
+would otherwise become the shortest one you get. For a capped option the cap
+applies identically to the connection-string key and to the typed option that
+overrides it, and to an explicit `timeoutMs` argument such as
+`waitForAcknowledged(sequence, timeoutMs)`.
+
+Exemption is a property of the typed spelling, not of the key. `idle_timeout_ms`,
+`max_lifetime_ms` and `auto_flush_interval` keep the parser's integer range —
+`2147483647` — even though the typed `idleTimeoutMs`, `maxLifetimeMs` and
+`autoFlushIntervalMs` below accept any safe integer, because every
+connection-string value must parse as an integer within a stated range.
+
+Budgets that are only measured against an elapsed clock, or that are re-clamped
+inside a rescheduling loop, accept any safe integer and are deliberately exempt:
+`reconnect_max_duration_millis`, `failover_max_duration_ms`,
+`poison_min_escalation_window_millis` and
+`catch_up_cap_gap_min_escalation_window_millis`, together with the typed
+spellings `maxDurationMs`, `poisonMinEscalationWindowMs`,
+`catchUpCapGapMinEscalationWindowMs`, `idleTimeoutMs`, `maxLifetimeMs`,
+`autoFlushIntervalMs` and `durableAckPollIntervalMs`.
+
 ### Store-and-forward (Node only)
 
 Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
 shown as a dash is applied downstream of the connect string, by the sender or
 session that consumes it.
 
-| Key                                             | Value                          | Default       | Meaning                                                                                                                                   |
-| ----------------------------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `sf_dir`                                        | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                     |
-| `sf_durability`                                 | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                      |
-| `sf_max_total_bytes`                            | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. Without `sf_dir` it retunes the 128 MiB memory queue.                      |
-| `sf_max_segment_bytes`                          | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. Set, it caps a frame without `sf_dir` too. |
-| `sf_sync_interval_millis`                       | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                        |
-| `sf_append_deadline_millis`                     | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                          |
-| `initial_connect_retry`                         | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                 |
-| `drain_orphans`                                 | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                       |
-| `max_background_drainers`                       | integer                        | —             | Concurrent orphan drainers.                                                                                                               |
-| `catch_up_cap_gap_min_escalation_window_millis` | integer ms                     | `300000`      | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. Requires `sf_dir`.                                               |
+| Key                                             | Value                          | Default       | Meaning                                                                                                                                                                                                                                                    |
+| ----------------------------------------------- | ------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sf_dir`                                        | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                                                                                                                                      |
+| `sf_durability`                                 | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                                                                                                                                       |
+| `sf_max_total_bytes`                            | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. With `sf_dir`, must reserve at least one whole segment: `sf_max_segment_bytes + 32`. Without `sf_dir` it retunes the 128 MiB memory queue.                                                  |
+| `sf_max_segment_bytes`                          | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. With `sf_dir`, `sf_max_total_bytes` must leave room for one whole segment of this size plus 32 bytes of headers. Set, it caps a frame without `sf_dir` too. |
+| `sf_sync_interval_millis`                       | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                                                                                                                                         |
+| `sf_append_deadline_millis`                     | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                                                                                                                                           |
+| `initial_connect_retry`                         | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                                                                                                                                  |
+| `drain_orphans`                                 | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                                                                                                                                        |
+| `max_background_drainers`                       | integer                        | —             | Concurrent orphan drainers.                                                                                                                                                                                                                                |
+| `catch_up_cap_gap_min_escalation_window_millis` | integer ms                     | `300000`      | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. Requires `sf_dir`.                                                                                                                                                                |
 
 ### Egress
 
@@ -465,7 +491,21 @@ Java-produced segment and dictionary fixtures and compare TypeScript output with
 same normalized bytes.
 
 Each segment reserves `maxSegmentBytes` of target payload data (4 MiB by default)
-plus one frame header so a maximum-sized frame fits. The active segment and one
+plus one frame header so a maximum-sized frame fits. A journal must therefore be
+able to reserve at least one whole segment: `sf_max_total_bytes` must be at least
+`sf_max_segment_bytes + 32`, counting the 24-byte segment header and the 8-byte
+frame header. A smaller total is rejected at configuration time, because no
+append could ever reserve its first segment and no acknowledgement could ever
+free room for one.
+
+The check reads configuration only and runs before the journal is opened, so it
+also applies to a directory that already holds unsent frames: raising
+`sf_max_segment_bytes` without raising `sf_max_total_bytes` makes an existing
+journal fail to open, leaving its backlog on disk until the total is raised.
+Raise `sf_max_total_bytes` first, or drain the directory before changing the
+segment size. Two or more segments are recommended, so a rotation can
+overlap with a pre-provisioned hot spare instead of provisioning one
+synchronously. The active segment and one
 pre-sized temporary hot spare keep open file handles; rotation activates the spare.
 A process-wide, unreferenced worker provisions replacements, checkpoints dirty paths,
 and performs ACK-driven unlink and directory barriers. ACK trimming advances the
@@ -1457,7 +1497,10 @@ A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
 the ingress frame cap from the first publication onward, before the server has
 advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.
 Raise `sf_max_segment_bytes`, or lower the cap with
-`qwp.session.maxBatchSizeBytes`, to choose a different bound. Without `sf_dir`
+`qwp.session.maxBatchSizeBytes`, to choose a different bound. `sf_max_total_bytes`
+must leave room for at least one `sf_max_segment_bytes` segment plus 32 bytes of
+headers, so with the 4 MiB segment default `sf_max_total_bytes=4m` is rejected and
+`sf_max_total_bytes=1m` requires lowering `sf_max_segment_bytes` too. Without `sf_dir`
 there is no default frame cap, and `sf_max_total_bytes`,
 `sf_append_deadline_millis` and `sf_max_segment_bytes` retune the built-in
 memory replay queue instead -- note that queue's own ceiling is 128 MiB, not the

@@ -1204,6 +1204,34 @@ describe("QwpEgressSession", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it("rejects over-ceiling per-query and completion timeout arguments", async () => {
+    // Both are passed straight to setTimeout, so above the host ceiling the
+    // delay is clamped to ~1ms and the longest budget becomes the shortest.
+    const timerCeiling = 0x7fffffff;
+    const overTimerCeiling = timerCeiling + 1;
+    const connection = new FakeConnection();
+    const session = new QwpEgressSession(connection, {});
+    connection.receive(serverInfo());
+    await session.ready;
+
+    await expect(
+      session.query("select 1", { timeoutMs: overTimerCeiling }),
+    ).rejects.toThrow(
+      `timeoutMs must be a non-negative finite number no greater than ${timerCeiling}`,
+    );
+    // The rejected query must not have claimed the single active slot.
+    const query = await session.query("select 1", { timeoutMs: timerCeiling });
+    await expect(query.awaitCompletion(overTimerCeiling)).rejects.toThrow(
+      `completion timeoutMs must be a non-negative finite number no greater than ${timerCeiling}`,
+    );
+    // The inclusive ceiling and zero stay legal on the same call.
+    await expect(query.awaitCompletion(0)).resolves.toBe(false);
+
+    connection.receive(resultEnd(query.requestId, 0n, 0n));
+    await query.completion;
+    await session.close();
+  });
+
   it("enforces its maxBatchRows on the batches a query receives", async () => {
     // The session has to hand its own request down to the decoder; otherwise
     // the bound exists only as a header on the wire.
