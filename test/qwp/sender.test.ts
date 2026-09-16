@@ -3617,6 +3617,51 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
     await sender.close();
   });
 
+  it("sends through a session that implements only the required members", async () => {
+    // QwpSenderSession requires sendTables, waitForDurable and close; the
+    // publication split, the delta variants and the ACK watermark are all
+    // optional capabilities. A default-configured sender nonetheless took the
+    // publication-only path and threw when publishTables was absent, so a
+    // session that satisfied the published interface could not send at all:
+    // flush() rejected, close() rejected too, and the staged row was reported
+    // lost. Fall back to the one method the interface does require.
+    class RequiredOnlySession implements QwpSenderSession {
+      readonly sent: (readonly QwpTableBuffer[])[] = [];
+      closeCalls = 0;
+
+      async sendTables(
+        tables: readonly QwpTableBuffer[],
+      ): Promise<QwpIngressResponse> {
+        this.sent.push(tables);
+        return { status: QWP_STATUS.OK, sequence: 0n, tables: [] };
+      }
+
+      async waitForDurable(): Promise<void> {}
+
+      async close(): Promise<void> {
+        this.closeCalls++;
+      }
+    }
+
+    const session = new RequiredOnlySession();
+    const sender = new QwpSender(async () => session);
+    await sender.table("events").longColumn("value", 42n).atNow();
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0][0].name).toBe("events");
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 0,
+      totalRowsPublished: 1,
+      totalFlushFailures: 0,
+    });
+
+    // close() must not demand the optional ACK watermark either.
+    await expect(sender.close()).resolves.toBeUndefined();
+    expect(session.closeCalls).toBe(1);
+    expect(sender.metrics.pendingRows).toBe(0);
+  });
+
   it("still rejects a word wider than 64 bits", () => {
     const sender = new QwpSender(async () => new PublishingSession(), {
       autoFlush: false,

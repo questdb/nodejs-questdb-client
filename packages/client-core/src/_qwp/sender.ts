@@ -122,7 +122,17 @@ export class QwpSenderCloseTimeoutError extends Error {
   }
 }
 
-/** The subset of QwpIngressSession used by QwpSender. */
+/**
+ * The subset of QwpIngressSession used by QwpSender.
+ *
+ * Only `sendTables`, `waitForDurable`, and `close` are required. The optional
+ * members are capabilities the sender uses when present: the `*WithPublication`
+ * and `publish*` pairs separate the local publication boundary from the server
+ * ACK, `sendTablesDelta`/`publishTablesDelta` carry incremental symbol
+ * dictionaries, and `waitForAcknowledged` exposes the ACK watermark. A session
+ * that implements only the required members is supported and falls back to
+ * `sendTables`.
+ */
 export interface QwpSenderSession {
   readonly metrics?: QwpIngressMetrics;
   readonly maxBatchSizeBytes?: number;
@@ -2104,22 +2114,30 @@ export class QwpSender {
         sessionAcknowledgedSequence(session) < target
       ) {
         if (!session.waitForAcknowledged) {
-          throw new Error(
-            "this QWP ingress session does not expose an ACK watermark",
+          // waitForAcknowledged is optional on QwpSenderSession, so a session
+          // implementing only the required members exposes no watermark to
+          // drain: its sendTables() promise is the acknowledgement, and the
+          // close flush above already consumed it. Refusing to close such a
+          // session broke the interface this class publishes instead of
+          // protecting anything.
+          this.log(
+            "debug",
+            "QWP ingress session exposes no ACK watermark; skipping the close drain",
           );
-        }
-        const remaining = drainDeadline - Date.now();
-        if (remaining <= 0) throw this.closeTimeoutError();
-        try {
-          await this.withCloseDeadline(
-            session.waitForAcknowledged(target, remaining),
-            drainDeadline,
-          );
-        } catch (error) {
-          if (error instanceof QwpIngressAckTimeoutError) {
-            throw this.closeTimeoutError();
+        } else {
+          const remaining = drainDeadline - Date.now();
+          if (remaining <= 0) throw this.closeTimeoutError();
+          try {
+            await this.withCloseDeadline(
+              session.waitForAcknowledged(target, remaining),
+              drainDeadline,
+            );
+          } catch (error) {
+            if (error instanceof QwpIngressAckTimeoutError) {
+              throw this.closeTimeoutError();
+            }
+            throw error;
           }
-          throw error;
         }
       }
     } catch (error) {
@@ -2862,22 +2880,39 @@ export class QwpSender {
       const publisher = useDelta
         ? session.publishTablesDelta
         : session.publishTables;
-      if (!publisher) {
-        throw new Error(
-          "this QWP ingress session does not support publication-only flushes",
-        );
-      }
-      publication = publisher
-        .call(session, wireTables, {
+      if (publisher) {
+        publication = publisher
+          .call(session, wireTables, {
+            gorilla: encode?.gorilla,
+            deferCommit,
+          })
+          .then(() => {
+            publishedSequence = advancedSequence(
+              beforeSequence,
+              sessionPublishedSequence(session),
+            );
+          });
+      } else {
+        // Only sendTables is required by QwpSenderSession; the publication
+        // split is optional. Throwing here made every conforming session
+        // without it unusable through the default configuration -- flush()
+        // rejected, close() rejected, and the row was reported lost -- even
+        // though the one method the interface does require can send it. Fall
+        // back to it rather than refusing the contract this class publishes.
+        //
+        // Its promise settles on the server ACK, so it is not awaited as a
+        // publication boundary: this flush did not ask for one, and under
+        // deferCommit the server withholds that ACK until a later commit.
+        // It is consumed exactly like the ACK-waiting path below, which the
+        // shipped sessions already reach whenever they expose no tracked
+        // sender.
+        const send = useDelta ? session.sendTablesDelta! : session.sendTables;
+        response = send.call(session, wireTables, {
           gorilla: encode?.gorilla,
           deferCommit,
-        })
-        .then(() => {
-          publishedSequence = advancedSequence(
-            beforeSequence,
-            sessionPublishedSequence(session),
-          );
         });
+        void response.catch(() => undefined);
+      }
     }
     publishedSequence = advancedSequence(
       beforeSequence,
