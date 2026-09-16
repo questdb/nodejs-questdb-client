@@ -75,6 +75,21 @@ function resultEnd(requestId: bigint): Uint8Array {
   );
 }
 
+function emptyResultBatch(requestId: bigint): Uint8Array {
+  return encodeQwpFrame(
+    new QwpByteWriter()
+      .writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH)
+      .writeBigUint64(requestId)
+      .writeUint8(0) // batch sequence
+      .writeUint8(0) // table name
+      .writeUint8(0) // row count
+      .writeUint8(0) // initial column count
+      .toUint8Array(),
+    0,
+    1,
+  );
+}
+
 class FakeConnection implements QwpBinaryConnection {
   readonly handshake: QwpHandshakeMetadata = { qwpVersion: 1 };
   readonly messages: AsyncIterable<Uint8Array>;
@@ -1067,6 +1082,58 @@ describe("QWP pooled client", () => {
     const reused = await client.borrowQuery();
     expect(queryCreations).toBe(1);
     await reused.close();
+    await client.close();
+  });
+
+  it("keeps lease-return teardown bounded while a terminal waits on a view", async () => {
+    const connections: FakeConnection[] = [];
+    let queryCreations = 0;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: async (slot) => {
+          queryCreations++;
+          return createQuerySession(slot, connections, {
+            cancelDrainTimeoutMs: 20,
+          });
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 500,
+      },
+    );
+    const lease = await client.borrowQuery();
+    let enterHandler!: () => void;
+    const handlerEntered = new Promise<void>((resolve) => {
+      enterHandler = resolve;
+    });
+    let releaseHandler!: () => void;
+    const handlerReleased = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    const query = await lease.queryViews("select * from x", async () => {
+      enterHandler();
+      await handlerReleased;
+    });
+    connections[0].receive(emptyResultBatch(query.requestId));
+    await handlerEntered;
+
+    const releasing = lease.close();
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(2));
+    connections[0].receive(resultEnd(query.requestId));
+    await expect(releasing).resolves.toBeUndefined();
+    expect(client.metrics.queries.total).toBe(0);
+
+    releaseHandler();
+    const replacement = await client.borrowQuery();
+    expect(queryCreations).toBe(2);
+    await replacement.close();
     await client.close();
   });
 

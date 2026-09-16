@@ -619,7 +619,31 @@ export class QwpNodeOrphanDrainer {
   private async waitUntilDrained(
     session: QwpNodeOrphanDrainSession,
   ): Promise<void> {
-    const terminal = session.closed.then(() => "closed" as const);
+    // Subscribe once for the lifetime of the adopted session. Racing the same
+    // unresolved promise on every 50ms poll retains one reaction per iteration
+    // until the outage ends, so memory grew without bound precisely while an
+    // orphan was expected to wait in the background.
+    let terminal = false;
+    let terminalRejection: unknown;
+    void session.closed.then(
+      () => {
+        terminal = true;
+      },
+      (error: unknown) => {
+        terminalRejection = error;
+        terminal = true;
+      },
+    );
+    const throwIfTerminal = (): void => {
+      if (!terminal) return;
+      throw (
+        terminalRejection ??
+        session.metrics.lastError ??
+        new Error(
+          "QWP orphan drain session closed before its replay slot drained",
+        )
+      );
+    };
     // Elapsed time. On the wall clock a backward correction suspended the
     // keepalive for the size of the step while the drain went on holding the
     // slot's advisory lock and one of its worker slots, waiting for durable
@@ -630,18 +654,9 @@ export class QwpNodeOrphanDrainer {
         : Number.POSITIVE_INFINITY;
     while (!this.closing) {
       if (session.metrics.pendingReplayFrames === 0) return;
-      const outcome = await Promise.race([
-        terminal,
-        delay(DEFAULT_PROGRESS_POLL_MS).then(() => "poll" as const),
-      ]);
-      if (outcome === "closed") {
-        throw (
-          session.metrics.lastError ??
-          new Error(
-            "QWP orphan drain session closed before its replay slot drained",
-          )
-        );
-      }
+      throwIfTerminal();
+      await delay(DEFAULT_PROGRESS_POLL_MS);
+      throwIfTerminal();
       if (
         session.pollDurableAck &&
         this.durableAckPollIntervalMs > 0 &&

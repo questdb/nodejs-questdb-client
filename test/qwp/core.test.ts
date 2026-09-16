@@ -47,6 +47,7 @@ import {
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
 import {
+  decodeUtf8,
   encodeUtf8,
   utf8Length,
 } from "../../packages/client-core/src/_qwp/_core/bytes";
@@ -115,6 +116,14 @@ describe("QWP browser-safe byte core", () => {
     ]) {
       expect(utf8Length(value)).toBe(encodeUtf8(value).length);
     }
+  });
+
+  it("preserves a leading U+FEFF in each length-delimited string", () => {
+    const withLeadingCharacter = "\uFEFFalpha";
+    expect(decodeUtf8(encodeUtf8(withLeadingCharacter))).toBe(
+      withLeadingCharacter,
+    );
+    expect(decodeUtf8(encodeUtf8("alpha"))).toBe("alpha");
   });
 });
 

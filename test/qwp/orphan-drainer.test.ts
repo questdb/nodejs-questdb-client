@@ -718,6 +718,41 @@ describe("QWP Node orphan drainer", () => {
     await drainer.close();
   });
 
+  it("does not attach another terminal reaction on every progress poll", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = new FakeDrainSession();
+      session.pollDurableAck = () => Promise.resolve();
+      const drainer = new QwpNodeOrphanDrainer({
+        rootDirectory: "/unused",
+        scanIntervalMs: 0,
+        durableAckPollIntervalMs: 0,
+        createSession: async () => session,
+      });
+      const race = vi.spyOn(Promise, "race");
+      const waiting = (
+        drainer as unknown as {
+          waitUntilDrained(value: QwpNodeOrphanDrainSession): Promise<void>;
+        }
+      ).waitUntilDrained(session);
+      const initialRaces = race.mock.calls.length;
+
+      for (let poll = 0; poll < 5; poll++) {
+        vi.advanceTimersByTime(50);
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      expect(race.mock.calls).toHaveLength(initialRaces);
+
+      session.pendingReplayFrames = 0;
+      vi.advanceTimersByTime(50);
+      await expect(waiting).resolves.toBeUndefined();
+      race.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stops active sessions when the owning client closes", async () => {
     const rootDirectory = await root();
     await recordSlot(rootDirectory, "offline");

@@ -1039,7 +1039,9 @@ export class QwpIngressSession {
     // rejection, while retaining dictionary entries that did persist.
     const reconciledPublication = sending.publication.catch(
       (error: unknown) => {
-        this.restoreDeltaStateAfterPublishFailure(previousSize);
+        this.restoreDeltaStateAfterPublishFailure(
+          Math.max(previousSize, successfullyPublishedMaxSymbolId + 1),
+        );
         this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
         this.deltaSymbolsPublished = successfullyPublishedDelta;
         throw error;
@@ -1107,7 +1109,9 @@ export class QwpIngressSession {
       this.deltaSymbolsPublished = true;
       await this.publishPlannedFrames(planned.frames, recordPublishedDelta);
     } catch (error) {
-      this.restoreDeltaStateAfterPublishFailure(previousSize);
+      this.restoreDeltaStateAfterPublishFailure(
+        Math.max(previousSize, successfullyPublishedMaxSymbolId + 1),
+      );
       this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
       this.deltaSymbolsPublished = successfullyPublishedDelta;
       throw error;
@@ -1155,9 +1159,13 @@ export class QwpIngressSession {
    * different symbol to an already durable ID. The unchanged published
    * watermark makes the retry include the durable-but-unpublished prefix.
    */
-  private restoreDeltaStateAfterPublishFailure(previousSize: number): void {
+  private restoreDeltaStateAfterPublishFailure(retainedSize: number): void {
     if (!(this.connection instanceof QwpReconnectingIngressConnection)) {
-      this.symbolDictionary.truncate(previousSize);
+      // A split publication may have transferred an early frame before a
+      // later send failed. Those symbol IDs are already connection-visible and
+      // the published watermark deliberately retains them; truncating below
+      // that watermark makes every subsequent encode fail before it can retry.
+      this.symbolDictionary.truncate(retainedSize);
       return;
     }
     const recovered = this.connection.ingressSymbolDictionary;

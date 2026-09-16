@@ -22,6 +22,10 @@ const LOGICAL_LOCK_DIRECTORY = ".slot-locks";
 // binding, so ownership is "created this directory" rather than a kernel lock.
 const OWNER_DIRECTORY_SUFFIX = ".owner";
 const OWNER_FILE = "owner";
+// An exclusive, generation-bound claim held only while a proven-dead owner is
+// renamed away. It prevents two contenders from carrying the same stale
+// decision across a successor acquisition.
+const RECLAIM_FILE = ".reclaim";
 // Marks an owner directory that has been renamed out of the way, by a release
 // or by a reclaim, and is waiting to be removed. It holds no lock.
 const ABANDONED_SUFFIX = ".abandoned-";
@@ -713,8 +717,11 @@ async function touchOwnerDirectory(ownerPath: string): Promise<number> {
  */
 async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
   let mtimeMs: number;
+  let identity: OwnerDirectoryIdentity;
   try {
-    mtimeMs = (await stat(ownerPath)).mtimeMs;
+    const observed = await stat(ownerPath);
+    mtimeMs = observed.mtimeMs;
+    identity = { dev: observed.dev, ino: observed.ino };
   } catch (error) {
     // Already gone; the caller's next mkdir decides the winner.
     return nodeErrorCode(error) === "ENOENT";
@@ -741,15 +748,134 @@ async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
     return false;
   }
 
+  const reclaimToken = await claimDefunctGeneration(ownerPath, identity, owner);
+  if (!reclaimToken) return false;
+
   const abandoned = `${ownerPath}${ABANDONED_SUFFIX}${process.pid}-${stealCounter++}`;
   try {
     await rename(ownerPath, abandoned);
-  } catch {
-    // Lost the race to another contender, or the holder released normally.
+  } catch (error) {
+    // Lost the race to an external cleanup, or the holder released normally.
+    // A non-ENOENT failure leaves the generation in place, so release only our
+    // own reclaim claim and keep acquisition fail-closed.
+    if (nodeErrorCode(error) !== "ENOENT") {
+      await removeOwnReclaimClaim(ownerPath, reclaimToken);
+      return false;
+    }
     return true;
   }
   await rm(abandoned, { recursive: true, force: true }).catch(() => undefined);
   return true;
+}
+
+function sameOwnerGeneration(left: OwnerRead, right: OwnerRead): boolean {
+  if (left.state !== right.state) return false;
+  if (left.state === "present" && right.state === "present") {
+    return (
+      left.record.pid === right.record.pid &&
+      left.record.host === right.record.host &&
+      left.record.token === right.record.token
+    );
+  }
+  return left.state === "absent" || left.state === "corrupt";
+}
+
+/**
+ * Claims exactly the dead directory generation observed by this contender.
+ *
+ * Creating the marker is atomic. A delayed contender that resumes after a
+ * successor has acquired the reusable pathname writes into that successor,
+ * but the identity/owner comparison below detects the generation mismatch and
+ * removes only its own marker instead of renaming the live lock.
+ */
+async function claimDefunctGeneration(
+  ownerPath: string,
+  expectedIdentity: OwnerDirectoryIdentity,
+  expectedOwner: OwnerRead,
+): Promise<string | undefined> {
+  const path = join(ownerPath, RECLAIM_FILE);
+  const token = newOwnerToken();
+  let claimed = false;
+  for (let attempt = 0; attempt < 2 && !claimed; attempt++) {
+    try {
+      await writeFile(
+        path,
+        JSON.stringify({ pid: process.pid, host: hostname(), token }),
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
+      );
+      claimed = true;
+    } catch (error) {
+      if (nodeErrorCode(error) !== "EEXIST" || attempt > 0) return undefined;
+      // A reclaimer killed in the tiny marker-to-rename window must not strand
+      // a dead producer forever. Remove that marker by token and retry once;
+      // a concurrent successor marker has a different token and survives.
+      const predecessor = await readReclaimClaim(path);
+      if (
+        !predecessor ||
+        predecessor.host !== hostname() ||
+        isPidAlive(predecessor.pid)
+      ) {
+        return undefined;
+      }
+      await removeOwnReclaimClaim(ownerPath, predecessor.token ?? "");
+    }
+  }
+  if (!claimed) return undefined;
+
+  try {
+    const current = await stat(ownerPath);
+    const currentIdentity = { dev: current.dev, ino: current.ino };
+    const currentOwner = await readOwnerFile(ownerPath);
+    if (
+      !sameOwnerDirectory(expectedIdentity, currentIdentity) ||
+      !sameOwnerGeneration(expectedOwner, currentOwner)
+    ) {
+      await removeOwnReclaimClaim(ownerPath, token);
+      return undefined;
+    }
+    return token;
+  } catch {
+    await removeOwnReclaimClaim(ownerPath, token);
+    return undefined;
+  }
+}
+
+/** Removes a reclaim marker only when it still names this contender. */
+async function removeOwnReclaimClaim(
+  ownerPath: string,
+  token: string,
+): Promise<void> {
+  const path = join(ownerPath, RECLAIM_FILE);
+  const record = await readReclaimClaim(path);
+  if (record?.token !== token) return;
+  await unlink(path).catch(() => undefined);
+}
+
+async function readReclaimClaim(
+  path: string,
+): Promise<OwnerRecord | undefined> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(path, "utf8"),
+    ) as Partial<OwnerRecord>;
+    if (
+      typeof parsed.pid !== "number" ||
+      !Number.isSafeInteger(parsed.pid) ||
+      parsed.pid <= 0 ||
+      typeof parsed.host !== "string" ||
+      typeof parsed.token !== "string"
+    ) {
+      return undefined;
+    }
+    return {
+      pid: parsed.pid,
+      host: parsed.host,
+      token: parsed.token,
+    };
+  } catch {
+    // Missing, replaced, corrupt, or unreadable is not a reclaimable claim.
+    return undefined;
+  }
 }
 
 /**

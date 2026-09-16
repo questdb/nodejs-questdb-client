@@ -267,11 +267,14 @@ function defaultBootstrapUrl(endpoint: string | URL): URL {
     endpoint instanceof URL ? new URL(endpoint) : new URL(endpoint, base);
   if (url.protocol === "ws:") url.protocol = "http:";
   else if (url.protocol === "wss:") url.protocol = "https:";
-  else {
+  else if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new TypeError(
       `QWP browser URL must use WS or WSS: ${redactedUrlText(url)}`,
     );
   }
+  // Relative WebSocket endpoints resolve against an HTTP(S) page before the
+  // browser upgrades their scheme. They are already in the protocol needed by
+  // the inferred REST bootstrap and must not be rejected as non-WebSocket.
   const suffix = /\/(?:write\/v4|read\/v1)\/?$/;
   url.pathname = suffix.test(url.pathname)
     ? url.pathname.replace(suffix, "/exec")

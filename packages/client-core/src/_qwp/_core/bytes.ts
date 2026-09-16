@@ -1,7 +1,14 @@
 import { QwpProtocolError } from "./errors";
 
 const UTF8_ENCODER = new TextEncoder();
-const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+// QWP strings are length-delimited values, not byte streams with an optional
+// signature. TextDecoder's default BOM handling consumes a leading U+FEFF on
+// every decode call, silently collapsing it with the otherwise identical
+// string that has no leading character.
+const UTF8_DECODER = new TextDecoder("utf-8", {
+  fatal: true,
+  ignoreBOM: true,
+});
 
 export function encodeUtf8(value: string): Uint8Array {
   return UTF8_ENCODER.encode(value);

@@ -1,5 +1,12 @@
-import { mkdtemp, readFile, rm, utimes } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -11,6 +18,8 @@ import { afterEach, expect, it, vi } from "vitest";
 const interleave = vi.hoisted(() => ({
   ownerFile: "",
   run: async (): Promise<void> => {},
+  reclaimFile: "",
+  runReclaim: async (): Promise<void> => {},
   /**
    * Models a filesystem that hands the inode freed by a reclaim straight back
    * to the replacement `mkdir`. ext4 does, which is what CI runs on; APFS does
@@ -35,6 +44,15 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         // One shot: the contender's own record write must pass straight
         // through, and so must this acquisition's retry of anything later.
         interleave.ownerFile = "";
+        await run();
+      } else if (
+        interleave.reclaimFile &&
+        String(file) === interleave.reclaimFile
+      ) {
+        const run = interleave.runReclaim;
+        // Let the successor's reclaim claim pass through while this stale
+        // contender remains paused immediately before its own marker write.
+        interleave.reclaimFile = "";
         await run();
       }
       return actual.writeFile(file, data, options);
@@ -64,6 +82,8 @@ const directories: string[] = [];
 afterEach(async () => {
   interleave.ownerFile = "";
   interleave.run = async () => {};
+  interleave.reclaimFile = "";
+  interleave.runReclaim = async () => {};
   interleave.reuseInodes = false;
   await Promise.all(
     directories
@@ -152,6 +172,68 @@ it.each([
     await store.close();
   },
 );
+
+it("does not let a stale reclaimer remove a live successor", async () => {
+  const directory = await trackedDirectory();
+  const ownerPath = join(directory, ".lock.owner");
+  const ownerFile = join(ownerPath, "owner");
+  await mkdir(ownerPath);
+  await writeFile(
+    ownerFile,
+    JSON.stringify({
+      pid: 2_147_483_647,
+      host: hostname(),
+      token: "dead-owner",
+    }),
+  );
+
+  let successor: QwpNodeAdvisoryLock | undefined;
+  interleave.reclaimFile = join(ownerPath, ".reclaim");
+  interleave.runReclaim = async () => {
+    successor = await QwpNodeAdvisoryLock.acquire(directory);
+  };
+
+  try {
+    await expect(QwpNodeAdvisoryLock.acquire(directory)).rejects.toMatchObject({
+      name: "QwpNodeAdvisoryLockBusyError",
+    });
+    expect(successor).toBeDefined();
+    await expect(successor!.ownership()).resolves.toBe("owned");
+    const record = JSON.parse(await readFile(ownerFile, "utf8")) as {
+      token?: string;
+    };
+    expect(record.token).toBe(
+      (successor as unknown as { token: string }).token,
+    );
+    await expect(
+      readFile(join(ownerPath, ".reclaim"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await successor?.release().catch(() => undefined);
+  }
+});
+
+it("recovers a reclaim marker whose contender was killed", async () => {
+  const directory = await trackedDirectory();
+  const ownerPath = join(directory, ".lock.owner");
+  const deadPid = 2_147_483_647;
+  await mkdir(ownerPath);
+  await writeFile(
+    join(ownerPath, "owner"),
+    JSON.stringify({ pid: deadPid, host: hostname(), token: "dead-owner" }),
+  );
+  await writeFile(
+    join(ownerPath, ".reclaim"),
+    JSON.stringify({ pid: deadPid, host: hostname(), token: "dead-reclaimer" }),
+  );
+
+  const lock = await QwpNodeAdvisoryLock.acquire(directory);
+  try {
+    await expect(lock.ownership()).resolves.toBe("owned");
+  } finally {
+    await lock.release();
+  }
+});
 
 it("keeps a normal acquisition working through the same write path", async () => {
   // Guards the mock itself: with no interleaving armed, acquisition is the

@@ -147,6 +147,7 @@ function serverInfo(
   role: number = QWP_SERVER_ROLE.STANDALONE,
   zone?: string,
   capabilities: number = QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+  cluster = "cluster",
 ): Uint8Array {
   const advertisedCapabilities =
     capabilities | (zone === undefined ? 0 : QWP_EGRESS_CAPABILITY.ZONE);
@@ -156,7 +157,7 @@ function serverInfo(
     .writeBigUint64(1n)
     .writeUint32(advertisedCapabilities)
     .writeBigInt64(123n);
-  writeUint16String(payload, "cluster");
+  writeUint16String(payload, cluster);
   writeUint16String(payload, node);
   if (zone !== undefined) writeUint16String(payload, zone);
   return encodeQwpFrame(payload.toUint8Array());
@@ -229,6 +230,7 @@ class FakeConnection implements QwpBinaryConnection {
   private readonly incoming = new QwpAsyncQueue<Uint8Array>();
   private readonly resolveClosed: (info: QwpConnectionCloseInfo) => void;
   private closedSettled = false;
+  onSend?: (payload: Uint8Array) => Promise<void>;
 
   constructor(
     readonly endpoint: string,
@@ -244,7 +246,7 @@ class FakeConnection implements QwpBinaryConnection {
 
   send(payload: Uint8Array): Promise<void> {
     this.sent.push(payload.slice());
-    return Promise.resolve();
+    return this.onSend?.(payload) ?? Promise.resolve();
   }
 
   close(code = 1000, reason = ""): Promise<void> {
@@ -5492,6 +5494,101 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  it("replays manual credit when its own send starts reconnect", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    first.onSend = async (payload) => {
+      if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT) {
+        throw new Error("credit send failed");
+      }
+    };
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: { maxAttempts: 1, initialBackoffMs: 0, maxBackoffMs: 0 },
+      },
+    );
+    const query = await session.query("select * from x", {
+      initialCredit: 1,
+      autoCredit: false,
+    });
+
+    await query.grantCredit(4096);
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    expect(second.sent[0]).toEqual(
+      encodeQwpQueryRequest({
+        requestId: query.requestId,
+        sql: "select * from x",
+        initialCredit: 4097,
+      }),
+    );
+    expect(
+      second.sent.filter((payload) => payload[0] === QWP_EGRESS_MESSAGE.CREDIT),
+    ).toEqual([]);
+
+    second.receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await session.close();
+  });
+
+  it("lets a view callback finish when its credit send starts reconnect", async () => {
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    first.onSend = async (payload) => {
+      if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT) {
+        throw new Error("credit send failed");
+      }
+    };
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          maxDurationMs: 500,
+        },
+      },
+    );
+    let callbackCalls = 0;
+    const query = await session.queryViews(
+      "select * from x",
+      async (_batch, control) => {
+        callbackCalls++;
+        if (callbackCalls === 1) await control.grantCredit(4096);
+      },
+      { initialCredit: 1, autoCredit: false },
+    );
+
+    first.receive(emptyResultBatch(query.requestId));
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    second.receive(emptyResultBatch(query.requestId));
+    second.receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    expect(callbackCalls).toBe(2);
+    await session.close();
+  });
+
   it("waits for an active reusable view before resetting it for replay", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
@@ -5706,6 +5803,53 @@ describe("QWP egress reconnect and replay", () => {
       kind: "result-end",
     });
     expect(attempts).toEqual(["primary", "secondary"]);
+    await session.close();
+  });
+
+  it("tries another endpoint after reconnect rejects a different cluster", async () => {
+    const attempts: string[] = [];
+    const connections = new Map<string, FakeConnection>();
+    const factory = createQwpEgressFailoverConnectionFactory(
+      "primary",
+      ["wrong-cluster", "compatible"],
+      async (endpoint) => {
+        const name = String(endpoint);
+        attempts.push(name);
+        const connection = new FakeConnection(name);
+        connections.set(name, connection);
+        const cluster = name === "wrong-cluster" ? "other" : "wanted";
+        connection.receive(
+          serverInfo(
+            name,
+            QWP_SERVER_ROLE.STANDALONE,
+            undefined,
+            QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+            cluster,
+          ),
+        );
+        return connection;
+      },
+      {},
+      100,
+    );
+    const session = await QwpEgressSession.connect(factory, {
+      reconnect: {
+        maxAttempts: 3,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+      },
+    });
+    const query = await session.query("select 1");
+    connections.get("primary")!.drop();
+
+    await vi.waitFor(() =>
+      expect(connections.get("compatible")?.sent).toHaveLength(1),
+    );
+    connections.get("compatible")!.receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    expect(attempts).toEqual(["primary", "wrong-cluster", "compatible"]);
     await session.close();
   });
 

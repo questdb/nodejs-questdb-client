@@ -217,9 +217,43 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   }
 
   send(payload: Uint8Array): Promise<void> {
+    return this.sendPayload(payload, false);
+  }
+
+  /**
+   * Sends manual credit whose application intent is already folded into the
+   * replayable QUERY_REQUEST. If the physical send starts a reconnect, the
+   * caller may continue as soon as that reconnect owns the intent; keeping a
+   * result-view callback blocked on the whole reconnect would deadlock the
+   * reset that must first drain that same callback.
+   *
+   * @internal
+   */
+  sendReplayableCredit(payload: Uint8Array): Promise<void> {
+    return this.sendPayload(payload, true);
+  }
+
+  private sendPayload(
+    payload: Uint8Array,
+    acceptWhenReconnectStarts: boolean,
+  ): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closing) return Promise.reject(new QwpSendClosedError());
     const copy = payload.slice();
+    let acceptedSettled = false;
+    let resolveAccepted!: () => void;
+    let rejectAccepted!: (error: unknown) => void;
+    const accepted = acceptWhenReconnectStarts
+      ? new Promise<void>((resolve, reject) => {
+          resolveAccepted = resolve;
+          rejectAccepted = reject;
+        })
+      : undefined;
+    const accept = (): void => {
+      if (acceptedSettled || !accepted) return;
+      acceptedSettled = true;
+      resolveAccepted();
+    };
     const sending = this.sendTail.then(async () => {
       this.throwIfUnavailable();
       const connection = await this.requireConnection();
@@ -227,12 +261,30 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       this.trackOutbound(prepared);
       try {
         await connection.send(prepared);
+        accept();
       } catch (error) {
-        await this.requestReconnect(error, connection);
+        const reconnecting = this.requestReconnect(error, connection);
+        // The replay request already carries this manual grant. Let a callback
+        // that issued it finish so prepareConnectionReset() can drain its view,
+        // while the transport tail continues to serialize on the reconnect.
+        accept();
+        await reconnecting;
       }
     });
+    if (accepted) {
+      void sending.then(accept, (error: unknown) => {
+        if (!acceptedSettled) {
+          acceptedSettled = true;
+          rejectAccepted(error);
+        } else {
+          // The caller has already released a callback needed by reconnect.
+          // Surface later exhaustion through the connection/session stream.
+          this.failTerminal(error);
+        }
+      });
+    }
     this.sendTail = sending.catch(() => undefined);
-    return sending;
+    return accepted ?? sending;
   }
 
   async close(code = 1000, reason = ""): Promise<void> {
@@ -410,6 +462,17 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           if (!(error instanceof QwpReconnectExhaustedError)) lastError = error;
           if (this.connectingCandidate === candidate) {
             this.connectingCandidate = undefined;
+          }
+          if (
+            candidate &&
+            error instanceof QwpUpgradeError &&
+            error.tryNextEndpoint === true
+          ) {
+            // The failover factory has already marked this opened connection
+            // healthy. A later reconnect-only validation (notably cluster ID)
+            // must feed its try-next verdict back into that health ledger or
+            // every fresh sweep selects the same incompatible endpoint again.
+            candidate.deprioritizeEndpoint?.();
           }
           if (candidate) await candidate.close().catch(() => undefined);
           if (this.closing) return;

@@ -37,8 +37,10 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,
   QwpBatchTooLargeError,
+  type QwpBinaryConnection,
   QwpByteReader,
   QwpByteWriter,
+  type QwpConnectionCloseInfo,
   decodeQwpFrame,
   decodeQwpIngressSymbolDictionaryDelta,
   encodeQwpDurableAckPollFrame,
@@ -59,6 +61,7 @@ import {
   QwpSymbolDictionary,
   readQwpVarintNumber,
 } from "../../packages/client-core/src/qwp";
+import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { openQwpWebSocket } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
 
 type Listener = (event: unknown) => void;
@@ -684,6 +687,40 @@ describe("QWP WebSocket adapters", () => {
     expect(bootstrapUrl.searchParams.has("qwp_max_batch_rows")).toBe(false);
     expect(events[1]).toBe("websocket");
     await connection.close();
+  });
+
+  it("infers bootstrap REST URLs from relative browser endpoints", async () => {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "location");
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { href: "https://questdb.example/console/" },
+    });
+    try {
+      const socket = new FakeWebSocket();
+      const bootstrapUrls: URL[] = [];
+      const connection = await connectQwpBrowserWebSocket({
+        url: "/write/v4",
+        sessionBootstrap: {
+          authentication: { type: "bearer", token: "rest-token" },
+          fetch: async (input) => {
+            bootstrapUrls.push(new URL(input));
+            return new Response("{}", { status: 200 });
+          },
+        },
+        webSocketFactory: () => {
+          queueMicrotask(() => socket.open());
+          return asQwpSocket(socket);
+        },
+      });
+
+      expect(bootstrapUrls).toHaveLength(1);
+      expect(bootstrapUrls[0].origin).toBe("https://questdb.example");
+      expect(bootstrapUrls[0].pathname).toBe("/exec");
+      await connection.close();
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "location", previous);
+      else delete (globalThis as { location?: unknown }).location;
+    }
   });
 
   it("includes a stalled browser bootstrap in the connection deadline", async () => {
@@ -3046,6 +3083,56 @@ describe("QwpIngressSession", () => {
       startId: 3,
       entries: ["symbol-3333"],
     });
+    await session.close();
+  });
+
+  it("retains symbol IDs published before a later split frame fails", async () => {
+    const incoming = new QwpAsyncQueue<Uint8Array>();
+    let resolveClosed!: (info: QwpConnectionCloseInfo) => void;
+    const closed = new Promise<QwpConnectionCloseInfo>((resolve) => {
+      resolveClosed = resolve;
+    });
+    const sent: Uint8Array[] = [];
+    let failSecondSend = true;
+    const connection: QwpBinaryConnection = {
+      messages: incoming,
+      handshake: { qwpVersion: 1 },
+      closed,
+      send: (payload) => {
+        sent.push(payload.slice());
+        if (failSecondSend && sent.length === 2) {
+          return Promise.reject(new Error("second split send failed"));
+        }
+        return Promise.resolve();
+      },
+      close: async (code = 1000, reason = "") => {
+        incoming.end();
+        resolveClosed({ code, reason, wasClean: code === 1000 });
+      },
+    };
+    const symbols = ["symbol-0000", "symbol-1111", "symbol-2222"];
+    const rows = symbolTable("trades", symbols);
+    const sizingDictionary = new QwpSymbolDictionary();
+    const cap = encodeQwpIngressFrame([rows.sliceRows(0, 1)], {
+      dictionary: sizingDictionary,
+      confirmedMaxSymbolId: -1,
+    }).byteLength;
+    const session = new QwpIngressSession(connection, {
+      maxBatchSizeBytes: cap,
+    });
+
+    await expect(session.publishTablesDelta([rows])).rejects.toThrow(
+      "second split send failed",
+    );
+    expect(sent).toHaveLength(2);
+    expect(decodeQwpIngressSymbolDictionaryDelta(sent[0])).toEqual({
+      startId: 0,
+      entries: [symbols[0]],
+    });
+
+    failSecondSend = false;
+    await expect(session.publishTablesDelta([rows])).resolves.toBeUndefined();
+    expect(sent.length).toBeGreaterThan(2);
     await session.close();
   });
 
