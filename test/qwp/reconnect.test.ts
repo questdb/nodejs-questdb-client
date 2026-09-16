@@ -5589,6 +5589,145 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  it("replays credit granted while a reconnect is already running", async () => {
+    // The reconnect drains in-flight views before it encodes the replacement
+    // request, and a view callback may grant credit while that reset waits for
+    // it. Holding the grant until the reconnect finishes made the two wait on
+    // each other: no request ever reached the healthy replacement and the
+    // query died on the reconnect deadline instead of replaying.
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          maxDurationMs: 500,
+        },
+      },
+    );
+    let releaseCallback!: () => void;
+    const callbackReleased = new Promise<void>((resolve) => {
+      releaseCallback = resolve;
+    });
+    let enterCallback!: () => void;
+    const callbackEntered = new Promise<void>((resolve) => {
+      enterCallback = resolve;
+    });
+    let callbackCalls = 0;
+    let granted = false;
+    const query = await session.queryViews(
+      "select * from x",
+      async (_batch, control) => {
+        callbackCalls++;
+        if (callbackCalls !== 1) return;
+        enterCallback();
+        await callbackReleased;
+        await control.grantCredit(4096);
+        granted = true;
+      },
+      { initialCredit: 1, autoCredit: false },
+    );
+
+    first.receive(emptyResultBatch(query.requestId));
+    await callbackEntered;
+    // A transport failure unrelated to the grant, so the reconnect is already
+    // running when the callback resumes.
+    first.drop();
+    await vi.waitFor(() => expect(connections).toHaveLength(0));
+    releaseCallback();
+
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    expect(granted).toBe(true);
+    // The grant travels in the replayed request's initial window, exactly
+    // once: a CREDIT frame as well would hand the server the same window
+    // twice, and no grant at all would stall an autoCredit:false reader.
+    expect(second.sent[0]).toEqual(
+      encodeQwpQueryRequest({
+        requestId: query.requestId,
+        sql: "select * from x",
+        initialCredit: 1 + 4096,
+      }),
+    );
+    expect(
+      second.sent.filter((payload) => payload[0] === QWP_EGRESS_MESSAGE.CREDIT),
+    ).toEqual([]);
+
+    second.receive(emptyResultBatch(query.requestId));
+    second.receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await session.close();
+  });
+
+  it("bounds close() while a reconnect waits for a view callback", async () => {
+    // A reconnect parks on the session's terminal verdict, and only the
+    // session settles it -- after the view callback returns. close() joined
+    // that reconnect unbounded, so shutdown inherited an application
+    // callback's latency with the sockets already gone, and a reconnect
+    // deadline of zero removed the last ceiling on it.
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        cancelDrainTimeoutMs: 20,
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          // Documented as disabling the deadline entirely.
+          maxDurationMs: 0,
+        },
+      },
+    );
+    let releaseCallback!: () => void;
+    const callbackReleased = new Promise<void>((resolve) => {
+      releaseCallback = resolve;
+    });
+    let enterCallback!: () => void;
+    const callbackEntered = new Promise<void>((resolve) => {
+      enterCallback = resolve;
+    });
+    const query = await session.queryViews("select * from x", async () => {
+      enterCallback();
+      await callbackReleased;
+    });
+
+    first.receive(emptyResultBatch(query.requestId));
+    await callbackEntered;
+    first.receive(resultEnd(query.requestId));
+    await Promise.resolve();
+    first.drop();
+    await vi.waitFor(() => expect(connections).toHaveLength(0));
+
+    const startedAt = Date.now();
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+
+    releaseCallback();
+    await expect(query.completion).rejects.toBeDefined();
+  });
+
   it("waits for an active reusable view before resetting it for replay", async () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");

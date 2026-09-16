@@ -567,6 +567,70 @@ describe("QWP Node UDP sender", () => {
     await sender.close();
   });
 
+  it("lets a typed sender section disable connection-string auto-flush", async () => {
+    // `qwp.sender` applies to every QWP ingress scheme, and a typed value wins
+    // over the same option in the connection string. The UDP path read the
+    // string's auto-flush keys first, so rows left the process before the
+    // explicit flush a caller had asked for by disabling automatic flushing.
+    const socket = new FakeUdpSocket();
+    const sender = await Sender.fromConfig(
+      "udp::addr=localhost;auto_flush=on;auto_flush_rows=1;auto_flush_interval=0;",
+      {
+        qwp: {
+          udp: { socketFactory: () => socket },
+          sender: { autoFlush: false },
+        },
+      },
+    );
+    await sender.connect();
+    sender.table("trades").intColumn("price", 1);
+    await sender.atNow();
+
+    expect(socket.packets).toHaveLength(0);
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.packets).toHaveLength(1);
+    await sender.close();
+  });
+
+  it("lets a typed sender section retune connection-string auto-flush rows", async () => {
+    const socket = new FakeUdpSocket();
+    const sender = await Sender.fromConfig(
+      "udp::addr=localhost;auto_flush=on;auto_flush_rows=1;auto_flush_interval=0;",
+      {
+        qwp: {
+          udp: { socketFactory: () => socket },
+          sender: { autoFlushRows: 3 },
+        },
+      },
+    );
+    await sender.connect();
+    for (const price of [1, 2]) {
+      sender.table("trades").intColumn("price", price);
+      await sender.atNow();
+    }
+
+    expect(socket.packets).toHaveLength(0);
+    sender.table("trades").intColumn("price", 3);
+    await sender.atNow();
+    expect(socket.packets).toHaveLength(1);
+    expect(decodeLongDatagram(socket.packets[0])).toEqual([1n, 2n, 3n]);
+    await sender.close();
+  });
+
+  it("still applies connection-string auto-flush without a typed override", async () => {
+    const socket = new FakeUdpSocket();
+    const sender = await Sender.fromConfig(
+      "udp::addr=localhost;auto_flush=on;auto_flush_rows=1;auto_flush_interval=0;",
+      { qwp: { udp: { socketFactory: () => socket } } },
+    );
+    await sender.connect();
+    sender.table("trades").intColumn("price", 1);
+    await sender.atNow();
+
+    expect(socket.packets).toHaveLength(1);
+    await sender.close();
+  });
+
   it("still applies the connection-string datagram size without a typed override", async () => {
     const socket = new FakeUdpSocket();
     const sender = await Sender.fromConfig(

@@ -798,6 +798,14 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private closePromise?: Promise<void>;
   private cancelDrainRequestId?: bigint;
   private cancelDrainTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Counts manual credit grants recorded in the replayable request, and the
+   * last count a replay encoded. A grant reaches the next connection through
+   * the replayed QUERY_REQUEST or through its own CREDIT frame, and comparing
+   * the two is what keeps it from arriving twice or not at all.
+   */
+  private manualCreditEpoch = 0;
+  private replayedCredit: { requestId?: bigint; epoch: number } = { epoch: 0 };
   /** Initial SERVER_INFO; use serverInfo for the current post-failover snapshot. */
   readonly ready: Promise<QwpServerInfoMessage>;
 
@@ -1117,6 +1125,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       () => {
         const request = this.activeRequest;
         if (!request || request.requestId !== requestId) return;
+        this.manualCreditEpoch++;
         const total = BigInt(request.initialCredit) + additional;
         // QUERY_REQUEST carries one uint64 initial-credit field. Saturating is
         // lossless for any representable result stream and avoids dropping all
@@ -1242,7 +1251,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     try {
       const [, closeResult] = await Promise.allSettled([
         bounded(this.sendTail),
-        transportClose,
+        // Bounded for the same reason as the rest: a reconnecting transport
+        // joins its in-flight reconnect while closing, and that reconnect can
+        // be parked on the very view callback this deadline exists to abandon.
+        // The socket is already closed by then, so the remaining wait only
+        // delays the caller's shutdown.
+        bounded(transportClose),
         bounded(this.receiveLoop),
         bounded(active?.waitForViewDrain() ?? Promise.resolve()),
       ]);
@@ -1436,6 +1450,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         `QWP egress replay references inactive request ID ${requestId}`,
       );
     }
+    // Recorded synchronously with the read below: every manual grant folded
+    // into this request before now travels with the replay, so its own CREDIT
+    // frame must not also reach the replacement connection.
+    this.replayedCredit = { requestId, epoch: this.manualCreditEpoch };
     return this.encodeQueryRequest(request, serverInfo);
   }
 
@@ -1538,7 +1556,17 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         replayableCredit &&
         this.connection instanceof QwpReconnectingEgressConnection
       ) {
-        await this.connection.sendReplayableCredit(payload);
+        // Read after onSending(), so it names this grant. The transport drops
+        // the frame only once a replay has encoded that same grant into the
+        // replacement request; sending both would grant the window twice, and
+        // dropping it without a replay would lose it.
+        const grantEpoch = this.manualCreditEpoch;
+        await this.connection.sendReplayableCredit(
+          payload,
+          () =>
+            this.replayedCredit.requestId === requestId &&
+            this.replayedCredit.epoch >= grantEpoch,
+        );
       } else {
         await this.connection.send(payload);
       }

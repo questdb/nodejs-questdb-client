@@ -217,25 +217,36 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
   }
 
   send(payload: Uint8Array): Promise<void> {
-    return this.sendPayload(payload, false);
+    return this.sendPayload(payload);
   }
 
   /**
-   * Sends manual credit whose application intent is already folded into the
-   * replayable QUERY_REQUEST. If the physical send starts a reconnect, the
-   * caller may continue as soon as that reconnect owns the intent; keeping a
-   * result-view callback blocked on the whole reconnect would deadlock the
-   * reset that must first drain that same callback.
+   * Sends manual credit whose application intent is already recorded in the
+   * replayable QUERY_REQUEST.
+   *
+   * Such a grant reaches the next connection generation either through this
+   * frame or through the replayed request, never both, so `supersededByReplay`
+   * reports whether a replay has already encoded it; a redundant frame would
+   * hand the server the same window twice.
+   *
+   * The caller is released as soon as the grant is owned by a reconnect rather
+   * than when the frame leaves: a result-view callback may be the caller, and
+   * the replay reset has to drain that very callback before it can encode the
+   * replacement request, so waiting for the connection here would leave the
+   * two waiting on each other.
    *
    * @internal
    */
-  sendReplayableCredit(payload: Uint8Array): Promise<void> {
-    return this.sendPayload(payload, true);
+  sendReplayableCredit(
+    payload: Uint8Array,
+    supersededByReplay: () => boolean,
+  ): Promise<void> {
+    return this.sendPayload(payload, supersededByReplay);
   }
 
   private sendPayload(
     payload: Uint8Array,
-    acceptWhenReconnectStarts: boolean,
+    supersededByReplay?: () => boolean,
   ): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closing) return Promise.reject(new QwpSendClosedError());
@@ -243,7 +254,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     let acceptedSettled = false;
     let resolveAccepted!: () => void;
     let rejectAccepted!: (error: unknown) => void;
-    const accepted = acceptWhenReconnectStarts
+    const accepted = supersededByReplay
       ? new Promise<void>((resolve, reject) => {
           resolveAccepted = resolve;
           rejectAccepted = reject;
@@ -256,7 +267,13 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     };
     const sending = this.sendTail.then(async () => {
       this.throwIfUnavailable();
+      // A reconnect that is already running owns this grant: it replays the
+      // QUERY_REQUEST the session recorded it in. Release the caller before
+      // waiting for that reconnect, because the reconnect's own reset may be
+      // waiting for the caller -- the callback -- to return.
+      if (this.reconnectTask) accept();
       const connection = await this.requireConnection();
+      if (supersededByReplay?.()) return;
       const prepared = await this.prepareOutboundQuery(copy);
       this.trackOutbound(prepared);
       try {
@@ -295,6 +312,10 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.closing = true;
     this.cancelBackoff?.();
     this.messagesQueue.end();
+    // Only the session settles a terminal verdict, and the session is closing.
+    // A reconnect parked on that verdict would otherwise hold close() open for
+    // as long as the application's result-view callback takes to return.
+    this.rejectPendingTerminal();
     const connection = this.connection;
     const reconnectTask = this.reconnectTask;
     // Tears down a connect that is still negotiating. Without this the socket
@@ -638,6 +659,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       // validated its query totals. Do not decide whether to replay until the
       // session accepts or rejects that terminal.
       const accepted = await pendingTerminal.verdict;
+      // close() settles that verdict to wake this wait; nothing here should
+      // then rebuild state for a connection that is going away.
+      this.throwIfUnavailable();
       if (accepted) {
         await this.onConnectionReset(serverInfo);
         return;

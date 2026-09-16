@@ -730,27 +730,39 @@ function createConfiguredQwpSender(
     },
     {
       ...configuredSender,
-      autoFlush: isBoolean(options.auto_flush)
-        ? options.auto_flush
-        : configuredSender.autoFlush,
-      autoFlushRows: isInteger(options.auto_flush_rows, 0)
-        ? options.auto_flush_rows
-        : configuredSender.autoFlushRows,
-      // Read like every other auto-flush trigger. A ws::/wss:: connect string
-      // resolves auto_flush_bytes through the QWP schema, and the programmatic
-      // UDP branch below reads it, so ignoring it here was the outlier: the
-      // key is declared on SenderOptions, the ILP parser rejects it for the
-      // transports that cannot honour it, and this path silently dropped it.
-      autoFlushBytes: isInteger(options.auto_flush_bytes, 0)
-        ? options.auto_flush_bytes
-        : configuredSender.autoFlushBytes,
-      autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
-        ? options.auto_flush_interval
-        : configuredSender.autoFlushIntervalMs,
+      // Typed first, string second: QWP.md states that a typed value wins
+      // wherever both spellings set the same option, and `qwp.sender` applies
+      // to every QWP ingress scheme. Reading the string first inverted that
+      // for the auto-flush triggers, so a caller who disabled or retuned them
+      // through the typed section kept the string's behavior.
+      //
+      // auto_flush_bytes is read like every other trigger. A ws::/wss:: connect
+      // string resolves it through the QWP schema, and the UDP branch below
+      // reads it, so ignoring it here was the outlier: the key is declared on
+      // SenderOptions, the ILP parser rejects it for the transports that cannot
+      // honour it, and this path silently dropped it.
+      autoFlush:
+        configuredSender.autoFlush ??
+        (isBoolean(options.auto_flush) ? options.auto_flush : undefined),
+      autoFlushRows:
+        configuredSender.autoFlushRows ??
+        (isInteger(options.auto_flush_rows, 0)
+          ? options.auto_flush_rows
+          : undefined),
+      autoFlushBytes:
+        configuredSender.autoFlushBytes ??
+        (isInteger(options.auto_flush_bytes, 0)
+          ? options.auto_flush_bytes
+          : undefined),
+      autoFlushIntervalMs:
+        configuredSender.autoFlushIntervalMs ??
+        (isInteger(options.auto_flush_interval, 0)
+          ? options.auto_flush_interval
+          : undefined),
       closeFlushTimeoutMs: configuredSender.closeFlushTimeoutMs,
-      maxNameLength: isInteger(options.max_name_len, 1)
-        ? options.max_name_len
-        : configuredSender.maxNameLength,
+      maxNameLength:
+        configuredSender.maxNameLength ??
+        (isInteger(options.max_name_len, 1) ? options.max_name_len : undefined),
       log: qwpConfiguredLogger(options, logger),
     },
     options.qwp?.session,
@@ -769,10 +781,12 @@ function createConfiguredQwpUdpSender(
   const configuredUdp = options.qwp?.udp ?? {};
   const configuredSender = options.qwp?.sender ?? {};
   // Typed overrides win over the connection string, the rule QWP.md states for
-  // every ExtraOptions.qwp section. Reading max_datagram_size first inverted
-  // it for the one transport where the string key exists, so a caller who
-  // raised the datagram size through the typed udp section still had rows
-  // rejected locally with QwpUdpDatagramTooLargeError at the string's cap.
+  // every ExtraOptions.qwp section. Reading the string first inverted it for
+  // the options this transport also spells there: a caller who raised the
+  // datagram size through the typed udp section still had rows rejected
+  // locally with QwpUdpDatagramTooLargeError at the string's cap, and a caller
+  // who disabled automatic flushing through the typed sender section still had
+  // rows leave before the explicit flush.
   const maxDatagramSize =
     configuredUdp.maxDatagramSize ?? options.max_datagram_size ?? 1_400;
   return qwpNode.createQwpNodeUdpSender(
@@ -786,21 +800,29 @@ function createConfiguredQwpUdpSender(
     },
     {
       ...configuredSender,
-      autoFlush: isBoolean(options.auto_flush)
-        ? options.auto_flush
-        : configuredSender.autoFlush,
-      autoFlushRows: isInteger(options.auto_flush_rows, 0)
-        ? options.auto_flush_rows
-        : configuredSender.autoFlushRows,
-      autoFlushBytes: isInteger(options.auto_flush_bytes, 0)
-        ? options.auto_flush_bytes
-        : (configuredSender.autoFlushBytes ?? maxDatagramSize),
-      autoFlushIntervalMs: isInteger(options.auto_flush_interval, 0)
-        ? options.auto_flush_interval
-        : configuredSender.autoFlushIntervalMs,
-      maxNameLength: isInteger(options.max_name_len, 1)
-        ? options.max_name_len
-        : configuredSender.maxNameLength,
+      autoFlush:
+        configuredSender.autoFlush ??
+        (isBoolean(options.auto_flush) ? options.auto_flush : undefined),
+      autoFlushRows:
+        configuredSender.autoFlushRows ??
+        (isInteger(options.auto_flush_rows, 0)
+          ? options.auto_flush_rows
+          : undefined),
+      // A datagram is the byte ceiling this transport can actually publish, so
+      // it remains the default when neither spelling sets the trigger.
+      autoFlushBytes:
+        configuredSender.autoFlushBytes ??
+        (isInteger(options.auto_flush_bytes, 0)
+          ? options.auto_flush_bytes
+          : maxDatagramSize),
+      autoFlushIntervalMs:
+        configuredSender.autoFlushIntervalMs ??
+        (isInteger(options.auto_flush_interval, 0)
+          ? options.auto_flush_interval
+          : undefined),
+      maxNameLength:
+        configuredSender.maxNameLength ??
+        (isInteger(options.max_name_len, 1) ? options.max_name_len : undefined),
       log: qwpConfiguredLogger(options, logger),
     },
   );

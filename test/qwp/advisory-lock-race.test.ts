@@ -235,6 +235,71 @@ it("recovers a reclaim marker whose contender was killed", async () => {
   }
 });
 
+it.each([
+  ["was created but never filled", ""],
+  ["was caught mid-write", '{"pid":123,"host":"'],
+  [
+    "names a PID the host has since reused",
+    JSON.stringify({ pid: process.pid, host: hostname(), token: "reused" }),
+  ],
+])("recovers a slot whose reclaim marker %s", async (_label, contents) => {
+  // writeFile() creates the marker before it fills it, so a contender killed
+  // in that window -- or one whose write failed with ENOSPC after the create --
+  // leaves bytes that name nobody. They are not a live claim, and nothing else
+  // sweeps them: the exclusive create keeps failing, so the slot stayed locked
+  // for good, with its journal unreadable, undrainable and unquarantinable.
+  const directory = await trackedDirectory();
+  const ownerPath = join(directory, ".lock.owner");
+  const marker = join(ownerPath, ".reclaim");
+  await mkdir(ownerPath);
+  await writeFile(
+    join(ownerPath, "owner"),
+    JSON.stringify({
+      pid: 2_147_483_647,
+      host: hostname(),
+      token: "dead-owner",
+    }),
+  );
+  await writeFile(marker, contents);
+  // A claim is held only across the rename that clears a defunct owner, so
+  // age is what separates abandoned remains from a contender mid-write.
+  const aged = new Date(Date.now() - 60_000);
+  await utimes(marker, aged, aged);
+
+  const lock = await QwpNodeAdvisoryLock.acquire(directory);
+  try {
+    await expect(lock.ownership()).resolves.toBe("owned");
+    await expect(readFile(marker, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  } finally {
+    await lock.release();
+  }
+});
+
+it("leaves a reclaim marker that is still being established", async () => {
+  // The same unparseable bytes inside the liveness window belong to a
+  // contender that may be about to finish its write, so they keep excluding
+  // this acquisition rather than handing one slot to two owners.
+  const directory = await trackedDirectory();
+  const ownerPath = join(directory, ".lock.owner");
+  await mkdir(ownerPath);
+  await writeFile(
+    join(ownerPath, "owner"),
+    JSON.stringify({
+      pid: 2_147_483_647,
+      host: hostname(),
+      token: "dead-owner",
+    }),
+  );
+  await writeFile(join(ownerPath, ".reclaim"), "");
+
+  await expect(QwpNodeAdvisoryLock.acquire(directory)).rejects.toMatchObject({
+    name: "QwpNodeAdvisoryLockBusyError",
+  });
+  await expect(readFile(join(ownerPath, ".reclaim"), "utf8")).resolves.toBe("");
+});
+
 it("keeps a normal acquisition working through the same write path", async () => {
   // Guards the mock itself: with no interleaving armed, acquisition is the
   // ordinary one, so a failure above cannot be an artefact of replacing the

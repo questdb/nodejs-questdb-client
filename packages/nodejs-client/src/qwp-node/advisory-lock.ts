@@ -807,17 +807,29 @@ async function claimDefunctGeneration(
     } catch (error) {
       if (nodeErrorCode(error) !== "EEXIST" || attempt > 0) return undefined;
       // A reclaimer killed in the tiny marker-to-rename window must not strand
-      // a dead producer forever. Remove that marker by token and retry once;
-      // a concurrent successor marker has a different token and survives.
+      // a dead producer forever. Remove that marker and retry once; a
+      // concurrent successor marker names a live process and survives.
       const predecessor = await readReclaimClaim(path);
       if (
-        !predecessor ||
-        predecessor.host !== hostname() ||
-        isPidAlive(predecessor.pid)
+        predecessor &&
+        predecessor.host === hostname() &&
+        !isPidAlive(predecessor.pid)
       ) {
+        await removeOwnReclaimClaim(ownerPath, predecessor.token ?? "");
+      } else if (await abandonedReclaimClaim(path)) {
+        // Either the bytes name nobody -- a claim caught mid-write, or one
+        // whose writer died between creating the file and filling it, which a
+        // SIGKILL inside writeFile and an ENOSPC/EIO after the create both
+        // leave behind -- or they name a PID the host has since reused. Such a
+        // marker proves no live contender, but a partial write could still
+        // become one, so only age settles it. Without this the remains fenced
+        // the slot out for good: the exclusive create kept failing while the
+        // unparseable bytes named no process that could be proved gone, so the
+        // journal could not be reopened, drained, or quarantined by anybody.
+        await unlink(path).catch(() => undefined);
+      } else {
         return undefined;
       }
-      await removeOwnReclaimClaim(ownerPath, predecessor.token ?? "");
     }
   }
   if (!claimed) return undefined;
@@ -837,6 +849,23 @@ async function claimDefunctGeneration(
   } catch {
     await removeOwnReclaimClaim(ownerPath, token);
     return undefined;
+  }
+}
+
+/**
+ * Whether a reclaim marker is old enough that no contender can still be
+ * establishing it. The claim is held only across the single rename that clears
+ * a defunct owner, so the liveness window is a generous bound; the acquisition
+ * that removes an aged marker still proves the generation it observed in
+ * {@link claimDefunctGeneration} before it renames anything.
+ */
+async function abandonedReclaimClaim(path: string): Promise<boolean> {
+  try {
+    const marker = await stat(path);
+    return Date.now() - marker.mtimeMs > STALE_AFTER_MS;
+  } catch (error) {
+    // Already gone: the retry's exclusive create decides the winner.
+    return nodeErrorCode(error) === "ENOENT";
   }
 }
 
