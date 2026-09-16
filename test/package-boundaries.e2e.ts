@@ -28,6 +28,7 @@ interface PackageManifest {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   engines?: Record<string, string>;
+  license?: string;
   files: string[];
   repository: { directory: string };
   exports: Record<string, Record<string, { types?: string; default?: string }>>;
@@ -236,6 +237,11 @@ describe("public npm package boundaries", () => {
       expect(files).toContain("package.json");
       expect(files).toContain("README.md");
       expect(files).toContain("THIRD_PARTY_NOTICES.md");
+      // Apache-2.0 section 4(a) asks that recipients of a redistribution get a
+      // copy of the license, and the manifest names that license. The tarball
+      // carried only the bundled dependency's MIT notice, so the terms the
+      // package itself is offered under were not in it.
+      expect(files).toContain("LICENSE");
       expect([...files]).toContainEqual(expect.stringMatching(/^dist\//));
       expect([...files]).not.toContainEqual(expect.stringMatching(/^src\//));
       expect([...files]).not.toContainEqual(
@@ -251,6 +257,7 @@ describe("public npm package boundaries", () => {
     expect(nodeManifest.name).toBe("@questdb/nodejs-client");
     expect(nodeManifest.files).toEqual([
       "dist",
+      "LICENSE",
       "README.md",
       "THIRD_PARTY_NOTICES.md",
     ]);
@@ -269,6 +276,7 @@ describe("public npm package boundaries", () => {
     expect(browserManifest.name).toBe("@questdb/browser-client");
     expect(browserManifest.files).toEqual([
       "dist",
+      "LICENSE",
       "README.md",
       "THIRD_PARTY_NOTICES.md",
     ]);
@@ -279,6 +287,24 @@ describe("public npm package boundaries", () => {
     expect(browserManifest.engines?.node).toBeUndefined();
     expect(browserManifest.dependencies).toEqual({});
     expect(browserManifest.devDependencies).toBeUndefined();
+  });
+
+  it("ships the terms each package says it is licensed under", () => {
+    for (const [directory, packageManifest] of [
+      [NODE_PACKAGE, nodeManifest],
+      [BROWSER_PACKAGE, browserManifest],
+    ] as const) {
+      expect(packageManifest.license).toBe("Apache-2.0");
+      const license = readFileSync(path.join(directory, "LICENSE"), "utf8");
+      // The identifier in the manifest names the terms; this is the copy of
+      // them. THIRD_PARTY_NOTICES.md is not a substitute -- it carries the
+      // bundled dependency's MIT text, which is a different license.
+      expect(license).toContain("Apache License");
+      expect(license).toContain("Version 2.0, January 2004");
+      expect(license).toContain(
+        "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION",
+      );
+    }
   });
 
   it.each(["import", "require"] as const)(
