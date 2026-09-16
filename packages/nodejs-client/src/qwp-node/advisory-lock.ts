@@ -226,10 +226,14 @@ export class QwpNodeAdvisoryLock {
       );
     }
 
-    // The record landed, but not necessarily inside the directory this call
-    // created: writeFile() resolves a pathname, not the inode behind it. An
-    // acquisition that lost its directory while that write was in flight has
-    // to fail rather than report a lock over somebody else's mutex.
+    // The record landed, and it landed exclusively -- but not necessarily
+    // inside the directory this call created, because writeFile() resolves a
+    // pathname rather than the inode behind it. Where the replacement is
+    // distinguishable, fail instead of reporting a lock over a mutex this call
+    // no longer holds. Where it is not (the inode was reused), the exclusive
+    // write above is what keeps the outcome single-owner: whichever record
+    // landed first is the one that survives, and its writer is the only
+    // acquisition that returns.
     if (!(await stillClaimedBy(ownerPath, claimed))) {
       // Take back only the record, never the directory: it belongs to the
       // acquisition that replaced this one, and leaving a token nobody holds
@@ -541,13 +545,17 @@ async function retryPendingReleases(): Promise<void> {
 }
 
 /**
- * Identifies the directory one acquisition created, so a later step can tell
- * it from a replacement that reused the same pathname.
+ * Identifies the directory one acquisition created, so a later step can often
+ * tell it from a replacement that reused the same pathname.
  *
- * `ino` is zero when the platform or filesystem does not report a usable one.
- * Every comparison then reports a match, which is the behaviour that existed
- * before identity was tracked at all: the acquisition token still fences a
- * holder afterwards, so degrading here loses nothing that was previously held.
+ * This is a secondary check, not the guarantee. A mismatch is proof that the
+ * pathname was replaced, but a match proves nothing: a filesystem is free to
+ * hand the inode freed by a reclaim straight back to the replacement `mkdir`,
+ * and ext4 does exactly that. `ino` is also zero where a platform reports no
+ * usable one, and every comparison then matches. Mutual exclusion rests on the
+ * exclusive owner-record write in acquireAt() and on the acquisition token
+ * afterwards; this only lets an acquisition notice sooner, and keeps a failed
+ * one from deleting a directory it can see is no longer its own.
  */
 interface OwnerDirectoryIdentity {
   readonly dev: number;
@@ -592,7 +600,11 @@ async function claimOwnerDirectory(
   }
 }
 
-/** Whether the owner pathname still resolves to the claimed directory. */
+/**
+ * Whether the owner pathname still plausibly resolves to the claimed
+ * directory. See {@link OwnerDirectoryIdentity} for why a true answer is not
+ * proof of ownership.
+ */
 async function stillClaimedBy(
   ownerPath: string,
   claimed: OwnerDirectoryIdentity,
