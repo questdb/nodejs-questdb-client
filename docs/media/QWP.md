@@ -1780,31 +1780,61 @@ deltas, ACK tracking, auto-flush, transactions, and durable waits.
 When a bare session really is what you want, `connectQwpNodeIngress()` and
 `connectQwpBrowserIngress()` open one and hand back a connected
 `QwpIngressSession`. Both take the same runtime-specific connection options as
-their `*Sender()` counterparts, plus optional session options and an
+their `*Sender()` counterparts -- so `requestDurableAck` belongs with the
+connection, not with the session options -- plus optional session options and an
 `AbortSignal` that cancels a first connect still negotiating:
 
 ```typescript
-import { connectQwpNodeIngress } from "@questdb/nodejs-client";
+import {
+  QWP_COLUMN_TYPE,
+  QwpTableBuffer,
+  connectQwpNodeIngress,
+} from "@questdb/nodejs-client";
 
-const session = await connectQwpNodeIngress(
-  { url: "wss://questdb.example:9000", token: process.env.QDB_TOKEN },
-  { requestDurableAck: true },
-);
+const session = await connectQwpNodeIngress({
+  url: "wss://questdb.example:9000/write/v4",
+  authorization: `Bearer ${token}`,
+  requestDurableAck: true,
+});
 
 try {
-  await session.sendTables([buffer.build()]);
-  await session.waitForAcknowledged();
+  const trades = new QwpTableBuffer("trades");
+  // getOrCreateColumn() reserves this row's cell and returns the column to
+  // append the value to. It returns null when the row already set that
+  // column, because the first value of a row wins.
+  trades
+    .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+    .values.push("ETH-USD");
+  trades.getOrCreateColumn("price", QWP_COLUMN_TYPE.DOUBLE)!.values.push(2615.54);
+  // The designated timestamp is the column with an empty name.
+  trades
+    .getOrCreateColumn("", QWP_COLUMN_TYPE.TIMESTAMP_NANOS)!
+    .values.push(1_723_000_000_000_000_000n);
+  trades.nextRow();
+
+  // Resolves on the server's acknowledgement of this batch.
+  const response = await session.sendTables([trades]);
+  if (response.sequence !== null) {
+    // Redundant straight after sendTables(); use it to wait for a watermark
+    // reached by sends this code did not await. The target is a bigint.
+    await session.waitForAcknowledged(response.sequence);
+  }
 } finally {
   await session.close();
 }
 ```
 
-These two entry points are the only supported way to obtain a `QwpIngressSession`
-directly; constructing one from an internal path is not supported.
-`parseQwpNodeClientConfig()` is the matching low-level helper for turning a
-`ws::`/`wss::` connect string into the typed options object those constructors
-take, and `scanQwpNodeOrphanSlots()` lists the store-and-forward slots under a
-parent directory without starting a drainer.
+These two entry points are the supported way to obtain a connected
+`QwpIngressSession`, and the one to prefer. The class and the connection
+factories are exported too, so `new QwpIngressSession(connection)` and
+`QwpIngressSession.connect(factory)` over `connectQwpNodeWebSocket()` /
+`createQwpNodeConnectionFactory()` (and their browser counterparts) are
+supported as well; they exist for applications that supply their own transport.
+Importing from an internal path instead of a package root is what is not
+supported. `parseQwpNodeClientConfig()` is the matching low-level helper for
+turning a `ws::`/`wss::` connect string into the typed options object those
+constructors take, and `scanQwpNodeOrphanSlots()` lists the store-and-forward
+slots under a parent directory without starting a drainer.
 
 Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
 signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
