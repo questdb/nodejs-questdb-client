@@ -183,22 +183,69 @@ export class QwpNodeAdvisoryLock {
       }
     }
 
-    // This acquisition owns the slot now, so any directory a previous release
-    // or reclaim renamed aside and did not live to remove is safe to clear.
-    await sweepAbandonedOwnerDirectories(ownerPath);
-
     const token = newOwnerToken();
-    let ownerMtimeMs: number;
+    const ownerFile = join(ownerPath, OWNER_FILE);
+    // Name the owner before this acquisition does anything else. A directory
+    // with no record inside is only a claim, and reclaimIfDefunct() may
+    // legitimately take an aged one, so every await between the mkdir above
+    // and this write is a window in which a contender can rename this
+    // directory aside and create its own at the same pathname. The abandoned
+    // sweep used to run in that window -- a readdir plus one rm per stray
+    // directory -- which made it wide enough to lose in practice; it now runs
+    // below, once the record proves the slot is taken.
     try {
       await writeFile(
-        join(ownerPath, OWNER_FILE),
+        ownerFile,
         JSON.stringify({
           pid: process.pid,
           host: hostname(),
           token,
         }),
-        { encoding: "utf8", mode: 0o600 },
+        // Exclusive: a pathname that already names an owner belongs to another
+        // acquisition. Without this, an acquisition resuming after a stall
+        // wrote straight through the replacement directory and overwrote the
+        // record of the live holder that had reclaimed it, so both calls
+        // returned a lock for one slot.
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
       );
+    } catch (error) {
+      if (nodeErrorCode(error) === "EEXIST") {
+        // Another acquisition owns the directory this call created, so it is
+        // emphatically not ours to remove.
+        throw new QwpNodeAdvisoryLockBusyError(
+          lockPath,
+          await readHolderPid(pidPath),
+          error,
+        );
+      }
+      await removeOwnedDirectory(ownerPath, claimed, token);
+      throw new QwpNodeAdvisoryLockError(
+        "could not establish QWP advisory lock",
+        lockPath,
+        error,
+      );
+    }
+
+    // The record landed, but not necessarily inside the directory this call
+    // created: writeFile() resolves a pathname, not the inode behind it. An
+    // acquisition that lost its directory while that write was in flight has
+    // to fail rather than report a lock over somebody else's mutex.
+    if (!(await stillClaimedBy(ownerPath, claimed))) {
+      // Take back only the record, never the directory: it belongs to the
+      // acquisition that replaced this one, and leaving a token nobody holds
+      // would fence that owner out of its own slot.
+      await removeOwnRecord(ownerFile, token);
+      throw new QwpNodeAdvisoryLockBusyError(
+        lockPath,
+        await readHolderPid(pidPath),
+      );
+    }
+
+    let ownerMtimeMs: number;
+    try {
+      // This acquisition owns the slot now, so any directory a previous release
+      // or reclaim renamed aside and did not live to remove is safe to clear.
+      await sweepAbandonedOwnerDirectories(ownerPath);
       ownerMtimeMs = await touchOwnerDirectory(ownerPath);
       // Keep the Java-visible slot metadata present and current. Java creates
       // these itself when absent, so they exist for format parity and for the
@@ -209,7 +256,7 @@ export class QwpNodeAdvisoryLock {
         mode: 0o600,
       });
     } catch (error) {
-      await removeOwnerDirectory(ownerPath).catch(() => undefined);
+      await removeOwnedDirectory(ownerPath, claimed, token);
       throw new QwpNodeAdvisoryLockError(
         "could not establish QWP advisory lock",
         lockPath,
@@ -493,19 +540,104 @@ async function retryPendingReleases(): Promise<void> {
   }
 }
 
-/** Returns true when this call created the owner directory. */
-async function claimOwnerDirectory(ownerPath: string): Promise<boolean> {
+/**
+ * Identifies the directory one acquisition created, so a later step can tell
+ * it from a replacement that reused the same pathname.
+ *
+ * `ino` is zero when the platform or filesystem does not report a usable one.
+ * Every comparison then reports a match, which is the behaviour that existed
+ * before identity was tracked at all: the acquisition token still fences a
+ * holder afterwards, so degrading here loses nothing that was previously held.
+ */
+interface OwnerDirectoryIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
+const INDETERMINATE_IDENTITY: OwnerDirectoryIdentity = { dev: 0, ino: 0 };
+
+function sameOwnerDirectory(
+  a: OwnerDirectoryIdentity,
+  b: OwnerDirectoryIdentity,
+): boolean {
+  if (a.ino === 0 || b.ino === 0) return true;
+  return a.ino === b.ino && a.dev === b.dev;
+}
+
+/**
+ * Creates the owner directory, returning the identity of the one this call
+ * made, or undefined when somebody else holds the pathname.
+ */
+async function claimOwnerDirectory(
+  ownerPath: string,
+): Promise<OwnerDirectoryIdentity | undefined> {
   try {
     await mkdir(ownerPath);
-    return true;
   } catch (error) {
-    if (nodeErrorCode(error) === "EEXIST") return false;
+    if (nodeErrorCode(error) === "EEXIST") return undefined;
     throw new QwpNodeAdvisoryLockError(
       "could not create QWP advisory lock owner directory",
       ownerPath,
       error,
     );
   }
+  try {
+    const created = await stat(ownerPath);
+    return { dev: created.dev, ino: created.ino };
+  } catch {
+    // The mkdir is what claimed the mutex; failing to describe the result does
+    // not undo it. Proceed without identity rather than dropping a lock that
+    // was genuinely acquired.
+    return INDETERMINATE_IDENTITY;
+  }
+}
+
+/** Whether the owner pathname still resolves to the claimed directory. */
+async function stillClaimedBy(
+  ownerPath: string,
+  claimed: OwnerDirectoryIdentity,
+): Promise<boolean> {
+  try {
+    const current = await stat(ownerPath);
+    return sameOwnerDirectory(claimed, {
+      dev: current.dev,
+      ino: current.ino,
+    });
+  } catch (error) {
+    // A directory that is gone was certainly not kept. Any other fault proves
+    // nothing, and latching on an unreadable stat would fail acquisitions that
+    // nothing had taken.
+    return nodeErrorCode(error) !== "ENOENT";
+  }
+}
+
+/** Removes an owner record only while it still names this acquisition. */
+async function removeOwnRecord(
+  ownerFile: string,
+  token: string,
+): Promise<void> {
+  const owner = await readOwnerFile(dirname(ownerFile));
+  if (owner.state !== "present" || owner.record.token !== token) return;
+  await unlink(ownerFile).catch(() => undefined);
+}
+
+/**
+ * Removes an owner directory this acquisition still holds. Unlike
+ * {@link removeOwnerDirectory} it first proves the pathname was not reclaimed
+ * and re-created by somebody else, so a failed acquisition cleaning up after
+ * itself cannot strip a live lock.
+ */
+async function removeOwnedDirectory(
+  ownerPath: string,
+  claimed: OwnerDirectoryIdentity,
+  token: string,
+): Promise<void> {
+  if (!(await stillClaimedBy(ownerPath, claimed))) return;
+  const owner = await readOwnerFile(ownerPath);
+  // `absent` is this acquisition's own state before its record lands, so it is
+  // removable; a record naming another token is not.
+  if (owner.state === "present" && owner.record.token !== token) return;
+  await removeOwnerDirectory(ownerPath).catch(() => undefined);
 }
 
 /**
