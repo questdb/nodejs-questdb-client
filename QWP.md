@@ -409,10 +409,11 @@ drained segments.
 `appendDeadlineMs` bounds each such pause and retries of transient journal faults
 such as a briefly read-only, full, or descriptor-starved filesystem (30 seconds
 by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. A split logical
-batch that cannot fit even in an empty journal instead fails immediately with
-`QwpReplayStoreBatchTooLargeError`; no ACK or trim could make that wait succeed.
-Waiting appenders do not hold the journal mutation queue, so ACK cleanup and
-checkpoint recovery can continue. Corruption and loss of the journal lock remain
+batch that cannot fit even in an empty journal generation instead fails
+immediately with `QwpReplayStoreBatchTooLargeError`; that fit includes the
+segment-rounded live-frame allowance preserved by a retained symbol dictionary,
+because no ACK or trim is needed to consume it. Waiting appenders do not hold the
+journal mutation queue, so ACK cleanup and checkpoint recovery can continue. Corruption and loss of the journal lock remain
 immediate failures.
 Direct users of `QwpNodeFileReplayStore` can inspect `metrics` for pending records
 and segments, checkpoint work, checkpoint failures, active waiters, stalls, and
@@ -420,21 +421,21 @@ timeouts.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
 cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target together
-with each complete fixed-segment reservation, including the hot spare. The journal
-preserves up to 32 MiB (or the configured target when smaller) for live frame segments
-if dictionary growth uses all remaining headroom. Dictionary persistence itself is
-never rejected by the target, so actual disk usage can exceed it by the current
-dictionary overshoot, and by the frames that close an open transaction: QuestDB
-withholds a deferred frame's ACK until its commit arrives, so the commit is
-journalled even when the deferred prefix already fills the journal. Under that
-liveness exception, let `S` be one complete fixed-segment reservation. Reservations
-are cumulatively capped at
+with each complete fixed-segment reservation, including the hot spare. While a
+dictionary generation is retained, frame segments have an independent rounded
+allowance of
+`S * max(floor(maxBytes / S), ceil(min(maxBytes, 32 MiB) / S))`, where `S` is one
+complete fixed-segment reservation. Dictionary persistence itself is never rejected
+by the target, so actual disk usage can exceed it by the retained dictionary and by
+the frames that close an open transaction: QuestDB withholds a deferred frame's ACK
+until its commit arrives, so the commit is journalled even when the deferred prefix
+already fills the journal. Reservations are cumulatively capped at
 `S * (floor(maxBytes / S) + max(floor(maxBytes / S), ceil(min(maxBytes, 32 MiB) / S)))`,
-saturated at `Number.MAX_SAFE_INTEGER`; a closing batch must still fit `maxBytes` on
-its own. The retained dictionary is additive to this segment ceiling. When `S`
-divides `maxBytes`, accounted physical use may reach the previous exact result of
-`dictionaryFileSize + 2 * maxBytes`. Beyond the segment cap, frame growth remains
-backpressured until background ACK trimming frees complete segments.
+saturated at `Number.MAX_SAFE_INTEGER`; a closing batch must still fit the standalone
+segment allowance on its own. The retained dictionary is additive to this segment
+ceiling. When `S` divides `maxBytes`, accounted physical use may reach the previous
+exact result of `dictionaryFileSize + 2 * maxBytes`. Beyond the segment cap, frame
+growth remains backpressured until background ACK trimming frees complete segments.
 A partly acknowledged segment remains charged to the disk budget until its last live
 record is acknowledged.
 Once every frame is acknowledged,

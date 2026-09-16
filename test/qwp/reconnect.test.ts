@@ -81,7 +81,10 @@ import {
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
 import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
-import { quarantineQwpNodeReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
+import {
+  quarantineQwpNodeReplayStore,
+  qwpSegmentFileSize,
+} from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { QwpReconnectingIngressConnection } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { validateQwpWebSocketTimeouts } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
@@ -2855,6 +2858,67 @@ describe("QWP ingress reconnect and replay", () => {
     });
     await session.close();
   });
+
+  it.each([QWP_SF_BACKPRESSURE_POLICY.ERROR, QWP_SF_BACKPRESSURE_POLICY.WAIT])(
+    "preflights split batches against retained-dictionary capacity under %s",
+    async (backpressurePolicy) => {
+      const directory = await createTemporaryDirectory();
+      const connection = new FakeConnection("primary");
+      const maxBytes = 460;
+      const replayStore = new QwpNodeFileReplayStore({
+        directory,
+        maxSegmentBytes: 297,
+        maxBytes,
+        durability: QWP_SF_DURABILITY.MEMORY,
+        backpressurePolicy,
+        appendDeadlineMs: 50,
+      });
+      const session = await QwpIngressSession.connect(async () => connection, {
+        reconnect: { maxAttempts: 1 },
+        replayStore,
+        maxBatchSizeBytes: 297,
+      });
+      const table = new QwpTableBuffer("events");
+      for (const [symbol, fill] of [
+        ["alpha", "a"],
+        ["beta", "b"],
+      ] as const) {
+        table
+          .getOrCreateColumn("kind", QWP_COLUMN_TYPE.SYMBOL)!
+          .values.push(symbol);
+        table
+          .getOrCreateColumn("payload", QWP_COLUMN_TYPE.VARCHAR)!
+          .values.push(fill.repeat(150));
+        table.nextRow();
+      }
+
+      try {
+        await expect(
+          session.publishTablesDelta([table], { deferCommit: true }),
+        ).resolves.toBeUndefined();
+        expect(connection.sent).toHaveLength(2);
+        expect(
+          connection.sent.every(
+            (frame) => (frame[5] & QWP_FLAG_DEFER_COMMIT) !== 0,
+          ),
+        ).toBe(true);
+        expect(await replayStore.loadSymbolDictionary()).toEqual([
+          "alpha",
+          "beta",
+        ]);
+        expect(replayStore.metrics).toMatchObject({
+          pendingRecords: 2,
+          pendingSegments: 2,
+          totalBackpressureStalls: 0,
+          totalAppendTimeouts: 0,
+        });
+        expect(replayStore.metrics.totalBytes).toBeGreaterThan(maxBytes);
+      } finally {
+        await session.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("preflights a split batch before publishing a deferred journal prefix", async () => {
     const directory = await createTemporaryDirectory();
@@ -8424,6 +8488,106 @@ describe("QWP Node file replay store", () => {
     ).resolves.toBeUndefined();
     await twoSegmentStore.close();
   });
+
+  it.each([QWP_SF_BACKPRESSURE_POLICY.ERROR, QWP_SF_BACKPRESSURE_POLICY.WAIT])(
+    "rejects batches beyond retained-dictionary capacity under %s",
+    async (backpressurePolicy) => {
+      const segmentFileSize = 329;
+      const store = new QwpNodeFileReplayStore({
+        directory: await trackedDirectory(),
+        maxBytes: 460,
+        maxSegmentBytes: 297,
+        durability: QWP_SF_DURABILITY.MEMORY,
+        backpressurePolicy,
+        appendDeadlineMs: 60_000,
+      });
+      try {
+        await store.load();
+        await store.appendSymbolDictionary(0, ["alpha", "beta"]);
+        const payload = new Uint8Array(160);
+
+        // The retained dictionary preserves two rounded segments even though
+        // their reservation exceeds maxBytes. A third segment is still
+        // impossible in an otherwise empty generation and must never wait.
+        await expect(
+          store.prepareAppendBatch([payload, payload]),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.prepareAppendBatch([payload, payload, payload]),
+        ).rejects.toMatchObject({
+          name: "QwpReplayStoreBatchTooLargeError",
+          retryable: false,
+          maxBytes: 460,
+          frameCount: 3,
+          requiredBytes: 3 * segmentFileSize,
+        } satisfies Partial<QwpReplayStoreBatchTooLargeError>);
+        expect(store.metrics).toMatchObject({
+          waitingAppends: 0,
+          totalBackpressureStalls: 0,
+          totalAppendTimeouts: 0,
+          pendingRecords: 0,
+          pendingSegments: 0,
+        });
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it.each([QWP_SF_BACKPRESSURE_POLICY.ERROR, QWP_SF_BACKPRESSURE_POLICY.WAIT])(
+    "keeps retained-dictionary preflight and provisioning aligned above the live-frame floor under %s",
+    async (backpressurePolicy) => {
+      const mebibyte = 1024 * 1024;
+      const segmentFileSize = 4 * mebibyte;
+      const maxSegmentBytes = segmentFileSize - qwpSegmentFileSize(0);
+      const maxBytes = 9 * segmentFileSize;
+      const allowedSegments = 9;
+      const store = new QwpNodeFileReplayStore({
+        directory: await trackedDirectory(),
+        maxBytes,
+        maxSegmentBytes,
+        durability: QWP_SF_DURABILITY.MEMORY,
+        backpressurePolicy,
+        appendDeadlineMs: 250,
+      });
+      try {
+        await store.load();
+        await store.appendSymbolDictionary(0, ["d".repeat(5 * mebibyte)]);
+        const payload = new Uint8Array(maxSegmentBytes);
+        const allowedBatch = Array<Uint8Array>(allowedSegments).fill(payload);
+
+        // Nine 4 MiB reservations exceed the 32 MiB live-frame floor. They
+        // remain independently admissible beside the retained dictionary,
+        // while a tenth segment is impossible and must never wait.
+        await expect(
+          store.prepareAppendBatch(allowedBatch),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.prepareAppendBatch([...allowedBatch, payload]),
+        ).rejects.toMatchObject({
+          name: "QwpReplayStoreBatchTooLargeError",
+          retryable: false,
+          maxBytes,
+          frameCount: allowedSegments + 1,
+          requiredBytes: (allowedSegments + 1) * segmentFileSize,
+        } satisfies Partial<QwpReplayStoreBatchTooLargeError>);
+
+        for (let index = 0; index < allowedSegments; index++) {
+          await store.append({ frameSequence: BigInt(index), payload });
+        }
+        expect(store.metrics).toMatchObject({
+          waitingAppends: 0,
+          totalBackpressureStalls: 0,
+          totalAppendTimeouts: 0,
+          pendingRecords: allowedSegments,
+          pendingSegments: allowedSegments,
+        });
+        expect(store.metrics.totalBytes).toBeGreaterThan(maxBytes);
+      } finally {
+        await store.close();
+      }
+    },
+  );
 
   it("accepts the smallest journal without depending on a symbol dictionary", async () => {
     const directory = await trackedDirectory();

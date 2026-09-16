@@ -55,6 +55,15 @@ export const QWP_MAX_SEGMENT_BYTES = 0xffffffff;
 export function qwpSegmentFileSize(maxSegmentBytes: number): number {
   return SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes;
 }
+
+function saturatingSegmentBytes(
+  segmentCount: number,
+  segmentFileSize: number,
+): number {
+  return segmentCount > Math.floor(Number.MAX_SAFE_INTEGER / segmentFileSize)
+    ? Number.MAX_SAFE_INTEGER
+    : segmentCount * segmentFileSize;
+}
 const MANIFEST_REQUIRED_FLAG = 1;
 const MANIFEST_MAGIC = Buffer.from("SFM1");
 const MANIFEST_FILE = "sf-manifest.bin";
@@ -144,9 +153,10 @@ interface ScannedRecord extends QwpIngressReplayReference {
  * One preflighted logical batch whose suffix closes an already-open
  * transaction, admitted above {@link QwpNodeFileReplayStoreOptions.maxBytes}
  * because its retained deferred prefix cannot be acknowledged until it is sent.
- * Only a batch that fits the configured target on its own is admitted this
- * way. Its fixed-segment reservations are added to the maximum rounded prefix;
- * the retained dictionary is excluded from that segment ceiling.
+ * Only a batch that fits its applicable standalone rounded segment allowance
+ * is admitted this way. Its fixed-segment reservations are added to the
+ * maximum rounded prefix; the retained dictionary is excluded from that
+ * segment ceiling.
  */
 interface PreparedTransactionCloseBatch {
   readonly frames: readonly {
@@ -213,9 +223,10 @@ export interface QwpNodeFileReplayStoreOptions {
    * so no amount of trimming could make room first. For fixed segment size S,
    * reservations are capped at S * (floor(maxBytes / S) + max(floor(maxBytes / S),
    * ceil(min(maxBytes, 32 MiB) / S))), saturated at Number.MAX_SAFE_INTEGER. The
-   * closing batch must fit the target on its own.
-   * The retained dictionary is additive; beyond the cap appends backpressure.
-   * When S divides maxBytes exactly, this segment cap is 2 * maxBytes.
+   * closing batch must fit the applicable standalone rounded segment allowance
+   * on its own. The retained dictionary is additive; beyond the cap appends
+   * backpressure. When S divides maxBytes exactly, this segment cap is 2 *
+   * maxBytes.
    *
    * Must reserve at least one whole segment -- `maxSegmentBytes + 32` for the
    * 24-byte SFA header and the 8-byte frame header. A smaller target throws a
@@ -493,6 +504,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
    * each transaction could ratchet the journal by another segment.
    */
   private readonly livenessSegmentCeilingBytes: number;
+  /**
+   * Segment-rounded frame allowance preserved while a dictionary generation
+   * is retained. Batch preflight and segment provisioning must share this
+   * ceiling or one can accept a batch that the other can never store.
+   */
+  private readonly retainedDictionaryFrameCeilingBytes: number;
   private readonly maxSegmentBytes: number;
   private readonly segmentFileSize: number;
   private readonly liveFrameBytes: number;
@@ -657,12 +674,15 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       targetSegmentCount,
       retainedFloorSegmentCount,
     );
+    this.retainedDictionaryFrameCeilingBytes = saturatingSegmentBytes(
+      preCloseSegmentCount,
+      this.segmentFileSize,
+    );
     const livenessSegmentCount = preCloseSegmentCount + targetSegmentCount;
-    this.livenessSegmentCeilingBytes =
-      livenessSegmentCount >
-      Math.floor(Number.MAX_SAFE_INTEGER / this.segmentFileSize)
-        ? Number.MAX_SAFE_INTEGER
-        : livenessSegmentCount * this.segmentFileSize;
+    this.livenessSegmentCeilingBytes = saturatingSegmentBytes(
+      livenessSegmentCount,
+      this.segmentFileSize,
+    );
     this.durability = validateDurability(
       options.durability ?? QWP_SF_DURABILITY.APPEND,
     );
@@ -1832,9 +1852,10 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       : 0;
     let newSegments = 0;
     // Segments the batch would need on its own, i.e. journalled into an empty
-    // store. The liveness exception is only ever justified beside a retained
-    // deferred prefix, so a batch that cannot fit the configured journal even
-    // without one must not be admitted by it.
+    // current generation. A retained dictionary makes its rounded live-frame
+    // allowance part of that generation: segment provisioning can consume the
+    // allowance without an ACK, trim, or transaction-close exception, so the
+    // preflight must not classify the same reservation as impossible.
     let standaloneSegments = 0;
     let standaloneRemaining = 0;
     for (const size of recordSizes) {
@@ -1850,12 +1871,15 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       standaloneRemaining -= size;
     }
 
-    const standaloneBytes =
-      standaloneSegments >
-      Math.floor(Number.MAX_SAFE_INTEGER / this.segmentFileSize)
-        ? Number.MAX_SAFE_INTEGER
-        : standaloneSegments * this.segmentFileSize;
-    if (standaloneBytes > this.maxBytes) {
+    const standaloneBytes = saturatingSegmentBytes(
+      standaloneSegments,
+      this.segmentFileSize,
+    );
+    const standaloneCeilingBytes =
+      this.dictionaryFileSize > 0
+        ? this.retainedDictionaryFrameCeilingBytes
+        : this.maxBytes;
+    if (standaloneBytes > standaloneCeilingBytes) {
       throw new QwpReplayStoreBatchTooLargeError(
         this.maxBytes,
         payloads.length,
@@ -1871,12 +1895,12 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       projectedBatchEndBytes - this.dictionaryFileSize;
     let projectedTotalBytes = this.totalBytes;
     let projectedFrameBytes = this.totalBytes - this.dictionaryFileSize;
-    let projectedSegments = this.segments.size + hotSpareSegments;
     while (additionalSegments-- > 0) {
       const requiredBytes = projectedTotalBytes + this.segmentFileSize;
+      const requiredSegmentBytes = projectedFrameBytes + this.segmentFileSize;
       const preservesLiveness =
         this.dictionaryFileSize > 0 &&
-        (projectedFrameBytes < this.liveFrameBytes || projectedSegments === 0);
+        requiredSegmentBytes <= this.retainedDictionaryFrameCeilingBytes;
       if (requiredBytes > this.maxBytes && !preservesLiveness) {
         // A deferred prefix already in the journal receives no server ACK, so
         // waiting for ACK-driven trimming before its commit-bearing suffix is
@@ -1908,8 +1932,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
         throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
       }
       projectedTotalBytes = requiredBytes;
-      projectedFrameBytes += this.segmentFileSize;
-      projectedSegments++;
+      projectedFrameBytes = requiredSegmentBytes;
     }
   }
 
@@ -2200,7 +2223,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       (admitOverTarget &&
         requiredSegmentBytes <= this.livenessSegmentCeilingBytes) ||
       (this.dictionaryFileSize > 0 &&
-        (frameBytes < this.liveFrameBytes || this.segments.size === 0));
+        requiredSegmentBytes <= this.retainedDictionaryFrameCeilingBytes);
     if (requiredBytes > this.maxBytes && !preservesLiveness) {
       if (required) {
         throw new QwpReplayStoreFullError(this.maxBytes, requiredBytes);
