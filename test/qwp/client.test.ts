@@ -1125,7 +1125,14 @@ describe("QWP pooled client", () => {
     await handlerEntered;
 
     const releasing = lease.close();
-    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(2));
+    // Tight polling on purpose: the cancellation drain is 20ms, so a coarse
+    // interval lets it expire first and the terminal then lands on a session
+    // that is already being discarded -- passing without ever reaching the
+    // terminal-waiting-on-a-view state this test exists for.
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(2), {
+      interval: 1,
+    });
+    expect(connections[0].closeCount).toBe(0);
     connections[0].receive(resultEnd(query.requestId));
     await expect(releasing).resolves.toBeUndefined();
     expect(client.metrics.queries.total).toBe(0);
@@ -1134,6 +1141,85 @@ describe("QWP pooled client", () => {
     const replacement = await client.borrowQuery();
     expect(queryCreations).toBe(2);
     await replacement.close();
+    await client.close();
+  });
+
+  it("bounds lease return when a reconnect waits for a view callback", async () => {
+    // Returning a lease cancels the active query, and that CANCEL waits for a
+    // live connection. A reconnect can hold it, and the reconnect first drains
+    // the result-view callback -- which is what the lease return is waiting
+    // behind. Unbounded, one stalled callback kept the pool slot leased for
+    // the whole outage and every other borrower timed out.
+    const connections: FakeConnection[] = [];
+    let queryCreations = 0;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: async () => {
+          queryCreations++;
+          return QwpEgressSession.connect(
+            async () => {
+              const connection = new FakeConnection(
+                `query-${connections.length}`,
+              );
+              connections.push(connection);
+              queueMicrotask(() =>
+                connection.receive(serverInfo(`node-${connections.length}`)),
+              );
+              return connection;
+            },
+            {
+              cancelDrainTimeoutMs: 20,
+              reconnect: {
+                initialBackoffMs: 0,
+                maxBackoffMs: 0,
+                // Documented as disabling the reconnect deadline entirely.
+                maxDurationMs: 0,
+              },
+            },
+          );
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 500,
+      },
+    );
+    const lease = await client.borrowQuery();
+    let enterHandler!: () => void;
+    const handlerEntered = new Promise<void>((resolve) => {
+      enterHandler = resolve;
+    });
+    let releaseHandler!: () => void;
+    const handlerReleased = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    const query = await lease.queryViews("select * from x", async () => {
+      enterHandler();
+      await handlerReleased;
+    });
+    void query.completion.catch(() => undefined);
+
+    connections[0].receive(emptyResultBatch(query.requestId));
+    await handlerEntered;
+    connections[0].drop();
+    await vi.waitFor(() => expect(connections).toHaveLength(2));
+
+    const startedAt = Date.now();
+    await expect(lease.close()).resolves.toBeUndefined();
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(client.metrics.queries).toMatchObject({ leased: 0, total: 0 });
+
+    const replacement = await client.borrowQuery();
+    expect(queryCreations).toBe(2);
+    await replacement.close();
+
+    releaseHandler();
     await client.close();
   });
 

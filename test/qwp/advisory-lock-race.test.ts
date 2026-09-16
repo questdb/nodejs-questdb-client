@@ -20,6 +20,8 @@ const interleave = vi.hoisted(() => ({
   run: async (): Promise<void> => {},
   reclaimFile: "",
   runReclaim: async (): Promise<void> => {},
+  renameFrom: "",
+  runRename: async (): Promise<void> => {},
   /**
    * Models a filesystem that hands the inode freed by a reclaim straight back
    * to the replacement `mkdir`. ext4 does, which is what CI runs on; APFS does
@@ -57,6 +59,19 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.writeFile(file, data, options);
     },
+    rename: async (
+      from: Parameters<typeof actual.rename>[0],
+      to: Parameters<typeof actual.rename>[1],
+    ) => {
+      if (interleave.renameFrom && String(from) === interleave.renameFrom) {
+        const run = interleave.runRename;
+        // One shot: whatever the hook itself renames must pass straight
+        // through, and so must this acquisition's later renames.
+        interleave.renameFrom = "";
+        await run();
+      }
+      return actual.rename(from, to);
+    },
     stat: async (
       target: Parameters<typeof actual.stat>[0],
       options?: Parameters<typeof actual.stat>[1],
@@ -84,6 +99,8 @@ afterEach(async () => {
   interleave.run = async () => {};
   interleave.reclaimFile = "";
   interleave.runReclaim = async () => {};
+  interleave.renameFrom = "";
+  interleave.runRename = async () => {};
   interleave.reuseInodes = false;
   await Promise.all(
     directories
@@ -208,6 +225,55 @@ it("does not let a stale reclaimer remove a live successor", async () => {
     await expect(
       readFile(join(ownerPath, ".reclaim"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await successor?.release().catch(() => undefined);
+  }
+});
+
+it("refuses a reclaim a successor has already superseded", async () => {
+  // Every step before the rename is an observation, and this process can be
+  // descheduled between making one and acting on it. Stall long enough and the
+  // claim ages out, so a contender may legitimately remove it and take the
+  // slot; resuming into that rename then moved the successor's directory aside
+  // and produced two holders of one journal.
+  const directory = await trackedDirectory();
+  const ownerPath = join(directory, ".lock.owner");
+  const ownerFile = join(ownerPath, "owner");
+  await mkdir(ownerPath);
+  await writeFile(
+    ownerFile,
+    JSON.stringify({
+      pid: 2_147_483_647,
+      host: hostname(),
+      token: "dead-owner",
+    }),
+  );
+
+  let successor: QwpNodeAdvisoryLock | undefined;
+  let stalled = false;
+  interleave.renameFrom = ownerPath;
+  interleave.runRename = async () => {
+    stalled = true;
+    const aged = new Date(Date.now() - 60_000);
+    await utimes(join(ownerPath, ".reclaim"), aged, aged);
+    successor = await QwpNodeAdvisoryLock.acquire(directory);
+  };
+
+  try {
+    await expect(QwpNodeAdvisoryLock.acquire(directory)).rejects.toMatchObject({
+      name: "QwpNodeAdvisoryLockBusyError",
+    });
+    expect(stalled).toBe(true);
+    expect(successor).toBeDefined();
+    // The successor keeps the slot it took, record and directory intact.
+    expect(successor!.lost).toBe(false);
+    await expect(successor!.ownership()).resolves.toBe("owned");
+    const record = JSON.parse(await readFile(ownerFile, "utf8")) as {
+      token?: string;
+    };
+    expect(record.token).toBe(
+      (successor as unknown as { token: string }).token,
+    );
   } finally {
     await successor?.release().catch(() => undefined);
   }

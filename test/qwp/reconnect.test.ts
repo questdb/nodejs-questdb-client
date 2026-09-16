@@ -5671,6 +5671,68 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  it("carries a public credit grant once across a pending reconnect", async () => {
+    // The grant is recorded in the replayable request before its frame is
+    // sent. Sending the frame to the replacement as well handed the server
+    // the same window twice: once in the replayed QUERY_REQUEST and again in
+    // CREDIT, so an autoCredit:false reader lost the bound it had set.
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    let releaseFactory!: () => void;
+    const factoryReleased = new Promise<void>((resolve) => {
+      releaseFactory = resolve;
+    });
+    let connectCalls = 0;
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connectCalls++ === 0 ? first : second;
+        // Hold the reconnect open so the grant is issued while it runs.
+        if (connection === second) await factoryReleased;
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          maxDurationMs: 2_000,
+        },
+      },
+    );
+    const query = await session.query("select * from x", {
+      initialCredit: 1,
+      autoCredit: false,
+    });
+
+    first.drop();
+    await vi.waitFor(() => expect(connectCalls).toBe(2));
+    // The public grant, not the view-callback control: it resolves as soon as
+    // the reconnect owns it rather than waiting out the outage.
+    await query.grantCredit(4096);
+    releaseFactory();
+
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    expect(second.sent[0]).toEqual(
+      encodeQwpQueryRequest({
+        requestId: query.requestId,
+        sql: "select * from x",
+        initialCredit: 1 + 4096,
+      }),
+    );
+
+    second.receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    expect(
+      second.sent.filter((payload) => payload[0] === QWP_EGRESS_MESSAGE.CREDIT),
+    ).toEqual([]);
+    await session.close();
+  });
+
   it("bounds close() while a reconnect waits for a view callback", async () => {
     // A reconnect parks on the session's terminal verdict, and only the
     // session settles it -- after the view callback returns. close() joined

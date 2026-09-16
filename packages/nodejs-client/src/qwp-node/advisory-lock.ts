@@ -751,6 +751,20 @@ async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
   const reclaimToken = await claimDefunctGeneration(ownerPath, identity, owner);
   if (!reclaimToken) return false;
 
+  // Everything above is an observation, and this process can be descheduled --
+  // a suspended VM, a debugger, a long event-loop block, a stalled network
+  // filesystem -- between making it and acting on it. A claim that has aged
+  // out is removable by a contender, so by the time this rename runs the
+  // pathname may already belong to a successor that legitimately took it.
+  // Re-prove the claim and the generation immediately beforehand: renaming on
+  // a stale observation moves a live acquisition's directory aside and leaves
+  // two holders writing to one journal.
+  if (
+    !(await stillHoldsReclaimClaim(ownerPath, reclaimToken, identity, owner))
+  ) {
+    return false;
+  }
+
   const abandoned = `${ownerPath}${ABANDONED_SUFFIX}${process.pid}-${stealCounter++}`;
   try {
     await rename(ownerPath, abandoned);
@@ -764,8 +778,46 @@ async function reclaimIfDefunct(ownerPath: string): Promise<boolean> {
     }
     return true;
   }
+  // The check above cannot be fused with the rename, so confirm afterwards
+  // that what moved really is the generation this contender condemned. If a
+  // successor slipped into that last window, put its directory back and refuse
+  // rather than reporting a reclaim that stripped a live lock.
+  const moved = await readOwnerFile(abandoned);
+  if (!sameOwnerGeneration(owner, moved)) {
+    await rename(abandoned, ownerPath).catch(() => undefined);
+    return false;
+  }
   await rm(abandoned, { recursive: true, force: true }).catch(() => undefined);
   return true;
+}
+
+/**
+ * Whether this contender still holds the claim it created, over the same owner
+ * directory generation it condemned. A successor removes an aged claim before
+ * taking the pathname, so both halves have to match.
+ */
+async function stillHoldsReclaimClaim(
+  ownerPath: string,
+  token: string,
+  expectedIdentity: OwnerDirectoryIdentity,
+  expectedOwner: OwnerRead,
+): Promise<boolean> {
+  const claim = await readReclaimClaim(join(ownerPath, RECLAIM_FILE));
+  if (claim?.token !== token) return false;
+  try {
+    const current = await stat(ownerPath);
+    if (
+      !sameOwnerDirectory(expectedIdentity, {
+        dev: current.dev,
+        ino: current.ino,
+      })
+    ) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return sameOwnerGeneration(expectedOwner, await readOwnerFile(ownerPath));
 }
 
 function sameOwnerGeneration(left: OwnerRead, right: OwnerRead): boolean {

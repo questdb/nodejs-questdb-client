@@ -414,12 +414,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
             this.awaitCompletion(timeoutMs),
           cancel: () => this.cancel(),
           grantCredit: (additionalBytes: number | bigint) =>
-            this.control.grantCredit(
-              this.requestId,
-              additionalBytes,
-              true,
-              true,
-            ),
+            this.grantCredit(additionalBytes),
           isDone: () => this.isDone(),
         })
       : undefined;
@@ -462,7 +457,18 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 
   grantCredit(additionalBytes: number | bigint): Promise<void> {
-    return this.control.grantCredit(this.requestId, additionalBytes);
+    // Replayable, and accepted as soon as a reconnect owns it. Both arguments
+    // matter: the grant is recorded in the replayable request before its frame
+    // is sent, so without the replay-supersession handling the replacement
+    // received the same window twice -- once in the replayed request and again
+    // in this CREDIT frame -- and without early acceptance a caller inside a
+    // result-view callback waits for a reconnect that first drains it.
+    return this.control.grantCredit(
+      this.requestId,
+      additionalBytes,
+      true,
+      true,
+    );
   }
 
   /**
@@ -1195,15 +1201,31 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     const active = this.active;
     if (!active) return true;
     const idle = this.waitUntilIdle();
-    if (!active.retired) {
-      try {
-        await this.abandon(active.requestId);
-      } catch (error) {
-        this.fail(error);
+    // Bounded by the same ceiling close() uses. The CANCEL this sends waits
+    // for a live connection, so a reconnect can hold it -- and that reconnect
+    // first drains the result-view callback, which is exactly what a lease
+    // return may be waiting behind. Unbounded, one stalled callback kept a
+    // pool slot leased for the whole outage and every other borrower timed
+    // out; the session is simply discarded instead.
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainDeadline = new Promise<void>((resolve) => {
+      drainTimer = setTimeout(resolve, this.cancelDrainTimeoutMs);
+      (drainTimer as { unref?: () => void }).unref?.();
+    });
+    try {
+      if (!active.retired) {
+        const abandoning = this.abandon(active.requestId).catch(
+          (error: unknown) => this.fail(error),
+        );
+        await Promise.race([abandoning, drainDeadline]);
       }
+      await Promise.race([idle, drainDeadline]);
+    } finally {
+      clearTimeout(drainTimer);
     }
-    await idle;
-    return !this.failure && !this.closing;
+    // A query still active here means the drain deadline won, so this physical
+    // session is no longer safe to hand to the next borrower.
+    return !this.failure && !this.closing && this.active === undefined;
   }
 
   private async closeNow(code: number, reason: string): Promise<void> {
