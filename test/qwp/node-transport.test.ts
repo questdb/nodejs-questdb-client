@@ -433,6 +433,39 @@ describe("QWP Node transport", () => {
     );
   });
 
+  it("reports a malformed endpoint URL instead of retrying it", async () => {
+    // A URL that does not parse is local configuration, and no reconnect can
+    // repair it. It threw before the catch that marks the other configuration
+    // rejections non-retryable, so the classifier's fail-open default retried
+    // the same parse for the whole configured budget and then replaced the
+    // caller's error with a generic exhaustion.
+    let webSocketFactoryCalls = 0;
+    const started = Date.now();
+    await expect(
+      connectQwpNodeIngress(
+        {
+          url: "not an absolute URL",
+          webSocketFactory: () => {
+            webSocketFactoryCalls++;
+            throw new Error("the endpoint must never be dialled");
+          },
+        },
+        {
+          reconnect: {
+            maxAttempts: 3,
+            initialBackoffMs: 200,
+            maxBackoffMs: 200,
+            maxDurationMs: 5_000,
+          },
+        },
+      ),
+    ).rejects.toThrow(/Invalid URL/);
+    // No backoff was served, so this is the parse error itself rather than an
+    // exhaustion that happens to carry one as its cause.
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(webSocketFactoryCalls).toBe(0);
+  });
+
   it("surfaces the server-clamped Zstd level from a real upgrade", async () => {
     let acceptEncoding: string | string[] | undefined;
     server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -659,6 +692,104 @@ describe("QWP Node transport", () => {
       );
       expect(received).toContainEqual(Uint8Array.of(4, 5, 6));
       expect(pingCount).toBeGreaterThan(0);
+    } finally {
+      await client.close();
+      await closeServer(endpoint);
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("drains a pooled orphan under the durability its sender asked for", async () => {
+    // awaitDurableAck is the sender-level spelling of the durable request, and
+    // createQwpNodeSender() infers requestDurableAck from it. The pooled
+    // orphan scanner built its recovery sessions straight from `ingress`, so
+    // it inherited neither: the adopted slot negotiated no durable ACK, and an
+    // ordinary OK was then enough to advance the persisted watermark and trim
+    // the journal for rows the caller had asked to keep until they were
+    // durable. Losing the server's not-yet-durable write after that leaves
+    // nothing to replay.
+    const endpoint = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    const durableRequests: (string | undefined)[] = [];
+    endpoint.on("headers", (headers, request) => {
+      if (request.url?.startsWith("/write/v4")) {
+        durableRequests.push(
+          request.headers["x-qwp-request-durable-ack"] as string | undefined,
+        );
+      }
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QWP-Durable-Ack: enabled");
+    });
+    const received: Uint8Array[] = [];
+    let releaseDurable: (() => void) | undefined;
+    endpoint.on("connection", (socket) => {
+      let sequence = 0n;
+      socket.on("message", (payload) => {
+        received.push(new Uint8Array(payload as Buffer));
+        // Ordinary acceptance only. The durable confirmation is withheld until
+        // the assertion below has observed that the journal still holds it.
+        socket.send(okResponse(sequence++, "trades", 1n));
+        releaseDurable = () => socket.send(durableResponse("trades", 1n));
+      });
+      socket.on("ping", () => releaseDurable?.());
+    });
+    await listen(endpoint);
+    const address = endpoint.address() as AddressInfo;
+    const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-pool-dur-"));
+    const orphanDirectory = join(rootDirectory, "sender-3");
+    const orphan = new QwpNodeFileReplayStore({ directory: orphanDirectory });
+    await orphan.load();
+    await orphan.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) });
+    await orphan.close();
+
+    const events: string[] = [];
+    const client = await connectQwpNodeClient({
+      ingress: {
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        storeAndForward: {
+          directory: rootDirectory,
+          orphanScanIntervalMs: 0,
+          onOrphanDrainEvent: (event) => events.push(event.kind),
+        },
+      },
+      ingressSession: {},
+      egress: { url: `ws://127.0.0.1:${address.port}/read/v1` },
+      // The only place durability is configured: no requestDurableAck, no
+      // durableAckKeepaliveMs.
+      sender: { awaitDurableAck: true },
+      pool: {
+        senderPoolMin: 1,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    });
+    try {
+      // The orphan's own upgrade carries the request the sender implies.
+      await vi.waitFor(
+        () => expect(durableRequests.length).toBeGreaterThan(1),
+        {
+          timeout: 2_000,
+        },
+      );
+      expect(durableRequests).not.toContain(undefined);
+
+      // Replayed, ordinarily acknowledged -- and still retained, because an
+      // ordinary OK is not the acknowledgement this journal was promised.
+      await vi.waitFor(
+        () => expect(received).toContainEqual(Uint8Array.of(1, 2, 3)),
+        { timeout: 2_000 },
+      );
+      expect(await assignedReplaySegments(orphanDirectory)).not.toEqual([]);
+      expect(events).not.toContain("drained");
+
+      releaseDurable?.();
+      await vi.waitFor(
+        async () => {
+          expect(await assignedReplaySegments(orphanDirectory)).toEqual([]);
+          expect(events).toContain("drained");
+        },
+        { timeout: 2_000 },
+      );
     } finally {
       await client.close();
       await closeServer(endpoint);

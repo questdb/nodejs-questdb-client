@@ -501,7 +501,25 @@ function connectQwpNodeEndpoint(
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
-  const endpointUrl = new URL(endpoint);
+  let endpointUrl: URL;
+  try {
+    endpointUrl = new URL(endpoint);
+  } catch (error) {
+    // A URL that does not parse is local configuration, like every other
+    // rejection below, and no retry can repair it. It threw before the catch
+    // that marks those non-retryable, so the reconnect classifier's fail-open
+    // default retried the same parse for the whole configured budget and then
+    // replaced the caller's `Invalid URL` with a generic
+    // QwpReconnectExhaustedError. Report it the way a single-attempt connect
+    // already does. The endpoint text is left to the original error, which
+    // does not echo it, so a malformed string carrying a credential is not
+    // copied into a new message.
+    return Promise.reject(
+      qwpNonRetryable(
+        error instanceof Error ? error : new TypeError("Invalid URL"),
+      ),
+    );
+  }
   const agent = validateQwpWebSocketAgent(
     options.agent,
     endpointUrl.protocol === "wss:",
@@ -1354,6 +1372,19 @@ function createPooledOrphanDrainer(
 ): QwpNodeOrphanDrainer | undefined {
   const storeAndForward = options.ingress.storeAndForward;
   if (!storeAndForward) return undefined;
+  // Pooled foreground senders have requestDurableAck inferred from
+  // sender.awaitDurableAck by createQwpNodeSender(). The scanner built its
+  // recovery sessions straight from options.ingress, so without the same
+  // inference an adopted slot negotiated no durable ACK and kept
+  // durableAckTracked false: an ordinary OK then advanced the persisted
+  // watermark and trimmed the journal for rows the caller had asked to keep
+  // until they were durable. Recovery has to honour the same durability
+  // contract as the producer whose slot it is draining.
+  const ingress: QwpNodeIngressOptions = {
+    ...options.ingress,
+    requestDurableAck:
+      options.ingress.requestDurableAck ?? options.sender?.awaitDurableAck,
+  };
   const rootDirectory = storeAndForwardRoot(storeAndForward);
   const managedSlotCount = options.pool?.senderPoolMax ?? 4;
   const senderId = validateQwpSenderId(options.ingress.senderId ?? "sender");
@@ -1366,7 +1397,7 @@ function createPooledOrphanDrainer(
     },
   );
   return createNodeOrphanDrainer(
-    options.ingress,
+    ingress,
     options.ingressSession ?? {},
     rootDirectory,
     (slotName) => {
