@@ -86,6 +86,12 @@ particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls`,
 continues to come from `addr`, because the typed object intentionally omits
 `url`.
 
+Typed `ExtraOptions.qwp` sections are transport-specific and a mismatched section
+is rejected rather than ignored: `webSocket` and `session` apply only to
+`ws::`/`wss::`, `udp` applies only to `udp::`, and `sender` applies to all three
+QWP ingress schemes. HTTP(S) and TCP(S) reject every present `qwp` section; an
+empty `qwp: {}` remains valid for callers that build the object conditionally.
+
 ### Connection
 
 | Key                  | Value              | Default   | Meaning                                                                                  |
@@ -121,23 +127,52 @@ continues to come from `addr`, because the typed object intentionally omits
 
 ### Reconnect and failover
 
-| Key                                | Value                       | Default            | Meaning                                                                                |
-| ---------------------------------- | --------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
-| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                |
-| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                       |
-| `reconnect_max_duration_millis`    | integer ms                  | `300000` / `30000` | Budget for a reconnect episode. This is the QWP replacement for ILP's `retry_timeout`. |
-| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                  |
-| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                    |
-| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                  |
-| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                        |
-| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                         |
-| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                       |
-| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.            |
+| Key                                | Value                       | Default            | Meaning                                                                                                   |
+| ---------------------------------- | --------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                                   |
+| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                                          |
+| `reconnect_max_duration_millis`    | integer ms ≥ 0              | `300000` / `30000` | Budget for a reconnect episode; `0` disables the deadline. The QWP replacement for ILP's `retry_timeout`. |
+| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                                     |
+| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                                       |
+| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                                     |
+| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                                           |
+| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                                            |
+| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                                          |
+| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.                               |
 
 The three `reconnect_*` defaults differ by side, shown here as ingress / egress.
 Ingress additionally defaults to unlimited attempts, because a running producer
 must outlast any outage; egress stops after 8. The `failover_*` keys configure
-egress only and share the egress reconnect defaults.
+egress only and share the egress reconnect defaults. Zero disables a duration
+budget on both sides, matching `QwpReconnectOptions.maxDurationMs`; the backoff
+keys require a positive value, because a zero delay is a hot retry loop rather
+than a documented mode.
+
+#### Timer bounds
+
+Every millisecond option that arms a host timer is capped at `2147483647` (about
+24.8 days), the largest delay Node and browsers schedule without clamping. A
+larger value is rejected with a `RangeError` rather than accepted, because hosts
+clamp an over-large delay to about 1 ms — the longest budget you can ask for
+would otherwise become the shortest one you get. For a capped option the cap
+applies identically to the connection-string key and to the typed option that
+overrides it, and to an explicit `timeoutMs` argument such as
+`waitForAcknowledged(sequence, timeoutMs)`.
+
+Exemption is a property of the typed spelling, not of the key. `idle_timeout_ms`,
+`max_lifetime_ms` and `auto_flush_interval` keep the parser's integer range —
+`2147483647` — even though the typed `idleTimeoutMs`, `maxLifetimeMs` and
+`autoFlushIntervalMs` below accept any safe integer, because every
+connection-string value must parse as an integer within a stated range.
+
+Budgets that are only measured against an elapsed clock, or that are re-clamped
+inside a rescheduling loop, accept any safe integer and are deliberately exempt:
+`reconnect_max_duration_millis`, `failover_max_duration_ms`,
+`poison_min_escalation_window_millis` and
+`catch_up_cap_gap_min_escalation_window_millis`, together with the typed
+spellings `maxDurationMs`, `poisonMinEscalationWindowMs`,
+`catchUpCapGapMinEscalationWindowMs`, `idleTimeoutMs`, `maxLifetimeMs`,
+`autoFlushIntervalMs` and `durableAckPollIntervalMs`.
 
 ### Store-and-forward (Node only)
 
@@ -145,18 +180,18 @@ Setting `sf_dir` turns on the persistent journal; the rest tune it. A default
 shown as a dash is applied downstream of the connect string, by the sender or
 session that consumes it.
 
-| Key                                             | Value                          | Default       | Meaning                                                                                                                                   |
-| ----------------------------------------------- | ------------------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `sf_dir`                                        | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                     |
-| `sf_durability`                                 | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                      |
-| `sf_max_total_bytes`                            | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. Without `sf_dir` it retunes the 128 MiB memory queue.                      |
-| `sf_max_segment_bytes`                          | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. Set, it caps a frame without `sf_dir` too. |
-| `sf_sync_interval_millis`                       | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                        |
-| `sf_append_deadline_millis`                     | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                          |
-| `initial_connect_retry`                         | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                 |
-| `drain_orphans`                                 | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                       |
-| `max_background_drainers`                       | integer                        | —             | Concurrent orphan drainers.                                                                                                               |
-| `catch_up_cap_gap_min_escalation_window_millis` | integer ms                     | `300000`      | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. Requires `sf_dir`.                                               |
+| Key                                             | Value                          | Default       | Meaning                                                                                                                                                                                                                                                    |
+| ----------------------------------------------- | ------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sf_dir`                                        | path                           | —             | Slot root. Enables store-and-forward; the journal is `<sf_dir>/<sender_id>`, or `<sf_dir>/<sender_id>-<slot>` pooled.                                                                                                                                      |
+| `sf_durability`                                 | `memory`, `periodic`, `append` | `memory`      | Local durability barrier after each vectored append.                                                                                                                                                                                                       |
+| `sf_max_total_bytes`                            | integer bytes                  | `10737418240` | Journal ceiling. Reaching it is the one error a producer sees. With `sf_dir`, must reserve at least one whole segment: `sf_max_segment_bytes + 32`. Without `sf_dir` it retunes the 128 MiB memory queue.                                                  |
+| `sf_max_segment_bytes`                          | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. With `sf_dir`, `sf_max_total_bytes` must leave room for one whole segment of this size plus 32 bytes of headers. Set, it caps a frame without `sf_dir` too. |
+| `sf_sync_interval_millis`                       | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                                                                                                                                         |
+| `sf_append_deadline_millis`                     | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                                                                                                                                           |
+| `initial_connect_retry`                         | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                                                                                                                                  |
+| `drain_orphans`                                 | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                                                                                                                                        |
+| `max_background_drainers`                       | integer                        | —             | Concurrent orphan drainers.                                                                                                                                                                                                                                |
+| `catch_up_cap_gap_min_escalation_window_millis` | integer ms                     | `300000`      | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. Requires `sf_dir`.                                                                                                                                                                |
 
 ### Egress
 
@@ -215,7 +250,10 @@ await sender.close();
 ```
 
 The default port is 9007, the maximum datagram size (`max_datagram_size`) is 1400
-bytes, and the multicast TTL (`multicast_ttl`) is zero. `max_datagram_size` accepts
+bytes, and the multicast TTL (`multicast_ttl`) is zero. Both have typed
+equivalents in `ExtraOptions.qwp.udp` -- `maxDatagramSize` and `multicastTtl` --
+and, like every other typed QWP section, they win when the connect string sets
+the same option. `max_datagram_size` accepts
 1 through 65507, the IPv4 payload maximum; a larger value is rejected when the sender
 is created. Many hosts refuse datagrams well below that ceiling — macOS defaults
 `net.inet.udp.maxdgram` to 9216 — so keep the value at or under the path MTU unless
@@ -226,7 +264,9 @@ self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
 fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the same
-transport from `@questdb/nodejs-client`.
+transport from `@questdb/nodejs-client`; `createQwpNodeUdpSender()` builds the
+same sender without binding the socket yet, for a caller that wants to construct
+it eagerly and connect later.
 
 UDP provides no authentication, TLS, server or durable ACK, transactions,
 reconnection, compression, or store-and-forward. Local socket errors are delivered
@@ -346,10 +386,16 @@ no handler is supplied, so journal loss is never silent. Trailing records that n
 reached disk leave no trace in the segment itself -- a lost page reads back exactly like
 the reservation a segment was created with -- so they are detected by comparing what
 recovery could read against the append high-water mark in the journal's own metadata.
-That mark advances whenever an acknowledgement is persisted, which bounds detection to
-what has been acknowledged at least once: a slot whose very first frames are lost before
-any ACK has nothing to compare against. `sf_durability=append` avoids the shape
-altogether by making each append durable before it is reported as accepted.
+That mark lives beside the acknowledgement watermark and advances whenever one is
+persisted, so detection is bounded by what that pair currently records. Two shapes fall
+outside it. A slot whose very first frames are lost before any ACK has nothing to
+compare against. So does a slot that has fully drained: an empty journal keeps no
+watermark, both values reset, and the records appended after the last acknowledgement
+are again undetectable until the next one is persisted. A healthy producer drains
+continuously, so this is the steady state rather than an edge case, and it is why
+`onRecoveryDataLoss` reporting nothing is not by itself proof that nothing was lost.
+`sf_durability=append` avoids the shape altogether by making each append durable before
+it is reported as accepted.
 
 The two surfaces do not share a default. `storeAndForward.durability` above
 defaults to `"append"`, while the `sf_durability` connect-string key defaults to
@@ -364,21 +410,34 @@ ACK advances the checksummed cursor, then a bounded background trimmer deletes f
 drained segments.
 `appendDeadlineMs` bounds each such pause and retries of transient journal faults
 such as a briefly read-only, full, or descriptor-starved filesystem (30 seconds
-by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. Waiting appenders
-do not hold the journal mutation queue, so ACK cleanup and checkpoint recovery
-can continue. Corruption and loss of the journal lock remain immediate failures.
+by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. A split logical
+batch that cannot fit even in an empty journal generation instead fails
+immediately with `QwpReplayStoreBatchTooLargeError`; that fit includes the
+segment-rounded live-frame allowance preserved by a retained symbol dictionary,
+because no ACK or trim is needed to consume it. Waiting appenders do not hold the
+journal mutation queue, so ACK cleanup and checkpoint recovery can continue. Corruption and loss of the journal lock remain
+immediate failures.
 Direct users of `QwpNodeFileReplayStore` can inspect `metrics` for pending records
 and segments, checkpoint work, checkpoint failures, active waiters, stalls, and
 timeouts.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
 cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target together
-with each complete fixed-segment reservation, including the hot spare. The journal
-preserves up to 32 MiB (or the configured target when smaller) for live frame segments
-if dictionary growth uses all remaining headroom. Dictionary persistence itself is
-never rejected by the target, so actual disk usage can exceed it by the current
-dictionary overshoot and at most one liveness segment. Frame growth beyond that
-allowance remains backpressured until background ACK trimming frees complete segments.
+with each complete fixed-segment reservation, including the hot spare. While a
+dictionary generation is retained, frame segments have an independent rounded
+allowance of
+`S * max(floor(maxBytes / S), ceil(min(maxBytes, 32 MiB) / S))`, where `S` is one
+complete fixed-segment reservation. Dictionary persistence itself is never rejected
+by the target, so actual disk usage can exceed it by the retained dictionary and by
+the frames that close an open transaction: QuestDB withholds a deferred frame's ACK
+until its commit arrives, so the commit is journalled even when the deferred prefix
+already fills the journal. Reservations are cumulatively capped at
+`S * (floor(maxBytes / S) + max(floor(maxBytes / S), ceil(min(maxBytes, 32 MiB) / S)))`,
+saturated at `Number.MAX_SAFE_INTEGER`; a closing batch must still fit the standalone
+segment allowance on its own. The retained dictionary is additive to this segment
+ceiling. When `S` divides `maxBytes`, accounted physical use may reach the previous
+exact result of `dictionaryFileSize + 2 * maxBytes`. Beyond the segment cap, frame
+growth remains backpressured until background ACK trimming frees complete segments.
 A partly acknowledged segment remains charged to the disk budget until its last live
 record is acknowledged.
 Once every frame is acknowledged,
@@ -438,7 +497,21 @@ Java-produced segment and dictionary fixtures and compare TypeScript output with
 same normalized bytes.
 
 Each segment reserves `maxSegmentBytes` of target payload data (4 MiB by default)
-plus one frame header so a maximum-sized frame fits. The active segment and one
+plus one frame header so a maximum-sized frame fits. A journal must therefore be
+able to reserve at least one whole segment: `sf_max_total_bytes` must be at least
+`sf_max_segment_bytes + 32`, counting the 24-byte segment header and the 8-byte
+frame header. A smaller total is rejected at configuration time, because no
+append could ever reserve its first segment and no acknowledgement could ever
+free room for one.
+
+The check reads configuration only and runs before the journal is opened, so it
+also applies to a directory that already holds unsent frames: raising
+`sf_max_segment_bytes` without raising `sf_max_total_bytes` makes an existing
+journal fail to open, leaving its backlog on disk until the total is raised.
+Raise `sf_max_total_bytes` first, or drain the directory before changing the
+segment size. Two or more segments are recommended, so a rotation can
+overlap with a pre-provisioned hot spare instead of provisioning one
+synchronously. The active segment and one
 pre-sized temporary hot spare keep open file handles; rotation activates the spare.
 A process-wide, unreferenced worker provisions replacements, checkpoints dirty paths,
 and performs ACK-driven unlink and directory barriers. ACK trimming advances the
@@ -647,6 +720,11 @@ await trades.rows([
 normal auto-flush, batch-cap, backpressure, transaction, symbol-dictionary, and ACK
 settings. The schema is validated once.
 
+`writer()` returns a `QwpTableWriter`, exported from both package roots; it is the
+type to annotate with when a compiled writer is stored in a field or passed
+around. It is generic over the schema, so `row()` and `rows()` stay typed per
+column rather than accepting a bare object.
+
 The schema vocabulary covers every column type the fluent row API can write:
 
 | Field                       | QuestDB type         | Accepted row values                                                                    |
@@ -683,8 +761,9 @@ Current QuestDB servers accept only DOUBLE arrays for ingestion. `longArrayColum
 and `longArray()` remain available for Java-client and protocol parity and encode the
 QWP LONG_ARRAY type, but flushing one is rejected by the server with `long arrays are
 not supported, only double arrays`. Decoding LONG_ARRAY values in query results remains
-supported. QWP arrays may have between 1 and 32 dimensions; the client rejects a larger
-rank before encoding a frame.
+supported. QWP arrays may have between 1 and 32 dimensions, and each axis is limited to
+268,435,455 elements, the length QuestDB can materialise; the client rejects a larger
+rank or axis before encoding a frame, on both ingress and egress.
 
 QuestDB reserves the minimum signed value as NULL for INT, LONG, and DATE. Both the
 fluent setters (`int32Column()`, `longColumn()`, and `dateColumn()`) and the compiled
@@ -706,6 +785,17 @@ for the rest of the frame; the lock is released once those rows are published, s
 next frame's first value sets it afresh. Decimal text and `{ unscaled, scale }` values are rescaled to the
 column's scale when that is exact, and rejected when it would round: at
 `decimal64(2)`, `"1.50"` stages as `150n` and `"1.005"` raises `QwpWriterRowError`.
+The `scale` of an `{ unscaled, scale }` value must itself be between 0 and 76,
+DECIMAL256's maximum, whatever the column's width; the value is rescaled onto the
+column's scale from there.
+Decimal text follows the same grammar as ILP. Scientific notation is accepted, so
+`"1e3"`, `"-2.5e2"` and `"1.5E-3"` are all valid spellings, and either side of the
+decimal point may be omitted, so `".5"` stages as `5` at scale 1 and `"5."` as `5`
+at scale 0. Text carrying no digit at all -- `"."`, `"+"`, `".e1"` -- is rejected,
+as are `"NaN"` and `"Infinity"`, which ILP accepts but which no
+`{ unscaled, scale }` pair can name. An exponent beyond ±1024 is rejected, because
+no DECIMAL256 value can name one and expanding it would be an unbounded string
+allocation.
 Base-32 geohash text carries five bits per character, so `geohash(20)` accepts
 `"u33d"` and rejects `"u33"`.
 
@@ -766,6 +856,31 @@ Java client). Set it to `0` or a negative value for a fast close, which publishe
 without the ACK drain; publication itself stays bounded, so `close()` always
 returns. An unfinished row is still discarded with a warning.
 The configuration-string equivalent is `close_flush_timeout_millis`.
+
+These warnings, and the other sender-level diagnostics, go to `QwpSenderOptions.log`
+when it is supplied and to the same console-backed default logger the rest of the
+client uses when it is not, on every entry point: `Sender`, the direct
+`createQwpNodeSender()`/`createQwpBrowserSender()` factories, and pooled leases. A
+top-level `log` wins over `qwp.sender.log`; pass an explicit no-op to silence them.
+`debug` messages stay below the default level, so the per-row staging diagnostics
+are not printed unless a supplied logger records them.
+
+QWP is columnar, so a row whose values were all nullish is still a row, and
+QuestDB can store it with NULL in every column. What reaches the wire depends on
+the closer: `at(value, unit)` carries the designated timestamp as a column, so a
+row closed that way always has at least one column, while `atNow()` leaves the
+timestamp to the server and can encode the row with a **column count of zero**.
+That shape is deliberate and is accepted by WebSocket QWP.
+
+Node UDP matches Java's `QwpUdpSender`: `atNow()` rejects with
+`no columns were provided` when this sender currently knows no non-null column
+for the selected table. An explicit `at()` row, or a later all-nullish row after the
+table schema is known, remains valid. Compiled writers enforce the same UDP rule.
+ILP senders reject every field-less row with
+`The row must have a symbol or column set before it is closed` -- see the nullish
+section of `README.md` for the full per-protocol comparison. Call `cancelRow()`
+before the closer when a permitted all-nullish row should be dropped instead of
+stored.
 
 `autoFlushBytes` is a soft threshold over estimated raw column-buffer storage and is
 disabled by default (`0`). It combines with `autoFlushRows` and
@@ -1109,7 +1224,8 @@ try {
 
 `query()` keeps its convenient materialized batches. For hot paths, `queryViews()`
 avoids allocating a JavaScript value array for every column and delivers one
-reusable batch view through an awaited callback:
+reusable batch view through an awaited callback. The value handed to that callback
+is a `QwpResultBatchView`, exported from both package roots:
 
 ```typescript
 const query = await session.queryViews(
@@ -1393,7 +1509,10 @@ A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
 the ingress frame cap from the first publication onward, before the server has
 advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.
 Raise `sf_max_segment_bytes`, or lower the cap with
-`qwp.session.maxBatchSizeBytes`, to choose a different bound. Without `sf_dir`
+`qwp.session.maxBatchSizeBytes`, to choose a different bound. `sf_max_total_bytes`
+must leave room for at least one `sf_max_segment_bytes` segment plus 32 bytes of
+headers, so with the 4 MiB segment default `sf_max_total_bytes=4m` is rejected and
+`sf_max_total_bytes=1m` requires lowering `sf_max_segment_bytes` too. Without `sf_dir`
 there is no default frame cap, and `sf_max_total_bytes`,
 `sf_append_deadline_millis` and `sf_max_segment_bytes` retune the built-in
 memory replay queue instead -- note that queue's own ceiling is 128 MiB, not the
@@ -1441,6 +1560,7 @@ try {
     await sender.close();
   }
 
+  // Each borrowQuery() resolves to a QwpQueryLease, exported from both roots.
   const [prices, volumes] = await Promise.all([
     db.borrowQuery(),
     db.borrowQuery(),
@@ -1500,8 +1620,11 @@ compression remain available as explicit overrides. The original split object
 form with complete `ingress` and `egress` trees remains supported for advanced
 cases that intentionally connect the two sides differently.
 
-`connectQwpNodeClient()` and `connectQwpBrowserClient()` prewarm each configured
-pool minimum. Their `createQwp*Client()` counterparts are lazy. A prewarm that
+`createQwpNodeClient()` and `createQwpBrowserClient()` build the pooled facade
+without contacting the server, leaving the first connect to `connect()` or to the
+first borrow. The connecting forms `connectQwpNodeClient()` and
+`connectQwpBrowserClient()` prewarm each configured
+pool minimum. A prewarm that
 fails rejects but does not close the client: connections it did establish stay
 pooled, and calling `connect()` again makes a fresh attempt, so a transient
 outage at start-up can be retried rather than requiring a new client. Pools grow to
@@ -1575,6 +1698,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpReplayDictionaryPersistenceError`   | A dictionary sidecar append failed before its delta frame was published; retrying the batch is safe         |
 | `QwpUnrecoverableReplayDictionaryError` | The persisted dictionary cannot be restored, so recovered delta frames cannot be replayed                   |
 | `QwpReplayStoreFullError`               | The Node.js replay journal reached its configured size                                                      |
+| `QwpReplayStoreBatchTooLargeError`      | One split logical batch cannot fit in an empty Node.js replay journal                                       |
 | `QwpReplayStoreAppendTimeoutError`      | The Node.js replay journal did not regain capacity before the configured append deadline                    |
 | `QwpReplayStoreCheckpointError`         | A periodic Node.js replay-journal checkpoint failed; operations fail closed until a retry succeeds          |
 | `QwpReplayStoreLockedError`             | Another process owns the configured Node.js replay directory                                                |
@@ -1653,10 +1777,41 @@ Code that manually creates `QwpTableBuffer` and calls
 to produce encoded table buffers itself. The high-level sender owns batching, symbol
 deltas, ACK tracking, auto-flush, transactions, and durable waits.
 
+When a bare session really is what you want, `connectQwpNodeIngress()` and
+`connectQwpBrowserIngress()` open one and hand back a connected
+`QwpIngressSession`. Both take the same runtime-specific connection options as
+their `*Sender()` counterparts, plus optional session options and an
+`AbortSignal` that cancels a first connect still negotiating:
+
+```typescript
+import { connectQwpNodeIngress } from "@questdb/nodejs-client";
+
+const session = await connectQwpNodeIngress(
+  { url: "wss://questdb.example:9000", token: process.env.QDB_TOKEN },
+  { requestDurableAck: true },
+);
+
+try {
+  await session.sendTables([buffer.build()]);
+  await session.waitForAcknowledged();
+} finally {
+  await session.close();
+}
+```
+
+These two entry points are the only supported way to obtain a `QwpIngressSession`
+directly; constructing one from an internal path is not supported.
+`parseQwpNodeClientConfig()` is the matching low-level helper for turning a
+`ws::`/`wss::` connect string into the typed options object those constructors
+take, and `scanQwpNodeOrphanSlots()` lists the store-and-forward slots under a
+parent directory without starting a drainer.
+
 Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
 signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
 every element. Coercible values such as booleans and numeric strings, unsafe or
-fractional numbers, and out-of-range bigints are rejected before encoding.
+fractional numbers, and out-of-range bigints are rejected before encoding. The
+root-exported `qwpGorillaSize()` and `encodeQwpGorilla()` helpers enforce the same
+signed 64-bit timestamp bounds for direct codec integrations.
 
 ### Java client concepts
 
@@ -1674,6 +1829,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Fire-and-forget UDP ingress  | Node `udp::` or `connectQwpNodeUdpSender()`                   |
 | Query parameters             | `session.query(sql, { binds })`                               |
+| Bare ingress session         | `connectQwpNodeIngress()` / `connectQwpBrowserIngress()`      |
 | Materialized result batches  | `for await (const batch of query)`                            |
 | Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |
 | Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |

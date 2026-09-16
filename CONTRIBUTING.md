@@ -111,15 +111,40 @@ compiled table writers promise per-column row typing that lives only in the
 emitted declarations, which is why `pnpm typecheck:dist` exists alongside
 `pnpm test:dist`.
 
+## Generated API reference
+
+`docs/` is committed and GitHub Pages serves it directly from the branch, so it
+is published output rather than a local build artifact. Regenerate it in the same
+commit whenever you add or rename a public export, or edit `QWP.md` or
+`README.md`:
+
+```bash
+pnpm run docs
+```
+
+`test/docs-reference.test.ts` runs inside `pnpm test` and fails when the
+committed reference has no page for an exported symbol, or when its embedded
+copy of `QWP.md` has fallen behind the real one. It deliberately does not
+compare the tree byte for byte: TypeDoc stamps the current commit SHA into every
+source link, so a regenerated tree always differs from the one committed a commit
+earlier, and a strict diff would be unsatisfiable rather than merely noisy.
+
 ## Releasing
 
 `.github/workflows/publish.yml` publishes both packages from one commit, so
 bump `packages/nodejs-client/package.json` and
 `packages/browser-client/package.json` to the same new version before
 dispatching it. `node scripts/check-release-versions.mjs` runs first and
-refuses a dispatch whose version either package has already published, because
-the publish action skips an existing version silently and would otherwise
-release only the other half.
+refuses a dispatch whose version **every** package has already published,
+because the publish action skips an existing version silently and such a
+dispatch would publish nothing at all.
+
+If a dispatch fails between the two publish steps, leaving one package on npm
+and the other not, **re-dispatch the same commit**. That is the supported
+repair: the gate reports `resuming a partial release` and passes, the published
+package no-ops inside the publish action, and the missing one lands. Do not
+bump the version to escape a partial release -- that strands the missing half
+at the old version permanently.
 
 `check-release-versions.mjs` decides *whether* to bump, never by how much.
 Pick the level from the changes the release carries: a change that alters the

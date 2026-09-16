@@ -264,7 +264,9 @@ self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
 fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the same
-transport from `@questdb/nodejs-client`.
+transport from `@questdb/nodejs-client`; `createQwpNodeUdpSender()` builds the
+same sender without binding the socket yet, for a caller that wants to construct
+it eagerly and connect later.
 
 UDP provides no authentication, TLS, server or durable ACK, transactions,
 reconnection, compression, or store-and-forward. Local socket errors are delivered
@@ -717,6 +719,11 @@ await trades.rows([
 `rows()` accepts `Iterable` and `AsyncIterable` sources and applies the sender's
 normal auto-flush, batch-cap, backpressure, transaction, symbol-dictionary, and ACK
 settings. The schema is validated once.
+
+`writer()` returns a `QwpTableWriter`, exported from both package roots; it is the
+type to annotate with when a compiled writer is stored in a field or passed
+around. It is generic over the schema, so `row()` and `rows()` stay typed per
+column rather than accepting a bare object.
 
 The schema vocabulary covers every column type the fluent row API can write:
 
@@ -1217,7 +1224,8 @@ try {
 
 `query()` keeps its convenient materialized batches. For hot paths, `queryViews()`
 avoids allocating a JavaScript value array for every column and delivers one
-reusable batch view through an awaited callback:
+reusable batch view through an awaited callback. The value handed to that callback
+is a `QwpResultBatchView`, exported from both package roots:
 
 ```typescript
 const query = await session.queryViews(
@@ -1552,6 +1560,7 @@ try {
     await sender.close();
   }
 
+  // Each borrowQuery() resolves to a QwpQueryLease, exported from both roots.
   const [prices, volumes] = await Promise.all([
     db.borrowQuery(),
     db.borrowQuery(),
@@ -1611,8 +1620,11 @@ compression remain available as explicit overrides. The original split object
 form with complete `ingress` and `egress` trees remains supported for advanced
 cases that intentionally connect the two sides differently.
 
-`connectQwpNodeClient()` and `connectQwpBrowserClient()` prewarm each configured
-pool minimum. Their `createQwp*Client()` counterparts are lazy. A prewarm that
+`createQwpNodeClient()` and `createQwpBrowserClient()` build the pooled facade
+without contacting the server, leaving the first connect to `connect()` or to the
+first borrow. The connecting forms `connectQwpNodeClient()` and
+`connectQwpBrowserClient()` prewarm each configured
+pool minimum. A prewarm that
 fails rejects but does not close the client: connections it did establish stay
 pooled, and calling `connect()` again makes a fresh attempt, so a transient
 outage at start-up can be retried rather than requiring a new client. Pools grow to
@@ -1765,6 +1777,35 @@ Code that manually creates `QwpTableBuffer` and calls
 to produce encoded table buffers itself. The high-level sender owns batching, symbol
 deltas, ACK tracking, auto-flush, transactions, and durable waits.
 
+When a bare session really is what you want, `connectQwpNodeIngress()` and
+`connectQwpBrowserIngress()` open one and hand back a connected
+`QwpIngressSession`. Both take the same runtime-specific connection options as
+their `*Sender()` counterparts, plus optional session options and an
+`AbortSignal` that cancels a first connect still negotiating:
+
+```typescript
+import { connectQwpNodeIngress } from "@questdb/nodejs-client";
+
+const session = await connectQwpNodeIngress(
+  { url: "wss://questdb.example:9000", token: process.env.QDB_TOKEN },
+  { requestDurableAck: true },
+);
+
+try {
+  await session.sendTables([buffer.build()]);
+  await session.waitForAcknowledged();
+} finally {
+  await session.close();
+}
+```
+
+These two entry points are the only supported way to obtain a `QwpIngressSession`
+directly; constructing one from an internal path is not supported.
+`parseQwpNodeClientConfig()` is the matching low-level helper for turning a
+`ws::`/`wss::` connect string into the typed options object those constructors
+take, and `scanQwpNodeOrphanSlots()` lists the store-and-forward slots under a
+parent directory without starting a drainer.
+
 Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
 signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
 every element. Coercible values such as booleans and numeric strings, unsafe or
@@ -1788,6 +1829,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Fire-and-forget UDP ingress  | Node `udp::` or `connectQwpNodeUdpSender()`                   |
 | Query parameters             | `session.query(sql, { binds })`                               |
+| Bare ingress session         | `connectQwpNodeIngress()` / `connectQwpBrowserIngress()`      |
 | Materialized result batches  | `for await (const batch of query)`                            |
 | Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |
 | Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |

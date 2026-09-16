@@ -45,6 +45,72 @@ describe("QWP configuration-string reference", () => {
     expect(missing).toEqual([]);
   });
 
+  it("names every high-level entry point the packages export", async () => {
+    // The converse of the check above, which only proved that a name the prose
+    // mentions exists. Nothing proved the other direction, so a high-level
+    // constructor could be exported, pinned by the public-API contract, and
+    // still appear in no prose document at all -- which is how
+    // connectQwpNodeIngress() and connectQwpBrowserIngress() shipped
+    // undiscoverable while QWP.md's public API policy claimed to cover "the
+    // documented high-level constructors, session classes, errors, constants,
+    // and option signatures".
+    //
+    // Scope matches that policy sentence. A constructor named for one of the
+    // high-level roles below is covered; the low-level transport, factory and
+    // error-construction primitives are the "additional low-level codec
+    // exports ... intended for advanced integrations" the same paragraph
+    // carves out, and the generated TypeDoc reference is their documentation.
+    const HIGH_LEVEL_ROLE =
+      /^(?:connect|create)Qwp(?:Node|Browser)(?:Client|Sender|Ingress|Egress|Udp|UdpSender)$/;
+
+    const entryPoints = [
+      ...new Set([...Object.keys(nodeClient), ...Object.keys(browserClient)]),
+    ]
+      .filter((name) => HIGH_LEVEL_ROLE.test(name))
+      .sort();
+    // Guards the regex itself: a rename that stops matching must not silently
+    // empty this test out.
+    expect(entryPoints.length).toBeGreaterThanOrEqual(14);
+
+    const prose = (
+      await Promise.all(
+        [
+          "QWP.md",
+          "README.md",
+          "packages/nodejs-client/README.md",
+          "packages/browser-client/README.md",
+        ].map((file) => readFile(path.join(ROOT, file), "utf8")),
+      )
+    ).join("\n");
+
+    const undocumented = entryPoints.filter((name) => !prose.includes(name));
+    expect(undocumented).toEqual([]);
+  });
+
+  it("names the high-level types a caller has to annotate with", async () => {
+    // These are returned by documented calls -- sender.writer(), queryViews(),
+    // borrowQuery() -- so the call sites were documented while the type a
+    // caller needs to name in a field or parameter was not.
+    const prose = (
+      await Promise.all(
+        [
+          "QWP.md",
+          "README.md",
+          "packages/nodejs-client/README.md",
+          "packages/browser-client/README.md",
+        ].map((file) => readFile(path.join(ROOT, file), "utf8")),
+      )
+    ).join("\n");
+
+    const undocumented = [
+      "QwpTableWriter",
+      "QwpQueryLease",
+      "QwpResultBatchView",
+      "QwpIngressSession",
+    ].filter((name) => !prose.includes(name));
+    expect(undocumented).toEqual([]);
+  });
+
   it("names only supported configuration-string entry points", async () => {
     const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
     const start = doc.indexOf("## Configuration-string keys");
