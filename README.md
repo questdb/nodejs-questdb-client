@@ -34,7 +34,7 @@ npm install @questdb/browser-client
 `^4.0.0` depends on `undici`, which declares `node >=20.18.1`; installing on an
 earlier v20 warns with `EBADENGINE` and fails outright under `engine-strict`.
 
-The current version of the client requires Node.js v20 or newer version.
+The current version of the client requires Node.js v20.18.1 or newer version.
 Versions up to and including 3.0.0 are compatible with Node.js v16 and above.
 
 The Undici HTTP agent was introduced in 4.0.0, and it is the default HTTP transport.

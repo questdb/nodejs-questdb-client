@@ -1,13 +1,15 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
-
-import * as nodeClient from "../packages/nodejs-client/src";
-import * as browserClient from "../packages/browser-client/src";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DOCS = path.join(ROOT, "docs");
+const ENTRY_POINTS = [
+  ["_questdb_nodejs-client", "packages/nodejs-client/src/index.ts"],
+  ["_questdb_browser-client", "packages/browser-client/src/index.ts"],
+] as const;
 
 // The generated TypeDoc reference is committed, and GitHub Pages serves it
 // straight from the branch (docs/.nojekyll, plus the `homepage` both manifests
@@ -21,6 +23,36 @@ const DOCS = path.join(ROOT, "docs");
 // whatever was committed one commit earlier. These two checks are the
 // deterministic part of that invariant -- both would have failed on the drift,
 // and neither can be defeated by SHA or reflection-id churn.
+
+/**
+ * Every name a package root exports, including the type-only ones.
+ *
+ * `Object.keys()` on the imported module cannot see them: TypeScript erases
+ * `export type`, so a module namespace holds the runtime values alone. That is
+ * most of the public QWP surface -- the option interfaces, the writer schema
+ * types, the result and bind unions -- and it is exactly the part of the
+ * generated reference a reader has to look up rather than infer, so the check
+ * below was blind to precisely the pages that matter most. TypeDoc enumerates
+ * the same module symbols this does.
+ */
+function moduleExports(entry: string): string[] {
+  const file = path.join(ROOT, entry);
+  const program = ts.createProgram([file], {
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ESNext,
+    types: [],
+  });
+  const checker = program.getTypeChecker();
+  const source = program.getSourceFile(file);
+  const module = source && checker.getSymbolAtLocation(source);
+  if (!module) throw new Error(`cannot inspect exports of ${entry}`);
+  return checker
+    .getExportsOfModule(module)
+    .map((symbol) => symbol.name)
+    .sort();
+}
 
 /** Page basenames TypeDoc emitted, e.g. `_questdb_nodejs-client.Sender`. */
 async function documentedPages(): Promise<Set<string>> {
@@ -58,11 +90,14 @@ describe("generated API reference", () => {
     expect(pages.size).toBeGreaterThan(100);
 
     const missing: string[] = [];
-    for (const [moduleName, module] of [
-      ["_questdb_nodejs-client", nodeClient],
-      ["_questdb_browser-client", browserClient],
-    ] as const) {
-      for (const name of Object.keys(module)) {
+    let inspected = 0;
+    for (const [moduleName, entry] of ENTRY_POINTS) {
+      const exports = moduleExports(entry);
+      // Guards the enumeration itself: a resolution failure that returned an
+      // empty list would otherwise pass this test silently.
+      expect(exports.length).toBeGreaterThan(100);
+      inspected += exports.length;
+      for (const name of exports) {
         if (!pages.has(`${moduleName}.${name}`)) {
           missing.push(`${moduleName}.${name}`);
         }
@@ -70,5 +105,8 @@ describe("generated API reference", () => {
     }
 
     expect(missing.sort()).toEqual([]);
+    // Type-only exports are the majority of the surface, so a regression back
+    // to runtime-only enumeration would drop the count well below this.
+    expect(inspected).toBeGreaterThan(500);
   });
 });
