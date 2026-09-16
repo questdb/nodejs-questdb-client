@@ -141,10 +141,13 @@ dispatch would publish nothing at all.
 
 If a dispatch fails between the two publish steps, leaving one package on npm
 and the other not, **re-dispatch the same commit**. That is the supported
-repair: the gate reports `resuming a partial release` and passes, the published
-package no-ops inside the publish action, and the missing one lands. Do not
-bump the version to escape a partial release -- that strands the missing half
-at the old version permanently.
+repair: the gate verifies that the published package's npm `gitHead` is the
+commit being dispatched, reports `resuming a partial release`, and passes. The
+published package no-ops inside the publish action, and the missing one lands.
+A package with the same version but a different or missing `gitHead` is an older
+unrelated artifact, not a partial release; the gate rejects it and the version
+must be bumped. Do not bump merely to escape a genuine same-commit partial
+release -- that strands the missing half at the old version permanently.
 
 `check-release-versions.mjs` decides *whether* to bump, never by how much.
 Pick the level from the changes the release carries: a change that alters the

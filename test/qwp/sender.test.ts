@@ -85,6 +85,30 @@ class RecordingSession implements QwpSenderSession {
     return this.sendTables(tables, options);
   }
 
+  sendTablesWithPublication(
+    tables: readonly QwpTableBuffer[],
+    options?: QwpIngressEncodeOptions,
+  ) {
+    const acknowledgement = this.sendTables(tables, options);
+    return {
+      sequence: this.publishedFrameSequence,
+      publication: Promise.resolve(),
+      acknowledgement,
+    };
+  }
+
+  sendTablesDeltaWithPublication(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ) {
+    const acknowledgement = this.sendTablesDelta(tables, options);
+    return {
+      sequence: this.publishedFrameSequence,
+      publication: Promise.resolve(),
+      acknowledgement,
+    };
+  }
+
   async publishTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
@@ -875,6 +899,35 @@ describe("QWP high-level sender", () => {
       debug.mockRestore();
       vi.resetModules();
     }
+  });
+
+  it("warns when an all-nullish fluent row is discarded unfinished", async () => {
+    const directLogs: string[] = [];
+    const direct = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+      log: (level, message) => {
+        if (level === "warn") directLogs.push(String(message));
+      },
+    });
+    direct.table("events").longColumn("value", null);
+    await direct.close();
+    expect(directLogs).toEqual([
+      "QWP sender contains 0 completed row(s) and 0 unfinished column(s) which will be lost",
+    ]);
+
+    const pooledLogs: string[] = [];
+    const pooled = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+      log: (level, message) => {
+        if (level === "warn") pooledLogs.push(String(message));
+      },
+    });
+    pooled.table("events").longColumn("value", undefined);
+    await pooled.prepareForPoolRelease();
+    expect(pooledLogs).toEqual([
+      "QWP pooled sender is releasing an unfinished row with 0 column(s); the row will be discarded",
+    ]);
+    await pooled.close();
   });
 
   it("closes and reports when the close ACK drain times out", async () => {
@@ -3660,6 +3713,37 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
     await expect(sender.close()).resolves.toBeUndefined();
     expect(session.closeCalls).toBe(1);
     expect(sender.metrics.pendingRows).toBe(0);
+  });
+
+  it("retains required-only session rows until its asynchronous send succeeds", async () => {
+    class FlakyRequiredOnlySession implements QwpSenderSession {
+      attempts = 0;
+
+      async sendTables(): Promise<QwpIngressResponse> {
+        if (this.attempts++ === 0) throw new Error("publication failed");
+        return { status: QWP_STATUS.OK, sequence: 0n, tables: [] };
+      }
+
+      async waitForDurable(): Promise<void> {}
+      async close(): Promise<void> {}
+    }
+
+    const session = new FlakyRequiredOnlySession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 42n).atNow();
+
+    await expect(sender.flush()).rejects.toThrow("publication failed");
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 1,
+      totalRowsPublished: 0,
+      totalFlushFailures: 1,
+    });
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 0,
+      totalRowsPublished: 1,
+    });
+    await sender.close();
   });
 
   it("still rejects a word wider than 64 bits", () => {

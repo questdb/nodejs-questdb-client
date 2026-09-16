@@ -1,6 +1,6 @@
 {
   "name": "@questdb/browser-client",
-  "version": "4.2.0",
+  "version": "5.0.0",
   "description": "QuestDB JavaScript Client for browsers",
   "scripts": {
     "build": "node ../../scripts/clean-package-dist.mjs browser-client && bunchee"

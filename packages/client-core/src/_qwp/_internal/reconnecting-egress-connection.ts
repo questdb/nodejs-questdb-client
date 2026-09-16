@@ -737,13 +737,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         break;
       case QWP_EGRESS_MESSAGE.CREDIT:
         // Deliberately not retained. Replay restarts the request from row zero
-        // and QwpEgressSession.resetForReplay() zeroes `deliveredCreditBytes`
-        // with it, so the session re-grants from scratch against the new
-        // connection; the QUERY_REQUEST being replayed carries `initialCredit`
-        // itself. Keeping the old grants re-issued a window the session no
-        // longer counted -- QWP credit is additive -- and, with autoCredit on,
-        // retained one payload per consumed batch for the whole life of a
-        // streaming query, with nothing to prune it until the query retired.
+        // and QwpEgressSession.resetForReplay() zeroes consumption-driven
+        // `deliveredCreditBytes` with it. Successful application grants are
+        // folded into the replayed QUERY_REQUEST's initialCredit by the
+        // session; automatic replenishment is not. Retaining every CREDIT here
+        // re-issued windows the session no longer counted and accumulated one
+        // payload per consumed batch for the whole streaming query.
         break;
     }
   }

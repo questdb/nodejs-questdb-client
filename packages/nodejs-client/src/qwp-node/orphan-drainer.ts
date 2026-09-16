@@ -1,4 +1,12 @@
-import { open, readdir, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  open,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import {
   QWP_RECONNECT_EVENT_KIND,
@@ -46,6 +54,7 @@ const DEFAULT_ERROR_INBOX_CAPACITY = 256;
 /** A terminal orphan-drain failure marker. Remove it to retry the slot. */
 /** Java-compatible marker that excludes a failed slot from automatic drain. */
 export const QWP_ORPHAN_FAILED_SENTINEL = ".failed";
+const QWP_ORPHAN_FAILED_PENDING_SENTINEL = ".failed.pending";
 
 export const QWP_ORPHAN_DRAIN_EVENT_KIND = {
   DISCOVERED: "discovered",
@@ -270,7 +279,10 @@ export class QwpNodeOrphanDrainer {
   private readonly eventDispatcher?: QwpNotificationDispatcher<QwpNodeOrphanDrainEvent>;
   private readonly errorDispatcher?: QwpNotificationDispatcher<QwpSenderError>;
   private readonly known = new Set<string>();
-  private readonly pendingTerminalFailures = new Map<string, Error>();
+  private readonly pendingTerminalFailures = new Map<
+    string,
+    { readonly failure: Error; readonly generationToken: string }
+  >();
   private readonly queue: string[] = [];
   private readonly active = new Map<string, QwpNodeOrphanDrainSession>();
   private readonly workers = new Set<Promise<void>>();
@@ -510,10 +522,32 @@ export class QwpNodeOrphanDrainer {
         this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING, directory, failure);
         return;
       }
+      const generationToken = randomUUID();
       try {
-        await markFailed(directory, failure);
+        // Bind any deferred marker retry to this directory generation. A slot
+        // pathname can be removed and recreated while marker I/O is failing;
+        // retaining only the pathname would let the old failure poison the new
+        // producer's journal on the next scan.
+        await writeTerminalFailureGuard(directory, generationToken, failure);
+        await promoteTerminalFailureGuard(directory);
       } catch (error) {
-        this.pendingTerminalFailures.set(directory, failure);
+        let guarded = false;
+        try {
+          guarded = await terminalFailureGuardMatches(
+            directory,
+            generationToken,
+          );
+        } catch {
+          // Without a readable persisted generation token, a pathname-only
+          // retry would be unsafe. A later scan will re-adopt whichever
+          // generation is present and classify it again under its own lock.
+        }
+        if (guarded) {
+          this.pendingTerminalFailures.set(directory, {
+            failure,
+            generationToken,
+          });
+        }
         this.retrying++;
         this.emit(
           QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING,
@@ -536,23 +570,49 @@ export class QwpNodeOrphanDrainer {
   }
 
   private async retryPendingTerminalMarkers(): Promise<void> {
-    for (const [directory, failure] of this.pendingTerminalFailures) {
+    for (const [directory, pending] of this.pendingTerminalFailures) {
       if (this.closing) return;
+      let sameGeneration: boolean;
       try {
-        await markFailed(directory, failure);
+        sameGeneration = await terminalFailureGuardMatches(
+          directory,
+          pending.generationToken,
+        );
       } catch (error) {
         this.retrying++;
         this.emit(
           QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING,
           directory,
-          markerPersistenceError(directory, failure, error),
+          markerPersistenceError(directory, pending.failure, error),
+        );
+        continue;
+      }
+      if (!sameGeneration) {
+        // The failed journal was removed or replaced. Forget its in-memory
+        // verdict and let this scan assess the current generation normally.
+        this.pendingTerminalFailures.delete(directory);
+        this.known.delete(directory);
+        continue;
+      }
+      try {
+        // Atomic rename binds the terminal marker to the directory generation
+        // that contains the guard. If the stable pathname was replaced after
+        // the check above, the source path is absent in the new directory and
+        // the rename cannot create a marker there.
+        await promoteTerminalFailureGuard(directory);
+      } catch (error) {
+        this.retrying++;
+        this.emit(
+          QWP_ORPHAN_DRAIN_EVENT_KIND.RETRYING,
+          directory,
+          markerPersistenceError(directory, pending.failure, error),
         );
         continue;
       }
       this.pendingTerminalFailures.delete(directory);
       this.known.delete(directory);
       this.failed++;
-      this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED, directory, failure);
+      this.emit(QWP_ORPHAN_DRAIN_EVENT_KIND.FAILED, directory, pending.failure);
     }
   }
 
@@ -693,11 +753,46 @@ export class QwpNodeOrphanDrainer {
   }
 }
 
-async function markFailed(directory: string, error: Error): Promise<void> {
+async function writeTerminalFailureGuard(
+  directory: string,
+  generationToken: string,
+  error: Error,
+): Promise<void> {
   await writeFile(
-    join(directory, QWP_ORPHAN_FAILED_SENTINEL),
-    `${new Date().toISOString()} ${error.name}: ${error.message}\n`,
+    join(directory, QWP_ORPHAN_FAILED_PENDING_SENTINEL),
+    `${generationToken}\n${new Date().toISOString()} ${error.name}: ${error.message}\n`,
     { encoding: "utf8", flag: "w", mode: 0o600 },
+  );
+}
+
+async function terminalFailureGuardMatches(
+  directory: string,
+  generationToken: string,
+): Promise<boolean> {
+  try {
+    const recorded = await readFile(
+      join(directory, QWP_ORPHAN_FAILED_PENDING_SENTINEL),
+      "utf8",
+    );
+    return recorded.split("\n", 1)[0] === generationToken;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function removeTerminalFailureGuard(directory: string): Promise<void> {
+  try {
+    await unlink(join(directory, QWP_ORPHAN_FAILED_PENDING_SENTINEL));
+  } catch (error) {
+    if (nodeErrorCode(error) !== "ENOENT") throw error;
+  }
+}
+
+async function promoteTerminalFailureGuard(directory: string): Promise<void> {
+  await rename(
+    join(directory, QWP_ORPHAN_FAILED_PENDING_SENTINEL),
+    join(directory, QWP_ORPHAN_FAILED_SENTINEL),
   );
 }
 
@@ -714,6 +809,9 @@ function markerPersistenceError(
 
 /** Removes a terminal marker so an operator-approved slot can be retried. */
 export async function retryQwpNodeOrphanSlot(directory: string): Promise<void> {
+  // Keep the public .failed exclusion in place until its private pending guard
+  // is gone, so a concurrent scanner cannot adopt the slot between removals.
+  await removeTerminalFailureGuard(directory);
   try {
     await unlink(join(directory, QWP_ORPHAN_FAILED_SENTINEL));
   } catch (error) {

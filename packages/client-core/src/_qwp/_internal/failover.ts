@@ -466,12 +466,24 @@ function endpointKeys(
 
 function endpointScheme(endpoint: string | URL): string | undefined {
   try {
-    return typeof endpoint === "string"
-      ? new URL(endpoint).protocol
-      : endpoint.protocol;
+    const base = (
+      globalThis as typeof globalThis & { location?: { href?: string } }
+    ).location?.href;
+    const protocol =
+      typeof endpoint === "string"
+        ? new URL(endpoint, base).protocol
+        : endpoint.protocol;
+    // The browser WebSocket constructor maps HTTP-family URLs (including a
+    // relative URL resolved against location) onto the corresponding WS
+    // transport. Compare that effective transport scheme so an HTTPS-relative
+    // primary cannot share credentials and rows with a cleartext ws failover.
+    if (protocol === "http:") return "ws:";
+    if (protocol === "https:") return "wss:";
+    return protocol;
   } catch {
-    // Not an absolute URL. Shape validation belongs to whichever entry point
-    // accepted it; this check only compares schemes it can read.
+    // A relative URL has no scheme outside a browser. Shape validation belongs
+    // to whichever entry point accepted it; this check compares every scheme
+    // it can resolve.
     return undefined;
   }
 }

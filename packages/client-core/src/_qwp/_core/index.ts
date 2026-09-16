@@ -7,7 +7,22 @@ export * from "./egress";
 export * from "./errors";
 export * from "./frame";
 export * from "./gorilla";
-export * from "./ingress";
+export {
+  decodeQwpIngressResponse,
+  decodeQwpIngressServerInfo,
+  decodeQwpIngressSymbolDictionaryDelta,
+  encodeQwpDurableAckPollFrame,
+  encodeQwpIngressCommitFrame,
+  encodeQwpIngressFrame,
+  encodeQwpIngressSymbolDictionaryFrame,
+} from "./ingress";
+export type {
+  QwpIngressEncodeOptions,
+  QwpIngressResponse,
+  QwpIngressServerInfo,
+  QwpIngressSymbolDictionaryDelta,
+  QwpIngressTableResult,
+} from "./ingress";
 export * from "./result-batch";
 export * from "./symbol-dictionary";
 export * from "./table";

@@ -10,12 +10,13 @@
 // The distinction that matters is *which* half is missing. A version no package
 // has published is a normal release. A version every package has published is a
 // forgotten bump, and refusing it is the point of this script. A version only
-// some packages have published is neither: it is the wreckage of a dispatch
-// whose first publish step succeeded and whose second failed, and the publish
-// action's skip-if-present behaviour makes re-dispatching it exactly the right
-// repair -- the published half no-ops, the missing half lands. Failing there
-// turned a self-healing retry into a permanent gap on npm whose only escape was
-// a version bump, which strands the missing half forever.
+// some packages have published is resumable only when npm says the published
+// artifact came from this exact release commit. Then it is the wreckage of a
+// dispatch whose first publish step succeeded and whose second failed, and the
+// publish action's skip-if-present behaviour makes re-dispatching it exactly
+// the right repair. A different or missing gitHead is an older unrelated
+// artifact that must never authorize publishing new code under the same
+// version.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -46,6 +47,17 @@ function publishedVersions(name) {
   }
 }
 
+function publishedGitHead(name, version) {
+  const output = execFileSync(
+    process.platform === "win32" ? "npm.cmd" : "npm",
+    ["view", `${name}@${version}`, "gitHead", "--json"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+  if (!output) return undefined;
+  const parsed = JSON.parse(output);
+  return typeof parsed === "string" ? parsed : undefined;
+}
+
 const problems = [];
 const releases = PACKAGES.map(manifest).map(({ name, version }) => ({
   name,
@@ -63,17 +75,35 @@ if (versions.size > 1) {
 
 const published = [];
 const pending = [];
-for (const { name, version } of releases) {
-  const onRegistry = publishedVersions(name);
+for (const release of releases) {
+  const onRegistry = publishedVersions(release.name);
   const list = Array.isArray(onRegistry) ? onRegistry : [onRegistry];
-  (list.includes(version) ? published : pending).push(`${name}@${version}`);
+  (list.includes(release.version) ? published : pending).push(release);
 }
+const label = ({ name, version }) => `${name}@${version}`;
 
 if (pending.length === 0) {
   problems.push(
-    `every package has already published this version (${published.join(", ")}), ` +
+    `every package has already published this version (${published.map(label).join(", ")}), ` +
       `so this dispatch would publish nothing. Bump the version first.`,
   );
+}
+
+if (published.length > 0 && pending.length > 0) {
+  const releaseCommit = (
+    process.env.GITHUB_SHA ??
+    execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" })
+  ).trim();
+  for (const release of published) {
+    const gitHead = publishedGitHead(release.name, release.version);
+    if (gitHead !== releaseCommit) {
+      problems.push(
+        `${label(release)} was published from gitHead ${gitHead ?? "<missing>"}, ` +
+          `not this release commit ${releaseCommit}; this is an older unrelated artifact, ` +
+          `not a partial release that can be resumed. Bump the version first.`,
+      );
+    }
+  }
 }
 
 if (problems.length > 0) {
@@ -85,8 +115,8 @@ if (published.length > 0) {
   // Resuming a partial release. Say so loudly: the run is legitimate, but an
   // earlier dispatch failed midway and that is worth seeing in the log.
   console.warn(
-    `resuming a partial release: ${published.join(", ")} already on npm, ` +
-      `publishing ${pending.join(", ")}. The published package(s) will be skipped.`,
+    `resuming a partial release: ${published.map(label).join(", ")} already on npm, ` +
+      `publishing ${pending.map(label).join(", ")}. The published package(s) will be skipped.`,
   );
 }
 

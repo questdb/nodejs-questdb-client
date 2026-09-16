@@ -363,6 +363,33 @@ describe("QWP endpoint credential redaction", () => {
     ]);
     expect(failover.attempts[0].endpoint).toBe(REDACTED);
     expect(failover.message).not.toContain("s3cr3t");
+
+    const malformed = new QwpFailoverError([
+      { endpoint: "wss://alice:s3cr3t@", error: new Error("invalid URL") },
+    ]);
+    expect(malformed.attempts[0].endpoint).toBe(
+      "wss://<redacted>@<invalid-url>",
+    );
+    expect(malformed.message).not.toContain("s3cr3t");
+  });
+
+  it("resolves a relative browser primary before checking failover schemes", () => {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "location");
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { href: "https://questdb.example/app" },
+    });
+    try {
+      expect(() =>
+        createQwpBrowserConnectionFactory({
+          url: "/write/v4",
+          failoverUrls: ["ws://backup.example/write/v4"],
+        }),
+      ).toThrow(/uses 'ws' but the preferred endpoint uses 'wss'/);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "location", previous);
+      else delete (globalThis as { location?: unknown }).location;
+    }
   });
 
   it("strips userinfo from browser URL validation errors", async () => {
@@ -2910,6 +2937,53 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
+  it("sizes oversized split candidates without allocating their full wire image", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const rows = new QwpTableBuffer("events");
+    const payload = new Uint8Array(512);
+    for (let index = 0; index < 16; index++) {
+      rows
+        .getOrCreateColumn("payload", QWP_COLUMN_TYPE.BINARY)!
+        .values.push(payload);
+      rows.nextRow();
+    }
+    const cap = encodeQwpIngressFrame([rows.sliceRows(0, 1)], {
+      gorilla: false,
+    }).byteLength;
+    const session = new QwpIngressSession(await connecting, {
+      maxBatchSizeBytes: cap,
+    });
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, BigInt(socket.sent.length - 1)),
+      );
+    };
+
+    const writerLengths: number[] = [];
+    const original = QwpByteWriter.prototype.toUint8Array;
+    const spy = vi
+      .spyOn(QwpByteWriter.prototype, "toUint8Array")
+      .mockImplementation(function (this: QwpByteWriter) {
+        writerLengths.push(this.length);
+        return original.call(this);
+      });
+    try {
+      await session.sendTables([rows], { gorilla: false });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(socket.sent).toHaveLength(16);
+    expect(Math.max(...writerLengths)).toBeLessThanOrEqual(cap);
+    expect(socket.sent.every((frame) => frame.byteLength <= cap)).toBe(true);
+    await session.close();
+  });
+
   it("advances automatic symbol deltas across split ingress frames", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
@@ -2972,6 +3046,41 @@ describe("QwpIngressSession", () => {
       startId: 3,
       entries: ["symbol-3333"],
     });
+    await session.close();
+  });
+
+  it("serializes concurrent automatic symbol-delta planning", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting);
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.OK, BigInt(socket.sent.length - 1)),
+      );
+    };
+
+    const first = session.sendTablesDelta([symbolTable("trades", ["A"])]);
+    const second = session.sendTablesDelta([symbolTable("trades", ["B"])]);
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(
+      socket.sent.map((frame) => decodeQwpIngressSymbolDictionaryDelta(frame)),
+    ).toEqual([
+      { startId: 0, entries: ["A"] },
+      { startId: 1, entries: ["B"] },
+    ]);
+
+    const held = session.sendTablesDeltaWithPublication([
+      symbolTable("trades", ["C"]),
+    ]);
+    expect(() =>
+      session.sendTablesDeltaWithPublication([symbolTable("trades", ["D"])]),
+    ).toThrow(/overlapping sendTablesDeltaWithPublication/);
+    await held.publication;
+    await held.acknowledgement;
     await session.close();
   });
 

@@ -1,6 +1,6 @@
 {
   "name": "questdb-javascript-client-workspace",
-  "version": "4.2.0",
+  "version": "5.0.0",
   "private": true,
   "description": "QuestDB JavaScript Client workspace",
   "packageManager": "pnpm@10.12.4",

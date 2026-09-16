@@ -464,6 +464,16 @@ describe("QWP Node transport", () => {
     // exhaustion that happens to carry one as its cause.
     expect(Date.now() - started).toBeLessThan(200);
     expect(webSocketFactoryCalls).toBe(0);
+
+    const secret = "malformed-password";
+    const error = await connectQwpNodeIngress(
+      { url: `ws://alice:${secret}@` },
+      { reconnect: false },
+    ).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as Error).message).toBe("Invalid URL");
+    expect(Object.keys(error as object)).not.toContain("input");
+    expect(JSON.stringify(error)).not.toContain(secret);
   });
 
   it("surfaces the server-clamped Zstd level from a real upgrade", async () => {

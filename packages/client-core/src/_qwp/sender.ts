@@ -2056,7 +2056,7 @@ export class QwpSender {
   async prepareForPoolRelease(): Promise<void> {
     this.throwIfUnavailable();
     await this.flush();
-    if (this.currentRow.size > 0) {
+    if (this.current) {
       this.log(
         "warn",
         `QWP pooled sender is releasing an unfinished row with ${this.currentRow.size} column(s); the row will be discarded`,
@@ -2191,7 +2191,7 @@ export class QwpSender {
       }
     }
 
-    if (this.pendingRowCount > 0 || this.currentRow.size > 0) {
+    if (this.pendingRowCount > 0 || this.current) {
       this.log(
         "warn",
         `QWP sender contains ${this.pendingRowCount} completed row(s) and ${this.currentRow.size} unfinished column(s) which will be lost`,
@@ -2866,6 +2866,11 @@ export class QwpSender {
           publishedSequence = sending.sequence;
         });
       } else {
+        if (deferCommit) {
+          throw new Error(
+            "transactional QWP flushing requires a session publication boundary",
+          );
+        }
         response = useDelta
           ? session.sendTablesDelta!(wireTables, {
               gorilla: encode?.gorilla,
@@ -2875,6 +2880,15 @@ export class QwpSender {
               gorilla: encode?.gorilla,
               deferCommit,
             });
+        // A required-only session exposes no earlier ownership boundary. Its
+        // ACK is therefore also the publication boundary: retain staging until
+        // it fulfills so an asynchronous rejection remains retryable.
+        publication = response.then(() => {
+          publishedSequence = advancedSequence(
+            beforeSequence,
+            sessionPublishedSequence(session),
+          );
+        });
       }
     } else {
       const publisher = useDelta
@@ -2893,25 +2907,29 @@ export class QwpSender {
             );
           });
       } else {
-        // Only sendTables is required by QwpSenderSession; the publication
-        // split is optional. Throwing here made every conforming session
-        // without it unusable through the default configuration -- flush()
-        // rejected, close() rejected, and the row was reported lost -- even
-        // though the one method the interface does require can send it. Fall
-        // back to it rather than refusing the contract this class publishes.
-        //
-        // Its promise settles on the server ACK, so it is not awaited as a
-        // publication boundary: this flush did not ask for one, and under
-        // deferCommit the server withholds that ACK until a later commit.
-        // It is consumed exactly like the ACK-waiting path below, which the
-        // shipped sessions already reach whenever they expose no tracked
-        // sender.
+        // Only sendTables is required by QwpSenderSession. Its ACK is the only
+        // proof that another component owns the rows, so it must also serve as
+        // the publication boundary; retiring staging immediately made an
+        // asynchronous rejection unretryable. A deferred transaction cannot
+        // use this fallback because the server intentionally withholds its ACK
+        // until a later commit, so that mode needs an explicit publisher.
+        if (deferCommit) {
+          throw new Error(
+            "transactional QWP flushing requires a session publication boundary",
+          );
+        }
         const send = useDelta ? session.sendTablesDelta! : session.sendTables;
         response = send.call(session, wireTables, {
           gorilla: encode?.gorilla,
           deferCommit,
         });
         void response.catch(() => undefined);
+        publication = response.then(() => {
+          publishedSequence = advancedSequence(
+            beforeSequence,
+            sessionPublishedSequence(session),
+          );
+        });
       }
     }
     publishedSequence = advancedSequence(

@@ -832,10 +832,19 @@ export function encodeQwpIngressFrame(
   }
 }
 
-function encodeQwpIngressFrameInternal(
+interface QwpIngressFrameEncodingPlan {
+  readonly flags: number;
+  readonly deltaSymbols: boolean;
+  readonly deltaStart: number;
+  readonly dictionaryEntries: readonly string[];
+  readonly columnOptions: ColumnEncodeOptions;
+  readonly payloadLength: number;
+}
+
+function planQwpIngressFrameEncoding(
   tables: readonly QwpTableBuffer[],
   options: QwpIngressEncodeOptions,
-): Uint8Array {
+): QwpIngressFrameEncodingPlan {
   if (tables.length > QWP_MAX_TABLES_PER_FRAME) {
     throw new Error(
       `QWP frame contains more than ${QWP_MAX_TABLES_PER_FRAME} tables`,
@@ -863,8 +872,6 @@ function encodeQwpIngressFrameInternal(
         `published symbol dictionary ID is out of range [id=${published}, size=${options.dictionary!.size}]`,
       );
     }
-  }
-  if (deltaSymbols) {
     // Resolve string values before calculating the delta prefix and frame size.
     for (const table of tables) {
       for (const column of table.columns) {
@@ -905,16 +912,47 @@ function encodeQwpIngressFrameInternal(
   }
   for (const table of tables) payloadLength += tableSize(table, columnOptions);
 
-  const writer = new QwpByteWriter(QWP_HEADER_SIZE + payloadLength);
-  writeQwpFrameHeader(writer, {
+  return {
     flags,
-    tableCount: tables.length,
+    deltaSymbols,
+    deltaStart,
+    dictionaryEntries,
+    columnOptions,
     payloadLength,
+  };
+}
+
+/** @internal Measures without allocating the full frame output buffer. */
+export function measureQwpIngressFrame(
+  tables: readonly QwpTableBuffer[],
+  options: QwpIngressEncodeOptions = {},
+): number {
+  const dictionarySize = options.dictionary?.size;
+  try {
+    const plan = planQwpIngressFrameEncoding(tables, options);
+    return QWP_HEADER_SIZE + plan.payloadLength;
+  } catch (error) {
+    if (dictionarySize !== undefined)
+      options.dictionary!.truncate(dictionarySize);
+    throw error;
+  }
+}
+
+function encodeQwpIngressFrameInternal(
+  tables: readonly QwpTableBuffer[],
+  options: QwpIngressEncodeOptions,
+): Uint8Array {
+  const plan = planQwpIngressFrameEncoding(tables, options);
+  const writer = new QwpByteWriter(QWP_HEADER_SIZE + plan.payloadLength);
+  writeQwpFrameHeader(writer, {
+    flags: plan.flags,
+    tableCount: tables.length,
+    payloadLength: plan.payloadLength,
   });
-  if (deltaSymbols) {
-    writeQwpVarint(writer, deltaStart);
-    writeQwpVarint(writer, dictionaryEntries.length);
-    for (const entry of dictionaryEntries) writeQwpString(writer, entry);
+  if (plan.deltaSymbols) {
+    writeQwpVarint(writer, plan.deltaStart);
+    writeQwpVarint(writer, plan.dictionaryEntries.length);
+    for (const entry of plan.dictionaryEntries) writeQwpString(writer, entry);
   }
   for (const table of tables) {
     writeQwpString(writer, table.name);
@@ -925,13 +963,13 @@ function encodeQwpIngressFrameInternal(
       writer.writeUint8(column.type);
     }
     for (const column of table.columns) {
-      writeColumn(writer, column, table.rowCount, columnOptions);
+      writeColumn(writer, column, table.rowCount, plan.columnOptions);
     }
   }
   const result = writer.toUint8Array();
-  if (result.length !== QWP_HEADER_SIZE + payloadLength) {
+  if (result.length !== QWP_HEADER_SIZE + plan.payloadLength) {
     throw new Error(
-      `QWP frame size mismatch [expected=${QWP_HEADER_SIZE + payloadLength}, actual=${result.length}]`,
+      `QWP frame size mismatch [expected=${QWP_HEADER_SIZE + plan.payloadLength}, actual=${result.length}]`,
     );
   }
   return result;

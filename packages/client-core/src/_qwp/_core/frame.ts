@@ -17,11 +17,40 @@ export function writeQwpFrameHeader(
   writer: QwpByteWriter,
   header: Omit<QwpFrameHeader, "version"> & { version?: number },
 ): void {
+  const version = checkedUnsignedInteger(
+    header.version ?? QWP_VERSION,
+    0xff,
+    "QWP version",
+  );
+  const flags = checkedUnsignedInteger(header.flags, 0xff, "QWP flags");
+  const tableCount = checkedUnsignedInteger(
+    header.tableCount,
+    0xffff,
+    "QWP table count",
+  );
+  const payloadLength = checkedUnsignedInteger(
+    header.payloadLength,
+    0xffffffff,
+    "QWP payload length",
+  );
   writer.writeUint32(QWP_MAGIC);
-  writer.writeUint8(header.version ?? QWP_VERSION);
-  writer.writeUint8(header.flags);
-  writer.writeUint16(header.tableCount);
-  writer.writeUint32(header.payloadLength);
+  writer.writeUint8(version);
+  writer.writeUint8(flags);
+  writer.writeUint16(tableCount);
+  writer.writeUint32(payloadLength);
+}
+
+function checkedUnsignedInteger(
+  value: number,
+  maximum: number,
+  name: string,
+): number {
+  if (!Number.isInteger(value) || value < 0 || value > maximum) {
+    throw new RangeError(
+      `${name} must be an integer from 0 through ${maximum}`,
+    );
+  }
+  return value;
 }
 
 export function encodeQwpFrame(

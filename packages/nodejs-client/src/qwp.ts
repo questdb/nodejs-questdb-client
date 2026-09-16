@@ -145,7 +145,7 @@ export type { QwpWebSocketLike } from "../../client-core/src/_qwp/_internal/webs
  * Deliberately not exported -- the version is observable on the wire, which is
  * where the test pins it, so this need not become public API.
  */
-const QWP_NODE_DEFAULT_CLIENT_ID = "typescript/4.2.0";
+const QWP_NODE_DEFAULT_CLIENT_ID = "typescript/5.0.0";
 
 export class QwpVersionMismatchError extends QwpUpgradeError {
   constructor(
@@ -504,21 +504,13 @@ function connectQwpNodeEndpoint(
   let endpointUrl: URL;
   try {
     endpointUrl = new URL(endpoint);
-  } catch (error) {
-    // A URL that does not parse is local configuration, like every other
-    // rejection below, and no retry can repair it. It threw before the catch
-    // that marks those non-retryable, so the reconnect classifier's fail-open
-    // default retried the same parse for the whole configured budget and then
-    // replaced the caller's `Invalid URL` with a generic
-    // QwpReconnectExhaustedError. Report it the way a single-attempt connect
-    // already does. The endpoint text is left to the original error, which
-    // does not echo it, so a malformed string carrying a credential is not
-    // copied into a new message.
-    return Promise.reject(
-      qwpNonRetryable(
-        error instanceof Error ? error : new TypeError("Invalid URL"),
-      ),
-    );
+  } catch {
+    // Node's URL TypeError retains the rejected input on an enumerable `input`
+    // property. Returning it directly leaks malformed userinfo through error
+    // serializers even though its message is generic. Replace it, without the
+    // original as a cause, and classify the local configuration failure as
+    // non-retryable.
+    return Promise.reject(qwpNonRetryable(new TypeError("Invalid URL")));
   }
   const agent = validateQwpWebSocketAgent(
     options.agent,

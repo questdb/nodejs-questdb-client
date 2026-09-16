@@ -13,6 +13,7 @@ import {
   QwpSymbolDictionary,
   QwpTableBuffer,
 } from "./_core";
+import { measureQwpIngressFrame } from "./_core/ingress";
 import {
   QWP_INITIAL_CONNECT_MODE,
   QwpBinaryConnection,
@@ -128,21 +129,36 @@ function planIngressFrames(
     const overTableCap = candidate.length > QWP_MAX_TABLES_PER_FRAME;
     let frameByteLength = 0;
     if (!overRowCap && !overTableCap) {
-      const frame = encodeQwpIngressFrame(candidate, {
+      const candidateOptions: QwpIngressEncodeOptions = {
         ...encodeOptions,
         deferCommit: false,
         dictionary,
         confirmedMaxSymbolId: dictionary
           ? confirmedMaxSymbolId
           : encodeOptions.confirmedMaxSymbolId,
-      });
-      if (frame.byteLength <= maxBatchSizeBytes) {
+      };
+      if (Number.isFinite(maxBatchSizeBytes)) {
+        // Size first without allocating an output buffer. Encoding the whole
+        // oversized candidate before every bisection briefly allocated many
+        // multiples of the negotiated cap and could exhaust the process before
+        // splitting had a chance to help.
+        frameByteLength = measureQwpIngressFrame(candidate, candidateOptions);
+        if (frameByteLength > maxBatchSizeBytes) {
+          if (dictionarySize !== undefined)
+            dictionary!.truncate(dictionarySize);
+        } else {
+          const frame = encodeQwpIngressFrame(candidate, candidateOptions);
+          frames.push(frame);
+          if (dictionary) confirmedMaxSymbolId = dictionary.size - 1;
+          return;
+        }
+      } else {
+        const frame = encodeQwpIngressFrame(candidate, candidateOptions);
+        frameByteLength = frame.byteLength;
         frames.push(frame);
         if (dictionary) confirmedMaxSymbolId = dictionary.size - 1;
         return;
       }
-      frameByteLength = frame.byteLength;
-      if (dictionarySize !== undefined) dictionary!.truncate(dictionarySize);
     }
 
     const units = splitUnitCount(candidate);
@@ -572,6 +588,7 @@ export class QwpIngressSession {
   private durablePollTimer?: ReturnType<typeof setTimeout>;
   private readonly localMaxBatchSizeBytes?: number;
   private readonly symbolDictionary = new QwpSymbolDictionary();
+  private deltaPublicationBarrier?: Promise<void>;
   private publishedMaxSymbolId = -1;
   private deltaSymbolsPublished = false;
   private acknowledgedSequence = -1n;
@@ -926,23 +943,33 @@ export class QwpIngressSession {
    * If a replay dictionary append fails, that call rejects with
    * QwpReplayDictionaryPersistenceError; retrying uses full inline symbols.
    */
-  sendTablesDelta(
+  async sendTablesDelta(
     tables: readonly QwpTableBuffer[],
     encodeOptions: Pick<
       QwpIngressEncodeOptions,
       "gorilla" | "deferCommit"
     > = {},
   ): Promise<QwpIngressResponse> {
-    try {
-      return this.sendTablesDeltaWithPublication(tables, encodeOptions)
-        .acknowledgement;
-    } catch (error) {
-      if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
-      throw error;
+    this.throwIfUnavailable();
+    if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
+      return this.sendTables(tables, encodeOptions);
     }
+    const releaseDeltaPublication = await this.acquireDeltaPublicationAsync();
+    return this.startTablesDeltaWithPublication(
+      tables,
+      encodeOptions,
+      releaseDeltaPublication,
+    ).acknowledgement;
   }
 
-  /** Delta-dictionary variant of sendTablesWithPublication(). */
+  /**
+   * Delta-dictionary variant of sendTablesWithPublication().
+   *
+   * The synchronous publication API cannot wait to plan behind another delta
+   * operation, so overlapping calls reject. Use sendTablesDelta() or
+   * publishTablesDelta() when operations may be started concurrently; those
+   * asynchronous APIs serialize planning through the publication boundary.
+   */
   sendTablesDeltaWithPublication(
     tables: readonly QwpTableBuffer[],
     encodeOptions: Pick<
@@ -954,6 +981,19 @@ export class QwpIngressSession {
     if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
       return this.sendTablesWithPublication(tables, encodeOptions);
     }
+    const releaseDeltaPublication = this.acquireDeltaPublication();
+    return this.startTablesDeltaWithPublication(
+      tables,
+      encodeOptions,
+      releaseDeltaPublication,
+    );
+  }
+
+  private startTablesDeltaWithPublication(
+    tables: readonly QwpTableBuffer[],
+    encodeOptions: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+    releaseDeltaPublication: () => void,
+  ): QwpIngressSendResult {
     const previousSize = this.symbolDictionary.size;
     const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
     const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
@@ -989,6 +1029,7 @@ export class QwpIngressSession {
       this.symbolDictionary.truncate(previousSize);
       this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
       this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
+      releaseDeltaPublication();
       throw error;
     }
 
@@ -996,12 +1037,21 @@ export class QwpIngressSession {
     // sendFrame(), is the authoritative ownership boundary. Restore the
     // allocator/watermark before the acknowledgement observes a local journal
     // rejection, while retaining dictionary entries that did persist.
-    const publication = sending.publication.catch((error: unknown) => {
-      this.restoreDeltaStateAfterPublishFailure(previousSize);
-      this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
-      this.deltaSymbolsPublished = successfullyPublishedDelta;
-      throw error;
-    });
+    const reconciledPublication = sending.publication.catch(
+      (error: unknown) => {
+        this.restoreDeltaStateAfterPublishFailure(previousSize);
+        this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
+        this.deltaSymbolsPublished = successfullyPublishedDelta;
+        throw error;
+      },
+    );
+    const publication = reconciledPublication.then(
+      () => releaseDeltaPublication(),
+      (error: unknown) => {
+        releaseDeltaPublication();
+        throw error;
+      },
+    );
     // Another new promise, and this one also carries the publication
     // rejection, so it needs the same containment.
     const acknowledgement = this.observeAcknowledgement(
@@ -1028,6 +1078,7 @@ export class QwpIngressSession {
     if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
       return this.publishTables(tables, encodeOptions);
     }
+    const releaseDeltaPublication = await this.acquireDeltaPublicationAsync();
     const previousSize = this.symbolDictionary.size;
     const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
     const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
@@ -1060,7 +1111,38 @@ export class QwpIngressSession {
       this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
       this.deltaSymbolsPublished = successfullyPublishedDelta;
       throw error;
+    } finally {
+      releaseDeltaPublication();
     }
+  }
+
+  private async acquireDeltaPublicationAsync(): Promise<() => void> {
+    while (this.deltaPublicationBarrier) {
+      await this.deltaPublicationBarrier;
+    }
+    return this.acquireDeltaPublication();
+  }
+
+  private acquireDeltaPublication(): () => void {
+    if (this.deltaPublicationBarrier) {
+      throw new Error(
+        "overlapping sendTablesDeltaWithPublication calls are not supported; await publication before starting another",
+      );
+    }
+    let resolve!: () => void;
+    const barrier = new Promise<void>((done) => {
+      resolve = done;
+    });
+    this.deltaPublicationBarrier = barrier;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (this.deltaPublicationBarrier === barrier) {
+        this.deltaPublicationBarrier = undefined;
+      }
+      resolve();
+    };
   }
 
   /**

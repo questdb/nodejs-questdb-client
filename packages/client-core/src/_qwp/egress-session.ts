@@ -136,7 +136,7 @@ interface QwpValidatedEgressSessionOptions {
 interface QwpReplayableQueryRequest {
   readonly requestId: bigint;
   readonly sql: string;
-  readonly initialCredit: number | bigint;
+  initialCredit: number | bigint;
   readonly bindCount?: number;
   readonly bindPayload?: Uint8Array;
   readonly resetDictionary: boolean;
@@ -311,6 +311,7 @@ interface QwpEgressQueryControl {
   grantCredit(
     requestId: bigint,
     additionalBytes: number | bigint,
+    replayOnReconnect?: boolean,
   ): Promise<void>;
   expire(requestId: bigint, timeoutMs: number): void;
   rejectView(requestId: bigint, error: Error): Promise<void>;
@@ -597,7 +598,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       // barrier: reconnect resets wait on that barrier before transport sends
       // resume. The session send tail preserves wire order and owns failures.
       void this.control
-        .grantCredit(this.requestId, creditBytes)
+        .grantCredit(this.requestId, creditBytes, false)
         .catch(() => undefined);
     });
   }
@@ -754,7 +755,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.deliveredCreditBytes = 0;
     if (!this.autoCredit || this.terminal || creditBytes === 0) return;
     try {
-      await this.control.grantCredit(this.requestId, creditBytes);
+      await this.control.grantCredit(this.requestId, creditBytes, false);
     } catch (error) {
       // Transport failures fail the query through the session send tail. If a
       // terminal response won the race, no replenishment is needed anymore.
@@ -1095,12 +1096,24 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   grantCredit(
     requestId: bigint,
     additionalBytes: number | bigint,
+    replayOnReconnect = true,
   ): Promise<void> {
     this.requireActive(requestId);
-    return this.sendWhileActive(
-      requestId,
-      encodeQwpCredit(requestId, additionalBytes),
-    );
+    const payload = encodeQwpCredit(requestId, additionalBytes);
+    if (!replayOnReconnect) {
+      return this.sendWhileActive(requestId, payload);
+    }
+    const additional = BigInt(additionalBytes);
+    return this.sendWhileActive(requestId, payload, () => {
+      const request = this.activeRequest;
+      if (!request || request.requestId !== requestId) return;
+      const total = BigInt(request.initialCredit) + additional;
+      // QUERY_REQUEST carries one uint64 initial-credit field. Saturating is
+      // lossless for any representable result stream and avoids dropping all
+      // successfully granted manual credit merely because several grants were
+      // used before a failover.
+      request.initialCredit = total > MAX_UINT64 ? MAX_UINT64 : total;
+    });
   }
 
   expire(requestId: bigint, timeoutMs: number): void {
@@ -1500,12 +1513,14 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private sendWhileActive(
     requestId: bigint,
     payload: Uint8Array,
+    onSent?: () => void,
   ): Promise<void> {
     this.throwIfUnavailable();
     const sending = this.sendTail.then(async () => {
       this.throwIfUnavailable();
       if (!this.active || this.active.requestId !== requestId) return;
       await this.connection.send(payload);
+      onSent?.();
     });
     this.sendTail = sending.catch((error: unknown) => this.fail(error));
     return sending;

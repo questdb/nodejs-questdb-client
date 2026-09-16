@@ -590,6 +590,51 @@ describe("QWP Node orphan drainer", () => {
     await drainer.close();
   });
 
+  it("does not apply a deferred terminal marker to a replacement journal", async () => {
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "replaced-marker");
+    await mkdir(join(directory, QWP_ORPHAN_FAILED_SENTINEL));
+    const terminal = new QwpReplayRejectedError(
+      0n,
+      QWP_STATUS.SCHEMA_MISMATCH,
+      "old generation rejected",
+    );
+    let sessionsCreated = 0;
+    let replacementSession: FakeDrainSession | undefined;
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      durableAckPollIntervalMs: 0,
+      createSession: async () => {
+        sessionsCreated++;
+        const session = new FakeDrainSession();
+        if (sessionsCreated === 1) {
+          queueMicrotask(() => session.fail(terminal));
+        } else {
+          replacementSession = session;
+        }
+        return session;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.retrying).toBe(1));
+
+    // Replace the complete slot pathname while the old marker retry is held in
+    // memory, then place a fresh valid journal at the same stable path.
+    await rm(directory, { recursive: true });
+    await recordSlot(rootDirectory, "replaced-marker");
+    drainer.scanNow();
+
+    await vi.waitFor(() => expect(sessionsCreated).toBe(2));
+    expect(replacementSession).toBeDefined();
+    expect(await readdir(directory)).not.toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    expect(drainer.metrics.failed).toBe(0);
+    expect(senderErrors).toEqual([]);
+    await drainer.close();
+  });
+
   it("quarantines terminal failures until an operator explicitly retries", async () => {
     const rootDirectory = await root();
     const directory = await recordSlot(rootDirectory, "corrupt");

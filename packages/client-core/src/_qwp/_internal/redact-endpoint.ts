@@ -17,8 +17,15 @@ export function redactQwpEndpoint(endpoint: string | URL): string {
   try {
     url = new URL(text);
   } catch {
-    // Not an absolute URL, so it has no userinfo component to carry a secret.
-    return text;
+    // A malformed absolute URL can still contain live userinfo (for example
+    // `wss://user:password@`). URL parsing cannot safely distinguish that from
+    // harmless text, so redact the whole authority-shaped value rather than
+    // returning the credential verbatim. Relative browser endpoints contain
+    // no `://` authority and remain useful in diagnostics.
+    const scheme = /^([a-z][a-z\d+.-]*):\/\//i.exec(text)?.[1];
+    return scheme && text.includes("@")
+      ? `${scheme}://<redacted>@<invalid-url>`
+      : text;
   }
   if (!url.username && !url.password) return text;
   url.username = "";

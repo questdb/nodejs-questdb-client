@@ -43,6 +43,7 @@ import {
   qwpGorillaSize,
   qwpVarintSize,
   readQwpVarint,
+  writeQwpFrameHeader,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
 import {
@@ -257,6 +258,34 @@ describe("QWP frame envelope", () => {
     const badLength = encodeQwpFrame(Uint8Array.of(1));
     dataView(badLength).setUint32(8, 2, true);
     expect(() => decodeQwpFrame(badLength)).toThrow(/length mismatch/i);
+  });
+
+  it("rejects header scalars that cannot be represented on the wire", () => {
+    for (const flags of [-255, 1.5, Number.NaN, 256]) {
+      expect(() => encodeQwpFrame(new Uint8Array(), flags)).toThrow(
+        /QWP flags must be an integer from 0 through 255/,
+      );
+    }
+    for (const tableCount of [-1, 1.5, Number.NaN, 65_536]) {
+      expect(() => encodeQwpFrame(new Uint8Array(), 0, tableCount)).toThrow(
+        /QWP table count must be an integer from 0 through 65535/,
+      );
+    }
+    expect(() =>
+      writeQwpFrameHeader(new QwpByteWriter(), {
+        version: Number.NaN,
+        flags: 0,
+        tableCount: 0,
+        payloadLength: 0,
+      }),
+    ).toThrow(/QWP version must be an integer/);
+    expect(() =>
+      writeQwpFrameHeader(new QwpByteWriter(), {
+        flags: 0,
+        tableCount: 0,
+        payloadLength: 2 ** 32,
+      }),
+    ).toThrow(/QWP payload length must be an integer/);
   });
 });
 

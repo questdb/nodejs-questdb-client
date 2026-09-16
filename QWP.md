@@ -854,8 +854,10 @@ assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`,
 ACK watermark for up to `closeFlushTimeoutMs` (5 seconds by default, matching the
 Java client). Set it to `0` or a negative value for a fast close, which publishes
 without the ACK drain; publication itself stays bounded, so `close()` always
-returns. An unfinished row is still discarded with a warning.
-The configuration-string equivalent is `close_flush_timeout_millis`.
+returns. An unfinished row is still discarded with a warning, including a row
+opened by `table()` whose every attempted value was nullish and therefore left it
+with zero columns. The configuration-string equivalent is
+`close_flush_timeout_millis`.
 
 These warnings, and the other sender-level diagnostics, go to `QwpSenderOptions.log`
 when it is supplied and to the same console-backed default logger the rest of the
@@ -908,6 +910,16 @@ store-and-forward when local durability is the intended completion boundary.
 when server acceptance is also required. If a split logical batch cannot be fully
 journaled, its unattempted suffix is suppressed and the operation's publication
 promise rejects.
+
+A custom `QwpSenderSession` with no optional publication method uses its required
+`sendTables()` method's ACK promise as the publication boundary, so an asynchronous
+failure retains the sender's rows for retry. Such a session cannot support deferred
+transactional auto-flush: the server withholds that ACK until commit, so transactional
+mode also requires one of the explicit publication-boundary methods. Automatic
+symbol-delta planning is serialized by `sendTablesDelta()` and
+`publishTablesDelta()`. The synchronous `sendTablesDeltaWithPublication()` form
+cannot wait behind an in-flight delta publication and rejects an overlapping call;
+await its `publication` promise before starting another.
 
 Leaving `acknowledgement` unawaited is safe. The session observes it, so an ACK
 deadline or a `close()` that rejects a frame still in flight cannot surface as an

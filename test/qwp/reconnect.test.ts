@@ -3053,6 +3053,36 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("serializes concurrent delta planning across a journal publication failure", async () => {
+    const connection = new FakeConnection("primary");
+    const replayStore = new FailOnceDictionaryReplayStore();
+    const session = await QwpIngressSession.connect(async () => connection, {
+      ackTimeoutMs: 1_000,
+      reconnect: { maxAttempts: 1 },
+      replayStore,
+    });
+
+    const first = session.publishTablesDelta([symbolTable("A")]);
+    const second = session.publishTablesDelta([symbolTable("B")]);
+    await expect(first).rejects.toThrow("journal is full");
+    await expect(second).resolves.toBeUndefined();
+    expect(replayStore.symbols).toEqual(["A", "B"]);
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[0])).toEqual({
+      startId: 0,
+      entries: ["A", "B"],
+    });
+
+    await expect(
+      session.publishTablesDelta([symbolTable("C")]),
+    ).resolves.toBeUndefined();
+    expect(replayStore.symbols).toEqual(["A", "B", "C"]);
+    expect(decodeQwpIngressSymbolDictionaryDelta(connection.sent[1])).toEqual({
+      startId: 2,
+      entries: ["C"],
+    });
+    await session.close();
+  });
+
   it("uses full symbols when a replay store has no dictionary sidecar", async () => {
     const connection = new FakeConnection("primary");
     const replayStore = new TrackingReplayStore();
@@ -5399,14 +5429,13 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
-  it("does not replay credit grants a reset has already zeroed", async () => {
-    // Replay restarts the request from row zero and resetForReplay() zeroes
-    // the session's own `deliveredCreditBytes` with it, so the grants issued
-    // against the dead connection are no longer counted by either side. QWP
-    // credit is additive, so replaying them re-opened a window the session had
-    // forgotten -- and with autoCredit on, one payload per consumed batch was
-    // retained for the whole life of a streaming query with nothing to prune
-    // it. The QUERY_REQUEST being replayed carries initialCredit itself.
+  it("reconstructs successful manual credit grants in a replayed request", async () => {
+    // Replay restarts the request from row zero. Manual credit is application
+    // intent rather than consumption-driven replenishment, so dropping grants
+    // that succeeded before failover can leave an autoCredit:false query with
+    // no remaining window and no result from which the caller can grant more.
+    // Reconstruct it in the replayed QUERY_REQUEST without retaining CREDIT
+    // frames or replaying automatic replenishment.
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
@@ -5425,7 +5454,10 @@ describe("QWP egress reconnect and replay", () => {
         reconnect: { maxAttempts: 1, initialBackoffMs: 0, maxBackoffMs: 0 },
       },
     );
-    const query = await session.query("select * from x");
+    const query = await session.query("select * from x", {
+      initialCredit: 1,
+      autoCredit: false,
+    });
     const iterator = query[Symbol.asyncIterator]();
 
     // Grants against the live connection, the way a consuming reader produces
@@ -5441,8 +5473,15 @@ describe("QWP egress reconnect and replay", () => {
     first.drop();
     await vi.waitFor(() => expect(second.sent.length).toBeGreaterThan(0));
 
-    // Exactly the request, and no carried-over credit.
-    expect(second.sent[0][0]).toBe(QWP_EGRESS_MESSAGE.QUERY_REQUEST);
+    // Exactly the request, with the successful manual grants folded into its
+    // initial window and no retained CREDIT frame backlog.
+    expect(second.sent[0]).toEqual(
+      encodeQwpQueryRequest({
+        requestId: 0n,
+        sql: "select * from x",
+        initialCredit: 1 + 25 * 4096,
+      }),
+    );
     expect(second.sent.filter((frame) => frame[0] === creditKind)).toEqual([]);
 
     second.receive(resultEnd(0n, 0n, 0n));
