@@ -383,10 +383,12 @@ function ilpTypeExportContract(
 }
 
 function rootSenderSequenceContract(sender: Sender): void {
+  const cancelled: Sender = sender.cancelRow();
   const published: Promise<bigint> = sender.flushAndGetSequence();
   const wait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
   const publishedWatermark: bigint = sender.publishedSequence;
   const acknowledgedWatermark: bigint = sender.acknowledgedSequence;
+  void cancelled;
   void published;
   void wait;
   void publishedWatermark;

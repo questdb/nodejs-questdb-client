@@ -2,6 +2,17 @@ import { QwpByteWriter } from "./bytes";
 
 const INT32_MIN = -2147483648n;
 const INT32_MAX = 2147483647n;
+const INT64_MIN = -(1n << 63n);
+const INT64_MAX = (1n << 63n) - 1n;
+
+function checkedTimestamp(value: bigint, index: number): bigint {
+  if (value < INT64_MIN || value > INT64_MAX) {
+    throw new RangeError(
+      `QWP Gorilla timestamp at index ${index} is outside the signed int64 range`,
+    );
+  }
+  return value;
+}
 
 class QwpBitWriter {
   private readonly bytes: Uint8Array;
@@ -39,26 +50,36 @@ function encodedDeltaBits(deltaOfDelta: bigint): number {
   return 36;
 }
 
-/** Encoded byte count, or -1 when a delta-of-delta leaves int32 range. */
+/**
+ * Encoded byte count, or -1 when a delta-of-delta leaves int32 range.
+ * Throws when a timestamp is outside the signed int64 wire range.
+ */
 export function qwpGorillaSize(timestamps: readonly bigint[]): number {
   if (timestamps.length === 0) return 0;
+  const firstTimestamp = checkedTimestamp(timestamps[0], 0);
   if (timestamps.length === 1) return 8;
+  const secondTimestamp = checkedTimestamp(timestamps[1], 1);
   if (timestamps.length === 2) return 16;
-  let previousTimestamp = timestamps[1];
-  let previousDelta = timestamps[1] - timestamps[0];
+  let previousTimestamp = secondTimestamp;
+  let previousDelta = secondTimestamp - firstTimestamp;
   let bits = 0;
+  let encodable = true;
   for (let index = 2; index < timestamps.length; index++) {
-    const delta = timestamps[index] - previousTimestamp;
+    const timestamp = checkedTimestamp(timestamps[index], index);
+    const delta = timestamp - previousTimestamp;
     const deltaOfDelta = delta - previousDelta;
-    if (deltaOfDelta < INT32_MIN || deltaOfDelta > INT32_MAX) return -1;
-    bits += encodedDeltaBits(deltaOfDelta);
+    if (deltaOfDelta < INT32_MIN || deltaOfDelta > INT32_MAX) {
+      encodable = false;
+    } else if (encodable) {
+      bits += encodedDeltaBits(deltaOfDelta);
+    }
     previousDelta = delta;
-    previousTimestamp = timestamps[index];
+    previousTimestamp = timestamp;
   }
-  return 16 + Math.ceil(bits / 8);
+  return encodable ? 16 + Math.ceil(bits / 8) : -1;
 }
 
-/** Encodes timestamps with the QWP LSB-first Gorilla variant. */
+/** Encodes signed int64 timestamps with the QWP LSB-first Gorilla variant. */
 export function encodeQwpGorilla(timestamps: readonly bigint[]): Uint8Array {
   const size = qwpGorillaSize(timestamps);
   if (size < 0) {

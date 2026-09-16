@@ -296,4 +296,10 @@ describe("QWP public API contract", () => {
       ilpRuntimeContract,
     );
   });
+
+  it("rejects out-of-int64 Gorilla timestamps through every public root", () => {
+    for (const api of [shared, browser, node]) {
+      expect(() => api.encodeQwpGorilla([1n << 63n])).toThrow(/signed int64/i);
+    }
+  });
 });

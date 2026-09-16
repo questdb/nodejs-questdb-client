@@ -10,7 +10,9 @@ import {
 import {
   decodeQwpFrame,
   QWP_COLUMN_TYPE,
+  QwpByteReader,
   QwpTableBuffer,
+  readQwpVarintNumber,
   varchar,
 } from "../../packages/client-core/src/qwp";
 import { QwpUdpDatagramTooLargeError } from "../../packages/nodejs-client/src";
@@ -93,6 +95,25 @@ function longTable(rows: number): QwpTableBuffer {
   return table;
 }
 
+function decodeLongDatagram(packet: Uint8Array): bigint[] {
+  const frame = decodeQwpFrame(packet);
+  expect(frame.tableCount).toBe(1);
+  const reader = new QwpByteReader(frame.payload);
+  const tableNameLength = readQwpVarintNumber(reader, "table name length");
+  expect(reader.readUtf8(tableNameLength, "table name")).toBe("trades");
+  const rowCount = readQwpVarintNumber(reader, "row count");
+  expect(readQwpVarintNumber(reader, "column count")).toBe(1);
+  const columnNameLength = readQwpVarintNumber(reader, "column name length");
+  expect(reader.readUtf8(columnNameLength, "column name")).toBe("price");
+  expect(reader.readUint8("column type")).toBe(QWP_COLUMN_TYPE.LONG);
+  expect(reader.readUint8("null marker")).toBe(0);
+  const values = Array.from({ length: rowCount }, () =>
+    reader.readBigInt64("LONG value"),
+  );
+  reader.expectEnd();
+  return values;
+}
+
 function stringTable(value: string): QwpTableBuffer {
   const table = new QwpTableBuffer("events");
   const column = table.getOrCreateColumn("message", QWP_COLUMN_TYPE.VARCHAR)!;
@@ -156,6 +177,9 @@ describe("QWP Node UDP sender", () => {
       totalDatagramsSent: socket.packets.length,
       totalSendErrors: 0,
     });
+    expect(socket.packets.flatMap(decodeLongDatagram)).toEqual(
+      Array.from({ length: 20 }, (_, row) => BigInt(row)),
+    );
     await session.close();
     expect(socket.closed).toBe(true);
   });
@@ -470,6 +494,44 @@ describe("QWP Node UDP sender", () => {
     expect(configuredSocket.packets).toHaveLength(1);
     expect(configuredSocket.multicastTtl).toBe(1);
     await configured.close();
+  });
+
+  it("forwards cancelRow through the configured Sender facade", async () => {
+    const socket = new FakeUdpSocket();
+    const sender = await Sender.fromConfig(
+      "udp::addr=localhost;max_datagram_size=256;auto_flush=off;",
+      { qwp: { udp: { socketFactory: () => socket } } },
+    );
+    await sender.connect();
+
+    sender.table("trades").intColumn("price", 1);
+    await sender.atNow();
+    expect(sender.table("trades").intColumn("price", 99).cancelRow()).toBe(
+      sender,
+    );
+    sender.table("trades").intColumn("price", 2);
+    await sender.atNow();
+
+    await expect(sender.flush()).resolves.toBe(true);
+    expect(socket.packets).toHaveLength(1);
+    expect(decodeLongDatagram(socket.packets[0])).toEqual([1n, 2n]);
+    await sender.close();
+  });
+
+  it("rejects cancelRow on ILP without discarding the open row", async () => {
+    const sender = new Sender({
+      protocol: "http",
+      host: "localhost",
+      protocol_version: "1",
+      auto_flush: false,
+    });
+    sender.table("trades").intColumn("price", 1);
+
+    expect(() => sender.cancelRow()).toThrow(/only with QWP transports/);
+    expect(() => sender.table("other")).toThrow(/already been set/);
+
+    sender.reset();
+    await sender.close();
   });
 
   it("lets typed UDP overrides win over the connection string", async () => {

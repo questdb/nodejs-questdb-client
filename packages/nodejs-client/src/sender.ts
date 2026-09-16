@@ -235,6 +235,22 @@ class Sender {
   }
 
   /**
+   * Discards the QWP row in progress, including its table selection, while
+   * retaining rows that were already completed. The next row starts from
+   * {@link table} again.
+   *
+   * @return {Sender} Returns this sender.
+   * @throws {Error} If this sender uses an ILP transport.
+   */
+  cancelRow(): Sender {
+    if (!this.qwpSender) {
+      throw new Error("row cancellation is available only with QWP transports");
+    }
+    this.qwpSender.cancelRow();
+    return this;
+  }
+
+  /**
    * Compiles a table-bound object-row writer for QWP transports.
    * Legacy ILP transports continue to use the fluent row API.
    */

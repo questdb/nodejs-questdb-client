@@ -784,6 +784,40 @@ describe("QWP ingress codec", () => {
     expect(gorilla[16]).toBe(0);
   });
 
+  it("rejects Gorilla timestamps outside the signed int64 wire range", () => {
+    const minimum = -(1n << 63n);
+    const maximum = (1n << 63n) - 1n;
+    const boundary = encodeQwpGorilla([minimum, maximum]);
+    expect(qwpGorillaSize([minimum, maximum])).toBe(16);
+    expect(dataView(boundary).getBigInt64(0, true)).toBe(minimum);
+    expect(dataView(boundary).getBigInt64(8, true)).toBe(maximum);
+
+    const invalidCases: Array<{
+      timestamps: bigint[];
+      invalidIndex: number;
+    }> = [
+      { timestamps: [minimum - 1n], invalidIndex: 0 },
+      { timestamps: [maximum + 1n], invalidIndex: 0 },
+      { timestamps: [2n ** 64n + 7n], invalidIndex: 0 },
+      { timestamps: [0n, maximum + 1n], invalidIndex: 1 },
+      { timestamps: [0n, 0n, minimum - 1n], invalidIndex: 2 },
+      // The third timestamp makes Gorilla unavailable. Validation must still
+      // reach the later out-of-int64 value instead of returning -1 early.
+      {
+        timestamps: [0n, 0n, 2147483648n, maximum + 1n],
+        invalidIndex: 3,
+      },
+    ];
+    for (const { timestamps, invalidIndex } of invalidCases) {
+      const expected = new RegExp(
+        `timestamp at index ${invalidIndex}.*signed int64`,
+        "i",
+      );
+      expect(() => qwpGorillaSize(timestamps)).toThrow(expected);
+      expect(() => encodeQwpGorilla(timestamps)).toThrow(expected);
+    }
+  });
+
   it("assigns string symbols stable global IDs and emits only new deltas", () => {
     const dictionary = new QwpSymbolDictionary();
     const first = new QwpTableBuffer("trades");

@@ -1768,7 +1768,9 @@ deltas, ACK tracking, auto-flush, transactions, and durable waits.
 Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
 signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
 every element. Coercible values such as booleans and numeric strings, unsafe or
-fractional numbers, and out-of-range bigints are rejected before encoding.
+fractional numbers, and out-of-range bigints are rejected before encoding. The
+root-exported `qwpGorillaSize()` and `encodeQwpGorilla()` helpers enforce the same
+signed 64-bit timestamp bounds for direct codec integrations.
 
 ### Java client concepts
 
