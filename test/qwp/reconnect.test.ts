@@ -5671,6 +5671,75 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  it("recovers when a callback grants credit twice and the first send fails", async () => {
+    // A failed send hands recovery to a reconnect and then waits for it. While
+    // it also held the transport queue, the callback's next grant could not
+    // even reach the early-acceptance guard, and the reconnect's reset was
+    // meanwhile waiting to drain that same callback: no request ever reached
+    // the healthy replacement and the query died on the reconnect deadline.
+    const first = new FakeConnection("primary");
+    const second = new FakeConnection("secondary");
+    const connections = [first, second];
+    let failedOnce = false;
+    first.onSend = async (payload) => {
+      if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT && !failedOnce) {
+        failedOnce = true;
+        throw new Error("credit send failed");
+      }
+    };
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          maxDurationMs: 500,
+        },
+      },
+    );
+    let callbackCalls = 0;
+    let grantsAccepted = 0;
+    const query = await session.queryViews(
+      "select * from x",
+      async (_batch, control) => {
+        callbackCalls++;
+        if (callbackCalls !== 1) return;
+        for (let grant = 0; grant < 2; grant++) {
+          await control.grantCredit(4096);
+          grantsAccepted++;
+        }
+      },
+      { initialCredit: 1, autoCredit: false },
+    );
+
+    first.receive(emptyResultBatch(query.requestId));
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    expect(grantsAccepted).toBe(2);
+    // Both grants ride the replayed request's initial window.
+    expect(second.sent[0]).toEqual(
+      encodeQwpQueryRequest({
+        requestId: query.requestId,
+        sql: "select * from x",
+        initialCredit: 1 + 4096 + 4096,
+      }),
+    );
+
+    second.receive(emptyResultBatch(query.requestId));
+    second.receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await session.close();
+  });
+
   it("carries a public credit grant once across a pending reconnect", async () => {
     // The grant is recorded in the replayable request before its frame is
     // sent. Sending the frame to the replacement as well handed the server

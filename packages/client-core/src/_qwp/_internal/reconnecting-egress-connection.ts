@@ -265,27 +265,44 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       acceptedSettled = true;
       resolveAccepted();
     };
+    // Resolves when this payload has left the send queue, which is not the
+    // same moment the payload settles: a send that fails hands recovery to a
+    // reconnect and then waits for it, and every later send serializes on that
+    // same reconnect through requireConnection() anyway. Keeping the queue
+    // until the reconnect finished made a failed send block the sends issued
+    // behind it -- including one from the result-view callback the replay
+    // reset has to drain first, so the two waited on each other.
+    let releaseQueue!: () => void;
+    const queued = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
     const sending = this.sendTail.then(async () => {
-      this.throwIfUnavailable();
-      // A reconnect that is already running owns this grant: it replays the
-      // QUERY_REQUEST the session recorded it in. Release the caller before
-      // waiting for that reconnect, because the reconnect's own reset may be
-      // waiting for the caller -- the callback -- to return.
-      if (this.reconnectTask) accept();
-      const connection = await this.requireConnection();
-      if (supersededByReplay?.()) return;
-      const prepared = await this.prepareOutboundQuery(copy);
-      this.trackOutbound(prepared);
       try {
-        await connection.send(prepared);
-        accept();
-      } catch (error) {
-        const reconnecting = this.requestReconnect(error, connection);
-        // The replay request already carries this manual grant. Let a callback
-        // that issued it finish so prepareConnectionReset() can drain its view,
-        // while the transport tail continues to serialize on the reconnect.
-        accept();
-        await reconnecting;
+        this.throwIfUnavailable();
+        // A reconnect that is already running owns this grant: it replays the
+        // QUERY_REQUEST the session recorded it in. Release the caller before
+        // waiting for that reconnect, because the reconnect's own reset may be
+        // waiting for the caller -- the callback -- to return.
+        if (this.reconnectTask) accept();
+        const connection = await this.requireConnection();
+        if (supersededByReplay?.()) return;
+        const prepared = await this.prepareOutboundQuery(copy);
+        this.trackOutbound(prepared);
+        try {
+          await connection.send(prepared);
+          accept();
+        } catch (error) {
+          const reconnecting = this.requestReconnect(error, connection);
+          // The replay request already carries this manual grant. Let a
+          // callback that issued it finish so prepareConnectionReset() can
+          // drain its view, and let the queue advance: this frame is gone, and
+          // nothing behind it can reach the wire before the reconnect either.
+          accept();
+          releaseQueue();
+          await reconnecting;
+        }
+      } finally {
+        releaseQueue();
       }
     });
     if (accepted) {
@@ -300,7 +317,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         }
       });
     }
-    this.sendTail = sending.catch(() => undefined);
+    void sending.catch(() => undefined);
+    this.sendTail = queued;
     return accepted ?? sending;
   }
 

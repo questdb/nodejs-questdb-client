@@ -312,7 +312,15 @@ export function resolveQwpNodeClientConfig(
 
   const ingressSession: QwpIngressSessionOptions = {
     reconnect: ingressReconnect,
-    initialConnectMode,
+    // One policy, two spellings: the session field is the internal one the
+    // Node adapter feeds from the store. Reading the connect string's value
+    // here instead of the store's effective value manufactured a disagreement
+    // out of a typed override -- `qwp.webSocket.storeAndForward.
+    // initialConnectMode` is documented to win over the string, yet it was
+    // rejected as conflicting with the default the string had just supplied.
+    initialConnectMode: storeAndForward
+      ? storeAndForward.initialConnectMode
+      : initialConnectMode,
     memoryReplayMaxBytes: storeAndForward
       ? undefined
       : optionalSize(value("sf_max_total_bytes"), "sf_max_total_bytes", 1),

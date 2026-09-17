@@ -380,6 +380,46 @@ describe("QWP unified Node client configuration", () => {
     }
   });
 
+  it("lets a typed store-and-forward startup mode win over the connect string", () => {
+    // QWP.md documents `initialConnectMode` as the typed spelling of the
+    // startup policy and states that a typed value wins. The session field is
+    // the internal half of the same policy, so deriving it from the string's
+    // default manufactured a conflict out of the documented override.
+    for (const suffix of ["", "initial_connect_retry=off;"]) {
+      const resolved = parseQwpNodeClientConfig(
+        `ws::addr=localhost;sf_dir=/tmp/qwp;${suffix}`,
+        {
+          storeAndForward: {
+            directory: "/tmp/qwp",
+            initialConnectMode: "async",
+          },
+        },
+      );
+      expect(resolved.ingress.storeAndForward?.initialConnectMode).toBe(
+        "async",
+      );
+      expect(resolved.ingressSession?.initialConnectMode).toBe("async");
+    }
+
+    // Without a typed override the connect string still decides.
+    const fromString = parseQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp;initial_connect_retry=sync;",
+    );
+    expect(fromString.ingress.storeAndForward?.initialConnectMode).toBe("sync");
+    expect(fromString.ingressSession?.initialConnectMode).toBe("sync");
+
+    // A typed session mode that genuinely disagrees is still a conflict.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;sf_dir=/tmp/qwp;", {
+        storeAndForward: {
+          directory: "/tmp/qwp",
+          initialConnectMode: "async",
+        },
+        ingressSession: { initialConnectMode: "sync" },
+      }),
+    ).toThrow(/initialConnectMode.*differs/);
+  });
+
   it("rejects lazy startup conflicts before constructing the client", async () => {
     expect(() =>
       parseQwpNodeClientConfig(
