@@ -1499,13 +1499,19 @@ export class QwpSender {
     }
   }
 
-  intColumn(name: string, value: number | null | undefined): QwpSender {
+  intColumn(
+    name: string,
+    value: number | bigint | null | undefined,
+  ): QwpSender {
     if (this.omitsNullish(name, value)) return this;
     try {
       return this.addColumn(
         name,
         QWP_COLUMN_TYPE.LONG,
-        BigInt(checkedInteger(value, "intColumn value")),
+        // Same LONG column as longColumn(), so it takes the same values:
+        // checkedInt64() keeps the safe-integer rule for numbers and adds the
+        // int64 bound a BigInt needs.
+        checkedInt64(value, "intColumn value"),
       );
     } catch (error) {
       return this.failRow(error);

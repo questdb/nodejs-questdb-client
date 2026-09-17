@@ -14,6 +14,11 @@ import { isInteger, TimestampUnit } from "../utils";
 // Default maximum length for table and column names.
 const DEFAULT_MAX_NAME_LENGTH = 127;
 
+// QuestDB's LONG is a 64-bit signed integer. A BigInt has no width of its own,
+// so out-of-range values have to be rejected before they reach the wire.
+const INT64_MIN = -9223372036854775808n;
+const INT64_MAX = 9223372036854775807n;
+
 /**
  * Abstract base class for sender buffer implementations. <br>
  * Provides common functionality for writing data into the buffer.
@@ -296,18 +301,29 @@ abstract class SenderBufferBase implements SenderBuffer {
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
-   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
+   * @param {number | bigint | null | undefined} value - Column value, accepts integer or `BigInt` values. LONG is a 64-bit signed integer, which is wider than the safe integer range of `number`, so pass a `BigInt` beyond `Number.MAX_SAFE_INTEGER` to avoid losing precision. A null or undefined value omits the column entirely (stored as NULL).
    * @return {SenderBuffer} Returns with a reference to this buffer.
-   * @throws Error if the value is not an integer
+   * @throws Error if the value is not an integer or a `BigInt`
+   * @throws RangeError if the value does not fit into a 64-bit signed integer
    */
-  intColumn(name: string, value: number | null | undefined): SenderBuffer {
+  intColumn(
+    name: string,
+    value: number | bigint | null | undefined,
+  ): SenderBuffer {
     this.validateColumnCall(name);
     // A null or undefined value omits the column entirely (see issue #28).
     if (this.isNullOrUndefined(value)) {
       return this.omitColumn();
     }
-    if (!Number.isInteger(value)) {
-      throw new Error(`Value must be an integer, received ${value}`);
+    if (typeof value === "bigint") {
+      // A BigInt is always an integer, so only its width is in question.
+      if (value < INT64_MIN || value > INT64_MAX) {
+        throw new RangeError(
+          `Value must fit into a 64-bit signed integer, received ${value}`,
+        );
+      }
+    } else if (!Number.isInteger(value)) {
+      throw new Error(`Value must be an integer or BigInt, received ${value}`);
     }
     this.writeColumn(name, value, () => {
       const valueStr = value.toString();

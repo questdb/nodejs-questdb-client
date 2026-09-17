@@ -455,11 +455,12 @@ class Sender {
    * Use it to insert into LONG, INT, SHORT and BYTE columns.
    *
    * @param {string} name - Column name.
-   * @param {number | null | undefined} value - Column value, accepts only number values. A null or undefined value omits the column entirely (stored as NULL).
+   * @param {number | bigint | null | undefined} value - Column value, accepts integer or `BigInt` values. LONG is a 64-bit signed integer, which is wider than the safe integer range of `number`, so pass a `BigInt` beyond `Number.MAX_SAFE_INTEGER` to avoid losing precision. A null or undefined value omits the column entirely (stored as NULL).
    * @return {Sender} Returns with a reference to this sender.
-   * @throws Error if the value is not an integer
+   * @throws Error if the value is not an integer or a `BigInt`
+   * @throws RangeError if the value does not fit into a 64-bit signed integer
    */
-  intColumn(name: string, value: number | null | undefined): Sender {
+  intColumn(name: string, value: number | bigint | null | undefined): Sender {
     if (this.qwpSender) this.qwpSender.intColumn(name, value);
     else this.buffer!.intColumn(name, value);
     return this;
