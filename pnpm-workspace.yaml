@@ -1,0 +1,5 @@
+packages:
+  - packages/*
+
+patchedDependencies:
+  fzstd@0.1.1: patches/fzstd@0.1.1.patch

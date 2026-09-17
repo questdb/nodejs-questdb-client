@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.dist-types.json",
+  "compilerOptions": {
+    "paths": {
+      "@questdb/nodejs-client": [
+        "./packages/nodejs-client/dist/cjs/index.d.ts"
+      ],
+      "@questdb/browser-client": [
+        "./packages/browser-client/dist/cjs/index.d.ts"
+      ]
+    }
+  }
+}

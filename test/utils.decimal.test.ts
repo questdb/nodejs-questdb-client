@@ -1,6 +1,6 @@
 // @ts-check
 import { describe, it, expect } from "vitest";
-import { bigintToTwosComplementBytes } from "../src/utils";
+import { bigintToTwosComplementBytes } from "../packages/nodejs-client/src/utils";
 
 describe("bigintToTwosComplementBytes", () => {
   it("encodes zero as a single zero byte", () => {

@@ -3,7 +3,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { GenericContainer, StartedTestContainer } from "testcontainers";
 import http from "http";
 
-import { Sender, SenderOptions } from "../src";
+import { Sender, SenderOptions } from "../packages/nodejs-client/src";
 
 const HTTP_OK = 200;
 

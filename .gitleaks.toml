@@ -1,0 +1,29 @@
+# Gitleaks configuration for the QuestDB JavaScript clients.
+#
+# The default rule set is kept in full. This file only names the sample
+# credentials the repository has to spell out in the clear, so that
+# `generic-api-key`, which cannot tell a sample apart from a credential, stops
+# reporting them.
+#
+# Every value below is a placeholder or a published documentation sample. None
+# authenticates anything: the tests hand them to mock servers that run inside
+# the test process, and the examples point at a local QuestDB.
+
+title = "QuestDB JavaScript clients"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Sample credentials used by the tests, examples, and README"
+regexes = [
+  # P-256 private scalars for ILP TCP authentication. Signing needs a real
+  # scalar, so these cannot be shortened to an obvious placeholder.
+  '''9b9x5WhJywDEuo1KGQWSPNxtX-6X6R2BRCKhYMMY6n8''', # kid "testapp", tests and examples.manifest.yaml
+  '''zhPiK3BkYMYJvRf5sqyrWNJwjDKHOWHnRbmQggUll6A''', # kid "user1", second key in the TCP auth tests
+  '''ZRxmCOQBpZoj2fZ-lEtqzVDkCre_ouF3ePpaQNDwoQk''', # kid "admin", the documented example key
+  # HTTP bearer tokens, which are opaque strings the client never interprets.
+  '''Xyvd3er6GF87ysaHk''', # README token example
+  '''abcdefghijkl123''',   # mock HTTP server in the transport tests
+  '''jwkprivkey123''',     # connect-string parsing fixture in the options tests
+]
