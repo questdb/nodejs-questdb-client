@@ -653,6 +653,12 @@ export class QwpClient {
 
   /** Pre-connects the configured minimum sender and query pool sizes. */
   connect(): Promise<this> {
+    // A fulfilled prewarm promise remains useful only while the client is
+    // usable. Returning it after close made initialization appear to succeed
+    // even though every subsequent borrow correctly rejected as closed.
+    if (this.closing || this.closed) {
+      return Promise.reject(new QwpClientClosedError());
+    }
     if (!this.connectPromise) {
       const attempt = this.connectNow();
       this.connectPromise = attempt;

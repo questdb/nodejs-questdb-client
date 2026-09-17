@@ -753,16 +753,20 @@ async function applyQwpBrowserIngressHandshake(
   void pendingFirst.then(undefined, () => undefined);
   const timeout = Symbol("QWP browser ingress negotiation timeout");
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const outcome =
-    timeoutMs === 0
-      ? timeout
-      : await Promise.race([
-          pendingFirst,
-          new Promise<typeof timeout>((resolve) => {
-            timer = setTimeout(resolve, timeoutMs, timeout);
-          }),
-        ]);
-  if (timer !== undefined) clearTimeout(timer);
+  let outcome: IteratorResult<Uint8Array> | typeof timeout;
+  try {
+    outcome =
+      timeoutMs === 0
+        ? timeout
+        : await Promise.race([
+            pendingFirst,
+            new Promise<typeof timeout>((resolve) => {
+              timer = setTimeout(resolve, timeoutMs, timeout);
+            }),
+          ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 
   const handshake: {
     qwpVersion: number;

@@ -5671,12 +5671,11 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
-  it("recovers when a callback grants credit twice and the first send fails", async () => {
-    // A failed send hands recovery to a reconnect and then waits for it. While
-    // it also held the transport queue, the callback's next grant could not
-    // even reach the early-acceptance guard, and the reconnect's reset was
-    // meanwhile waiting to drain that same callback: no request ever reached
-    // the healthy replacement and the query died on the reconnect deadline.
+  it("recovers when a callback grants credit repeatedly and the first send fails", async () => {
+    // A failed send hands recovery to a reconnect and releases its queue slot.
+    // Every replayable grant accepted behind it must do the same: retaining
+    // even one slot blocks the next grant while replay waits to drain the
+    // callback that is awaiting that grant.
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
@@ -5712,7 +5711,7 @@ describe("QWP egress reconnect and replay", () => {
       async (_batch, control) => {
         callbackCalls++;
         if (callbackCalls !== 1) return;
-        for (let grant = 0; grant < 2; grant++) {
+        for (let grant = 0; grant < 3; grant++) {
           await control.grantCredit(4096);
           grantsAccepted++;
         }
@@ -5722,13 +5721,13 @@ describe("QWP egress reconnect and replay", () => {
 
     first.receive(emptyResultBatch(query.requestId));
     await vi.waitFor(() => expect(second.sent).toHaveLength(1));
-    expect(grantsAccepted).toBe(2);
-    // Both grants ride the replayed request's initial window.
+    expect(grantsAccepted).toBe(3);
+    // Every grant rides the replayed request's initial window.
     expect(second.sent[0]).toEqual(
       encodeQwpQueryRequest({
         requestId: query.requestId,
         sql: "select * from x",
-        initialCredit: 1 + 4096 + 4096,
+        initialCredit: 1 + 4096 * 3,
       }),
     );
 

@@ -796,6 +796,32 @@ describe("QWP WebSocket adapters", () => {
     }
   });
 
+  it("clears browser ingress negotiation timeout after an early transport error", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = createQwpBrowserConnectionFactory({
+        url: "wss://questdb.example/write/v4",
+        connectTimeoutMs: 1_000,
+        ingressNegotiationTimeoutMs: 60_000,
+        webSocketFactory: () => {
+          queueMicrotask(() => {
+            socket.open();
+            queueMicrotask(() => socket.error());
+          });
+          return asQwpSocket(socket);
+        },
+      })();
+
+      await vi.runAllTicks();
+      await expect(connecting).rejects.toThrow("QWP WebSocket transport error");
+      expect(socket.closeCalls).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses one browser cluster for authenticated ingress, egress, and failover", async () => {
     const webSocketUrls: URL[] = [];
     const bootstrapUrls: URL[] = [];

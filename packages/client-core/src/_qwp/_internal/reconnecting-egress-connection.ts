@@ -283,7 +283,14 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         // QUERY_REQUEST the session recorded it in. Release the caller before
         // waiting for that reconnect, because the reconnect's own reset may be
         // waiting for the caller -- the callback -- to return.
-        if (this.reconnectTask) accept();
+        if (this.reconnectTask) {
+          accept();
+          // Replayable grants are already recorded in the request that owns
+          // the reconnect. They must also vacate the transport queue before
+          // waiting for it: otherwise the next grant from the same callback
+          // waits behind this one while replay waits for that callback.
+          if (accepted) releaseQueue();
+        }
         const connection = await this.requireConnection();
         if (supersededByReplay?.()) return;
         const prepared = await this.prepareOutboundQuery(copy);

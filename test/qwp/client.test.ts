@@ -475,6 +475,39 @@ describe("QWP pooled client", () => {
     expect(closes).toBe(1);
   });
 
+  it("rejects connect after a successfully connected client closes", async () => {
+    let starts = 0;
+    let closes = 0;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+        start: async () => {
+          starts++;
+        },
+        close: async () => {
+          closes++;
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+      },
+    );
+
+    await expect(client.connect()).resolves.toBe(client);
+    await client.close();
+    await expect(client.connect()).rejects.toBeInstanceOf(QwpClientClosedError);
+    expect(starts).toBe(1);
+    expect(closes).toBe(1);
+  });
+
   it("flushes and reuses an exclusively borrowed sender", async () => {
     const senderSessions: FakeSenderSession[] = [];
     let senderCreations = 0;
