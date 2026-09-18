@@ -469,6 +469,29 @@ describe("QWP high-level sender", () => {
     expect(explicit.columns[0].name).toBe("");
   });
 
+  it("accepts BigInt values in intColumn()", async () => {
+    // intColumn() and longColumn() stage the same QWP LONG column, so a BigInt
+    // the ILP path accepts has to survive this path too. 2^62 is past
+    // Number.MAX_SAFE_INTEGER, where a `number` would already have rounded.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender
+      .table("events")
+      .intColumn("value", 2n ** 62n)
+      .atNow();
+    await expect(sender.flush()).resolves.toBe(true);
+
+    const column = session.sends[0].tables[0].columns[0];
+    expect(column.type).toBe(QWP_COLUMN_TYPE.LONG);
+    expect(column.values[0]).toBe(4611686018427387904n);
+
+    // The int64 bound still holds, and the rejected row is discarded.
+    expect(() => sender.table("events").intColumn("value", 2n ** 63n)).toThrow(
+      "intColumn value exceeds signed int64",
+    );
+    await sender.close();
+  });
+
   it("uses the Java-compatible local-publication flush boundary by default", async () => {
     const session = new PublishingSession();
     const sender = new QwpSender(async () => session, { autoFlush: false });

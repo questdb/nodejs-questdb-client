@@ -1586,8 +1586,85 @@ describe("Sender message builder test suite (anything not covered in client inte
     });
     expect(() =>
       sender.table("tableName").intColumn("intField", 123.222),
-    ).toThrow("Value must be an integer, received 123.222");
+    ).toThrow("Value must be an integer or BigInt, received 123.222");
     await sender.close();
+  });
+
+  it("supports BigInt values in integer fields", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    await sender
+      .table("tableName")
+      .intColumn("small", 42n)
+      .intColumn("negative", -42n)
+      .at(1658484769000000, "us");
+    expect(bufferContent(sender)).toBe(
+      "tableName small=42i,negative=-42i 1658484769000000000\n",
+    );
+    await sender.close();
+  });
+
+  it("keeps full LONG precision above Number.MAX_SAFE_INTEGER", async function () {
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      host: "host",
+      init_buf_size: 1024,
+    });
+    // 2^63-1, the largest QuestDB LONG. As a `number` this rounds to
+    // 9223372036854775808, which is out of range for the column.
+    await sender
+      .table("tableName")
+      .intColumn("maxLong", 9223372036854775807n)
+      .at(1658484769000000, "us");
+    expect(bufferContent(sender)).toBe(
+      "tableName maxLong=9223372036854775807i 1658484769000000000\n",
+    );
+    await sender.close();
+  });
+
+  it("throws exception if a BigInt does not fit into a 64-bit signed integer", async function () {
+    const build = () =>
+      new Sender({
+        protocol: "tcp",
+        protocol_version: "1",
+        host: "host",
+        init_buf_size: 1024,
+      });
+    // A BigInt carries no width of its own: without the bound, 2^63 would be
+    // written as 9223372036854775808i and rejected by the server, not here.
+    const tooLarge = build();
+    expect(() =>
+      tooLarge.table("tableName").intColumn("intField", 2n ** 63n),
+    ).toThrow(
+      "Value must fit into a 64-bit signed integer, received 9223372036854775808",
+    );
+    await tooLarge.close();
+
+    const tooSmall = build();
+    expect(() =>
+      tooSmall.table("tableName").intColumn("intField", -(2n ** 63n) - 1n),
+    ).toThrow(
+      "Value must fit into a 64-bit signed integer, received -9223372036854775809",
+    );
+    await tooSmall.close();
+
+    // The bounds themselves are in range. -2^63 is QuestDB's LONG NULL
+    // sentinel, so the server stores it as NULL rather than as a value, but it
+    // is a legal int64 and the guard lets it through.
+    const atBound = build();
+    await atBound
+      .table("tableName")
+      .intColumn("minLong", -(2n ** 63n))
+      .at(1658484769000000, "us");
+    expect(bufferContent(atBound)).toBe(
+      "tableName minLong=-9223372036854775808i 1658484769000000000\n",
+    );
+    await atBound.close();
   });
 
   it("throws exception if a float is passed as timestamp field", async function () {
