@@ -612,6 +612,23 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       ) {
         return;
       }
+      if (
+        error instanceof QwpProtocolError &&
+        this.outboundReplay.length > 0 &&
+        !this.pendingTerminal
+      ) {
+        // An undecodable frame during an active query reproduces after the
+        // replay just as an undecodable result batch does, and every
+        // reconnect succeeds, so connectLoop's own budget never runs out.
+        // Charge it to the same per-query recovery budget. A queued terminal
+        // awaiting the session's verdict is exempt: if accepted, nothing is
+        // replayed; if rejected, the session charges it itself.
+        const exhausted = this.chargeProtocolRecovery(error);
+        if (exhausted) {
+          this.failTerminal(exhausted);
+          return;
+        }
+      }
       await this.requestReconnect(
         error,
         connection,
@@ -776,29 +793,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.throwIfUnavailable();
     const connection = this.connection;
     if (!connection) throw new QwpSendClosedError();
-    // Reconnecting replays the same QUERY_REQUEST, so a response this client
-    // cannot decode reproduces on the replacement connection. Each connect
-    // SUCCEEDS, so connectLoop's own budget is never consumed and the retry
-    // would otherwise run forever, rotating the whole cluster. Charge these
-    // recoveries to the same maxAttempts/maxDurationMs budget instead, the way
-    // the Java client counts every re-submission of one execute() against
-    // failover_max_attempts and failover_max_duration.
-    if (this.protocolRecoveries === 0) {
-      this.protocolRecoveryStartedAt = monotonicNowMs();
-    }
-    this.protocolRecoveries++;
-    // `>` not `>=`: maxAttempts counts reconnects here, as it does in
-    // connectLoop, so maxAttempts=1 still permits one recovery.
-    const attemptsExhausted =
-      this.maxAttempts > 0 && this.protocolRecoveries > this.maxAttempts;
-    const durationExhausted =
-      this.maxDurationMs > 0 &&
-      monotonicNowMs() - this.protocolRecoveryStartedAt >= this.maxDurationMs;
-    if (attemptsExhausted || durationExhausted) {
-      const exhausted = new QwpReconnectExhaustedError(
-        this.protocolRecoveries,
-        error,
-      );
+    const exhausted = this.chargeProtocolRecovery(error);
+    if (exhausted) {
       this.failTerminal(exhausted);
       throw exhausted;
     }
@@ -814,6 +810,38 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       this.failTerminal(reconnectError);
       throw reconnectError;
     }
+  }
+
+  /**
+   * Charges one protocol-failure recovery of the active query to the
+   * reconnect budget. Returns the terminal error once the budget is spent.
+   */
+  private chargeProtocolRecovery(
+    error: unknown,
+  ): QwpReconnectExhaustedError | undefined {
+    // Reconnecting replays the same QUERY_REQUEST, so a response this client
+    // cannot decode -- whether the outer frame (pump) or a result batch inside
+    // it (recoverProtocolFailure) -- reproduces on the replacement connection.
+    // Each connect SUCCEEDS, so connectLoop's own budget is never consumed and
+    // the retry would otherwise run forever, rotating the whole cluster.
+    // Charge these recoveries to the same maxAttempts/maxDurationMs budget
+    // instead, the way the Java client counts every re-submission of one
+    // execute() against failover_max_attempts and failover_max_duration.
+    if (this.protocolRecoveries === 0) {
+      this.protocolRecoveryStartedAt = monotonicNowMs();
+    }
+    this.protocolRecoveries++;
+    // `>` not `>=`: maxAttempts counts reconnects here, as it does in
+    // connectLoop, so maxAttempts=1 still permits one recovery.
+    const attemptsExhausted =
+      this.maxAttempts > 0 && this.protocolRecoveries > this.maxAttempts;
+    const durationExhausted =
+      this.maxDurationMs > 0 &&
+      monotonicNowMs() - this.protocolRecoveryStartedAt >= this.maxDurationMs;
+    if (attemptsExhausted || durationExhausted) {
+      return new QwpReconnectExhaustedError(this.protocolRecoveries, error);
+    }
+    return undefined;
   }
 
   private armTerminalVerdict(requestId: bigint): void {

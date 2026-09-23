@@ -1797,7 +1797,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         (candidate) =>
           candidate.clientSequence !== undefined && !candidate.ackDelivered,
       );
-      for (const candidate of covered) candidate.ackDelivered = true;
+      // ackDelivered is set only once the ACK is persisted. If persisting
+      // fails, pump() reconnects and replays every frame still in the
+      // journal; marking them delivered up front made the replacement
+      // connection's OK look like a duplicate and dropped it, leaving the
+      // caller's awaitServerAck()/awaitDurableAck() to time out.
+      const markDelivered = (): void => {
+        for (const candidate of covered) candidate.ackDelivered = true;
+      };
       if (frame.frameSequence > this.highestOkFrameSequence) {
         this.highestOkFrameSequence = frame.frameSequence;
       }
@@ -1809,17 +1816,35 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // stalled at -1n while cumulative OKs kept arriving. close() then failed
       // with "pending data may be lost" on a fully acknowledged sender, and
       // durableTargets accumulated one map per frame with nothing to drain it.
-      if (this.handshake.durableAckEnabled && this.durableAckTracked) {
-        frame.durableTargets = new Map(
-          response.tables.map((table) => [
-            table.name,
-            table.sequenceTransaction,
-          ]),
-        );
-        await this.trimDurablePrefix();
-      } else {
-        await this.acknowledgeThrough(frame.frameSequence);
+      try {
+        if (this.handshake.durableAckEnabled && this.durableAckTracked) {
+          frame.durableTargets = new Map(
+            response.tables.map((table) => [
+              table.name,
+              table.sequenceTransaction,
+            ]),
+          );
+          await this.trimDurablePrefix();
+        } else {
+          await this.acknowledgeThrough(frame.frameSequence);
+        }
+      } catch (error) {
+        // A step after the store accepted the ACK can still fail. The frame
+        // is then already retired and will not be replayed, so no
+        // replacement OK will arrive for it: deliver this one now.
+        if (
+          !this.frames.has(frame.frameSequence) &&
+          shouldDeliver &&
+          clientTarget?.clientSequence !== undefined
+        ) {
+          markDelivered();
+          this.messagesQueue.push(
+            rewriteResponseSequence(payload, clientTarget.clientSequence),
+          );
+        }
+        throw error;
       }
+      markDelivered();
       // ACKs are cumulative, so nothing reads the covered prefix again.
       // Dropping it keeps both the log and the payloads it pins bounded, and
       // keeps each ACK proportional to the frames it actually covers.
