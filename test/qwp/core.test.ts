@@ -51,6 +51,7 @@ import {
   encodeUtf8,
   utf8Length,
 } from "../../packages/client-core/src/_qwp/_core/bytes";
+import { measureQwpIngressFrame } from "../../packages/client-core/src/_qwp/_core/ingress";
 
 function dataView(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -894,6 +895,58 @@ describe("QWP ingress codec", () => {
       "BTC-USD",
       "SOL-USD",
     ]);
+  });
+
+  it("encodes a measured frame from its plan exactly as a fresh encode", () => {
+    const table = (): QwpTableBuffer => {
+      const result = new QwpTableBuffer("trades");
+      for (const [symbol, price] of [
+        ["ETH-USD", 1.5],
+        ["BTC-USD", 2.5],
+        ["ETH-USD", 3.5],
+      ] as const) {
+        result
+          .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
+          .values.push(symbol);
+        result
+          .getOrCreateColumn("price", QWP_COLUMN_TYPE.DOUBLE)!
+          .values.push(price);
+        result.nextRow();
+      }
+      return result;
+    };
+    for (const delta of [false, true]) {
+      const measuredDictionary = delta ? new QwpSymbolDictionary() : undefined;
+      const freshDictionary = delta ? new QwpSymbolDictionary() : undefined;
+      const measured = measureQwpIngressFrame([table()], {
+        dictionary: measuredDictionary,
+        confirmedMaxSymbolId: delta ? -1 : undefined,
+      });
+      const encoded = measured.encode();
+      const fresh = encodeQwpIngressFrame([table()], {
+        dictionary: freshDictionary,
+        confirmedMaxSymbolId: delta ? -1 : undefined,
+      });
+      expect(encoded.byteLength).toBe(measured.byteLength);
+      expect(encoded).toEqual(fresh);
+      expect(measuredDictionary?.entriesFrom(0)).toEqual(
+        freshDictionary?.entriesFrom(0),
+      );
+    }
+  });
+
+  it("restores the dictionary when a measured frame fails to plan", () => {
+    const dictionary = new QwpSymbolDictionary();
+    dictionary.getOrAdd("ETH-USD");
+    const table = new QwpTableBuffer("trades");
+    table.getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!.values.push("X");
+    table.nextRow();
+    // An out-of-range published ID fails the plan after nothing was added;
+    // the dictionary must come back at its pre-measure size either way.
+    expect(() =>
+      measureQwpIngressFrame([table], { dictionary, confirmedMaxSymbolId: 5 }),
+    ).toThrow(/published symbol dictionary ID is out of range/);
+    expect(dictionary.size).toBe(1);
   });
 
   it("encodes a full inline symbol dictionary with dense first-seen IDs", () => {

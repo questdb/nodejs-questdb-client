@@ -690,6 +690,113 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("keeps validating identifiers that only resemble ones already staged", async () => {
+    // Staged names skip revalidation, so each case below checks that the skip
+    // applies only to the exact spelling that was validated.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    // An invalid name fails on every attempt, not only the first.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(() => sender.table("bad/table")).toThrow(
+        /table name contains illegal characters/,
+      );
+      expect(() => sender.table("events").longColumn("bad-col", 1n)).toThrow(
+        /column name contains illegal characters/,
+      );
+    }
+
+    // U+212A (KELVIN SIGN) lower-cases to "k", so these two names share a
+    // column key, but only the ASCII one fits the UTF-8 byte limit.
+    const ascii = "k".repeat(100);
+    const kelvin = "\u212a".repeat(100);
+    const expectKelvinRejected = (): void => {
+      expect(() => sender.table("events").longColumn(kelvin, 2n)).toThrow(
+        /column name too long/,
+      );
+      expect(() => sender.table("events").longColumn(kelvin, null)).toThrow(
+        /column name too long/,
+      );
+    };
+
+    await sender.table("events").longColumn(ascii, 1n).at(1n);
+    // Staged, not yet published.
+    expectKelvinRejected();
+    // The designated timestamp's empty name is in the schema too; it must not
+    // make an empty ordinary column name look validated.
+    expect(() => sender.table("events").longColumn("", 1n)).toThrow(
+      /column name cannot be empty/,
+    );
+    expect(() => sender.table("events").longColumn("", null)).toThrow(
+      /column name cannot be empty/,
+    );
+    await sender.flush();
+    // Published: the staged frame schema is gone, the published one remains.
+    expectKelvinRejected();
+
+    // The exact spelling is still accepted without a hitch.
+    await sender.table("events").longColumn(ascii, 3n).at(2n);
+    await sender.flush();
+    expect(column(session.sends.at(-1)!.tables[0], ascii).values).toEqual([3n]);
+    await sender.close();
+  });
+
+  it("rejects rather than throws from at() and atNow()", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+
+    let pending: Promise<void> | undefined;
+    expect(() => {
+      pending = sender.table("events").longColumn("value", 1n).at(1.5);
+    }).not.toThrow();
+    await expect(pending).rejects.toThrow();
+    // The failed row was discarded along with its table selection.
+    await sender.table("events").longColumn("value", 2n).at(1n);
+
+    expect(() => {
+      pending = sender.atNow();
+    }).not.toThrow();
+    await expect(pending).rejects.toThrow(/table name must be set/);
+
+    await sender.flush();
+    expect(session.sends).toHaveLength(1);
+    expect(column(session.sends[0].tables[0], "value").values).toEqual([2n]);
+
+    await sender.close();
+    expect(() => {
+      pending = sender.at(1n);
+    }).not.toThrow();
+    await expect(pending).rejects.toThrow();
+    expect(() => {
+      pending = sender.atNow();
+    }).not.toThrow();
+    await expect(pending).rejects.toThrow();
+  });
+
+  it("auto-flushes writer row streams and rejects bad writer rows", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlushRows: 2 });
+    const writer = sender.writer("events", { value: long() });
+
+    let pending: Promise<void> | undefined;
+    expect(() => {
+      pending = writer.row({ value: "wrong" } as never);
+    }).not.toThrow();
+    await expect(pending).rejects.toBeInstanceOf(QwpWriterRowError);
+
+    await writer.rows([1n, 2n, 3n, 4n, 5n].map((value) => ({ value })));
+    // Two rows per auto-flush; the fifth waits for an explicit flush.
+    expect(session.sends.map((send) => send.tables[0].rowCount)).toEqual([
+      2, 2,
+    ]);
+    expect(sender.metrics.pendingRows).toBe(1);
+    await sender.flush();
+    expect(
+      session.sends.flatMap((send) => column(send.tables[0], "value").values),
+    ).toEqual([1n, 2n, 3n, 4n, 5n]);
+    await sender.close();
+  });
+
   it("returns a publication sequence and waits for its ACK independently", async () => {
     const session = new WatermarkSession();
     const sender = new QwpSender(async () => session, {

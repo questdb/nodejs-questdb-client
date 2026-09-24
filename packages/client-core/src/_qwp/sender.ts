@@ -17,7 +17,11 @@ import {
   type QwpIngressSendResult,
   type QwpIngressMetrics,
 } from "./ingress-session";
-import { qwpColumnNameKey, validateQwpColumnName } from "./_core/identifiers";
+import {
+  qwpColumnNameKey,
+  validateQwpColumnName,
+  validateQwpTableName,
+} from "./_core/identifiers";
 import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
@@ -1141,16 +1145,23 @@ function encodeQwpWriterValue(
 
 const QWP_TABLE_WRITER_CONSTRUCTOR = Symbol("QWP table writer constructor");
 
+/** Returned by at()/atNow() for a row that started no flush. */
+const SETTLED: Promise<void> = Promise.resolve();
+
+function ignoreResult(): void {}
+
 /** A reusable table-bound writer compiled from a QWP schema. */
 export class QwpTableWriter<Schema extends QwpWriterSchema> {
   /** @internal Construct table writers with QwpSender.writer(). */
   constructor(
     token: typeof QWP_TABLE_WRITER_CONSTRUCTOR,
     readonly tableName: string,
+    // Returns undefined when the row staged without starting an auto-flush,
+    // so a stream of rows allocates no promise per row. May throw.
     private readonly appendRow: (
       row: unknown,
       rowIndex?: number,
-    ) => Promise<void>,
+    ) => Promise<void> | undefined,
   ) {
     if (token !== QWP_TABLE_WRITER_CONSTRUCTOR) {
       throw new TypeError("QWP table writers must be created by QwpSender");
@@ -1158,8 +1169,9 @@ export class QwpTableWriter<Schema extends QwpWriterSchema> {
   }
 
   /** Validates and atomically appends one complete object row. */
-  row(row: QwpWriterRow<Schema>): Promise<void> {
-    return this.appendRow(row);
+  async row(row: QwpWriterRow<Schema>): Promise<void> {
+    // `async` so a rejected row rejects rather than throws, as documented.
+    await this.appendRow(row);
   }
 
   /** Appends a synchronous or asynchronous stream of complete object rows. */
@@ -1183,7 +1195,10 @@ export class QwpTableWriter<Schema extends QwpWriterSchema> {
 
     let rowIndex = 0;
     for await (const row of rows) {
-      await this.appendRow(row, rowIndex++);
+      // Await only a flush the row actually started. Awaiting every row cost
+      // a promise per row, a large share of this loop's allocation churn.
+      const flushing = this.appendRow(row, rowIndex++);
+      if (flushing !== undefined) await flushing;
     }
   }
 }
@@ -1356,10 +1371,13 @@ export class QwpSender {
   table(name: string): QwpSender {
     this.throwIfUnavailable();
     if (this.current) throw new Error("Table name has already been set");
-    // Validate eagerly rather than waiting for flush.
-    new QwpTableBuffer(name, this.maxNameLength);
     let table = this.tablesByName.get(name);
     if (!table) {
+      // Validate eagerly rather than waiting for flush. Only names reach
+      // tablesByName once validated, so a table already staged skips it: the
+      // fluent API names the same table on every row, and rescanning it each
+      // time was a measurable share of the builder's per-row cost.
+      validateQwpTableName(name, this.maxNameLength);
       table = {
         name,
         rows: [],
@@ -1394,15 +1412,43 @@ export class QwpSender {
     if (value !== null && value !== undefined) return false;
     try {
       this.throwIfUnavailable();
-      this.requireTable();
+      const table = this.requireTable();
       if (typeof name !== "string") {
         throw new TypeError("column name must be a string");
       }
-      validateQwpColumnName(name, this.maxNameLength);
+      this.validateColumnName(table, name, qwpColumnNameKey(name));
     } catch (error) {
       this.failRow(error);
     }
     return true;
+  }
+
+  /**
+   * Validates a fluent column name unless the table already knows a column by
+   * exactly this spelling.
+   *
+   * The fluent API repeats the same names on every row, and rescanning each
+   * one per cell was a measurable share of the builder's per-row cost. Every
+   * name in a table's staged or published schema was validated before it got
+   * there, so an exact match proves this one is valid. The match has to be
+   * exact, not by key: two spellings can share a case-insensitive key and
+   * still differ in UTF-8 length. The designated timestamp's empty name is
+   * never valid for an ordinary column, so it is always checked.
+   *
+   * Unlike a global memo, this needs no bound of its own: it lives exactly as
+   * long as the schema it reads from.
+   */
+  private validateColumnName(
+    table: StagedTable,
+    name: string,
+    nameKey: string,
+  ): void {
+    if (name.length !== 0) {
+      const known =
+        table.schema.get(nameKey) ?? table.publishedSchema.get(nameKey);
+      if (known !== undefined && known.name === name) return;
+    }
+    validateQwpColumnName(name, this.maxNameLength);
   }
 
   symbol(name: string, value: unknown): QwpSender {
@@ -1914,32 +1960,48 @@ export class QwpSender {
     return this;
   }
 
-  async at(
-    value: number | bigint,
-    unit: QwpTimestampUnit = "us",
-  ): Promise<void> {
+  // at() and atNow() are deliberately not `async`: an async method allocates
+  // a promise per row even when no flush starts, which is almost every row.
+  // They still never throw -- every failure is a rejected promise, as when
+  // they were async -- and a row that starts no flush gets a shared settled
+  // promise.
+  at(value: number | bigint, unit: QwpTimestampUnit = "us"): Promise<void> {
     try {
       const timestamp = timestampValue(value, unit);
       this.addColumn("", timestamp.type, timestamp.value, {}, true);
       this.finishRow();
     } catch (error) {
-      this.failRow(error);
+      this.discardRow();
+      return Promise.reject(error);
     }
-    await this.tryFlush();
+    return this.flushAfterRow();
   }
 
-  async atNow(): Promise<void> {
-    this.throwIfUnavailable();
-    const table = this.requireTable();
-    if (
-      this.rejectZeroColumnRows &&
-      this.currentRow.size === 0 &&
-      table.knownColumnNames.size === 0
-    ) {
-      return this.failRow(new Error("no columns were provided"));
+  atNow(): Promise<void> {
+    try {
+      this.throwIfUnavailable();
+      const table = this.requireTable();
+      if (
+        this.rejectZeroColumnRows &&
+        this.currentRow.size === 0 &&
+        table.knownColumnNames.size === 0
+      ) {
+        this.failRow(new Error("no columns were provided"));
+      }
+      this.finishRow();
+    } catch (error) {
+      return Promise.reject(error);
     }
-    this.finishRow();
-    await this.tryFlush();
+    return this.flushAfterRow();
+  }
+
+  /** tryFlush() for the public row closers, which must return a Promise. */
+  private flushAfterRow(): Promise<void> {
+    try {
+      return this.tryFlush() ?? SETTLED;
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   /**
@@ -2422,11 +2484,12 @@ export class QwpSender {
     return { columns, estimatedBytes: stagedRowBytes(columns) };
   }
 
-  private async appendCompiledWriterRow(
+  /** Stages one writer row; returns only the auto-flush it started, if any. */
+  private appendCompiledWriterRow(
     schema: CompiledQwpWriterSchema,
     input: unknown,
     rowIndex: number | undefined,
-  ): Promise<void> {
+  ): Promise<void> | undefined {
     this.throwIfUnavailable();
     // Report the conflicting fluent row before validating this one: it is the
     // actionable error, and row contents cannot be staged either way.
@@ -2532,7 +2595,7 @@ export class QwpSender {
       "debug",
       `Pending QWP rows: ${this.pendingRowCount}, estimated bytes: ${this.pendingByteCount}`,
     );
-    await this.tryFlush();
+    return this.tryFlush();
   }
 
   private fixedDecimalColumn(
@@ -2574,10 +2637,10 @@ export class QwpSender {
       if (typeof name !== "string") {
         throw new TypeError("column name must be a string");
       }
-      if (!designatedTimestamp) {
-        validateQwpColumnName(name, this.maxNameLength);
-      }
       const nameKey = qwpColumnNameKey(name);
+      if (!designatedTimestamp) {
+        this.validateColumnName(table, name, nameKey);
+      }
       // The fluent API is first-value-wins within a row. Apply that rule before
       // schema reconciliation: a duplicate decimal with a different scale is
       // ignored, not rescaled and allowed to discard the value already staged.
@@ -2800,7 +2863,11 @@ export class QwpSender {
     return this.releaseStagedRows(snapshots, this.stagingGeneration, false);
   }
 
-  private async tryFlush(): Promise<void> {
+  /**
+   * Starts an auto-flush when a threshold is crossed and returns it, or
+   * returns undefined -- the common case -- without allocating a promise.
+   */
+  private tryFlush(): Promise<void> | undefined {
     const byteThreshold = this.effectiveAutoFlushByteThreshold();
     if (
       this.autoFlush &&
@@ -2810,8 +2877,9 @@ export class QwpSender {
         (this.autoFlushIntervalMs > 0 &&
           Date.now() - this.lastFlushTime >= this.autoFlushIntervalMs))
     ) {
-      await this.enqueueFlush(this.transactional);
+      return this.enqueueFlush(this.transactional).then(ignoreResult);
     }
+    return undefined;
   }
 
   private async flushNow(
