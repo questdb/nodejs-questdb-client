@@ -1791,7 +1791,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     if (response.status === QWP_STATUS.OK) {
       if (frame.dictionaryCatchup) return undefined;
-      const covered = this.wireFrames.slice(0, localIndex + 1);
+      // localIndex indexes this log. A reconnect during the await below
+      // installs the replacement connection's log in its place, which the
+      // trim at the end must then leave alone.
+      const wireFrames = this.wireFrames;
+      const covered = wireFrames.slice(0, localIndex + 1);
       const clientTarget = findLastClientFrame(covered);
       // Evaluated only after the ACK is persisted, never before the await: a
       // reconnect that runs while the store is persisting replays these same
@@ -1854,8 +1858,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // ACKs are cumulative, so nothing reads the covered prefix again.
       // Dropping it keeps both the log and the payloads it pins bounded, and
       // keeps each ACK proportional to the frames it actually covers.
-      this.wireFrames.splice(0, localIndex + 1);
-      this.wireFramesBase += localIndex + 1;
+      // Only this connection's log is trimmed. If a reconnect replaced it
+      // while the ACK was persisting, localIndex means nothing in the new
+      // log: trimming it there dropped replayed frames the new connection
+      // had not had acknowledged, so their OKs were discarded as duplicates.
+      if (this.wireFrames === wireFrames) {
+        wireFrames.splice(0, localIndex + 1);
+        this.wireFramesBase += localIndex + 1;
+      }
       if (!shouldDeliver || clientTarget?.clientSequence === undefined) {
         return undefined;
       }

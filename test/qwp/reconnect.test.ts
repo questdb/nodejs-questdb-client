@@ -329,6 +329,33 @@ class AckFaultStore extends TrackingReplayStore {
   }
 }
 
+/** Holds the next acknowledgeThrough() open until release() once armed. */
+class GatedAckStore extends TrackingReplayStore {
+  private gate?: Promise<void>;
+  private openGate?: () => void;
+  gated = false;
+
+  holdNextAck(): void {
+    this.gate = new Promise((resolve) => {
+      this.openGate = resolve;
+    });
+  }
+
+  release(): void {
+    this.openGate?.();
+  }
+
+  override async acknowledgeThrough(frameSequence: bigint): Promise<void> {
+    const gate = this.gate;
+    this.gate = undefined;
+    if (gate) {
+      this.gated = true;
+      await gate;
+    }
+    return super.acknowledgeThrough(frameSequence);
+  }
+}
+
 class LazyTrackingReplayStore extends TrackingReplayStore {
   readonly reads: bigint[] = [];
   loadCalls = 0;
@@ -1728,32 +1755,9 @@ describe("QWP ingress reconnect and replay", () => {
     // A reconnect during that wait replays the same frames, and the
     // replacement connection's OK can deliver them first. Deciding whether
     // to deliver before the wait made the original OK deliver them again.
-    class GatedAckStore extends TrackingReplayStore {
-      private gate?: Promise<void>;
-      private openGate?: () => void;
-      gated = false;
-
-      holdNextAck(): void {
-        this.gate = new Promise((resolve) => {
-          this.openGate = resolve;
-        });
-      }
-
-      release(): void {
-        this.openGate?.();
-      }
-
-      override async acknowledgeThrough(frameSequence: bigint): Promise<void> {
-        const gate = this.gate;
-        this.gate = undefined;
-        if (gate) {
-          this.gated = true;
-          await gate;
-        }
-        return super.acknowledgeThrough(frameSequence);
-      }
-    }
-
+    // The stale OK must also leave the replacement connection's log alone:
+    // trimming it there dropped the replayed second frame, so the server's
+    // OK for that frame was discarded as a duplicate.
     const connections: FakeConnection[] = [];
     const replayStore = new GatedAckStore();
     const okSequences: bigint[] = [];
@@ -1788,7 +1792,7 @@ describe("QWP ingress reconnect and replay", () => {
 
     // A failed send reconnects while that OK is still being persisted.
     connections[0].onSend = () => Promise.reject(new Error("socket reset"));
-    void session.sendFrame(Uint8Array.of(2)).catch(() => undefined);
+    const second = session.sendFrame(Uint8Array.of(2));
     await vi.waitFor(() =>
       expect(connections[1]?.sent).toEqual([
         Uint8Array.of(1),
@@ -1802,10 +1806,88 @@ describe("QWP ingress reconnect and replay", () => {
     });
 
     replayStore.release();
+    // The store is in-memory, so the stale OK finishes within the
+    // microtasks that follow release(), ahead of this timer.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(okSequences).toEqual([0n]);
     expect(session.metrics.totalAcks).toBe(1);
-    await session.close().catch(() => undefined);
+
+    // The replayed second frame is still acknowledgeable on the new wire.
+    connections[1].receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await expect(second).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 1n,
+    });
+    await vi.waitFor(() => expect(okSequences).toEqual([0n, 1n]));
+    expect(Array.from(replayStore.records.keys())).toEqual([]);
+    await session.close();
+  });
+
+  it("keeps the replacement wire log aligned when a stale OK finishes after a cumulative one", async () => {
+    // The replacement connection acknowledges both replayed frames before
+    // the original OK finishes persisting. Trimming the new log again by the
+    // stale OK's index shifted it by one, so the next frame's OK was dropped
+    // and the one after it was applied to the wrong frame.
+    const connections: FakeConnection[] = [];
+    const replayStore = new GatedAckStore();
+    const okSequences: bigint[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const next = new FakeConnection(`endpoint-${connections.length}`);
+        connections.push(next);
+        return next;
+      },
+      {
+        replayStore,
+        ackTimeoutMs: 5_000,
+        onResponse: (response) => {
+          if (response.status === QWP_STATUS.OK) {
+            okSequences.push(response.sequence);
+          }
+        },
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    const first = session.sendFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(1));
+    replayStore.holdNextAck();
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(replayStore.gated).toBe(true));
+
+    connections[0].onSend = () => Promise.reject(new Error("socket reset"));
+    const second = session.sendFrame(Uint8Array.of(2));
+    await vi.waitFor(() =>
+      expect(connections[1]?.sent).toEqual([
+        Uint8Array.of(1),
+        Uint8Array.of(2),
+      ]),
+    );
+    connections[1].receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await expect(second).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 1n,
+    });
+    await expect(first).resolves.toMatchObject({ status: QWP_STATUS.OK });
+
+    replayStore.release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const third = session.sendFrame(Uint8Array.of(3));
+    await vi.waitFor(() => expect(connections[1].sent).toHaveLength(3));
+    connections[1].receive(ingressResponse(QWP_STATUS.OK, 2n));
+    await expect(third).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 2n,
+    });
+    await vi.waitFor(() => expect(okSequences).toEqual([1n, 2n]));
+    expect(Array.from(replayStore.records.keys())).toEqual([]);
+    await session.close();
   });
 
   it("delivers the ACK when persisting fails after the store retired the frame", async () => {
@@ -5429,6 +5511,85 @@ describe("QWP egress reconnect and replay", () => {
     // The initial connection plus maxAttempts recoveries, then exhaustion.
     expect(connections).toHaveLength(4);
     await session.close().catch(() => undefined);
+  });
+
+  it("does not charge undecodable frames on an idle connection to a query budget", async () => {
+    // With no query in flight nothing is replayed, so a reconnect cannot
+    // reproduce the frame. Nothing resets the per-query budget while idle
+    // either, so charging these would end the session after maxAttempts
+    // unrelated bad frames.
+    const connections: FakeConnection[] = [];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = new FakeConnection(`node-${connections.length}`);
+        connections.push(connection);
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    for (let index = 0; index < 3; index++) {
+      connections[index].receive(Uint8Array.of(0xff));
+      await vi.waitFor(() => expect(connections).toHaveLength(index + 2));
+    }
+    const latest = connections[3];
+    const query = await session.query("select 1");
+    await vi.waitFor(() => expect(latest.sent).toHaveLength(1));
+    latest.receive(resultEnd());
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    expect(connections).toHaveLength(4);
+    await session.close();
+  });
+
+  it("does not charge an undecodable frame that follows a queued terminal", async () => {
+    // The terminal is awaiting the session's verdict when the bad frame
+    // arrives. Once accepted, the reconnect replays nothing, so this
+    // recovery cannot repeat and must not spend the query's budget.
+    const connections: FakeConnection[] = [];
+    const session = await QwpEgressSession.connect(
+      async () => {
+        const connection = new FakeConnection(`node-${connections.length}`);
+        connections.push(connection);
+        queueMicrotask(() =>
+          connection.receive(serverInfo(connection.endpoint)),
+        );
+        return connection;
+      },
+      {
+        reconnect: {
+          maxAttempts: 1,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    const query = await session.query("select 1");
+    // Spend the query's single recovery on a frame that is charged.
+    connections[0].receive(Uint8Array.of(0xff));
+    await vi.waitFor(() => expect(connections[1]?.sent).toHaveLength(1));
+
+    connections[1].receive(resultEnd());
+    connections[1].receive(Uint8Array.of(0xff));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await vi.waitFor(() => expect(connections).toHaveLength(3));
+    expect(connections[2].sent).toEqual([]);
+    await session.close();
   });
 
   it("retries the initial connection until one provides SERVER_INFO", async () => {
