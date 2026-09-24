@@ -1739,6 +1739,15 @@ describe("QWP ingress reconnect and replay", () => {
       expect(connections[1]?.sent).toEqual([Uint8Array.of(1)]),
     );
     expect(replayStore.ackFailures).toBe(1);
+    // The failed OK must not settle the caller: its ACK was never persisted,
+    // so the frame is replayed and only the replacement OK may deliver it.
+    let settledEarly = false;
+    const markSettled = (): void => {
+      settledEarly = true;
+    };
+    void pending.then(markSettled, markSettled);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settledEarly).toBe(false);
     connections[1].receive(ingressResponse(QWP_STATUS.OK, 0n));
 
     // No later frame is sent: the replacement ACK alone must settle it.
