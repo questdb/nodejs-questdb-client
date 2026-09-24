@@ -1416,8 +1416,9 @@ export class QwpSender {
       if (typeof name !== "string") {
         throw new TypeError("column name must be a string");
       }
-      // An omitted name never enters the schema. Look up exact keys without
-      // case-folding first, so an unknown nullish name is validated only once.
+      // An omitted name never enters the schema, so skip case-folding and
+      // look it up by its exact spelling. An exact hit was validated when it
+      // was staged; any other name is validated here.
       const known = table.schema.get(name) ?? table.publishedSchema.get(name);
       if (name.length === 0 || known?.name !== name) {
         validateQwpColumnName(name, this.maxNameLength);

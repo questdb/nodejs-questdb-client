@@ -747,8 +747,21 @@ describe("QWP high-level sender", () => {
       /column name cannot be empty/,
     );
     await sender.flush();
-    // Published: the staged frame schema is gone, the published one remains.
+    // Published. A flush keeps non-decimal columns in the staged schema, so
+    // these lookups still resolve there.
     expectLookalikesRejected();
+
+    // A flush drops a decimal column's frame-local scale lock, leaving the
+    // column only in the published schema. A lookalike must not be accepted
+    // through that entry either.
+    await sender.table("prices").decimalColumn(ascii, 1n, 2).at(1n);
+    await sender.flush();
+    expect(() => sender.table("prices").decimalColumn(kelvin, 2n, 2)).toThrow(
+      /column name too long/,
+    );
+    await sender.table("prices").decimalColumn(ascii, 3n, 2).at(2n);
+    await sender.flush();
+    expect(column(session.sends.at(-1)!.tables[0], ascii).values).toEqual([3n]);
 
     // The exact spelling is still accepted without a hitch.
     await sender.table("events").longColumn(ascii, 3n).at(2n);
