@@ -622,7 +622,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         // reconnect succeeds, so connectLoop's own budget never runs out.
         // Charge it to the same per-query recovery budget. A queued terminal
         // awaiting the session's verdict is exempt: if accepted, nothing is
-        // replayed; if rejected, the session charges it itself.
+        // replayed. If rejected, recoverProtocolFailure() finds the reconnect
+        // this starts already under way and fails the query rather than
+        // replaying it, so this path cannot repeat without a charge either.
         const exhausted = this.chargeProtocolRecovery(error);
         if (exhausted) {
           this.failTerminal(exhausted);

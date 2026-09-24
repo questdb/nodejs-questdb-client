@@ -310,6 +310,25 @@ class CloseFaultStore extends TrackingReplayStore {
   }
 }
 
+/** Fails the next acknowledgeThrough() once armed, before it trims anything. */
+class AckFaultStore extends TrackingReplayStore {
+  failNextAck = false;
+  ackFailures = 0;
+
+  constructor(private readonly faultMessage: string) {
+    super();
+  }
+
+  override async acknowledgeThrough(frameSequence: bigint): Promise<void> {
+    if (this.failNextAck) {
+      this.failNextAck = false;
+      this.ackFailures++;
+      throw new QwpReplayStoreError(this.faultMessage);
+    }
+    return super.acknowledgeThrough(frameSequence);
+  }
+}
+
 class LazyTrackingReplayStore extends TrackingReplayStore {
   readonly reads: bigint[] = [];
   loadCalls = 0;
@@ -1609,28 +1628,14 @@ describe("QWP ingress reconnect and replay", () => {
     // permanent -- so a filesystem hiccup of about a second ended a healthy
     // producer for the rest of the process lifetime. transmitOnce() already
     // routed the identical class to a reconnect for that reason.
-    class AckFaultStore extends TrackingReplayStore {
-      failNextAck = false;
-      ackFailures = 0;
-
-      override async acknowledgeThrough(frameSequence: bigint): Promise<void> {
-        if (this.failNextAck) {
-          this.failNextAck = false;
-          this.ackFailures++;
-          throw new QwpReplayStoreError(
-            "could not trim QWP store-and-forward segment [firstSequence=0]",
-          );
-        }
-        return super.acknowledgeThrough(frameSequence);
-      }
-    }
-
     const connections = [
       new FakeConnection("primary"),
       new FakeConnection("replacement"),
     ];
     let factoryCalls = 0;
-    const replayStore = new AckFaultStore();
+    const replayStore = new AckFaultStore(
+      "could not trim QWP store-and-forward segment [firstSequence=0]",
+    );
     const session = await QwpIngressSession.connect(
       async () => connections[Math.min(factoryCalls++, connections.length - 1)],
       {
@@ -1676,24 +1681,10 @@ describe("QWP ingress reconnect and replay", () => {
     // frame and the replacement OK was then dropped as a duplicate, so an
     // otherwise idle caller timed out on an already-accepted frame -- and a
     // retry wrote the rows twice.
-    class AckFaultStore extends TrackingReplayStore {
-      failNextAck = false;
-      ackFailures = 0;
-
-      override async acknowledgeThrough(frameSequence: bigint): Promise<void> {
-        if (this.failNextAck) {
-          this.failNextAck = false;
-          this.ackFailures++;
-          throw new QwpReplayStoreError(
-            "could not persist QWP ack watermark: EACCES",
-          );
-        }
-        return super.acknowledgeThrough(frameSequence);
-      }
-    }
-
     const connections: FakeConnection[] = [];
-    const replayStore = new AckFaultStore();
+    const replayStore = new AckFaultStore(
+      "could not persist QWP ack watermark: EACCES",
+    );
     const session = await QwpIngressSession.connect(
       async () => {
         const next = new FakeConnection(`endpoint-${connections.length}`);
@@ -1732,19 +1723,102 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("delivers an OK once when a reconnect replays its frame while the ACK is persisting", async () => {
+    // The OK's frames are marked delivered only after the ACK is persisted.
+    // A reconnect during that wait replays the same frames, and the
+    // replacement connection's OK can deliver them first. Deciding whether
+    // to deliver before the wait made the original OK deliver them again.
+    class GatedAckStore extends TrackingReplayStore {
+      private gate?: Promise<void>;
+      private openGate?: () => void;
+      gated = false;
+
+      holdNextAck(): void {
+        this.gate = new Promise((resolve) => {
+          this.openGate = resolve;
+        });
+      }
+
+      release(): void {
+        this.openGate?.();
+      }
+
+      override async acknowledgeThrough(frameSequence: bigint): Promise<void> {
+        const gate = this.gate;
+        this.gate = undefined;
+        if (gate) {
+          this.gated = true;
+          await gate;
+        }
+        return super.acknowledgeThrough(frameSequence);
+      }
+    }
+
+    const connections: FakeConnection[] = [];
+    const replayStore = new GatedAckStore();
+    const okSequences: bigint[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const next = new FakeConnection(`endpoint-${connections.length}`);
+        connections.push(next);
+        return next;
+      },
+      {
+        replayStore,
+        ackTimeoutMs: 5_000,
+        onResponse: (response) => {
+          if (response.status === QWP_STATUS.OK) {
+            okSequences.push(response.sequence);
+          }
+        },
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    const first = session.sendFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(1));
+    replayStore.holdNextAck();
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(replayStore.gated).toBe(true));
+
+    // A failed send reconnects while that OK is still being persisted.
+    connections[0].onSend = () => Promise.reject(new Error("socket reset"));
+    void session.sendFrame(Uint8Array.of(2)).catch(() => undefined);
+    await vi.waitFor(() =>
+      expect(connections[1]?.sent).toEqual([
+        Uint8Array.of(1),
+        Uint8Array.of(2),
+      ]),
+    );
+    connections[1].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(first).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+
+    replayStore.release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(okSequences).toEqual([0n]);
+    expect(session.metrics.totalAcks).toBe(1);
+    await session.close().catch(() => undefined);
+  });
+
   it("delivers the ACK when persisting fails after the store retired the frame", async () => {
     // The complementary case: the store accepted the ACK and retired the
     // frame, then retiring the recovered uncommitted tail failed. The frame is
     // gone from the journal and is not replayed, so no replacement OK will
     // arrive and this one must be delivered.
     class DiscardFaultStore extends TrackingReplayStore {
-      discardFailures = 0;
+      discardCalls = 0;
 
-      async discardThrough(frameSequence: bigint): Promise<void> {
-        if (this.discardFailures++ === 0) {
-          throw new QwpReplayStoreError("could not persist QWP discard: EIO");
-        }
-        await super.acknowledgeThrough(frameSequence);
+      async discardThrough(): Promise<void> {
+        this.discardCalls++;
+        throw new QwpReplayStoreError("could not persist QWP discard: EIO");
       }
     }
 
@@ -1785,9 +1859,9 @@ describe("QWP ingress reconnect and replay", () => {
       status: QWP_STATUS.OK,
       sequence: 0n,
     });
-    expect(replayStore.discardFailures).toBeGreaterThan(0);
     await vi.waitFor(() => expect(connections.length).toBe(2));
     expect(connections[1].sent).toEqual([]);
+    expect(replayStore.discardCalls).toBe(1);
     await session.close();
   });
 

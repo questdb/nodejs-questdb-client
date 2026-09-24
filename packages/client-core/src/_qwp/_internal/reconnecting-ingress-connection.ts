@@ -1793,10 +1793,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (frame.dictionaryCatchup) return undefined;
       const covered = this.wireFrames.slice(0, localIndex + 1);
       const clientTarget = findLastClientFrame(covered);
-      const shouldDeliver = covered.some(
-        (candidate) =>
-          candidate.clientSequence !== undefined && !candidate.ackDelivered,
-      );
+      // Evaluated only after the ACK is persisted, never before the await: a
+      // reconnect that runs while the store is persisting replays these same
+      // frames, and the replacement connection's OK may deliver them first.
+      // A verdict captured before the await would then deliver the OK twice.
+      const hasUndelivered = (): boolean =>
+        covered.some(
+          (candidate) =>
+            candidate.clientSequence !== undefined && !candidate.ackDelivered,
+        );
       // ackDelivered is set only once the ACK is persisted. If persisting
       // fails, pump() reconnects and replays every frame still in the
       // journal; marking them delivered up front made the replacement
@@ -1834,7 +1839,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         // replacement OK will arrive for it: deliver this one now.
         if (
           !this.frames.has(frame.frameSequence) &&
-          shouldDeliver &&
+          hasUndelivered() &&
           clientTarget?.clientSequence !== undefined
         ) {
           markDelivered();
@@ -1844,6 +1849,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         }
         throw error;
       }
+      const shouldDeliver = hasUndelivered();
       markDelivered();
       // ACKs are cumulative, so nothing reads the covered prefix again.
       // Dropping it keeps both the log and the payloads it pins bounded, and
