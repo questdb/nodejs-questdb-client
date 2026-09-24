@@ -935,18 +935,52 @@ describe("QWP ingress codec", () => {
     }
   });
 
-  it("restores the dictionary when a measured frame fails to plan", () => {
+  it("restores newly added symbols when a measured frame fails to plan", () => {
+    const dictionary = new QwpSymbolDictionary();
+    dictionary.getOrAdd("ETH-USD");
+    const table = new QwpTableBuffer("trades");
+    table.getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!.values.push("X");
+    table
+      .getOrCreateColumn("payload", QWP_COLUMN_TYPE.BINARY)!
+      .values.push("not binary");
+    table.nextRow();
+
+    // The valid published ID lets planning add "X" before sizing BINARY fails.
+    expect(() =>
+      measureQwpIngressFrame([table], { dictionary, confirmedMaxSymbolId: 0 }),
+    ).toThrow(/Uint8Array/);
+    expect(dictionary.entriesFrom(0)).toEqual(["ETH-USD"]);
+  });
+
+  it("rejects published symbol IDs outside the dictionary", () => {
     const dictionary = new QwpSymbolDictionary();
     dictionary.getOrAdd("ETH-USD");
     const table = new QwpTableBuffer("trades");
     table.getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!.values.push("X");
     table.nextRow();
-    // An out-of-range published ID fails the plan after nothing was added;
-    // the dictionary must come back at its pre-measure size either way.
+
     expect(() =>
       measureQwpIngressFrame([table], { dictionary, confirmedMaxSymbolId: 5 }),
     ).toThrow(/published symbol dictionary ID is out of range/);
-    expect(dictionary.size).toBe(1);
+    expect(dictionary.entriesFrom(0)).toEqual(["ETH-USD"]);
+  });
+
+  it("restores newly added symbols when a measured frame fails to encode", () => {
+    const dictionary = new QwpSymbolDictionary();
+    dictionary.getOrAdd("ETH-USD");
+    const table = new QwpTableBuffer("trades");
+    table.getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!.values.push("X");
+    table.getOrCreateColumn("price", QWP_COLUMN_TYPE.BYTE)!.values.push(300);
+    table.nextRow();
+
+    // Fixed-width sizing succeeds; only the write rejects the invalid BYTE.
+    const measured = measureQwpIngressFrame([table], {
+      dictionary,
+      confirmedMaxSymbolId: 0,
+    });
+    expect(dictionary.entriesFrom(0)).toEqual(["ETH-USD", "X"]);
+    expect(() => measured.encode()).toThrow(/between -128 and 127/);
+    expect(dictionary.entriesFrom(0)).toEqual(["ETH-USD"]);
   });
 
   it("encodes a full inline symbol dictionary with dense first-seen IDs", () => {
