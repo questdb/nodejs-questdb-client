@@ -1791,13 +1791,29 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     if (response.status === QWP_STATUS.OK) {
       if (frame.dictionaryCatchup) return undefined;
-      const covered = this.wireFrames.slice(0, localIndex + 1);
+      // localIndex indexes this log. A reconnect during the await below
+      // installs the replacement connection's log in its place, which the
+      // trim at the end must then leave alone.
+      const wireFrames = this.wireFrames;
+      const covered = wireFrames.slice(0, localIndex + 1);
       const clientTarget = findLastClientFrame(covered);
-      const shouldDeliver = covered.some(
-        (candidate) =>
-          candidate.clientSequence !== undefined && !candidate.ackDelivered,
-      );
-      for (const candidate of covered) candidate.ackDelivered = true;
+      // Evaluated only after the ACK is persisted, never before the await: a
+      // reconnect that runs while the store is persisting replays these same
+      // frames, and the replacement connection's OK may deliver them first.
+      // A verdict captured before the await would then deliver the OK twice.
+      const hasUndelivered = (): boolean =>
+        covered.some(
+          (candidate) =>
+            candidate.clientSequence !== undefined && !candidate.ackDelivered,
+        );
+      // ackDelivered is set only once the ACK is persisted. If persisting
+      // fails, pump() reconnects and replays every frame still in the
+      // journal; marking them delivered up front made the replacement
+      // connection's OK look like a duplicate and dropped it, leaving the
+      // caller's awaitServerAck()/awaitDurableAck() to time out.
+      const markDelivered = (): void => {
+        for (const candidate of covered) candidate.ackDelivered = true;
+      };
       if (frame.frameSequence > this.highestOkFrameSequence) {
         this.highestOkFrameSequence = frame.frameSequence;
       }
@@ -1809,22 +1825,47 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // stalled at -1n while cumulative OKs kept arriving. close() then failed
       // with "pending data may be lost" on a fully acknowledged sender, and
       // durableTargets accumulated one map per frame with nothing to drain it.
-      if (this.handshake.durableAckEnabled && this.durableAckTracked) {
-        frame.durableTargets = new Map(
-          response.tables.map((table) => [
-            table.name,
-            table.sequenceTransaction,
-          ]),
-        );
-        await this.trimDurablePrefix();
-      } else {
-        await this.acknowledgeThrough(frame.frameSequence);
+      try {
+        if (this.handshake.durableAckEnabled && this.durableAckTracked) {
+          frame.durableTargets = new Map(
+            response.tables.map((table) => [
+              table.name,
+              table.sequenceTransaction,
+            ]),
+          );
+          await this.trimDurablePrefix();
+        } else {
+          await this.acknowledgeThrough(frame.frameSequence);
+        }
+      } catch (error) {
+        // A step after the store accepted the ACK can still fail. The frame
+        // is then already retired and will not be replayed, so no
+        // replacement OK will arrive for it: deliver this one now.
+        if (
+          !this.frames.has(frame.frameSequence) &&
+          hasUndelivered() &&
+          clientTarget?.clientSequence !== undefined
+        ) {
+          markDelivered();
+          this.messagesQueue.push(
+            rewriteResponseSequence(payload, clientTarget.clientSequence),
+          );
+        }
+        throw error;
       }
+      const shouldDeliver = hasUndelivered();
+      markDelivered();
       // ACKs are cumulative, so nothing reads the covered prefix again.
       // Dropping it keeps both the log and the payloads it pins bounded, and
       // keeps each ACK proportional to the frames it actually covers.
-      this.wireFrames.splice(0, localIndex + 1);
-      this.wireFramesBase += localIndex + 1;
+      // Only this connection's log is trimmed. If a reconnect replaced it
+      // while the ACK was persisting, localIndex means nothing in the new
+      // log: trimming it there dropped replayed frames the new connection
+      // had not had acknowledged, so their OKs were discarded as duplicates.
+      if (this.wireFrames === wireFrames) {
+        wireFrames.splice(0, localIndex + 1);
+        this.wireFramesBase += localIndex + 1;
+      }
       if (!shouldDeliver || clientTarget?.clientSequence === undefined) {
         return undefined;
       }
