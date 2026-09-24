@@ -710,18 +710,34 @@ describe("QWP high-level sender", () => {
     // column key, but only the ASCII one fits the UTF-8 byte limit.
     const ascii = "k".repeat(100);
     const kelvin = "\u212a".repeat(100);
-    const expectKelvinRejected = (): void => {
+    // The reverse: U+023A lower-cases to U+2C65, which takes one more UTF-8
+    // byte, so this staged name fits the limit but its own key does not.
+    const grows = "\u023a".repeat(63);
+    const grownKey = grows.toLowerCase();
+    const expectLookalikesRejected = (): void => {
       expect(() => sender.table("events").longColumn(kelvin, 2n)).toThrow(
         /column name too long/,
       );
       expect(() => sender.table("events").longColumn(kelvin, null)).toThrow(
         /column name too long/,
       );
+      // A nullish call spelled like the key finds the staged entry by that
+      // key, and must still be validated against its own spelling.
+      expect(() => sender.table("events").longColumn(grownKey, 2n)).toThrow(
+        /column name too long/,
+      );
+      expect(() => sender.table("events").longColumn(grownKey, null)).toThrow(
+        /column name too long/,
+      );
     };
 
-    await sender.table("events").longColumn(ascii, 1n).at(1n);
+    await sender
+      .table("events")
+      .longColumn(ascii, 1n)
+      .longColumn(grows, 1n)
+      .at(1n);
     // Staged, not yet published.
-    expectKelvinRejected();
+    expectLookalikesRejected();
     // The designated timestamp's empty name is in the schema too; it must not
     // make an empty ordinary column name look validated.
     expect(() => sender.table("events").longColumn("", 1n)).toThrow(
@@ -732,7 +748,7 @@ describe("QWP high-level sender", () => {
     );
     await sender.flush();
     // Published: the staged frame schema is gone, the published one remains.
-    expectKelvinRejected();
+    expectLookalikesRejected();
 
     // The exact spelling is still accepted without a hitch.
     await sender.table("events").longColumn(ascii, 3n).at(2n);
