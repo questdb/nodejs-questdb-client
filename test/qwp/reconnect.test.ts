@@ -1947,6 +1947,100 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("delivers a retired frame's ACK once when a stale OK also fails after retiring it", async () => {
+    // Both OKs for the frame reach the catch block's delivery: the stale one
+    // was persisting when a reconnect replayed the frame, and each fails to
+    // retire the recovered tail after the store has retired the frame. The
+    // replacement OK delivers first, so the stale one must find nothing left
+    // to deliver rather than delivering the frame a second time.
+    class GatedDiscardFaultStore extends GatedAckStore {
+      discardCalls = 0;
+
+      async discardThrough(): Promise<void> {
+        this.discardCalls++;
+        throw new QwpReplayStoreError("could not persist QWP discard: EIO");
+      }
+    }
+
+    const committed = encodeQwpIngressFrame([symbolTable("ETH-USD")]);
+    const replayStore = new GatedDiscardFaultStore();
+    replayStore.records.set(5n, committed);
+    replayStore.records.set(
+      6n,
+      encodeQwpIngressFrame([symbolTable("BTC-USD")], { deferCommit: true }),
+    );
+    const connections: FakeConnection[] = [];
+    const okSequences: bigint[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const next = new FakeConnection(`endpoint-${connections.length}`);
+        connections.push(next);
+        return next;
+      },
+      {
+        replayStore,
+        ackTimeoutMs: 5_000,
+        onResponse: (response) => {
+          if (response.status === QWP_STATUS.OK) {
+            okSequences.push(response.sequence);
+          }
+        },
+        reconnect: {
+          maxAttempts: 0,
+          maxDurationMs: 0,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+        },
+      },
+    );
+
+    expect(connections[0].sent).toEqual([committed]);
+    const first = session.sendFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(2));
+    replayStore.holdNextAck();
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await vi.waitFor(() => expect(replayStore.gated).toBe(true));
+
+    // A failed send reconnects while that OK is still being persisted.
+    connections[0].onSend = () => Promise.reject(new Error("socket reset"));
+    const second = session.sendFrame(Uint8Array.of(2));
+    await vi.waitFor(() =>
+      expect(connections[1]?.sent).toEqual([
+        committed,
+        Uint8Array.of(1),
+        Uint8Array.of(2),
+      ]),
+    );
+    // The replacement OK retires the frame, fails on the tail, and delivers.
+    connections[1].receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await expect(first).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 0n,
+    });
+    await vi.waitFor(() =>
+      expect(connections[2]?.sent).toEqual([Uint8Array.of(2)]),
+    );
+    expect(replayStore.discardCalls).toBe(1);
+
+    // The stale OK now fails on the tail too, with its frame already retired.
+    replayStore.release();
+    await vi.waitFor(() => expect(replayStore.discardCalls).toBe(2));
+    // The in-memory store settles the rest within microtasks; one macrotask
+    // lets a wrongly delivered OK reach onResponse before the check.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(okSequences).toEqual([0n]);
+    expect(session.metrics.totalAcks).toBe(1);
+
+    connections[2].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(second).resolves.toMatchObject({
+      status: QWP_STATUS.OK,
+      sequence: 1n,
+    });
+    await vi.waitFor(() => expect(okSequences).toEqual([0n, 1n]));
+    expect(session.metrics.totalAcks).toBe(2);
+    await session.close();
+  });
+
   it("stays terminal when an ACK meets a journal verdict rather than a fault", async () => {
     // Corrupt bytes read the same way on every attempt, so reconnecting would
     // spin. The store marks such failures non-retryable and this path honours
