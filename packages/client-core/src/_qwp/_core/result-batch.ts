@@ -908,12 +908,20 @@ export class QwpResultBatchView {
       this.columnViews.map((column) => ({
         name: column.name,
         type: column.type,
-        values: fillArray(this._rowCount, (row) => {
-          const value = column.get(row);
-          // Binary values are zero-copy slices in the view API. materialize()
-          // promises independently owned data, so detach those slices here.
-          return value instanceof Uint8Array ? value.slice() : value;
-        }),
+        values:
+          column.nonNullCount === this._rowCount &&
+          INTEGER_COLUMN_TYPES.has(column.type)
+            ? fillIntegers(this._rowCount, (row) => column.get(row) as number)
+            : column.nonNullCount === this._rowCount &&
+                FLOAT_COLUMN_TYPES.has(column.type)
+              ? fillFloats(this._rowCount, (row) => column.get(row) as number)
+              : fillArray(this._rowCount, (row) => {
+                  const value = column.get(row);
+                  // Binary values are zero-copy slices in the view API.
+                  // materialize() promises independently owned data, so
+                  // detach those slices here.
+                  return value instanceof Uint8Array ? value.slice() : value;
+                }),
         ...(column.scale === undefined ? {} : { scale: column.scale }),
         ...(column.precisionBits === undefined
           ? {}
@@ -1239,6 +1247,50 @@ function fillArray<T>(count: number, mapper: (index: number) => T): T[] {
   return values;
 }
 
+// The helpers below duplicate fillArray on purpose. V8 tracks an elements kind
+// per allocation site: fillArray's `new Array` is shared with schema, bigint,
+// and object callers, so V8 pretransitions it to generic elements, and every
+// double stored there becomes a boxed HeapNumber (~24 instead of 8 bytes per
+// element, and slower consumer loops). Arrays handed to users that hold only
+// numbers get their own sites so they keep unboxed SMI/double elements. Do
+// not fold these back into fillArray.
+function readFloat64Values(reader: QwpByteReader, count: number): number[] {
+  const values = new Array<number>(count);
+  for (let index = 0; index < count; index++) {
+    values[index] = reader.readFloat64("double array element");
+  }
+  return values;
+}
+
+const INTEGER_COLUMN_TYPES: ReadonlySet<number> = new Set([
+  QWP_COLUMN_TYPE.BYTE,
+  QWP_COLUMN_TYPE.SHORT,
+  QWP_COLUMN_TYPE.INT,
+  QWP_COLUMN_TYPE.IPV4,
+]);
+const FLOAT_COLUMN_TYPES: ReadonlySet<number> = new Set([
+  QWP_COLUMN_TYPE.FLOAT,
+  QWP_COLUMN_TYPE.DOUBLE,
+]);
+
+function fillIntegers(
+  count: number,
+  mapper: (index: number) => number,
+): number[] {
+  const values = new Array<number>(count);
+  for (let index = 0; index < count; index++) values[index] = mapper(index);
+  return values;
+}
+
+function fillFloats(
+  count: number,
+  mapper: (index: number) => number,
+): number[] {
+  const values = new Array<number>(count);
+  for (let index = 0; index < count; index++) values[index] = mapper(index);
+  return values;
+}
+
 function readTimestampValues(
   reader: QwpByteReader,
   count: number,
@@ -1290,9 +1342,7 @@ function readArrayValue(
   if (type === QWP_COLUMN_TYPE.DOUBLE_ARRAY) {
     return {
       dimensions: shape,
-      values: fillArray(elementCount, () =>
-        reader.readFloat64("double array element"),
-      ),
+      values: readFloat64Values(reader, elementCount),
     };
   }
   return {
