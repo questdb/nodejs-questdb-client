@@ -908,7 +908,7 @@ export class QwpResultBatchView {
       this.columnViews.map((column) => ({
         name: column.name,
         type: column.type,
-        values: Array.from({ length: this._rowCount }, (_, row) => {
+        values: fillArray(this._rowCount, (row) => {
           const value = column.get(row);
           // Binary values are zero-copy slices in the view API. materialize()
           // promises independently owned data, so detach those slices here.
