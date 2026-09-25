@@ -98,8 +98,19 @@ export class QwpResultBatch {
   }
 
   *rows(): IterableIterator<readonly QwpResultValue[]> {
+    // Look each column's values up once per batch, not once per cell.
+    const columns = this.columns;
+    const width = columns.length;
+    const values = new Array<readonly QwpResultValue[]>(width);
+    for (let column = 0; column < width; column++) {
+      values[column] = columns[column].values;
+    }
     for (let row = 0; row < this.rowCount; row++) {
-      yield this.columns.map((column) => column.values[row]);
+      const out = new Array<QwpResultValue>(width);
+      for (let column = 0; column < width; column++) {
+        out[column] = values[column][row];
+      }
+      yield out;
     }
   }
 }
