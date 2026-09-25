@@ -51,6 +51,7 @@ import {
   encodeUtf8,
   utf8Length,
 } from "../../packages/client-core/src/_qwp/_core/bytes";
+import { readQwpVarintSmall } from "../../packages/client-core/src/_qwp/_core/varint-number";
 
 function dataView(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -97,6 +98,67 @@ describe("QWP browser-safe byte core", () => {
         ]),
       ),
     ).toThrow(/uint64/i);
+  });
+
+  it("reads number-valued varints exactly like readQwpVarint", () => {
+    // The decoder's counts and symbol IDs use readQwpVarintSmall, which skips
+    // BigInt for encodings up to 7 bytes. It must accept, reject, and advance
+    // exactly as readQwpVarint does; only the result type may differ.
+    const outcome = (
+      bytes: Uint8Array,
+      read: (reader: QwpByteReader) => number | bigint,
+    ) => {
+      const reader = new QwpByteReader(bytes);
+      try {
+        return { value: BigInt(read(reader)), position: reader.position };
+      } catch (error) {
+        return { error: String(error), position: reader.position };
+      }
+    };
+    const check = (bytes: Uint8Array) => {
+      expect(outcome(bytes, readQwpVarintSmall)).toEqual(
+        outcome(bytes, readQwpVarint),
+      );
+    };
+
+    for (const value of [
+      0n,
+      127n,
+      128n,
+      2n ** 49n - 1n, // largest 7-byte value, still a number
+      2n ** 49n, // first 8-byte value, bigint fallback
+      2n ** 53n,
+      2n ** 64n - 1n,
+    ]) {
+      const encoded = encodeQwpVarint(value);
+      check(encoded);
+      const expectedType = encoded.length <= 7 ? "number" : "bigint";
+      expect(typeof readQwpVarintSmall(new QwpByteReader(encoded))).toBe(
+        expectedType,
+      );
+    }
+    // Zero-padded (non-canonical) encodings of 1, crossing the 7-byte limit.
+    for (let length = 2; length <= 11; length++) {
+      const bytes = new Uint8Array(length).fill(0x80);
+      bytes[0] = 0x81;
+      bytes[length - 1] = 0;
+      check(bytes);
+    }
+    check(Uint8Array.from([0x80, 0x80])); // truncated
+    check(new Uint8Array(11).fill(0xff)); // over 10 bytes
+
+    let seed = 0x5eed;
+    const random = () => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return seed >>> 24;
+    };
+    for (let run = 0; run < 5000; run++) {
+      const bytes = new Uint8Array(1 + (random() % 12));
+      for (let index = 0; index < bytes.length; index++) {
+        bytes[index] = random();
+      }
+      check(bytes);
+    }
   });
 
   it("measures UTF-8 byte length identically to encoding it", () => {

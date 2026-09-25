@@ -1,5 +1,6 @@
 import { QwpByteReader, QwpByteWriter } from "./bytes";
 import { QwpProtocolError } from "./errors";
+import { readQwpVarintSmall } from "./varint-number";
 
 const MAX_UINT64 = 0xffffffffffffffffn;
 
@@ -60,7 +61,8 @@ export function readQwpVarintNumber(
   reader: QwpByteReader,
   label = "varint",
 ): number {
-  const value = readQwpVarint(reader);
+  const value = readQwpVarintSmall(reader);
+  if (typeof value === "number") return value;
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new QwpProtocolError(
       `${label} exceeds JavaScript's safe integer range`,

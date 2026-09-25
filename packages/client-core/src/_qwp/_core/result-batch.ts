@@ -13,7 +13,7 @@ import {
 } from "./constants";
 import { QwpResultBatchMessage } from "./egress";
 import { QwpProtocolError } from "./errors";
-import { readQwpVarint } from "./varint";
+import { readQwpVarintSmall } from "./varint-number";
 import { decompressQwpZstdFrame } from "./zstd";
 
 // One axis bound for both directions: a decoder that accepted an axis the
@@ -1070,7 +1070,8 @@ function signedLittleEndianValue(
 }
 
 interface NullLayout {
-  nulls: boolean[];
+  /** Per-row null flags, or null when the column carries no nulls. */
+  nulls: boolean[] | null;
   nonNullCount: number;
 }
 
@@ -1108,7 +1109,13 @@ function readCount(
   maximum: number,
   label: string,
 ): number {
-  const value = readQwpVarint(reader);
+  const value = readQwpVarintSmall(reader);
+  if (typeof value === "number") {
+    if (value > maximum) {
+      throw new QwpProtocolError(`${label} out of range: ${value}`);
+    }
+    return value;
+  }
   if (value > BigInt(maximum)) {
     throw new QwpProtocolError(`${label} out of range: ${value}`);
   }
@@ -1120,8 +1127,8 @@ function readNullLayout(reader: QwpByteReader, rowCount: number): NullLayout {
   if (flag !== 0 && flag !== 1) {
     throw new QwpProtocolError(`invalid column null flag: ${flag}`);
   }
+  if (flag === 0) return { nulls: null, nonNullCount: rowCount };
   const nulls = new Array<boolean>(rowCount).fill(false);
-  if (flag === 0) return { nulls, nonNullCount: rowCount };
 
   const bitmap = reader.readBytes(
     Math.ceil(rowCount / 8),
@@ -1137,14 +1144,18 @@ function readNullLayout(reader: QwpByteReader, rowCount: number): NullLayout {
   return { nulls, nonNullCount };
 }
 
-function expandNulls<T extends QwpResultValue>(
-  dense: readonly T[],
+function expandNulls(
+  dense: QwpResultValue[],
   layout: NullLayout,
 ): QwpResultValue[] {
-  const values = new Array<QwpResultValue>(layout.nulls.length);
+  const nulls = layout.nulls;
+  // Every dense producer returns a fresh array of exactly nonNullCount
+  // elements, so a null-free column can hand it over without a copy.
+  if (nulls === null) return dense;
+  const values = new Array<QwpResultValue>(nulls.length);
   let denseIndex = 0;
-  for (let row = 0; row < layout.nulls.length; row++) {
-    values[row] = layout.nulls[row] ? null : dense[denseIndex++];
+  for (let row = 0; row < nulls.length; row++) {
+    values[row] = nulls[row] ? null : dense[denseIndex++];
   }
   return values;
 }
@@ -1252,8 +1263,10 @@ function fillArray<T>(count: number, mapper: (index: number) => T): T[] {
 // and object callers, so V8 pretransitions it to generic elements, and every
 // double stored there becomes a boxed HeapNumber (~24 instead of 8 bytes per
 // element, and slower consumer loops). Arrays handed to users that hold only
-// numbers get their own sites so they keep unboxed SMI/double elements. Do
-// not fold these back into fillArray.
+// numbers -- DOUBLE_ARRAY elements, null-free numeric columns from decode()
+// and materialize() -- get their own sites so they keep unboxed SMI/double
+// elements. Do not fold these back into fillArray, and never store null or a
+// non-number through them.
 function readFloat64Values(reader: QwpByteReader, count: number): number[] {
   const values = new Array<number>(count);
   for (let index = 0; index < count; index++) {
@@ -1873,6 +1886,12 @@ export class QwpResultBatchDecoder {
   ): QwpResultColumn {
     const layout = readNullLayout(reader, rowCount);
     const count = layout.nonNullCount;
+    // Null-free dense arrays become the column values as-is, so numeric ones
+    // use number-only allocation sites to keep unboxed elements. Columns with
+    // nulls are copied into a generic array by expandNulls(), where boxed
+    // input is cheaper to copy.
+    const fillInts = layout.nulls === null ? fillIntegers : fillArray;
+    const fillDoubles = layout.nulls === null ? fillFloats : fillArray;
     let dense: QwpResultValue[];
     let scale: number | undefined;
     let precisionBits: number | undefined;
@@ -1887,10 +1906,10 @@ export class QwpResultBatchDecoder {
         break;
       }
       case QWP_COLUMN_TYPE.BYTE:
-        dense = fillArray(count, () => reader.readInt8("byte value"));
+        dense = fillInts(count, () => reader.readInt8("byte value"));
         break;
       case QWP_COLUMN_TYPE.SHORT:
-        dense = fillArray(count, () => reader.readInt16("short value"));
+        dense = fillInts(count, () => reader.readInt16("short value"));
         break;
       case QWP_COLUMN_TYPE.CHAR:
         dense = fillArray(count, () =>
@@ -1899,13 +1918,13 @@ export class QwpResultBatchDecoder {
         break;
       case QWP_COLUMN_TYPE.INT:
       case QWP_COLUMN_TYPE.IPV4:
-        dense = fillArray(count, () => reader.readInt32("int value"));
+        dense = fillInts(count, () => reader.readInt32("int value"));
         break;
       case QWP_COLUMN_TYPE.FLOAT:
-        dense = fillArray(count, () => reader.readFloat32("float value"));
+        dense = fillDoubles(count, () => reader.readFloat32("float value"));
         break;
       case QWP_COLUMN_TYPE.DOUBLE:
-        dense = fillArray(count, () => reader.readFloat64("double value"));
+        dense = fillDoubles(count, () => reader.readFloat64("double value"));
         break;
       case QWP_COLUMN_TYPE.LONG:
         dense = fillArray(count, () => reader.readBigInt64("long value"));
