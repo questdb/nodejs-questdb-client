@@ -830,6 +830,65 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
+  it("rejects writer.row() with the auto-flush it starts", async () => {
+    class FailingSession extends RecordingSession {
+      fail = true;
+      // flush() publishes locally by default, so fail the publication.
+      override async publishTables(
+        tables: readonly QwpTableBuffer[],
+        options?: QwpIngressEncodeOptions,
+      ): Promise<void> {
+        if (this.fail) throw new Error("auto-flush send failed");
+        return super.publishTables(tables, options);
+      }
+    }
+    const session = new FailingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+    });
+    const writer = sender.writer("events", { value: long() });
+
+    // row() must not settle before the flush it started, nor hide its failure.
+    await expect(writer.row({ value: 1n })).rejects.toThrow(
+      /auto-flush send failed/,
+    );
+    session.fail = false;
+    await sender.flush();
+    expect(
+      session.sends.flatMap((send) => column(send.tables[0], "value").values),
+    ).toEqual([1n]);
+    await sender.close();
+  });
+
+  it("rejects an over-long column name without case-folding it", async () => {
+    const sender = new QwpSender(async () => new RecordingSession(), {
+      autoFlush: false,
+    });
+    // An upper-case first letter sends qwpColumnNameKey() down its per-code-unit
+    // toLowerCase() path, which would copy the whole name before validation.
+    const name = "A".repeat(200);
+    let rejection: unknown;
+    let caseFolds = -1;
+    // Count only the sender call: expect() matchers may lower-case strings,
+    // and mockRestore() clears the recorded calls.
+    const toLowerCase = vi.spyOn(String.prototype, "toLowerCase");
+    try {
+      sender.table("events").longColumn(name, 1n);
+    } catch (error) {
+      rejection = error;
+    } finally {
+      caseFolds = toLowerCase.mock.calls.length;
+      toLowerCase.mockRestore();
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(
+      /column name too long.*maxLength=127/,
+    );
+    expect(caseFolds).toBe(0);
+    await sender.close();
+  });
+
   it("returns a publication sequence and waits for its ACK independently", async () => {
     const session = new WatermarkSession();
     const sender = new QwpSender(async () => session, {

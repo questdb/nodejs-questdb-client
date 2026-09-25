@@ -2643,6 +2643,14 @@ export class QwpSender {
       if (typeof name !== "string") {
         throw new TypeError("column name must be a string");
       }
+      // Refuse an over-long name before case-folding it: the key is rebuilt
+      // over the whole name, so an invalid multi-megabyte name would otherwise
+      // cost heap in proportion to its length just to be rejected. UTF-16
+      // length never exceeds UTF-8 byte length, so validation rejects every
+      // name this catches, with the same error.
+      if (name.length > this.maxNameLength) {
+        validateQwpColumnName(name, this.maxNameLength);
+      }
       const nameKey = qwpColumnNameKey(name);
       if (!designatedTimestamp) {
         this.validateColumnName(table, name, nameKey);
