@@ -537,7 +537,7 @@ describe("QWP result batch decoder", () => {
       payload.writeUint8(1).writeInt32(values.length);
       for (const value of values) payload.writeBigInt64(value);
     }
-    payload.writeUint8(0); // local symbol dictionary
+    payload.writeUint8(0); // no SYMBOL nulls; local dictionary follows
     writeQwpVarint(payload, 2);
     writeString(payload, "alpha");
     writeString(payload, "beta");
