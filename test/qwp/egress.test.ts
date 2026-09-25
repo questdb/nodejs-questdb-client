@@ -512,6 +512,55 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
+  it("keeps materialized values in wire order across nulls and nested arrays", () => {
+    const payload = new QwpByteWriter();
+    payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
+    writeQwpVarint(payload, 0); // batch sequence
+    writeQwpVarint(payload, 0); // table name
+    writeQwpVarint(payload, 4); // rows
+    writeQwpVarint(payload, 4); // columns
+    for (const [name, type] of [
+      ["bool", QWP_COLUMN_TYPE.BOOLEAN],
+      ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
+      ["array", QWP_COLUMN_TYPE.LONG_ARRAY],
+      ["sym", QWP_COLUMN_TYPE.SYMBOL],
+    ] as const) {
+      writeString(payload, name);
+      payload.writeUint8(type);
+    }
+
+    payload.writeUint8(0).writeUint8(0b1010); // bit-packed booleans
+    payload.writeUint8(1).writeUint8(0b0010); // timestamp row 1 is null
+    payload.writeBigInt64(100n).writeBigInt64(200n).writeBigInt64(300n);
+    payload.writeUint8(0); // no array nulls
+    for (const values of [[1n, 2n], [], [3n], [4n, 5n, 6n]]) {
+      payload.writeUint8(1).writeInt32(values.length);
+      for (const value of values) payload.writeBigInt64(value);
+    }
+    payload.writeUint8(0); // local symbol dictionary
+    writeQwpVarint(payload, 2);
+    writeString(payload, "alpha");
+    writeString(payload, "beta");
+    for (const id of [1, 0, 1, 0]) writeQwpVarint(payload, id);
+
+    const message = decodeQwpEgressMessage(
+      encodeQwpFrame(payload.toUint8Array(), 0, 1),
+    );
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(message);
+    expect(batch.columns.map((column) => column.values)).toEqual([
+      [false, true, false, true],
+      [100n, null, 200n, 300n],
+      [
+        { dimensions: [2], values: [1n, 2n] },
+        { dimensions: [0], values: [] },
+        { dimensions: [1], values: [3n] },
+        { dimensions: [3], values: [4n, 5n, 6n] },
+      ],
+      ["beta", "alpha", "beta", "alpha"],
+    ]);
+  });
+
   it("decodes identifiers at the defensive egress byte bound", () => {
     // Query results may expose existing Java metadata created through another
     // protocol. Keep accepting up to 127 UTF-16 code units on egress, while

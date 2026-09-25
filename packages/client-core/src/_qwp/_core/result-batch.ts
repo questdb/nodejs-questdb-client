@@ -1230,21 +1230,26 @@ function decodeGorillaValues(reader: QwpByteReader, count: number): bigint[] {
   return values;
 }
 
+// Array.from({ length }, mapper) takes the generic array-like path; a
+// preallocated array with an indexed loop avoids that overhead while still
+// reading values in order.
+function fillArray<T>(count: number, mapper: (index: number) => T): T[] {
+  const values = new Array<T>(count);
+  for (let index = 0; index < count; index++) values[index] = mapper(index);
+  return values;
+}
+
 function readTimestampValues(
   reader: QwpByteReader,
   count: number,
   gorilla: boolean,
 ): bigint[] {
   if (!gorilla) {
-    return Array.from({ length: count }, () =>
-      reader.readBigInt64("timestamp value"),
-    );
+    return fillArray(count, () => reader.readBigInt64("timestamp value"));
   }
   const encoding = reader.readUint8("timestamp encoding");
   if (encoding === 0) {
-    return Array.from({ length: count }, () =>
-      reader.readBigInt64("timestamp value"),
-    );
+    return fillArray(count, () => reader.readBigInt64("timestamp value"));
   }
   if (encoding !== 1) {
     throw new QwpProtocolError(`unknown timestamp encoding: ${encoding}`);
@@ -1285,14 +1290,14 @@ function readArrayValue(
   if (type === QWP_COLUMN_TYPE.DOUBLE_ARRAY) {
     return {
       dimensions: shape,
-      values: Array.from({ length: elementCount }, () =>
+      values: fillArray(elementCount, () =>
         reader.readFloat64("double array element"),
       ),
     };
   }
   return {
     dimensions: shape,
-    values: Array.from({ length: elementCount }, () =>
+    values: fillArray(elementCount, () =>
       reader.readBigInt64("long array element"),
     ),
   };
@@ -1464,7 +1469,7 @@ export class QwpResultBatchDecoder {
         QWP_MAX_COLUMNS_PER_TABLE,
         "result column count",
       );
-      this.schema = Array.from({ length: columnCount }, () => {
+      this.schema = fillArray(columnCount, () => {
         const nameLength = readCount(
           reader,
           QWP_MAX_IDENTIFIER_BYTES,
@@ -1825,47 +1830,35 @@ export class QwpResultBatchDecoder {
     switch (schema.type) {
       case QWP_COLUMN_TYPE.BOOLEAN: {
         const bytes = reader.readBytes(Math.ceil(count / 8), "boolean values");
-        dense = Array.from(
-          { length: count },
-          (_, index) => (bytes[index >>> 3] & (1 << (index & 7))) !== 0,
+        dense = fillArray(
+          count,
+          (index) => (bytes[index >>> 3] & (1 << (index & 7))) !== 0,
         );
         break;
       }
       case QWP_COLUMN_TYPE.BYTE:
-        dense = Array.from({ length: count }, () =>
-          reader.readInt8("byte value"),
-        );
+        dense = fillArray(count, () => reader.readInt8("byte value"));
         break;
       case QWP_COLUMN_TYPE.SHORT:
-        dense = Array.from({ length: count }, () =>
-          reader.readInt16("short value"),
-        );
+        dense = fillArray(count, () => reader.readInt16("short value"));
         break;
       case QWP_COLUMN_TYPE.CHAR:
-        dense = Array.from({ length: count }, () =>
+        dense = fillArray(count, () =>
           String.fromCharCode(reader.readUint16("char value")),
         );
         break;
       case QWP_COLUMN_TYPE.INT:
       case QWP_COLUMN_TYPE.IPV4:
-        dense = Array.from({ length: count }, () =>
-          reader.readInt32("int value"),
-        );
+        dense = fillArray(count, () => reader.readInt32("int value"));
         break;
       case QWP_COLUMN_TYPE.FLOAT:
-        dense = Array.from({ length: count }, () =>
-          reader.readFloat32("float value"),
-        );
+        dense = fillArray(count, () => reader.readFloat32("float value"));
         break;
       case QWP_COLUMN_TYPE.DOUBLE:
-        dense = Array.from({ length: count }, () =>
-          reader.readFloat64("double value"),
-        );
+        dense = fillArray(count, () => reader.readFloat64("double value"));
         break;
       case QWP_COLUMN_TYPE.LONG:
-        dense = Array.from({ length: count }, () =>
-          reader.readBigInt64("long value"),
-        );
+        dense = fillArray(count, () => reader.readBigInt64("long value"));
         break;
       case QWP_COLUMN_TYPE.DATE:
       case QWP_COLUMN_TYPE.TIMESTAMP:
@@ -1886,13 +1879,13 @@ export class QwpResultBatchDecoder {
         dense = this.readSymbols(reader, count, rowCount, deltaMode);
         break;
       case QWP_COLUMN_TYPE.UUID:
-        dense = Array.from({ length: count }, () => ({
+        dense = fillArray(count, () => ({
           low: reader.readBigUint64("UUID low bits"),
           high: reader.readBigUint64("UUID high bits"),
         }));
         break;
       case QWP_COLUMN_TYPE.LONG256:
-        dense = Array.from({ length: count }, () => ({
+        dense = fillArray(count, () => ({
           words: [
             reader.readBigInt64("LONG256 word 0"),
             reader.readBigInt64("LONG256 word 1"),
@@ -1911,7 +1904,7 @@ export class QwpResultBatchDecoder {
             : schema.type === QWP_COLUMN_TYPE.DECIMAL128
               ? 16
               : 32;
-        dense = Array.from({ length: count }, () => ({
+        dense = fillArray(count, () => ({
           unscaled: readSignedLittleEndian(reader, bytes, "decimal value"),
           scale: scale!,
         }));
@@ -1925,7 +1918,7 @@ export class QwpResultBatchDecoder {
           );
         }
         const byteCount = Math.ceil(precisionBits / 8);
-        dense = Array.from({ length: count }, () => {
+        dense = fillArray(count, () => {
           const bytes = reader.readBytes(byteCount, "geohash value");
           return {
             bits: geohashLittleEndianValue(bytes, 0, precisionBits!),
@@ -1936,9 +1929,7 @@ export class QwpResultBatchDecoder {
       }
       case QWP_COLUMN_TYPE.DOUBLE_ARRAY:
       case QWP_COLUMN_TYPE.LONG_ARRAY:
-        dense = Array.from({ length: count }, () =>
-          readArrayValue(reader, schema.type),
-        );
+        dense = fillArray(count, () => readArrayValue(reader, schema.type));
         break;
       default:
         throw new QwpProtocolError(
@@ -2012,7 +2003,7 @@ export class QwpResultBatchDecoder {
       }
       dictionary = local;
     }
-    return Array.from({ length: count }, () => {
+    return fillArray(count, () => {
       const id = readCount(reader, dictionary.length, "symbol ID");
       if (id >= dictionary.length) {
         throw new QwpProtocolError(`symbol ID out of range: ${id}`);
