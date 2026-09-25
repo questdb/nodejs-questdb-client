@@ -1274,10 +1274,10 @@ function fillArray<T>(count: number, mapper: (index: number) => T): T[] {
 // and object callers, so V8 pretransitions it to generic elements, and every
 // double stored there becomes a boxed HeapNumber (~24 instead of 8 bytes per
 // element, and slower consumer loops). Arrays handed to users that hold only
-// numbers -- DOUBLE_ARRAY elements, null-free numeric columns from decode()
-// and materialize() -- get their own sites so they keep unboxed SMI/double
-// elements. Do not fold these back into fillArray, and never store null or a
-// non-number through them.
+// numbers -- DOUBLE_ARRAY elements, null-free numeric columns from
+// materialize(), and the numeric cases of readFixedWidthValues() -- get their
+// own sites so they keep unboxed SMI/double elements. Do not fold these back
+// into fillArray, and never store null or a non-number through them.
 function readFloat64Values(reader: QwpByteReader, count: number): number[] {
   const values = new Array<number>(count);
   for (let index = 0; index < count; index++) {
@@ -1315,17 +1315,110 @@ function fillFloats(
   return values;
 }
 
+// Fixed-width columns: one bounds check for the whole column, then direct
+// little-endian DataView reads, instead of a closure call and a bounds-checked
+// reader method per value. Truncation throws the same "truncated QWP payload
+// while reading <label>" error, detected before the first value rather than
+// at the first missing one. Each case allocates its own array, so V8 keeps a
+// separate elements kind per value type (see the note above readFloat64Values):
+// SMI for the integer kinds, unboxed doubles for FLOAT/DOUBLE.
+function fixedWidthView(
+  reader: QwpByteReader,
+  byteLength: number,
+  label: string,
+): DataView {
+  const bytes = reader.readBytes(byteLength, label);
+  return new DataView(bytes.buffer, bytes.byteOffset, byteLength);
+}
+
+function readInt64Values(
+  reader: QwpByteReader,
+  count: number,
+  label: string,
+): bigint[] {
+  const view = fixedWidthView(reader, count * 8, label);
+  const values = new Array<bigint>(count);
+  for (let index = 0; index < count; index++) {
+    values[index] = view.getBigInt64(index * 8, true);
+  }
+  return values;
+}
+
+function readFixedWidthValues(
+  reader: QwpByteReader,
+  type: QwpColumnType,
+  count: number,
+): QwpResultValue[] {
+  switch (type) {
+    case QWP_COLUMN_TYPE.BYTE: {
+      const view = fixedWidthView(reader, count, "byte value");
+      const values = new Array<number>(count);
+      for (let index = 0; index < count; index++) {
+        values[index] = view.getInt8(index);
+      }
+      return values;
+    }
+    case QWP_COLUMN_TYPE.SHORT: {
+      const view = fixedWidthView(reader, count * 2, "short value");
+      const values = new Array<number>(count);
+      for (let index = 0; index < count; index++) {
+        values[index] = view.getInt16(index * 2, true);
+      }
+      return values;
+    }
+    case QWP_COLUMN_TYPE.CHAR: {
+      const view = fixedWidthView(reader, count * 2, "char value");
+      const values = new Array<string>(count);
+      for (let index = 0; index < count; index++) {
+        values[index] = String.fromCharCode(view.getUint16(index * 2, true));
+      }
+      return values;
+    }
+    case QWP_COLUMN_TYPE.INT:
+    case QWP_COLUMN_TYPE.IPV4: {
+      const view = fixedWidthView(reader, count * 4, "int value");
+      const values = new Array<number>(count);
+      for (let index = 0; index < count; index++) {
+        values[index] = view.getInt32(index * 4, true);
+      }
+      return values;
+    }
+    case QWP_COLUMN_TYPE.FLOAT: {
+      const view = fixedWidthView(reader, count * 4, "float value");
+      const values = new Array<number>(count);
+      for (let index = 0; index < count; index++) {
+        values[index] = view.getFloat32(index * 4, true);
+      }
+      return values;
+    }
+    case QWP_COLUMN_TYPE.DOUBLE: {
+      const view = fixedWidthView(reader, count * 8, "double value");
+      const values = new Array<number>(count);
+      for (let index = 0; index < count; index++) {
+        values[index] = view.getFloat64(index * 8, true);
+      }
+      return values;
+    }
+    case QWP_COLUMN_TYPE.LONG:
+      return readInt64Values(reader, count, "long value");
+    default:
+      throw new QwpProtocolError(
+        `not a fixed-width QWP result column type: ${String(type)}`,
+      );
+  }
+}
+
 function readTimestampValues(
   reader: QwpByteReader,
   count: number,
   gorilla: boolean,
 ): bigint[] {
   if (!gorilla) {
-    return fillArray(count, () => reader.readBigInt64("timestamp value"));
+    return readInt64Values(reader, count, "timestamp value");
   }
   const encoding = reader.readUint8("timestamp encoding");
   if (encoding === 0) {
-    return fillArray(count, () => reader.readBigInt64("timestamp value"));
+    return readInt64Values(reader, count, "timestamp value");
   }
   if (encoding !== 1) {
     throw new QwpProtocolError(`unknown timestamp encoding: ${encoding}`);
@@ -1897,12 +1990,6 @@ export class QwpResultBatchDecoder {
   ): QwpResultColumn {
     const layout = readNullLayout(reader, rowCount);
     const count = layout.nonNullCount;
-    // Null-free dense arrays become the column values as-is, so numeric ones
-    // use number-only allocation sites to keep unboxed elements. Columns with
-    // nulls are copied into a generic array by expandNulls(), where boxed
-    // input is cheaper to copy.
-    const fillInts = layout.nulls === null ? fillIntegers : fillArray;
-    const fillDoubles = layout.nulls === null ? fillFloats : fillArray;
     let dense: QwpResultValue[];
     let scale: number | undefined;
     let precisionBits: number | undefined;
@@ -1917,28 +2004,14 @@ export class QwpResultBatchDecoder {
         break;
       }
       case QWP_COLUMN_TYPE.BYTE:
-        dense = fillInts(count, () => reader.readInt8("byte value"));
-        break;
       case QWP_COLUMN_TYPE.SHORT:
-        dense = fillInts(count, () => reader.readInt16("short value"));
-        break;
       case QWP_COLUMN_TYPE.CHAR:
-        dense = fillArray(count, () =>
-          String.fromCharCode(reader.readUint16("char value")),
-        );
-        break;
       case QWP_COLUMN_TYPE.INT:
       case QWP_COLUMN_TYPE.IPV4:
-        dense = fillInts(count, () => reader.readInt32("int value"));
-        break;
       case QWP_COLUMN_TYPE.FLOAT:
-        dense = fillDoubles(count, () => reader.readFloat32("float value"));
-        break;
       case QWP_COLUMN_TYPE.DOUBLE:
-        dense = fillDoubles(count, () => reader.readFloat64("double value"));
-        break;
       case QWP_COLUMN_TYPE.LONG:
-        dense = fillArray(count, () => reader.readBigInt64("long value"));
+        dense = readFixedWidthValues(reader, schema.type, count);
         break;
       case QWP_COLUMN_TYPE.DATE:
       case QWP_COLUMN_TYPE.TIMESTAMP:

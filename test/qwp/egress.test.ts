@@ -20,12 +20,14 @@ import {
   QwpBinaryConnection,
   QwpByteReader,
   QwpByteWriter,
+  QwpColumnType,
   QwpConnectionCloseInfo,
   QwpEgressQueryAbandonedError,
   QwpEgressQueryCancelTimeoutError,
   QwpEgressQueryError,
   QwpEgressQueryTimeoutError,
   QwpEgressSession,
+  QwpProtocolError,
   QwpResultBatchDecoder,
   QwpTableBuffer,
   QwpResultBatchView,
@@ -561,53 +563,99 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
-  it("keeps null-free numeric columns in row order through decode and materialize", () => {
-    // Null-free numeric columns take dedicated fill paths (their own V8
-    // allocation sites) in both decode() and materialize(); columns with nulls
-    // take the generic path. Distinct per-row values catch any reordering.
-    const columns = [
-      ["byte", QWP_COLUMN_TYPE.BYTE, [-1, 2, 3]],
-      ["short", QWP_COLUMN_TYPE.SHORT, [-300, 400, 500]],
-      ["int", QWP_COLUMN_TYPE.INT, [7, -8, 9]],
-      ["ipv4", QWP_COLUMN_TYPE.IPV4, [0x0a000001, 0x0a000002, 0x0a000003]],
-      ["float", QWP_COLUMN_TYPE.FLOAT, [1.5, -2.25, 3.75]],
-      ["double", QWP_COLUMN_TYPE.DOUBLE, [0.1, -0.2, 0.3]],
-    ] as const;
+  // Fixed-width columns decode straight from a DataView in decode(), with a
+  // separate array per value type; null-free numeric columns also take
+  // dedicated fill paths in materialize(). Distinct per-row values catch any
+  // reordering, and the nullable DOUBLE covers the null-expansion path.
+  const fixedWidthColumns = [
+    ["byte", QWP_COLUMN_TYPE.BYTE, "byte value", [-1, 2, 3]],
+    ["short", QWP_COLUMN_TYPE.SHORT, "short value", [-300, 400, 500]],
+    ["char", QWP_COLUMN_TYPE.CHAR, "char value", ["x", "é", "Z"]],
+    ["int", QWP_COLUMN_TYPE.INT, "int value", [7, -8, 9]],
+    [
+      "ipv4",
+      QWP_COLUMN_TYPE.IPV4,
+      "int value",
+      [0x0a000001, 0x0a000002, 0x0a000003],
+    ],
+    ["float", QWP_COLUMN_TYPE.FLOAT, "float value", [1.5, -2.25, 3.75]],
+    ["double", QWP_COLUMN_TYPE.DOUBLE, "double value", [0.1, -0.2, 0.3]],
+    ["long", QWP_COLUMN_TYPE.LONG, "long value", [-(2n ** 63n), 0n, 2n ** 62n]],
+    ["ts", QWP_COLUMN_TYPE.TIMESTAMP, "timestamp value", [100n, 300n, 200n]],
+  ] as const;
+
+  function writeFixedWidthValue(
+    payload: QwpByteWriter,
+    type: QwpColumnType,
+    value: number | bigint | string,
+  ): void {
+    switch (type) {
+      case QWP_COLUMN_TYPE.BYTE:
+        payload.writeInt8(value as number);
+        break;
+      case QWP_COLUMN_TYPE.SHORT:
+        payload.writeInt16(value as number);
+        break;
+      case QWP_COLUMN_TYPE.CHAR:
+        payload.writeUint16((value as string).charCodeAt(0));
+        break;
+      case QWP_COLUMN_TYPE.FLOAT:
+        payload.writeFloat32(value as number);
+        break;
+      case QWP_COLUMN_TYPE.DOUBLE:
+        payload.writeFloat64(value as number);
+        break;
+      case QWP_COLUMN_TYPE.LONG:
+      case QWP_COLUMN_TYPE.TIMESTAMP:
+        payload.writeBigInt64(value as bigint);
+        break;
+      default:
+        payload.writeInt32(value as number);
+    }
+  }
+
+  function resultBatchHeader(
+    rows: number,
+    schema: readonly (readonly [string, QwpColumnType])[],
+  ): QwpByteWriter {
     const payload = new QwpByteWriter();
     payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
     writeQwpVarint(payload, 0); // batch sequence
     writeQwpVarint(payload, 0); // table name
-    writeQwpVarint(payload, 3); // rows
-    writeQwpVarint(payload, columns.length + 1);
-    for (const [name, type] of columns) {
+    writeQwpVarint(payload, rows);
+    writeQwpVarint(payload, schema.length);
+    for (const [name, type] of schema) {
       writeString(payload, name);
       payload.writeUint8(type);
     }
-    writeString(payload, "nullable");
-    payload.writeUint8(QWP_COLUMN_TYPE.DOUBLE);
+    return payload;
+  }
 
-    for (const [, type, values] of columns) {
+  it("keeps fixed-width columns in row order through decode, rows, and materialize", () => {
+    const payload = resultBatchHeader(3, [
+      ...fixedWidthColumns.map(([name, type]) => [name, type] as const),
+      ["nullable", QWP_COLUMN_TYPE.DOUBLE] as const,
+    ]);
+    for (const [, type, , values] of fixedWidthColumns) {
       payload.writeUint8(0); // no nulls
-      for (const value of values) {
-        if (type === QWP_COLUMN_TYPE.BYTE) payload.writeInt8(value);
-        else if (type === QWP_COLUMN_TYPE.SHORT) payload.writeInt16(value);
-        else if (type === QWP_COLUMN_TYPE.FLOAT) payload.writeFloat32(value);
-        else if (type === QWP_COLUMN_TYPE.DOUBLE) payload.writeFloat64(value);
-        else payload.writeInt32(value);
-      }
+      for (const value of values) writeFixedWidthValue(payload, type, value);
     }
     payload.writeUint8(1).writeUint8(0b010); // nullable DOUBLE, row 1 null
     payload.writeFloat64(4.5).writeFloat64(-5.5);
 
     const expected = [
-      ...columns.map(([, , values]) => [...values]),
+      ...fixedWidthColumns.map(([, , , values]) => [...values]),
       [4.5, null, -5.5],
     ];
+    const expectedRows = [0, 1, 2].map((row) =>
+      expected.map((values) => values[row]),
+    );
     const frame = encodeQwpFrame(payload.toUint8Array(), 0, 1);
     const decoded = decodeQwpEgressMessage(frame);
     if (decoded.kind !== "result-batch") throw new Error("unexpected message");
     const batch = new QwpResultBatchDecoder().decode(decoded);
     expect(batch.columns.map((column) => column.values)).toEqual(expected);
+    expect([...batch.rows()]).toEqual(expectedRows);
 
     const viewed = decodeQwpEgressMessage(frame);
     if (viewed.kind !== "result-batch") throw new Error("unexpected message");
@@ -615,6 +663,26 @@ describe("QWP result batch decoder", () => {
     const retained = view.materialize();
     view.release();
     expect(retained.columns.map((column) => column.values)).toEqual(expected);
+    expect([...retained.rows()]).toEqual(expectedRows);
+  });
+
+  it("names the column type when a fixed-width column is truncated", () => {
+    for (const [name, type, label, values] of fixedWidthColumns) {
+      const payload = resultBatchHeader(3, [[name, type]]);
+      payload.writeUint8(0); // no nulls, but only two of three values follow
+      for (const value of values.slice(0, 2)) {
+        writeFixedWidthValue(payload, type, value);
+      }
+      const message = decodeQwpEgressMessage(
+        encodeQwpFrame(payload.toUint8Array(), 0, 1),
+      );
+      if (message.kind !== "result-batch") {
+        throw new Error("unexpected message");
+      }
+      const decode = () => new QwpResultBatchDecoder().decode(message);
+      expect(decode).toThrow(QwpProtocolError);
+      expect(decode).toThrow(`truncated QWP payload while reading ${label}`);
+    }
   });
 
   it("decodes identifiers at the defensive egress byte bound", () => {
