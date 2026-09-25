@@ -102,3 +102,7 @@ Integration tests use TestContainers to spin up QuestDB instances for realistic 
 - Each worker thread needs its own Sender instance (buffers cannot be shared)
 - Protocol version 2 or higher is recommended for new implementations; v2 adds array columns and v3 adds DECIMAL
 - Run `pnpm test:dist` after package-boundary changes; it checks both npm tarballs, ESM/CJS loading, browser bundling, and the absence of Node modules from the browser artifact.
+
+## Workflow
+
+- Do not watch or poll CI after pushing unless explicitly asked.
