@@ -804,7 +804,11 @@ describe("QWP high-level sender", () => {
 
   it("auto-flushes writer row streams and rejects bad writer rows", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlushRows: 2 });
+    // Pin the interval off so a slow runner cannot add a time-based flush.
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 2,
+      autoFlushIntervalMs: 0,
+    });
     const writer = sender.writer("events", { value: long() });
 
     let pending: Promise<void> | undefined;
