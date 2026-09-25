@@ -2,8 +2,6 @@ import { QwpByteReader } from "./bytes";
 import { QwpProtocolError } from "./errors";
 
 /**
- * @internal Not re-exported from the `_core` barrel.
- *
  * Reads an unsigned LEB128 uint64 with the exact validation and reader
  * advancement of readQwpVarint(), but accumulates encodings of up to 7 bytes
  * (49 bits, always exact) in a plain number and returns it without touching
@@ -11,6 +9,11 @@ import { QwpProtocolError } from "./errors";
  * building each one as a BigInt only to convert it back dominated decoding.
  * 8..10-byte encodings, including zero-padded small values, fall back to
  * BigInt and return a bigint.
+ *
+ * Deliberately not re-exported from the `_core` barrel, so it stays out of
+ * both public packages.
+ *
+ * @internal
  */
 export function readQwpVarintSmall(reader: QwpByteReader): number | bigint {
   let byte = reader.readUint8("varint");

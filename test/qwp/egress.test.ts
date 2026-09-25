@@ -561,6 +561,62 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
+  it("keeps null-free numeric columns in row order through decode and materialize", () => {
+    // Null-free numeric columns take dedicated fill paths (their own V8
+    // allocation sites) in both decode() and materialize(); columns with nulls
+    // take the generic path. Distinct per-row values catch any reordering.
+    const columns = [
+      ["byte", QWP_COLUMN_TYPE.BYTE, [-1, 2, 3]],
+      ["short", QWP_COLUMN_TYPE.SHORT, [-300, 400, 500]],
+      ["int", QWP_COLUMN_TYPE.INT, [7, -8, 9]],
+      ["ipv4", QWP_COLUMN_TYPE.IPV4, [0x0a000001, 0x0a000002, 0x0a000003]],
+      ["float", QWP_COLUMN_TYPE.FLOAT, [1.5, -2.25, 3.75]],
+      ["double", QWP_COLUMN_TYPE.DOUBLE, [0.1, -0.2, 0.3]],
+    ] as const;
+    const payload = new QwpByteWriter();
+    payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
+    writeQwpVarint(payload, 0); // batch sequence
+    writeQwpVarint(payload, 0); // table name
+    writeQwpVarint(payload, 3); // rows
+    writeQwpVarint(payload, columns.length + 1);
+    for (const [name, type] of columns) {
+      writeString(payload, name);
+      payload.writeUint8(type);
+    }
+    writeString(payload, "nullable");
+    payload.writeUint8(QWP_COLUMN_TYPE.DOUBLE);
+
+    for (const [, type, values] of columns) {
+      payload.writeUint8(0); // no nulls
+      for (const value of values) {
+        if (type === QWP_COLUMN_TYPE.BYTE) payload.writeInt8(value);
+        else if (type === QWP_COLUMN_TYPE.SHORT) payload.writeInt16(value);
+        else if (type === QWP_COLUMN_TYPE.FLOAT) payload.writeFloat32(value);
+        else if (type === QWP_COLUMN_TYPE.DOUBLE) payload.writeFloat64(value);
+        else payload.writeInt32(value);
+      }
+    }
+    payload.writeUint8(1).writeUint8(0b010); // nullable DOUBLE, row 1 null
+    payload.writeFloat64(4.5).writeFloat64(-5.5);
+
+    const expected = [
+      ...columns.map(([, , values]) => [...values]),
+      [4.5, null, -5.5],
+    ];
+    const frame = encodeQwpFrame(payload.toUint8Array(), 0, 1);
+    const decoded = decodeQwpEgressMessage(frame);
+    if (decoded.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(decoded);
+    expect(batch.columns.map((column) => column.values)).toEqual(expected);
+
+    const viewed = decodeQwpEgressMessage(frame);
+    if (viewed.kind !== "result-batch") throw new Error("unexpected message");
+    const view = new QwpResultBatchDecoder().decodeView(viewed);
+    const retained = view.materialize();
+    view.release();
+    expect(retained.columns.map((column) => column.values)).toEqual(expected);
+  });
+
   it("decodes identifiers at the defensive egress byte bound", () => {
     // Query results may expose existing Java metadata created through another
     // protocol. Keep accepting up to 127 UTF-16 code units on egress, while

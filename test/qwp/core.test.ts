@@ -146,6 +146,14 @@ describe("QWP browser-safe byte core", () => {
     }
     check(Uint8Array.from([0x80, 0x80])); // truncated
     check(new Uint8Array(11).fill(0xff)); // over 10 bytes
+    // A 10th byte may only carry bit 63: 0x00 and 0x01 are accepted, while
+    // 0x02..0x7f overflow uint64 and must fail with the uint64 error rather
+    // than a caller's later range check.
+    for (const last of [0x00, 0x01, 0x02, 0x03, 0x40, 0x7f]) {
+      const bytes = new Uint8Array(10).fill(0x80);
+      bytes[9] = last;
+      check(bytes);
+    }
 
     let seed = 0x5eed;
     const random = () => {
