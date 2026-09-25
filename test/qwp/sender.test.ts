@@ -778,7 +778,7 @@ describe("QWP high-level sender", () => {
     expect(() => {
       pending = sender.table("events").longColumn("value", 1n).at(1.5);
     }).not.toThrow();
-    await expect(pending).rejects.toThrow();
+    await expect(pending).rejects.toThrow(/safe integer/);
     // The failed row was discarded along with its table selection.
     await sender.table("events").longColumn("value", 2n).at(1n);
 
@@ -795,11 +795,11 @@ describe("QWP high-level sender", () => {
     expect(() => {
       pending = sender.at(1n);
     }).not.toThrow();
-    await expect(pending).rejects.toThrow();
+    await expect(pending).rejects.toThrow(/closed/);
     expect(() => {
       pending = sender.atNow();
     }).not.toThrow();
-    await expect(pending).rejects.toThrow();
+    await expect(pending).rejects.toThrow(/closed/);
   });
 
   it("auto-flushes writer row streams and rejects bad writer rows", async () => {
