@@ -514,22 +514,36 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
-  it("decodes values in wire order across nulls and nested arrays", () => {
+  // RESULT_BATCH message type, request ID, and batch sequence.
+  function resultBatchPrefix(): QwpByteWriter {
     const payload = new QwpByteWriter();
     payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
     writeQwpVarint(payload, 0); // batch sequence
+    return payload;
+  }
+
+  function resultBatchHeader(
+    rows: number,
+    schema: readonly (readonly [string, QwpColumnType])[],
+  ): QwpByteWriter {
+    const payload = resultBatchPrefix();
     writeQwpVarint(payload, 0); // table name
-    writeQwpVarint(payload, 4); // rows
-    writeQwpVarint(payload, 4); // columns
-    for (const [name, type] of [
+    writeQwpVarint(payload, rows);
+    writeQwpVarint(payload, schema.length);
+    for (const [name, type] of schema) {
+      writeString(payload, name);
+      payload.writeUint8(type);
+    }
+    return payload;
+  }
+
+  it("decodes values in wire order across nulls and arrays", () => {
+    const payload = resultBatchHeader(4, [
       ["bool", QWP_COLUMN_TYPE.BOOLEAN],
       ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
       ["array", QWP_COLUMN_TYPE.LONG_ARRAY],
       ["sym", QWP_COLUMN_TYPE.SYMBOL],
-    ] as const) {
-      writeString(payload, name);
-      payload.writeUint8(type);
-    }
+    ]);
 
     payload.writeUint8(0).writeUint8(0b1010); // bit-packed booleans
     payload.writeUint8(1).writeUint8(0b0010); // timestamp row 1 is null
@@ -612,23 +626,6 @@ describe("QWP result batch decoder", () => {
       default:
         payload.writeInt32(value as number);
     }
-  }
-
-  function resultBatchHeader(
-    rows: number,
-    schema: readonly (readonly [string, QwpColumnType])[],
-  ): QwpByteWriter {
-    const payload = new QwpByteWriter();
-    payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
-    writeQwpVarint(payload, 0); // batch sequence
-    writeQwpVarint(payload, 0); // table name
-    writeQwpVarint(payload, rows);
-    writeQwpVarint(payload, schema.length);
-    for (const [name, type] of schema) {
-      writeString(payload, name);
-      payload.writeUint8(type);
-    }
-    return payload;
   }
 
   it("keeps fixed-width columns in row order through decode, rows, and materialize", () => {
@@ -1104,12 +1101,6 @@ describe("QWP result batch decoder", () => {
         writer.writeUint8(index < length - 1 ? low | 0x80 : low);
       }
     };
-    const header = () => {
-      const payload = new QwpByteWriter();
-      payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
-      writeQwpVarint(payload, 0); // batch sequence
-      return payload;
-    };
     const cases: [string, (payload: QwpByteWriter, length: number) => void][] =
       [
         [
@@ -1136,7 +1127,7 @@ describe("QWP result batch decoder", () => {
 
     for (const length of [8, 9, 10]) {
       for (const [error, writeCount] of cases) {
-        const payload = header();
+        const payload = resultBatchPrefix();
         writeCount(payload, length);
         const message = decodeQwpEgressMessage(
           encodeQwpFrame(payload.toUint8Array(), 0, 1),

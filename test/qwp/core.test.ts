@@ -43,6 +43,7 @@ import {
   qwpGorillaSize,
   qwpVarintSize,
   readQwpVarint,
+  readQwpVarintNumber,
   writeQwpFrameHeader,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
@@ -166,6 +167,36 @@ describe("QWP browser-safe byte core", () => {
         bytes[index] = random();
       }
       check(bytes);
+    }
+  });
+
+  it("reads 8-10 byte varints as numbers up to the safe integer limit", () => {
+    // readQwpVarintNumber returns 7-byte encodings straight from
+    // readQwpVarintSmall; longer ones arrive as a bigint and must still come
+    // back as a number, or fail the safe-integer check.
+    const read = (bytes: Uint8Array) => {
+      const reader = new QwpByteReader(bytes);
+      const value = readQwpVarintNumber(reader, "test count");
+      return { value, position: reader.position };
+    };
+    for (let length = 8; length <= 10; length++) {
+      const bytes = new Uint8Array(length).fill(0x80);
+      bytes[0] = 0x81;
+      bytes[length - 1] = 0;
+      expect(read(bytes)).toEqual({ value: 1, position: length });
+    }
+    const maxSafe = encodeQwpVarint(Number.MAX_SAFE_INTEGER);
+    expect(maxSafe.length).toBe(8);
+    expect(read(maxSafe)).toEqual({
+      value: Number.MAX_SAFE_INTEGER,
+      position: 8,
+    });
+    for (const value of [2n ** 53n, 2n ** 64n - 1n]) {
+      expect(() => read(encodeQwpVarint(value))).toThrow(
+        new QwpProtocolError(
+          "test count exceeds JavaScript's safe integer range",
+        ),
+      );
     }
   });
 
