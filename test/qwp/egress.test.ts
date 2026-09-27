@@ -514,7 +514,7 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
-  it("keeps materialized values in wire order across nulls and nested arrays", () => {
+  it("decodes values in wire order across nulls and nested arrays", () => {
     const payload = new QwpByteWriter();
     payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
     writeQwpVarint(payload, 0); // batch sequence
@@ -1086,6 +1086,73 @@ describe("QWP result batch decoder", () => {
     );
     // Rejected before the entry loop -- reading one is what allocates.
     expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+  });
+
+  it("range-checks counts sent as zero-padded 8-10 byte varints", () => {
+    // readCount() reads encodings of up to 7 bytes as a number and longer ones
+    // as a bigint. A non-minimal encoding sends a small count down the bigint
+    // branch, which must enforce the same limits as the number branch.
+    const writePaddedVarint = (
+      writer: QwpByteWriter,
+      value: number,
+      length: number,
+    ) => {
+      let remaining = value;
+      for (let index = 0; index < length; index++) {
+        const low = remaining % 0x80;
+        remaining = Math.floor(remaining / 0x80);
+        writer.writeUint8(index < length - 1 ? low | 0x80 : low);
+      }
+    };
+    const header = () => {
+      const payload = new QwpByteWriter();
+      payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
+      writeQwpVarint(payload, 0); // batch sequence
+      return payload;
+    };
+    const cases: [string, (payload: QwpByteWriter, length: number) => void][] =
+      [
+        [
+          "table name length out of range: 1000000",
+          (payload, length) => writePaddedVarint(payload, 1_000_000, length),
+        ],
+        [
+          // One above the decoder's 1,048,576-row batch limit.
+          "result row count out of range: 1048577",
+          (payload, length) => {
+            writeQwpVarint(payload, 0); // table name
+            writePaddedVarint(payload, 1_048_577, length);
+          },
+        ],
+        [
+          `result column count out of range: ${QWP_MAX_COLUMNS_PER_TABLE + 1}`,
+          (payload, length) => {
+            writeQwpVarint(payload, 0); // table name
+            writeQwpVarint(payload, 1); // rows
+            writePaddedVarint(payload, QWP_MAX_COLUMNS_PER_TABLE + 1, length);
+          },
+        ],
+      ];
+
+    for (const length of [8, 9, 10]) {
+      for (const [error, writeCount] of cases) {
+        const payload = header();
+        writeCount(payload, length);
+        const message = decodeQwpEgressMessage(
+          encodeQwpFrame(payload.toUint8Array(), 0, 1),
+        );
+        if (message.kind !== "result-batch") {
+          throw new Error("unexpected message");
+        }
+        for (const decode of [
+          () => new QwpResultBatchDecoder().decode(message),
+          () => new QwpResultBatchDecoder().decodeView(message),
+        ]) {
+          expect(decode).toThrow(QwpProtocolError);
+          expect(decode).toThrow(error);
+        }
+      }
+    }
   });
 
   it("still decodes a delta dictionary that fits its frame", () => {
