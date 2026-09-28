@@ -62,8 +62,9 @@ interface ColumnEncodeOptions {
   deltaSymbols: boolean;
   dictionary?: QwpSymbolDictionary;
   /**
-   * Scoped to a single encodeQwpIngressFrame() call, so a column mutated
-   * between calls can never be sized from a stale plan.
+   * Scoped to a single frame plan -- one encodeQwpIngressFrame() call, or one
+   * measureQwpIngressFrame() and its encode() -- so a column mutated between
+   * frames can never be sized from a stale plan.
    */
   plans: Map<QwpColumnBuffer, ColumnPlan>;
 }
@@ -922,27 +923,73 @@ function planQwpIngressFrameEncoding(
   };
 }
 
-/** @internal Measures without allocating the full frame output buffer. */
+/** @internal A sized ingress frame that can be encoded without replanning. */
+export interface QwpMeasuredIngressFrame {
+  /** Exact byte length encode() will produce. */
+  readonly byteLength: number;
+  /**
+   * Encodes the frame from the plan that measured it. Call it at most once,
+   * before the tables or the dictionary change, in the same synchronous
+   * section as the measurement.
+   */
+  encode(): Uint8Array;
+}
+
+/**
+ * @internal Sizes a frame without allocating its output buffer.
+ *
+ * Measuring and then encoding used to plan the frame twice: the plan resolves
+ * every symbol against the dictionary and sizes every column, which made it
+ * the costliest step on the flush path. The measurement now holds on to its
+ * plan so encode() writes straight from it.
+ *
+ * On failure, either step truncates the dictionary to its size before
+ * measuring. A caller that discards a measured frame without encoding it must
+ * truncate the dictionary itself.
+ */
 export function measureQwpIngressFrame(
   tables: readonly QwpTableBuffer[],
   options: QwpIngressEncodeOptions = {},
-): number {
+): QwpMeasuredIngressFrame {
   const dictionarySize = options.dictionary?.size;
-  try {
-    const plan = planQwpIngressFrameEncoding(tables, options);
-    return QWP_HEADER_SIZE + plan.payloadLength;
-  } catch (error) {
+  const restoreDictionary = (): void => {
     if (dictionarySize !== undefined)
       options.dictionary!.truncate(dictionarySize);
+  };
+  let plan: QwpIngressFrameEncodingPlan;
+  try {
+    plan = planQwpIngressFrameEncoding(tables, options);
+  } catch (error) {
+    restoreDictionary();
     throw error;
   }
+  return {
+    byteLength: QWP_HEADER_SIZE + plan.payloadLength,
+    encode: () => {
+      try {
+        return writeQwpIngressFrame(tables, plan);
+      } catch (error) {
+        restoreDictionary();
+        throw error;
+      }
+    },
+  };
 }
 
 function encodeQwpIngressFrameInternal(
   tables: readonly QwpTableBuffer[],
   options: QwpIngressEncodeOptions,
 ): Uint8Array {
-  const plan = planQwpIngressFrameEncoding(tables, options);
+  return writeQwpIngressFrame(
+    tables,
+    planQwpIngressFrameEncoding(tables, options),
+  );
+}
+
+function writeQwpIngressFrame(
+  tables: readonly QwpTableBuffer[],
+  plan: QwpIngressFrameEncodingPlan,
+): Uint8Array {
   const writer = new QwpByteWriter(QWP_HEADER_SIZE + plan.payloadLength);
   writeQwpFrameHeader(writer, {
     flags: plan.flags,

@@ -7,10 +7,17 @@ import {
   type QwpIngressResponse,
   type QwpTableBuffer,
 } from "../packages/client-core/src/_qwp/_core";
-import { QwpSender, type QwpSenderSession } from "../packages/client-core/src/_qwp/sender";
+import {
+  QwpSender,
+  type QwpSenderSession,
+} from "../packages/client-core/src/_qwp/sender";
 import { BENCHMARK_WORKLOADS, type BenchmarkRow } from "./workloads";
 
 const ROWS = 10_000;
+const NULLISH_COLUMN_NAMES = Array.from(
+  { length: 20 },
+  (_, index) => `optional_${index}_${"x".repeat(82)}`,
+);
 let sink = 0;
 
 class EncodingSession implements QwpSenderSession {
@@ -155,6 +162,19 @@ describe("high-level symbol dictionary modes", () => {
   bench("delta dictionary / confirmed steady state", async () => {
     const sender = senderFor(steadySession, "delta");
     await fillSender(sender, rows);
+    await sender.flush();
+  });
+});
+
+describe("high-level QwpSender with never-populated optional columns", () => {
+  bench("validate nullish names and publish", async () => {
+    const sender = senderFor(new EncodingSession(), "full");
+    await sender.table("bench_nullish").longColumn("present", 1n).atNow();
+    for (let row = 0; row < ROWS; row++) {
+      sender.table("bench_nullish");
+      for (const name of NULLISH_COLUMN_NAMES) sender.longColumn(name, null);
+      await sender.atNow();
+    }
     await sender.flush();
   });
 });

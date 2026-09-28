@@ -142,12 +142,15 @@ function planIngressFrames(
         // oversized candidate before every bisection briefly allocated many
         // multiples of the negotiated cap and could exhaust the process before
         // splitting had a chance to help.
-        frameByteLength = measureQwpIngressFrame(candidate, candidateOptions);
+        // A candidate that fits is encoded from the plan that measured it,
+        // in this same synchronous section, rather than planned a second time.
+        const measured = measureQwpIngressFrame(candidate, candidateOptions);
+        frameByteLength = measured.byteLength;
         if (frameByteLength > maxBatchSizeBytes) {
           if (dictionarySize !== undefined)
             dictionary!.truncate(dictionarySize);
         } else {
-          const frame = encodeQwpIngressFrame(candidate, candidateOptions);
+          const frame = measured.encode();
           frames.push(frame);
           if (dictionary) confirmedMaxSymbolId = dictionary.size - 1;
           return;
