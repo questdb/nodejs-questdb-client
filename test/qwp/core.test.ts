@@ -43,6 +43,7 @@ import {
   qwpGorillaSize,
   qwpVarintSize,
   readQwpVarint,
+  readQwpVarintNumber,
   writeQwpFrameHeader,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
@@ -52,6 +53,7 @@ import {
   utf8Length,
 } from "../../packages/client-core/src/_qwp/_core/bytes";
 import { measureQwpIngressFrame } from "../../packages/client-core/src/_qwp/_core/ingress";
+import { readQwpVarintSmall } from "../../packages/client-core/src/_qwp/_core/varint-number";
 
 function dataView(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -98,6 +100,105 @@ describe("QWP browser-safe byte core", () => {
         ]),
       ),
     ).toThrow(/uint64/i);
+  });
+
+  it("reads number-valued varints exactly like readQwpVarint", () => {
+    // The decoder's counts and symbol IDs use readQwpVarintSmall, which skips
+    // BigInt for encodings up to 7 bytes. It must accept, reject, and advance
+    // exactly as readQwpVarint does; only the result type may differ.
+    const outcome = (
+      bytes: Uint8Array,
+      read: (reader: QwpByteReader) => number | bigint,
+    ) => {
+      const reader = new QwpByteReader(bytes);
+      try {
+        return { value: BigInt(read(reader)), position: reader.position };
+      } catch (error) {
+        return { error: String(error), position: reader.position };
+      }
+    };
+    const check = (bytes: Uint8Array) => {
+      expect(outcome(bytes, readQwpVarintSmall)).toEqual(
+        outcome(bytes, readQwpVarint),
+      );
+    };
+
+    for (const value of [
+      0n,
+      127n,
+      128n,
+      2n ** 49n - 1n, // largest 7-byte value, still a number
+      2n ** 49n, // first 8-byte value, bigint fallback
+      2n ** 53n,
+      2n ** 64n - 1n,
+    ]) {
+      const encoded = encodeQwpVarint(value);
+      check(encoded);
+      const expectedType = encoded.length <= 7 ? "number" : "bigint";
+      expect(typeof readQwpVarintSmall(new QwpByteReader(encoded))).toBe(
+        expectedType,
+      );
+    }
+    // Zero-padded (non-canonical) encodings of 1, crossing the 7-byte limit.
+    for (let length = 2; length <= 11; length++) {
+      const bytes = new Uint8Array(length).fill(0x80);
+      bytes[0] = 0x81;
+      bytes[length - 1] = 0;
+      check(bytes);
+    }
+    check(Uint8Array.from([0x80, 0x80])); // truncated
+    check(new Uint8Array(11).fill(0xff)); // over 10 bytes
+    // A 10th byte may only carry bit 63: 0x00 and 0x01 are accepted, while
+    // 0x02..0x7f overflow uint64 and must fail with the uint64 error rather
+    // than a caller's later range check.
+    for (const last of [0x00, 0x01, 0x02, 0x03, 0x40, 0x7f]) {
+      const bytes = new Uint8Array(10).fill(0x80);
+      bytes[9] = last;
+      check(bytes);
+    }
+
+    let seed = 0x5eed;
+    const random = () => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return seed >>> 24;
+    };
+    for (let run = 0; run < 5000; run++) {
+      const bytes = new Uint8Array(1 + (random() % 12));
+      for (let index = 0; index < bytes.length; index++) {
+        bytes[index] = random();
+      }
+      check(bytes);
+    }
+  });
+
+  it("reads 8-10 byte varints as numbers up to the safe integer limit", () => {
+    // readQwpVarintNumber returns 7-byte encodings straight from
+    // readQwpVarintSmall; longer ones arrive as a bigint and must still come
+    // back as a number, or fail the safe-integer check.
+    const read = (bytes: Uint8Array) => {
+      const reader = new QwpByteReader(bytes);
+      const value = readQwpVarintNumber(reader, "test count");
+      return { value, position: reader.position };
+    };
+    for (let length = 8; length <= 10; length++) {
+      const bytes = new Uint8Array(length).fill(0x80);
+      bytes[0] = 0x81;
+      bytes[length - 1] = 0;
+      expect(read(bytes)).toEqual({ value: 1, position: length });
+    }
+    const maxSafe = encodeQwpVarint(Number.MAX_SAFE_INTEGER);
+    expect(maxSafe.length).toBe(8);
+    expect(read(maxSafe)).toEqual({
+      value: Number.MAX_SAFE_INTEGER,
+      position: 8,
+    });
+    for (const value of [2n ** 53n, 2n ** 64n - 1n]) {
+      expect(() => read(encodeQwpVarint(value))).toThrow(
+        new QwpProtocolError(
+          "test count exceeds JavaScript's safe integer range",
+        ),
+      );
+    }
   });
 
   it("measures UTF-8 byte length identically to encoding it", () => {

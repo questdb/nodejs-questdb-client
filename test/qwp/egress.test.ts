@@ -20,12 +20,14 @@ import {
   QwpBinaryConnection,
   QwpByteReader,
   QwpByteWriter,
+  QwpColumnType,
   QwpConnectionCloseInfo,
   QwpEgressQueryAbandonedError,
   QwpEgressQueryCancelTimeoutError,
   QwpEgressQueryError,
   QwpEgressQueryTimeoutError,
   QwpEgressSession,
+  QwpProtocolError,
   QwpResultBatchDecoder,
   QwpTableBuffer,
   QwpResultBatchView,
@@ -512,6 +514,242 @@ describe("QWP result batch decoder", () => {
     ]);
   });
 
+  // RESULT_BATCH message type, request ID, and batch sequence.
+  function resultBatchPrefix(): QwpByteWriter {
+    const payload = new QwpByteWriter();
+    payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(0n);
+    writeQwpVarint(payload, 0); // batch sequence
+    return payload;
+  }
+
+  function resultBatchHeader(
+    rows: number,
+    schema: readonly (readonly [string, QwpColumnType])[],
+  ): QwpByteWriter {
+    const payload = resultBatchPrefix();
+    writeQwpVarint(payload, 0); // table name
+    writeQwpVarint(payload, rows);
+    writeQwpVarint(payload, schema.length);
+    for (const [name, type] of schema) {
+      writeString(payload, name);
+      payload.writeUint8(type);
+    }
+    return payload;
+  }
+
+  it("decodes values in wire order across nulls and arrays", () => {
+    const payload = resultBatchHeader(4, [
+      ["bool", QWP_COLUMN_TYPE.BOOLEAN],
+      ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
+      ["array", QWP_COLUMN_TYPE.LONG_ARRAY],
+      ["sym", QWP_COLUMN_TYPE.SYMBOL],
+    ]);
+
+    payload.writeUint8(0).writeUint8(0b1010); // bit-packed booleans
+    payload.writeUint8(1).writeUint8(0b0010); // timestamp row 1 is null
+    payload.writeBigInt64(100n).writeBigInt64(200n).writeBigInt64(300n);
+    payload.writeUint8(0); // no array nulls
+    for (const values of [[1n, 2n], [], [3n], [4n, 5n, 6n]]) {
+      payload.writeUint8(1).writeInt32(values.length);
+      for (const value of values) payload.writeBigInt64(value);
+    }
+    payload.writeUint8(0); // no SYMBOL nulls; local dictionary follows
+    writeQwpVarint(payload, 2);
+    writeString(payload, "alpha");
+    writeString(payload, "beta");
+    for (const id of [1, 0, 1, 0]) writeQwpVarint(payload, id);
+
+    const message = decodeQwpEgressMessage(
+      encodeQwpFrame(payload.toUint8Array(), 0, 1),
+    );
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(message);
+    expect(batch.columns.map((column) => column.values)).toEqual([
+      [false, true, false, true],
+      [100n, null, 200n, 300n],
+      [
+        { dimensions: [2], values: [1n, 2n] },
+        { dimensions: [0], values: [] },
+        { dimensions: [1], values: [3n] },
+        { dimensions: [3], values: [4n, 5n, 6n] },
+      ],
+      ["beta", "alpha", "beta", "alpha"],
+    ]);
+  });
+
+  // Fixed-width columns decode straight from a DataView in decode(), with a
+  // separate array per value type; null-free numeric columns also take
+  // dedicated fill paths in materialize(). Distinct per-row values catch any
+  // reordering, and the nullable DOUBLE covers the null-expansion path.
+  const fixedWidthColumns = [
+    ["byte", QWP_COLUMN_TYPE.BYTE, "byte value", [-1, 2, 3]],
+    ["short", QWP_COLUMN_TYPE.SHORT, "short value", [-300, 400, 500]],
+    ["char", QWP_COLUMN_TYPE.CHAR, "char value", ["x", "é", "Z"]],
+    ["int", QWP_COLUMN_TYPE.INT, "int value", [7, -8, 9]],
+    [
+      "ipv4",
+      QWP_COLUMN_TYPE.IPV4,
+      "int value",
+      [0x0a000001, 0x0a000002, 0x0a000003],
+    ],
+    ["float", QWP_COLUMN_TYPE.FLOAT, "float value", [1.5, -2.25, 3.75]],
+    ["double", QWP_COLUMN_TYPE.DOUBLE, "double value", [0.1, -0.2, 0.3]],
+    ["long", QWP_COLUMN_TYPE.LONG, "long value", [-(2n ** 63n), 0n, 2n ** 62n]],
+    ["ts", QWP_COLUMN_TYPE.TIMESTAMP, "timestamp value", [100n, 300n, 200n]],
+  ] as const;
+
+  function writeFixedWidthValue(
+    payload: QwpByteWriter,
+    type: QwpColumnType,
+    value: number | bigint | string,
+  ): void {
+    switch (type) {
+      case QWP_COLUMN_TYPE.BYTE:
+        payload.writeInt8(value as number);
+        break;
+      case QWP_COLUMN_TYPE.SHORT:
+        payload.writeInt16(value as number);
+        break;
+      case QWP_COLUMN_TYPE.CHAR:
+        payload.writeUint16((value as string).charCodeAt(0));
+        break;
+      case QWP_COLUMN_TYPE.FLOAT:
+        payload.writeFloat32(value as number);
+        break;
+      case QWP_COLUMN_TYPE.DOUBLE:
+        payload.writeFloat64(value as number);
+        break;
+      case QWP_COLUMN_TYPE.LONG:
+      case QWP_COLUMN_TYPE.TIMESTAMP:
+        payload.writeBigInt64(value as bigint);
+        break;
+      default:
+        payload.writeInt32(value as number);
+    }
+  }
+
+  it("keeps fixed-width columns in row order through decode, rows, and materialize", () => {
+    const payload = resultBatchHeader(3, [
+      ...fixedWidthColumns.map(([name, type]) => [name, type] as const),
+      ["nullable", QWP_COLUMN_TYPE.DOUBLE] as const,
+    ]);
+    for (const [, type, , values] of fixedWidthColumns) {
+      payload.writeUint8(0); // no nulls
+      for (const value of values) writeFixedWidthValue(payload, type, value);
+    }
+    payload.writeUint8(1).writeUint8(0b010); // nullable DOUBLE, row 1 null
+    payload.writeFloat64(4.5).writeFloat64(-5.5);
+
+    const expected = [
+      ...fixedWidthColumns.map(([, , , values]) => [...values]),
+      [4.5, null, -5.5],
+    ];
+    const expectedRows = [0, 1, 2].map((row) =>
+      expected.map((values) => values[row]),
+    );
+    const frame = encodeQwpFrame(payload.toUint8Array(), 0, 1);
+    const decoded = decodeQwpEgressMessage(frame);
+    if (decoded.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(decoded);
+    expect(batch.columns.map((column) => column.values)).toEqual(expected);
+    expect([...batch.rows()]).toEqual(expectedRows);
+
+    const viewed = decodeQwpEgressMessage(frame);
+    if (viewed.kind !== "result-batch") throw new Error("unexpected message");
+    const view = new QwpResultBatchDecoder().decodeView(viewed);
+    const retained = view.materialize();
+    view.release();
+    expect(retained.columns.map((column) => column.values)).toEqual(expected);
+    expect([...retained.rows()]).toEqual(expectedRows);
+  });
+
+  it("names the column type when a fixed-width column is truncated", () => {
+    for (const [name, type, label, values] of fixedWidthColumns) {
+      const payload = resultBatchHeader(3, [[name, type]]);
+      payload.writeUint8(0); // no nulls, but only two of three values follow
+      for (const value of values.slice(0, 2)) {
+        writeFixedWidthValue(payload, type, value);
+      }
+      const message = decodeQwpEgressMessage(
+        encodeQwpFrame(payload.toUint8Array(), 0, 1),
+      );
+      if (message.kind !== "result-batch") {
+        throw new Error("unexpected message");
+      }
+      const decode = () => new QwpResultBatchDecoder().decode(message);
+      expect(decode).toThrow(QwpProtocolError);
+      expect(decode).toThrow(`truncated QWP payload while reading ${label}`);
+    }
+  });
+
+  it("keeps raw-fallback timestamps in row order in Gorilla-flagged batches", () => {
+    // With the Gorilla flag set, a timestamp column still falls back to raw
+    // int64 values (encoding 0) when a delta-of-delta leaves int32 range, as
+    // these irregular nanosecond gaps do. The trailing INT column fails if the
+    // raw values consume the wrong number of bytes.
+    const timestamps = [
+      1_700_000_000_000_000_000n,
+      1_700_000_000_000_000_001n,
+      1_700_000_005_000_000_000n,
+      1_700_000_005_000_000_002n,
+    ];
+    const schema = [
+      ["date", QWP_COLUMN_TYPE.DATE],
+      ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
+      ["nanos", QWP_COLUMN_TYPE.TIMESTAMP_NANOS],
+      ["nullable", QWP_COLUMN_TYPE.TIMESTAMP_NANOS],
+      ["int", QWP_COLUMN_TYPE.INT],
+    ] as const;
+    const payload = resultBatchHeader(timestamps.length, schema);
+    for (let column = 0; column < 3; column++) {
+      payload.writeUint8(0).writeUint8(0); // no nulls, raw encoding
+      for (const value of timestamps) payload.writeBigInt64(value);
+    }
+    // Rows 1 and 3 are null, so only two raw values follow.
+    payload.writeUint8(1).writeUint8(0b1010).writeUint8(0);
+    payload.writeBigInt64(timestamps[3]).writeBigInt64(timestamps[0]);
+    payload.writeUint8(0);
+    for (const value of [11, 22, 33, 44]) payload.writeInt32(value);
+
+    const expected = [
+      timestamps,
+      timestamps,
+      timestamps,
+      [timestamps[3], null, timestamps[0], null],
+      [11, 22, 33, 44],
+    ];
+    const expectedRows = timestamps.map((_, row) =>
+      expected.map((values) => values[row]),
+    );
+    const frame = encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1);
+    const decoded = decodeQwpEgressMessage(frame);
+    if (decoded.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(decoded);
+    expect(batch.columns.map((column) => column.values)).toEqual(expected);
+    expect([...batch.rows()]).toEqual(expectedRows);
+
+    const viewed = decodeQwpEgressMessage(frame);
+    if (viewed.kind !== "result-batch") throw new Error("unexpected message");
+    const view = new QwpResultBatchDecoder().decodeView(viewed);
+    const retained = view.materialize();
+    view.release();
+    expect(retained.columns.map((column) => column.values)).toEqual(expected);
+
+    // Three rows declared, two raw values present.
+    const truncated = resultBatchHeader(3, [["ts", QWP_COLUMN_TYPE.TIMESTAMP]]);
+    truncated.writeUint8(0).writeUint8(0);
+    truncated.writeBigInt64(timestamps[0]).writeBigInt64(timestamps[1]);
+    const message = decodeQwpEgressMessage(
+      encodeQwpFrame(truncated.toUint8Array(), QWP_FLAG_GORILLA, 1),
+    );
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const decode = () => new QwpResultBatchDecoder().decode(message);
+    expect(decode).toThrow(QwpProtocolError);
+    expect(decode).toThrow(
+      "truncated QWP payload while reading timestamp value",
+    );
+  });
+
   it("decodes identifiers at the defensive egress byte bound", () => {
     // Query results may expose existing Java metadata created through another
     // protocol. Keep accepting up to 127 UTF-16 code units on egress, while
@@ -913,6 +1151,67 @@ describe("QWP result batch decoder", () => {
     );
     // Rejected before the entry loop -- reading one is what allocates.
     expect(process.memoryUsage().heapUsed - before).toBeLessThan(50e6);
+  });
+
+  it("range-checks counts sent as zero-padded 8-10 byte varints", () => {
+    // readCount() reads encodings of up to 7 bytes as a number and longer ones
+    // as a bigint. A non-minimal encoding sends a small count down the bigint
+    // branch, which must enforce the same limits as the number branch.
+    const writePaddedVarint = (
+      writer: QwpByteWriter,
+      value: number,
+      length: number,
+    ) => {
+      let remaining = value;
+      for (let index = 0; index < length; index++) {
+        const low = remaining % 0x80;
+        remaining = Math.floor(remaining / 0x80);
+        writer.writeUint8(index < length - 1 ? low | 0x80 : low);
+      }
+    };
+    const cases: [string, (payload: QwpByteWriter, length: number) => void][] =
+      [
+        [
+          "table name length out of range: 1000000",
+          (payload, length) => writePaddedVarint(payload, 1_000_000, length),
+        ],
+        [
+          // One above the decoder's 1,048,576-row batch limit.
+          "result row count out of range: 1048577",
+          (payload, length) => {
+            writeQwpVarint(payload, 0); // table name
+            writePaddedVarint(payload, 1_048_577, length);
+          },
+        ],
+        [
+          `result column count out of range: ${QWP_MAX_COLUMNS_PER_TABLE + 1}`,
+          (payload, length) => {
+            writeQwpVarint(payload, 0); // table name
+            writeQwpVarint(payload, 1); // rows
+            writePaddedVarint(payload, QWP_MAX_COLUMNS_PER_TABLE + 1, length);
+          },
+        ],
+      ];
+
+    for (const length of [8, 9, 10]) {
+      for (const [error, writeCount] of cases) {
+        const payload = resultBatchPrefix();
+        writeCount(payload, length);
+        const message = decodeQwpEgressMessage(
+          encodeQwpFrame(payload.toUint8Array(), 0, 1),
+        );
+        if (message.kind !== "result-batch") {
+          throw new Error("unexpected message");
+        }
+        for (const decode of [
+          () => new QwpResultBatchDecoder().decode(message),
+          () => new QwpResultBatchDecoder().decodeView(message),
+        ]) {
+          expect(decode).toThrow(QwpProtocolError);
+          expect(decode).toThrow(error);
+        }
+      }
+    }
   });
 
   it("still decodes a delta dictionary that fits its frame", () => {

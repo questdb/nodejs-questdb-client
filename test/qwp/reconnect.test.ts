@@ -8753,23 +8753,27 @@ describe("QWP Node file replay store", () => {
     try {
       // Five segments become fully acknowledged in one maintenance batch.
       await store.acknowledgeThrough(4n);
-      await vi.waitFor(() => expect(unlinked).toHaveLength(1));
+      // The lapse after the first trim ends this batch, and arming the retry
+      // timer is the last thing it does. Wait for that rather than for the
+      // queue to shrink: pendingTrimSegments reads 4 while the batch is still
+      // re-proving ownership, and un-pinning `lost` then lets that check
+      // succeed, so the batch would keep trimming alongside the direct call
+      // below and both would unlink the same segment.
       await vi.waitFor(() =>
-        expect(internals.pendingTrimSegments).toHaveLength(4),
+        expect(internals.maintenanceRetryTimer).toBeDefined(),
       );
+      expect(unlinked).toHaveLength(1);
+      expect(internals.pendingTrimSegments).toHaveLength(4);
 
       // Re-proving the same token resumes the preserved queue. Calling the
       // batch directly avoids making this regression test wait for its 1s timer.
       delete (lock as unknown as Record<string, unknown>).lost;
       // Production only ever reaches runMaintenanceBatch() through the store's
-      // serializing queue. Calling it directly races the retry timer that the
-      // ownership lapse just armed: both batches read pendingTrimSegments[0],
-      // both unlink it, and both shift. Disarm it so this stays a test of the
-      // preserved queue rather than an intermittent double-unlink.
-      if (internals.maintenanceRetryTimer) {
-        clearTimeout(internals.maintenanceRetryTimer);
-        internals.maintenanceRetryTimer = undefined;
-      }
+      // serializing queue, so disarm the timer: a timer-driven batch would run
+      // alongside the direct call, both would read pendingTrimSegments[0], and
+      // both would unlink it.
+      clearTimeout(internals.maintenanceRetryTimer);
+      internals.maintenanceRetryTimer = undefined;
       await internals.runMaintenanceBatch();
       expect(unlinked).toHaveLength(5);
       expect(internals.pendingTrimSegments).toHaveLength(0);
