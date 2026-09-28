@@ -682,6 +682,74 @@ describe("QWP result batch decoder", () => {
     }
   });
 
+  it("keeps raw-fallback timestamps in row order in Gorilla-flagged batches", () => {
+    // With the Gorilla flag set, a timestamp column still falls back to raw
+    // int64 values (encoding 0) when a delta-of-delta leaves int32 range, as
+    // these irregular nanosecond gaps do. The trailing INT column fails if the
+    // raw values consume the wrong number of bytes.
+    const timestamps = [
+      1_700_000_000_000_000_000n,
+      1_700_000_000_000_000_001n,
+      1_700_000_005_000_000_000n,
+      1_700_000_005_000_000_002n,
+    ];
+    const schema = [
+      ["date", QWP_COLUMN_TYPE.DATE],
+      ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
+      ["nanos", QWP_COLUMN_TYPE.TIMESTAMP_NANOS],
+      ["nullable", QWP_COLUMN_TYPE.TIMESTAMP_NANOS],
+      ["int", QWP_COLUMN_TYPE.INT],
+    ] as const;
+    const payload = resultBatchHeader(timestamps.length, schema);
+    for (let column = 0; column < 3; column++) {
+      payload.writeUint8(0).writeUint8(0); // no nulls, raw encoding
+      for (const value of timestamps) payload.writeBigInt64(value);
+    }
+    // Rows 1 and 3 are null, so only two raw values follow.
+    payload.writeUint8(1).writeUint8(0b1010).writeUint8(0);
+    payload.writeBigInt64(timestamps[3]).writeBigInt64(timestamps[0]);
+    payload.writeUint8(0);
+    for (const value of [11, 22, 33, 44]) payload.writeInt32(value);
+
+    const expected = [
+      timestamps,
+      timestamps,
+      timestamps,
+      [timestamps[3], null, timestamps[0], null],
+      [11, 22, 33, 44],
+    ];
+    const expectedRows = timestamps.map((_, row) =>
+      expected.map((values) => values[row]),
+    );
+    const frame = encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1);
+    const decoded = decodeQwpEgressMessage(frame);
+    if (decoded.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decode(decoded);
+    expect(batch.columns.map((column) => column.values)).toEqual(expected);
+    expect([...batch.rows()]).toEqual(expectedRows);
+
+    const viewed = decodeQwpEgressMessage(frame);
+    if (viewed.kind !== "result-batch") throw new Error("unexpected message");
+    const view = new QwpResultBatchDecoder().decodeView(viewed);
+    const retained = view.materialize();
+    view.release();
+    expect(retained.columns.map((column) => column.values)).toEqual(expected);
+
+    // Three rows declared, two raw values present.
+    const truncated = resultBatchHeader(3, [["ts", QWP_COLUMN_TYPE.TIMESTAMP]]);
+    truncated.writeUint8(0).writeUint8(0);
+    truncated.writeBigInt64(timestamps[0]).writeBigInt64(timestamps[1]);
+    const message = decodeQwpEgressMessage(
+      encodeQwpFrame(truncated.toUint8Array(), QWP_FLAG_GORILLA, 1),
+    );
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const decode = () => new QwpResultBatchDecoder().decode(message);
+    expect(decode).toThrow(QwpProtocolError);
+    expect(decode).toThrow(
+      "truncated QWP payload while reading timestamp value",
+    );
+  });
+
   it("decodes identifiers at the defensive egress byte bound", () => {
     // Query results may expose existing Java metadata created through another
     // protocol. Keep accepting up to 127 UTF-16 code units on egress, while
