@@ -145,13 +145,22 @@ jobs:
           # `message` when it is a non-empty string, otherwise the start of the
           # body. The filter outputs nothing for anything else, so jq -e fails
           # without first printing `null` or another non-string value.
-          azure_error() {
-            jq -er '.message | strings | select(length > 0)' <<<"$1" 2>/dev/null ||
-              head -c 500 <<<"$1"
+          # An empty body means curl failed before Azure answered (DNS, TLS,
+          # connection) or Azure sent no explanation; curl's own -sS line
+          # above then names the cause, so don't blame Azure for it.
+          azure_failure() {
+            if [ -z "$2" ]; then
+              echo "The Azure DevOps $1 failed without a response body; see curl's error above." >&2
+            else
+              echo "Azure DevOps rejected the $1: $(
+                jq -er '.message | strings | select(length > 0)' <<<"$2" 2>/dev/null ||
+                  head -c 500 <<<"$2"
+              )" >&2
+            fi
           }
           if ! PIPELINES=$(curl --fail-with-body -sS -u ":${ENT_DISPATCH_PAT}" \
             "${ORG_URL}${PROJECT}/_apis/pipelines?api-version=7.0"); then
-            echo "Azure DevOps rejected the pipeline lookup: $(azure_error "$PIPELINES")" >&2
+            azure_failure "pipeline lookup" "$PIPELINES"
             exit 1
           fi
           PIPELINE_ID=$(echo "$PIPELINES" | jq -r --arg name "$PIPELINE_NAME" \
@@ -184,7 +193,7 @@ jobs:
             -X POST \
             -d "$BODY" \
             "${ORG_URL}${PROJECT}/_apis/pipelines/${PIPELINE_ID}/runs?api-version=7.0"); then
-            echo "Azure DevOps rejected the dispatch: $(azure_error "$RESPONSE")" >&2
+            azure_failure "dispatch" "$RESPONSE"
             exit 1
           fi
           echo "Enterprise E2E queued: $(echo "$RESPONSE" | jq -r '._links.web.href')"
