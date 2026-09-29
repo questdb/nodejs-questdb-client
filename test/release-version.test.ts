@@ -9,14 +9,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an ordinary version bump cannot change what they observe.
 const PUBLISHED = "5.0.0";
 
+const NODEJS = "@questdb/nodejs-client";
+const BROWSER = "@questdb/browser-client";
+
+// FAKE_NPM_PUBLISHED lists, comma-separated, the packages that have published
+// PUBLISHED; every one of them reports FAKE_NPM_GIT_HEAD as its gitHead.
 const fakeNpm = `#!/usr/bin/env node
 const [, , command, specifier, field] = process.argv;
 if (command !== "view") process.exit(2);
+const published = (process.env.FAKE_NPM_PUBLISHED ?? "").split(",");
 if (field === "versions") {
-  console.log(specifier === "@questdb/nodejs-client" ? '["${PUBLISHED}"]' : '[]');
+  console.log(published.includes(specifier) ? '["${PUBLISHED}"]' : '[]');
 } else if (
-  specifier === "@questdb/nodejs-client@${PUBLISHED}" &&
-  field === "gitHead"
+  field === "gitHead" &&
+  published.some((name) => specifier === name + "@${PUBLISHED}")
 ) {
   console.log(JSON.stringify(process.env.FAKE_NPM_GIT_HEAD));
 } else {
@@ -75,7 +81,11 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
     await rm(scratch, { recursive: true, force: true });
   });
 
-  const run = (gitHead: string, packages?: string, cwd = root) =>
+  const run = (
+    gitHead: string,
+    packages?: string,
+    { cwd = root, published = [NODEJS] } = {},
+  ) =>
     spawnSync(process.execPath, [script], {
       cwd,
       encoding: "utf8",
@@ -84,6 +94,7 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
         PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
         GITHUB_SHA: "release-commit",
         FAKE_NPM_GIT_HEAD: gitHead,
+        FAKE_NPM_PUBLISHED: published.join(","),
         RELEASE_PACKAGES: packages ?? "",
       },
     });
@@ -122,7 +133,43 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
       "the selected package has already published",
     );
     expect(nodeOnly.stderr).not.toContain("every package");
+    expect(nodeOnly.stderr).toContain(
+      `${BROWSER}@${PUBLISHED} is not on npm yet`,
+    );
     expect(nodeOnly.stderr).toContain("packages=browser");
+
+    const browserOnly = run("release-commit", "browser", {
+      published: [BROWSER],
+    });
+    expect(browserOnly.status).toBe(1);
+    expect(browserOnly.stderr).toContain(
+      `${NODEJS}@${PUBLISHED} is not on npm yet`,
+    );
+    expect(browserOnly.stderr).toContain("packages=nodejs");
+  });
+
+  it("refuses a version every package has already published", () => {
+    // A forgotten bump. A narrowed dispatch has no other package to point
+    // at, so it must not suggest one.
+    const published = { published: [NODEJS, BROWSER] };
+
+    const both = run("release-commit", "both", published);
+    expect(both.status).toBe(1);
+    expect(both.stderr).toContain(
+      "every package has already published this version",
+    );
+    expect(both.stderr).toContain("Bump the version first");
+
+    for (const packages of ["nodejs", "browser"]) {
+      const narrowed = run("release-commit", packages, published);
+      expect(narrowed.status, packages).toBe(1);
+      expect(narrowed.stderr, packages).toContain(
+        "the selected package has already published",
+      );
+      expect(narrowed.stderr, packages).toContain("Bump the version first");
+      expect(narrowed.stderr, packages).not.toContain("not on npm yet");
+      expect(narrowed.stderr, packages).not.toContain("dispatch with");
+    }
   });
 
   it("rejects an unknown package selection", () => {
@@ -137,7 +184,7 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
       browser: PUBLISHED,
     });
     for (const packages of ["both", "nodejs", "browser"]) {
-      const result = run("release-commit", packages, drifted);
+      const result = run("release-commit", packages, { cwd: drifted });
       expect(result.status, packages).toBe(1);
       expect(result.stderr, packages).toContain(
         "the published packages are on different versions",
