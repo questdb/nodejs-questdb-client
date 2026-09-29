@@ -111,7 +111,9 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
       "release check passed (packages=browser): @questdb/browser-client@",
     );
     expect(browserOnly.stdout).not.toContain("@questdb/nodejs-client");
+  });
 
+  it("refuses a selected package that is already published", () => {
     // Everything selected is already on npm: a no-op dispatch. The package
     // still missing from npm is the one the follow-up should have selected.
     const nodeOnly = run("release-commit", "nodejs");
@@ -121,7 +123,9 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
     );
     expect(nodeOnly.stderr).not.toContain("every package");
     expect(nodeOnly.stderr).toContain("packages=browser");
+  });
 
+  it("rejects an unknown package selection", () => {
     const unknown = run("release-commit", "node");
     expect(unknown.status).toBe(1);
     expect(unknown.stderr).toContain("unknown RELEASE_PACKAGES value");
