@@ -173,8 +173,9 @@ jobs:
                 }
                 # Azure rejects an empty string for a string parameter
                 # ("is not a valid String", HTTP 400), which broke every
-                # push and schedule dispatch. Omitting it applies the
-                # pipeline default, which skips the GitHub status post.
+                # push, schedule and workflow_dispatch run. Omitting it
+                # applies the pipeline default, which skips the GitHub
+                # status post.
                 + (if $pr == "" then {} else {javascriptClientPrNumber: $pr} end)
               )
             }')
