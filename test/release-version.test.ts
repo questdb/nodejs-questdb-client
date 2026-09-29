@@ -122,6 +122,15 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
       "release check passed (packages=browser): @questdb/browser-client@",
     );
     expect(browserOnly.stdout).not.toContain("@questdb/nodejs-client");
+
+    // The Node package ships first, before either package is on npm.
+    const nodeOnly = run("release-commit", "nodejs", { published: [] });
+    expect(nodeOnly.status).toBe(0);
+    expect(nodeOnly.stderr).not.toContain("resuming");
+    expect(nodeOnly.stdout).toContain(
+      "release check passed (packages=nodejs): @questdb/nodejs-client@",
+    );
+    expect(nodeOnly.stdout).not.toContain("@questdb/browser-client");
   });
 
   it("refuses a selected package that is already published", () => {
