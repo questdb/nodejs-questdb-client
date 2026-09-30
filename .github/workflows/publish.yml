@@ -2,6 +2,17 @@ name: publish
 
 on:
   workflow_dispatch:
+    inputs:
+      packages:
+        description: >-
+          Packages to publish. Both manifests must carry the same version;
+          a package left out can be published later under that version.
+        type: choice
+        options:
+          - both
+          - nodejs
+          - browser
+        default: both
 
 jobs:
   test:
@@ -61,12 +72,18 @@ jobs:
       - name: Check for build artifacts
         run: node scripts/check-build-artifacts.mjs
 
-      # Both packages are published from one commit, and npm-publish silently
-      # skips a version that already exists. Fail here instead of half-releasing.
+      # The selected packages are published from one commit, and npm-publish
+      # silently skips a version that already exists. Fail here instead of
+      # half-releasing or publishing nothing.
+      # Every gate above still covers both packages: they share client-core, so
+      # a broken browser build is a broken build even on a Node-only release.
       - name: Check release versions
+        env:
+          RELEASE_PACKAGES: ${{ inputs.packages }}
         run: node scripts/check-release-versions.mjs
 
       - name: Publish @questdb/nodejs-client
+        if: inputs.packages == 'both' || inputs.packages == 'nodejs'
         uses: JS-DevTools/npm-publish@v3
         with:
           token: ${{ secrets.CI_TOKEN }}
@@ -75,6 +92,7 @@ jobs:
           package: packages/nodejs-client/package.json
 
       - name: Publish @questdb/browser-client
+        if: inputs.packages == 'both' || inputs.packages == 'browser'
         uses: JS-DevTools/npm-publish@v3
         with:
           token: ${{ secrets.CI_TOKEN }}
