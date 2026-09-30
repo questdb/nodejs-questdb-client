@@ -140,6 +140,8 @@ export type {
   QwpBinaryConnection as BrowserQwpBinaryConnection,
   QwpBindSetter as BrowserQwpBindSetter,
   QwpBindType as BrowserQwpBindType,
+  QwpBrowserAuthContext,
+  QwpBrowserAuthProvider,
   QwpBrowserClientEgressOptions,
   QwpBrowserClientIngressOptions,
   QwpBrowserClientOptions,
