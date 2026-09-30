@@ -928,7 +928,9 @@ unhandled rejection, and both still reach `onError` and the metrics snapshot.
 ### Browser ingress
 
 Browser applications must use the browser entry point and a same-origin WebSocket
-route (directly or through a reverse proxy):
+route (directly or through a reverse proxy), unless the server lists the
+application's origin in `qwp.browser.allowed.origins`; see
+[Third-party browser applications](#third-party-browser-applications):
 
 ```typescript
 import { connectQwpBrowserSender } from "@questdb/browser-client";
@@ -985,6 +987,65 @@ const sender = await connectQwpBrowserSender({
   },
 });
 ```
+
+### Third-party browser applications
+
+A web application served from its own origin connects to QuestDB directly when
+the server lists that exact origin, written the way browsers send the `Origin`
+header:
+
+```
+# QuestDB server.conf
+qwp.browser.allowed.origins=https://app.example.com
+```
+
+QuestDB ignores cookies on such a cross-origin upgrade, so session bootstrap
+cannot authenticate it. Set `auth` instead: the client sends the credential with
+every upgrade as a WebSocket subprotocol, which browser JavaScript can set,
+beside the QWP dialect QuestDB selects (`questdb.qwp.v1`, or durable ACK when
+requested):
+
+```typescript
+const sender = await connectQwpBrowserSender({
+  url: "wss://questdb.example.com:9000/write/v4",
+  auth: { type: "bearer", token: restToken },
+});
+```
+
+`auth` takes the same `bearer` and `basic` credentials as session bootstrap, or a
+function returning one. The client calls the function before every initial
+connect, reconnect, and failover attempt, so it can return a freshly refreshed
+OIDC access token and keep a long-lived session authenticated:
+
+```typescript
+const db = await connectQwpBrowserClient({
+  cluster: {
+    url: "wss://questdb.example.com:9000",
+    auth: async ({ signal }) => ({
+      type: "bearer",
+      token: await identityProvider.getAccessToken({ signal }),
+    }),
+  },
+});
+```
+
+The function's `signal` aborts when the attempt is abandoned, and its time counts
+against `connectTimeoutMs`. A throw fails the attempt with a `QwpUpgradeError` of
+kind `authentication` carrying the thrown error as `cause`, without trying the
+remaining endpoints; reconnects retry it with backoff unless the error carries
+`retryable: false`. A returned credential that could never be sent, such as a
+bearer token with a space or a non-ASCII character, fails without a retry.
+
+`auth` cannot be combined with `sessionBootstrap`. The credential is
+base64url-encoded, not encrypted, so use `wss:`. QuestDB accepts it only from a
+listed origin; a page served from QuestDB's own origin must be listed too, or
+keep using session bootstrap. QuestDB creates no session for the credential and
+runs the connection as the credential's own principal, so `serviceAccount`
+assumption is not available on this path. With authentication disabled, a listed origin needs
+no credential. QuestDB never selects the credential as the connection's
+subprotocol; the client treats a server that does as defective, closes the
+connection, and neither retries nor tries another endpoint, because every node
+of a cluster normally runs the same build.
 
 ### Transactions and durable acknowledgement
 
@@ -1625,8 +1686,8 @@ const db = await connectQwpBrowserClient({
 });
 ```
 
-`url`, `failoverUrls`, and `sessionBootstrap` belong to `cluster` in this
-unified form and are rejected if repeated under `ingress` or `egress`.
+`url`, `failoverUrls`, `sessionBootstrap`, and `auth` belong to `cluster` in
+this unified form and are rejected if repeated under `ingress` or `egress`.
 Side-specific timeouts, WebSocket factories, durable-ACK settings, routing, and
 compression remain available as explicit overrides. The original split object
 form with complete `ingress` and `egress` trees remains supported for advanced
