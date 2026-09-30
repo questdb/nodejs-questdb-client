@@ -138,8 +138,31 @@ jobs:
           ORG_URL="https://dev.azure.com/questdb/"
           PROJECT="questdb-enterprise"
           PIPELINE_NAME="build-and-test-e2e-javascript-client"
-          PIPELINES=$(curl -fsS -u ":${ENT_DISPATCH_PAT}" \
-            "${ORG_URL}${PROJECT}/_apis/pipelines?api-version=7.0")
+          # Azure explains a rejection in the response body. --fail-with-body
+          # keeps it, but on stdout, which $(...) captures; under set -e the
+          # step would exit before anything printed it. Each call therefore
+          # reports the captured body itself when curl fails: Azure's JSON
+          # `message` when it is a non-empty string, otherwise the start of the
+          # body. The filter outputs nothing for anything else, so jq -e fails
+          # without first printing `null` or another non-string value.
+          # An empty body means curl failed before Azure answered (DNS, TLS,
+          # connection) or Azure sent no explanation; curl's own -sS line
+          # above then names the cause, so don't blame Azure for it.
+          azure_failure() {
+            if [ -z "$2" ]; then
+              echo "The Azure DevOps $1 failed without a response body; see curl's error above." >&2
+            else
+              echo "Azure DevOps rejected the $1: $(
+                jq -er '.message | strings | select(length > 0)' <<<"$2" 2>/dev/null ||
+                  head -c 500 <<<"$2"
+              )" >&2
+            fi
+          }
+          if ! PIPELINES=$(curl --fail-with-body -sS -u ":${ENT_DISPATCH_PAT}" \
+            "${ORG_URL}${PROJECT}/_apis/pipelines?api-version=7.0"); then
+            azure_failure "pipeline lookup" "$PIPELINES"
+            exit 1
+          fi
           PIPELINE_ID=$(echo "$PIPELINES" | jq -r --arg name "$PIPELINE_NAME" \
             '.value[] | select(.name == $name) | .id' | head -1)
           if [ -z "$PIPELINE_ID" ] || [ "$PIPELINE_ID" = "null" ]; then
@@ -152,15 +175,25 @@ jobs:
             --arg pr "$CLIENT_PR_NUMBER" \
             --arg branch "$CLIENT_BRANCH" \
             '{
-              templateParameters: {
-                javascriptClientCommit: $commit,
-                javascriptClientPrNumber: $pr,
-                clientBranch: $branch
-              }
+              templateParameters: (
+                {
+                  javascriptClientCommit: $commit,
+                  clientBranch: $branch
+                }
+                # Azure rejects an empty string for a string parameter
+                # ("is not a valid String", HTTP 400), which broke every
+                # push, schedule and workflow_dispatch run. Omitting it
+                # applies the pipeline default, which skips the GitHub
+                # status post.
+                + (if $pr == "" then {} else {javascriptClientPrNumber: $pr} end)
+              )
             }')
-          RESPONSE=$(curl -fsS -u ":${ENT_DISPATCH_PAT}" \
+          if ! RESPONSE=$(curl --fail-with-body -sS -u ":${ENT_DISPATCH_PAT}" \
             -H "Content-Type: application/json" \
             -X POST \
             -d "$BODY" \
-            "${ORG_URL}${PROJECT}/_apis/pipelines/${PIPELINE_ID}/runs?api-version=7.0")
+            "${ORG_URL}${PROJECT}/_apis/pipelines/${PIPELINE_ID}/runs?api-version=7.0"); then
+            azure_failure "dispatch" "$RESPONSE"
+            exit 1
+          fi
           echo "Enterprise E2E queued: $(echo "$RESPONSE" | jq -r '._links.web.href')"

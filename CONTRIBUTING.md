@@ -131,13 +131,16 @@ earlier, and a strict diff would be unsatisfiable rather than merely noisy.
 
 ## Releasing
 
-`.github/workflows/publish.yml` publishes both packages from one commit, so
-bump `packages/nodejs-client/package.json` and
+`.github/workflows/publish.yml` publishes the selected packages (both by
+default, see below) from one commit, so bump `packages/nodejs-client/package.json` and
 `packages/browser-client/package.json` to the same new version before
 dispatching it. `node scripts/check-release-versions.mjs` runs first and
-refuses a dispatch whose version **every** package has already published,
-because the publish action skips an existing version silently and such a
-dispatch would publish nothing at all.
+refuses a dispatch whose version **every** selected package has already
+published, because the publish action skips an existing version silently and
+such a dispatch would publish nothing at all. For a single-package dispatch
+that means re-dispatching a package already on npm is refused even while the
+other package is still missing; the error names the missing package and the
+`packages` value that publishes it.
 
 If a dispatch fails between the two publish steps, leaving one package on npm
 and the other not, **re-dispatch the same commit**. That is the supported
@@ -146,8 +149,27 @@ commit being dispatched, reports `resuming a partial release`, and passes. The
 published package no-ops inside the publish action, and the missing one lands.
 A package with the same version but a different or missing `gitHead` is an older
 unrelated artifact, not a partial release; the gate rejects it and the version
-must be bumped. Do not bump merely to escape a genuine same-commit partial
+must be bumped, unless that package was deliberately released on its own (see
+below). Do not bump merely to escape a genuine same-commit partial
 release -- that strands the missing half at the old version permanently.
+
+### Releasing one package on its own
+
+The workflow's `packages` input (`both`, `nodejs`, or `browser`; default
+`both`) publishes a subset, for example when a package depends on server
+support that has not shipped yet. The manifests must still carry the same
+version, but the gate checks only the selected packages against npm, so the
+other package can follow later under that same version from a later commit:
+dispatch it with its own `packages` value. Do not dispatch `both` for a
+follow-up from a later commit; the gate sees the already-published package's
+`gitHead` differ from the new commit and rejects the release as an unrelated
+artifact. A follow-up from the same commit may dispatch either the missing
+package or `both`; with `both`, the gate reports it as a resumed partial
+release and the already-published package is skipped.
+
+If the first package needs a fix before the second ships, bump both manifests
+and dispatch only the first again. The second then ships under the newer
+version.
 
 `check-release-versions.mjs` decides *whether* to bump, never by how much.
 Pick the level from the changes the release carries: a change that alters the
