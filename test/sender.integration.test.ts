@@ -14,6 +14,45 @@ async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** A non-200 answer from QuestDB's /exec, with the reason the server gave. */
+class QueryError extends Error {
+  readonly serverError?: string;
+
+  constructor(
+    readonly statusCode: number | undefined,
+    body: string,
+    query: string,
+  ) {
+    let serverError: string | undefined;
+    try {
+      serverError = JSON.parse(body).error;
+    } catch {
+      serverError = body || undefined;
+    }
+    super(
+      `HTTP request failed, statusCode=${statusCode}, query=${query}` +
+        (serverError ? `, error=${serverError}` : ""),
+    );
+    this.name = "QueryError";
+    this.serverError = serverError;
+  }
+}
+
+/**
+ * ILP over TCP has no acknowledgement, so a test cannot know when QuestDB has
+ * finished creating a table. QuestDB lists a new table in tables() before its
+ * name resolves for queries -- the name is synced to the table registry in
+ * between -- so a query can land in that gap and get this answer. It means
+ * "not yet", not a failure.
+ */
+function isTableNotYetQueryable(error: unknown): error is QueryError {
+  return (
+    error instanceof QueryError &&
+    error.statusCode === 400 &&
+    /table does not exist/.test(error.serverError ?? "")
+  );
+}
+
 describe("Sender tests with containerized QuestDB instance", () => {
   let container: StartedTestContainer;
 
@@ -27,22 +66,19 @@ describe("Sender tests with containerized QuestDB instance", () => {
 
     return new Promise((resolve, reject) => {
       const req = http.request(options, (response) => {
-        if (response.statusCode === HTTP_OK) {
-          const body: Uint8Array[] = [];
-          response
-            .on("data", (data: Uint8Array) => {
-              body.push(data);
-            })
-            .on("end", () => {
-              resolve(JSON.parse(Buffer.concat(body).toString()));
-            });
-        } else {
-          reject(
-            new Error(
-              `HTTP request failed, statusCode=${response.statusCode}, query=${query}`,
-            ),
-          );
-        }
+        const body: Uint8Array[] = [];
+        response
+          .on("data", (data: Uint8Array) => {
+            body.push(data);
+          })
+          .on("end", () => {
+            const text = Buffer.concat(body).toString();
+            if (response.statusCode === HTTP_OK) {
+              resolve(JSON.parse(text));
+            } else {
+              reject(new QueryError(response.statusCode, text, query));
+            }
+          });
       });
 
       req.on("error", (error) => reject(error));
@@ -59,15 +95,24 @@ describe("Sender tests with containerized QuestDB instance", () => {
     const interval = 500;
     const num = timeout / interval;
     let selectResult: any;
+    let notQueryable: QueryError | undefined;
     for (let i = 0; i < num; i++) {
-      selectResult = await query(container, select);
+      try {
+        selectResult = await query(container, select);
+        notQueryable = undefined;
+      } catch (error) {
+        if (!isTableNotYetQueryable(error)) throw error;
+        notQueryable = error;
+        selectResult = undefined;
+      }
       if (selectResult && selectResult.count >= expectedCount) {
         return selectResult;
       }
       await sleep(interval);
     }
     throw new Error(
-      `Timed out while waiting for ${expectedCount} rows, select='${select}'`,
+      `Timed out while waiting for ${expectedCount} rows, select='${select}'` +
+        (notQueryable ? `; last error: ${notQueryable.serverError}` : ""),
     );
   }
 
