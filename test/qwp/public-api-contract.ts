@@ -492,12 +492,15 @@ function queryViewContract(
     // @ts-expect-error completion is not callback-safe
     void query.completion;
     const rawValues: Uint8Array | undefined = batch.column(0).valuesBytes();
+    const exactNumber: number | null = batch.column(0).getLongNumber(0);
     const directRow: QwpResultRowView = batch.row(0);
     const rowCallback: QwpResultRowViewCallback = (row) => {
       const rowIndex: number = row.rowIndex;
       const value: bigint = row.getLong(0);
+      const numberValue: number | null = row.getLongNumber(0);
       void rowIndex;
       void value;
+      void numberValue;
     };
     batch.forEachRow(rowCallback);
     void typedBatch;
@@ -505,6 +508,7 @@ function queryViewContract(
     void completionWait;
     void done;
     void rawValues;
+    void exactNumber;
     void directRow;
   };
   const direct: Promise<QwpEgressViewQuery> = session.queryViews(

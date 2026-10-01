@@ -1266,6 +1266,14 @@ const query = await session.queryViews(
 await query.completion;
 ```
 
+For `LONG`, `DATE`, `TIMESTAMP`, and `TIMESTAMP_NANOS` columns,
+`timestamp.getLongNumber(row)` returns a `number` directly from the view's
+little-endian int64 bytes, or `null` for a NULL cell. It throws `RangeError` if
+the value cannot be represented as a safe JavaScript integer (as is normally
+the case for present-day nanosecond timestamps). The row view offers
+`row.getLongNumber(columnIndex)` as well. `getLong()` remains the lossless
+`bigint` accessor.
+
 The callback receives bounded control operations such as `cancel()`,
 `grantCredit()`, and `awaitCompletion(timeoutMs)`. The unbounded `completion`
 promise is available only on the returned query handle and must be awaited

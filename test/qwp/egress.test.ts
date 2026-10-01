@@ -682,6 +682,148 @@ describe("QWP result batch decoder", () => {
     }
   });
 
+  it("decodes Gorilla dates and timestamps exactly across all prefix widths", () => {
+    const values = [1_700_000_000_000_000_000n, 1_700_000_000_000_001_000n];
+    let delta = 1_000n;
+    // Zero, both signs at each prefix boundary, and signed int32 extremes.
+    for (const deltaOfDelta of [
+      0n,
+      63n,
+      -64n,
+      64n,
+      -65n,
+      255n,
+      -256n,
+      256n,
+      -257n,
+      2047n,
+      -2048n,
+      2048n,
+      -2049n,
+      2147483647n,
+      -2147483648n,
+    ]) {
+      delta += deltaOfDelta;
+      values.push(values[values.length - 1] + delta);
+    }
+    const nullable = values.map((value, row) =>
+      row === 3 || row === 6 ? null : value,
+    );
+    const columns: readonly (readonly [
+      string,
+      QwpColumnType,
+      readonly (bigint | null)[],
+    ])[] = [
+      ["date", QWP_COLUMN_TYPE.DATE, values],
+      ["ts", QWP_COLUMN_TYPE.TIMESTAMP, values],
+      ["nanos", QWP_COLUMN_TYPE.TIMESTAMP_NANOS, values],
+      ["nullable", QWP_COLUMN_TYPE.TIMESTAMP_NANOS, nullable],
+    ];
+    const payload = resultBatchHeader(values.length, [
+      ...columns.map(([name, type]) => [name, type] as const),
+      ["after", QWP_COLUMN_TYPE.INT],
+    ]);
+    for (const [, , expected] of columns) {
+      const dense = expected.filter((value): value is bigint => value !== null);
+      if (dense.length === expected.length) {
+        payload.writeUint8(0);
+      } else {
+        const nulls = new Uint8Array(Math.ceil(values.length / 8));
+        expected.forEach((value, row) => {
+          if (value === null) nulls[row >>> 3] |= 1 << (row & 7);
+        });
+        payload.writeUint8(1).writeBytes(nulls);
+      }
+      payload.writeUint8(1).writeBytes(encodeQwpGorilla(dense));
+    }
+    payload.writeUint8(0);
+    for (let row = 0; row < values.length; row++) payload.writeInt32(row);
+
+    const frame = encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1);
+    const message = decodeQwpEgressMessage(frame);
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const expected = [
+      ...columns.map(([, , cells]) => cells),
+      values.map((_, i) => i),
+    ];
+    const batch = new QwpResultBatchDecoder().decode(message);
+    expect(batch.columns.map((column) => column.values)).toEqual(expected);
+
+    const viewed = decodeQwpEgressMessage(frame);
+    if (viewed.kind !== "result-batch") throw new Error("unexpected message");
+    const view = new QwpResultBatchDecoder().decodeView(viewed);
+    for (let column = 0; column < columns.length; column++) {
+      const cells = columns[column][2];
+      const columnView = view.column(column);
+      const bytes = columnView.valuesBytes()!;
+      const raw = new DataView(
+        bytes.buffer,
+        bytes.byteOffset,
+        bytes.byteLength,
+      );
+      let dense = 0;
+      for (let row = 0; row < cells.length; row++) {
+        expect(columnView.get(row)).toBe(cells[row]);
+        expect(columnView.getLong(row)).toBe(cells[row] ?? 0n);
+        if (cells[row] !== null) {
+          expect(raw.getBigInt64(dense++ * 8, true)).toBe(cells[row]);
+        }
+      }
+    }
+    const retained = view.materialize();
+    view.release();
+    expect(retained.columns.map((column) => column.values)).toEqual(expected);
+  });
+
+  it("wraps Gorilla timestamp arithmetic at signed int64 boundaries", () => {
+    const min = -(1n << 63n);
+    const max = (1n << 63n) - 1n;
+    const payload = resultBatchHeader(3, [
+      ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
+      ["date", QWP_COLUMN_TYPE.DATE],
+      ["nanos", QWP_COLUMN_TYPE.TIMESTAMP_NANOS],
+      ["after", QWP_COLUMN_TYPE.INT],
+    ]);
+    // These sequences cross int64 boundaries, so the ingress encoder (which
+    // deliberately falls back to raw values there) cannot produce the fixture.
+    payload.writeUint8(0).writeUint8(1);
+    payload.writeBigInt64(max - 1n).writeBigInt64(max);
+    payload.writeUint8(0x05).writeUint8(0); // +1 delta-of-delta (9 bits)
+    payload.writeUint8(0).writeUint8(1);
+    payload.writeBigInt64(min).writeBigInt64(max).writeUint8(0); // initial delta wraps to -1
+    payload.writeUint8(0).writeUint8(1);
+    payload.writeBigInt64(min + 1n).writeBigInt64(min);
+    payload.writeUint8(0xfd).writeUint8(0x01); // -1 delta-of-delta
+    payload.writeUint8(0).writeInt32(1).writeInt32(2).writeInt32(3);
+
+    const frame = encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1);
+    const expected = [
+      [max - 1n, max, min + 1n],
+      [min, max, max - 1n],
+      [min + 1n, min, max - 1n],
+      [1, 2, 3],
+    ];
+    const message = decodeQwpEgressMessage(frame);
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    expect(
+      new QwpResultBatchDecoder()
+        .decode(message)
+        .columns.map((column) => column.values),
+    ).toEqual(expected);
+    const viewed = decodeQwpEgressMessage(frame);
+    if (viewed.kind !== "result-batch") throw new Error("unexpected message");
+    const view = new QwpResultBatchDecoder().decodeView(viewed);
+    expect(
+      view.columns.map((column) =>
+        Array.from({ length: 3 }, (_, row) => column.get(row)),
+      ),
+    ).toEqual(expected);
+    expect(view.materialize().columns.map((column) => column.values)).toEqual(
+      expected,
+    );
+    view.release();
+  });
+
   it("keeps raw-fallback timestamps in row order in Gorilla-flagged batches", () => {
     // With the Gorilla flag set, a timestamp column still falls back to raw
     // int64 values (encoding 0) when a delta-of-delta leaves int32 range, as
@@ -833,6 +975,75 @@ describe("QWP result batch decoder", () => {
       [null, "bb", "beta", 200n],
       [9, "", "alpha", 300n],
     ]);
+  });
+
+  it("reads signed-int64 view values as exact numbers or null", () => {
+    const safe = BigInt(Number.MAX_SAFE_INTEGER);
+    const payload = resultBatchHeader(5, [
+      ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
+      ["date", QWP_COLUMN_TYPE.DATE],
+      ["nanos", QWP_COLUMN_TYPE.TIMESTAMP_NANOS],
+      ["long", QWP_COLUMN_TYPE.LONG],
+      ["int", QWP_COLUMN_TYPE.INT],
+    ]);
+    payload.writeUint8(1).writeUint8(0b00000010).writeUint8(1);
+    payload.writeBytes(
+      encodeQwpGorilla([safe - 2n, safe - 1n, safe, safe + 1n]),
+    );
+    payload.writeUint8(1).writeUint8(0b00000100).writeUint8(0);
+    for (const value of [-safe, -1n, 0n, safe]) payload.writeBigInt64(value);
+    payload.writeUint8(1).writeUint8(0b00010000).writeUint8(0);
+    for (const value of [0n, 1n, 2n, 1_700_000_000_000_000_000n]) {
+      payload.writeBigInt64(value);
+    }
+    payload.writeUint8(0);
+    for (const value of [-safe - 1n, -safe, 0n, safe, safe + 1n]) {
+      payload.writeBigInt64(value);
+    }
+    payload.writeUint8(0);
+    for (let row = 0; row < 5; row++) payload.writeInt32(row);
+
+    const message = decodeQwpEgressMessage(
+      encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1),
+    );
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    const batch = new QwpResultBatchDecoder().decodeView(message);
+    const ts = batch.column(0);
+    expect([0, 1, 2, 3].map((row) => ts.getLongNumber(row))).toEqual([
+      Number(safe - 2n),
+      null,
+      Number(safe - 1n),
+      Number(safe),
+    ]);
+    expect(ts.getLong(1)).toBe(0n);
+    expect(() => ts.getLongNumber(4)).toThrow(
+      "column 'ts' row 4 is outside the safe integer range",
+    );
+    expect(
+      [0, 1, 2, 3, 4].map((row) => batch.column(1).getLongNumber(row)),
+    ).toEqual([Number(-safe), -1, null, 0, Number(safe)]);
+    expect([0, 1, 2].map((row) => batch.column(2).getLongNumber(row))).toEqual([
+      0, 1, 2,
+    ]);
+    expect(() => batch.column(2).getLongNumber(3)).toThrow(RangeError);
+    expect(batch.column(2).getLongNumber(4)).toBeNull();
+    const long = batch.column(3);
+    expect(long.getLongNumber(1)).toBe(Number(-safe));
+    expect(long.getLongNumber(2)).toBe(0);
+    expect(long.getLongNumber(3)).toBe(Number(safe));
+    expect(() => long.getLongNumber(0)).toThrow(RangeError);
+    expect(() => long.getLongNumber(4)).toThrow(RangeError);
+    expect(() => batch.column(4).getLongNumber(0)).toThrow(TypeError);
+    expect(() => ts.getLongNumber(-1)).toThrow("row index out of range");
+    expect(() => ts.getLongNumber(5)).toThrow("row index out of range");
+
+    const rowView = batch.row(1);
+    expect(rowView.getLongNumber(0)).toBeNull();
+    expect(rowView.of(3).getLongNumber(0)).toBe(Number(safe));
+    expect(() => rowView.of(4).getLongNumber(0)).toThrow(RangeError);
+    batch.release();
+    expect(() => ts.getLongNumber(0)).toThrow(/no longer valid/i);
+    expect(() => rowView.getLongNumber(0)).toThrow(/no longer valid/i);
   });
 
   it("reuses one row-major view for row() and forEachRow()", () => {
