@@ -1502,7 +1502,7 @@ export class QwpResultBatchDecoder {
   private expectedBatchSequence = 0n;
 
   resetQuerySchema(): void {
-    for (const batch of this.viewBatches) batch.release();
+    for (const batch of this.viewBatches) batch?.release();
     this.schema = undefined;
     this.expectedBatchSequence = 0n;
   }

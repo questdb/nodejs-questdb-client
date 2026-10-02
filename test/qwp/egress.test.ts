@@ -977,6 +977,27 @@ describe("QWP result batch decoder", () => {
     expect(second.row(0).getBoolean(0)).toBe(true);
   });
 
+  it("resets query state when the only decoded view occupies slot 1", () => {
+    const decoder = new QwpResultBatchDecoder();
+    const message = decodeQwpEgressMessage(scalarResultBatch());
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const batch = decoder.decodeView(message, 1);
+    expect(batch.valid).toBe(true);
+    expect(batch.columnCount).toBeGreaterThan(0);
+    decoder.resetQuerySchema();
+    expect(batch.valid).toBe(false);
+
+    const nextMessage = decodeQwpEgressMessage(emptyResultBatch(1n, 0));
+    if (nextMessage.kind !== "result-batch") {
+      throw new Error("unexpected message");
+    }
+    const next = decoder.decodeView(nextMessage, 1);
+    expect(next).toBe(batch);
+    expect(next.batchSequence).toBe(0n);
+    expect(next.columnCount).toBe(0);
+  });
+
   it("rejects a continuation batch before a schema-bearing batch", () => {
     const bytes = firstResultBatch();
     // RESULT_BATCH sequence is the byte immediately after kind + request ID.

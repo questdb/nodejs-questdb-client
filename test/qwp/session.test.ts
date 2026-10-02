@@ -2370,6 +2370,7 @@ describe("QwpIngressSession", () => {
 
     await expect(sender.flushAndGetSequence()).resolves.toBe(3n);
     expect(sender.publishedSequence).toBe(3n);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(4));
     expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1, 1]);
     const acknowledged = sender.waitForAcknowledged(3n, 1_000);
     socket.message(

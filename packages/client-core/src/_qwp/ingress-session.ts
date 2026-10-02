@@ -221,9 +221,11 @@ export interface QwpIngressSessionOptions {
    */
   ackTimeoutMs?: number;
   /**
-   * Bounded reconnection and at-least-once replay policy. Reconnection is
+   * Reconnection and at-least-once replay policy. Reconnection is
    * enabled by default for factory-created sessions; set false to keep one
    * fixed connection. Browser and non-persistent Node replay is memory-only.
+   * A running sender retries indefinitely by default; positive maxAttempts
+   * or maxDurationMs bounds subsequent reconnect episodes.
    *
    * An ACK lost during disconnect can cause a frame to be replayed after the
    * server accepted it; configure server-side deduplication when duplicates
@@ -677,6 +679,15 @@ export class QwpIngressSession {
     }
     this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
     this.deltaSymbolsPublished = this.symbolDictionary.size > 0;
+    if (connection instanceof QwpReconnectingIngressConnection) {
+      // Recovered frames advance the transport watermark without forwarding
+      // their OK to this session, so the response loop cannot wake waiters.
+      connection.setAcknowledgedFrameSequenceListener(() => {
+        if (this.acknowledgedSequenceWaiters.size > 0) {
+          this.resolveAcknowledgedSequenceWaiters();
+        }
+      });
+    }
     this.receiveLoop = this.consumeMessages();
   }
 
@@ -705,6 +716,14 @@ export class QwpIngressSession {
       options.reconnect === false
         ? undefined
         : { ...QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS, ...options.reconnect };
+    // The default five-minute budget governs a synchronous first connect,
+    // not a running sender's recovery. Explicit retry limits still opt into
+    // bounded post-connection reconnects.
+    const unboundedRunningReconnect =
+      options.reconnect === undefined ||
+      (options.reconnect !== false &&
+        !options.reconnect.maxAttempts &&
+        !options.reconnect.maxDurationMs);
     const initialConnectMode =
       options.initialConnectMode ??
       (options.reconnect === undefined && !options.backgroundStoreAndForward
@@ -749,6 +768,7 @@ export class QwpIngressSession {
           // server's, and only the caller's request decides whether ordinary
           // OKs or durable progress may advance it.
           options.durableAckKeepaliveMs !== undefined,
+          unboundedRunningReconnect,
         )
       : await factory(signal);
     try {

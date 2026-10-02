@@ -800,6 +800,113 @@ describe("QWP pooled client", () => {
     await client.close();
   });
 
+  it("routes replay resets to the active query when pooled request IDs overlap", async () => {
+    const primary = [
+      new FakeConnection("query-0-primary"),
+      new FakeConnection("query-1-primary"),
+    ];
+    const replacement = [
+      new FakeConnection("query-0-replacement"),
+      new FakeConnection("query-1-replacement"),
+    ];
+    const wires = primary.map((connection, slot) => [
+      connection,
+      replacement[slot],
+    ]);
+    const sessionReset = vi.fn();
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: (slot) =>
+          QwpEgressSession.connect(
+            async () => {
+              const connection = wires[slot].shift();
+              if (!connection) throw new Error("no connection available");
+              queueMicrotask(() =>
+                connection.receive(serverInfo(connection.endpoint)),
+              );
+              return connection;
+            },
+            {
+              reconnect: {
+                maxAttempts: 1,
+                initialBackoffMs: 0,
+                maxBackoffMs: 0,
+              },
+              onReplayReset: sessionReset,
+            },
+          ),
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 2,
+      },
+    );
+
+    const first = await client.borrowQuery();
+    const second = await client.borrowQuery();
+    let firstRows = 0;
+    let secondRows = 0;
+    const firstReset = vi.fn(() => {
+      firstRows = 0;
+    });
+    const secondReset = vi.fn(() => {
+      secondRows = 0;
+    });
+    const firstQuery = await first.query("select * from first", {
+      onReplayReset: firstReset,
+    });
+    const secondQuery = await second.query("select * from second", {
+      onReplayReset: secondReset,
+    });
+    expect(firstQuery.requestId).toBe(0n);
+    expect(secondQuery.requestId).toBe(0n);
+
+    const firstBatches = firstQuery[Symbol.asyncIterator]();
+    const secondBatches = secondQuery[Symbol.asyncIterator]();
+    primary[0].receive(emptyResultBatch(0n));
+    primary[1].receive(emptyResultBatch(0n));
+    await firstBatches.next();
+    firstRows++;
+    await secondBatches.next();
+    secondRows++;
+
+    primary[0].drop();
+    await vi.waitFor(() => expect(firstReset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(replacement[0].sent).toHaveLength(1));
+    expect(firstReset).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 0n }),
+    );
+    expect(secondReset).not.toHaveBeenCalled();
+    expect(sessionReset).not.toHaveBeenCalled();
+    expect(firstRows).toBe(0);
+    expect(secondRows).toBe(1);
+
+    replacement[0].receive(emptyResultBatch(0n));
+    replacement[0].receive(resultEnd(0n));
+    await firstBatches.next();
+    firstRows++;
+
+    primary[1].drop();
+    await vi.waitFor(() => expect(secondReset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(replacement[1].sent).toHaveLength(1));
+    expect(firstReset).toHaveBeenCalledOnce();
+    expect(sessionReset).not.toHaveBeenCalled();
+    expect([firstRows, secondRows]).toEqual([1, 0]);
+    replacement[1].receive(emptyResultBatch(0n));
+    replacement[1].receive(resultEnd(0n));
+    await secondBatches.next();
+    secondRows++;
+    await Promise.all([firstQuery.completion, secondQuery.completion]);
+    expect([firstRows, secondRows]).toEqual([1, 1]);
+    await Promise.all([first.close(), second.close()]);
+    await client.close();
+  });
+
   it("reaps idle excess connections without shrinking below pool minimums", async () => {
     vi.useFakeTimers();
     try {

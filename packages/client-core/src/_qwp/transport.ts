@@ -366,7 +366,8 @@ export type QwpInitialConnectMode =
 export interface QwpReconnectOptions {
   /**
    * Maximum connection sweeps per outage; zero is unlimited.
-   * Ingress defaults to zero, egress to 8.
+   * Ingress defaults to zero (and retries indefinitely once connected),
+   * egress to 8. Setting a positive ingress limit also bounds reconnects.
    */
   maxAttempts?: number;
   /**
@@ -381,7 +382,9 @@ export interface QwpReconnectOptions {
   maxBackoffMs?: number;
   /**
    * Total reconnect deadline; zero disables the deadline.
-   * Ingress defaults to 5 minutes, egress to 30s.
+   * Ingress defaults to 5 minutes for synchronous initial connection only;
+   * a configured value also bounds reconnects after connection. Egress
+   * defaults to 30 seconds per episode.
    */
   maxDurationMs?: number;
   /**

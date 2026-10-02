@@ -2025,9 +2025,9 @@ export class QwpSender {
 
   /**
    * Publishes pending rows without waiting for their server ACK and returns
-   * the highest frame sequence produced by this call, or -1n when empty.
-   * Pass the result to waitForAcknowledged() when an explicit delivery
-   * barrier is needed.
+   * the highest frame sequence published so far, including by auto-flush.
+   * Returns -1n only if no frame has been published. Pass the result to
+   * waitForAcknowledged() when an explicit delivery barrier is needed.
    */
   async flushAndGetSequence(): Promise<bigint> {
     return this.enqueueSequenceFlush(false);
@@ -2907,7 +2907,7 @@ export class QwpSender {
       if (this.activeSession?.waitForAcknowledged) {
         await this.activeSession.waitForAcknowledged(-1n);
       }
-      return { flushed: false, sequence: -1n };
+      return { flushed: false, sequence: this.publishedSequence };
     }
     const session = await this.getSession();
     const generation = this.stagingGeneration;
@@ -2915,7 +2915,7 @@ export class QwpSender {
       .filter((table) => table.rows.length > 0)
       .map((table) => ({ table, rows: table.rows.slice() }));
     if (snapshots.length === 0 && !this.hasDeferredMessages) {
-      return { flushed: false, sequence: -1n };
+      return { flushed: false, sequence: sessionPublishedSequence(session) };
     }
 
     const wireTables = snapshots.map(({ table, rows }) =>

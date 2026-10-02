@@ -127,26 +127,27 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 
 ### Reconnect and failover
 
-| Key                                | Value                       | Default            | Meaning                                                                                                   |
-| ---------------------------------- | --------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------- |
-| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                                   |
-| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                                          |
-| `reconnect_max_duration_millis`    | integer ms ≥ 0              | `300000` / `30000` | Budget for a reconnect episode; `0` disables the deadline. The QWP replacement for ILP's `retry_timeout`. |
-| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                                     |
-| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                                       |
-| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                                     |
-| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                                           |
-| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                                            |
-| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                                          |
-| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.                               |
+| Key                                | Value                       | Default            | Meaning                                                                                          |
+| ---------------------------------- | --------------------------- | ------------------ | ------------------------------------------------------------------------------------------------ |
+| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                          |
+| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                                 |
+| `reconnect_max_duration_millis`    | integer ms ≥ 0              | `300000` / `30000` | Ingress: sync startup budget; explicit value caps reconnects. Egress: per-episode. `0` disables. |
+| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                            |
+| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                              |
+| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                            |
+| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                                  |
+| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                                   |
+| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                                 |
+| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.                      |
 
 The three `reconnect_*` defaults differ by side, shown here as ingress / egress.
-Ingress additionally defaults to unlimited attempts, because a running producer
-must outlast any outage; egress stops after 8. The `failover_*` keys configure
-egress only and share the egress reconnect defaults. Zero disables a duration
-budget on both sides, matching `QwpReconnectOptions.maxDurationMs`; the backoff
-keys require a positive value, because a zero delay is a hot retry loop rather
-than a documented mode.
+Ingress additionally defaults to unlimited attempts and retries indefinitely
+after its first connection; a positive `maxAttempts` or `maxDurationMs`
+bounds later reconnects. Egress stops after 8 attempts. The
+`failover_*` keys configure egress only and share the egress reconnect defaults.
+Zero disables a duration budget on both sides, matching
+`QwpReconnectOptions.maxDurationMs`; the backoff keys require a positive value,
+because a zero delay is a hot retry loop rather than a documented mode.
 
 #### Timer bounds
 
@@ -829,8 +830,9 @@ await sender.waitForAcknowledged(sequence, 5_000);
 ```
 
 `flushAndGetSequence()` always resolves at the publication boundary, independently
-of `awaitServerAck`, and returns the highest stable frame sequence published by that
-call. It returns `-1n` when there was nothing to publish. `publishedSequence` and
+of `awaitServerAck`, and returns the sender's highest published frame sequence,
+including frames published by auto-flush before this call. It returns `-1n` only
+before any frame has been published. `publishedSequence` and
 `acknowledgedSequence` expose the current immutable watermarks. ACK waits are
 cumulative, so one later acknowledgement resolves all covered waits and callers may
 wait for different sequences concurrently. When durable ACK is being tracked, the
@@ -1057,11 +1059,16 @@ batch that can never fit is rejected before its first frame with
 to tune these bounds. The accounting includes a fixed per-frame allowance so many
 small frames cannot bypass the byte cap.
 
-The default memory policy uses full-jitter backoff from 100 ms to 5 seconds and a
-five-minute per-outage deadline; the initial connection remains fail-fast. Set
-`reconnect: false` for one fixed connection. Supplying a `reconnect` object tunes the
-bounds, emits lifecycle events through `onEvent`, and retains the earlier opt-in
-behavior of retrying initial connection establishment.
+In-memory publication completes once the frame enters the bounded replay queue;
+a serialized background drainer transmits it and replays unacknowledged frames
+on reconnect. Only a full queue blocks publication (for at most the append
+deadline); this memory is lost if the process exits. The default memory policy
+uses full-jitter backoff from 100 ms to 5 seconds and retries indefinitely
+after its first connection. The initial connection remains fail-fast unless
+reconnect is configured; a positive `maxAttempts` or `maxDurationMs` also bounds
+later reconnects. Set `reconnect: false` for one fixed connection. A `reconnect`
+object can tune backoff or emit lifecycle events through `onEvent` without
+limiting post-connection retries.
 
 QuestDB stops processing a connection's later frames after any ingress NACK so a
 cumulative ACK cannot advance across the rejected sequence. Reconnecting sessions
@@ -1422,9 +1429,13 @@ transport successfully rebinds, then refreshes to the new endpoint.
 
 Re-execution is at least once: a statement may have completed before its response was
 lost, and a consumer may already have observed a prefix of SELECT rows. Queued but
-unconsumed batches are discarded automatically. Configure `onReplayReset` when the
-application must clear an accumulated prefix before batches restart at sequence zero;
-the callback is an optional notification, not an opt-in. Set `reconnect: false` to use
+unconsumed batches are discarded automatically. Configure `onReplayReset` on the
+query when the application must clear an accumulated prefix before batches restart
+at sequence zero. The query-scoped callback is especially important with pooled
+leases: request IDs are local to each session and cannot distinguish concurrent
+leases in one shared session-options callback. A session-level `onReplayReset`
+remains the fallback for queries without their own callback. Both are optional
+notifications, not an opt-in. Set `reconnect: false` to use
 one fixed connection and surface failures without replay. Supplying a `reconnect`
 object tunes the failover bounds and also retains the earlier opt-in behavior of
 retrying initial connection establishment.
@@ -1645,6 +1656,27 @@ exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active
 query sends `CANCEL` and waits for the session's bounded cancellation drain; a
 connection that cannot drain is closed instead of being handed to another borrower.
+For a pooled query that accumulates consumed results, use a per-query reset callback:
+
+```typescript
+const lease = await db.borrowQuery();
+try {
+  let rowCount = 0;
+  const query = await lease.query("select * from trades", {
+    onReplayReset: () => {
+      rowCount = 0; // Drop the prefix observed before failover.
+    },
+  });
+  for await (const batch of query) rowCount += batch.rowCount;
+  await query.completion;
+} finally {
+  await lease.close();
+}
+```
+
+The callback is awaited before replay, overrides the session default for this
+query, and works with both `query()` and `queryViews()`. `requestId` alone is not
+a unique key across pooled query sessions.
 Each query lease exposes the same refreshed snapshot as `lease.serverInfo`; accessing
 it after returning the lease raises `QwpClientClosedError` rather than exposing a
 pooled connection now owned by another borrower.
@@ -1817,7 +1849,9 @@ try {
   trades
     .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
     .values.push("ETH-USD");
-  trades.getOrCreateColumn("price", QWP_COLUMN_TYPE.DOUBLE)!.values.push(2615.54);
+  trades
+    .getOrCreateColumn("price", QWP_COLUMN_TYPE.DOUBLE)!
+    .values.push(2615.54);
   // The designated timestamp is the column with an empty name.
   trades
     .getOrCreateColumn("", QWP_COLUMN_TYPE.TIMESTAMP_NANOS)!

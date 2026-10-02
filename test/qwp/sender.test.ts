@@ -911,7 +911,38 @@ describe("QWP high-level sender", () => {
     session.acknowledgeThrough(0n);
     await waiting;
     expect(sender.acknowledgedSequence).toBe(0n);
+    await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
+    await sender.close();
+  });
+
+  it("returns the published watermark after auto-flush without publishing again", async () => {
+    const session = new WatermarkSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+    });
     await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    expect(sender.publishedSequence).toBe(0n);
+    expect(sender.acknowledgedSequence).toBe(-1n);
+    await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
+    expect(session.sends).toHaveLength(1);
+
+    let acknowledged = false;
+    const waiting = sender.waitForAcknowledged(0n, 1_000).then(() => {
+      acknowledged = true;
+    });
+    await Promise.resolve();
+    expect(acknowledged).toBe(false);
+    session.acknowledgeThrough(0n);
+    await waiting;
+
+    await sender.table("events").longColumn("value", 2n).atNow();
+    await expect(sender.flushAndGetSequence()).resolves.toBe(1n);
+    expect(session.sends).toHaveLength(2);
+    session.acknowledgeThrough(1n);
+    await expect(sender.flush()).resolves.toBe(false);
     await sender.close();
   });
 
