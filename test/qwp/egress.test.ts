@@ -1103,6 +1103,65 @@ describe("QWP result batch decoder", () => {
     }
   });
 
+  it("byte-swaps every decoded Gorilla word on a big-endian host in both decoders", async () => {
+    // NATIVE_LITTLE_ENDIAN is fixed when result-batch.ts loads, and no CI host
+    // is big-endian. Make its Uint16Array.of(1) probe see big-endian storage
+    // and load a fresh copy: on this little-endian host, the swap that turns a
+    // big-endian host's words into little-endian int64 bytes then shows up as
+    // byte-reversed int32 halves in every decoded value.
+    const NativeUint16Array = Uint16Array;
+    class BigEndianUint16Array extends NativeUint16Array {
+      static of(...items: number[]) {
+        const array = new NativeUint16Array(items.length);
+        const view = new DataView(array.buffer);
+        items.forEach((item, index) => view.setUint16(index * 2, item, false));
+        return array;
+      }
+    }
+    const previous = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "Uint16Array",
+    )!;
+    Object.defineProperty(globalThis, "Uint16Array", {
+      ...previous,
+      value: BigEndianUint16Array,
+    });
+    let bigEndian:
+      | typeof import("../../packages/client-core/src/_qwp/_core/result-batch")
+      | undefined;
+    try {
+      vi.resetModules();
+      bigEndian = await import(
+        "../../packages/client-core/src/_qwp/_core/result-batch"
+      );
+    } finally {
+      Object.defineProperty(globalThis, "Uint16Array", previous);
+    }
+
+    // Every byte within each half is non-zero and distinct, so a dropped or
+    // misplaced byte changes the value.
+    const values = [0n, 0x10101n, 0x20202n, 0x30304n].map(
+      (offset) => 0x0123_4567_89ab_cdefn + offset,
+    );
+    const swapped = values.map((value) => {
+      const bytes = new DataView(new ArrayBuffer(8));
+      bytes.setInt32(0, Number(BigInt.asIntN(32, value)), false);
+      bytes.setInt32(4, Number(BigInt.asIntN(32, value >> 32n)), false);
+      return bytes.getBigInt64(0, true);
+    });
+    const frame = gorillaFrame(
+      values.length,
+      [["ts", QWP_COLUMN_TYPE.TIMESTAMP]],
+      (payload) => {
+        payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
+        payload.writeBytes(encodeQwpGorilla(values));
+      },
+    );
+    expect(
+      decodeBothWays(frame, new bigEndian!.QwpResultBatchDecoder()),
+    ).toEqual({ decoded: [swapped], viewed: [swapped] });
+  });
+
   it("decodes identifiers at the defensive egress byte bound", () => {
     // Query results may expose existing Java metadata created through another
     // protocol. Keep accepting up to 127 UTF-16 code units on egress, while
