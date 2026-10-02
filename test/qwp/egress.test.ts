@@ -11,6 +11,7 @@ import {
   QWP_FLAG_ZSTD,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
   QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
+  QWP_ENCODING_GORILLA,
   QWP_MAX_CELLS_PER_BATCH,
   QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
@@ -489,6 +490,55 @@ class FakeConnection implements QwpBinaryConnection {
   }
 }
 
+/** Deterministic xorshift32 values in [0, 1). */
+function xorshift32(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 0x100000000;
+  };
+}
+
+/**
+ * Gorilla decoding as specified, written for clarity rather than speed: one
+ * bit at a time, with the delta and timestamp as BigInts wrapped to int64.
+ * `stream` starts with the two raw timestamps. Returns the values and the
+ * number of bytes the encoded column occupies.
+ */
+function referenceGorillaDecode(
+  stream: Uint8Array,
+  count: number,
+): { values: bigint[]; byteLength: number } {
+  const view = new DataView(stream.buffer, stream.byteOffset, stream.length);
+  const values = [view.getBigInt64(0, true), view.getBigInt64(8, true)];
+  let position = 128;
+  const readBit = (): number => {
+    if (position >= stream.length * 8) {
+      throw new QwpProtocolError("truncated QWP Gorilla bitstream");
+    }
+    const bit = (stream[position >>> 3] >>> (position & 7)) & 1;
+    position++;
+    return bit;
+  };
+  let delta = BigInt.asIntN(64, values[1] - values[0]);
+  for (let index = 2; index < count; index++) {
+    let ones = 0;
+    while (ones < 4 && readBit() === 1) ones++;
+    if (ones > 0) {
+      const width = [7, 9, 12, 32][ones - 1];
+      let deltaOfDelta = 0n;
+      for (let bit = 0; bit < width; bit++) {
+        if (readBit() === 1) deltaOfDelta |= 1n << BigInt(bit);
+      }
+      delta = BigInt.asIntN(64, delta + BigInt.asIntN(width, deltaOfDelta));
+    }
+    values.push(BigInt.asIntN(64, values[index - 1] + delta));
+  }
+  return { values, byteLength: Math.ceil(position / 8) };
+}
+
 describe("QWP result batch decoder", () => {
   it("decodes nullable, variable-width, symbol, and Gorilla columns", () => {
     const message = decodeQwpEgressMessage(firstResultBatch());
@@ -748,6 +798,368 @@ describe("QWP result batch decoder", () => {
     expect(decode).toThrow(
       "truncated QWP payload while reading timestamp value",
     );
+  });
+
+  // A Gorilla-flagged RESULT_BATCH whose column bodies `write` supplies.
+  function gorillaFrame(
+    rows: number,
+    schema: readonly (readonly [string, QwpColumnType])[],
+    write: (payload: QwpByteWriter) => void,
+  ): Uint8Array {
+    const payload = resultBatchHeader(rows, schema);
+    write(payload);
+    return encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1);
+  }
+
+  // Column values from decode() and from decodeView().materialize(). Reusing
+  // one decoder also reuses its retained Gorilla storage.
+  function decodeBothWays(
+    frame: Uint8Array,
+    decoder = new QwpResultBatchDecoder(),
+  ): { decoded: (readonly unknown[])[]; viewed: (readonly unknown[])[] } {
+    const decodedMessage = decodeQwpEgressMessage(frame);
+    const viewedMessage = decodeQwpEgressMessage(frame);
+    if (
+      decodedMessage.kind !== "result-batch" ||
+      viewedMessage.kind !== "result-batch"
+    ) {
+      throw new Error("unexpected message");
+    }
+    decoder.resetQuerySchema();
+    const decoded = decoder
+      .decode(decodedMessage)
+      .columns.map((column) => column.values);
+    decoder.resetQuerySchema();
+    const view = decoder.decodeView(viewedMessage);
+    const viewed = view.materialize().columns.map((column) => column.values);
+    view.release();
+    return { decoded, viewed };
+  }
+
+  function expectDecodeErrors(frame: Uint8Array, error: string): void {
+    const message = decodeQwpEgressMessage(frame);
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+    for (const decode of [
+      () => new QwpResultBatchDecoder().decode(message),
+      () => new QwpResultBatchDecoder().decodeView(message),
+    ]) {
+      expect(decode).toThrow(QwpProtocolError);
+      expect(decode).toThrow(error);
+    }
+  }
+
+  it("decodes every Gorilla code width, NULLs, and int64 edges in both decoders", () => {
+    // Both edges of the 7-, 9-, 12-, and 32-bit delta-of-delta codes, then a
+    // run of `0` codes longer than the decoder's 32-bit bit buffer.
+    const deltaOfDeltas = [
+      1,
+      -1,
+      63,
+      -64,
+      64,
+      -65,
+      255,
+      -256,
+      256,
+      -257,
+      2047,
+      -2048,
+      2048,
+      -2049,
+      2 ** 31 - 1,
+      -(2 ** 31),
+      ...new Array<number>(70).fill(0),
+      5,
+      -5,
+      0,
+    ];
+    const series = (first: bigint, delta: bigint): bigint[] => {
+      const values = [first, first + delta];
+      for (const deltaOfDelta of deltaOfDeltas) {
+        delta += BigInt(deltaOfDelta);
+        values.push(values[values.length - 1] + delta);
+      }
+      return values;
+    };
+    // The same series, shifted to end at `last`.
+    const seriesTo = (last: bigint, delta: bigint): bigint[] => {
+      const values = series(0n, delta);
+      const shift = last - values[values.length - 1];
+      return values.map((value) => value + shift);
+    };
+    const columns = [
+      [
+        "micros",
+        QWP_COLUMN_TYPE.TIMESTAMP,
+        series(1_700_000_000_000_000n, 1_000n),
+      ],
+      // Beyond 2^53, where float64 arithmetic would lose precision.
+      [
+        "nanos",
+        QWP_COLUMN_TYPE.TIMESTAMP_NANOS,
+        series(1_700_000_000_000_000_000n, 1_000_000n),
+      ],
+      ["date", QWP_COLUMN_TYPE.DATE, series(1_700_000_000_000n, 1n)],
+      // Carries across the low 32-bit word, across zero, and at both ends of
+      // the int64 range: `min` starts at INT64_MIN and `max` ends at INT64_MAX.
+      ["carry", QWP_COLUMN_TYPE.TIMESTAMP, series(2n ** 32n - 5_000n, 1_000n)],
+      ["preEpoch", QWP_COLUMN_TYPE.TIMESTAMP, series(-5_000n, 1_000n)],
+      ["min", QWP_COLUMN_TYPE.TIMESTAMP, series(-(2n ** 63n), 2n ** 32n)],
+      ["max", QWP_COLUMN_TYPE.TIMESTAMP, seriesTo(2n ** 63n - 1n, 2n ** 32n)],
+    ] as const;
+    const rows = columns[0][2].length;
+    // Gorilla encodes only the non-NULL values of a nullable column.
+    const nulls = Array.from({ length: rows }, (_, row) => row % 3 === 1);
+    const nonNull = series(1_700_000_000_000_000n, 1_000n).slice(
+      0,
+      nulls.filter((isNull) => !isNull).length,
+    );
+    const bitmap = new Uint8Array(Math.ceil(rows / 8));
+    nulls.forEach((isNull, row) => {
+      if (isNull) bitmap[row >>> 3] |= 1 << (row & 7);
+    });
+    const ints = Array.from({ length: rows }, (_, row) => row);
+    const frame = gorillaFrame(
+      rows,
+      [
+        ...columns.map(([name, type]) => [name, type] as const),
+        ["nullable", QWP_COLUMN_TYPE.TIMESTAMP],
+        // Lines up only if every Gorilla column consumed exactly its bytes.
+        ["int", QWP_COLUMN_TYPE.INT],
+      ],
+      (payload) => {
+        for (const [, , values] of columns) {
+          payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
+          payload.writeBytes(encodeQwpGorilla(values));
+        }
+        payload.writeUint8(1).writeBytes(bitmap);
+        payload.writeUint8(QWP_ENCODING_GORILLA);
+        payload.writeBytes(encodeQwpGorilla(nonNull));
+        payload.writeUint8(0);
+        for (const value of ints) payload.writeInt32(value);
+      },
+    );
+    let dense = 0;
+    const expected = [
+      ...columns.map(([, , values]) => values),
+      nulls.map((isNull) => (isNull ? null : nonNull[dense++])),
+      ints,
+    ];
+    // One Gorilla TIMESTAMP column of `values`.
+    const timestampFrame = (values: readonly bigint[]): Uint8Array =>
+      gorillaFrame(
+        values.length,
+        [["ts", QWP_COLUMN_TYPE.TIMESTAMP]],
+        (payload) => {
+          payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
+          payload.writeBytes(encodeQwpGorilla(values));
+        },
+      );
+
+    // Three values first leave the smallest retained storage, so `frame` has
+    // to grow it in both decoders.
+    const decoder = new QwpResultBatchDecoder();
+    const small = [1n, 2n, 4n];
+    expect(decodeBothWays(timestampFrame(small), decoder)).toEqual({
+      decoded: [small],
+      viewed: [small],
+    });
+    expect(decodeBothWays(frame, decoder)).toEqual({
+      decoded: expected,
+      viewed: expected,
+    });
+
+    // Shorter columns through the same decoder, whose retained storage still
+    // holds the previous batch. Ten constant-interval values take one bit
+    // each after the first two: exactly one byte, with none to spare.
+    for (const short of [
+      [-3n, 7n, 7n, 2_000_000_000n],
+      Array.from({ length: 10 }, (_, index) => 1_000n * BigInt(index)),
+    ]) {
+      expect(decodeBothWays(timestampFrame(short), decoder)).toEqual({
+        decoded: [short],
+        viewed: [short],
+      });
+    }
+  });
+
+  it("decodes arbitrary Gorilla streams exactly like a bit-at-a-time reference", () => {
+    const next = xorshift32(0x9e3779b9);
+    const edges = [0n, -1n, 2n ** 32n - 1n, 2n ** 63n - 1n, -(2n ** 63n)];
+    const randomInt64 = (): bigint =>
+      next() < 0.3
+        ? edges[Math.floor(next() * edges.length)]
+        : BigInt.asIntN(
+            64,
+            (BigInt(Math.floor(next() * 2 ** 32)) << 32n) |
+              BigInt(Math.floor(next() * 2 ** 32)),
+          );
+    let decodedCount = 0;
+    let truncatedCount = 0;
+    for (let iteration = 0; iteration < 600; iteration++) {
+      const count = 3 + Math.floor(next() * 200);
+      const writer = new QwpByteWriter();
+      writer.writeBigInt64(randomInt64()).writeBigInt64(randomInt64());
+      // Mostly-zero bytes make long runs of `0` codes; dense ones make many
+      // 32-bit codes, whose sums wrap modulo 2^64.
+      const zeroBias = next();
+      const bodyLength = 1 + Math.floor(next() * count * 2);
+      for (let index = 0; index < bodyLength; index++) {
+        writer.writeUint8(next() < zeroBias ? 0 : Math.floor(next() * 256));
+      }
+      const stream = writer.toUint8Array();
+      let reference: ReturnType<typeof referenceGorillaDecode> | undefined;
+      try {
+        reference = referenceGorillaDecode(stream, count);
+      } catch (error) {
+        expect(error).toBeInstanceOf(QwpProtocolError);
+      }
+
+      if (reference === undefined) {
+        // The stream ends the payload, so no later column can supply the
+        // missing bits.
+        truncatedCount++;
+        expectDecodeErrors(
+          gorillaFrame(
+            count,
+            [["ts", QWP_COLUMN_TYPE.TIMESTAMP]],
+            (payload) => {
+              payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
+              payload.writeBytes(stream);
+            },
+          ),
+          "truncated QWP Gorilla bitstream",
+        );
+        continue;
+      }
+      decodedCount++;
+      const { values, byteLength } = reference;
+      const ints = Array.from({ length: count }, (_, row) => row);
+      const frame = gorillaFrame(
+        count,
+        [
+          ["ts", QWP_COLUMN_TYPE.TIMESTAMP],
+          ["int", QWP_COLUMN_TYPE.INT],
+        ],
+        (payload) => {
+          payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
+          payload.writeBytes(stream.subarray(0, byteLength));
+          payload.writeUint8(0);
+          for (const value of ints) payload.writeInt32(value);
+        },
+      );
+      expect(decodeBothWays(frame)).toEqual({
+        decoded: [values, ints],
+        viewed: [values, ints],
+      });
+    }
+    // Both outcomes must be exercised, or the comparison proves little.
+    expect(decodedCount).toBeGreaterThan(400);
+    expect(truncatedCount).toBeGreaterThan(80);
+  });
+
+  it("rejects malformed Gorilla timestamp columns in both decoders", () => {
+    // Three 32-bit delta-of-delta codes: 108 bits in 14 bytes.
+    const wide = encodeQwpGorilla([0n, 0n, 1_000_000n, 1_000_000n, 3_000_000n]);
+    const header = wide.subarray(0, 16);
+    const cases: [number, Uint8Array, string][] = [
+      [5, Uint8Array.of(2, ...wide), "unknown timestamp encoding: 2"],
+      [
+        2,
+        Uint8Array.of(1, ...encodeQwpGorilla([1n, 2n])),
+        "Gorilla-encoded column has fewer than three values: 2",
+      ],
+      [
+        5,
+        Uint8Array.of(1, ...wide.subarray(0, 7)),
+        "truncated QWP payload while reading first Gorilla timestamp",
+      ],
+      [
+        5,
+        Uint8Array.of(1, ...wide.subarray(0, 15)),
+        "truncated QWP payload while reading second Gorilla timestamp",
+      ],
+      // Too few bits for one per value: rejected before decoding starts.
+      [5, Uint8Array.of(1, ...header), "truncated QWP Gorilla bitstream"],
+      [
+        1_000,
+        Uint8Array.of(1, ...header, 0, 0),
+        "truncated QWP Gorilla bitstream",
+      ],
+      // Enough bits for that, but the last 32-bit code runs past the end.
+      [
+        5,
+        Uint8Array.of(1, ...wide.subarray(0, wide.length - 1)),
+        "truncated QWP Gorilla bitstream",
+      ],
+    ];
+    for (const [rows, column, error] of cases) {
+      expectDecodeErrors(
+        gorillaFrame(rows, [["ts", QWP_COLUMN_TYPE.TIMESTAMP]], (payload) => {
+          payload.writeUint8(0).writeBytes(column);
+        }),
+        error,
+      );
+    }
+  });
+
+  it("byte-swaps every decoded Gorilla word on a big-endian host in both decoders", async () => {
+    // NATIVE_LITTLE_ENDIAN is fixed when result-batch.ts loads, and no CI host
+    // is big-endian. Make its Uint16Array.of(1) probe see big-endian storage
+    // and load a fresh copy: on this little-endian host, the swap that turns a
+    // big-endian host's words into little-endian int64 bytes then shows up as
+    // byte-reversed int32 halves in every decoded value.
+    const NativeUint16Array = Uint16Array;
+    class BigEndianUint16Array extends NativeUint16Array {
+      static of(...items: number[]) {
+        const array = new NativeUint16Array(items.length);
+        const view = new DataView(array.buffer);
+        items.forEach((item, index) => view.setUint16(index * 2, item, false));
+        return array;
+      }
+    }
+    const previous = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "Uint16Array",
+    )!;
+    Object.defineProperty(globalThis, "Uint16Array", {
+      ...previous,
+      value: BigEndianUint16Array,
+    });
+    let bigEndian:
+      | typeof import("../../packages/client-core/src/_qwp/_core/result-batch")
+      | undefined;
+    try {
+      vi.resetModules();
+      bigEndian = await import(
+        "../../packages/client-core/src/_qwp/_core/result-batch"
+      );
+    } finally {
+      Object.defineProperty(globalThis, "Uint16Array", previous);
+    }
+
+    // Every byte within each half is non-zero and distinct, so a dropped or
+    // misplaced byte changes the value.
+    const values = [0n, 0x10101n, 0x20202n, 0x30304n].map(
+      (offset) => 0x0123_4567_89ab_cdefn + offset,
+    );
+    const swapped = values.map((value) => {
+      const bytes = new DataView(new ArrayBuffer(8));
+      bytes.setInt32(0, Number(BigInt.asIntN(32, value)), false);
+      bytes.setInt32(4, Number(BigInt.asIntN(32, value >> 32n)), false);
+      return bytes.getBigInt64(0, true);
+    });
+    const frame = gorillaFrame(
+      values.length,
+      [["ts", QWP_COLUMN_TYPE.TIMESTAMP]],
+      (payload) => {
+        payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
+        payload.writeBytes(encodeQwpGorilla(values));
+      },
+    );
+    expect(
+      decodeBothWays(frame, new bigEndian!.QwpResultBatchDecoder()),
+    ).toEqual({ decoded: [swapped], viewed: [swapped] });
   });
 
   it("decodes identifiers at the defensive egress byte bound", () => {

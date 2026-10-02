@@ -16,7 +16,7 @@ export interface BenchmarkWorkload {
 }
 
 /** Deterministic, dependency-free xorshift32 generator. */
-function random(seed: number): () => number {
+export function random(seed: number): () => number {
   let state = seed || 0x9e3779b9;
   const next = (): number => {
     state ^= state << 13;
