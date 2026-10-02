@@ -312,7 +312,9 @@ await sender.close();
 
 QWP `close()` publishes completed rows and waits up to 5 seconds for their
 committed-frame ACK watermark. Configure `closeFlushTimeoutMs` (or
-`close_flush_timeout_millis` in a `ws::` string); `0` publishes without waiting.
+`close_flush_timeout_millis` in a `ws::` string); `0` skips the ACK wait but
+still waits up to 5 seconds for RAM-backed frames to reach the socket, rejecting
+rather than silently dropping them if that deadline expires.
 An unfinished row is not completed implicitly.
 
 The server intentionally withholds ACKs for deferred frames until commit. The

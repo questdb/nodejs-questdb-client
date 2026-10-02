@@ -19,6 +19,7 @@ import {
   QwpPoolAcquireTimeoutError,
   type QwpPoolSlotReservation,
   QwpSender,
+  QwpSenderCloseTimeoutError,
   QwpSenderSession,
   designatedTimestamp,
   long,
@@ -665,6 +666,35 @@ describe("QWP pooled client", () => {
     await closing;
     expect(senderSessions[0].flushes).toBe(1);
     expect(senderSessions[0].closes).toBe(1);
+  });
+
+  it("returns a post-shutdown sender delivery timeout to its borrower", async () => {
+    const timeout = new QwpSenderCloseTimeoutError(0, 0n, -1n);
+    const session = new FakeSenderSession();
+    session.close = () => Promise.reject(timeout);
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          const sender = new QwpSender(async () => session);
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 0,
+      },
+    );
+
+    const borrowed = await client.borrowSender();
+    await client.close();
+    await expect(borrowed.close()).rejects.toBe(timeout);
   });
 
   it("runs independently borrowed query connections concurrently", async () => {

@@ -1608,6 +1608,13 @@ export class QwpIngressSession {
     return poll.publication;
   }
 
+  /** @internal Waits for RAM replay to reach the socket before fast close. */
+  waitForPendingSends(): Promise<void> {
+    return this.connection instanceof QwpReconnectingIngressConnection
+      ? this.connection.waitForPendingSends()
+      : Promise.resolve();
+  }
+
   /** @internal Registers runtime-specific cleanup owned by this session. */
   registerCloseHook(hook: () => void | Promise<void>): void {
     if (this.closing) {

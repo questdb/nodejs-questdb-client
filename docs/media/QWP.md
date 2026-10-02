@@ -854,9 +854,11 @@ Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` 
 assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`, or
 `ms` timestamp. `close()` publishes completed rows and waits for the committed-frame
 ACK watermark for up to `closeFlushTimeoutMs` (5 seconds by default, matching the
-Java client). Set it to `0` or a negative value for a fast close, which publishes
-without the ACK drain; publication itself stays bounded, so `close()` always
-returns. An unfinished row is still discarded with a warning, including a row
+Java client). Set it to `0` or a negative value for a fast close, which skips
+the ACK drain but still waits up to 5 seconds for RAM-backed frames to reach
+the socket. If they cannot be sent in that time, `close()` rejects with
+`QwpSenderCloseTimeoutError` rather than silently discarding them. An unfinished
+row is still discarded with a warning, including a row
 opened by `table()` whose every attempted value was nullish and therefore left it
 with zero columns. The configuration-string equivalent is
 `close_flush_timeout_millis`.
@@ -1692,7 +1694,10 @@ shutdown; subsequent operations on it fail as closed. Borrowed senders remain un
 their producer's ownership: shutdown waits up to `acquireTimeoutMs` (capped at five
 seconds) for them to return and never closes a sender underneath its borrower. A
 sender returned during or after shutdown is closed instead of re-entering the pool,
-while a sender that outlives the bounded wait owns its eventual teardown.
+while a sender that outlives the bounded wait owns its eventual teardown. If an idle
+RAM-backed sender cannot send its published frames before fast close's deadline,
+`QwpClient.close()` rejects with `QwpSenderCloseTimeoutError` rather than silently
+reporting a successful shutdown.
 
 Pooled sender `close()` flushes completed rows, discards an unfinished row with a
 warning, and resets staging before reuse. With Node store-and-forward enabled, the
@@ -1725,7 +1730,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpSendError`                          | Base class for a frame that could not be handed to the transport                                            |
 | `QwpSendClosedError`                    | The WebSocket was closed, or not open, when a frame was sent                                                |
 | `QwpSendTimeoutError`                   | A send did not drain before its deadline; delivery is unknown                                               |
-| `QwpSenderCloseTimeoutError`            | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
+| `QwpSenderCloseTimeoutError`            | Sender shutdown could not publish, transmit RAM-backed frames, or ACK-drain committed frames in time        |
 | `QwpIngressNackError`                   | QuestDB rejected an ingress frame                                                                           |
 | `QwpIngressAckTimeoutError`             | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
 | `QwpIngressAckAbandonedError`           | A recovered frame was deliberately retired without a server ACK                                             |

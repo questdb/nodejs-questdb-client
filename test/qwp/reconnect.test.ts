@@ -1604,6 +1604,99 @@ describe("QWP ingress reconnect and replay", () => {
     }
   });
 
+  it("sends RAM-published frames before a fast close during reconnect", async () => {
+    const first = new FakeConnection("primary");
+    const replacement = new FakeConnection("secondary");
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => (factoryCalls++ === 0 ? first : reconnecting),
+      {
+        reconnect: {
+          maxAttempts: 2,
+          initialBackoffMs: 0,
+          maxBackoffMs: 0,
+          maxDurationMs: 1_000,
+        },
+      },
+    );
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
+    try {
+      first.drop();
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+      await sender.table("events").longColumn("value", 1n).atNow();
+      await expect(sender.flush()).resolves.toBe(true);
+      expect(replacement.sent).toHaveLength(0);
+
+      const closing = sender.close();
+      let closed = false;
+      void closing.then(
+        () => {
+          closed = true;
+        },
+        () => {
+          closed = true;
+        },
+      );
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      releaseReconnect(replacement);
+      await expect(closing).resolves.toBeUndefined();
+      expect(replacement.sent).toHaveLength(1);
+      // Fast close does not need a server ACK, only a physical send.
+      expect(session.metrics.totalAcks).toBe(0);
+    } finally {
+      releaseReconnect(replacement);
+      await sender.close().catch(() => undefined);
+    }
+  });
+
+  it("reports undelivered RAM frames when fast close exceeds its send deadline", async () => {
+    const first = new FakeConnection("primary");
+    const replacement = new FakeConnection("secondary");
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => (factoryCalls++ === 0 ? first : reconnecting),
+      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0, maxDurationMs: 0 } },
+    );
+    const sender = new QwpSender(async () => session, {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
+    try {
+      first.drop();
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+      await sender.table("events").longColumn("value", 1n).atNow();
+      await sender.flush();
+      vi.useFakeTimers();
+      const outcome = sender.close().then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      releaseReconnect(replacement);
+      expect(await outcome).toMatchObject({
+        name: "QwpSenderCloseTimeoutError",
+      });
+      expect(replacement.sent).toHaveLength(0);
+      expect(sender.metrics.closed).toBe(true);
+    } finally {
+      releaseReconnect(replacement);
+      vi.useRealTimers();
+      await sender.close().catch(() => undefined);
+    }
+  });
+
   it("keeps default RAM replay alive past the five-minute reconnect budget", async () => {
     vi.useFakeTimers();
     let session: QwpIngressSession | undefined;

@@ -135,12 +135,13 @@ pool-only keys.</p>
 authentication, acknowledgements, transactions, retry, or store-and-forward and is
 not available in browsers. See the QWP guide for the lower-level Node UDP API.</p>
 <p>QWP <code>flush()</code> resolves at the local publication boundary by default in both
-Node.js and browsers, matching the Java QWP sender. Set
-<code>qwp.sender.awaitServerAck: true</code> to wait for QuestDB's protocol ACK instead,
+Node.js and browsers, matching the Java QWP sender. Without a journal, that
+boundary is the bounded in-memory replay queue: a background drainer sends
+frames in order, even while the sender keeps accepting flushes during an outage.
+Set <code>qwp.sender.awaitServerAck: true</code> to wait for QuestDB's protocol ACK instead,
 or <code>awaitDurableAck: true</code> to wait through durable upload. When Node QWP is
 configured with <code>qwp.webSocket.storeAndForward</code>, the publication boundary is
-the local durable journal, so the sender can accept flushes while QuestDB is
-offline and a background drainer reconnects and sends them in order.
+the local durable journal; only that mode survives a process restart.
 Set <code>initialConnectMode</code> to <code>&quot;off&quot;</code> (the default), <code>&quot;sync&quot;</code>, or <code>&quot;async&quot;</code> to
 choose fail-fast, bounded blocking, or background startup. Supplying reconnect
 budget settings without an explicit mode promotes initial startup to <code>&quot;sync&quot;</code>,
@@ -181,7 +182,9 @@ tables is not one cross-table transaction.</p>
 
 <p>QWP <code>close()</code> publishes completed rows and waits up to 5 seconds for their
 committed-frame ACK watermark. Configure <code>closeFlushTimeoutMs</code> (or
-<code>close_flush_timeout_millis</code> in a <code>ws::</code> string); <code>0</code> publishes without waiting.
+<code>close_flush_timeout_millis</code> in a <code>ws::</code> string); <code>0</code> skips the ACK wait but
+still waits up to 5 seconds for RAM-backed frames to reach the socket, rejecting
+rather than silently dropping them if that deadline expires.
 An unfinished row is not completed implicitly.</p>
 <p>The server intentionally withholds ACKs for deferred frames until commit. The
 sender pipelines transactional auto-flushes without waiting for those ACKs,

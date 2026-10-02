@@ -1079,6 +1079,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     });
   }
 
+  /** @internal Waits for RAM-backed frames to reach the socket, not for ACKs. */
+  async waitForPendingSends(): Promise<void> {
+    if (!(this.store instanceof QwpMemoryReplayStore)) return;
+    await this.drainTail;
+    this.throwIfUnavailable();
+  }
+
   private startBackgroundConnect(): void {
     const connecting = this.connectLoop(undefined, false, "unbounded");
     this.reconnectTask = connecting;

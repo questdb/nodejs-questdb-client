@@ -95,9 +95,10 @@ export interface QwpSenderOptions {
   durableAckTimeoutMs?: number;
   /**
    * Maximum time close() spends publishing queued rows and waiting for the
-   * server ACK watermark. Zero or a negative value skips the drain. Defaults
-   * to 5 seconds. Capped at 2,147,483,647ms (the host timer ceiling); a larger
-   * value throws a `RangeError`.
+   * server ACK watermark. Zero or a negative value skips the ACK wait, but
+   * RAM-backed frames still have up to 5 seconds to reach the socket before
+   * close() reports a timeout. Defaults to 5 seconds. Capped at 2,147,483,647ms
+   * (the host timer ceiling); a larger value throws a `RangeError`.
    */
   closeFlushTimeoutMs?: number;
   /** QWP frame encoding options supported by the high-level sender. */
@@ -170,6 +171,8 @@ export interface QwpSenderSession {
     targetSequence: bigint,
     timeoutMs?: number,
   ): Promise<void>;
+  /** @internal Optional socket-send boundary for RAM-backed fast close. */
+  waitForPendingSends?(): Promise<void>;
   waitForDurable(
     response: QwpIngressResponse,
     timeoutMs?: number,
@@ -2180,6 +2183,15 @@ export class QwpSender {
       await this.withCloseDeadline(closeFlush, publishDeadline);
 
       const session = this.activeSession;
+      // Fast close skips the server ACK, not the physical send. RAM replay
+      // publishes before its background drainer transmits; closing the session
+      // now would erase accepted frames without ever putting them on the wire.
+      if (drainDeadline === undefined && session?.waitForPendingSends) {
+        await this.withCloseDeadline(
+          session.waitForPendingSends(),
+          publishDeadline,
+        );
+      }
       const target = this.lastCommitBoundarySequence;
       if (
         drainDeadline !== undefined &&
