@@ -881,6 +881,12 @@ describe("QWP result batch decoder", () => {
       }
       return values;
     };
+    // The same series, shifted to end at `last`.
+    const seriesTo = (last: bigint, delta: bigint): bigint[] => {
+      const values = series(0n, delta);
+      const shift = last - values[values.length - 1];
+      return values.map((value) => value + shift);
+    };
     const columns = [
       [
         "micros",
@@ -895,15 +901,11 @@ describe("QWP result batch decoder", () => {
       ],
       ["date", QWP_COLUMN_TYPE.DATE, series(1_700_000_000_000n, 1n)],
       // Carries across the low 32-bit word, across zero, and at both ends of
-      // the int64 range.
+      // the int64 range: `min` starts at INT64_MIN and `max` ends at INT64_MAX.
       ["carry", QWP_COLUMN_TYPE.TIMESTAMP, series(2n ** 32n - 5_000n, 1_000n)],
       ["preEpoch", QWP_COLUMN_TYPE.TIMESTAMP, series(-5_000n, 1_000n)],
       ["min", QWP_COLUMN_TYPE.TIMESTAMP, series(-(2n ** 63n), 2n ** 32n)],
-      [
-        "max",
-        QWP_COLUMN_TYPE.TIMESTAMP,
-        series(2n ** 63n - 2n ** 40n, 2n ** 32n),
-      ],
+      ["max", QWP_COLUMN_TYPE.TIMESTAMP, seriesTo(2n ** 63n - 1n, 2n ** 32n)],
     ] as const;
     const rows = columns[0][2].length;
     // Gorilla encodes only the non-NULL values of a nullable column.
@@ -943,7 +945,25 @@ describe("QWP result batch decoder", () => {
       nulls.map((isNull) => (isNull ? null : nonNull[dense++])),
       ints,
     ];
+    // One Gorilla TIMESTAMP column of `values`.
+    const timestampFrame = (values: readonly bigint[]): Uint8Array =>
+      gorillaFrame(
+        values.length,
+        [["ts", QWP_COLUMN_TYPE.TIMESTAMP]],
+        (payload) => {
+          payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
+          payload.writeBytes(encodeQwpGorilla(values));
+        },
+      );
+
+    // Three values first leave the smallest retained storage, so `frame` has
+    // to grow it in both decoders.
     const decoder = new QwpResultBatchDecoder();
+    const small = [1n, 2n, 4n];
+    expect(decodeBothWays(timestampFrame(small), decoder)).toEqual({
+      decoded: [small],
+      viewed: [small],
+    });
     expect(decodeBothWays(frame, decoder)).toEqual({
       decoded: expected,
       viewed: expected,
@@ -956,15 +976,7 @@ describe("QWP result batch decoder", () => {
       [-3n, 7n, 7n, 2_000_000_000n],
       Array.from({ length: 10 }, (_, index) => 1_000n * BigInt(index)),
     ]) {
-      const shortFrame = gorillaFrame(
-        short.length,
-        [["ts", QWP_COLUMN_TYPE.TIMESTAMP]],
-        (payload) => {
-          payload.writeUint8(0).writeUint8(QWP_ENCODING_GORILLA);
-          payload.writeBytes(encodeQwpGorilla(short));
-        },
-      );
-      expect(decodeBothWays(shortFrame, decoder)).toEqual({
+      expect(decodeBothWays(timestampFrame(short), decoder)).toEqual({
         decoded: [short],
         viewed: [short],
       });
