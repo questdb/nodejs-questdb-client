@@ -1214,10 +1214,10 @@ function readGorillaEncoding(reader: QwpByteReader): boolean {
  * The loop does no BigInt work. Bits come from a 32-bit accumulator rather
  * than one read per bit, and the int64 delta and timestamp are carried as
  * int32 halves with explicit carries, wrapping modulo 2^64 exactly as
- * BigInt.asIntN(64, ...) does. On 10,000-row batches that decodes column
- * views 3-32x faster in V8 and 65-110x faster in JavaScriptCore than the
- * per-bit BigInt decoder it replaced: least for a constant interval, most for
- * irregular timestamps.
+ * BigInt.asIntN(64, ...) does. Against the per-bit BigInt decoder it
+ * replaced, 10,000-row column views decode 3-32x faster in V8 -- least for a
+ * constant interval, most for irregular timestamps -- and over 60x faster in
+ * JavaScriptCore.
  */
 function decodeGorillaTimestamps(
   reader: QwpByteReader,
