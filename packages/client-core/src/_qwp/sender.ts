@@ -95,9 +95,10 @@ export interface QwpSenderOptions {
   durableAckTimeoutMs?: number;
   /**
    * Maximum time close() spends publishing queued rows and waiting for the
-   * server ACK watermark. Zero or a negative value skips the drain. Defaults
-   * to 5 seconds. Capped at 2,147,483,647ms (the host timer ceiling); a larger
-   * value throws a `RangeError`.
+   * server ACK watermark. Zero or a negative value skips the ACK wait, but
+   * RAM-backed frames still have up to 5 seconds to reach the socket before
+   * close() reports a timeout. Defaults to 5 seconds. Capped at 2,147,483,647ms
+   * (the host timer ceiling); a larger value throws a `RangeError`.
    */
   closeFlushTimeoutMs?: number;
   /** QWP frame encoding options supported by the high-level sender. */
@@ -170,6 +171,8 @@ export interface QwpSenderSession {
     targetSequence: bigint,
     timeoutMs?: number,
   ): Promise<void>;
+  /** @internal Optional socket-send boundary for RAM-backed fast close. */
+  waitForPendingSends?(): Promise<void>;
   waitForDurable(
     response: QwpIngressResponse,
     timeoutMs?: number,
@@ -2025,9 +2028,9 @@ export class QwpSender {
 
   /**
    * Publishes pending rows without waiting for their server ACK and returns
-   * the highest frame sequence produced by this call, or -1n when empty.
-   * Pass the result to waitForAcknowledged() when an explicit delivery
-   * barrier is needed.
+   * the highest frame sequence published so far, including by auto-flush.
+   * Returns -1n only if no frame has been published. Pass the result to
+   * waitForAcknowledged() when an explicit delivery barrier is needed.
    */
   async flushAndGetSequence(): Promise<bigint> {
     return this.enqueueSequenceFlush(false);
@@ -2180,6 +2183,15 @@ export class QwpSender {
       await this.withCloseDeadline(closeFlush, publishDeadline);
 
       const session = this.activeSession;
+      // Fast close skips the server ACK, not the physical send. RAM replay
+      // publishes before its background drainer transmits; closing the session
+      // now would erase accepted frames without ever putting them on the wire.
+      if (drainDeadline === undefined && session?.waitForPendingSends) {
+        await this.withCloseDeadline(
+          session.waitForPendingSends(),
+          publishDeadline,
+        );
+      }
       const target = this.lastCommitBoundarySequence;
       if (
         drainDeadline !== undefined &&
@@ -2907,7 +2919,7 @@ export class QwpSender {
       if (this.activeSession?.waitForAcknowledged) {
         await this.activeSession.waitForAcknowledged(-1n);
       }
-      return { flushed: false, sequence: -1n };
+      return { flushed: false, sequence: this.publishedSequence };
     }
     const session = await this.getSession();
     const generation = this.stagingGeneration;
@@ -2915,7 +2927,7 @@ export class QwpSender {
       .filter((table) => table.rows.length > 0)
       .map((table) => ({ table, rows: table.rows.slice() }));
     if (snapshots.length === 0 && !this.hasDeferredMessages) {
-      return { flushed: false, sequence: -1n };
+      return { flushed: false, sequence: sessionPublishedSequence(session) };
     }
 
     const wireTables = snapshots.map(({ table, rows }) =>

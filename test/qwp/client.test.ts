@@ -16,9 +16,11 @@ import {
   QwpEgressSessionOptions,
   QwpHandshakeMetadata,
   QwpIngressResponse,
+  QwpIngressSession,
   QwpPoolAcquireTimeoutError,
   type QwpPoolSlotReservation,
   QwpSender,
+  QwpSenderCloseTimeoutError,
   QwpSenderSession,
   designatedTimestamp,
   long,
@@ -667,6 +669,35 @@ describe("QWP pooled client", () => {
     expect(senderSessions[0].closes).toBe(1);
   });
 
+  it("returns a post-shutdown sender delivery timeout to its borrower", async () => {
+    const timeout = new QwpSenderCloseTimeoutError(0, 0n, -1n);
+    const session = new FakeSenderSession();
+    session.close = () => Promise.reject(timeout);
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          const sender = new QwpSender(async () => session);
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 0,
+      },
+    );
+
+    const borrowed = await client.borrowSender();
+    await client.close();
+    await expect(borrowed.close()).rejects.toBe(timeout);
+  });
+
   it("runs independently borrowed query connections concurrently", async () => {
     const connections: FakeConnection[] = [];
     let queryCreations = 0;
@@ -800,6 +831,113 @@ describe("QWP pooled client", () => {
     await client.close();
   });
 
+  it("routes replay resets to the active query when pooled request IDs overlap", async () => {
+    const primary = [
+      new FakeConnection("query-0-primary"),
+      new FakeConnection("query-1-primary"),
+    ];
+    const replacement = [
+      new FakeConnection("query-0-replacement"),
+      new FakeConnection("query-1-replacement"),
+    ];
+    const wires = primary.map((connection, slot) => [
+      connection,
+      replacement[slot],
+    ]);
+    const sessionReset = vi.fn();
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: (slot) =>
+          QwpEgressSession.connect(
+            async () => {
+              const connection = wires[slot].shift();
+              if (!connection) throw new Error("no connection available");
+              queueMicrotask(() =>
+                connection.receive(serverInfo(connection.endpoint)),
+              );
+              return connection;
+            },
+            {
+              reconnect: {
+                maxAttempts: 1,
+                initialBackoffMs: 0,
+                maxBackoffMs: 0,
+              },
+              onReplayReset: sessionReset,
+            },
+          ),
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 2,
+      },
+    );
+
+    const first = await client.borrowQuery();
+    const second = await client.borrowQuery();
+    let firstRows = 0;
+    let secondRows = 0;
+    const firstReset = vi.fn(() => {
+      firstRows = 0;
+    });
+    const secondReset = vi.fn(() => {
+      secondRows = 0;
+    });
+    const firstQuery = await first.query("select * from first", {
+      onReplayReset: firstReset,
+    });
+    const secondQuery = await second.query("select * from second", {
+      onReplayReset: secondReset,
+    });
+    expect(firstQuery.requestId).toBe(0n);
+    expect(secondQuery.requestId).toBe(0n);
+
+    const firstBatches = firstQuery[Symbol.asyncIterator]();
+    const secondBatches = secondQuery[Symbol.asyncIterator]();
+    primary[0].receive(emptyResultBatch(0n));
+    primary[1].receive(emptyResultBatch(0n));
+    await firstBatches.next();
+    firstRows++;
+    await secondBatches.next();
+    secondRows++;
+
+    primary[0].drop();
+    await vi.waitFor(() => expect(firstReset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(replacement[0].sent).toHaveLength(1));
+    expect(firstReset).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 0n }),
+    );
+    expect(secondReset).not.toHaveBeenCalled();
+    expect(sessionReset).not.toHaveBeenCalled();
+    expect(firstRows).toBe(0);
+    expect(secondRows).toBe(1);
+
+    replacement[0].receive(emptyResultBatch(0n));
+    replacement[0].receive(resultEnd(0n));
+    await firstBatches.next();
+    firstRows++;
+
+    primary[1].drop();
+    await vi.waitFor(() => expect(secondReset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(replacement[1].sent).toHaveLength(1));
+    expect(firstReset).toHaveBeenCalledOnce();
+    expect(sessionReset).not.toHaveBeenCalled();
+    expect([firstRows, secondRows]).toEqual([1, 0]);
+    replacement[1].receive(emptyResultBatch(0n));
+    replacement[1].receive(resultEnd(0n));
+    await secondBatches.next();
+    secondRows++;
+    await Promise.all([firstQuery.completion, secondQuery.completion]);
+    expect([firstRows, secondRows]).toEqual([1, 1]);
+    await Promise.all([first.close(), second.close()]);
+    await client.close();
+  });
+
   it("reaps idle excess connections without shrinking below pool minimums", async () => {
     vi.useFakeTimers();
     try {
@@ -863,6 +1001,90 @@ describe("QWP pooled client", () => {
         2,
       );
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an idle RAM sender until its offline publications are acknowledged", async () => {
+    vi.useFakeTimers();
+    const primary = new FakeConnection("primary");
+    const replacement = new FakeConnection("replacement");
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    let factoryCalls = 0;
+    let session!: QwpIngressSession;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          session = await QwpIngressSession.connect(
+            async () => (factoryCalls++ === 0 ? primary : reconnecting),
+            {
+              reconnect: {
+                initialBackoffMs: 0,
+                maxBackoffMs: 0,
+                maxDurationMs: 0,
+              },
+            },
+          );
+          const sender = new QwpSender(async () => session, {
+            autoFlush: false,
+            closeFlushTimeoutMs: 0,
+          });
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        idleTimeoutMs: 100,
+        maxLifetimeMs: 0,
+        housekeepingIntervalMs: 100,
+      },
+    );
+    try {
+      const lease = await client.borrowSender();
+      primary.drop();
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+      await lease.table("events").longColumn("value", 123n).atNow();
+      await expect(lease.flush()).resolves.toBe(true);
+      expect(primary.sent).toHaveLength(0);
+      expect(session.metrics).toMatchObject({
+        pendingReplayFrames: 1,
+        memoryReplayMaxBytes: expect.any(Number),
+      });
+      await lease.close();
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(client.metrics.senders).toMatchObject({ total: 1, available: 1 });
+      expect(replacement.sent).toHaveLength(0);
+
+      releaseReconnect(replacement);
+      await vi.waitFor(() => expect(replacement.sent).toHaveLength(1));
+      replacement.receive(
+        new QwpByteWriter()
+          .writeUint8(QWP_STATUS.OK)
+          .writeBigUint64(0n)
+          .writeUint16(0)
+          .toUint8Array(),
+      );
+      await vi.waitFor(() =>
+        expect(session.metrics.pendingReplayFrames).toBe(0),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      expect(client.metrics.senders.total).toBe(0);
+    } finally {
+      releaseReconnect(replacement);
+      const closing = client.close();
+      await vi.advanceTimersByTimeAsync(5_001);
+      await closing.catch(() => undefined);
       vi.useRealTimers();
     }
   });

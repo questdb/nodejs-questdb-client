@@ -68,10 +68,10 @@ import {
  * cannot disagree. They used to: the session default object was replaced
  * wholesale by any partial `reconnect`, and the constructor's own per-field
  * fallbacks then supplied maxAttempts 3 and maxDurationMs 30s instead of the
- * unlimited/5-minute policy the session promises. Setting one documented key --
- * `reconnect_max_duration_millis`, say, which QWP.md presents as the ws/wss
- * replacement for ILP's `retry_timeout` -- therefore capped a running sender at
- * three reconnect attempts and latched it terminal during a transient outage.
+ * unlimited-attempt/5-minute synchronous-startup policy the session promises.
+ * Setting one documented key then capped a running sender at three attempts.
+ * The default running sender instead retries indefinitely after its first
+ * connection; explicit attempt or duration limits can opt back into a cap.
  */
 export const QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<
   Required<Omit<QwpReconnectOptions, "onEvent">>
@@ -550,6 +550,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private nextClientSequence = 0n;
   private publishedFrameSequence = -1n;
   private acknowledgedFrameSequence = -1n;
+  private acknowledgedFrameSequenceListener?: () => void;
   private highestOkFrameSequence = -1n;
   private poisonFrameSequence?: bigint;
   private poisonFirstStrikeMs = 0;
@@ -614,6 +615,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
      * the question decides which watermark this connection maintains.
      */
     private readonly durableAckTracked = true,
+    private readonly unboundedRunningReconnect = false,
   ) {
     this.store = store;
     this.lazyReplayStore = isLazyReplayStore(store) ? store : undefined;
@@ -725,6 +727,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     onSenderError?: (error: QwpSenderError) => void,
     signal?: AbortSignal,
     durableAckTracked = true,
+    unboundedRunningReconnect = false,
   ): Promise<QwpReconnectingIngressConnection> {
     const store: QwpIngressReplayStore =
       replayStore ??
@@ -821,6 +824,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         errorInboxCapacity,
         onSenderError,
         durableAckTracked,
+        unboundedRunningReconnect,
       );
       // The store's lock is held from here on, so an abort has something to
       // release and must reach the connect that is about to run.
@@ -967,6 +971,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     });
   }
 
+  /** @internal Notifies the owning session even when a replayed OK is hidden. */
+  setAcknowledgedFrameSequenceListener(listener: () => void): void {
+    this.acknowledgedFrameSequenceListener = listener;
+  }
+
   getIngressFrameSequence(clientSequence: bigint): bigint | undefined {
     for (const frame of this.frames.values()) {
       if (frame.clientSequence === clientSequence) return frame.frameSequence;
@@ -1039,8 +1048,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       frame.frameSequence = frameSequence;
       this.trackFrame(frame);
       this.publishedFrameSequence = frame.frameSequence;
-      if (this.backgroundStoreAndForward) {
+      if (
+        this.backgroundStoreAndForward ||
+        this.store instanceof QwpMemoryReplayStore
+      ) {
         if (this.lazyReplayStore) frame.payload = undefined;
+        // Local publication is the completion boundary for RAM replay too.
+        // The serialized drain continues independently during reconnects.
         this.enqueueDrain(frame);
         return;
       }
@@ -1063,6 +1077,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.drainTail = draining.catch((error: unknown) => {
       if (!this.closing) this.failTerminal(error);
     });
+  }
+
+  /** @internal Waits for RAM-backed frames to reach the socket, not for ACKs. */
+  async waitForPendingSends(): Promise<void> {
+    if (!(this.store instanceof QwpMemoryReplayStore)) return;
+    await this.drainTail;
+    this.throwIfUnavailable();
   }
 
   private startBackgroundConnect(): void {
@@ -2151,6 +2172,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.removeFramesThrough(frameSequence);
     if (frameSequence > this.acknowledgedFrameSequence) {
       this.acknowledgedFrameSequence = frameSequence;
+      this.acknowledgedFrameSequenceListener?.();
     }
   }
 
@@ -2433,7 +2455,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     const reconnecting = this.connectLoop(
       cause,
       true,
-      this.backgroundStoreAndForward ? "unbounded" : "configured",
+      this.backgroundStoreAndForward || this.unboundedRunningReconnect
+        ? "unbounded"
+        : "configured",
     );
     this.reconnectTask = reconnecting;
     try {

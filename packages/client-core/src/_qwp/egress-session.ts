@@ -88,15 +88,22 @@ export interface QwpEgressSessionOptions {
    */
   connectionListenerInboxCapacity?: number;
   /**
-   * Optional notification immediately before an active query is re-executed.
+   * Default notification immediately before an active query is re-executed.
    * Not-yet-consumed batches are discarded automatically; callers that retain
-   * an already-consumed prefix should discard it here. Omitting this callback
-   * leaves replay enabled and is appropriate for idempotent consumers.
+   * an already-consumed prefix should discard it here. A query's own
+   * onReplayReset overrides this callback, which is important for pooled
+   * sessions whose request IDs may overlap.
    */
   onReplayReset?: (event: QwpEgressReplayResetEvent) => void | Promise<void>;
 }
 
 export interface QwpEgressQueryOptions {
+  /**
+   * Notification before this query is replayed after failover. Use it to clear
+   * results already consumed from the old connection. Overrides the session's
+   * onReplayReset for this query; the callback is awaited before replay.
+   */
+  onReplayReset?: (event: QwpEgressReplayResetEvent) => void | Promise<void>;
   /** Overrides session send-ahead credit. Zero explicitly disables flow control. */
   initialCredit?: number | bigint;
   /**
@@ -140,6 +147,7 @@ interface QwpReplayableQueryRequest {
   readonly bindCount?: number;
   readonly bindPayload?: Uint8Array;
   readonly resetDictionary: boolean;
+  readonly onReplayReset?: QwpEgressQueryOptions["onReplayReset"];
 }
 
 /** Default send-ahead credit used by Java and TypeScript: zero is unbounded. */
@@ -892,11 +900,15 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             }
             return session.encodeActiveQueryRequest(serverInfo, requestId);
           },
-          options.onReplayReset
-            ? async (event) => {
-                await options.onReplayReset!(event);
-              }
-            : undefined,
+          async (event) => {
+            const session = state.session;
+            if (!session) {
+              throw new QwpProtocolError(
+                "QWP egress session is unavailable during query replay",
+              );
+            }
+            await session.notifyReplayReset(event, options.onReplayReset);
+          },
           options.reconnect !== undefined,
           signal,
           validated.connectionListenerInboxCapacity,
@@ -1047,6 +1059,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     ) {
       throw new TypeError("autoCredit must be a boolean");
     }
+    if (
+      options.onReplayReset !== undefined &&
+      typeof options.onReplayReset !== "function"
+    ) {
+      throw new TypeError("onReplayReset must be a function");
+    }
     await this.ready;
     this.throwIfUnavailable();
     if (this.active) {
@@ -1083,6 +1101,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       bindCount: encodedBinds?.count ?? options.bindCount,
       bindPayload: (encodedBinds?.payload ?? options.bindPayload)?.slice(),
       resetDictionary: options.resetDictionary === true,
+      onReplayReset: options.onReplayReset,
     };
     this.decoder.resetQuerySchema();
     this.active = query;
@@ -1460,6 +1479,19 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     await this.active?.resetForReplay();
     this.decoder.applyCacheReset(QWP_RESET_MASK_DICTIONARY);
     this.decoder.resetQuerySchema();
+  }
+
+  private async notifyReplayReset(
+    event: QwpEgressReplayResetEvent,
+    defaultCallback?: QwpEgressSessionOptions["onReplayReset"],
+  ): Promise<void> {
+    const request = this.activeRequest;
+    if (!request || request.requestId !== event.requestId) {
+      throw new QwpProtocolError(
+        `QWP egress replay references inactive request ID ${event.requestId}`,
+      );
+    }
+    await (request.onReplayReset ?? defaultCallback)?.(event);
   }
 
   private encodeActiveQueryRequest(

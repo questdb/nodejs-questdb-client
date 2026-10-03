@@ -5,7 +5,7 @@ import {
   QwpEgressViewQuery,
   QwpResultBatchViewHandler,
 } from "./egress-session";
-import { QwpSender } from "./sender";
+import { QwpSender, QwpSenderCloseTimeoutError } from "./sender";
 import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
@@ -157,6 +157,7 @@ interface PoolEntry<T> {
   idleSinceMs: number;
   leased: boolean;
   destroyPromise?: Promise<void>;
+  destroyError?: unknown;
 }
 
 interface PoolWaiter {
@@ -274,6 +275,11 @@ class QwpResourcePool<T> {
         this.wakeWaiters();
         this.wakeCloseWaiters();
       }
+      // A lease returned after shutdown owns its teardown. Do not let the
+      // pool hide a RAM-frame send timeout from that borrower either.
+      if (entry.destroyError instanceof QwpSenderCloseTimeoutError) {
+        throw entry.destroyError;
+      }
       return;
     }
     entry.idleSinceMs = Date.now();
@@ -302,6 +308,19 @@ class QwpResourcePool<T> {
       if (!idleExpired && !lifetimeExpired) {
         index++;
         continue;
+      }
+      if (this.resource === "sender") {
+        const replay = (entry.value as QwpSender).metrics.ingress;
+        if (
+          replay?.memoryReplayMaxBytes !== undefined &&
+          replay.pendingReplayFrames > 0
+        ) {
+          // The RAM queue belongs to this sender. Retiring it now would erase
+          // published frames, and housekeeping has no borrower to receive the
+          // resulting close timeout. Recheck after an ACK trims the queue.
+          index++;
+          continue;
+        }
       }
       this.available.splice(index, 1);
       this.all.delete(entry.slot);
@@ -368,6 +387,15 @@ class QwpResourcePool<T> {
       return;
     }
     await this.waitForLeases(Math.max(0, shutdownDeadline - Date.now()));
+    // Idle senders may have RAM-published frames still waiting for the socket.
+    // Their bounded close reports a delivery failure; suppressing it here made
+    // client.close() claim success after discarding those frames on shutdown.
+    if (this.resource === "sender") {
+      const undelivered = entries.find(
+        (entry) => entry.destroyError instanceof QwpSenderCloseTimeoutError,
+      );
+      if (undelivered) throw undelivered.destroyError;
+    }
   }
 
   private reserveSlot(): number | undefined {
@@ -493,7 +521,9 @@ class QwpResourcePool<T> {
   private destroy(entry: PoolEntry<T>): Promise<void> {
     if (!entry.destroyPromise) {
       entry.destroyPromise = this.destroyResource(entry.value)
-        .catch(() => undefined)
+        .catch((error: unknown) => {
+          entry.destroyError = error;
+        })
         .finally(() => this.releaseSlotReservation(entry.slot));
     }
     return entry.destroyPromise;

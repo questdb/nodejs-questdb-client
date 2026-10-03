@@ -236,12 +236,13 @@ authentication, acknowledgements, transactions, retry, or store-and-forward and 
 not available in browsers. See the QWP guide for the lower-level Node UDP API.
 
 QWP `flush()` resolves at the local publication boundary by default in both
-Node.js and browsers, matching the Java QWP sender. Set
-`qwp.sender.awaitServerAck: true` to wait for QuestDB's protocol ACK instead,
+Node.js and browsers, matching the Java QWP sender. Without a journal, that
+boundary is the bounded in-memory replay queue: a background drainer sends
+frames in order, even while the sender keeps accepting flushes during an outage.
+Set `qwp.sender.awaitServerAck: true` to wait for QuestDB's protocol ACK instead,
 or `awaitDurableAck: true` to wait through durable upload. When Node QWP is
 configured with `qwp.webSocket.storeAndForward`, the publication boundary is
-the local durable journal, so the sender can accept flushes while QuestDB is
-offline and a background drainer reconnects and sends them in order.
+the local durable journal; only that mode survives a process restart.
 Set `initialConnectMode` to `"off"` (the default), `"sync"`, or `"async"` to
 choose fail-fast, bounded blocking, or background startup. Supplying reconnect
 budget settings without an explicit mode promotes initial startup to `"sync"`,
@@ -311,7 +312,9 @@ await sender.close();
 
 QWP `close()` publishes completed rows and waits up to 5 seconds for their
 committed-frame ACK watermark. Configure `closeFlushTimeoutMs` (or
-`close_flush_timeout_millis` in a `ws::` string); `0` publishes without waiting.
+`close_flush_timeout_millis` in a `ws::` string); `0` skips the ACK wait but
+still waits up to 5 seconds for RAM-backed frames to reach the socket, rejecting
+rather than silently dropping them if that deadline expires.
 An unfinished row is not completed implicitly.
 
 The server intentionally withholds ACKs for deferred frames until commit. The

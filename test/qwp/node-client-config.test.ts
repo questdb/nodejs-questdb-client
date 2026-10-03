@@ -351,7 +351,7 @@ describe("QWP unified Node client configuration", () => {
     }
   });
 
-  it("starts lazy memory-buffered ingress without sf_dir", async () => {
+  it("reports undelivered lazy memory ingress on client shutdown", async () => {
     const attemptedPaths: string[] = [];
     const client = await connectQwpNodeClient(
       "ws::addr=offline.example;lazy_connect=on;sender_pool_max=1;",
@@ -376,7 +376,16 @@ describe("QWP unified Node client configuration", () => {
       expect(sender.metrics.totalRowsPublished).toBe(1);
       await sender.close();
     } finally {
-      await client.close();
+      vi.useFakeTimers();
+      try {
+        const closing = expect(client.close()).rejects.toMatchObject({
+          name: "QwpSenderCloseTimeoutError",
+        });
+        await vi.advanceTimersByTimeAsync(5_001);
+        await closing;
+      } finally {
+        vi.useRealTimers();
+      }
     }
   });
 
