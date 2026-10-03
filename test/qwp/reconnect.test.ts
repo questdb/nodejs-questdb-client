@@ -5328,7 +5328,12 @@ describe("QWP ingress reconnect and replay", () => {
       fromFsn: 5n,
       toFsn: 7n,
     } satisfies Partial<QwpIngressAckAbandonedError>);
-    expect(await readdir(directory)).not.toContain(".ack-watermark");
+    // Segment unlink precedes the asynchronous maintenance finalization that
+    // removes the recovery watermark; neither the unlink nor the abandonment
+    // notification implies that finalization has completed yet.
+    await vi.waitFor(async () =>
+      expect(await readdir(directory)).not.toContain(".ack-watermark"),
+    );
 
     const currentFrame = encodeQwpIngressFrame([symbolTable("SOL-USD")]);
     const current = session.sendFrame(currentFrame);
