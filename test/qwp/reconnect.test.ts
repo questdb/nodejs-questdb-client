@@ -1535,6 +1535,15 @@ describe("QWP ingress reconnect and replay", () => {
     expect(factoryCalls).toBe(1);
   });
 
+  it("accepts null reconnect options as it did before unbounded recovery", async () => {
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: null,
+    });
+    expect(session.publishedFrameSequence).toBe(-1n);
+    await session.close();
+  });
+
   it("completes RAM publication before a stalled physical send", async () => {
     const connection = new FakeConnection("primary");
     let releaseSend!: () => void;

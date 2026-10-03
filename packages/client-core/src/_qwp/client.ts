@@ -309,6 +309,19 @@ class QwpResourcePool<T> {
         index++;
         continue;
       }
+      if (this.resource === "sender") {
+        const replay = (entry.value as QwpSender).metrics.ingress;
+        if (
+          replay?.memoryReplayMaxBytes !== undefined &&
+          replay.pendingReplayFrames > 0
+        ) {
+          // The RAM queue belongs to this sender. Retiring it now would erase
+          // published frames, and housekeeping has no borrower to receive the
+          // resulting close timeout. Recheck after an ACK trims the queue.
+          index++;
+          continue;
+        }
+      }
       this.available.splice(index, 1);
       this.all.delete(entry.slot);
       reaped.push(entry);

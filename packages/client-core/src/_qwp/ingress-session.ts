@@ -721,6 +721,7 @@ export class QwpIngressSession {
     // bounded post-connection reconnects.
     const unboundedRunningReconnect =
       options.reconnect === undefined ||
+      options.reconnect === null ||
       (options.reconnect !== false &&
         !options.reconnect.maxAttempts &&
         !options.reconnect.maxDurationMs);

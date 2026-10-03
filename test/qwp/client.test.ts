@@ -16,6 +16,7 @@ import {
   QwpEgressSessionOptions,
   QwpHandshakeMetadata,
   QwpIngressResponse,
+  QwpIngressSession,
   QwpPoolAcquireTimeoutError,
   type QwpPoolSlotReservation,
   QwpSender,
@@ -1000,6 +1001,90 @@ describe("QWP pooled client", () => {
         2,
       );
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an idle RAM sender until its offline publications are acknowledged", async () => {
+    vi.useFakeTimers();
+    const primary = new FakeConnection("primary");
+    const replacement = new FakeConnection("replacement");
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    let factoryCalls = 0;
+    let session!: QwpIngressSession;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          session = await QwpIngressSession.connect(
+            async () => (factoryCalls++ === 0 ? primary : reconnecting),
+            {
+              reconnect: {
+                initialBackoffMs: 0,
+                maxBackoffMs: 0,
+                maxDurationMs: 0,
+              },
+            },
+          );
+          const sender = new QwpSender(async () => session, {
+            autoFlush: false,
+            closeFlushTimeoutMs: 0,
+          });
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        idleTimeoutMs: 100,
+        maxLifetimeMs: 0,
+        housekeepingIntervalMs: 100,
+      },
+    );
+    try {
+      const lease = await client.borrowSender();
+      primary.drop();
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+      await lease.table("events").longColumn("value", 123n).atNow();
+      await expect(lease.flush()).resolves.toBe(true);
+      expect(primary.sent).toHaveLength(0);
+      expect(session.metrics).toMatchObject({
+        pendingReplayFrames: 1,
+        memoryReplayMaxBytes: expect.any(Number),
+      });
+      await lease.close();
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(client.metrics.senders).toMatchObject({ total: 1, available: 1 });
+      expect(replacement.sent).toHaveLength(0);
+
+      releaseReconnect(replacement);
+      await vi.waitFor(() => expect(replacement.sent).toHaveLength(1));
+      replacement.receive(
+        new QwpByteWriter()
+          .writeUint8(QWP_STATUS.OK)
+          .writeBigUint64(0n)
+          .writeUint16(0)
+          .toUint8Array(),
+      );
+      await vi.waitFor(() =>
+        expect(session.metrics.pendingReplayFrames).toBe(0),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      expect(client.metrics.senders.total).toBe(0);
+    } finally {
+      releaseReconnect(replacement);
+      const closing = client.close();
+      await vi.advanceTimersByTimeAsync(5_001);
+      await closing.catch(() => undefined);
       vi.useRealTimers();
     }
   });

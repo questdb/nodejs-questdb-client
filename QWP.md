@@ -1684,8 +1684,13 @@ it after returning the lease raises `QwpClientClosedError` rather than exposing 
 pooled connection now owned by another borrower.
 The shared housekeeper closes excess connections after `idleTimeoutMs` and recycles
 connections older than `maxLifetimeMs` once they are idle, while always retaining
-each configured pool minimum. Set either timeout to zero to disable that policy;
-`housekeepingIntervalMs` controls how quickly an expired idle connection is noticed.
+each configured pool minimum. An idle RAM-backed sender with unacknowledged
+frames is retained until its replay queue drains; otherwise idle retirement
+would discard frames that a completed `flush()` handed to memory during an
+outage. Journal-backed senders can still retire because their pending frames
+survive in the store-and-forward directory. Set either timeout to zero to
+disable that policy; `housekeepingIntervalMs` controls how quickly an expired
+idle connection is noticed.
 Prefer returning application-owned leases before calling `QwpClient.close()`.
 If shutdown races a borrower, it rejects queued borrowers, closes idle connections,
 and cancels active queries before closing every borrowed query connection. A query

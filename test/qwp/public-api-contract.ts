@@ -216,6 +216,7 @@ const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
 };
 
 const queryOptionsContract: QwpEgressQueryOptions = {
+  onReplayReset: (event) => void event.requestId,
   initialCredit: 1024,
   autoCredit: true,
   timeoutMs: 30_000,
