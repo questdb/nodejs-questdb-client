@@ -7,10 +7,8 @@ import {
   type QwpIngressResponse,
   type QwpTableBuffer,
 } from "../packages/client-core/src/_qwp/_core";
-import {
-  QwpSender,
-  type QwpSenderSession,
-} from "../packages/client-core/src/_qwp/sender";
+import { QwpSender } from "../packages/client-core/src/_qwp/sender";
+import type { QwpSenderSession } from "../packages/client-core/src/_qwp/_internal/sender-session";
 import { BENCHMARK_WORKLOADS, type BenchmarkRow } from "./workloads";
 
 const ROWS = 10_000;

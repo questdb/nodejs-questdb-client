@@ -14,7 +14,6 @@ import {
 import {
   QwpBatchTooLargeError,
   QwpIngressAckTimeoutError,
-  type QwpIngressSendResult,
   type QwpIngressMetrics,
 } from "./ingress-session";
 import {
@@ -26,6 +25,10 @@ import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
 } from "./_internal/timer-bounds";
+import type {
+  QwpSenderSession,
+  QwpSenderSessionFactory,
+} from "./_internal/sender-session";
 import { isInt8Array, isUint8Array } from "./_core/typed-array-brand";
 import { log as defaultLog } from "../logging";
 import {
@@ -126,69 +129,6 @@ export class QwpSenderCloseTimeoutError extends Error {
     this.acknowledgedSequence = acknowledgedSequence;
   }
 }
-
-/**
- * The subset of QwpIngressSession used by QwpSender.
- *
- * Only `sendTables`, `waitForDurable`, and `close` are required. The optional
- * members are capabilities the sender uses when present: the `*WithPublication`
- * and `publish*` pairs separate the local publication boundary from the server
- * ACK, `sendTablesDelta`/`publishTablesDelta` carry incremental symbol
- * dictionaries, and `waitForAcknowledged` exposes the ACK watermark. A session
- * that implements only the required members is supported and falls back to
- * `sendTables`.
- */
-export interface QwpSenderSession {
-  readonly metrics?: QwpIngressMetrics;
-  readonly maxBatchSizeBytes?: number;
-  readonly publishedFrameSequence?: bigint;
-  readonly acknowledgedFrameSequence?: bigint;
-  sendTables(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse>;
-  sendTablesDelta?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<QwpIngressResponse>;
-  sendTablesWithPublication?(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): QwpIngressSendResult;
-  sendTablesDeltaWithPublication?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): QwpIngressSendResult;
-  publishTables?(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<void>;
-  publishTablesDelta?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<void>;
-  waitForAcknowledged?(
-    targetSequence: bigint,
-    timeoutMs?: number,
-  ): Promise<void>;
-  /** @internal Optional socket-send boundary for RAM-backed fast close. */
-  waitForPendingSends?(): Promise<void>;
-  waitForDurable(
-    response: QwpIngressResponse,
-    timeoutMs?: number,
-  ): Promise<void>;
-  close(code?: number, reason?: string): Promise<void>;
-}
-
-/**
- * Opens the sender's session. The signal is aborted by close(), so a connect
- * still negotiating can be torn down instead of outliving the sender by up to
- * its connect/auth deadline. Factories that ignore the parameter remain
- * assignable, matching QwpConnectionFactory.
- */
-export type QwpSenderSessionFactory = (
-  signal?: AbortSignal,
-) => Promise<QwpSenderSession>;
 
 /** Transport-specific row constraints supplied by a QWP runtime adapter. */
 interface QwpSenderTransportConstraints {
@@ -1261,6 +1201,11 @@ export class QwpSender {
 
   private readonly connectAbort = new AbortController();
 
+  /**
+   * @internal Obtain senders from the runtime factories, such as
+   * connectQwpNodeSender() or connectQwpBrowserSender(), or from a pooled
+   * client's borrowSender().
+   */
   constructor(
     private readonly sessionFactory: QwpSenderSessionFactory,
     private readonly options: QwpSenderOptions = {},

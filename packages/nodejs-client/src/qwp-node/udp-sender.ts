@@ -5,7 +5,7 @@ import {
   type QwpIngressResponse,
   type QwpTableBuffer,
 } from "../../../client-core/src/_qwp/_core";
-import type { QwpSenderSession } from "../../../client-core/src/_qwp/sender";
+import type { QwpSenderSession } from "../../../client-core/src/_qwp/_internal/sender-session";
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
 
 const DEFAULT_QWP_UDP_PORT = 9007;

@@ -110,8 +110,6 @@ export type {
   QwpSenderLogger,
   QwpSenderMetrics,
   QwpSenderOptions,
-  QwpSenderSession,
-  QwpSenderSessionFactory,
   QwpServerInfoMessage,
   QwpSfBackpressurePolicy,
   QwpSfDurability,
@@ -231,8 +229,6 @@ export type {
   QwpSenderLogger as BrowserQwpSenderLogger,
   QwpSenderMetrics as BrowserQwpSenderMetrics,
   QwpSenderOptions as BrowserQwpSenderOptions,
-  QwpSenderSession as BrowserQwpSenderSession,
-  QwpSenderSessionFactory as BrowserQwpSenderSessionFactory,
   QwpServerInfoMessage as BrowserQwpServerInfoMessage,
   QwpSymbolValue as BrowserQwpSymbolValue,
   QwpTarget as BrowserQwpTarget,
@@ -249,3 +245,16 @@ export type {
   QwpWriterRow as BrowserQwpWriterRow,
   QwpWriterSchema as BrowserQwpWriterSchema,
 } from "@questdb/browser-client";
+
+// The sender-to-transport session seam is internal. Neither built package may
+// export it from its declarations.
+import type * as NodeRoot from "@questdb/nodejs-client";
+import type * as BrowserRoot from "@questdb/browser-client";
+// @ts-expect-error QwpSenderSession is internal.
+export type NodeSenderSession = NodeRoot.QwpSenderSession;
+// @ts-expect-error QwpSenderSessionFactory is internal.
+export type NodeSenderSessionFactory = NodeRoot.QwpSenderSessionFactory;
+// @ts-expect-error QwpSenderSession is internal.
+export type BrowserSenderSession = BrowserRoot.QwpSenderSession;
+// @ts-expect-error QwpSenderSessionFactory is internal.
+export type BrowserSenderSessionFactory = BrowserRoot.QwpSenderSessionFactory;

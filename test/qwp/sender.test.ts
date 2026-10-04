@@ -13,7 +13,6 @@ import {
   QwpResultBatchDecoder,
   QwpSender,
   QwpSenderCloseTimeoutError,
-  QwpSenderSession,
   QwpTableBuffer,
   QwpWriterRowError,
   binary,
@@ -47,6 +46,7 @@ import {
   varchar,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
+import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 
 class RecordingSession implements QwpSenderSession {
   readonly sends: {

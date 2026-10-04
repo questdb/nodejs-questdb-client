@@ -915,12 +915,7 @@ when server acceptance is also required. If a split logical batch cannot be full
 journaled, its unattempted suffix is suppressed and the operation's publication
 promise rejects.
 
-A custom `QwpSenderSession` with no optional publication method uses its required
-`sendTables()` method's ACK promise as the publication boundary, so an asynchronous
-failure retains the sender's rows for retry. Such a session cannot support deferred
-transactional auto-flush: the server withholds that ACK until commit, so transactional
-mode also requires one of the explicit publication-boundary methods. Automatic
-symbol-delta planning is serialized by `sendTablesDelta()` and
+Automatic symbol-delta planning is serialized by `sendTablesDelta()` and
 `publishTablesDelta()`. The synchronous `sendTablesDeltaWithPublication()` form
 cannot wait behind an in-flight delta publication and rejects an overlapping call;
 await its `publication` promise before starting another.

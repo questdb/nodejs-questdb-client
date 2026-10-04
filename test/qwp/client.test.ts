@@ -21,12 +21,12 @@ import {
   type QwpPoolSlotReservation,
   QwpSender,
   QwpSenderCloseTimeoutError,
-  QwpSenderSession,
   designatedTimestamp,
   long,
   symbol as qwpSymbol,
 } from "../../packages/client-core/src/qwp";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
+import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 
 function writeString(writer: QwpByteWriter, value: string): void {
   const encoded = new TextEncoder().encode(value);

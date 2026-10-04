@@ -6,8 +6,8 @@ import {
   QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
   QwpSender,
-  type QwpSenderSession,
 } from "../../packages/client-core/src/qwp";
+import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-egress-connection";
 import { createQwpNodeClient } from "../../packages/nodejs-client/src";
