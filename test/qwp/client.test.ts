@@ -15,7 +15,7 @@ import {
   QwpEgressSessionClosedError,
   QwpEgressSessionOptions,
   QwpHandshakeMetadata,
-  QwpIngressResponse,
+  type QwpIngressMetrics,
   QwpIngressSession,
   QwpPoolAcquireTimeoutError,
   type QwpPoolSlotReservation,
@@ -144,30 +144,33 @@ class FakeSenderSession implements QwpSenderSession {
   publishedFrameSequence = -1n;
   acknowledgedFrameSequence = -1n;
 
-  sendTables(): Promise<QwpIngressResponse> {
-    this.flushes++;
-    const sequence = ++this.publishedFrameSequence;
-    this.acknowledgedFrameSequence = sequence;
-    return Promise.resolve({
-      status: QWP_STATUS.OK,
-      sequence,
-      tables: [],
-    });
-  }
-
   publishTables(): Promise<void> {
     this.flushes++;
     this.acknowledgedFrameSequence = ++this.publishedFrameSequence;
     return Promise.resolve();
   }
 
-  waitForDurable(): Promise<void> {
-    return Promise.resolve();
+  waitForAcknowledged(): Promise<boolean> {
+    return Promise.resolve(true);
   }
 
   close(): Promise<void> {
     this.closes++;
     return Promise.resolve();
+  }
+}
+
+/** A sender session reporting where its unacknowledged frames are kept. */
+class ReplayingFakeSenderSession extends FakeSenderSession {
+  constructor(private readonly memoryReplayMaxBytes?: number) {
+    super();
+  }
+
+  get metrics(): QwpIngressMetrics {
+    return {
+      replayPublishedFrameSequence: this.publishedFrameSequence,
+      memoryReplayMaxBytes: this.memoryReplayMaxBytes,
+    } as unknown as QwpIngressMetrics;
   }
 }
 
@@ -669,33 +672,65 @@ describe("QWP pooled client", () => {
     expect(senderSessions[0].closes).toBe(1);
   });
 
-  it("returns a post-shutdown sender delivery timeout to its borrower", async () => {
-    const timeout = new QwpSenderCloseTimeoutError(0, 0n, -1n);
-    const session = new FakeSenderSession();
-    session.close = () => Promise.reject(timeout);
-    const client = new QwpClient(
-      {
-        createSender: async () => {
-          const sender = new QwpSender(async () => session);
-          await sender.connect();
-          return sender;
+  it("logs a pooled sender's failed close instead of failing shutdown", async () => {
+    // As in the Java, Rust and Python pools, a sender that cannot close
+    // cleanly -- here a close drain that timed out -- is reported as a
+    // warning, and neither client.close() nor the lease that triggered the
+    // close rejects. A store-and-forward sender's warning says its frames
+    // survive in the journal; an in-memory sender's does not.
+    const timeout = new QwpSenderCloseTimeoutError(5_000, 0n, -1n);
+    const clientWith = (warnings: string[], memoryReplayMaxBytes?: number) => {
+      const session = new ReplayingFakeSenderSession(memoryReplayMaxBytes);
+      session.close = () => Promise.reject(timeout);
+      return new QwpClient(
+        {
+          createSender: async () => {
+            const sender = new QwpSender(async () => session, {
+              log: (level, message) => {
+                if (level === "warn") warnings.push(String(message));
+              },
+            });
+            await sender.connect();
+            return sender;
+          },
+          createQuerySession: async () => {
+            throw new Error("query factory should not run");
+          },
         },
-        createQuerySession: async () => {
-          throw new Error("query factory should not run");
+        {
+          senderPoolMin: 0,
+          senderPoolMax: 1,
+          queryPoolMin: 0,
+          queryPoolMax: 1,
+          acquireTimeoutMs: 0,
         },
-      },
-      {
-        senderPoolMin: 0,
-        senderPoolMax: 1,
-        queryPoolMin: 0,
-        queryPoolMax: 1,
-        acquireTimeoutMs: 0,
-      },
-    );
+      );
+    };
+    const journalNote = "remain in the store-and-forward journal";
 
-    const borrowed = await client.borrowSender();
-    await client.close();
-    await expect(borrowed.close()).rejects.toBe(timeout);
+    for (const memoryReplayMaxBytes of [undefined, 128 * 1024 * 1024]) {
+      // An idle sender closed by shutdown.
+      const idleWarnings: string[] = [];
+      const idle = clientWith(idleWarnings, memoryReplayMaxBytes);
+      await (await idle.borrowSender()).close();
+      await expect(idle.close()).resolves.toBeUndefined();
+
+      // A lease returned after shutdown, which closes its sender itself.
+      const returnedWarnings: string[] = [];
+      const returned = clientWith(returnedWarnings, memoryReplayMaxBytes);
+      const borrowed = await returned.borrowSender();
+      await returned.close();
+      await expect(borrowed.close()).resolves.toBeUndefined();
+
+      for (const warnings of [idleWarnings, returnedWarnings]) {
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("Closing a pooled QWP sender failed");
+        expect(warnings[0]).toContain(timeout.message);
+        expect(warnings[0].includes(journalNote)).toBe(
+          memoryReplayMaxBytes === undefined,
+        );
+      }
+    }
   });
 
   it("runs independently borrowed query connections concurrently", async () => {
@@ -783,9 +818,9 @@ describe("QWP pooled client", () => {
             },
             {
               reconnect: {
-                maxAttempts: 1,
-                initialBackoffMs: 0,
-                maxBackoffMs: 0,
+                failoverMaxAttempts: 1,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
               },
             },
           ),
@@ -862,9 +897,9 @@ describe("QWP pooled client", () => {
             },
             {
               reconnect: {
-                maxAttempts: 1,
-                initialBackoffMs: 0,
-                maxBackoffMs: 0,
+                failoverMaxAttempts: 1,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
               },
               onReplayReset: sessionReset,
             },
@@ -1022,9 +1057,8 @@ describe("QWP pooled client", () => {
             async () => (factoryCalls++ === 0 ? primary : reconnecting),
             {
               reconnect: {
-                initialBackoffMs: 0,
-                maxBackoffMs: 0,
-                maxDurationMs: 0,
+                reconnectInitialBackoffMs: 0,
+                reconnectMaxBackoffMs: 0,
               },
             },
           );
@@ -1428,10 +1462,10 @@ describe("QWP pooled client", () => {
             {
               cancelDrainTimeoutMs: 20,
               reconnect: {
-                initialBackoffMs: 0,
-                maxBackoffMs: 0,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
                 // Documented as disabling the reconnect deadline entirely.
-                maxDurationMs: 0,
+                failoverMaxDurationMs: 0,
               },
             },
           );

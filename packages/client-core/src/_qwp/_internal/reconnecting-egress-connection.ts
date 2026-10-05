@@ -10,13 +10,13 @@ import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
+  QwpEgressReconnectOptions,
   QwpEgressReplayResetEvent,
   QwpEgressTransportMetrics,
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
-  QwpReconnectOptions,
   QwpSendClosedError,
   QwpUpgradeError,
 } from "../transport";
@@ -24,7 +24,7 @@ import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import {
   jitterReconnectDelayMs,
-  validateQwpReconnectBackoffs,
+  validateQwpEgressReconnectBackoffs,
 } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { monotonicNowMs } from "./monotonic-clock";
@@ -39,17 +39,12 @@ import { QwpNotificationDispatcher } from "./notification-dispatcher";
  * field from the merged result, so the two layers cannot drift apart.
  */
 export const QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS: Readonly<
-  Required<
-    Omit<
-      QwpReconnectOptions,
-      "onEvent" | "maxFrameRejections" | "poisonMinEscalationWindowMs"
-    >
-  >
+  Required<Omit<QwpEgressReconnectOptions, "onEvent">>
 > = {
-  maxAttempts: 8,
-  initialBackoffMs: 50,
-  maxBackoffMs: 1_000,
-  maxDurationMs: 30_000,
+  failoverMaxAttempts: 8,
+  failoverBackoffInitialMs: 50,
+  failoverBackoffMaxMs: 1_000,
+  failoverMaxDurationMs: 30_000,
 };
 
 type ReplayResetHandler = (
@@ -126,7 +121,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
 
   private constructor(
     private readonly factory: QwpConnectionFactory,
-    private readonly reconnectOptions: QwpReconnectOptions,
+    private readonly reconnectOptions: QwpEgressReconnectOptions,
     private readonly serverInfoTimeoutMs: number,
     private readonly onConnectionReset: ConnectionResetHandler,
     private readonly encodeQueryRequest: QueryRequestEncoder,
@@ -141,12 +136,15 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         connectionListenerInboxCapacity,
       );
     }
-    this.maxAttempts = reconnectOptions.maxAttempts ?? defaults.maxAttempts;
+    this.maxAttempts =
+      reconnectOptions.failoverMaxAttempts ?? defaults.failoverMaxAttempts;
     this.initialBackoffMs =
-      reconnectOptions.initialBackoffMs ?? defaults.initialBackoffMs;
-    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? defaults.maxBackoffMs;
+      reconnectOptions.failoverBackoffInitialMs ??
+      defaults.failoverBackoffInitialMs;
+    this.maxBackoffMs =
+      reconnectOptions.failoverBackoffMaxMs ?? defaults.failoverBackoffMaxMs;
     this.maxDurationMs =
-      reconnectOptions.maxDurationMs ?? defaults.maxDurationMs;
+      reconnectOptions.failoverMaxDurationMs ?? defaults.failoverMaxDurationMs;
     validateReconnectPolicy(
       this.maxAttempts,
       this.initialBackoffMs,
@@ -162,7 +160,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
 
   static async connect(
     factory: QwpConnectionFactory,
-    reconnectOptions: QwpReconnectOptions,
+    reconnectOptions: QwpEgressReconnectOptions,
     serverInfoTimeoutMs: number,
     onConnectionReset: ConnectionResetHandler,
     encodeQueryRequest: QueryRequestEncoder,
@@ -826,15 +824,16 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     // it (recoverProtocolFailure) -- reproduces on the replacement connection.
     // Each connect SUCCEEDS, so connectLoop's own budget is never consumed and
     // the retry would otherwise run forever, rotating the whole cluster.
-    // Charge these recoveries to the same maxAttempts/maxDurationMs budget
-    // instead, the way the Java client counts every re-submission of one
-    // execute() against failover_max_attempts and failover_max_duration.
+    // Charge these recoveries to the same failoverMaxAttempts and
+    // failoverMaxDurationMs budget instead, the way the Java client counts
+    // every re-submission of one execute() against failover_max_attempts and
+    // failover_max_duration.
     if (this.protocolRecoveries === 0) {
       this.protocolRecoveryStartedAt = monotonicNowMs();
     }
     this.protocolRecoveries++;
-    // `>` not `>=`: maxAttempts counts reconnects here, as it does in
-    // connectLoop, so maxAttempts=1 still permits one recovery.
+    // `>` not `>=`: failoverMaxAttempts counts reconnects here, as it does in
+    // connectLoop, so failoverMaxAttempts=1 still permits one recovery.
     const attemptsExhausted =
       this.maxAttempts > 0 && this.protocolRecoveries > this.maxAttempts;
     const durationExhausted =
@@ -965,8 +964,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     // treatment the ingress connection gives the identical callback. Invoked
     // inline, a user observer ran on the reconnect stack: the time it spent
     // was added to the outage it was reporting, and because these events are
-    // emitted inside the window checked against maxDurationMs, a slow one
-    // could exhaust a budget and turn a recoverable outage into a terminal
+    // emitted inside the window checked against failoverMaxDurationMs, a slow
+    // one could exhaust a budget and turn a recoverable outage into a terminal
     // QwpReconnectExhaustedError. An async observer also had nothing bounding
     // or counting its concurrent invocations.
     this.connectionDispatcher?.offer(
@@ -1039,20 +1038,21 @@ function validateReconnectPolicy(
 ): void {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 0) {
     throw new RangeError(
-      "reconnect maxAttempts must be a non-negative safe integer",
+      "reconnect failoverMaxAttempts must be a non-negative safe integer",
     );
   }
-  validateQwpReconnectBackoffs({ initialBackoffMs, maxBackoffMs });
-  for (const [name, value] of [["maxDurationMs", maxDurationMs]] as const) {
-    if (!Number.isFinite(value) || value < 0) {
-      throw new RangeError(
-        `reconnect ${name} must be a non-negative finite number`,
-      );
-    }
+  validateQwpEgressReconnectBackoffs({
+    failoverBackoffInitialMs: initialBackoffMs,
+    failoverBackoffMaxMs: maxBackoffMs,
+  });
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs < 0) {
+    throw new RangeError(
+      "reconnect failoverMaxDurationMs must be a non-negative finite number",
+    );
   }
   if (maxBackoffMs < initialBackoffMs) {
     throw new RangeError(
-      "reconnect maxBackoffMs must be greater than or equal to initialBackoffMs",
+      "reconnect failoverBackoffMaxMs must be greater than or equal to failoverBackoffInitialMs",
     );
   }
 }

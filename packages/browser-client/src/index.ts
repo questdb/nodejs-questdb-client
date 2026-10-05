@@ -964,22 +964,8 @@ export function createQwpBrowserSender(
   senderOptions: QwpSenderOptions = {},
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
-  if (senderOptions.awaitDurableAck && options.requestDurableAck === false) {
-    throw new RangeError(
-      "awaitDurableAck cannot be combined with requestDurableAck=false",
-    );
-  }
   return new QwpSender(
-    (signal) =>
-      connectQwpBrowserIngress(
-        {
-          ...options,
-          requestDurableAck:
-            options.requestDurableAck ?? senderOptions.awaitDurableAck,
-        },
-        sessionOptions,
-        signal,
-      ),
+    (signal) => connectQwpBrowserIngress(options, sessionOptions, signal),
     senderOptions,
   );
 }

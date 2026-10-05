@@ -79,7 +79,6 @@ import type {
   QwpEgressViewQuery,
   QwpIngressSession,
   QwpIngressSessionOptions,
-  QwpIngressSendResult,
   QwpSenderError,
   QwpQueryLease,
   QwpResultBatchView,
@@ -321,10 +320,9 @@ const qwpExtraOptionsContract: QwpExtraOptions = {
     autoFlushBytes: 4 * 1024 * 1024,
     maxNameLength: 255,
     closeFlushTimeoutMs: 5_000,
-    awaitDurableAck: true,
   },
   session: {
-    reconnect: { maxAttempts: 3 },
+    reconnect: { reconnectMaxDurationMs: 30_000 },
   },
   udp: {
     maxDatagramSize: 1_400,
@@ -337,28 +335,29 @@ function senderSequenceContract(
   session: QwpIngressSession,
 ): void {
   const published: Promise<bigint> = sender.flushAndGetSequence();
-  const senderWait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
+  const drained: Promise<boolean> = sender.flushAndWait(5_000);
+  const drainedByDefault: Promise<boolean> = sender.flushAndWait();
+  const senderWait: Promise<boolean> = sender.waitForAcknowledged(0n, 5_000);
+  const senderCheck: Promise<boolean> = sender.waitForAcknowledged(0n, 0);
   const senderPublished: bigint = sender.publishedSequence;
   const senderAcknowledged: bigint = sender.acknowledgedSequence;
-  const sessionWait: Promise<void> = session.waitForAcknowledged(0n, 5_000);
+  const sessionWait: Promise<boolean> = session.waitForAcknowledged(0n, 5_000);
   const sessionPublished: bigint = session.publishedFrameSequence;
   const sessionAcknowledged: bigint = session.acknowledgedFrameSequence;
-  const tracked: QwpIngressSendResult = session.sendFrameWithPublication(
+  const localPublication: Promise<void> = session.publishFrame(
     new Uint8Array(),
   );
-  const localPublication: Promise<void> = tracked.publication;
-  const serverAcknowledgement = tracked.acknowledgement;
-  const trackedSequence: bigint = tracked.sequence;
   void published;
+  void drained;
+  void drainedByDefault;
   void senderWait;
+  void senderCheck;
   void senderPublished;
   void senderAcknowledged;
   void sessionWait;
   void sessionPublished;
   void sessionAcknowledged;
   void localPublication;
-  void serverAcknowledgement;
-  void trackedSequence;
 }
 
 /**
@@ -386,11 +385,13 @@ function ilpTypeExportContract(
 function rootSenderSequenceContract(sender: Sender): void {
   const cancelled: Sender = sender.cancelRow();
   const published: Promise<bigint> = sender.flushAndGetSequence();
-  const wait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
+  const drained: Promise<boolean> = sender.flushAndWait(5_000);
+  const wait: Promise<boolean> = sender.waitForAcknowledged(0n, 5_000);
   const publishedWatermark: bigint = sender.publishedSequence;
   const acknowledgedWatermark: bigint = sender.acknowledgedSequence;
   void cancelled;
   void published;
+  void drained;
   void wait;
   void publishedWatermark;
   void acknowledgedWatermark;

@@ -199,35 +199,36 @@ describe("QWP configuration-string reference", () => {
       await client.close();
     }
 
-    // Ingress and egress disagree on the reconnect defaults, so those cells
-    // carry both, in that order.
-    for (const [key, ingress, egress] of [
-      ["reconnect_initial_backoff_millis", "initialBackoffMs"],
-      ["reconnect_max_backoff_millis", "maxBackoffMs"],
-      ["reconnect_max_duration_millis", "maxDurationMs"],
-    ].map(([key, field]) => [
-      key,
-      QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS[
-        field as keyof typeof QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS
+    // The reconnect_* keys configure ingress only, as in the Java client;
+    // egress failover is tuned by the failover_* keys below.
+    for (const [key, ingress] of [
+      [
+        "reconnect_initial_backoff_millis",
+        QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.reconnectInitialBackoffMs,
       ],
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS[
-        field as keyof typeof QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS
+      [
+        "reconnect_max_backoff_millis",
+        QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.reconnectMaxBackoffMs,
       ],
-    ]) as [string, number, number][]) {
-      expect(documented(key), key).toBe(`\`${ingress}\` / \`${egress}\``);
+      [
+        "reconnect_max_duration_millis",
+        QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.reconnectMaxDurationMs,
+      ],
+    ] as const) {
+      expect(documentedNumber(key), key).toBe(ingress);
     }
-    // The failover keys share the egress reconnect defaults.
+    // The failover keys carry the egress reconnect defaults.
     expect(documentedNumber("failover_max_attempts")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxAttempts,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverMaxAttempts,
     );
     expect(documentedNumber("failover_backoff_initial_ms")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.initialBackoffMs,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverBackoffInitialMs,
     );
     expect(documentedNumber("failover_backoff_max_ms")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxBackoffMs,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverBackoffMaxMs,
     );
     expect(documentedNumber("failover_max_duration_ms")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxDurationMs,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverMaxDurationMs,
     );
   });
 
@@ -283,10 +284,7 @@ describe("QWP configuration-string reference", () => {
       async publishTablesDelta(tables: readonly { rowCount: number }[]) {
         sends.push(tables[0].rowCount);
       },
-      async sendTables() {
-        return { status: 0, sequence: 0n, tables: [] };
-      },
-      async waitForDurable() {},
+      async waitForAcknowledged() {},
       async close() {},
     } as unknown as QwpSenderSession;
 

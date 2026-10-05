@@ -8,7 +8,8 @@ import {
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_STATUS,
   QwpIngressEncodeOptions,
-  QwpIngressResponse,
+  QwpIngressNackError,
+  QwpIngressSessionClosedError,
   QwpByteWriter,
   QwpResultBatchDecoder,
   QwpSender,
@@ -53,61 +54,12 @@ class RecordingSession implements QwpSenderSession {
     tables: readonly QwpTableBuffer[];
     options?: QwpIngressEncodeOptions;
   }[] = [];
-  readonly durable: QwpIngressResponse[] = [];
+  readonly waits: { target: bigint; timeoutMs?: number }[] = [];
   deltaSendCount = 0;
   publicationCount = 0;
   closeCount = 0;
   publishedFrameSequence = -1n;
   acknowledgedFrameSequence = -1n;
-
-  async sendTables(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse> {
-    this.sends.push({ tables, options });
-    const sequence = ++this.publishedFrameSequence;
-    this.acknowledgedFrameSequence = sequence;
-    return {
-      status: QWP_STATUS.OK,
-      sequence,
-      tables: tables.map((table) => ({
-        name: table.name,
-        sequenceTransaction: BigInt(table.rowCount),
-      })),
-    };
-  }
-
-  sendTablesDelta(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<QwpIngressResponse> {
-    this.deltaSendCount++;
-    return this.sendTables(tables, options);
-  }
-
-  sendTablesWithPublication(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ) {
-    const acknowledgement = this.sendTables(tables, options);
-    return {
-      sequence: this.publishedFrameSequence,
-      publication: Promise.resolve(),
-      acknowledgement,
-    };
-  }
-
-  sendTablesDeltaWithPublication(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ) {
-    const acknowledgement = this.sendTablesDelta(tables, options);
-    return {
-      sequence: this.publishedFrameSequence,
-      publication: Promise.resolve(),
-      acknowledgement,
-    };
-  }
 
   async publishTables(
     tables: readonly QwpTableBuffer[],
@@ -116,6 +68,8 @@ class RecordingSession implements QwpSenderSession {
     this.publicationCount++;
     this.sends.push({ tables, options });
     const sequence = ++this.publishedFrameSequence;
+    // The fake server acknowledges a commit-bearing frame at once, and with
+    // it the deferred frames of the transaction it closes.
     if (!options?.deferCommit) this.acknowledgedFrameSequence = sequence;
   }
 
@@ -127,59 +81,43 @@ class RecordingSession implements QwpSenderSession {
     await this.publishTables(tables, options);
   }
 
-  async waitForDurable(response: QwpIngressResponse): Promise<void> {
-    this.durable.push(response);
+  /** Nothing acknowledges later, so an uncovered target times out at once. */
+  async waitForAcknowledged(
+    target: bigint,
+    timeoutMs?: number,
+  ): Promise<boolean> {
+    this.waits.push({ target, timeoutMs });
+    return target <= this.acknowledgedFrameSequence;
   }
 
   async close(): Promise<void> {
     this.closeCount++;
-  }
-}
-
-class CommitAwareSession extends RecordingSession {
-  private readonly deferred: {
-    resolve: (response: QwpIngressResponse) => void;
-  }[] = [];
-
-  override sendTables(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse> {
-    this.sends.push({ tables, options });
-    const sequence = ++this.publishedFrameSequence;
-    const response = {
-      status: QWP_STATUS.OK,
-      sequence,
-      tables: tables.map((table) => ({
-        name: table.name,
-        sequenceTransaction: BigInt(table.rowCount),
-      })),
-    } satisfies QwpIngressResponse;
-    if (options?.deferCommit) {
-      return new Promise((resolve) => this.deferred.push({ resolve }));
-    }
-    this.acknowledgedFrameSequence = sequence;
-    for (const pending of this.deferred.splice(0)) pending.resolve(response);
-    return Promise.resolve(response);
   }
 }
 
 class ClosingUnblocksSession extends RecordingSession {
-  private rejectSend?: (error: Error) => void;
+  private rejectPublication?: (error: Error) => void;
 
-  sendTables(
+  override publishTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse> {
+  ): Promise<void> {
     this.sends.push({ tables, options });
     return new Promise((_resolve, reject) => {
-      this.rejectSend = reject;
+      this.rejectPublication = reject;
     });
+  }
+
+  override publishTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): Promise<void> {
+    return this.publishTables(tables, options);
   }
 
   async close(): Promise<void> {
     this.closeCount++;
-    this.rejectSend?.(new Error("session closed"));
+    this.rejectPublication?.(new Error("session closed"));
   }
 }
 
@@ -205,22 +143,23 @@ class PublishingSession extends RecordingSession {
     return this.publishTables(tables, options);
   }
 
-  async waitForAcknowledged(target: bigint): Promise<void> {
+  async waitForAcknowledged(target: bigint): Promise<boolean> {
     if (target > this.acknowledgedFrameSequence) {
       this.acknowledgedFrameSequence = target;
     }
+    return true;
   }
 }
 
 class WatermarkSession extends PublishingSession {
   private readonly waiters = new Set<{
     target: bigint;
-    resolve: () => void;
+    resolve: (acknowledged: boolean) => void;
   }>();
 
-  waitForAcknowledged(target: bigint): Promise<void> {
+  waitForAcknowledged(target: bigint): Promise<boolean> {
     if (target < 0n || this.acknowledgedFrameSequence >= target) {
-      return Promise.resolve();
+      return Promise.resolve(true);
     }
     return new Promise((resolve) => this.waiters.add({ target, resolve }));
   }
@@ -230,21 +169,8 @@ class WatermarkSession extends PublishingSession {
     for (const waiter of this.waiters) {
       if (waiter.target > sequence) continue;
       this.waiters.delete(waiter);
-      waiter.resolve();
+      waiter.resolve(true);
     }
-  }
-}
-
-class DeferredWatermarkSession extends PublishingSession {
-  override sendTablesDelta(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<QwpIngressResponse> {
-    if (!options?.deferCommit) return super.sendTablesDelta(tables, options);
-    this.deltaSendCount++;
-    this.sends.push({ tables, options });
-    this.publishedFrameSequence++;
-    return new Promise<QwpIngressResponse>(() => undefined);
   }
 }
 
@@ -507,18 +433,153 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
-  it("retains explicit server-ACK flush behavior", async () => {
-    const session = new RecordingSession();
+  it("flushes and then waits for every published frame in flushAndWait()", async () => {
+    const session = new WatermarkSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await sender.flush();
+    await sender.table("events").longColumn("value", 2n).atNow();
+
+    let settled = false;
+    const waiting = sender.flushAndWait().finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(session.publishedFrameSequence).toBe(1n));
+    expect(sender.metrics.pendingRows).toBe(0);
+    // The frame published by the earlier flush() is not enough.
+    session.acknowledgeThrough(0n);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    session.acknowledgeThrough(1n);
+    await expect(waiting).resolves.toBe(true);
+    expect(session.publicationAttempts).toBe(2);
+    await sender.close();
+  });
+
+  it("returns false from flushAndWait() when the ACK wait times out", async () => {
+    class UnacknowledgedSession extends RecordingSession {
+      override async publishTables(
+        tables: readonly QwpTableBuffer[],
+        options?: QwpIngressEncodeOptions,
+      ): Promise<void> {
+        this.publicationCount++;
+        this.sends.push({ tables, options });
+        this.publishedFrameSequence++;
+      }
+    }
+    const session = new UnacknowledgedSession();
     const sender = new QwpSender(async () => session, {
       autoFlush: false,
-      awaitServerAck: true,
+      closeFlushTimeoutMs: 0,
     });
-    await sender.table("events").longColumn("value", 42n).atNow();
+    await sender.table("events").longColumn("value", 1n).atNow();
 
-    await expect(sender.flush()).resolves.toBe(true);
-    expect(session.deltaSendCount).toBe(1);
-    expect(session.publicationCount).toBe(0);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    await expect(sender.flushAndWait(25)).resolves.toBe(false);
+    expect(session.waits).toEqual([{ target: 0n, timeoutMs: 25 }]);
+    // The rows were handed over, not lost: they stay with the session and
+    // are neither staged again nor published twice.
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 0,
+      totalRowsPublished: 1,
+    });
+    // Omitting the timeout leaves the choice to the session's ackTimeoutMs.
+    await expect(sender.flushAndWait()).resolves.toBe(false);
+    expect(session.waits.at(-1)).toEqual({ target: 0n, timeoutMs: undefined });
+    expect(session.sends).toHaveLength(1);
+
+    session.acknowledgedFrameSequence = 0n;
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    await sender.close();
+  });
+
+  it("rejects flushAndWait() when the server rejects a frame or the session dies", async () => {
+    const rejection = new QwpIngressNackError({
+      status: QWP_STATUS.WRITE_ERROR,
+      sequence: 0n,
+      tables: [],
+      errorMessage: "write failed",
+    });
+    const closed = new QwpIngressSessionClosedError();
+    let failure: Error = rejection;
+    class FailingWaitSession extends RecordingSession {
+      override async waitForAcknowledged(target: bigint): Promise<boolean> {
+        if (target >= 0n) throw failure;
+        return true;
+      }
+    }
+    const sender = new QwpSender(async () => new FailingWaitSession(), {
+      autoFlush: false,
+    });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await expect(sender.flushAndWait()).rejects.toBe(rejection);
+
+    failure = closed;
+    await expect(sender.flushAndWait()).rejects.toBe(closed);
+    await sender.close().catch(() => undefined);
+  });
+
+  it("validates the flushAndWait() timeout before publishing", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 1n).atNow();
+
+    for (const timeoutMs of [Number.NaN, Infinity, -Infinity, 0x7fffffff + 1]) {
+      await expect(sender.flushAndWait(timeoutMs)).rejects.toThrow(RangeError);
+    }
+    expect(session.sends).toHaveLength(0);
+    expect(sender.metrics.pendingRows).toBe(1);
+    await expect(sender.flushAndWait(0x7fffffff)).resolves.toBe(true);
+    await sender.close();
+  });
+
+  it("flushes, then checks without waiting, for a zero or negative flushAndWait() timeout", async () => {
+    // As in the Java client's drain(): the flush still happens, and the
+    // session is asked to check the watermark rather than wait for it.
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await expect(sender.flushAndWait(0)).resolves.toBe(true);
+    await sender.table("events").longColumn("value", 2n).atNow();
+    await expect(sender.flushAndWait(-1)).resolves.toBe(true);
+    expect(session.sends).toHaveLength(2);
+    expect(session.waits).toEqual([
+      { target: 0n, timeoutMs: 0 },
+      { target: 1n, timeoutMs: -1 },
+    ]);
+    await sender.close();
+  });
+
+  it("commits a transaction and waits for its commit frame in flushAndWait()", async () => {
+    const session = new RecordingSession();
+    const sender = new QwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+      transactional: true,
+    });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    expect(session.sends.map((send) => send.options?.deferCommit)).toEqual([
+      true,
+    ]);
+
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    expect(session.sends.map((send) => send.options?.deferCommit)).toEqual([
+      true,
+      false,
+    ]);
+    expect(session.waits.at(-1)?.target).toBe(1n);
+    expect(sender.metrics.totalTransactionsCommitted).toBe(1);
+    await sender.close();
+  });
+
+  it("resolves flushAndWait() without connecting when nothing was published", async () => {
+    let factoryCalls = 0;
+    const sender = new QwpSender(async () => {
+      factoryCalls++;
+      return new RecordingSession();
+    });
+
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    expect(factoryCalls).toBe(0);
     await sender.close();
   });
 
@@ -584,7 +645,7 @@ describe("QWP high-level sender", () => {
     const timerCeiling = 0x7fffffff;
     const overTimerCeiling = timerCeiling + 1;
     const session = new RecordingSession();
-    // Both land in a raw setTimeout, where a larger delay is clamped to ~1ms.
+    // It lands in a raw setTimeout, where a larger delay is clamped to ~1ms.
     expect(
       () =>
         new QwpSender(async () => session, {
@@ -593,21 +654,12 @@ describe("QWP high-level sender", () => {
     ).toThrow(
       `closeFlushTimeoutMs must be a safe integer no greater than ${timerCeiling}`,
     );
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          durableAckTimeoutMs: overTimerCeiling,
-        }),
-    ).toThrow(
-      `durableAckTimeoutMs must be a positive number no greater than ${timerCeiling}`,
-    );
     // The inclusive ceiling, and the documented zero/negative "skip the drain"
     // spellings, all stay legal.
     expect(
       () =>
         new QwpSender(async () => session, {
           closeFlushTimeoutMs: timerCeiling,
-          durableAckTimeoutMs: timerCeiling,
         }),
     ).not.toThrow();
     expect(
@@ -833,7 +885,7 @@ describe("QWP high-level sender", () => {
   it("rejects writer.row() with the auto-flush it starts", async () => {
     class FailingSession extends RecordingSession {
       fail = true;
-      // flush() publishes locally by default, so fail the publication.
+      // flush() ends at local publication, so fail the publication.
       override async publishTables(
         tables: readonly QwpTableBuffer[],
         options?: QwpIngressEncodeOptions,
@@ -891,10 +943,7 @@ describe("QWP high-level sender", () => {
 
   it("returns a publication sequence and waits for its ACK independently", async () => {
     const session = new WatermarkSession();
-    const sender = new QwpSender(async () => session, {
-      autoFlush: false,
-      awaitServerAck: true,
-    });
+    const sender = new QwpSender(async () => session, { autoFlush: false });
     await sender.table("events").longColumn("value", 42n).atNow();
 
     await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
@@ -911,11 +960,12 @@ describe("QWP high-level sender", () => {
     session.acknowledgeThrough(0n);
     await waiting;
     expect(sender.acknowledgedSequence).toBe(0n);
-    await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
+    // A flush that publishes nothing has no frame sequence to return.
+    await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
     await sender.close();
   });
 
-  it("returns the published watermark after auto-flush without publishing again", async () => {
+  it("returns -1n from flushAndGetSequence() when auto-flush already published the rows", async () => {
     const session = new WatermarkSession();
     const sender = new QwpSender(async () => session, {
       autoFlushRows: 1,
@@ -926,32 +976,34 @@ describe("QWP high-level sender", () => {
     await sender.table("events").longColumn("value", 1n).atNow();
     expect(sender.publishedSequence).toBe(0n);
     expect(sender.acknowledgedSequence).toBe(-1n);
-    await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
+    await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
     expect(session.sends).toHaveLength(1);
 
-    let acknowledged = false;
-    const waiting = sender.waitForAcknowledged(0n, 1_000).then(() => {
-      acknowledged = true;
+    // flushAndWait() is the barrier for everything published so far.
+    let acknowledged: boolean | undefined;
+    const waiting = sender.flushAndWait(1_000).then((result) => {
+      acknowledged = result;
     });
-    await Promise.resolve();
-    expect(acknowledged).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acknowledged).toBeUndefined();
     session.acknowledgeThrough(0n);
     await waiting;
+    expect(acknowledged).toBe(true);
 
     await sender.table("events").longColumn("value", 2n).atNow();
-    await expect(sender.flushAndGetSequence()).resolves.toBe(1n);
+    await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
     expect(session.sends).toHaveLength(2);
+    expect(sender.publishedSequence).toBe(1n);
     session.acknowledgeThrough(1n);
     await expect(sender.flush()).resolves.toBe(false);
     await sender.close();
   });
 
-  it("returns the commit sequence without awaiting deferred transaction ACKs", async () => {
-    const session = new DeferredWatermarkSession();
+  it("returns the commit frame's sequence from a transactional flushAndGetSequence()", async () => {
+    const session = new PublishingSession();
     const sender = new QwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
-      awaitServerAck: true,
       transactional: true,
     });
 
@@ -965,12 +1017,9 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
-  it("retains rows until publication-only flush succeeds", async () => {
+  it("retains rows until the flush's publication succeeds", async () => {
     const session = new PublishingSession();
-    const sender = new QwpSender(async () => session, {
-      autoFlush: false,
-      awaitServerAck: false,
-    });
+    const sender = new QwpSender(async () => session, { autoFlush: false });
     await sender.table("events").longColumn("value", 42n).atNow();
 
     session.failPublication = true;
@@ -998,7 +1047,6 @@ describe("QWP high-level sender", () => {
     const sender = new QwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
-      awaitServerAck: false,
       transactional: true,
     });
 
@@ -1023,7 +1071,6 @@ describe("QWP high-level sender", () => {
     const session = new ClosingUnblocksSession();
     const sender = new QwpSender(async () => session, {
       autoFlush: false,
-      awaitServerAck: true,
       closeFlushTimeoutMs: 10,
     });
     await sender.table("events").longColumn("value", 42n).atNow();
@@ -1217,11 +1264,11 @@ describe("QWP high-level sender", () => {
     class ElapsingSession extends WatermarkSession {
       private readonly rejecters = new Set<(error: Error) => void>();
 
-      override waitForAcknowledged(): Promise<void> {
+      override waitForAcknowledged(): Promise<boolean> {
         // Real code reaches this when the publication lands on the deadline,
         // a window of microseconds. Forcing the skew here makes it certain.
         skewMs = 10_000;
-        return new Promise<void>((_resolve, reject) => {
+        return new Promise<boolean>((_resolve, reject) => {
           this.rejecters.add(reject);
         });
       }
@@ -3453,7 +3500,7 @@ describe("QWP high-level sender", () => {
     let armed = true;
     let frames = 0;
 
-    // flush() publishes locally by default, so park that rather than sendTables.
+    // flush() ends at local publication, so park the publication.
     class ParkingSession extends RecordingSession {
       override async publishTables(
         tables: readonly QwpTableBuffer[],
@@ -3639,20 +3686,6 @@ describe("QWP high-level sender", () => {
     expect(column(session.sends[0].tables[0], "value").values).toEqual([3n]);
   });
 
-  it("can await durable ACKs and auto-flush by row count", async () => {
-    const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, {
-      autoFlushRows: 1,
-      autoFlushIntervalMs: 0,
-      awaitDurableAck: true,
-    });
-
-    await sender.table("events").longColumn("value", 42n).atNow();
-    expect(session.sends).toHaveLength(1);
-    expect(session.durable).toHaveLength(1);
-    await expect(sender.flush()).resolves.toBe(false);
-  });
-
   it("auto-flushes by estimated buffered bytes", async () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, {
@@ -3743,7 +3776,6 @@ describe("QWP high-level sender", () => {
       autoFlushRows: 0,
       autoFlushBytes: 8,
       autoFlushIntervalMs: 0,
-      awaitServerAck: false,
     });
 
     await expect(
@@ -3757,13 +3789,14 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
-  it("defers transactional auto-flush and commits without waiting on its withheld ACK", async () => {
-    const session = new CommitAwareSession();
+  it("defers transactional auto-flush and commits without waiting for an ACK", async () => {
+    // The server withholds the deferred frame's ACK until the commit, so
+    // neither the auto-flush nor the commit may wait for one.
+    const session = new RecordingSession();
     const sender = new QwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
       transactional: true,
-      awaitDurableAck: true,
     });
 
     await expect(
@@ -3773,7 +3806,7 @@ describe("QWP high-level sender", () => {
     expect(session.sends[0]).toMatchObject({
       options: { deferCommit: true },
     });
-    expect(session.durable).toHaveLength(0);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
 
     await expect(sender.commit()).resolves.toBe(true);
     expect(session.sends).toHaveLength(2);
@@ -3781,7 +3814,7 @@ describe("QWP high-level sender", () => {
     expect(session.sends[1]).toMatchObject({
       options: { deferCommit: false },
     });
-    expect(session.durable).toHaveLength(1);
+    expect(session.waits).toEqual([]);
     expect(sender.metrics).toMatchObject({
       totalRowsStaged: 1,
       totalRowsPublished: 1,
@@ -3799,7 +3832,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("uses an explicit data flush to close a deferred transaction", async () => {
-    const session = new CommitAwareSession();
+    const session = new RecordingSession();
     const sender = new QwpSender(async () => session, {
       autoFlushRows: 2,
       autoFlushIntervalMs: 0,
@@ -3819,7 +3852,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("warns when close abandons an uncommitted transactional auto-flush", async () => {
-    const session = new CommitAwareSession();
+    const session = new RecordingSession();
     const messages: (string | Error)[] = [];
     const sender = new QwpSender(async () => session, {
       autoFlushRows: 1,
@@ -3924,25 +3957,25 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
   });
 
   it("sends through a session that implements only the required members", async () => {
-    // QwpSenderSession requires sendTables, waitForDurable and close; the
-    // publication split, the delta variants and the ACK watermark are all
-    // optional capabilities. A default-configured sender nonetheless took the
-    // publication-only path and threw when publishTables was absent, so a
-    // session that satisfied the published interface could not send at all:
-    // flush() rejected, close() rejected too, and the staged row was reported
-    // lost. Fall back to the one method the interface does require.
+    // publishTablesDelta is optional: a session without it, such as UDP's,
+    // publishes full symbol values through publishTables instead.
     class RequiredOnlySession implements QwpSenderSession {
       readonly sent: (readonly QwpTableBuffer[])[] = [];
+      publishedFrameSequence = -1n;
+      acknowledgedFrameSequence = -1n;
       closeCalls = 0;
 
-      async sendTables(
-        tables: readonly QwpTableBuffer[],
-      ): Promise<QwpIngressResponse> {
+      async publishTables(tables: readonly QwpTableBuffer[]): Promise<void> {
         this.sent.push(tables);
-        return { status: QWP_STATUS.OK, sequence: 0n, tables: [] };
+        this.acknowledgedFrameSequence = ++this.publishedFrameSequence;
       }
 
-      async waitForDurable(): Promise<void> {}
+      async waitForAcknowledged(target: bigint): Promise<boolean> {
+        if (target > this.acknowledgedFrameSequence) {
+          throw new Error("the fake acknowledges every frame it publishes");
+        }
+        return true;
+      }
 
       async close(): Promise<void> {
         this.closeCalls++;
@@ -3951,52 +3984,20 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
 
     const session = new RequiredOnlySession();
     const sender = new QwpSender(async () => session);
-    await sender.table("events").longColumn("value", 42n).atNow();
+    await sender.table("events").symbol("kind", "trade").atNow();
 
-    await expect(sender.flush()).resolves.toBe(true);
+    await expect(sender.flushAndWait()).resolves.toBe(true);
     expect(session.sent).toHaveLength(1);
     expect(session.sent[0][0].name).toBe("events");
+    expect(column(session.sent[0][0], "kind").values).toEqual(["trade"]);
     expect(sender.metrics).toMatchObject({
       pendingRows: 0,
       totalRowsPublished: 1,
       totalFlushFailures: 0,
     });
 
-    // close() must not demand the optional ACK watermark either.
     await expect(sender.close()).resolves.toBeUndefined();
     expect(session.closeCalls).toBe(1);
-    expect(sender.metrics.pendingRows).toBe(0);
-  });
-
-  it("retains required-only session rows until its asynchronous send succeeds", async () => {
-    class FlakyRequiredOnlySession implements QwpSenderSession {
-      attempts = 0;
-
-      async sendTables(): Promise<QwpIngressResponse> {
-        if (this.attempts++ === 0) throw new Error("publication failed");
-        return { status: QWP_STATUS.OK, sequence: 0n, tables: [] };
-      }
-
-      async waitForDurable(): Promise<void> {}
-      async close(): Promise<void> {}
-    }
-
-    const session = new FlakyRequiredOnlySession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
-    await sender.table("events").longColumn("value", 42n).atNow();
-
-    await expect(sender.flush()).rejects.toThrow("publication failed");
-    expect(sender.metrics).toMatchObject({
-      pendingRows: 1,
-      totalRowsPublished: 0,
-      totalFlushFailures: 1,
-    });
-    await expect(sender.flush()).resolves.toBe(true);
-    expect(sender.metrics).toMatchObject({
-      pendingRows: 0,
-      totalRowsPublished: 1,
-    });
-    await sender.close();
   });
 
   it("still rejects a word wider than 64 bits", () => {

@@ -29,10 +29,14 @@ import {
 } from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
-import { validateQwpReconnectBackoffs } from "../../client-core/src/_qwp/_internal/reconnect-backoff";
+import { selectsQwpSyncInitialConnect } from "../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
 import { withPriorQwpSenderErrorDeliveries } from "../../client-core/src/_qwp/_internal/notification-dispatcher";
-import { resolveQwpNodeClientConfig } from "./qwp-node/client-config";
+import {
+  assertConsistentQwpInitialConnectMode,
+  normalizeQwpNodeClientOptions,
+  resolveQwpNodeClientConfig,
+} from "./qwp-node/client-config";
 import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_UPGRADE_ERROR_KIND,
@@ -192,9 +196,8 @@ function classifyUpgradeRejection(
       kind,
       // A 5xx or a 429 is what a proxy, a load balancer, or a rolling restart
       // answers with while a backend is coming back, so it must not end the
-      // reconnect loop: connectLoop rethrows a non-retryable error before it
-      // ever reaches the attempt/duration budget, which latches the sender
-      // terminal on the first blip. This matches the browser bootstrap
+      // reconnect loop: connectLoop rethrows a non-retryable error without
+      // retrying it, which latches the sender terminal on the first blip. This matches the browser bootstrap
       // (`statusCode >= 500`) and the ILP HTTP transport's retriable set.
       // 401/403 stay terminal, and a 4xx other than 429 is a client-side
       // mistake that byte-identical replay cannot fix.
@@ -309,8 +312,12 @@ export interface QwpNodeReplayRecoveryEvent {
 export interface QwpNodeStoreAndForwardOptions
   extends QwpNodeFileReplayStoreOptions {
   /**
-   * Initial server connection policy. Defaults to `off`; an explicitly tuned
-   * reconnect policy promotes it to `sync`, matching the Java client.
+   * Initial server connection policy; the same option as the session's
+   * `initialConnectMode`, which applies when this one is unset. Setting both
+   * to different values is rejected. Defaults to `off`; setting the session's
+   * reconnectMaxDurationMs, reconnectInitialBackoffMs or
+   * reconnectMaxBackoffMs promotes the default to `sync`, as in the Java
+   * client.
    */
   initialConnectMode?: QwpInitialConnectMode;
   /**
@@ -376,8 +383,10 @@ export interface QwpNodeClientOptions {
   /**
    * Coordinates a non-blocking startup: ingress connects in the background,
    * using memory replay when store-and-forward is absent, and the egress pool
-   * remains cold until the first query. Conflicts with a positive queryPoolMin
-   * or a non-async initialConnectMode.
+   * remains cold until the first query. Conflicts with a positive queryPoolMin,
+   * a non-async initialConnectMode, or `reconnect: false`. This is the typed
+   * spelling of the `lazy_connect` key, which, as in the Java, Rust and Python
+   * clients, only the pooled client applies.
    */
   lazyConnect?: boolean;
 }
@@ -761,6 +770,13 @@ async function connectQwpNodeIngressInternal(
       },
     );
   const storeAndForward = resolveNodeStoreAndForwardOptions(connectionOptions);
+  // Checked before anything below opens a journal. The session's spelling is
+  // public as well as the store's, so the two have to agree, and the store
+  // used to win silently even when only the session's was set.
+  assertConsistentQwpInitialConnectMode(
+    storeAndForward?.initialConnectMode,
+    sessionOptions.initialConnectMode,
+  );
   if (storeAndForward) {
     await warnAboutUnreachableJournal(
       storeAndForwardRoot(connectionOptions.storeAndForward!),
@@ -793,12 +809,11 @@ async function connectQwpNodeIngressInternal(
     ? (sessionOptions.reconnect ?? {})
     : sessionOptions.reconnect;
   const initialConnectMode = storeAndForward
-    ? validateInitialConnectMode(
-        storeAndForward.initialConnectMode ??
-          (sessionOptions.reconnect === undefined
-            ? QWP_INITIAL_CONNECT_MODE.OFF
-            : QWP_INITIAL_CONNECT_MODE.SYNC),
-      )
+    ? (storeAndForward.initialConnectMode ??
+      sessionOptions.initialConnectMode ??
+      (selectsQwpSyncInitialConnect(sessionOptions.reconnect)
+        ? QWP_INITIAL_CONNECT_MODE.SYNC
+        : QWP_INITIAL_CONNECT_MODE.OFF))
     : sessionOptions.initialConnectMode;
   const backgroundReplay =
     storeAndForward !== undefined ||
@@ -996,27 +1011,13 @@ export function createQwpNodeSender(
   senderOptions: QwpSenderOptions = {},
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
-  if (senderOptions.awaitDurableAck && options.requestDurableAck === false) {
-    throw new RangeError(
-      "awaitDurableAck cannot be combined with requestDurableAck=false",
-    );
-  }
   // This factory is lazy, so without a check here the failover factory's own
   // one would not run until the first connect. Routing is configuration, and
   // a mixed scheme decides which socket carries the credentials below, so it
   // belongs with the other construction-time rejections.
   assertUniformQwpEndpointScheme(options.url, options.failoverUrls);
   return new QwpSender(
-    (signal) =>
-      connectQwpNodeIngress(
-        {
-          ...options,
-          requestDurableAck:
-            options.requestDurableAck ?? senderOptions.awaitDurableAck,
-        },
-        sessionOptions,
-        signal,
-      ),
+    (signal) => connectQwpNodeIngress(options, sessionOptions, signal),
     senderOptions,
   );
 }
@@ -1056,8 +1057,6 @@ export function createQwpNodeUdpSender(
       autoFlushBytes:
         senderOptions.autoFlushBytes ?? options.maxDatagramSize ?? 1_400,
       transactional: false,
-      awaitServerAck: true,
-      awaitDurableAck: false,
       encode: {
         ...senderOptions.encode,
         gorilla: false,
@@ -1081,12 +1080,6 @@ export async function connectQwpNodeUdpSender(
 function validateUdpSenderOptions(options: QwpSenderOptions): void {
   if (options.transactional) {
     throw new RangeError("QWP UDP does not support transactions");
-  }
-  if (options.awaitDurableAck) {
-    throw new RangeError("QWP UDP does not support durable acknowledgements");
-  }
-  if (options.awaitServerAck) {
-    throw new RangeError("QWP UDP does not support server acknowledgements");
   }
 }
 
@@ -1232,75 +1225,6 @@ function resolveNodeClientOptions(
     : normalizeQwpNodeClientOptions(optionsOrConfiguration);
 }
 
-function normalizeQwpNodeClientOptions(
-  options: QwpNodeClientOptions,
-): QwpNodeClientOptions {
-  validateQwpReconnectBackoffs(options.ingressSession?.reconnect);
-  validateQwpReconnectBackoffs(options.egressSession?.reconnect);
-  // Both sweeps carry one connection configuration across every endpoint, so a
-  // mixed scheme sends this client's credentials and rows over whichever
-  // socket a sweep reaches. Checked here as well as in the failover factory so
-  // a typed override is reported before the client exists.
-  assertUniformQwpEndpointScheme(
-    options.ingress.url,
-    options.ingress.failoverUrls,
-  );
-  assertUniformQwpEndpointScheme(
-    options.egress.url,
-    options.egress.failoverUrls,
-  );
-  const storeAndForward = options.ingress.storeAndForward;
-  const storeInitialConnectMode = storeAndForward?.initialConnectMode;
-  const sessionInitialConnectMode = options.ingressSession?.initialConnectMode;
-  if (
-    storeInitialConnectMode !== undefined &&
-    sessionInitialConnectMode !== undefined &&
-    storeInitialConnectMode !== sessionInitialConnectMode
-  ) {
-    throw new RangeError(
-      `conflicting configuration: storeAndForward.initialConnectMode='${storeInitialConnectMode}' differs from ingressSession.initialConnectMode='${sessionInitialConnectMode}'`,
-    );
-  }
-  if (!options.lazyConnect) return options;
-  for (const configuredInitialConnectMode of [
-    storeInitialConnectMode,
-    sessionInitialConnectMode,
-  ]) {
-    if (
-      configuredInitialConnectMode === undefined ||
-      configuredInitialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC
-    ) {
-      continue;
-    }
-    throw new RangeError(
-      `conflicting configuration: lazyConnect requires initialConnectMode='async', got '${configuredInitialConnectMode}'`,
-    );
-  }
-  if ((options.pool?.queryPoolMin ?? 0) > 0) {
-    throw new RangeError(
-      `conflicting configuration: lazyConnect requires queryPoolMin=0, got ${options.pool?.queryPoolMin}`,
-    );
-  }
-  return {
-    ...options,
-    ingress: {
-      ...options.ingress,
-      storeAndForward: storeAndForward
-        ? {
-            ...storeAndForward,
-            initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
-          }
-        : undefined,
-    },
-    ingressSession: {
-      ...options.ingressSession,
-      backgroundStoreAndForward: true,
-      initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
-    },
-    pool: { ...options.pool, queryPoolMin: 0 },
-  };
-}
-
 function pooledNodeIngressOptions(
   options: QwpNodeIngressOptions,
   slot: number,
@@ -1364,19 +1288,11 @@ function createPooledOrphanDrainer(
 ): QwpNodeOrphanDrainer | undefined {
   const storeAndForward = options.ingress.storeAndForward;
   if (!storeAndForward) return undefined;
-  // Pooled foreground senders have requestDurableAck inferred from
-  // sender.awaitDurableAck by createQwpNodeSender(). The scanner built its
-  // recovery sessions straight from options.ingress, so without the same
-  // inference an adopted slot negotiated no durable ACK and kept
-  // durableAckTracked false: an ordinary OK then advanced the persisted
-  // watermark and trimmed the journal for rows the caller had asked to keep
-  // until they were durable. Recovery has to honour the same durability
-  // contract as the producer whose slot it is draining.
-  const ingress: QwpNodeIngressOptions = {
-    ...options.ingress,
-    requestDurableAck:
-      options.ingress.requestDurableAck ?? options.sender?.awaitDurableAck,
-  };
+  // Recovery sessions are built from the same ingress options as the pooled
+  // foreground senders, so an adopted slot negotiates the durable ACK its
+  // producer requested: an ordinary OK must not advance the persisted
+  // watermark for rows the caller asked to keep until they are durable.
+  const ingress: QwpNodeIngressOptions = options.ingress;
   const rootDirectory = storeAndForwardRoot(storeAndForward);
   const managedSlotCount = options.pool?.senderPoolMax ?? 4;
   const senderId = validateQwpSenderId(options.ingress.senderId ?? "sender");
@@ -1632,19 +1548,4 @@ function minimumDefined(
   if (left === undefined) return right;
   if (right === undefined) return left;
   return Math.min(left, right);
-}
-
-function validateInitialConnectMode(
-  value: QwpInitialConnectMode,
-): QwpInitialConnectMode {
-  if (
-    value !== QWP_INITIAL_CONNECT_MODE.OFF &&
-    value !== QWP_INITIAL_CONNECT_MODE.SYNC &&
-    value !== QWP_INITIAL_CONNECT_MODE.ASYNC
-  ) {
-    throw new RangeError(
-      "store-and-forward initialConnectMode must be 'off', 'sync', or 'async'",
-    );
-  }
-  return value;
 }

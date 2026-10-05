@@ -25,7 +25,7 @@ import {
   QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
   QwpReconnectingEgressConnection,
 } from "./_internal/reconnecting-egress-connection";
-import { validateQwpReconnectBackoffs } from "./_internal/reconnect-backoff";
+import { validateQwpEgressReconnectBackoffs } from "./_internal/reconnect-backoff";
 import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
@@ -34,9 +34,9 @@ import {
   QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpConnectionFactory,
+  QwpEgressReconnectOptions,
   QwpEgressReplayResetEvent,
   QwpHandshakeMetadata,
-  QwpReconnectOptions,
   QwpSendClosedError,
 } from "./transport";
 
@@ -81,7 +81,7 @@ export interface QwpEgressSessionOptions {
    * Bounded failover policy. Failover and at-least-once active-query replay
    * are enabled by default; set false to keep one fixed connection.
    */
-  reconnect?: QwpReconnectOptions | false;
+  reconnect?: QwpEgressReconnectOptions | false;
   /**
    * Bounded inbox depth for `reconnect.onEvent`. Defaults to 64, matching
    * ingress. Overflow drops the oldest pending notification.
@@ -180,7 +180,7 @@ function validateOptionalTimeout(
 function validateEgressSessionOptions(
   options: QwpEgressSessionOptions,
 ): QwpValidatedEgressSessionOptions {
-  validateQwpReconnectBackoffs(options.reconnect);
+  validateQwpEgressReconnectBackoffs(options.reconnect);
   const serverInfoTimeoutMs =
     options.serverInfoTimeoutMs ?? QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS;
   if (

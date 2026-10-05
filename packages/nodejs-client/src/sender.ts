@@ -26,6 +26,7 @@ import type {
   QwpTableWriter,
 } from "../../client-core/src/_qwp/sender";
 import type { QwpWriterSchema } from "../../client-core/src/_qwp/writer";
+import { validateQwpAckWaitTimeout } from "../../client-core/src/_qwp/_internal/timer-bounds";
 
 const QWP_INGRESS_PATH = "/write/v4";
 
@@ -304,13 +305,29 @@ class Sender {
 
   /**
    * Flushes pending rows and returns the highest QWP frame sequence published
-   * by this call. Non-QWP transports flush normally and return -1n because
-   * they do not expose frame sequences.
+   * by this call, or -1n when it published nothing. Non-QWP transports flush
+   * normally and return -1n because they do not expose frame sequences.
    */
   async flushAndGetSequence(): Promise<bigint> {
     if (this.qwpSender) return this.qwpSender.flushAndGetSequence();
     await this.flush();
     return -1n;
+  }
+
+  /**
+   * Flushes pending rows and, for QWP, waits until the server has acknowledged
+   * every frame this sender has published. Resolves false when the QWP ACK
+   * watermark makes no progress for `timeoutMs` (the session's ackTimeoutMs
+   * by default); the frames then remain queued and are still delivered, so do
+   * not send them again. A `timeoutMs` of zero or less flushes and then
+   * checks without waiting. Non-QWP transports flush normally and resolve
+   * true: they expose no ACK watermark to wait on.
+   */
+  async flushAndWait(timeoutMs?: number): Promise<boolean> {
+    if (this.qwpSender) return this.qwpSender.flushAndWait(timeoutMs);
+    validateQwpAckWaitTimeout(timeoutMs);
+    await this.flush();
+    return true;
   }
 
   /** Highest stable QWP frame sequence published, or -1n when unavailable. */
@@ -323,26 +340,26 @@ class Sender {
     return this.qwpSender?.acknowledgedSequence ?? -1n;
   }
 
-  /** Waits independently for a cumulative QWP ACK watermark. */
+  /**
+   * Waits until the cumulative QWP ACK watermark covers a frame sequence, such
+   * as one returned by flushAndGetSequence(). Resolves true once it does, and
+   * false when the watermark makes no progress for `timeoutMs` (the session's
+   * ackTimeoutMs by default); a `timeoutMs` of zero or less checks without
+   * waiting. Non-QWP transports resolve true for a negative sequence, which
+   * flushAndGetSequence() returns for them.
+   */
   async waitForAcknowledged(
     targetSequence: bigint,
     timeoutMs?: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (this.qwpSender) {
       return this.qwpSender.waitForAcknowledged(targetSequence, timeoutMs);
     }
     if (typeof targetSequence !== "bigint") {
       throw new TypeError("QWP ACK target sequence must be a bigint");
     }
-    if (
-      timeoutMs !== undefined &&
-      (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    ) {
-      throw new RangeError(
-        "QWP ACK watermark timeout must be positive and finite",
-      );
-    }
-    if (targetSequence < 0n) return;
+    validateQwpAckWaitTimeout(timeoutMs);
+    if (targetSequence < 0n) return true;
     throw new Error(
       "ACK sequence watermarks are available only with the QWP WebSocket transport",
     );

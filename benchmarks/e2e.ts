@@ -19,6 +19,8 @@ interface ArmOptions {
   table: string;
   configuration: (repeat: number, sfDirectory: string) => string;
   extraOptions?: SenderExtraOptions;
+  /** Measure flushAndWait(), which also waits for the server's ACK. */
+  flushAndWait?: boolean;
 }
 
 function positiveInteger(value: number, name: string): number {
@@ -44,6 +46,16 @@ function percentile(
   return sorted[Math.max(0, Math.min(sorted.length - 1, rank))];
 }
 
+async function flushOnce(sender: Sender, options: ArmOptions): Promise<void> {
+  if (!options.flushAndWait) {
+    await sender.flush();
+    return;
+  }
+  if (!(await sender.flushAndWait())) {
+    throw new Error(`${options.label}: timed out waiting for the server ACK`);
+  }
+}
+
 async function measureArm(
   options: ArmOptions,
   repeat: number,
@@ -66,7 +78,7 @@ async function measureArm(
         .floatColumn("amount", row.doubles[1][1]);
       await sender.at(row.timestamp + timestampOffset);
     }
-    await sender.flush();
+    await flushOnce(sender, options);
 
     for (const row of allRows.slice(WARMUP_ROWS)) {
       sender
@@ -76,7 +88,7 @@ async function measureArm(
         .floatColumn("amount", row.doubles[1][1]);
       await sender.at(row.timestamp + timestampOffset);
       const started = process.hrtime.bigint();
-      await sender.flush();
+      await flushOnce(sender, options);
       samples.push(Number(process.hrtime.bigint() - started) / 1000);
     }
   } finally {
@@ -122,18 +134,13 @@ it("measures QWP ingress completion boundaries", async () => {
       },
     },
     {
-      label: "flush() = server protocol ACK",
+      label: "flushAndWait() = server protocol ACK",
       table: "bench_e2e_ack",
       configuration: () => `ws::addr=${ADDRESS};auto_flush=off`,
       extraOptions: {
-        qwp: {
-          sender: {
-            autoFlush: false,
-            awaitServerAck: true,
-            closeFlushTimeoutMs: 0,
-          },
-        },
+        qwp: { sender: { autoFlush: false, closeFlushTimeoutMs: 0 } },
       },
+      flushAndWait: true,
     },
     {
       label: "flush() = local SF append durability",
@@ -149,19 +156,14 @@ it("measures QWP ingress completion boundaries", async () => {
 
   if (process.env.QWP_BENCH_DURABLE_ACK === "1") {
     arms.push({
-      label: "flush() = server durable ACK",
+      label: "flushAndWait() = server durable ACK",
       table: "bench_e2e_durable_ack",
       configuration: () =>
         `ws::addr=${ADDRESS};auto_flush=off;request_durable_ack=on`,
       extraOptions: {
-        qwp: {
-          sender: {
-            autoFlush: false,
-            awaitDurableAck: true,
-            closeFlushTimeoutMs: 0,
-          },
-        },
+        qwp: { sender: { autoFlush: false, closeFlushTimeoutMs: 0 } },
       },
+      flushAndWait: true,
     });
   }
 

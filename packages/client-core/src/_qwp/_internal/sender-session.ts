@@ -1,12 +1,5 @@
-import type {
-  QwpIngressEncodeOptions,
-  QwpIngressResponse,
-  QwpTableBuffer,
-} from "../_core";
-import type {
-  QwpIngressMetrics,
-  QwpIngressSendResult,
-} from "../ingress-session";
+import type { QwpIngressEncodeOptions, QwpTableBuffer } from "../_core";
+import type { QwpIngressMetrics } from "../ingress-session";
 
 /**
  * The subset of QwpIngressSession used by QwpSender.
@@ -16,38 +9,20 @@ import type {
  * not a public extension point: applications obtain senders from the runtime
  * factories or a pooled client, so this contract can change with them.
  *
- * Only `sendTables`, `waitForDurable`, and `close` are required. The optional
- * members are capabilities the sender uses when present: the `*WithPublication`
- * and `publish*` pairs separate the local publication boundary from the server
- * ACK, `sendTablesDelta`/`publishTablesDelta` carry incremental symbol
- * dictionaries, and `waitForAcknowledged` exposes the ACK watermark. A session
- * that implements only the required members is supported and falls back to
- * `sendTables`.
+ * A flush publishes through `publishTables` (or `publishTablesDelta`, when the
+ * session carries incremental symbol dictionaries) and observes the result
+ * through the published and acknowledged frame watermarks.
  *
  * @internal
  */
 export interface QwpSenderSession {
   readonly metrics?: QwpIngressMetrics;
   readonly maxBatchSizeBytes?: number;
-  readonly publishedFrameSequence?: bigint;
-  readonly acknowledgedFrameSequence?: bigint;
-  sendTables(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse>;
-  sendTablesDelta?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<QwpIngressResponse>;
-  sendTablesWithPublication?(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): QwpIngressSendResult;
-  sendTablesDeltaWithPublication?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): QwpIngressSendResult;
-  publishTables?(
+  /** Highest frame sequence published locally, or -1n before the first. */
+  readonly publishedFrameSequence: bigint;
+  /** Highest frame sequence covered by the cumulative ACK watermark. */
+  readonly acknowledgedFrameSequence: bigint;
+  publishTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
   ): Promise<void>;
@@ -55,17 +30,25 @@ export interface QwpSenderSession {
     tables: readonly QwpTableBuffer[],
     options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
   ): Promise<void>;
-  waitForAcknowledged?(
+  /**
+   * Resolves true once the ACK watermark covers `targetSequence`, and false
+   * when it makes no progress for `timeoutMs`; zero or less checks without
+   * waiting. Rejects with the session's failure once it can no longer advance.
+   */
+  waitForAcknowledged(
     targetSequence: bigint,
     timeoutMs?: number,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /** Optional socket-send boundary for RAM-backed fast close. */
   waitForPendingSends?(): Promise<void>;
-  waitForDurable(
-    response: QwpIngressResponse,
-    timeoutMs?: number,
-  ): Promise<void>;
   close(code?: number, reason?: string): Promise<void>;
+  /**
+   * Closes without the session's own drain of unsent frames. QwpSender has
+   * already applied a bounded drain, and reported its outcome, by the time it
+   * closes the session, so waiting again would only stretch close() past its
+   * deadline. Sessions without such a drain implement close() alone.
+   */
+  closeWithoutDrain?(code?: number, reason?: string): Promise<void>;
 }
 
 /**

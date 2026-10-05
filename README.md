@@ -235,20 +235,26 @@ UDP datagrams are self-contained and split at row boundaries. UDP has no
 authentication, acknowledgements, transactions, retry, or store-and-forward and is
 not available in browsers. See the QWP guide for the lower-level Node UDP API.
 
-QWP `flush()` resolves at the local publication boundary by default in both
-Node.js and browsers, matching the Java QWP sender. Without a journal, that
-boundary is the bounded in-memory replay queue: a background drainer sends
-frames in order, even while the sender keeps accepting flushes during an outage.
-Set `qwp.sender.awaitServerAck: true` to wait for QuestDB's protocol ACK instead,
-or `awaitDurableAck: true` to wait through durable upload. When Node QWP is
-configured with `qwp.webSocket.storeAndForward`, the publication boundary is
-the local durable journal; only that mode survives a process restart.
+QWP `flush()` resolves at the local publication boundary in both Node.js and
+browsers, matching the Java QWP sender. Without a journal, that boundary is the
+bounded in-memory replay queue: a background drainer sends frames in order, even
+while the sender keeps accepting flushes during an outage. Call `flushAndWait()`
+to also wait until QuestDB has acknowledged everything the sender published; it
+resolves `false` when the acknowledgements make no progress for its timeout, and
+the rows then stay queued for delivery. With `requestDurableAck: true` that wait
+lasts through durable upload. When Node QWP is configured with
+`qwp.webSocket.storeAndForward`, the publication boundary is the local durable
+journal; only that mode survives a process restart.
 Set `initialConnectMode` to `"off"` (the default), `"sync"`, or `"async"` to
-choose fail-fast, bounded blocking, or background startup. Supplying reconnect
-budget settings without an explicit mode promotes initial startup to `"sync"`,
-matching the Java client. The configuration-string
-equivalent is `initial_connect_retry`, used together with the store-and-forward
-options in `extraOptions.qwp`.
+choose fail-fast, bounded blocking, or background startup, with or without a
+journal. It belongs to the ingress session options (`qwp.session` for
+`Sender.fromConfig()`), or to `qwp.webSocket.storeAndForward`. Setting
+`reconnectMaxDurationMs`, `reconnectInitialBackoffMs` or `reconnectMaxBackoffMs`
+without an explicit mode promotes initial startup to `"sync"`, as in the Java
+client; the Rust and Python clients do so only for a standalone sender. The
+configuration-string equivalent is `initial_connect_retry`. The pooled client's
+`lazy_connect` selects `"async"` as well, but like the other QuestDB clients'
+standalone senders, a `Sender` ignores that key and logs a warning.
 Persistent frames are coalesced into fixed-size 4 MiB `.sfa` segments by default,
 using the shared Java/Rust/Python SFA envelope, manifest, ACK watermark, and symbol
 dictionary formats. The active segment and a pre-sized temporary hot spare keep open
@@ -283,8 +289,8 @@ await sender.close();
 
 For batches larger than the automatic flush threshold, transactional mode
 keeps each auto-flushed frame in an open server-side transaction. An explicit
-`flush()` (or its `commit()` alias) publishes the group-closing frame. Set
-`awaitServerAck: true`, or wait on the sequence returned by
+`flush()` (or its `commit()` alias) publishes the group-closing frame. Call
+`flushAndWait()` instead, or wait on the sequence returned by
 `flushAndGetSequence()`, when the call must also observe the cumulative ACK.
 QuestDB guarantees this atomicity per table; a flush that contains multiple
 tables is not one cross-table transaction.
@@ -319,9 +325,9 @@ An unfinished row is not completed implicitly.
 
 The server intentionally withholds ACKs for deferred frames until commit. The
 sender pipelines transactional auto-flushes without waiting for those ACKs,
-then publishes the group-closing frame at `flush()`/`commit()`. With
-`awaitServerAck` or `awaitDurableAck`, that call also waits for all covered
-ACKs; durable waiting starts only after the transaction commits. Closing
+then publishes the group-closing frame at `flush()`/`commit()`.
+`flushAndWait()` publishes the same frame and then waits for all covered ACKs;
+durable waiting starts only after the transaction commits. Closing
 without an explicit commit abandons the open transaction and logs a warning;
 QuestDB rolls it back when the WebSocket disconnects.
 
@@ -437,15 +443,17 @@ table-less QWP poll frames because the WebSocket API does not expose
 protocol-level PING frames. A poll completes once published: durable progress
 arrives independently, and an open deferred transaction may intentionally
 prevent the server from sending a cumulative OK for that poll. Supplying
-`durableAckKeepaliveMs` requires durable negotiation (`requestDurableAck: true`,
-either explicit or implied by `awaitDurableAck`); manual polls and durable waits
-reject locally when the capability was not negotiated.
+`durableAckKeepaliveMs` requires durable negotiation (`requestDurableAck: true`);
+manual polls reject locally when the capability was not negotiated. Once it is
+negotiated, `flushAndWait()` waits for durable upload:
 
 ```typescript
 const sender = await connectQwpBrowserSender(
   { url, requestDurableAck: true },
-  { autoFlush: false, awaitDurableAck: true },
+  { autoFlush: false },
 );
+await sender.table("events").longColumn("value", 42n).atNow();
+const durable = await sender.flushAndWait();
 ```
 
 Browser durable ACKs are an in-memory delivery confirmation only. Persistent

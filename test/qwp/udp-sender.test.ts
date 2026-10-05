@@ -124,7 +124,7 @@ function stringTable(value: string): QwpTableBuffer {
 
 describe("QWP Node UDP sender", () => {
   it("rejects encode options a self-contained datagram cannot honour", async () => {
-    // sendTables() accepts QwpIngressEncodeOptions but encodeUdpDatagrams
+    // publishTables() accepts QwpIngressEncodeOptions but encodeUdpDatagrams
     // discarded them, so a caller who correctly passed a delta dictionary got
     // it silently ignored -- and the non-delta encoder then wrote every symbol
     // in the frame as the empty string.
@@ -135,12 +135,12 @@ describe("QWP Node UDP sender", () => {
     });
 
     expect(() =>
-      session.sendTables([longTable(1)], {
+      session.publishTables([longTable(1)], {
         dictionary: new QwpSymbolDictionary(),
       }),
     ).toThrow(/cannot use a delta symbol dictionary/);
     expect(() =>
-      session.sendTables([longTable(1)], { confirmedMaxSymbolId: 0 }),
+      session.publishTables([longTable(1)], { confirmedMaxSymbolId: 0 }),
     ).toThrow(/no connection to track confirmed symbol IDs/);
     expect(socket.packets).toHaveLength(0);
 
@@ -158,7 +158,7 @@ describe("QWP Node UDP sender", () => {
       socketFactory: () => socket,
     });
 
-    await session.sendTables([longTable(20)]);
+    await session.publishTables([longTable(20)]);
 
     expect(socket.packets.length).toBeGreaterThan(1);
     for (const packet of socket.packets) {
@@ -210,7 +210,7 @@ describe("QWP Node UDP sender", () => {
         return sliceRows(from, to);
       };
 
-      await session.sendTables([table]);
+      await session.publishTables([table]);
 
       slicedRows.push(encoded);
       // The split still has to hold: many self-contained frames, none over cap.
@@ -244,9 +244,6 @@ describe("QWP Node UDP sender", () => {
 
     // Synchronously, before the returned promise exists -- QwpSender relies on
     // that to keep the batch staged when encoding fails.
-    expect(() => session.sendTables([stringTable("x".repeat(256))])).toThrow(
-      QwpUdpDatagramTooLargeError,
-    );
     expect(() => session.publishTables([stringTable("x".repeat(256))])).toThrow(
       QwpUdpDatagramTooLargeError,
     );
@@ -326,10 +323,10 @@ describe("QWP Node UDP sender", () => {
     // acknowledgedFrameSequence, so advancing it over a datagram that never
     // left the host reported those rows as delivered -- flushAndGetSequence()
     // returned a sequence covering them and waitForAcknowledged() resolved.
-    await expect(session.sendTables([longTable(1)])).resolves.toMatchObject({
-      status: 0,
-      sequence: -1n,
-    });
+    await expect(
+      session.publishTables([longTable(1)]),
+    ).resolves.toBeUndefined();
+    expect(session.publishedFrameSequence).toBe(-1n);
     expect(errors.map((error) => error.message)).toEqual([
       "network unreachable",
     ]);
@@ -347,7 +344,7 @@ describe("QWP Node UDP sender", () => {
   it("settles an in-flight send when close races it", async () => {
     // node:dgram drops the completion callbacks of sends still queued in the
     // handle when close() runs, and send() resolves only from that callback,
-    // so `const p = session.sendTables(rows); await session.close(); await p;`
+    // so `const p = session.publishTables(rows); await session.close(); await p;`
     // never returned. No error, no rejection, just a promise that never
     // settled -- and sendDatagrams() awaits each datagram, so one dropped
     // callback stranded the whole call.
@@ -357,13 +354,11 @@ describe("QWP Node UDP sender", () => {
       socketFactory: () => socket,
     });
 
-    const sending = session.sendTables([longTable(1)]);
+    const sending = session.publishTables([longTable(1)]);
     await session.close();
-    await expect(sending).resolves.toMatchObject({
-      status: 0,
-      // Abandoned rather than confirmed, so the watermark stays put.
-      sequence: -1n,
-    });
+    await expect(sending).resolves.toBeUndefined();
+    // Abandoned rather than confirmed, so the watermark stays put.
+    expect(session.publishedFrameSequence).toBe(-1n);
     expect(session.udpMetrics).toMatchObject({
       publishedDatagramSequence: -1n,
       totalDatagramsSent: 0,
@@ -378,7 +373,7 @@ describe("QWP Node UDP sender", () => {
       socketFactory: () => socket,
     });
 
-    const sending = session.sendTables([longTable(40)]);
+    const sending = session.publishTables([longTable(40)]);
     expect(socket.packets.length).toBeGreaterThan(0);
     await session.close();
     // The caller is told the batch stopped, instead of waiting on it forever.
@@ -749,7 +744,7 @@ describe("QWP Node UDP sender", () => {
     expect(socketCreations).toBe(0);
   });
 
-  it("rejects acknowledgement and transaction options that UDP cannot honor", () => {
+  it("rejects the transaction option that UDP cannot honor", () => {
     const options = {
       host: "localhost",
       socketFactory: () => new FakeUdpSocket(),
@@ -757,11 +752,20 @@ describe("QWP Node UDP sender", () => {
     expect(() =>
       createQwpNodeUdpSender(options, { transactional: true }),
     ).toThrow(/does not support transactions/);
-    expect(() =>
-      createQwpNodeUdpSender(options, { awaitDurableAck: true }),
-    ).toThrow(/does not support durable acknowledgements/);
-    expect(() =>
-      createQwpNodeUdpSender(options, { awaitServerAck: true }),
-    ).toThrow(/does not support server acknowledgements/);
+  });
+
+  it("resolves flushAndWait() once its datagrams are sent", async () => {
+    const socket = new FakeUdpSocket();
+    const sender = await connectQwpNodeUdpSender(
+      { host: "localhost", socketFactory: () => socket },
+      { autoFlush: false },
+    );
+    await sender.table("events").longColumn("value", 1n).atNow();
+
+    // UDP has no server acknowledgements, so the wait ends with the send.
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    expect(socket.packets).toHaveLength(1);
+    expect(sender.acknowledgedSequence).toBe(0n);
+    await sender.close();
   });
 });

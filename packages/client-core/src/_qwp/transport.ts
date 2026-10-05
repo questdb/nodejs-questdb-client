@@ -121,7 +121,12 @@ export class QwpFailoverError extends Error {
   }
 }
 
-/** A configured QWP reconnect policy exhausted its retry boundary. */
+/**
+ * A QWP reconnect budget ran out: a synchronous ingress initial connect
+ * reached reconnectMaxDurationMs, or an egress failover episode reached
+ * failoverMaxAttempts or failoverMaxDurationMs. A connected ingress session does not raise
+ * it, because its reconnects are not bounded.
+ */
 export class QwpReconnectExhaustedError extends Error {
   readonly cause: unknown;
 
@@ -345,7 +350,7 @@ export interface QwpReconnectEvent {
 export const QWP_INITIAL_CONNECT_MODE = {
   /** Try once on the caller and fail immediately. */
   OFF: "off",
-  /** Retry on the caller within the configured reconnect budget. */
+  /** Retry on the caller until reconnectMaxDurationMs elapses. */
   SYNC: "sync",
   /** Return immediately and connect on the background replay loop. */
   ASYNC: "async",
@@ -355,49 +360,76 @@ export type QwpInitialConnectMode =
   (typeof QWP_INITIAL_CONNECT_MODE)[keyof typeof QWP_INITIAL_CONNECT_MODE];
 
 /**
- * Reconnect tuning shared by ingress and egress. The two sides ship different
- * defaults, so every field below documents both; an unset field keeps its own
- * side's default rather than the other's.
+ * Ingress reconnect and replay policy: the `reconnect` option of an ingress
+ * session.
  *
- * The ingress defaults favour survival -- a producer holding buffered or
- * journalled rows must outlast an outage rather than give up on it -- while
- * egress bounds a query connection so a caller is not left waiting.
+ * As in the Java, Rust and Python clients, a session that has connected is
+ * not stopped by any configured limit. Transport and endpoint failures are
+ * retried until close(), and only a terminal error ends the session.
+ * reconnectMaxDurationMs bounds a synchronous initial connect only.
  */
-export interface QwpReconnectOptions {
+export interface QwpIngressReconnectOptions {
   /**
-   * Maximum connection sweeps per outage; zero is unlimited.
-   * Ingress defaults to zero (and retries indefinitely once connected),
-   * egress to 8. Setting a positive ingress limit also bounds reconnects.
+   * Full-jitter ceiling before the first failed connection sweep is retried.
+   * Must not exceed 2_147_483_647ms. Defaults to 100ms.
    */
-  maxAttempts?: number;
+  reconnectInitialBackoffMs?: number;
   /**
-   * Full-jitter ceiling before the first failed sweep is retried. Must not
-   * exceed 2_147_483_647ms. Ingress defaults to 100ms, egress to 50ms.
+   * Full-jitter exponential-backoff ceiling. Must not exceed 2_147_483_647ms.
+   * Defaults to 5 seconds.
    */
-  initialBackoffMs?: number;
+  reconnectMaxBackoffMs?: number;
   /**
-   * Full-jitter exponential-backoff ceiling. Must not exceed
-   * 2_147_483_647ms. Ingress defaults to 5s, egress to 1s.
+   * How long a synchronous initial connect keeps retrying before it fails
+   * with QwpReconnectExhaustedError. Defaults to 5 minutes. Zero allows one
+   * attempt and no retries, as in the Rust and Python clients; the attempt
+   * itself is not cut short. Reconnects after the first connection do not
+   * consult it, and neither does an initial connect that runs in the
+   * background (initialConnectMode `"async"`, which Node's
+   * `initial_connect_retry=async` and the pooled client's `lazy_connect` also
+   * select): both retry until close() or a terminal error.
    */
-  maxBackoffMs?: number;
+  reconnectMaxDurationMs?: number;
   /**
-   * Total reconnect deadline; zero disables the deadline.
-   * Ingress defaults to 5 minutes for synchronous initial connection only;
-   * a configured value also bounds reconnects after connection. Egress
-   * defaults to 30 seconds per episode.
-   */
-  maxDurationMs?: number;
-  /**
-   * Consecutive retriable rejections of one ingress frame before it is treated
-   * as poison and retained for inspection. Defaults to 4. Ingress only.
+   * Consecutive retriable rejections of one frame before it is treated as
+   * poison and retained for inspection. Defaults to 4.
    */
   maxFrameRejections?: number;
   /**
-   * Minimum time the same ingress frame must remain suspect before repeated
+   * Minimum time the same frame must remain suspect before repeated
    * rejections or non-orderly closes become terminal. Defaults to 5 minutes;
-   * zero escalates as soon as maxFrameRejections is reached. Ingress only.
+   * zero escalates as soon as maxFrameRejections is reached.
    */
   poisonMinEscalationWindowMs?: number;
+  onEvent?: (event: QwpReconnectEvent) => void;
+}
+
+/**
+ * Egress failover policy: the `reconnect` option of an egress session. Unlike
+ * ingress, each failover episode is bounded, so a caller waiting for a query
+ * result is not left waiting through a long outage.
+ */
+export interface QwpEgressReconnectOptions {
+  /**
+   * Maximum connection sweeps per failover episode; zero is unlimited.
+   * Defaults to 8.
+   */
+  failoverMaxAttempts?: number;
+  /**
+   * Full-jitter ceiling before the first failed connection sweep is retried.
+   * Must not exceed 2_147_483_647ms. Defaults to 50ms.
+   */
+  failoverBackoffInitialMs?: number;
+  /**
+   * Full-jitter exponential-backoff ceiling. Must not exceed 2_147_483_647ms.
+   * Defaults to 1 second.
+   */
+  failoverBackoffMaxMs?: number;
+  /**
+   * Deadline for one failover episode; zero disables it. Defaults to 30
+   * seconds.
+   */
+  failoverMaxDurationMs?: number;
   onEvent?: (event: QwpReconnectEvent) => void;
 }
 

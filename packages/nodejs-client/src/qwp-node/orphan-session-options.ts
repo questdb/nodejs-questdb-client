@@ -17,13 +17,13 @@ export function orphanIngressSessionOptions(
   const configuredOnEvent = configuredReconnect?.onEvent;
   return {
     ...options,
-    // No foreground caller remains to retry orphan bytes, so transport
-    // outages stay retryable for the drainer's lifetime. Authentication,
-    // protocol, and poison-frame failures remain terminal and quarantined.
+    // No foreground caller remains to retry orphan bytes. The adopted slot
+    // connects in the background and, like every connected session, retries
+    // transport outages until close(), so they stay retryable for the
+    // drainer's lifetime. Authentication, protocol, and poison-frame failures
+    // remain terminal and quarantined.
     reconnect: {
       ...configuredReconnect,
-      maxAttempts: 0,
-      maxDurationMs: 0,
       onEvent: (event) => {
         // This wrapper is the notification inbox's handler, and the inbox waits
         // on whatever the handler returns before it delivers the next event.
@@ -48,9 +48,11 @@ export function orphanIngressSessionOptions(
     backgroundStoreAndForward: undefined,
     initialConnectMode: undefined,
     orphanStoreAndForward: true,
+    // Java also bounds an orphan's durable-ACK gap by
+    // reconnect_max_duration_millis.
     orphanDurableAckMismatchMaxDurationMs:
       options.orphanDurableAckMismatchMaxDurationMs ??
-      configuredReconnect?.maxDurationMs ??
+      configuredReconnect?.reconnectMaxDurationMs ??
       300_000,
     onResponse: undefined,
     onDurableAck: undefined,

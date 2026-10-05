@@ -7,10 +7,12 @@ import * as https from "https";
 import { log, Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
-import * as qwpNode from "./qwp";
-// Imported directly rather than through ./qwp: this is a Sender-side guard, and
-// ./qwp is re-exported wholesale by the package root.
-import { warnUnsupportedQwpSenderKeys } from "./qwp-node/client-config";
+// Imported directly rather than through ./qwp: these are Sender-side helpers,
+// and ./qwp is re-exported wholesale by the package root.
+import {
+  resolveQwpNodeSenderConfig,
+  warnUnsupportedQwpSenderKeys,
+} from "./qwp-node/client-config";
 // Imported directly for the same reason: a Sender-side guard on routing the
 // QWP schema never saw, kept out of the package root's re-export.
 import { assertUniformQwpEndpointScheme } from "../../client-core/src/_qwp/_internal/failover";
@@ -114,7 +116,10 @@ function resolveQwpConfig(
   const agent =
     webSocketOverrides.agent ??
     selectQwpSchemeAgent(options.agent, options.protocol === WSS, logger);
-  const resolved = qwpNode.parseQwpNodeClientConfig(configString, {
+  // The Sender scope validates the whole shared vocabulary but leaves the
+  // pool-level lazy_connect flag unapplied, as the other QuestDB clients'
+  // standalone senders do; the warning above names it.
+  const resolved = resolveQwpNodeSenderConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,
     // The top-level logger wins, then the QWP-specific one, then the default
@@ -180,7 +185,10 @@ type QwpExtraOptions = {
    * same option.
    */
   webSocket?: Omit<QwpNodeIngressOptions, "url">;
-  /** WS/WSS ingress ACK, durable-ACK, and reconnect options. */
+  /**
+   * WS/WSS ingress ACK, durable-ACK, reconnect, and startup options;
+   * `initialConnectMode` here is the typed spelling of `initial_connect_retry`.
+   */
   session?: QwpIngressSessionOptions;
   /**
    * High-level buffering and auto-flush options for WS, WSS, and UDP. A `log`

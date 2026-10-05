@@ -21,15 +21,17 @@ import {
   QwpConnectionFactory,
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
+  QwpIngressReconnectOptions,
   QwpIngressReplayStore,
-  QwpReconnectOptions,
-  QwpReplayDictionaryPersistenceError,
 } from "./transport";
 import {
   QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
   QwpReconnectingIngressConnection,
+  selectsQwpSyncInitialConnect,
+  validateQwpInitialConnectMode,
 } from "./_internal/reconnecting-ingress-connection";
-import { validateQwpReconnectBackoffs } from "./_internal/reconnect-backoff";
+import { validateQwpIngressReconnectBackoffs } from "./_internal/reconnect-backoff";
+import { monotonicNowMs } from "./_internal/monotonic-clock";
 import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
@@ -38,7 +40,7 @@ import {
   priorQwpSenderErrorDeliveries,
   QwpNotificationDispatcher,
 } from "./_internal/notification-dispatcher";
-import { defersCommit, QWP_FLAGS_OFFSET } from "./_internal/frame-flags";
+import { QWP_FLAGS_OFFSET } from "./_internal/frame-flags";
 import { safelyInvoke } from "./_internal/safe-callback";
 import {
   createQwpSenderError,
@@ -51,6 +53,8 @@ import { log } from "../logging";
 const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
 const DEFAULT_ERROR_INBOX_CAPACITY = 256;
 const DEFAULT_PROGRESS_INBOX_CAPACITY = 256;
+/** How long close() lets published in-memory frames reach the socket. */
+const CLOSE_DRAIN_TIMEOUT_MS = 5_000;
 
 interface PlannedIngressFrames {
   readonly frames: Uint8Array[];
@@ -192,46 +196,30 @@ function planIngressFrames(
   }
 }
 
-function mergeIngressResponses(
-  responses: readonly QwpIngressResponse[],
-): QwpIngressResponse {
-  const last = responses[responses.length - 1];
-  const tables = new Map<string, bigint>();
-  for (const response of responses) {
-    for (const table of response.tables) {
-      const previous = tables.get(table.name);
-      if (previous === undefined || table.sequenceTransaction > previous) {
-        tables.set(table.name, table.sequenceTransaction);
-      }
-    }
-  }
-  return {
-    ...last,
-    tables: [...tables].map(([name, sequenceTransaction]) => ({
-      name,
-      sequenceTransaction,
-    })),
-  };
-}
-
 export interface QwpIngressSessionOptions {
   /**
-   * Per-frame ACK deadline. Defaults to 15 seconds. Capped at 2,147,483,647ms
-   * (the host timer ceiling); a larger value throws a `RangeError`.
+   * Default timeout for waitForAcknowledged() and QwpSender.flushAndWait():
+   * how long a wait may go without the ACK watermark advancing. Defaults to
+   * 15 seconds. Capped at 2,147,483,647ms (the host timer ceiling); a larger
+   * value throws a `RangeError`.
    */
   ackTimeoutMs?: number;
   /**
    * Reconnection and at-least-once replay policy. Reconnection is
    * enabled by default for factory-created sessions; set false to keep one
    * fixed connection. Browser and non-persistent Node replay is memory-only.
-   * A running sender retries indefinitely by default; positive maxAttempts
-   * or maxDurationMs bounds subsequent reconnect episodes.
+   * When initialConnectMode is not set, the first connect is a single attempt
+   * unless reconnectMaxDurationMs, reconnectInitialBackoffMs or
+   * reconnectMaxBackoffMs is set, as in the Java client; it then retries for
+   * up to reconnectMaxDurationMs (5 minutes by default). An onEvent observer
+   * alone does not make it retry. Once connected, the session retries every
+   * outage until close() or a terminal error.
    *
    * An ACK lost during disconnect can cause a frame to be replayed after the
    * server accepted it; configure server-side deduplication when duplicates
    * are not acceptable.
    */
-  reconnect?: QwpReconnectOptions | false;
+  reconnect?: QwpIngressReconnectOptions | false;
   /**
    * Target cap for the built-in memory-only replay queue, including estimated
    * per-frame bookkeeping. Defaults to 128 MiB. A transaction-closing logical
@@ -248,9 +236,30 @@ export interface QwpIngressSessionOptions {
   memoryReplayAppendDeadlineMs?: number;
   /** @internal Node adapter hook for persistent store-and-forward. */
   replayStore?: QwpIngressReplayStore;
-  /** @internal Starts memory or persistent replay without waiting for a server. */
+  /**
+   * @internal Starts memory or persistent replay without waiting for a
+   * server. Implied by initialConnectMode `"async"`.
+   */
   backgroundStoreAndForward?: boolean;
-  /** @internal Initial connection policy supplied by the Node adapter. */
+  /**
+   * Startup policy when no server is reachable; the typed spelling of the
+   * `initial_connect_retry` configuration-string key.
+   *
+   * - `"off"` makes one pass over the endpoints and fails fast.
+   * - `"sync"` retries on the caller for up to
+   *   `reconnect.reconnectMaxDurationMs`, then fails with
+   *   QwpReconnectExhaustedError.
+   * - `"async"` returns at once and connects in the background, retrying
+   *   until close(). Rows published meanwhile wait in the replay queue --
+   *   memory, or the Node store-and-forward journal. An authentication or
+   *   capability rejection that every endpoint would repeat ends the session
+   *   if it comes before the first successful connection.
+   *
+   * Defaults to `"off"`, or to `"sync"` when reconnectMaxDurationMs,
+   * reconnectInitialBackoffMs or reconnectMaxBackoffMs is set. `"sync"` and
+   * `"async"` require reconnection, so they cannot be combined with
+   * `reconnect: false`.
+   */
   initialConnectMode?: QwpInitialConnectMode;
   /** @internal Orphan sessions may quarantine persistent catch-up cap gaps. */
   orphanStoreAndForward?: boolean;
@@ -302,7 +311,10 @@ export interface QwpIngressSessionOptions {
   onDurableAck?: (response: QwpIngressResponse) => void;
   /** Monotonic send/accept/durability notifications. Callback errors are ignored. */
   onProgress?: (event: QwpIngressProgressEvent) => void;
-  /** Server rejections, deadlines, and terminal session failures. */
+  /**
+   * Server rejections and terminal session failures. A waitForAcknowledged()
+   * that times out is reported only to its caller.
+   */
   onError?: (event: QwpIngressErrorEvent) => void;
 }
 
@@ -321,8 +333,6 @@ export interface QwpIngressMetrics {
   readonly publishedSequence: bigint;
   /** Highest client-session sequence covered by a successful cumulative ACK. */
   readonly acknowledgedSequence: bigint;
-  readonly pendingResponses: number;
-  readonly pendingResponseBytes: number;
   readonly pendingDurableTables: number;
   readonly totalFramesPublished: number;
   readonly totalBytesPublished: number;
@@ -377,40 +387,16 @@ export interface QwpIngressErrorEvent {
   readonly metrics: QwpIngressMetrics;
 }
 
-/**
- * One ingress operation with independent local-publication and server-ACK
- * completion. Publication resolves after every physical frame belonging to
- * the logical batch has been accepted by the connection. For persistent Node
- * transports that means the frames are durable in the replay journal.
- */
-export interface QwpIngressSendResult {
-  /** Last client-session sequence allocated to this logical batch. */
-  readonly sequence: bigint;
-  /** Local transport/journal ownership boundary. */
-  readonly publication: Promise<void>;
-  /** Cumulative server response for every frame in the logical batch. */
-  readonly acknowledgement: Promise<QwpIngressResponse>;
-}
-
-interface PendingResponse {
-  resolve: (response: QwpIngressResponse) => void;
-  reject: (error: unknown) => void;
-  readonly payloadBytes: number;
-  timer?: ReturnType<typeof setTimeout>;
-}
-
-interface PendingDurableResponse {
-  readonly targets: Map<string, bigint>;
-  resolve: () => void;
-  reject: (error: unknown) => void;
-  timer?: ReturnType<typeof setTimeout>;
-}
-
 interface PendingAcknowledgedSequence {
   readonly targetSequence: bigint;
-  resolve: () => void;
+  /** True once the watermark covers the target, false when the wait expires. */
+  resolve: (acknowledged: boolean) => void;
   reject: (error: unknown) => void;
   timer?: ReturnType<typeof setTimeout>;
+  /** Watermark last seen by this wait; an advance restarts its deadline. */
+  lastSeen: bigint;
+  /** Monotonic time the watermark was last seen advancing. */
+  lastProgressMs: number;
 }
 
 export class QwpIngressNackError extends Error {
@@ -437,20 +423,6 @@ export class QwpIngressSessionClosedError extends Error {
   }
 }
 
-/** The ingress ACK watermark did not reach the requested frame in time. */
-export class QwpIngressAckTimeoutError extends Error {
-  constructor(
-    readonly targetSequence: bigint,
-    readonly acknowledgedSequence: bigint,
-    readonly timeoutMs: number,
-  ) {
-    super(
-      `timed out waiting for QWP ACK watermark [targetSequence=${targetSequence}, acknowledgedSequence=${acknowledgedSequence}, timeoutMs=${timeoutMs}]`,
-    );
-    this.name = "QwpIngressAckTimeoutError";
-  }
-}
-
 /** A recovered frame was deliberately retired without a server ACK. */
 export class QwpIngressAckAbandonedError extends Error {
   constructor(
@@ -462,6 +434,23 @@ export class QwpIngressAckAbandonedError extends Error {
       `QWP frame was abandoned before server acknowledgement [targetSequence=${targetSequence}, abandoned=${fromFsn}..${toFsn}]`,
     );
     this.name = "QwpIngressAckAbandonedError";
+  }
+}
+
+/**
+ * close() discarded frames that had been published to the in-memory replay
+ * queue but could not reach the socket before its drain deadline, typically
+ * because no server was reachable. The connection is closed regardless.
+ */
+export class QwpIngressSessionCloseTimeoutError extends Error {
+  constructor(
+    readonly timeoutMs: number,
+    readonly unsentFrames: number,
+  ) {
+    super(
+      `QWP ingress session close timed out after ${timeoutMs}ms; ${unsentFrames} published frame(s) had not reached the socket and were discarded`,
+    );
+    this.name = "QwpIngressSessionCloseTimeoutError";
   }
 }
 
@@ -480,7 +469,19 @@ export class QwpBatchTooLargeError extends RangeError {
 function validateIngressSessionOptions(
   options: QwpIngressSessionOptions,
 ): void {
-  validateQwpReconnectBackoffs(options.reconnect);
+  validateQwpIngressReconnectBackoffs(options.reconnect);
+  validateQwpInitialConnectMode(options.initialConnectMode);
+  // A fixed connection has nothing to retry with and no replay queue to hold
+  // rows for a background connect, so either mode would silently run as "off".
+  if (
+    options.reconnect === false &&
+    options.initialConnectMode !== undefined &&
+    options.initialConnectMode !== QWP_INITIAL_CONNECT_MODE.OFF
+  ) {
+    throw new RangeError(
+      `initialConnectMode '${options.initialConnectMode}' requires ingress reconnect`,
+    );
+  }
   const timeout = options.ackTimeoutMs ?? 15_000;
   if (
     !Number.isFinite(timeout) ||
@@ -567,16 +568,13 @@ function validateIngressSessionOptions(
 /**
  * Connection-scoped ingress sequencer.
  *
- * One promise is registered before each WebSocket send, preventing a fast ACK
- * from racing its waiter. Calls are serialized to preserve the server's
- * zero-based wire sequence. Successful ACKs are cumulative, so an ACK for
- * sequence N resolves every outstanding send through N.
+ * Publications are serialized to preserve the server's zero-based wire
+ * sequence. Successful ACKs are cumulative, so the ACK watermark covers every
+ * frame through the acknowledged sequence; waitForAcknowledged() observes it.
  */
 export class QwpIngressSession {
-  private readonly pending = new Map<bigint, PendingResponse>();
   private readonly durableWatermarks = new Map<string, bigint>();
   private readonly pendingDurableTargets = new Map<string, bigint>();
-  private readonly durableWaiters = new Set<PendingDurableResponse>();
   private readonly acknowledgedSequenceWaiters =
     new Set<PendingAcknowledgedSequence>();
   private readonly durableFrameTargets = new Map<
@@ -636,6 +634,15 @@ export class QwpIngressSession {
       ) {
         throw new Error(
           "ingress reconnect options require QwpIngressSession.connect(factory, options)",
+        );
+      }
+      if (
+        options.initialConnectMode !== undefined &&
+        options.initialConnectMode !== QWP_INITIAL_CONNECT_MODE.OFF &&
+        !(connection instanceof QwpReconnectingIngressConnection)
+      ) {
+        throw new Error(
+          "an initialConnectMode other than 'off' requires QwpIngressSession.connect(factory, options)",
         );
       }
       if (
@@ -709,25 +716,25 @@ export class QwpIngressSession {
     }
     // Spread, not `??`: a caller who tunes one field is asking to change that
     // field, not to opt out of every other default. Replacing the object left
-    // the connection's per-field fallbacks to supply maxAttempts and
-    // maxDurationMs, which are not the session's policy -- so setting a single
-    // documented key silently capped reconnect at three attempts.
+    // the connection's per-field fallbacks to supply values that are not the
+    // session's policy.
     const reconnectOptions =
       options.reconnect === false
         ? undefined
         : { ...QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS, ...options.reconnect };
-    // The default five-minute budget governs a synchronous first connect,
-    // not a running sender's recovery. Explicit retry limits still opt into
-    // bounded post-connection reconnects.
-    const unboundedRunningReconnect =
-      options.reconnect === undefined ||
-      options.reconnect === null ||
-      (options.reconnect !== false &&
-        !options.reconnect.maxAttempts &&
-        !options.reconnect.maxDurationMs);
+    // ASYNC needs the background replay loop, whichever adapter asked for it.
+    // Only the Node adapter used to set this internal flag alongside the mode,
+    // so a browser session given "async" ran a synchronous startup instead:
+    // it blocked the caller and then failed with QwpReconnectExhaustedError.
+    const backgroundStoreAndForward =
+      options.backgroundStoreAndForward === true ||
+      options.initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC;
+    // Unset, the connection picks ASYNC for background replay and SYNC
+    // otherwise; only a policy that tunes retrying asks for SYNC here.
     const initialConnectMode =
       options.initialConnectMode ??
-      (options.reconnect === undefined && !options.backgroundStoreAndForward
+      (!backgroundStoreAndForward &&
+      !selectsQwpSyncInitialConnect(options.reconnect)
         ? QWP_INITIAL_CONNECT_MODE.OFF
         : undefined);
     // Preserve the connector contract that the first browser/Node transport
@@ -738,7 +745,7 @@ export class QwpIngressSession {
       reconnectOptions &&
       options.reconnect === undefined &&
       !options.replayStore &&
-      !options.backgroundStoreAndForward
+      !backgroundStoreAndForward
         ? factory(signal)
         : undefined;
     const connection = reconnectOptions
@@ -749,7 +756,7 @@ export class QwpIngressSession {
           options.maxBatchSizeBytes,
           options.memoryReplayMaxBytes,
           options.memoryReplayAppendDeadlineMs,
-          options.backgroundStoreAndForward,
+          backgroundStoreAndForward,
           initialConnectMode,
           options.orphanStoreAndForward,
           options.orphanDurableAckMismatchMaxDurationMs,
@@ -769,7 +776,6 @@ export class QwpIngressSession {
           // server's, and only the caller's request decides whether ordinary
           // OKs or durable progress may advance it.
           options.durableAckKeepaliveMs !== undefined,
-          unboundedRunningReconnect,
         )
       : await factory(signal);
     try {
@@ -813,7 +819,7 @@ export class QwpIngressSession {
    *
    * The handshake flag on its own is not enough: durable targets are tracked
    * only when the caller asked for durable progress with
-   * durableAckKeepaliveMs, which is also what waitForDurable() requires. The
+   * durableAckKeepaliveMs. The
    * two conditions have to be read together everywhere, because a session
    * that reports a watermark nothing advances is worse than one that reports
    * the ordinary ACK -- it stalls rather than degrades.
@@ -849,15 +855,9 @@ export class QwpIngressSession {
 
   get metrics(): QwpIngressMetrics {
     const transport = this.connection.getIngressMetrics?.();
-    let pendingResponseBytes = 0;
-    for (const pending of this.pending.values()) {
-      pendingResponseBytes += pending.payloadBytes;
-    }
     return Object.freeze({
       publishedSequence: this.nextSequence - 1n,
       acknowledgedSequence: this.acknowledgedSequence,
-      pendingResponses: this.pending.size,
-      pendingResponseBytes,
       pendingDurableTables: this.pendingDurableTargets.size,
       totalFramesPublished: this.totalFramesPublished,
       totalBytesPublished: this.totalBytesPublished,
@@ -905,42 +905,12 @@ export class QwpIngressSession {
     });
   }
 
-  sendTables(
-    tables: readonly QwpTableBuffer[],
-    encodeOptions: QwpIngressEncodeOptions = {},
-  ): Promise<QwpIngressResponse> {
-    try {
-      return this.sendTablesWithPublication(tables, encodeOptions)
-        .acknowledgement;
-    } catch (error) {
-      if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
-      throw error;
-    }
-  }
-
   /**
-   * Starts an ingress batch and exposes local publication separately from its
-   * server ACK. High-level senders use this boundary to retain retryable rows
-   * until a persistent replay journal owns the complete logical batch.
-   */
-  sendTablesWithPublication(
-    tables: readonly QwpTableBuffer[],
-    encodeOptions: QwpIngressEncodeOptions = {},
-  ): QwpIngressSendResult {
-    this.throwIfUnavailable();
-    const planned = planIngressFrames(
-      tables,
-      encodeOptions,
-      this.maxBatchSizeBytes,
-    );
-    return this.sendPlannedFramesWithPublication(planned.frames);
-  }
-
-  /**
-   * Encodes and publishes tables without waiting for their server ACK. With
-   * Node store-and-forward this resolves only after every frame is durable in
-   * the local journal; browser and non-persistent transports resolve after the
-   * WebSocket accepts the frames.
+   * Encodes and publishes tables without waiting for their server ACK. This
+   * resolves once every frame is published locally: in the journal with Node
+   * store-and-forward, in the in-memory replay queue for other reconnecting
+   * sessions, or on the WebSocket for a fixed connection. Pass
+   * publishedFrameSequence to waitForAcknowledged() to wait for the ACK.
    */
   publishTables(
     tables: readonly QwpTableBuffer[],
@@ -962,133 +932,6 @@ export class QwpIngressSession {
   }
 
   /**
-   * Sends tables using the session's connection-scoped symbol dictionary.
-   * String symbol values are assigned stable IDs automatically.
-   * If a replay dictionary append fails, that call rejects with
-   * QwpReplayDictionaryPersistenceError; retrying uses full inline symbols.
-   */
-  async sendTablesDelta(
-    tables: readonly QwpTableBuffer[],
-    encodeOptions: Pick<
-      QwpIngressEncodeOptions,
-      "gorilla" | "deferCommit"
-    > = {},
-  ): Promise<QwpIngressResponse> {
-    this.throwIfUnavailable();
-    if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
-      return this.sendTables(tables, encodeOptions);
-    }
-    const releaseDeltaPublication = await this.acquireDeltaPublicationAsync();
-    return this.startTablesDeltaWithPublication(
-      tables,
-      encodeOptions,
-      releaseDeltaPublication,
-    ).acknowledgement;
-  }
-
-  /**
-   * Delta-dictionary variant of sendTablesWithPublication().
-   *
-   * The synchronous publication API cannot wait to plan behind another delta
-   * operation, so overlapping calls reject. Use sendTablesDelta() or
-   * publishTablesDelta() when operations may be started concurrently; those
-   * asynchronous APIs serialize planning through the publication boundary.
-   */
-  sendTablesDeltaWithPublication(
-    tables: readonly QwpTableBuffer[],
-    encodeOptions: Pick<
-      QwpIngressEncodeOptions,
-      "gorilla" | "deferCommit"
-    > = {},
-  ): QwpIngressSendResult {
-    this.throwIfUnavailable();
-    if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
-      return this.sendTablesWithPublication(tables, encodeOptions);
-    }
-    const releaseDeltaPublication = this.acquireDeltaPublication();
-    return this.startTablesDeltaWithPublication(
-      tables,
-      encodeOptions,
-      releaseDeltaPublication,
-    );
-  }
-
-  private startTablesDeltaWithPublication(
-    tables: readonly QwpTableBuffer[],
-    encodeOptions: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-    releaseDeltaPublication: () => void,
-  ): QwpIngressSendResult {
-    const previousSize = this.symbolDictionary.size;
-    const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
-    const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
-    let successfullyPublishedMaxSymbolId = previousPublishedMaxSymbolId;
-    let successfullyPublishedDelta = previousDeltaSymbolsPublished;
-    const recordPublishedDelta = (frame: Uint8Array): void => {
-      const delta = decodeQwpIngressSymbolDictionaryDelta(frame);
-      if (!delta) return;
-      successfullyPublishedDelta = true;
-      successfullyPublishedMaxSymbolId = Math.max(
-        successfullyPublishedMaxSymbolId,
-        delta.startId + delta.entries.length - 1,
-      );
-    };
-    let sending: QwpIngressSendResult;
-    try {
-      const planned = planIngressFrames(
-        tables,
-        {
-          ...encodeOptions,
-          dictionary: this.symbolDictionary,
-          confirmedMaxSymbolId: this.publishedMaxSymbolId,
-        },
-        this.maxBatchSizeBytes,
-      );
-      this.publishedMaxSymbolId = this.symbolDictionary.size - 1;
-      this.deltaSymbolsPublished = true;
-      sending = this.sendPlannedFramesWithPublication(
-        planned.frames,
-        recordPublishedDelta,
-      );
-    } catch (error) {
-      this.symbolDictionary.truncate(previousSize);
-      this.publishedMaxSymbolId = previousPublishedMaxSymbolId;
-      this.deltaSymbolsPublished = previousDeltaSymbolsPublished;
-      releaseDeltaPublication();
-      throw error;
-    }
-
-    // The publication promise, rather than a synchronous try/catch around
-    // sendFrame(), is the authoritative ownership boundary. Restore the
-    // allocator/watermark before the acknowledgement observes a local journal
-    // rejection, while retaining dictionary entries that did persist.
-    const reconciledPublication = sending.publication.catch(
-      (error: unknown) => {
-        this.restoreDeltaStateAfterPublishFailure(
-          Math.max(previousSize, successfullyPublishedMaxSymbolId + 1),
-        );
-        this.publishedMaxSymbolId = successfullyPublishedMaxSymbolId;
-        this.deltaSymbolsPublished = successfullyPublishedDelta;
-        throw error;
-      },
-    );
-    const publication = reconciledPublication.then(
-      () => releaseDeltaPublication(),
-      (error: unknown) => {
-        releaseDeltaPublication();
-        throw error;
-      },
-    );
-    // Another new promise, and this one also carries the publication
-    // rejection, so it needs the same containment.
-    const acknowledgement = this.observeAcknowledgement(
-      Promise.all([publication, sending.acknowledgement]).then(
-        ([, response]) => response,
-      ),
-    );
-    return { sequence: sending.sequence, publication, acknowledgement };
-  }
-
-  /**
    * Publishes tables with the automatic connection-scoped symbol dictionary.
    * After a replay dictionary persistence error, retries use full inline
    * symbols and no longer depend on the failed sidecar.
@@ -1104,7 +947,7 @@ export class QwpIngressSession {
     if (this.connection.ingressDeltaSymbolDictionaryEnabled === false) {
       return this.publishTables(tables, encodeOptions);
     }
-    const releaseDeltaPublication = await this.acquireDeltaPublicationAsync();
+    const releaseDeltaPublication = await this.acquireDeltaPublication();
     const previousSize = this.symbolDictionary.size;
     const previousPublishedMaxSymbolId = this.publishedMaxSymbolId;
     const previousDeltaSymbolsPublished = this.deltaSymbolsPublished;
@@ -1144,18 +987,13 @@ export class QwpIngressSession {
     }
   }
 
-  private async acquireDeltaPublicationAsync(): Promise<() => void> {
+  /**
+   * Serializes delta planning: each publication plans against the dictionary
+   * state the previous one left, so the next waits until it is released.
+   */
+  private async acquireDeltaPublication(): Promise<() => void> {
     while (this.deltaPublicationBarrier) {
       await this.deltaPublicationBarrier;
-    }
-    return this.acquireDeltaPublication();
-  }
-
-  private acquireDeltaPublication(): () => void {
-    if (this.deltaPublicationBarrier) {
-      throw new Error(
-        "overlapping sendTablesDeltaWithPublication calls are not supported; await publication before starting another",
-      );
     }
     let resolve!: () => void;
     const barrier = new Promise<void>((done) => {
@@ -1200,8 +1038,10 @@ export class QwpIngressSession {
   }
 
   /**
-   * Publishes one pre-encoded frame without allocating an ACK waiter.
-   * Applications can observe later acceptance through progress callbacks.
+   * Publishes one pre-encoded frame without waiting for its server ACK. Like
+   * publishTables(), this resolves once the frame is published locally; pass
+   * publishedFrameSequence to waitForAcknowledged() to wait for the ACK, or
+   * observe acceptance through the progress callbacks.
    */
   publishFrame(frame: Uint8Array): Promise<void> {
     this.throwIfUnavailable();
@@ -1234,182 +1074,6 @@ export class QwpIngressSession {
       () => undefined,
     );
     return publishing;
-  }
-
-  sendFrame(frame: Uint8Array): Promise<QwpIngressResponse> {
-    try {
-      return this.sendFrameWithPublication(frame).acknowledgement;
-    } catch (error) {
-      if (error instanceof QwpBatchTooLargeError) return Promise.reject(error);
-      throw error;
-    }
-  }
-
-  /** Starts one pre-encoded frame with independent publication and ACKs. */
-  sendFrameWithPublication(frame: Uint8Array): QwpIngressSendResult {
-    return this.startFrameWithPublication(frame);
-  }
-
-  private startFrameWithPublication(
-    frame: Uint8Array,
-    publicationBarrier: Promise<void> = this.sendTail,
-    ackTimeoutEnabled = true,
-  ): QwpIngressSendResult {
-    this.throwIfUnavailable();
-    const ackDeferredUntilCommit = defersCommit(frame);
-    if (
-      this.maxBatchSizeBytes !== undefined &&
-      frame.byteLength > this.maxBatchSizeBytes
-    ) {
-      throw new QwpBatchTooLargeError(frame.byteLength, this.maxBatchSizeBytes);
-    }
-    const sequence = this.nextSequence++;
-    let pending!: PendingResponse;
-    const response = new Promise<QwpIngressResponse>((resolve, reject) => {
-      pending = { resolve, reject, payloadBytes: frame.byteLength };
-    });
-    this.pending.set(sequence, pending);
-    this.totalFramesPublished++;
-    this.totalBytesPublished += frame.byteLength;
-
-    let sendStarted = false;
-    const sending = publicationBarrier.then(
-      async () => {
-        this.throwIfUnavailable();
-        sendStarted = true;
-        this.highestSentSequence = sequence;
-        await this.connection.send(frame);
-      },
-      (error: unknown) => {
-        // This session sequence was already allocated, but the frame must not
-        // reach a replay transport after an earlier frame in the same logical
-        // transaction failed publication. Reserve its translation slot so all
-        // later wire ACKs still map to the correct session sequence.
-        this.connection.skipIngressClientSequence?.();
-        throw error;
-      },
-    );
-    this.sendTail = sending.catch((error: unknown) => {
-      if (!sendStarted) return;
-      if (error instanceof QwpReplayDictionaryPersistenceError) {
-        this.recordError(error, false);
-      } else if (this.connection instanceof QwpReconnectingIngressConnection) {
-        // Replay transports own their terminal state. A local journal append
-        // failure is retryable by the caller and must not brick the session;
-        // terminal transport failures independently close the message stream.
-        this.recordError(error, false);
-      } else {
-        this.fail(error);
-      }
-    });
-    // Publish the callback only after sendTail owns this frame so a callback
-    // that queues another frame cannot reorder it ahead of this sequence.
-    this.emitProgress(QWP_INGRESS_PROGRESS_KIND.PUBLISHED, sequence);
-    void sending.then(
-      () => {
-        this.totalFramesSent++;
-        this.totalBytesSent += frame.byteLength;
-        if (this.pending.get(sequence) !== pending) return;
-        // QuestDB deliberately sends no ACK for a deferred frame. The later
-        // group-closing frame has its own deadline and cumulatively resolves
-        // this waiter, so starting a per-frame timer here would make valid
-        // transactions fail merely because they stayed open for ackTimeoutMs.
-        if (ackDeferredUntilCommit || !ackTimeoutEnabled) return;
-        pending.timer = setTimeout(() => {
-          if (!this.pending.delete(sequence)) return;
-          const error = new Error(
-            `timed out waiting for QWP ACK [sequence=${sequence}]`,
-          );
-          pending.reject(error);
-          this.recordError(error, false);
-        }, this.options.ackTimeoutMs ?? 15_000);
-      },
-      () => undefined,
-    );
-    void sending.catch((error: unknown) => {
-      const current = this.pending.get(sequence);
-      if (current !== pending) return;
-      this.pending.delete(sequence);
-      if (pending.timer) clearTimeout(pending.timer);
-      pending.reject(error);
-    });
-    return {
-      sequence,
-      publication: sending,
-      acknowledgement: this.observeAcknowledgement(response),
-    };
-  }
-
-  /**
-   * Marks an acknowledgement promise as observed and returns it unchanged.
-   *
-   * `acknowledgement` is optional by contract: QWP.md tells callers to await
-   * `publication` before releasing retryable source rows and to await
-   * `acknowledgement` only when server acceptance is also required. The
-   * session nevertheless rejects it from paths the caller never asked about --
-   * the ACK deadline in startFrameWithPublication() and rejectAll() in
-   * closeNow() -- and under Node's default unhandled-rejection mode an
-   * unobserved rejection terminates the process. Following the documented
-   * pattern therefore killed the producer roughly ackTimeoutMs into any
-   * outage, and again on close() with a frame still in flight.
-   *
-   * Attaching a handler settles that tracking without consuming anything: the
-   * same promise is returned, so a caller who does await it still receives the
-   * rejection, and both rejecting paths already report through recordError()
-   * and the onError observer. QwpSender applies this to its own use of these
-   * methods and clearDurablePoll()'s poll does the same; the public API is
-   * simply held to the same rule.
-   */
-  private observeAcknowledgement(
-    acknowledgement: Promise<QwpIngressResponse>,
-  ): Promise<QwpIngressResponse> {
-    void acknowledgement.catch(() => undefined);
-    return acknowledgement;
-  }
-
-  private sendPlannedFramesWithPublication(
-    frames: readonly Uint8Array[],
-    onFramePublished?: (frame: Uint8Array) => void,
-  ): QwpIngressSendResult {
-    const sends: QwpIngressSendResult[] = [];
-    let publicationBarrier = this.sendTail;
-    if (frames.length > 1 && this.connection.prepareIngressBatch) {
-      publicationBarrier = publicationBarrier.then(() =>
-        this.connection.prepareIngressBatch!(frames),
-      );
-    }
-    for (const frame of frames) {
-      const sending = this.startFrameWithPublication(frame, publicationBarrier);
-      const tracked = onFramePublished
-        ? {
-            ...sending,
-            publication: sending.publication.then(() =>
-              onFramePublished(frame),
-            ),
-          }
-        : sending;
-      sends.push(tracked);
-      // Within one logical split batch a failed prefix must suppress every
-      // later frame. In particular, never send the final commit frame after a
-      // deferred prefix failed to enter the replay journal.
-      publicationBarrier = tracked.publication;
-    }
-    if (sends.length === 1) return sends[0];
-    // The final barrier settles only after every suffix has either published
-    // or been deliberately suppressed and had its sequence slot reserved.
-    const publication = publicationBarrier;
-    // Promise.all() builds a new promise, so the per-frame containment above
-    // does not reach it.
-    const acknowledgement = this.observeAcknowledgement(
-      Promise.all(sends.map((send) => send.acknowledgement)).then(
-        mergeIngressResponses,
-      ),
-    );
-    return {
-      sequence: sends[sends.length - 1].sequence,
-      publication,
-      acknowledgement,
-    };
   }
 
   private publishPlannedFrames(
@@ -1456,116 +1120,76 @@ export class QwpIngressSession {
   }
 
   /**
-   * Waits independently for the cumulative frame ACK watermark. A negative
-   * target is already satisfied, but still surfaces a latched session error.
+   * Waits until the cumulative ACK watermark covers `targetSequence`, a frame
+   * sequence such as publishedFrameSequence. Resolves true once it does, and
+   * false when the watermark makes no progress for `timeoutMs` (ackTimeoutMs
+   * by default): the deadline restarts whenever the watermark advances, so a
+   * backlog that keeps draining is not cut off. After false the frames stay
+   * queued and are still delivered. As in the Java client, a `timeoutMs` of
+   * zero or less checks the watermark without waiting. Rejects when the
+   * server rejects a covered frame or the session fails; a latched session
+   * failure throws even from a check that does not wait. With durable ACK
+   * tracking the watermark advances only after durability. A negative target
+   * is already satisfied.
    */
   waitForAcknowledged(
     targetSequence: bigint,
     timeoutMs = this.options.ackTimeoutMs ?? 15_000,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.throwIfUnavailable();
     if (typeof targetSequence !== "bigint") {
       return Promise.reject(
         new TypeError("QWP ACK target sequence must be a bigint"),
       );
     }
-    if (
-      !Number.isFinite(timeoutMs) ||
-      timeoutMs <= 0 ||
-      exceedsQwpTimerCeiling(timeoutMs)
-    ) {
+    if (!Number.isFinite(timeoutMs) || exceedsQwpTimerCeiling(timeoutMs)) {
       return Promise.reject(
         new RangeError(
-          `QWP ACK watermark timeout must be positive and finite, and no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+          `QWP ACK watermark timeout must be finite and no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
         ),
       );
     }
     const rejection = this.acknowledgementFailure(targetSequence);
     if (rejection) return Promise.reject(rejection);
-    if (
-      targetSequence < 0n ||
-      this.acknowledgedFrameSequence >= targetSequence
-    ) {
-      return Promise.resolve();
+    const acknowledged = this.acknowledgedFrameSequence;
+    if (targetSequence < 0n || acknowledged >= targetSequence) {
+      return Promise.resolve(true);
     }
+    if (timeoutMs <= 0) return Promise.resolve(false);
 
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<boolean>((resolve, reject) => {
       const pending: PendingAcknowledgedSequence = {
         targetSequence,
         resolve,
         reject,
+        lastSeen: acknowledged,
+        lastProgressMs: monotonicNowMs(),
       };
-      pending.timer = setTimeout(() => {
-        if (!this.acknowledgedSequenceWaiters.delete(pending)) return;
-        const error = new QwpIngressAckTimeoutError(
-          targetSequence,
-          this.acknowledgedFrameSequence,
-          timeoutMs,
-        );
-        reject(error);
-        this.recordError(error, false);
-      }, timeoutMs);
+      // Armed once per deadline rather than on every ACK: when it fires, a
+      // wait that saw progress is re-armed for the rest of its window.
+      const arm = (delayMs: number): void => {
+        pending.timer = setTimeout(() => {
+          // Settle first: a wait whose target the watermark already covers,
+          // or that a rejection or retirement already decided, must not
+          // expire merely because no notification reached it.
+          this.resolveAcknowledgedSequenceWaiters();
+          if (!this.acknowledgedSequenceWaiters.has(pending)) return;
+          const idleMs = monotonicNowMs() - pending.lastProgressMs;
+          if (idleMs < timeoutMs) {
+            arm(Math.max(1, timeoutMs - idleMs));
+            return;
+          }
+          this.acknowledgedSequenceWaiters.delete(pending);
+          // Reported to the caller only. A wait's budget expiring is not a
+          // session failure, so it does not reach onError or the logger.
+          resolve(false);
+        }, delayMs);
+      };
+      arm(timeoutMs);
       this.acknowledgedSequenceWaiters.add(pending);
       // Close the ACK-before-registration race. JavaScript is single-threaded,
       // but a custom connection can synchronously enqueue a response callback.
       this.resolveAcknowledgedSequenceWaiters();
-    });
-  }
-
-  /**
-   * Waits until a durable ACK covers every table transaction in an OK ACK.
-   * Durable tracking must have been enabled with durableAckKeepaliveMs.
-   */
-  waitForDurable(
-    response: QwpIngressResponse,
-    timeoutMs = this.options.ackTimeoutMs ?? 15_000,
-  ): Promise<void> {
-    if (this.options.durableAckKeepaliveMs === undefined) {
-      return Promise.reject(
-        new Error("durable ACK tracking is not enabled for this session"),
-      );
-    }
-    if (!this.connection.handshake.durableAckEnabled) {
-      return Promise.reject(
-        new Error("durable ACK was not negotiated for this session"),
-      );
-    }
-    if (response.status !== QWP_STATUS.OK) {
-      return Promise.reject(
-        new Error("only a successful QWP ACK can be awaited for durability"),
-      );
-    }
-    if (
-      !Number.isFinite(timeoutMs) ||
-      timeoutMs <= 0 ||
-      exceedsQwpTimerCeiling(timeoutMs)
-    ) {
-      return Promise.reject(
-        new RangeError(
-          `durable ACK timeout must be a positive finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
-        ),
-      );
-    }
-    if (
-      response.sequence !== null &&
-      response.sequence <= this.durableAcknowledgedSequence
-    ) {
-      return Promise.resolve();
-    }
-    const targets = new Map(
-      response.tables.map((table) => [table.name, table.sequenceTransaction]),
-    );
-    if (this.areDurableTargetsCovered(targets)) return Promise.resolve();
-
-    return new Promise<void>((resolve, reject) => {
-      const pending: PendingDurableResponse = { targets, resolve, reject };
-      pending.timer = setTimeout(() => {
-        if (!this.durableWaiters.delete(pending)) return;
-        const error = new Error("timed out waiting for QWP durable ACK");
-        reject(error);
-        this.recordError(error, false);
-      }, timeoutMs);
-      this.durableWaiters.add(pending);
     });
   }
 
@@ -1589,24 +1213,13 @@ export class QwpIngressSession {
   }
 
   /**
-   * Publishes a browser control poll without an ordinary ACK deadline.
-   *
-   * QuestDB can answer this frame with durable progress but deliberately defer
-   * its cumulative OK while an earlier transaction is still open. Retaining an
-   * untimed internal waiter preserves NACK handling and lets a later cumulative
-   * OK retire the poll sequence; callers only wait for local publication.
+   * Publishes a browser control poll. QuestDB can answer it with durable
+   * progress while deferring its cumulative OK behind an open transaction, so
+   * callers only wait for local publication. A rejection of the poll frame is
+   * handled like a rejection of any other frame.
    */
   private publishBrowserDurableAckPoll(): Promise<void> {
-    const poll = this.startFrameWithPublication(
-      encodeQwpDurableAckPollFrame(),
-      this.sendTail,
-      false,
-    );
-    void poll.acknowledgement.catch((error: unknown) => {
-      if (this.closing || this.failure) return;
-      this.fail(error);
-    });
-    return poll.publication;
+    return this.publishFrame(encodeQwpDurableAckPollFrame());
   }
 
   /** @internal Waits for RAM replay to reach the socket before fast close. */
@@ -1624,15 +1237,47 @@ export class QwpIngressSession {
     this.closeHooks.push(hook);
   }
 
+  /**
+   * Closes the session and its connection. Frames already published to the
+   * in-memory replay queue first get up to 5 seconds to reach the socket. Any
+   * that cannot be sent in that time, typically because no server is
+   * reachable, are discarded, and close() rejects with
+   * QwpIngressSessionCloseTimeoutError once the connection is closed, or with
+   * the session's failure when it can no longer send them at all. A
+   * store-and-forward journal keeps unsent frames for the next session, so it
+   * is not drained. close() does not wait for ACKs: wait for
+   * publishedFrameSequence with waitForAcknowledged() first when the frames
+   * must be confirmed before closing.
+   */
   close(code = 1000, reason = ""): Promise<void> {
-    if (!this.closePromise) this.closePromise = this.closeNow(code, reason);
+    if (!this.closePromise) {
+      this.closePromise = this.closeNow(code, reason, CLOSE_DRAIN_TIMEOUT_MS);
+    }
     return this.closePromise;
   }
 
-  private async closeNow(code: number, reason: string): Promise<void> {
+  /**
+   * @internal Closes without draining unsent frames first. QwpSender bounds
+   * its own drain, and reports its outcome, before it closes the session.
+   */
+  closeWithoutDrain(code = 1000, reason = ""): Promise<void> {
+    if (!this.closePromise) this.closePromise = this.closeNow(code, reason, 0);
+    return this.closePromise;
+  }
+
+  private async closeNow(
+    code: number,
+    reason: string,
+    drainTimeoutMs: number,
+  ): Promise<void> {
     this.closing = true;
     this.clearDurablePoll();
     this.rejectAll(new QwpIngressSessionClosedError());
+    // Before the transport closes: closing it discards the in-memory queue.
+    const discarded =
+      drainTimeoutMs > 0
+        ? await this.drainUnsentFrames(drainTimeoutMs)
+        : undefined;
     const closeHooks = this.closeHooks.splice(0).map((hook) =>
       Promise.resolve()
         .then(hook)
@@ -1654,7 +1299,63 @@ export class QwpIngressSession {
       this.progressDispatcher?.close(),
       this.errorDispatcher?.close(),
     ]);
+    if (discarded) throw discarded;
     if (closeResult.status === "rejected") throw closeResult.reason;
+  }
+
+  /**
+   * Gives frames already published to the in-memory replay queue up to
+   * `timeoutMs` to reach the socket, and returns the error close() reports
+   * when some of them could not be sent. Publication used to end at the
+   * socket, so a published frame could never be left behind by close(). Now
+   * that it ends at the queue, closing straight away discarded whatever the
+   * background drainer had not sent yet -- silently, after every publish call
+   * had resolved.
+   */
+  private async drainUnsentFrames(
+    timeoutMs: number,
+  ): Promise<Error | undefined> {
+    const connection = this.connection;
+    if (!(connection instanceof QwpReconnectingIngressConnection)) {
+      // A fixed connection publishes on the socket itself.
+      return undefined;
+    }
+    let failure: unknown;
+    // Frames still on their way into the queue are refused rather than waited
+    // for: one blocked on a full queue would otherwise hold close() for its
+    // whole append deadline, and its publish call reports the refusal.
+    connection.stopPublishing();
+    const drained = connection.waitForPendingSends().then(
+      () => "drained" as const,
+      (error: unknown) => {
+        failure = error;
+        return "failed" as const;
+      },
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<"expired">((resolve) => {
+      timer = setTimeout(() => resolve("expired"), timeoutMs);
+    });
+    try {
+      const outcome = await Promise.race([drained, expired]);
+      if (outcome === "drained") return undefined;
+      if (outcome === "failed") {
+        // The frames are lost because the session can no longer send; its
+        // own failure says why better than the transport's echo of it.
+        return (
+          this.failure ??
+          (failure instanceof Error
+            ? failure
+            : new Error(`QWP ingress failed: ${failure}`))
+        );
+      }
+      const unsent = connection.unsentFrameCount;
+      return unsent > 0
+        ? new QwpIngressSessionCloseTimeoutError(timeoutMs, unsent)
+        : undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async consumeMessages(): Promise<void> {
@@ -1711,12 +1412,6 @@ export class QwpIngressSession {
       this.totalAcks++;
       this.trackDurableFrame(response);
       this.trackDurableTargets(response);
-      for (const [sequence, pending] of this.pending) {
-        if (sequence > response.sequence) break;
-        this.pending.delete(sequence);
-        if (pending.timer) clearTimeout(pending.timer);
-        pending.resolve(response);
-      }
       if (response.sequence > this.acknowledgedSequence) {
         this.acknowledgedSequence = response.sequence;
         this.emitProgress(
@@ -1730,7 +1425,6 @@ export class QwpIngressSession {
     }
 
     this.totalNacks++;
-    const pending = this.pending.get(response.sequence);
     const fsn = this.connection.getIngressFrameSequence?.(response.sequence);
     const senderError = createQwpSenderError(response, {
       appliedPolicy: this.connection.managesIngressSenderErrors
@@ -1745,11 +1439,6 @@ export class QwpIngressSession {
       response.sequence < this.acknowledgementRejection.sequence
     ) {
       this.acknowledgementRejection = { sequence: response.sequence, error };
-    }
-    if (pending) {
-      this.pending.delete(response.sequence);
-      if (pending.timer) clearTimeout(pending.timer);
-      pending.reject(error);
     }
     this.rejectAcknowledgedSequenceWaitersThrough(response.sequence, error);
     const dictionaryGap =
@@ -1899,12 +1588,6 @@ export class QwpIngressSession {
       }
     }
 
-    for (const waiter of this.durableWaiters) {
-      if (!this.areDurableTargetsCovered(waiter.targets)) continue;
-      this.durableWaiters.delete(waiter);
-      if (waiter.timer) clearTimeout(waiter.timer);
-      waiter.resolve();
-    }
     const frameAdvanced = this.advanceDurableFrameWatermark();
     this.resolveAcknowledgedSequenceWaiters();
     if (this.pendingDurableTargets.size === 0) {
@@ -1929,14 +1612,6 @@ export class QwpIngressSession {
         if (targets.has(table)) {
           referenced = true;
           break;
-        }
-      }
-      if (!referenced) {
-        for (const waiter of this.durableWaiters) {
-          if (waiter.targets.has(table)) {
-            referenced = true;
-            break;
-          }
         }
       }
       if (!referenced) this.durableWatermarks.delete(table);
@@ -1966,11 +1641,24 @@ export class QwpIngressSession {
         pending.reject(failure);
         continue;
       }
-      if (pending.targetSequence > acknowledged) continue;
+      if (pending.targetSequence > acknowledged) {
+        this.observeWaiterProgress(pending, acknowledged);
+        continue;
+      }
       this.acknowledgedSequenceWaiters.delete(pending);
       if (pending.timer) clearTimeout(pending.timer);
-      pending.resolve();
+      pending.resolve(true);
     }
+  }
+
+  /** Restarts a wait's no-progress deadline when the watermark has advanced. */
+  private observeWaiterProgress(
+    pending: PendingAcknowledgedSequence,
+    acknowledged: bigint,
+  ): void {
+    if (acknowledged <= pending.lastSeen) return;
+    pending.lastSeen = acknowledged;
+    pending.lastProgressMs = monotonicNowMs();
   }
 
   private acknowledgementFailure(targetSequence: bigint): Error | undefined {
@@ -2068,16 +1756,6 @@ export class QwpIngressSession {
   }
 
   private rejectAll(error: Error): void {
-    for (const pending of this.pending.values()) {
-      if (pending.timer) clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.pending.clear();
-    for (const pending of this.durableWaiters) {
-      if (pending.timer) clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.durableWaiters.clear();
     for (const pending of this.acknowledgedSequenceWaiters) {
       if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);

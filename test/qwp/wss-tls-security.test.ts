@@ -714,7 +714,7 @@ describe("QWP reports a permanent upgrade-argument fault immediately", () => {
       port: 1,
       token: "header.payload.signature\n",
       log: () => undefined,
-      qwp: { session: { reconnect: { maxDurationMs: 30_000 } } },
+      qwp: { session: { reconnect: { reconnectMaxDurationMs: 30_000 } } },
     } as never);
     const started = Date.now();
     await expect(sender.connect()).rejects.toThrow(/Authorization/);
@@ -730,7 +730,7 @@ describe("QWP reports a permanent upgrade-argument fault immediately", () => {
       host: "127.0.0.1",
       port: 1,
       log: () => undefined,
-      qwp: { session: { reconnect: { maxDurationMs: 600 } } },
+      qwp: { session: { reconnect: { reconnectMaxDurationMs: 600 } } },
     } as never);
     const started = Date.now();
     await expect(sender.connect()).rejects.toThrow(/reconnect/i);

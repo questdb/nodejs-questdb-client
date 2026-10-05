@@ -134,20 +134,26 @@ pool-only keys.</p>
 <p>UDP datagrams are self-contained and split at row boundaries. UDP has no
 authentication, acknowledgements, transactions, retry, or store-and-forward and is
 not available in browsers. See the QWP guide for the lower-level Node UDP API.</p>
-<p>QWP <code>flush()</code> resolves at the local publication boundary by default in both
-Node.js and browsers, matching the Java QWP sender. Without a journal, that
-boundary is the bounded in-memory replay queue: a background drainer sends
-frames in order, even while the sender keeps accepting flushes during an outage.
-Set <code>qwp.sender.awaitServerAck: true</code> to wait for QuestDB's protocol ACK instead,
-or <code>awaitDurableAck: true</code> to wait through durable upload. When Node QWP is
-configured with <code>qwp.webSocket.storeAndForward</code>, the publication boundary is
-the local durable journal; only that mode survives a process restart.
+<p>QWP <code>flush()</code> resolves at the local publication boundary in both Node.js and
+browsers, matching the Java QWP sender. Without a journal, that boundary is the
+bounded in-memory replay queue: a background drainer sends frames in order, even
+while the sender keeps accepting flushes during an outage. Call <code>flushAndWait()</code>
+to also wait until QuestDB has acknowledged everything the sender published; it
+resolves <code>false</code> when the acknowledgements make no progress for its timeout, and
+the rows then stay queued for delivery. With <code>requestDurableAck: true</code> that wait
+lasts through durable upload. When Node QWP is configured with
+<code>qwp.webSocket.storeAndForward</code>, the publication boundary is the local durable
+journal; only that mode survives a process restart.
 Set <code>initialConnectMode</code> to <code>&quot;off&quot;</code> (the default), <code>&quot;sync&quot;</code>, or <code>&quot;async&quot;</code> to
-choose fail-fast, bounded blocking, or background startup. Supplying reconnect
-budget settings without an explicit mode promotes initial startup to <code>&quot;sync&quot;</code>,
-matching the Java client. The configuration-string
-equivalent is <code>initial_connect_retry</code>, used together with the store-and-forward
-options in <code>extraOptions.qwp</code>.
+choose fail-fast, bounded blocking, or background startup, with or without a
+journal. It belongs to the ingress session options (<code>qwp.session</code> for
+<code>Sender.fromConfig()</code>), or to <code>qwp.webSocket.storeAndForward</code>. Setting
+<code>reconnectMaxDurationMs</code>, <code>reconnectInitialBackoffMs</code> or <code>reconnectMaxBackoffMs</code>
+without an explicit mode promotes initial startup to <code>&quot;sync&quot;</code>, as in the Java
+client; the Rust and Python clients do so only for a standalone sender. The
+configuration-string equivalent is <code>initial_connect_retry</code>. The pooled client's
+<code>lazy_connect</code> selects <code>&quot;async&quot;</code> as well, but like the other QuestDB clients'
+standalone senders, a <code>Sender</code> ignores that key and logs a warning.
 Persistent frames are coalesced into fixed-size 4 MiB <code>.sfa</code> segments by default,
 using the shared Java/Rust/Python SFA envelope, manifest, ACK watermark, and symbol
 dictionary formats. The active segment and a pre-sized temporary hot spare keep open
@@ -172,8 +178,8 @@ for a fixed connection. Only Node store-and-forward survives process failure.</p
 
 <p>For batches larger than the automatic flush threshold, transactional mode
 keeps each auto-flushed frame in an open server-side transaction. An explicit
-<code>flush()</code> (or its <code>commit()</code> alias) publishes the group-closing frame. Set
-<code>awaitServerAck: true</code>, or wait on the sequence returned by
+<code>flush()</code> (or its <code>commit()</code> alias) publishes the group-closing frame. Call
+<code>flushAndWait()</code> instead, or wait on the sequence returned by
 <code>flushAndGetSequence()</code>, when the call must also observe the cumulative ACK.
 QuestDB guarantees this atomicity per table; a flush that contains multiple
 tables is not one cross-table transaction.</p>
@@ -188,9 +194,9 @@ rather than silently dropping them if that deadline expires.
 An unfinished row is not completed implicitly.</p>
 <p>The server intentionally withholds ACKs for deferred frames until commit. The
 sender pipelines transactional auto-flushes without waiting for those ACKs,
-then publishes the group-closing frame at <code>flush()</code>/<code>commit()</code>. With
-<code>awaitServerAck</code> or <code>awaitDurableAck</code>, that call also waits for all covered
-ACKs; durable waiting starts only after the transaction commits. Closing
+then publishes the group-closing frame at <code>flush()</code>/<code>commit()</code>.
+<code>flushAndWait()</code> publishes the same frame and then waits for all covered ACKs;
+durable waiting starts only after the transaction commits. Closing
 without an explicit commit abandons the open transaction and logs a warning;
 QuestDB rolls it back when the WebSocket disconnects.</p>
 <p>Ingress sessions expose browser-safe progress/error callbacks and immutable
@@ -239,10 +245,10 @@ table-less QWP poll frames because the WebSocket API does not expose
 protocol-level PING frames. A poll completes once published: durable progress
 arrives independently, and an open deferred transaction may intentionally
 prevent the server from sending a cumulative OK for that poll. Supplying
-<code>durableAckKeepaliveMs</code> requires durable negotiation (<code>requestDurableAck: true</code>,
-either explicit or implied by <code>awaitDurableAck</code>); manual polls and durable waits
-reject locally when the capability was not negotiated.</p>
-<pre><code class="typescript"><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">sender</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-1">connectQwpBrowserSender</span><span class="hl-2">(</span><br/><span class="hl-2">  { </span><span class="hl-6">url</span><span class="hl-2">, </span><span class="hl-6">requestDurableAck:</span><span class="hl-2"> </span><span class="hl-4">true</span><span class="hl-2"> },</span><br/><span class="hl-2">  { </span><span class="hl-6">autoFlush:</span><span class="hl-2"> </span><span class="hl-4">false</span><span class="hl-2">, </span><span class="hl-6">awaitDurableAck:</span><span class="hl-2"> </span><span class="hl-4">true</span><span class="hl-2"> },</span><br/><span class="hl-2">);</span>
+<code>durableAckKeepaliveMs</code> requires durable negotiation (<code>requestDurableAck: true</code>);
+manual polls reject locally when the capability was not negotiated. Once it is
+negotiated, <code>flushAndWait()</code> waits for durable upload:</p>
+<pre><code class="typescript"><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">sender</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-1">connectQwpBrowserSender</span><span class="hl-2">(</span><br/><span class="hl-2">  { </span><span class="hl-6">url</span><span class="hl-2">, </span><span class="hl-6">requestDurableAck:</span><span class="hl-2"> </span><span class="hl-4">true</span><span class="hl-2"> },</span><br/><span class="hl-2">  { </span><span class="hl-6">autoFlush:</span><span class="hl-2"> </span><span class="hl-4">false</span><span class="hl-2"> },</span><br/><span class="hl-2">);</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">table</span><span class="hl-2">(</span><span class="hl-3">&quot;events&quot;</span><span class="hl-2">).</span><span class="hl-1">longColumn</span><span class="hl-2">(</span><span class="hl-3">&quot;value&quot;</span><span class="hl-2">, </span><span class="hl-8">42</span><span class="hl-4">n</span><span class="hl-2">).</span><span class="hl-1">atNow</span><span class="hl-2">();</span><br/><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">durable</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">flushAndWait</span><span class="hl-2">();</span>
 </code><button type="button">Copy</button></pre>
 
 <p>Browser durable ACKs are an in-memory delivery confirmation only. Persistent

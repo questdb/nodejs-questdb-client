@@ -12,6 +12,7 @@ import {
   type QwpNodeClientOptions,
   type QwpWebSocketLike,
 } from "../../packages/nodejs-client/src";
+import { qwpConfig } from "../../packages/nodejs-client/src/options";
 
 class RejectingWebSocket {
   binaryType = "";
@@ -180,22 +181,46 @@ describe("QWP unified Node client configuration", () => {
     expect(tunedMemory.ingressSession?.initialConnectMode).toBe("sync");
   });
 
-  it("accepts reconnect_max_duration_millis=0 as the disabled deadline", async () => {
-    // Zero is the documented "no reconnect deadline" state: both reconnecting
-    // connections gate their deadline on maxDurationMs > 0, and the egress
-    // failover_max_duration_ms key already accepts it. Requiring a positive
-    // value here made the documented state unreachable from the portable
-    // connection-string spelling, on both public entry points.
-    const disabled = parseQwpNodeClientConfig(
+  it("accepts reconnect_max_duration_millis=0 as a one-attempt startup budget", async () => {
+    // Accepted, as by the Rust and Python clients, and with their meaning: the
+    // synchronous startup the key selects makes one attempt and does not
+    // retry. Java rejects zero.
+    const zero = parseQwpNodeClientConfig(
       "ws::addr=localhost;reconnect_max_duration_millis=0;",
-    ).ingressSession?.reconnect;
-    expect(disabled).toBeTruthy();
-    expect(disabled ? disabled.maxDurationMs : -1).toBe(0);
+    );
+    const reconnect = zero.ingressSession?.reconnect;
+    expect(reconnect).toBeTruthy();
+    expect(reconnect ? reconnect.reconnectMaxDurationMs : -1).toBe(0);
+    expect(zero.ingressSession?.initialConnectMode).toBe("sync");
     await expect(
       SenderOptions.fromConfig(
         "ws::addr=localhost:9000;reconnect_max_duration_millis=0;",
       ),
     ).resolves.toBeDefined();
+
+    let attempts = 0;
+    const sender = await Sender.fromConfig(
+      "ws::addr=offline.example;reconnect_max_duration_millis=0;",
+      {
+        qwp: {
+          webSocket: {
+            webSocketFactory: () => {
+              attempts++;
+              return new RejectingWebSocket() as unknown as QwpWebSocketLike;
+            },
+          },
+        },
+      },
+    );
+    try {
+      await expect(sender.connect()).rejects.toMatchObject({
+        name: "QwpReconnectExhaustedError",
+        attempts: 1,
+      });
+      expect(attempts).toBe(1);
+    } finally {
+      await sender.close().catch(() => undefined);
+    }
     // A negative budget is still a configuration error.
     expect(() =>
       parseQwpNodeClientConfig(
@@ -351,8 +376,54 @@ describe("QWP unified Node client configuration", () => {
     }
   });
 
-  it("reports undelivered lazy memory ingress on client shutdown", async () => {
+  it("shuts a store-and-forward pool down during an outage with its frames journalled", async () => {
+    // The pooled sender's close drain times out because no server is
+    // reachable, but its frames stay in the journal for the next process:
+    // shutdown succeeds and the warning says where the frames are.
+    const directory = await mkdtemp(join(tmpdir(), "qwp-pool-sf-close-"));
+    const warnings: string[] = [];
+    try {
+      const client = await connectQwpNodeClient(
+        `ws::addr=offline.example;sf_dir=${directory};sender_id=producer;lazy_connect=on;sender_pool_max=1;`,
+        {
+          webSocket: {
+            webSocketFactory: (_url, { onConnected }) => {
+              onConnected();
+              return new RejectingWebSocket() as unknown as QwpWebSocketLike;
+            },
+          },
+          sender: {
+            closeFlushTimeoutMs: 50,
+            log: (level, message) => {
+              if (level === "warn") warnings.push(String(message));
+            },
+          },
+        },
+      );
+      const sender = await client.borrowSender();
+      await sender.table("events").longColumn("value", 42n).atNow();
+      await sender.flush();
+      await sender.close();
+
+      await expect(client.close()).resolves.toBeUndefined();
+      expect(warnings).toEqual([
+        expect.stringMatching(
+          /^Closing a pooled QWP sender failed: QWP sender close timed out.*remain in the store-and-forward journal/,
+        ),
+      ]);
+      const journal = new QwpNodeFileReplayStore({
+        directory: join(directory, "producer-0"),
+      });
+      await expect(journal.load()).resolves.toHaveLength(1);
+      await journal.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("warns about undelivered lazy memory ingress on client shutdown", async () => {
     const attemptedPaths: string[] = [];
+    const warnings: string[] = [];
     const client = await connectQwpNodeClient(
       "ws::addr=offline.example;lazy_connect=on;sender_pool_max=1;",
       {
@@ -363,7 +434,12 @@ describe("QWP unified Node client configuration", () => {
             return new RejectingWebSocket() as unknown as QwpWebSocketLike;
           },
         },
-        sender: { closeFlushTimeoutMs: 0 },
+        sender: {
+          closeFlushTimeoutMs: 0,
+          log: (level, message) => {
+            if (level === "warn") warnings.push(String(message));
+          },
+        },
       },
     );
     try {
@@ -378,15 +454,20 @@ describe("QWP unified Node client configuration", () => {
     } finally {
       vi.useFakeTimers();
       try {
-        const closing = expect(client.close()).rejects.toMatchObject({
-          name: "QwpSenderCloseTimeoutError",
-        });
+        // Shutdown itself succeeds, as in the Java, Rust and Python pools;
+        // the frames it could not send are reported as a warning.
+        const closing = expect(client.close()).resolves.toBeUndefined();
         await vi.advanceTimersByTimeAsync(5_001);
         await closing;
       } finally {
         vi.useRealTimers();
       }
     }
+    expect(warnings).toEqual([
+      expect.stringMatching(
+        /^Closing a pooled QWP sender failed: QWP sender close timed out.*pending data may be lost$/,
+      ),
+    ]);
   });
 
   it("lets a typed store-and-forward startup mode win over the connect string", () => {
@@ -469,6 +550,173 @@ describe("QWP unified Node client configuration", () => {
     });
     expect(client.metrics.senders.minimum).toBe(0);
     await client.close();
+  });
+
+  it("reads lazy_connect and initial_connect_retry as the Java and Rust parsers do", () => {
+    // The Java, Rust and Python docs all spell the flag lazy_connect=true,
+    // which this parser used to reject; Rust also ignores case for both keys,
+    // and Java for initial_connect_retry.
+    for (const flag of ["on", "true", "ON", "True"]) {
+      expect(
+        parseQwpNodeClientConfig(`ws::addr=localhost;lazy_connect=${flag};`)
+          .lazyConnect,
+      ).toBe(true);
+    }
+    for (const flag of ["off", "false", "OFF", "False"]) {
+      expect(
+        parseQwpNodeClientConfig(`ws::addr=localhost;lazy_connect=${flag};`)
+          .lazyConnect,
+      ).toBe(false);
+    }
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;lazy_connect=yes;"),
+    ).toThrow(
+      "Invalid lazy_connect: 'yes', accepted values: 'on', 'off', 'true', 'false'",
+    );
+
+    for (const [value, mode] of [
+      ["ASYNC", "async"],
+      ["Sync", "sync"],
+      ["On", "sync"],
+      ["TRUE", "sync"],
+      ["Off", "off"],
+      ["false", "off"],
+    ] as const) {
+      expect(
+        parseQwpNodeClientConfig(
+          `ws::addr=localhost;initial_connect_retry=${value};`,
+        ).ingressSession?.initialConnectMode,
+      ).toBe(mode);
+    }
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;initial_connect_retry=later;",
+      ),
+    ).toThrow(
+      "Invalid initial_connect_retry: 'later', accepted values: 'on', 'off', 'true', 'false', 'sync', 'async'",
+    );
+
+    // The lazy_connect conflict check reads the parsed mode, so it is
+    // case-insensitive as well.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;lazy_connect=true;initial_connect_retry=SYNC;",
+      ),
+    ).toThrow(/lazyConnect requires.*initialConnectMode='async'/);
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;lazy_connect=TRUE;initial_connect_retry=Async;",
+      ).ingressSession?.initialConnectMode,
+    ).toBe("async");
+  });
+
+  it("leaves lazy_connect to the pooled client", async () => {
+    // The Java QuestDB facade and the Rust and Python pools apply
+    // lazy_connect; their standalone senders accept it and ignore it.
+    const log = () => undefined;
+    const memory = qwpConfig(
+      await SenderOptions.fromConfig(
+        "ws::addr=localhost:9000;lazy_connect=on;",
+        {
+          log,
+        },
+      ),
+    );
+    expect(memory?.lazyConnect).toBe(false);
+    expect(memory?.ingressSession?.initialConnectMode).toBe("off");
+    expect(memory?.ingressSession?.backgroundStoreAndForward).toBeUndefined();
+
+    const persistent = qwpConfig(
+      await SenderOptions.fromConfig(
+        "ws::addr=localhost:9000;lazy_connect=on;sf_dir=/tmp/qwp-lazy-sender;",
+        { log },
+      ),
+    );
+    expect(persistent?.ingress.storeAndForward?.initialConnectMode).toBe("off");
+
+    // Ignored, so it neither suppresses the reconnect promotion nor conflicts
+    // with the keys the pooled client's lazy contract rejects.
+    expect(
+      qwpConfig(
+        await SenderOptions.fromConfig(
+          "ws::addr=localhost:9000;lazy_connect=on;reconnect_max_duration_millis=1000;",
+          { log },
+        ),
+      )?.ingressSession?.initialConnectMode,
+    ).toBe("sync");
+    expect(
+      qwpConfig(
+        await SenderOptions.fromConfig(
+          "ws::addr=localhost:9000;lazy_connect=on;query_pool_min=1;initial_connect_retry=sync;",
+          { log },
+        ),
+      )?.ingressSession?.initialConnectMode,
+    ).toBe("sync");
+
+    // Its value is still validated, like every key in the shared vocabulary.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=localhost:9000;lazy_connect=maybe;", {
+        log,
+      }),
+    ).rejects.toThrow(/Invalid lazy_connect: 'maybe'/);
+
+    // The pooled client keeps applying it.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;lazy_connect=on;")
+        .ingressSession?.initialConnectMode,
+    ).toBe("async");
+  });
+
+  it("resolves typed startup overrides against the connect string", () => {
+    // The session's initialConnectMode is public, and a typed value wins over
+    // the string. It used to conflict with the default the string supplied
+    // for the store.
+    const sessionOverride = parseQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp;",
+      { ingressSession: { initialConnectMode: "async" } },
+    );
+    expect(sessionOverride.ingress.storeAndForward?.initialConnectMode).toBe(
+      "async",
+    );
+    expect(sessionOverride.ingressSession?.initialConnectMode).toBe("async");
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;initial_connect_retry=sync;",
+        {
+          ingressSession: { initialConnectMode: "off" },
+        },
+      ).ingressSession?.initialConnectMode,
+    ).toBe("off");
+
+    // Promotion reads the reconnect policy the session will run, and a typed
+    // `reconnect` replaces the string's whole object.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        ingressSession: { reconnect: { reconnectMaxDurationMs: 30_000 } },
+      }).ingressSession?.initialConnectMode,
+    ).toBe("sync");
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;reconnect_max_duration_millis=30000;",
+        { ingressSession: { reconnect: { onEvent: () => undefined } } },
+      ).ingressSession?.initialConnectMode,
+    ).toBe("off");
+
+    // Typed values are validated up front, and lazyConnect needs reconnect.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        ingressSession: { initialConnectMode: "later" as never },
+      }),
+    ).toThrow(
+      "ingressSession.initialConnectMode must be 'off', 'sync', or 'async'",
+    );
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;lazy_connect=on;", {
+        ingressSession: { reconnect: false },
+      }),
+    ).toThrow(
+      "conflicting configuration: lazyConnect requires ingress reconnect",
+    );
   });
 
   it("validates ingress, egress, pool, and shared conflicts up front", () => {
@@ -810,47 +1058,49 @@ describe("QWP unified Node client configuration", () => {
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=localhost;", {
         ingressSession: {
-          reconnect: { initialBackoffMs: overTimerCeiling },
+          reconnect: { reconnectInitialBackoffMs: overTimerCeiling },
         },
       }),
     ).toThrow(
-      `reconnect initialBackoffMs must be no greater than ${timerCeiling}`,
+      `reconnect reconnectInitialBackoffMs must be no greater than ${timerCeiling}`,
     );
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=localhost;", {
         egressSession: {
-          reconnect: { maxBackoffMs: overTimerCeiling },
+          reconnect: { failoverBackoffMaxMs: overTimerCeiling },
         },
       }),
-    ).toThrow(`reconnect maxBackoffMs must be no greater than ${timerCeiling}`);
+    ).toThrow(
+      `reconnect failoverBackoffMaxMs must be no greater than ${timerCeiling}`,
+    );
 
     const parsed = parseQwpNodeClientConfig("ws::addr=localhost;", {
       ingressSession: {
         reconnect: {
-          initialBackoffMs: timerCeiling,
-          maxBackoffMs: timerCeiling,
-          maxDurationMs: overTimerCeiling,
+          reconnectInitialBackoffMs: timerCeiling,
+          reconnectMaxBackoffMs: timerCeiling,
+          reconnectMaxDurationMs: overTimerCeiling,
           poisonMinEscalationWindowMs: overTimerCeiling,
         },
       },
       egressSession: {
         reconnect: {
-          initialBackoffMs: timerCeiling,
-          maxBackoffMs: timerCeiling,
-          maxDurationMs: overTimerCeiling,
+          failoverBackoffInitialMs: timerCeiling,
+          failoverBackoffMaxMs: timerCeiling,
+          failoverMaxDurationMs: overTimerCeiling,
         },
       },
     });
     expect(parsed.ingressSession?.reconnect).toMatchObject({
-      initialBackoffMs: timerCeiling,
-      maxBackoffMs: timerCeiling,
-      maxDurationMs: overTimerCeiling,
+      reconnectInitialBackoffMs: timerCeiling,
+      reconnectMaxBackoffMs: timerCeiling,
+      reconnectMaxDurationMs: overTimerCeiling,
       poisonMinEscalationWindowMs: overTimerCeiling,
     });
     expect(parsed.egressSession?.reconnect).toMatchObject({
-      initialBackoffMs: timerCeiling,
-      maxBackoffMs: timerCeiling,
-      maxDurationMs: overTimerCeiling,
+      failoverBackoffInitialMs: timerCeiling,
+      failoverBackoffMaxMs: timerCeiling,
+      failoverMaxDurationMs: overTimerCeiling,
     });
 
     const webSocketFactory = vi.fn(
@@ -871,27 +1121,31 @@ describe("QWP unified Node client configuration", () => {
       createQwpNodeClient({
         ...baseOptions,
         ingressSession: {
-          reconnect: { initialBackoffMs: overTimerCeiling },
+          reconnect: { reconnectInitialBackoffMs: overTimerCeiling },
         },
       }),
     ).toThrow(
-      `reconnect initialBackoffMs must be no greater than ${timerCeiling}`,
+      `reconnect reconnectInitialBackoffMs must be no greater than ${timerCeiling}`,
     );
     expect(() =>
       createQwpNodeClient({
         ...baseOptions,
         egressSession: {
-          reconnect: { maxBackoffMs: overTimerCeiling },
+          reconnect: { failoverBackoffMaxMs: overTimerCeiling },
         },
       }),
-    ).toThrow(`reconnect maxBackoffMs must be no greater than ${timerCeiling}`);
+    ).toThrow(
+      `reconnect failoverBackoffMaxMs must be no greater than ${timerCeiling}`,
+    );
     // A valid client at the inclusive ceiling still constructs, and lazyConnect
     // defers every socket to the first borrow. Asserting the factory is unused
     // only means something once construction has actually succeeded.
     const lazyClient = createQwpNodeClient({
       ...baseOptions,
-      ingressSession: { reconnect: { initialBackoffMs: timerCeiling } },
-      egressSession: { reconnect: { maxBackoffMs: timerCeiling } },
+      ingressSession: {
+        reconnect: { reconnectInitialBackoffMs: timerCeiling },
+      },
+      egressSession: { reconnect: { failoverBackoffMaxMs: timerCeiling } },
     });
     expect(webSocketFactory).not.toHaveBeenCalled();
     await lazyClient.close();
@@ -935,27 +1189,27 @@ describe("QWP unified Node client configuration", () => {
         "wss::addr=host:9000;reconnect_initial_backoff_millis=2147483647;reconnect_max_backoff_millis=2147483647;",
       ).ingressSession?.reconnect,
     ).toMatchObject({
-      initialBackoffMs: 2147483647,
-      maxBackoffMs: 2147483647,
+      reconnectInitialBackoffMs: 2147483647,
+      reconnectMaxBackoffMs: 2147483647,
     });
     expect(
       parseQwpNodeClientConfig(
         "wss::addr=host:9000;failover_backoff_initial_ms=2147483647;failover_backoff_max_ms=2147483647;",
       ).egressSession?.reconnect,
     ).toMatchObject({
-      initialBackoffMs: 2147483647,
-      maxBackoffMs: 2147483647,
+      failoverBackoffInitialMs: 2147483647,
+      failoverBackoffMaxMs: 2147483647,
     });
     // Elapsed-duration budgets and escalation windows do not feed raw timers.
     const longWindow = parseQwpNodeClientConfig(
       "wss::addr=host:9000;sf_dir=/tmp/qwp;reconnect_max_duration_millis=2147483648;poison_min_escalation_window_millis=2147483648;failover_max_duration_ms=2147483648;catch_up_cap_gap_min_escalation_window_millis=2147483648;",
     );
     expect(longWindow.ingressSession?.reconnect).toMatchObject({
-      maxDurationMs: 2147483648,
+      reconnectMaxDurationMs: 2147483648,
       poisonMinEscalationWindowMs: 2147483648,
     });
     expect(longWindow.egressSession?.reconnect).toMatchObject({
-      maxDurationMs: 2147483648,
+      failoverMaxDurationMs: 2147483648,
     });
     expect(longWindow.ingress.storeAndForward).toMatchObject({
       catchUpCapGapMinEscalationWindowMs: 2147483648,
