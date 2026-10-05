@@ -441,6 +441,10 @@ export class QwpIngressAckAbandonedError extends Error {
  * close() discarded frames that had been published to the in-memory replay
  * queue but could not reach the socket before its drain deadline, typically
  * because no server was reachable. The connection is closed regardless.
+ *
+ * @internal Only QwpIngressSession.close() throws it. QwpSender bounds and
+ * reports its own drain with QwpSenderCloseTimeoutError, so neither package
+ * exports this class.
  */
 export class QwpIngressSessionCloseTimeoutError extends Error {
   constructor(
@@ -571,6 +575,10 @@ function validateIngressSessionOptions(
  * Publications are serialized to preserve the server's zero-based wire
  * sequence. Successful ACKs are cumulative, so the ACK watermark covers every
  * frame through the acknowledged sequence; waitForAcknowledged() observes it.
+ *
+ * @internal The layer below QwpSender. As in the Java, Rust and Python
+ * clients, applications publish through a sender instead, so neither package
+ * exports this class or a factory that returns one.
  */
 export class QwpIngressSession {
   private readonly durableWatermarks = new Map<string, bigint>();

@@ -1,4 +1,8 @@
-/** Node.js WebSocket adapter and shared QWP protocol/session APIs. */
+/**
+ * Node.js WebSocket, UDP and store-and-forward adapter over the shared QWP
+ * protocol/session APIs. The package root (index.ts) re-exports its public
+ * names; connectQwpNodeIngress() is exported for the senders and tests only.
+ */
 export * from "../../client-core/src/qwp";
 
 import type { Agent } from "node:http";
@@ -720,7 +724,13 @@ function connectQwpNodeEndpoint(
   });
 }
 
-/** Opens a Node WebSocket and starts an ingress ACK/NACK session. */
+/**
+ * Opens a Node WebSocket and starts an ingress ACK/NACK session.
+ *
+ * @internal The session factory behind createQwpNodeSender(). The package root
+ * does not export it: applications publish through a sender, as in the Java,
+ * Rust and Python clients.
+ */
 export async function connectQwpNodeIngress(
   options: QwpNodeIngressOptions,
   sessionOptions: QwpIngressSessionOptions = {},

@@ -1,7 +1,5 @@
-import type {
-  QwpIngressSession,
-  QwpTableBuffer,
-} from "../../packages/client-core/src/qwp";
+import type { QwpTableBuffer } from "../../packages/client-core/src/qwp";
+import type { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 
 /**
  * Publishes one frame, then waits for the ACK watermark to cover the published

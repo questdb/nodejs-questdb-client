@@ -261,10 +261,10 @@ describe("QWP in a real browser", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const connection = await qwp.connectQwpBrowserIngress({
+          const connection = await qwp.createQwpBrowserConnectionFactory({
             url,
             requestDurableAck: true,
-          });
+          })();
           try {
             return connection.handshake;
           } finally {
@@ -327,10 +327,10 @@ describe("QWP in a real browser", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const connection = await qwp.connectQwpBrowserIngress({
+          const connection = await qwp.createQwpBrowserConnectionFactory({
             url,
             failoverUrls,
-          });
+          })();
           try {
             return connection.handshake;
           } finally {
@@ -463,10 +463,10 @@ describe("QWP in a real browser", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const connection = await qwp.connectQwpBrowserIngress({
+          const connection = await qwp.createQwpBrowserConnectionFactory({
             url,
             ingressNegotiationTimeoutMs: 10,
-          });
+          })();
           try {
             return connection.handshake;
           } finally {

@@ -29,7 +29,6 @@ import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
   connectQwpBrowserEgress,
-  connectQwpBrowserIngress,
   connectQwpBrowserSender,
 } from "../../packages/browser-client/src";
 import type {
@@ -47,7 +46,6 @@ import type {
 import {
   connectQwpNodeEgress,
   connectQwpNodeClient,
-  connectQwpNodeIngress,
   connectQwpNodeSender,
   connectQwpNodeUdp,
   connectQwpNodeUdpSender,
@@ -77,7 +75,6 @@ import type {
   QwpEgressSession,
   QwpEgressSessionOptions,
   QwpEgressViewQuery,
-  QwpIngressSession,
   QwpIngressSessionOptions,
   QwpSenderError,
   QwpQueryLease,
@@ -104,11 +101,6 @@ const browserSenderSignature: (
 
 const defaultSenderErrorHandlerSignature: (error: QwpSenderError) => void =
   defaultQwpSenderErrorHandler;
-
-const browserIngressSignature: (
-  options: QwpBrowserWebSocketOptions,
-  sessionOptions?: QwpIngressSessionOptions,
-) => Promise<QwpIngressSession> = connectQwpBrowserIngress;
 
 const browserEgressSignature: (
   options: QwpBrowserEgressOptions,
@@ -137,11 +129,6 @@ const nodeUdpSenderSignature: (
   options: QwpNodeUdpOptions,
   senderOptions?: QwpSenderOptions,
 ) => Promise<QwpSender> = connectQwpNodeUdpSender;
-
-const nodeIngressSignature: (
-  options: QwpNodeIngressOptions,
-  sessionOptions?: QwpIngressSessionOptions,
-) => Promise<QwpIngressSession> = connectQwpNodeIngress;
 
 const nodeEgressSignature: (
   options: QwpNodeEgressOptions,
@@ -330,10 +317,7 @@ const qwpExtraOptionsContract: QwpExtraOptions = {
   },
 };
 
-function senderSequenceContract(
-  sender: QwpSender,
-  session: QwpIngressSession,
-): void {
+function senderSequenceContract(sender: QwpSender): void {
   const published: Promise<bigint> = sender.flushAndGetSequence();
   const drained: Promise<boolean> = sender.flushAndWait(5_000);
   const drainedByDefault: Promise<boolean> = sender.flushAndWait();
@@ -341,12 +325,6 @@ function senderSequenceContract(
   const senderCheck: Promise<boolean> = sender.waitForAcknowledged(0n, 0);
   const senderPublished: bigint = sender.publishedSequence;
   const senderAcknowledged: bigint = sender.acknowledgedSequence;
-  const sessionWait: Promise<boolean> = session.waitForAcknowledged(0n, 5_000);
-  const sessionPublished: bigint = session.publishedFrameSequence;
-  const sessionAcknowledged: bigint = session.acknowledgedFrameSequence;
-  const localPublication: Promise<void> = session.publishFrame(
-    new Uint8Array(),
-  );
   void published;
   void drained;
   void drainedByDefault;
@@ -354,10 +332,6 @@ function senderSequenceContract(
   void senderCheck;
   void senderPublished;
   void senderAcknowledged;
-  void sessionWait;
-  void sessionPublished;
-  void sessionAcknowledged;
-  void localPublication;
 }
 
 /**
@@ -529,7 +503,6 @@ const rootExtraOptionsContract: ExtraOptions = {
 
 void browserSenderSignature;
 void defaultSenderErrorHandlerSignature;
-void browserIngressSignature;
 void memoryReplayIngressContract;
 void browserEgressSignature;
 void bootstrapSignature;
@@ -537,7 +510,6 @@ void browserClientSignature;
 void nodeSenderSignature;
 void nodeUdpSignature;
 void nodeUdpSenderSignature;
-void nodeIngressSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
 void nodeWebSocketOptionsContract;

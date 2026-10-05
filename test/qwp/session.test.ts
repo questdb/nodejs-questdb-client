@@ -5,7 +5,6 @@ import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
   connectQwpBrowserEgress,
-  connectQwpBrowserIngress,
   connectQwpBrowserWebSocket,
   createQwpBrowserClient,
   createQwpBrowserConnectionFactory,
@@ -50,7 +49,6 @@ import {
   QwpIngressNackError,
   QwpProtocolError,
   QwpIngressResponse,
-  QwpIngressSession,
   type QwpSenderError,
   QwpTableBuffer,
   QwpSendClosedError,
@@ -59,6 +57,9 @@ import {
   QwpSymbolDictionary,
   readQwpVarintNumber,
 } from "../../packages/client-core/src/qwp";
+// Both are internal: neither package root exports the ingress session.
+import { connectQwpBrowserIngress } from "../../packages/browser-client/src/qwp";
+import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { openQwpWebSocket } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
 import { publishAndWait, waitForPublished } from "./publish-and-wait";

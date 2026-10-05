@@ -49,8 +49,8 @@ describe("QWP configuration-string reference", () => {
     // The converse of the check above, which only proved that a name the prose
     // mentions exists. Nothing proved the other direction, so a high-level
     // constructor could be exported, pinned by the public-API contract, and
-    // still appear in no prose document at all -- which is how
-    // connectQwpNodeIngress() and connectQwpBrowserIngress() shipped
+    // still appear in no prose document at all -- which is how the bare
+    // ingress-session factories, since made internal, once shipped
     // undiscoverable while QWP.md's public API policy claimed to cover "the
     // documented high-level constructors, session classes, errors, constants,
     // and option signatures".
@@ -61,7 +61,7 @@ describe("QWP configuration-string reference", () => {
     // exports ... intended for advanced integrations" the same paragraph
     // carves out, and the generated TypeDoc reference is their documentation.
     const HIGH_LEVEL_ROLE =
-      /^(?:connect|create)Qwp(?:Node|Browser)(?:Client|Sender|Ingress|Egress|Udp|UdpSender)$/;
+      /^(?:connect|create)Qwp(?:Node|Browser)(?:Client|Sender|Egress|Udp|UdpSender)$/;
 
     const entryPoints = [
       ...new Set([...Object.keys(nodeClient), ...Object.keys(browserClient)]),
@@ -70,7 +70,7 @@ describe("QWP configuration-string reference", () => {
       .sort();
     // Guards the regex itself: a rename that stops matching must not silently
     // empty this test out.
-    expect(entryPoints.length).toBeGreaterThanOrEqual(14);
+    expect(entryPoints.length).toBeGreaterThanOrEqual(13);
 
     const prose = (
       await Promise.all(
@@ -106,7 +106,6 @@ describe("QWP configuration-string reference", () => {
       "QwpTableWriter",
       "QwpQueryLease",
       "QwpResultBatchView",
-      "QwpIngressSession",
     ].filter((name) => !prose.includes(name));
     expect(undocumented).toEqual([]);
   });

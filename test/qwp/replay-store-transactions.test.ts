@@ -18,10 +18,10 @@ import {
   QwpByteWriter,
   QwpConnectionCloseInfo,
   QwpHandshakeMetadata,
-  QwpIngressSession,
   QwpSender,
   QwpTableBuffer,
 } from "../../packages/client-core/src/qwp";
+import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { waitForPublished } from "./publish-and-wait";
 

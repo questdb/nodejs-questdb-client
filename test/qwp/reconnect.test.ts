@@ -16,14 +16,12 @@ import { basename, join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  connectQwpNodeIngress,
   QWP_ORPHAN_FAILED_SENTINEL,
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
   QwpNodeOrphanDrainer,
   QwpEgressSession,
-  QwpIngressSession,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
   QwpReplayStoreCheckpointError,
@@ -57,7 +55,6 @@ import {
   QWP_INGRESS_PROGRESS_KIND,
   QwpIngressAckAbandonedError,
   QwpIngressSessionClosedError,
-  QwpIngressSessionCloseTimeoutError,
   QwpIngressReplayRecord,
   QwpIngressReplayReference,
   QwpIngressReplayStore,
@@ -87,6 +84,12 @@ import {
   publishTablesDeltaAndWait,
   waitForPublished,
 } from "./publish-and-wait";
+// Internal: neither package root exports the ingress session or its factory.
+import { connectQwpNodeIngress } from "../../packages/nodejs-client/src/qwp";
+import {
+  QwpIngressSession,
+  QwpIngressSessionCloseTimeoutError,
+} from "../../packages/client-core/src/_qwp/ingress-session";
 import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
 import {
   quarantineQwpNodeReplayStore,

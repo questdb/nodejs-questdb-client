@@ -960,7 +960,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   /**
    * Immutable notification-inbox counters for this session's reconnect
-   * observer, the egress counterpart of `QwpIngressSession.metrics`.
+   * observer, the egress counterpart of `QwpSender.metrics.ingress`.
    *
    * A `reconnect.onEvent` observer runs on a bounded inbox that drops its
    * oldest pending entry under overflow, exactly as ingress does. Nothing
