@@ -962,32 +962,6 @@ deltas, tracks acknowledgements, and splits multi-row batches at the smaller of 
 client cap and the server-advertised cap. One row that cannot fit is rejected with
 `QwpBatchTooLargeError` before it is sent.
 
-Low-level sessions publish through `publishFrame()`, `publishTables()`, and
-`publishTablesDelta()`. Each resolves once its frames are published locally: in the
-journal with Node store-and-forward, in the in-memory replay queue for other
-reconnecting sessions, or on the WebSocket for a fixed connection. None of them waits
-for the server. As in the Java, Rust and Python clients, there is no per-frame
-acknowledgement promise: read `publishedFrameSequence` after a publication and pass it
-to `waitForAcknowledged()`, which follows the cumulative ACK watermark. Individual
-server responses remain observable through `onResponse`, `onProgress`, `onError`,
-and `onSenderError`. If a split logical batch cannot be fully journaled, its
-unattempted suffix is suppressed and the publication rejects, so the caller can retry
-the whole batch.
-
-Automatic symbol-delta planning is serialized by `publishTablesDelta()`: overlapping
-calls plan one after another.
-
-A session's `close()` gives frames already published to the in-memory replay queue up
-to 5 seconds to reach the socket before it closes the connection. Frames that cannot
-be sent in that time, typically during an outage, are discarded, and `close()`
-rejects with `QwpIngressSessionCloseTimeoutError`, or with the session's failure when
-it can no longer send at all. Publications still in flight when `close()` starts are
-refused rather than queued behind the drain, so their publish calls reject. A
-store-and-forward journal keeps unsent frames for the next session, so it is not
-drained. `close()` does not wait for ACKs: call
-`waitForAcknowledged(session.publishedFrameSequence)` first when the frames must be
-confirmed.
-
 ### Browser ingress
 
 Browser applications must use the browser entry point and a same-origin WebSocket
@@ -1084,7 +1058,9 @@ In browsers, durable ACK capability is negotiated with a WebSocket subprotocol;
 Node.js uses upgrade headers. Request it with `requestDurableAck: true`
 (`request_durable_ack=on` in a configuration string). The ACK watermark then
 advances only on durable progress, so `flushAndWait()`, `waitForAcknowledged()`,
-and the `close()` drain all wait for durability. The connection fails with
+and the `close()` drain all wait for durability. The ordinary OK that precedes it
+still reaches the `onResponse` session callback and the `onProgress` events of kind
+`acknowledged`, for code that has to observe both. The connection fails with
 `QwpDurableAckUnavailableError` when the server does not confirm it. Browser durable
 tracking is in memory only. Persistent store-and-forward is intentionally Node-only.
 
@@ -1809,7 +1785,6 @@ The public error classes preserve enough context for policy decisions:
 | `QwpSenderCloseTimeoutError`            | Sender shutdown could not publish, transmit RAM-backed frames, or ACK-drain committed frames in time        |
 | `QwpIngressNackError`                   | QuestDB rejected an ingress frame                                                                           |
 | `QwpIngressAckAbandonedError`           | A recovered frame was deliberately retired without a server ACK                                             |
-| `QwpIngressSessionCloseTimeoutError`    | Session `close()` discarded published in-memory frames that could not reach the socket in time              |
 | `QwpIngressSessionClosedError`          | The ingress session is closed; pending ACK waits are rejected with it                                       |
 | `QwpBatchTooLargeError`                 | One encoded row cannot fit the effective ingress cap                                                        |
 | `QwpWriterRowError`                     | A compiled object-row writer rejected a value, naming its table, column and row                             |
@@ -1895,72 +1870,18 @@ during migration.
 
 ### Low-level QWP ingress
 
-Code that manually creates `QwpTableBuffer` and calls
-`QwpIngressSession.publishTables()` can normally move to `connectQwpNodeSender()` or
-`connectQwpBrowserSender()`. Keep low-level sessions only when an application needs
-to produce encoded table buffers itself. The high-level sender owns batching, symbol
-deltas, ACK tracking, auto-flush, transactions, and durable waits.
+The ingress session below the sender is internal, as in the Java, Rust and Python
+clients, so neither package exports `QwpIngressSession` or a factory that returns
+one. Code that filled `QwpTableBuffer` batches and published them through a session
+moves to `connectQwpNodeSender()` or `connectQwpBrowserSender()`. The high-level
+sender owns batching, symbol deltas, ACK tracking, auto-flush, transactions, and
+durable waits, and its third argument takes the same session options, including the
+`onResponse`, `onProgress`, and `onError` callbacks.
 
-When a bare session really is what you want, `connectQwpNodeIngress()` and
-`connectQwpBrowserIngress()` open one and hand back a connected
-`QwpIngressSession`. Both take the same runtime-specific connection options as
-their `*Sender()` counterparts -- so `requestDurableAck` belongs with the
-connection, not with the session options -- plus optional session options and an
-`AbortSignal` that cancels a first connect still negotiating:
-
-```typescript
-import {
-  QWP_COLUMN_TYPE,
-  QwpTableBuffer,
-  connectQwpNodeIngress,
-} from "@questdb/nodejs-client";
-
-const session = await connectQwpNodeIngress({
-  url: "wss://questdb.example:9000/write/v4",
-  authorization: `Bearer ${token}`,
-  requestDurableAck: true,
-});
-
-try {
-  const trades = new QwpTableBuffer("trades");
-  // getOrCreateColumn() reserves this row's cell and returns the column to
-  // append the value to. It returns null when the row already set that
-  // column, because the first value of a row wins.
-  trades
-    .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
-    .values.push("ETH-USD");
-  trades
-    .getOrCreateColumn("price", QWP_COLUMN_TYPE.DOUBLE)!
-    .values.push(2615.54);
-  // The designated timestamp is the column with an empty name.
-  trades
-    .getOrCreateColumn("", QWP_COLUMN_TYPE.TIMESTAMP_NANOS)!
-    .values.push(1_723_000_000_000_000_000n);
-  trades.nextRow();
-
-  // Resolves once the batch is published locally, not on the server's ACK.
-  await session.publishTables([trades]);
-  // Wait for the cumulative ACK watermark to cover the published frames. The
-  // session requested durable ACK, so the wait lasts until they are durable.
-  if (!(await session.waitForAcknowledged(session.publishedFrameSequence))) {
-    // No progress within ackTimeoutMs. The frames are still queued.
-  }
-} finally {
-  await session.close();
-}
-```
-
-These two entry points are the supported way to obtain a connected
-`QwpIngressSession`, and the one to prefer. The class and the connection
-factories are exported too, so `new QwpIngressSession(connection)` and
-`QwpIngressSession.connect(factory)` over `connectQwpNodeWebSocket()` /
-`createQwpNodeConnectionFactory()` (and their browser counterparts) are
-supported as well; they exist for applications that supply their own transport.
-Importing from an internal path instead of a package root is what is not
-supported. `parseQwpNodeClientConfig()` is the matching low-level helper for
-turning a `ws::`/`wss::` connect string into the typed options object those
-constructors take, and `scanQwpNodeOrphanSlots()` lists the store-and-forward
-slots under a parent directory without starting a drainer.
+`parseQwpNodeClientConfig()` is the low-level helper for turning a `ws::`/`wss::`
+connect string into the typed options object `createQwpNodeClient()` takes, and
+`scanQwpNodeOrphanSlots()` lists the store-and-forward slots under a parent directory
+without starting a drainer.
 
 Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
 signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
@@ -1986,7 +1907,6 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Fire-and-forget UDP ingress  | Node `udp::` or `connectQwpNodeUdpSender()`                   |
 | Query parameters             | `session.query(sql, { binds })`                               |
-| Bare ingress session         | `connectQwpNodeIngress()` / `connectQwpBrowserIngress()`      |
 | Materialized result batches  | `for await (const batch of query)`                            |
 | Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |
 | Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |
