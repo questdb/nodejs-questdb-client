@@ -209,8 +209,6 @@ describe("Sender QWP integration", () => {
         qwp: {
           webSocket: {
             connectTimeoutMs: 100,
-          },
-          session: {
             // A startup budget: initial_connect_retry=off still fails on the
             // first attempt.
             reconnect: {

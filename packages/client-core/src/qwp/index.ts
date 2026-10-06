@@ -11,7 +11,8 @@ export * from "../_qwp/client";
 export * from "../_qwp/egress-session";
 // QwpIngressSession is the internal layer below QwpSender, as in the Java, Rust
 // and Python clients, so only what the sender API surfaces is public: its
-// session options, notifications, metrics and errors.
+// notifications, metrics and errors. Its options, like the sender's own, are
+// part of each runtime's ingress options rather than types of their own.
 export {
   QWP_INGRESS_PROGRESS_KIND,
   QwpBatchTooLargeError,
@@ -24,9 +25,13 @@ export type {
   QwpIngressMetrics,
   QwpIngressProgressEvent,
   QwpIngressProgressKind,
-  QwpIngressSessionOptions,
 } from "../_qwp/ingress-session";
-export * from "../_qwp/sender";
+export {
+  QwpSender,
+  QwpSenderCloseTimeoutError,
+  QwpTableWriter,
+} from "../_qwp/sender";
+export type { QwpSenderLogger, QwpSenderMetrics } from "../_qwp/sender";
 export * from "../_qwp/sender-error";
 export * from "../_qwp/transport";
 export {

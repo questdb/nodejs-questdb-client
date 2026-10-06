@@ -155,11 +155,7 @@ class Sender {
         ? // SenderOptions already parsed the ws/wss connect string with the
           // QWP schema, so there is one vocabulary and one parser however the
           // sender was constructed.
-          qwpNode.createQwpNodeSender(
-            resolved.ingress,
-            resolved.sender,
-            resolved.ingressSession,
-          )
+          qwpNode.createQwpNodeSender(resolved)
         : options.protocol === UDP
           ? createConfiguredQwpUdpSender(options, this.log)
           : createConfiguredQwpSender(options, this.log);
@@ -664,20 +660,22 @@ class Sender {
  * Resolves the logger a programmatically constructed QWP sender receives.
  *
  * Same order as the ws/wss connect-string resolver in options.ts: an explicit
- * top-level logger first, then the QWP-specific one, then the module default.
- * Writing `log: logger` after spreading `options.qwp.sender` discarded a
- * supported `qwp.sender.log` callback whenever the caller left the top-level
- * logger unset, so the sink that asked for the sender's lifecycle warnings --
- * unfinished rows, an abandoned open transaction -- silently received none of
- * them while the default console sink got them instead.
+ * top-level logger first, then the QWP section's, then the module default.
+ * Writing `log: logger` after spreading the typed section discarded a
+ * supported `qwp.webSocket.log` or `qwp.udp.log` callback whenever the caller
+ * left the top-level logger unset, so the sink that asked for the sender's
+ * lifecycle warnings -- unfinished rows, an abandoned open transaction --
+ * silently received none of them while the default console sink got them
+ * instead.
  */
 function qwpConfiguredLogger(
   options: SenderOptions,
+  configured: QwpSenderLogger | undefined,
   logger: Logger,
 ): QwpSenderLogger {
   return typeof options.log === "function"
     ? options.log
-    : (options.qwp?.sender?.log ?? logger);
+    : (configured ?? logger);
 }
 
 function createConfiguredQwpSender(
@@ -690,7 +688,6 @@ function createConfiguredQwpSender(
     throw new Error("The 'host' and 'port' options are mandatory for QWP");
   }
   const configuredWebSocket = options.qwp?.webSocket ?? {};
-  const configuredSender = options.qwp?.sender ?? {};
   const secure = options.protocol === WSS;
   const explicitAgent = configuredWebSocket.agent;
   let agent =
@@ -736,55 +733,45 @@ function createConfiguredQwpSender(
     configuredWebSocket.authorization ?? configuredAuthorization;
   // ws/wss connect-string keys are the QWP schema's, parsed only by
   // resolveQwpNodeClientConfig(). This path builds a sender from a
-  // programmatic options object, so it reads options.qwp.* directly.
-  const storeAndForward = configuredWebSocket.storeAndForward;
-  return qwpNode.createQwpNodeSender(
-    {
-      ...configuredWebSocket,
-      storeAndForward,
-      url: `${options.protocol}://${options.host}:${options.port}${QWP_INGRESS_PATH}`,
-      agent,
-      authorization,
-    },
-    {
-      ...configuredSender,
-      // Typed first, string second: QWP.md states that a typed value wins
-      // wherever both spellings set the same option, and `qwp.sender` applies
-      // to every QWP ingress scheme. Reading the string first inverted that
-      // for the auto-flush triggers, so a caller who disabled or retuned them
-      // through the typed section kept the string's behavior.
-      //
-      // auto_flush_bytes is read like every other trigger. A ws::/wss:: connect
-      // string resolves it through the QWP schema, and the UDP branch below
-      // reads it, so ignoring it here was the outlier: the key is declared on
-      // SenderOptions, the ILP parser rejects it for the transports that cannot
-      // honour it, and this path silently dropped it.
-      autoFlush:
-        configuredSender.autoFlush ??
-        (isBoolean(options.auto_flush) ? options.auto_flush : undefined),
-      autoFlushRows:
-        configuredSender.autoFlushRows ??
-        (isInteger(options.auto_flush_rows, 0)
-          ? options.auto_flush_rows
-          : undefined),
-      autoFlushBytes:
-        configuredSender.autoFlushBytes ??
-        (isInteger(options.auto_flush_bytes, 0)
-          ? options.auto_flush_bytes
-          : undefined),
-      autoFlushIntervalMs:
-        configuredSender.autoFlushIntervalMs ??
-        (isInteger(options.auto_flush_interval, 0)
-          ? options.auto_flush_interval
-          : undefined),
-      closeFlushTimeoutMs: configuredSender.closeFlushTimeoutMs,
-      maxNameLength:
-        configuredSender.maxNameLength ??
-        (isInteger(options.max_name_len, 1) ? options.max_name_len : undefined),
-      log: qwpConfiguredLogger(options, logger),
-    },
-    options.qwp?.session,
-  );
+  // programmatic options object, so it reads options.qwp.webSocket directly.
+  return qwpNode.createQwpNodeSender({
+    ...configuredWebSocket,
+    url: `${options.protocol}://${options.host}:${options.port}${QWP_INGRESS_PATH}`,
+    agent,
+    authorization,
+    // Typed first, string second: QWP.md states that a typed value wins
+    // wherever both spellings set the same option. Reading the string first
+    // inverted that for the auto-flush triggers, so a caller who disabled or
+    // retuned them through the typed section kept the string's behavior.
+    //
+    // auto_flush_bytes is read like every other trigger. A ws::/wss:: connect
+    // string resolves it through the QWP schema, and the UDP branch below
+    // reads it, so ignoring it here was the outlier: the key is declared on
+    // SenderOptions, the ILP parser rejects it for the transports that cannot
+    // honour it, and this path silently dropped it.
+    autoFlush:
+      configuredWebSocket.autoFlush ??
+      (isBoolean(options.auto_flush) ? options.auto_flush : undefined),
+    autoFlushRows:
+      configuredWebSocket.autoFlushRows ??
+      (isInteger(options.auto_flush_rows, 0)
+        ? options.auto_flush_rows
+        : undefined),
+    autoFlushBytes:
+      configuredWebSocket.autoFlushBytes ??
+      (isInteger(options.auto_flush_bytes, 0)
+        ? options.auto_flush_bytes
+        : undefined),
+    autoFlushIntervalMs:
+      configuredWebSocket.autoFlushIntervalMs ??
+      (isInteger(options.auto_flush_interval, 0)
+        ? options.auto_flush_interval
+        : undefined),
+    maxNameLength:
+      configuredWebSocket.maxNameLength ??
+      (isInteger(options.max_name_len, 1) ? options.max_name_len : undefined),
+    log: qwpConfiguredLogger(options, configuredWebSocket.log, logger),
+  });
 }
 
 function createConfiguredQwpUdpSender(
@@ -797,53 +784,47 @@ function createConfiguredQwpUdpSender(
     throw new Error("The 'host' and 'port' options are mandatory for QWP UDP");
   }
   const configuredUdp = options.qwp?.udp ?? {};
-  const configuredSender = options.qwp?.sender ?? {};
   // Typed overrides win over the connection string, the rule QWP.md states for
   // every ExtraOptions.qwp section. Reading the string first inverted it for
   // the options this transport also spells there: a caller who raised the
   // datagram size through the typed udp section still had rows rejected
   // locally with QwpUdpDatagramTooLargeError at the string's cap, and a caller
-  // who disabled automatic flushing through the typed sender section still had
-  // rows leave before the explicit flush.
+  // who disabled automatic flushing through it still had rows leave before the
+  // explicit flush.
   const maxDatagramSize =
     configuredUdp.maxDatagramSize ?? options.max_datagram_size ?? 1_400;
-  return qwpNode.createQwpNodeUdpSender(
-    {
-      ...configuredUdp,
-      host: options.host,
-      port: options.port,
-      maxDatagramSize,
-      multicastTtl: configuredUdp.multicastTtl ?? options.multicast_ttl,
-      onError: configuredUdp.onError ?? ((error) => logger("warn", error)),
-    },
-    {
-      ...configuredSender,
-      autoFlush:
-        configuredSender.autoFlush ??
-        (isBoolean(options.auto_flush) ? options.auto_flush : undefined),
-      autoFlushRows:
-        configuredSender.autoFlushRows ??
-        (isInteger(options.auto_flush_rows, 0)
-          ? options.auto_flush_rows
-          : undefined),
-      // A datagram is the byte ceiling this transport can actually publish, so
-      // it remains the default when neither spelling sets the trigger.
-      autoFlushBytes:
-        configuredSender.autoFlushBytes ??
-        (isInteger(options.auto_flush_bytes, 0)
-          ? options.auto_flush_bytes
-          : maxDatagramSize),
-      autoFlushIntervalMs:
-        configuredSender.autoFlushIntervalMs ??
-        (isInteger(options.auto_flush_interval, 0)
-          ? options.auto_flush_interval
-          : undefined),
-      maxNameLength:
-        configuredSender.maxNameLength ??
-        (isInteger(options.max_name_len, 1) ? options.max_name_len : undefined),
-      log: qwpConfiguredLogger(options, logger),
-    },
-  );
+  return qwpNode.createQwpNodeUdpSender({
+    ...configuredUdp,
+    host: options.host,
+    port: options.port,
+    maxDatagramSize,
+    multicastTtl: configuredUdp.multicastTtl ?? options.multicast_ttl,
+    onError: configuredUdp.onError ?? ((error) => logger("warn", error)),
+    autoFlush:
+      configuredUdp.autoFlush ??
+      (isBoolean(options.auto_flush) ? options.auto_flush : undefined),
+    autoFlushRows:
+      configuredUdp.autoFlushRows ??
+      (isInteger(options.auto_flush_rows, 0)
+        ? options.auto_flush_rows
+        : undefined),
+    // A datagram is the byte ceiling this transport can actually publish, so
+    // it remains the default when neither spelling sets the trigger.
+    autoFlushBytes:
+      configuredUdp.autoFlushBytes ??
+      (isInteger(options.auto_flush_bytes, 0)
+        ? options.auto_flush_bytes
+        : maxDatagramSize),
+    autoFlushIntervalMs:
+      configuredUdp.autoFlushIntervalMs ??
+      (isInteger(options.auto_flush_interval, 0)
+        ? options.auto_flush_interval
+        : undefined),
+    maxNameLength:
+      configuredUdp.maxNameLength ??
+      (isInteger(options.max_name_len, 1) ? options.max_name_len : undefined),
+    log: qwpConfiguredLogger(options, configuredUdp.log, logger),
+  });
 }
 
 function qwpAuthorization(options: SenderOptions): string | undefined {

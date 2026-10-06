@@ -185,8 +185,7 @@ describe("QWP configuration-string reference", () => {
     // The pool constants are module-private, so assert against the values a
     // default client really reports.
     const client = createQwpNodeClient({
-      ingress: { url: "ws://127.0.0.1:1/write/v4" },
-      egress: { url: "ws://127.0.0.1:1/read/v1" },
+      cluster: { url: "ws://127.0.0.1:1" },
     });
     try {
       const metrics = client.metrics;
@@ -352,7 +351,7 @@ describe("QWP configuration-string reference", () => {
     // The row says a segment default is also the frame cap; that only holds
     // if the ingress session really receives it.
     expect(
-      resolved.ingressSession?.maxBatchSizeBytes ??
+      resolved.ingress?.maxBatchSizeBytes ??
         resolved.ingress.storeAndForward?.maxSegmentBytes,
     ).toBe(documented("sf_max_segment_bytes"));
 
@@ -361,7 +360,7 @@ describe("QWP configuration-string reference", () => {
     expect(
       resolveQwpNodeClientConfig(
         "ws::addr=localhost;initial_connect_retry=async;",
-      ).ingressSession?.initialConnectMode,
+      ).ingress?.initialConnectMode,
     ).toBe("async");
   });
 });

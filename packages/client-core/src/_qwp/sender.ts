@@ -48,7 +48,10 @@ export type QwpSenderLogger = (
   message: string | Error,
 ) => void;
 
-/** Options for the browser-safe, fluent QWP sender. */
+/**
+ * Row buffering and flushing options of the browser-safe, fluent QWP sender.
+ * Each runtime's ingress options, and the Node UDP options, include them.
+ */
 export interface QwpSenderOptions {
   autoFlush?: boolean;
   autoFlushRows?: number;

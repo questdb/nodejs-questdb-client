@@ -12,10 +12,10 @@ import {
  * Logger routing for the two QWP senders that are built from a programmatic
  * options object rather than from a parsed ws/wss connect string.
  *
- * Both factories spread `options.qwp.sender` and then wrote `log: logger`,
+ * Both factories spread the typed QWP section and then wrote `log: logger`,
  * where `logger` is already the module default whenever no top-level logger was
- * supplied. A caller who configured the documented `qwp.sender.log` callback
- * and nothing else therefore had it silently replaced: the sender's lifecycle
+ * supplied. A caller who configured the documented `qwp.webSocket.log` or
+ * `qwp.udp.log` callback and nothing else therefore had it silently replaced: the sender's lifecycle
  * warnings -- rows about to be discarded, an open transaction about to be
  * rolled back -- went to the console instead of the sink that asked for them.
  */
@@ -65,13 +65,15 @@ describe("programmatic QWP sender logging", () => {
           { log } as never,
         ),
       (log: unknown) =>
-        createQwpNodeSender({ url: "ws://localhost:9000/write/v4" }, {
+        createQwpNodeSender({
+          url: "ws://localhost:9000/write/v4",
           log,
         } as never),
       (log: unknown) =>
-        createQwpNodeUdpSender({ host: "localhost" }, { log } as never),
+        createQwpNodeUdpSender({ host: "localhost", log } as never),
       (log: unknown) =>
-        createQwpBrowserSender({ url: "ws://localhost:9000/write/v4" }, {
+        createQwpBrowserSender({
+          url: "ws://localhost:9000/write/v4",
           log,
         } as never),
     ];
@@ -85,7 +87,7 @@ describe("programmatic QWP sender logging", () => {
     }
   });
 
-  it("keeps qwp.sender.log on a programmatic ws sender", async () => {
+  it("keeps qwp.webSocket.log on a programmatic ws sender", async () => {
     const records: Array<[string, string | Error]> = [];
     const sender = new Sender({
       protocol: "ws",
@@ -93,7 +95,7 @@ describe("programmatic QWP sender logging", () => {
       port: 9000,
       auto_flush: false,
       qwp: {
-        sender: {
+        webSocket: {
           log: (level, message) => records.push([level, message]),
         },
       },
@@ -107,14 +109,14 @@ describe("programmatic QWP sender logging", () => {
     expect(unfinishedRowWarnings(records)).toHaveLength(1);
   });
 
-  it("keeps qwp.sender.log on a UDP sender built from a connect string", async () => {
+  it("keeps qwp.udp.log on a UDP sender built from a connect string", async () => {
     const records: Array<[string, string | Error]> = [];
     const sender = await Sender.fromConfig(
       "udp::addr=127.0.0.1:9009;auto_flush=off;",
       {
         qwp: {
-          udp: { socketFactory: () => new SilentUdpSocket() },
-          sender: {
+          udp: {
+            socketFactory: () => new SilentUdpSocket(),
             log: (level, message) => records.push([level, message]),
           },
         },
@@ -138,7 +140,7 @@ describe("programmatic QWP sender logging", () => {
       log: (level: string, message: string | Error) =>
         topLevel.push([level, message]),
       qwp: {
-        sender: {
+        webSocket: {
           log: (level, message) => qwpLevel.push([level, message]),
         },
       },

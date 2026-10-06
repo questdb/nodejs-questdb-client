@@ -8875,26 +8875,22 @@ describe("QWP Node file replay store", () => {
     }
 
     const senderErrors: QwpSenderError[] = [];
-    const session = await connectQwpNodeIngress(
-      {
-        // Nothing listens here; `async` startup resolves regardless, and the
-        // recovery report is what this test is after.
-        url: "ws://127.0.0.1:1/write/v4",
-        storeAndForward: {
-          directory,
-          maxSegmentBytes: 4096,
-          durability: "memory",
-          initialConnectMode: "async",
-        },
+    const session = await connectQwpNodeIngress({
+      // Nothing listens here; `async` startup resolves regardless, and the
+      // recovery report is what this test is after.
+      url: "ws://127.0.0.1:1/write/v4",
+      storeAndForward: {
+        directory,
+        maxSegmentBytes: 4096,
+        durability: "memory",
       },
-      {
-        onSenderError: (error) => senderErrors.push(error),
-        reconnect: {
-          reconnectInitialBackoffMs: 10_000,
-          reconnectMaxBackoffMs: 10_000,
-        },
+      initialConnectMode: "async",
+      onSenderError: (error) => senderErrors.push(error),
+      reconnect: {
+        reconnectInitialBackoffMs: 10_000,
+        reconnectMaxBackoffMs: 10_000,
       },
-    );
+    });
     try {
       await vi.waitFor(() => expect(senderErrors).not.toHaveLength(0));
       const dataLoss = senderErrors.find(
@@ -10986,10 +10982,10 @@ describe("QWP Node file replay store", () => {
 
   it("accepts tuned in-memory reconnect for Node ingress", async () => {
     await expect(
-      connectQwpNodeIngress(
-        { url: "ws://127.0.0.1:1/write/v4" },
-        { reconnect: { reconnectMaxDurationMs: 100 } },
-      ),
+      connectQwpNodeIngress({
+        url: "ws://127.0.0.1:1/write/v4",
+        reconnect: { reconnectMaxDurationMs: 100 },
+      }),
     ).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
   });
 });

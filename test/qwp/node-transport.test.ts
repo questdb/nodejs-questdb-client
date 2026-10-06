@@ -401,10 +401,10 @@ describe("QWP Node transport", () => {
     // Node callers may request durable tracking through the session keepalive
     // alone. The transport must promote that request into the upgrade header;
     // otherwise ordinary OKs silently become the public ACK watermark.
-    const session = await connectQwpNodeIngress(
-      { url: `ws://127.0.0.1:${address.port}/write/v4` },
-      { durableAckKeepaliveMs: 10 },
-    );
+    const session = await connectQwpNodeIngress({
+      url: `ws://127.0.0.1:${address.port}/write/v4`,
+      durableAckKeepaliveMs: 10,
+    });
     try {
       expect(session.handshake).toMatchObject({
         qwpVersion: 1,
@@ -427,13 +427,11 @@ describe("QWP Node transport", () => {
 
   it("rejects disabling durable ACK while requesting keepalive tracking", async () => {
     await expect(
-      connectQwpNodeIngress(
-        {
-          url: "ws://127.0.0.1:1/write/v4",
-          requestDurableAck: false,
-        },
-        { durableAckKeepaliveMs: 10 },
-      ),
+      connectQwpNodeIngress({
+        url: "ws://127.0.0.1:1/write/v4",
+        requestDurableAck: false,
+        durableAckKeepaliveMs: 10,
+      }),
     ).rejects.toThrow(
       "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
     );
@@ -448,22 +446,18 @@ describe("QWP Node transport", () => {
     let webSocketFactoryCalls = 0;
     const started = Date.now();
     await expect(
-      connectQwpNodeIngress(
-        {
-          url: "not an absolute URL",
-          webSocketFactory: () => {
-            webSocketFactoryCalls++;
-            throw new Error("the endpoint must never be dialled");
-          },
+      connectQwpNodeIngress({
+        url: "not an absolute URL",
+        webSocketFactory: () => {
+          webSocketFactoryCalls++;
+          throw new Error("the endpoint must never be dialled");
         },
-        {
-          reconnect: {
-            reconnectInitialBackoffMs: 200,
-            reconnectMaxBackoffMs: 200,
-            reconnectMaxDurationMs: 5_000,
-          },
+        reconnect: {
+          reconnectInitialBackoffMs: 200,
+          reconnectMaxBackoffMs: 200,
+          reconnectMaxDurationMs: 5_000,
         },
-      ),
+      }),
     ).rejects.toThrow(/Invalid URL/);
     // No backoff was served, so this is the parse error itself rather than an
     // exhaustion that happens to carry one as its cause.
@@ -471,10 +465,10 @@ describe("QWP Node transport", () => {
     expect(webSocketFactoryCalls).toBe(0);
 
     const secret = "malformed-password";
-    const error = await connectQwpNodeIngress(
-      { url: `ws://alice:${secret}@` },
-      { reconnect: false },
-    ).catch((cause: unknown) => cause);
+    const error = await connectQwpNodeIngress({
+      url: `ws://alice:${secret}@`,
+      reconnect: false,
+    }).catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(TypeError);
     expect((error as Error).message).toBe("Invalid URL");
     expect(Object.keys(error as object)).not.toContain("input");
@@ -596,13 +590,8 @@ describe("QWP Node transport", () => {
     await listen(endpoint);
     const address = endpoint.address() as AddressInfo;
     const client = await connectQwpNodeClient({
-      ingress: {
-        url: `ws://127.0.0.1:${address.port}/write/v4`,
-      },
-      egress: {
-        url: `ws://127.0.0.1:${address.port}/read/v1`,
-      },
-      sender: { autoFlush: false },
+      cluster: { url: `ws://127.0.0.1:${address.port}` },
+      ingress: { autoFlush: false },
       pool: {
         senderPoolMin: 1,
         senderPoolMax: 1,
@@ -675,20 +664,17 @@ describe("QWP Node transport", () => {
 
     const events: string[] = [];
     const client = await connectQwpNodeClient({
+      cluster: { url: `ws://127.0.0.1:${address.port}` },
       ingress: {
-        url: `ws://127.0.0.1:${address.port}/write/v4`,
         target: "primary",
         zone: "eu-west-1",
         requestDurableAck: true,
+        durableAckKeepaliveMs: 10,
         storeAndForward: {
           directory: rootDirectory,
           orphanScanIntervalMs: 0,
           onOrphanDrainEvent: (event) => events.push(event.kind),
         },
-      },
-      ingressSession: { durableAckKeepaliveMs: 10 },
-      egress: {
-        url: `ws://127.0.0.1:${address.port}/read/v1`,
       },
       pool: {
         senderPoolMin: 1,
@@ -756,8 +742,8 @@ describe("QWP Node transport", () => {
 
     const events: string[] = [];
     const client = await connectQwpNodeClient({
+      cluster: { url: `ws://127.0.0.1:${address.port}` },
       ingress: {
-        url: `ws://127.0.0.1:${address.port}/write/v4`,
         // The only place durability is configured: no durableAckKeepaliveMs.
         requestDurableAck: true,
         storeAndForward: {
@@ -766,8 +752,6 @@ describe("QWP Node transport", () => {
           onOrphanDrainEvent: (event) => events.push(event.kind),
         },
       },
-      ingressSession: {},
-      egress: { url: `ws://127.0.0.1:${address.port}/read/v1` },
       pool: {
         senderPoolMin: 1,
         senderPoolMax: 1,
@@ -838,16 +822,13 @@ describe("QWP Node transport", () => {
 
     const events: string[] = [];
     const client = await connectQwpNodeClient({
+      cluster: { url: `ws://127.0.0.1:${address.port}` },
       ingress: {
-        url: `ws://127.0.0.1:${address.port}/write/v4`,
         storeAndForward: {
           directory: rootDirectory,
           orphanScanIntervalMs: 0,
           onOrphanDrainEvent: (event) => events.push(event.kind),
         },
-      },
-      egress: {
-        url: `ws://127.0.0.1:${address.port}/read/v1`,
       },
       pool: {
         senderPoolMin: 1,
@@ -903,22 +884,20 @@ describe("QWP Node transport", () => {
     const senderErrors: QwpSenderError[] = [];
     const address = server.address() as AddressInfo;
     try {
-      const session = await connectQwpNodeIngress(
-        {
-          url: `ws://127.0.0.1:${address.port}/write/v4`,
-          storeAndForward: {
-            directory,
-            initialConnectMode: "sync",
-            onRecoveryQuarantine: (event) => {
-              events.push(event.error);
-              expect(event.senderError.quarantinedPath).toBe(
-                event.quarantineDirectory,
-              );
-            },
+      const session = await connectQwpNodeIngress({
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        storeAndForward: {
+          directory,
+          onRecoveryQuarantine: (event) => {
+            events.push(event.error);
+            expect(event.senderError.quarantinedPath).toBe(
+              event.quarantineDirectory,
+            );
           },
         },
-        { onSenderError: (error) => senderErrors.push(error) },
-      );
+        initialConnectMode: "sync",
+        onSenderError: (error) => senderErrors.push(error),
+      });
       try {
         await expect(publishAndWait(session, Uint8Array.of(2))).resolves.toBe(
           0n,
@@ -1077,17 +1056,15 @@ describe("QWP Node transport", () => {
     const senderErrors: QwpSenderError[] = [];
     const address = server.address() as AddressInfo;
     try {
-      const session = await connectQwpNodeIngress(
-        {
-          url: `ws://127.0.0.1:${address.port}/write/v4`,
-          storeAndForward: {
-            directory,
-            initialConnectMode: "sync",
-            onRecoveryQuarantine: (event) => quarantined.push(event.error),
-          },
+      const session = await connectQwpNodeIngress({
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        storeAndForward: {
+          directory,
+          onRecoveryQuarantine: (event) => quarantined.push(event.error),
         },
-        { onSenderError: (error) => senderErrors.push(error) },
-      );
+        initialConnectMode: "sync",
+        onSenderError: (error) => senderErrors.push(error),
+      });
       await session.close();
 
       expect(quarantined).toEqual([]);
@@ -1190,9 +1167,9 @@ describe("QWP Node transport", () => {
         url: `ws://127.0.0.1:${address.port}/write/v4`,
         storeAndForward: {
           directory,
-          initialConnectMode: "sync",
           onRecoveryQuarantine: (event) => quarantined.push(event.error),
         },
+        initialConnectMode: "sync",
       });
       await vi.waitFor(() => expect(received).toHaveLength(2));
       await session.close();
@@ -1229,13 +1206,11 @@ describe("QWP Node transport", () => {
       directory: string,
       reconnect: QwpIngressReconnectOptions,
     ): Promise<unknown> =>
-      connectQwpNodeIngress(
-        {
-          url: `ws://127.0.0.1:${port}/write/v4`,
-          storeAndForward: { directory: join(root, directory) },
-        },
-        { reconnect },
-      ).then(
+      connectQwpNodeIngress({
+        url: `ws://127.0.0.1:${port}/write/v4`,
+        storeAndForward: { directory: join(root, directory) },
+        reconnect,
+      }).then(
         async (session) => {
           await session.close();
           return undefined;
@@ -1289,17 +1264,13 @@ describe("QWP Node transport", () => {
 
     const primaryAddress = primary.address() as AddressInfo;
     const secondaryAddress = secondary.address() as AddressInfo;
-    const session = await connectQwpNodeIngress(
-      {
-        url: `ws://127.0.0.1:${primaryAddress.port}/write/v4`,
-        failoverUrls: [`ws://127.0.0.1:${secondaryAddress.port}/write/v4`],
-        storeAndForward: { directory },
-      },
-      {
-        ackTimeoutMs: 2_000,
-        reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
-      },
-    );
+    const session = await connectQwpNodeIngress({
+      url: `ws://127.0.0.1:${primaryAddress.port}/write/v4`,
+      failoverUrls: [`ws://127.0.0.1:${secondaryAddress.port}/write/v4`],
+      storeAndForward: { directory },
+      ackTimeoutMs: 2_000,
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
     try {
       await expect(
         publishAndWait(session, Uint8Array.of(1, 2, 3)),
@@ -1333,10 +1304,10 @@ describe("QWP Node transport", () => {
         connectTimeoutMs: 50,
         storeAndForward: {
           directory: join(root, "journal"),
-          initialConnectMode: "async",
           drainOrphans: true,
           orphanScanIntervalMs: 50,
         },
+        initialConnectMode: "async",
       });
       try {
         // Past the point where a scanner rooted at the parent reaches it, and
@@ -1363,20 +1334,17 @@ describe("QWP Node transport", () => {
     const port = (reservation.address() as AddressInfo).port;
     await closeServer(reservation);
     const directory = await mkdtemp(join(tmpdir(), "qwp-node-offline-"));
-    const sender = createQwpNodeSender(
-      {
-        url: `ws://127.0.0.1:${port}/write/v4`,
-        connectTimeoutMs: 100,
-        storeAndForward: { directory, initialConnectMode: "async" },
+    const sender = createQwpNodeSender({
+      url: `ws://127.0.0.1:${port}/write/v4`,
+      connectTimeoutMs: 100,
+      storeAndForward: { directory },
+      initialConnectMode: "async",
+      autoFlush: false,
+      reconnect: {
+        reconnectInitialBackoffMs: 10,
+        reconnectMaxBackoffMs: 10,
       },
-      { autoFlush: false },
-      {
-        reconnect: {
-          reconnectInitialBackoffMs: 10,
-          reconnectMaxBackoffMs: 10,
-        },
-      },
-    );
+    });
 
     try {
       await expect(sender.connect()).resolves.toBe(true);
@@ -1406,9 +1374,9 @@ describe("QWP Node transport", () => {
     }
   });
 
-  it("applies the session's initialConnectMode to a store-and-forward session", async () => {
-    // The session's spelling is public alongside the store's. The store's
-    // default used to win even when only the session's was set, so a journal
+  it("applies initialConnectMode to a store-and-forward session", async () => {
+    // A journal always replays in the background, but its startup policy is
+    // still the caller's: the store's own default used to win, so a journal
     // with `initialConnectMode: "async"` still failed fast while offline.
     const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await listen(reservation);
@@ -1417,32 +1385,13 @@ describe("QWP Node transport", () => {
     const url = `ws://127.0.0.1:${port}/write/v4`;
     const root = await mkdtemp(join(tmpdir(), "qwp-node-session-mode-"));
     try {
-      const session = await connectQwpNodeIngress(
-        {
-          url,
-          connectTimeoutMs: 100,
-          storeAndForward: { directory: join(root, "journal") },
-        },
-        { initialConnectMode: "async" },
-      );
+      const session = await connectQwpNodeIngress({
+        url,
+        connectTimeoutMs: 100,
+        storeAndForward: { directory: join(root, "journal") },
+        initialConnectMode: "async",
+      });
       await session.close();
-
-      // Spellings that disagree are rejected before a journal is opened.
-      await expect(
-        connectQwpNodeIngress(
-          {
-            url,
-            storeAndForward: {
-              directory: join(root, "conflicting"),
-              initialConnectMode: "off",
-            },
-          },
-          { initialConnectMode: "async" },
-        ),
-      ).rejects.toThrow(
-        "conflicting configuration: storeAndForward.initialConnectMode='off' differs from ingressSession.initialConnectMode='async'",
-      );
-      expect(await readdir(root)).not.toContain("conflicting");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

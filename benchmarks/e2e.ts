@@ -130,7 +130,7 @@ it("measures QWP ingress completion boundaries", async () => {
       table: "bench_e2e_publication",
       configuration: () => `ws::addr=${ADDRESS};auto_flush=off`,
       extraOptions: {
-        qwp: { sender: { autoFlush: false, closeFlushTimeoutMs: 0 } },
+        qwp: { webSocket: { autoFlush: false, closeFlushTimeoutMs: 0 } },
       },
     },
     {
@@ -138,7 +138,7 @@ it("measures QWP ingress completion boundaries", async () => {
       table: "bench_e2e_ack",
       configuration: () => `ws::addr=${ADDRESS};auto_flush=off`,
       extraOptions: {
-        qwp: { sender: { autoFlush: false, closeFlushTimeoutMs: 0 } },
+        qwp: { webSocket: { autoFlush: false, closeFlushTimeoutMs: 0 } },
       },
       flushAndWait: true,
     },
@@ -149,7 +149,7 @@ it("measures QWP ingress completion boundaries", async () => {
         `ws::addr=${ADDRESS};auto_flush=off;sf_dir=${directory};` +
         `sender_id=bench-${repeat};sf_durability=append`,
       extraOptions: {
-        qwp: { sender: { autoFlush: false, closeFlushTimeoutMs: 0 } },
+        qwp: { webSocket: { autoFlush: false, closeFlushTimeoutMs: 0 } },
       },
     },
   ];
@@ -161,7 +161,7 @@ it("measures QWP ingress completion boundaries", async () => {
       configuration: () =>
         `ws::addr=${ADDRESS};auto_flush=off;request_durable_ack=on`,
       extraOptions: {
-        qwp: { sender: { autoFlush: false, closeFlushTimeoutMs: 0 } },
+        qwp: { webSocket: { autoFlush: false, closeFlushTimeoutMs: 0 } },
       },
       flushAndWait: true,
     });

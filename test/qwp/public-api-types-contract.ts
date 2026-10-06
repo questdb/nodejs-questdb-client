@@ -53,7 +53,6 @@ export type {
   QwpIngressReplayStore,
   QwpIngressResponse,
   QwpIngressServerInfo,
-  QwpIngressSessionOptions,
   QwpIngressSymbolDictionaryDelta,
   QwpIngressTableResult,
   QwpIngressTransportMetrics,
@@ -105,7 +104,6 @@ export type {
   QwpSenderErrorResponseContext,
   QwpSenderLogger,
   QwpSenderMetrics,
-  QwpSenderOptions,
   QwpServerInfoMessage,
   QwpSfBackpressurePolicy,
   QwpSfDurability,
@@ -135,8 +133,6 @@ export type {
   QwpBinaryConnection as BrowserQwpBinaryConnection,
   QwpBindSetter as BrowserQwpBindSetter,
   QwpBindType as BrowserQwpBindType,
-  QwpBrowserClientEgressOptions,
-  QwpBrowserClientIngressOptions,
   QwpBrowserClientOptions,
   QwpBrowserEgressOptions,
   QwpBrowserFetch,
@@ -186,7 +182,6 @@ export type {
   QwpIngressReplayStore as BrowserQwpIngressReplayStore,
   QwpIngressResponse as BrowserQwpIngressResponse,
   QwpIngressServerInfo as BrowserQwpIngressServerInfo,
-  QwpIngressSessionOptions as BrowserQwpIngressSessionOptions,
   QwpIngressSymbolDictionaryDelta as BrowserQwpIngressSymbolDictionaryDelta,
   QwpIngressTableResult as BrowserQwpIngressTableResult,
   QwpIngressTransportMetrics as BrowserQwpIngressTransportMetrics,
@@ -222,7 +217,6 @@ export type {
   QwpSenderErrorResponseContext as BrowserQwpSenderErrorResponseContext,
   QwpSenderLogger as BrowserQwpSenderLogger,
   QwpSenderMetrics as BrowserQwpSenderMetrics,
-  QwpSenderOptions as BrowserQwpSenderOptions,
   QwpServerInfoMessage as BrowserQwpServerInfoMessage,
   QwpSymbolValue as BrowserQwpSymbolValue,
   QwpTarget as BrowserQwpTarget,
@@ -287,8 +281,17 @@ export type NodeUdpMetrics = NodeRoot.QwpNodeUdpMetrics;
 // @ts-expect-error connectQwpNodeUdp is internal.
 export type NodeUdpFactory = typeof NodeRoot.connectQwpNodeUdp;
 
-// So is the interface carrying the session options only an adapter sets, and
-// the published session options must not regain any of its handoffs.
+// The sender's buffering options and the ingress session's delivery options
+// are part of each runtime's ingress options, not types of their own, and the
+// session options only an adapter sets are internal too.
+// @ts-expect-error QwpSenderOptions is internal.
+export type NodeSenderOptions = NodeRoot.QwpSenderOptions;
+// @ts-expect-error QwpSenderOptions is internal.
+export type BrowserSenderOptions = BrowserRoot.QwpSenderOptions;
+// @ts-expect-error QwpIngressSessionOptions is internal.
+export type NodeSessionOptions = NodeRoot.QwpIngressSessionOptions;
+// @ts-expect-error QwpIngressSessionOptions is internal.
+export type BrowserSessionOptions = BrowserRoot.QwpIngressSessionOptions;
 // @ts-expect-error QwpIngressSessionInternalOptions is internal.
 export type NodeSessionInternals = NodeRoot.QwpIngressSessionInternalOptions;
 export type BrowserSessionInternals =
@@ -302,11 +305,13 @@ type InternalSessionField =
   | "orphanDurableAckMismatchMaxDurationMs"
   | "catchUpCapGapMinEscalationWindowMs"
   | "priorSenderErrorDeliveries";
+// The published ingress options carry the session's delivery options, and
+// must not regain any of the adapter's handoffs.
 export type NodeSessionLeaks = ExpectNone<
-  Extract<keyof NodeRoot.QwpIngressSessionOptions, InternalSessionField>
+  Extract<keyof NodeRoot.QwpNodeIngressOptions, InternalSessionField>
 >;
 export type BrowserSessionLeaks = ExpectNone<
-  Extract<keyof BrowserRoot.QwpIngressSessionOptions, InternalSessionField>
+  Extract<keyof BrowserRoot.QwpBrowserIngressOptions, InternalSessionField>
 >;
 
 // Durable ACK is negotiated on /write/v4 only, so neither the transport

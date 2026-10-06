@@ -18,8 +18,6 @@ export {
   createQwpBrowserSender,
 } from "./qwp";
 export type {
-  QwpBrowserClientEgressOptions,
-  QwpBrowserClientIngressOptions,
   QwpBrowserClientOptions,
   QwpBrowserEgressOptions,
   QwpBrowserFetch,

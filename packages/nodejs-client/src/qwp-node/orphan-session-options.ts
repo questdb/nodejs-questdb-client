@@ -1,5 +1,8 @@
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
-import type { QwpReconnectEvent } from "../../../client-core/src/_qwp/transport";
+import {
+  QWP_INITIAL_CONNECT_MODE,
+  type QwpReconnectEvent,
+} from "../../../client-core/src/_qwp/transport";
 import type { QwpIngressSessionInternalOptions } from "../../../client-core/src/_qwp/ingress-session";
 
 /**
@@ -8,10 +11,9 @@ import type { QwpIngressSessionInternalOptions } from "../../../client-core/src/
  * Not re-exported by the package root: it is reachable only through
  * `storeAndForward.drainOrphans`, and tests import it by path.
  */
-export function orphanIngressSessionOptions(
-  options: QwpIngressSessionInternalOptions,
-  onReconnectEvent?: (event: QwpReconnectEvent) => void,
-): QwpIngressSessionInternalOptions {
+export function orphanIngressSessionOptions<
+  T extends QwpIngressSessionInternalOptions,
+>(options: T, onReconnectEvent?: (event: QwpReconnectEvent) => void): T {
   const configuredReconnect =
     options.reconnect === false ? undefined : options.reconnect;
   const configuredOnEvent = configuredReconnect?.onEvent;
@@ -46,7 +48,9 @@ export function orphanIngressSessionOptions(
     },
     replayStore: undefined,
     backgroundStoreAndForward: undefined,
-    initialConnectMode: undefined,
+    // Orphan adoption is always non-blocking. Terminal endpoint-policy
+    // failures and cap-gap quarantine are selected by orphanStoreAndForward.
+    initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
     orphanStoreAndForward: true,
     // Java also bounds an orphan's durable-ACK gap by
     // reconnect_max_duration_millis.

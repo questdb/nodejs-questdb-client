@@ -247,8 +247,8 @@ lasts through durable upload. When Node QWP is configured with
 journal; only that mode survives a process restart.
 Set `initialConnectMode` to `"off"` (the default), `"sync"`, or `"async"` to
 choose fail-fast, bounded blocking, or background startup, with or without a
-journal. It belongs to the ingress session options (`qwp.session` for
-`Sender.fromConfig()`), or to `qwp.webSocket.storeAndForward`. Setting
+journal. It is an ingress option (`qwp.webSocket` for `Sender.fromConfig()`),
+beside `storeAndForward` rather than inside it. Setting
 `reconnectMaxDurationMs`, `reconnectInitialBackoffMs` or `reconnectMaxBackoffMs`
 without an explicit mode promotes initial startup to `"sync"`, as in the Java
 client; the Rust and Python clients do so only for a standalone sender. The
@@ -273,7 +273,7 @@ use the in-memory replay boundary.
 Browser applications use the browser entry point, which has no Node.js
 dependencies. Cookies are supplied by the browser during a same-origin
 WebSocket upgrade. Browser and non-persistent Node ingress reconnect by default and
-retain unacknowledged frames in memory; set `reconnect: false` in the session options
+retain unacknowledged frames in memory; set `reconnect: false` in the sender options
 for a fixed connection. Only Node store-and-forward survives process failure.
 
 ```typescript
@@ -281,7 +281,7 @@ import { connectQwpBrowserSender } from "@questdb/browser-client";
 
 const url = new URL("/write/v4", location.href);
 url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+const sender = await connectQwpBrowserSender({ url, autoFlush: false });
 await sender.table("events").longColumn("value", 42n).atNow();
 await sender.flush();
 await sender.close();
@@ -296,14 +296,12 @@ QuestDB guarantees this atomicity per table; a flush that contains multiple
 tables is not one cross-table transaction.
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  { url },
-  {
-    autoFlushRows: 10_000,
-    autoFlushBytes: 4 * 1024 * 1024,
-    transactional: true,
-  },
-);
+const sender = await connectQwpBrowserSender({
+  url,
+  autoFlushRows: 10_000,
+  autoFlushBytes: 4 * 1024 * 1024,
+  transactional: true,
+});
 
 for (const event of events) {
   await sender
@@ -341,29 +339,27 @@ import {
   createQwpBrowserSender,
 } from "@questdb/browser-client";
 
-const sender = createQwpBrowserSender(
-  { url },
-  { autoFlush: false },
-  {
-    reconnect: {
-      onEvent: (event) => console.info("QWP connection", event),
-    },
-    onProgress: (event) => {
-      if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
-        console.info("accepted through", event.sequence);
-      }
-    },
-    onError: (event) => console.error("QWP ingress", event.error),
-    onSenderError: (error) =>
-      console.error(
-        "QWP rejection",
-        error.category,
-        error.appliedPolicy,
-        error.fromFsn,
-        error.toFsn,
-      ),
+const sender = createQwpBrowserSender({
+  url,
+  autoFlush: false,
+  reconnect: {
+    onEvent: (event) => console.info("QWP connection", event),
   },
-);
+  onProgress: (event) => {
+    if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
+      console.info("accepted through", event.sequence);
+    }
+  },
+  onError: (event) => console.error("QWP ingress", event.error),
+  onSenderError: (error) =>
+    console.error(
+      "QWP rejection",
+      error.category,
+      error.appliedPolicy,
+      error.fromFsn,
+      error.toFsn,
+    ),
+});
 
 await sender.connect();
 const snapshot = sender.metrics;
@@ -406,26 +402,24 @@ await bootstrapQwpBrowserSession({
   serviceAccount: "market_data_writer",
 });
 
-const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+const sender = await connectQwpBrowserSender({ url, autoFlush: false });
 ```
 
 The bootstrap can also be attached to the connection options. It then runs
 before each initial, reconnect, or failover WebSocket attempt:
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  {
-    url,
-    sessionBootstrap: {
-      authentication: {
-        type: "basic",
-        username: "admin",
-        password: "quest",
-      },
+const sender = await connectQwpBrowserSender({
+  url,
+  sessionBootstrap: {
+    authentication: {
+      type: "basic",
+      username: "admin",
+      password: "quest",
     },
   },
-  { autoFlush: false },
-);
+  autoFlush: false,
+});
 ```
 
 The REST request uses `credentials: "include"`. The default bootstrap URL is
@@ -448,10 +442,11 @@ manual polls reject locally when the capability was not negotiated. Once it is
 negotiated, `flushAndWait()` waits for durable upload:
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  { url, requestDurableAck: true },
-  { autoFlush: false },
-);
+const sender = await connectQwpBrowserSender({
+  url,
+  requestDurableAck: true,
+  autoFlush: false,
+});
 await sender.table("events").longColumn("value", 42n).atNow();
 const durable = await sender.flushAndWait();
 ```
@@ -462,7 +457,7 @@ point. In-memory ingress replay targets a 128 MiB cap and waits at most 30 secon
 for ACK-driven trimming by default. A commit-bearing logical batch may temporarily
 raise usage to at most twice that target so a retained deferred prefix cannot deadlock;
 tune `memoryReplayMaxBytes` and
-`memoryReplayAppendDeadlineMs` in the ingress session options when needed.
+`memoryReplayAppendDeadlineMs` in the sender options when needed.
 
 ### Zstd-compressed QWP egress
 
@@ -472,16 +467,12 @@ WebSocket upgrade. Raw batches remain the default for compatibility.
 ```typescript
 import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
-const session = await connectQwpNodeEgress(
-  {
-    url: "ws://127.0.0.1:9000/read/v1",
-    compression: "zstd",
-    compressionLevel: 3,
-  },
-  {
-    queryTimeoutMs: 30_000,
-  },
-);
+const session = await connectQwpNodeEgress({
+  url: "ws://127.0.0.1:9000/read/v1",
+  compression: "zstd",
+  compressionLevel: 3,
+  queryTimeoutMs: 30_000,
+});
 try {
   const query = await session.query("select * from trades", {
     initialCredit: 1024 * 1024,

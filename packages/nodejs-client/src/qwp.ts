@@ -36,9 +36,9 @@ import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/eg
 import { selectsQwpSyncInitialConnect } from "../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
 import {
-  assertConsistentQwpInitialConnectMode,
   normalizeQwpNodeClientOptions,
   resolveQwpNodeClientConfig,
+  resolveQwpNodeClientSides,
 } from "./qwp-node/client-config";
 import {
   QWP_INITIAL_CONNECT_MODE,
@@ -47,7 +47,6 @@ import {
   QwpConnectionFactory,
   QwpDurableAckUnavailableError,
   QwpHandshakeMetadata,
-  QwpInitialConnectMode,
   QwpRoutingOptions,
   QwpSendClosedError,
   QwpUnrecoverableReplayDictionaryError,
@@ -240,6 +239,11 @@ function parseMaxBatchSize(
     : undefined;
 }
 
+/**
+ * Node WebSocket connection settings: endpoints, upgrade headers, the TLS
+ * agent, authentication and opening deadlines. A pooled client's `cluster`
+ * takes these, and the ingress and egress options extend them.
+ */
 export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   headers?: Record<string, string>;
   /** Optional HTTP(S) agent used for the WebSocket upgrade. */
@@ -274,13 +278,20 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   ) => QwpWebSocketLike;
 }
 
+/**
+ * Everything a Node QWP WebSocket sender takes: the connection, row buffering
+ * and flushing, and delivery -- acknowledgement, reconnect and replay, kept in
+ * memory or, with `storeAndForward`, in a crash-safe journal.
+ */
 export interface QwpNodeIngressOptions
   extends QwpNodeWebSocketOptions,
-    QwpRoutingOptions {
+    QwpRoutingOptions,
+    QwpSenderOptions,
+    QwpIngressSessionOptions {
   /**
    * Requests durable ACKs on the `/write/v4` upgrade; connecting fails with
-   * QwpDurableAckUnavailableError when the server does not confirm them. The
-   * session's durableAckKeepaliveMs implies it and conflicts with `false`.
+   * QwpDurableAckUnavailableError when the server does not confirm them.
+   * durableAckKeepaliveMs implies it and conflicts with `false`.
    */
   requestDurableAck?: boolean;
   /**
@@ -311,15 +322,6 @@ export interface QwpNodeReplayRecoveryEvent {
 /** Node store-and-forward controls layered on the crash-safe replay journal. */
 export interface QwpNodeStoreAndForwardOptions
   extends QwpNodeFileReplayStoreOptions {
-  /**
-   * Initial server connection policy; the same option as the session's
-   * `initialConnectMode`, which applies when this one is unset. Setting both
-   * to different values is rejected. Defaults to `off`; setting the session's
-   * reconnectMaxDurationMs, reconnectInitialBackoffMs or
-   * reconnectMaxBackoffMs promotes the default to `sync`, as in the Java
-   * client.
-   */
-  initialConnectMode?: QwpInitialConnectMode;
   /**
    * Minimum time an orphan slot's symbol catch-up cap gap must persist before
    * it is quarantined. The gap must also be observed 16 times. Defaults to
@@ -353,9 +355,15 @@ export interface QwpNodeStoreAndForwardOptions
   onRecoveryQuarantine?: (event: QwpNodeReplayRecoveryEvent) => void;
 }
 
+/**
+ * Everything a Node QWP query session takes: the connection, endpoint
+ * routing, result compression, and the session's flow control, deadlines and
+ * failover.
+ */
 export interface QwpNodeEgressOptions
   extends QwpNodeWebSocketOptions,
-    QwpRoutingOptions {
+    QwpRoutingOptions,
+    QwpEgressSessionOptions {
   /**
    * Requests Zstd-compressed result batches. The default is `raw`, which
    * preserves compatibility with servers that predate QWP compression.
@@ -368,51 +376,68 @@ export interface QwpNodeEgressOptions
    * accept-encoding header for a level to travel on.
    */
   compressionLevel?: number;
-  /** Requests a server-side RESULT_BATCH row cap. */
+  /**
+   * Requests a server-side RESULT_BATCH row cap, and rejects a batch that
+   * declares more rows: decoder scratch is sized from the declared row count
+   * and retained for the session's lifetime.
+   */
   maxBatchRows?: number;
 }
 
-/** Node configuration for a combined pooled QWP ingress/egress client. */
+/**
+ * Node configuration for a combined pooled QWP ingress/egress client. One
+ * endpoint list and authentication are shared, while side-specific options
+ * remain explicit.
+ */
 export interface QwpNodeClientOptions {
-  ingress: QwpNodeIngressOptions;
-  egress: QwpNodeEgressOptions;
-  sender?: QwpSenderOptions;
-  ingressSession?: QwpIngressSessionOptions;
-  egressSession?: QwpEgressSessionOptions;
+  /**
+   * Endpoints, authentication and the connection settings both sides share.
+   * Each URL may be an origin, a reverse-proxy base path, or an existing
+   * `/write/v4` or `/read/v1` endpoint; each side derives its own route.
+   */
+  cluster: QwpNodeWebSocketOptions;
+  /**
+   * The pooled senders' options. `url`, `failoverUrls` and `authorization`
+   * belong to `cluster`; any other connection setting given here overrides
+   * the cluster's for ingress only.
+   */
+  ingress?: Omit<
+    QwpNodeIngressOptions,
+    "url" | "failoverUrls" | "authorization"
+  >;
+  /** The query sessions' options, on the same terms as `ingress`. */
+  egress?: Omit<QwpNodeEgressOptions, "url" | "failoverUrls" | "authorization">;
   pool?: QwpClientPoolOptions;
   /**
    * Coordinates a non-blocking startup: ingress connects in the background,
    * using memory replay when store-and-forward is absent, and the egress pool
    * remains cold until the first query. Conflicts with a positive queryPoolMin,
-   * a non-async initialConnectMode, or `reconnect: false`. This is the typed
-   * spelling of the `lazy_connect` key, which, as in the Java, Rust and Python
-   * clients, only the pooled client applies.
+   * an ingress initialConnectMode other than `async`, or ingress
+   * `reconnect: false`. This is the typed spelling of the `lazy_connect` key,
+   * which, as in the Java, Rust and Python clients, only the pooled client
+   * applies.
    */
   lazyConnect?: boolean;
 }
 
 /**
- * Programmatic hooks layered over a unified ws/wss cluster string. Values in
- * this object take precedence after the complete string has been validated.
+ * Typed overrides for a ws/wss cluster string, in the sections of
+ * {@link QwpNodeClientOptions}. They take precedence after the complete string
+ * has been validated; the endpoints themselves always come from `addr`.
  */
 export interface QwpNodeClientConfigOptions {
-  /** Shared transport overrides applied to both ingress and egress. */
-  webSocket?: Partial<Omit<QwpNodeWebSocketOptions, "url" | "failoverUrls">>;
-  /** Optional persistent ingress configuration; may supply/override sf_dir. */
-  storeAndForward?: QwpNodeStoreAndForwardOptions;
-  /** Ingress-only overrides. */
-  ingress?: Partial<Pick<QwpNodeIngressOptions, "requestDurableAck">>;
-  /** Egress-only routing and compression overrides. */
-  egress?: Partial<
-    Pick<
-      QwpNodeEgressOptions,
-      "target" | "zone" | "compression" | "compressionLevel" | "maxBatchRows"
-    >
+  /** Connection overrides both sides share. */
+  cluster?: Partial<Omit<QwpNodeWebSocketOptions, "url" | "failoverUrls">>;
+  /** Ingress overrides; `storeAndForward` may supply or override `sf_dir`. */
+  ingress?: Omit<
+    QwpNodeIngressOptions,
+    "url" | "failoverUrls" | "authorization"
   >;
-  sender?: QwpSenderOptions;
-  ingressSession?: QwpIngressSessionOptions;
-  egressSession?: QwpEgressSessionOptions;
+  /** Egress overrides. */
+  egress?: Omit<QwpNodeEgressOptions, "url" | "failoverUrls" | "authorization">;
   pool?: QwpClientPoolOptions;
+  /** Overrides the `lazy_connect` key. */
+  lazyConnect?: boolean;
 }
 
 function egressTransportOptions(
@@ -742,24 +767,18 @@ function connectQwpNodeEndpoint(
  */
 export async function connectQwpNodeIngress(
   options: QwpNodeIngressOptions,
-  sessionOptions: QwpIngressSessionOptions = {},
   /** Cancels a first connect still negotiating; see QwpIngressSession.connect. */
   signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
-  return connectQwpNodeIngressInternal(
-    options,
-    sessionOptions,
-    true,
-    undefined,
-    signal,
-  );
+  return connectQwpNodeIngressInternal(options, true, undefined, signal);
 }
 
-function withDurableAckRequest(
-  options: QwpNodeIngressOptions,
-  sessionOptions: QwpIngressSessionOptions,
-): QwpNodeIngressOptions {
-  if (sessionOptions.durableAckKeepaliveMs === undefined) return options;
+/** Ingress options plus the session handoffs only this adapter sets. */
+type QwpNodeIngressInternalOptions = QwpNodeIngressOptions &
+  QwpIngressSessionInternalOptions;
+
+function withDurableAckRequest<T extends QwpNodeIngressOptions>(options: T): T {
+  if (options.durableAckKeepaliveMs === undefined) return options;
   if (options.requestDurableAck === false) {
     throw new RangeError(
       "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
@@ -771,13 +790,12 @@ function withDurableAckRequest(
 }
 
 async function connectQwpNodeIngressInternal(
-  options: QwpNodeIngressOptions,
-  sessionOptions: QwpIngressSessionInternalOptions,
+  options: QwpNodeIngressInternalOptions,
   startOrphanDrainer: boolean,
   sharedHealthTracker?: QwpFailoverHealthTracker,
   signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
-  const connectionOptions = withDurableAckRequest(options, sessionOptions);
+  const connectionOptions = withDurableAckRequest(options);
   const healthTracker =
     sharedHealthTracker ??
     createQwpFailoverHealthTracker(
@@ -789,13 +807,6 @@ async function connectQwpNodeIngressInternal(
       },
     );
   const storeAndForward = resolveNodeStoreAndForwardOptions(connectionOptions);
-  // Checked before anything below opens a journal. The session's spelling is
-  // public as well as the store's, so the two have to agree, and the store
-  // used to win silently even when only the session's was set.
-  assertConsistentQwpInitialConnectMode(
-    storeAndForward?.initialConnectMode,
-    sessionOptions.initialConnectMode,
-  );
   if (storeAndForward) {
     await warnAboutUnreachableJournal(
       storeAndForwardRoot(connectionOptions.storeAndForward!),
@@ -803,7 +814,7 @@ async function connectQwpNodeIngressInternal(
       connectionOptions.senderId,
     );
   }
-  if (storeAndForward && sessionOptions.replayStore) {
+  if (storeAndForward && options.replayStore) {
     throw new RangeError(
       "storeAndForward and a custom replayStore cannot both be configured",
     );
@@ -819,50 +830,48 @@ async function connectQwpNodeIngressInternal(
     ? new QwpNodeFileReplayStore(
         withRecoveryDataLossReporter(
           storeAndForward,
-          sessionOptions.onSenderError,
+          options.onSenderError,
           recoveryDeliveries,
         ),
       )
-    : sessionOptions.replayStore;
+    : options.replayStore;
   const reconnect = storeAndForward
-    ? (sessionOptions.reconnect ?? {})
-    : sessionOptions.reconnect;
+    ? (options.reconnect ?? {})
+    : options.reconnect;
+  // A journal always replays in the background, and left unset the connection
+  // would pick `async` for that; the documented default is `off`, promoted to
+  // `sync` by a tuned reconnect budget, as in the Java client.
   const initialConnectMode = storeAndForward
-    ? (storeAndForward.initialConnectMode ??
-      sessionOptions.initialConnectMode ??
-      (selectsQwpSyncInitialConnect(sessionOptions.reconnect)
+    ? (options.initialConnectMode ??
+      (selectsQwpSyncInitialConnect(options.reconnect)
         ? QWP_INITIAL_CONNECT_MODE.SYNC
         : QWP_INITIAL_CONNECT_MODE.OFF))
-    : sessionOptions.initialConnectMode;
+    : options.initialConnectMode;
   const backgroundReplay =
     storeAndForward !== undefined ||
-    sessionOptions.backgroundStoreAndForward === true ||
+    options.backgroundStoreAndForward === true ||
     initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC;
   const storeBatchCap =
     storeAndForward?.maxSegmentBytes ??
     (storeAndForward ? 4 * 1024 * 1024 : undefined);
   const effectiveSessionOptions: QwpIngressSessionInternalOptions = {
-    ...sessionOptions,
+    ...connectionOptions,
     reconnect,
     replayStore,
     backgroundStoreAndForward: backgroundReplay,
     initialConnectMode,
-    maxBatchSizeBytes: minimumDefined(
-      sessionOptions.maxBatchSizeBytes,
-      storeBatchCap,
-    ),
+    maxBatchSizeBytes: minimumDefined(options.maxBatchSizeBytes, storeBatchCap),
     catchUpCapGapMinEscalationWindowMs:
       storeAndForward?.catchUpCapGapMinEscalationWindowMs,
     durableAckKeepaliveMs: connectionOptions.requestDurableAck
-      ? (sessionOptions.durableAckKeepaliveMs ?? 200)
-      : sessionOptions.durableAckKeepaliveMs,
+      ? (options.durableAckKeepaliveMs ?? 200)
+      : options.durableAckKeepaliveMs,
     priorSenderErrorDeliveries: () => recoveryDeliveries.count,
   };
   const orphanDrainer =
     startOrphanDrainer && storeAndForward?.drainOrphans === true
       ? createStandaloneOrphanDrainer(
           { ...connectionOptions, senderId: undefined, storeAndForward },
-          sessionOptions,
           healthTracker,
           // The options above deliberately drop senderId so the drainer's own
           // sessions do not re-nest an already-resolved slot directory. Whether
@@ -886,7 +895,7 @@ async function connectQwpNodeIngressInternal(
   } catch (error) {
     if (
       !storeAndForward ||
-      sessionOptions.orphanStoreAndForward === true ||
+      options.orphanStoreAndForward === true ||
       !isQuarantinableReplayRecoveryError(error)
     ) {
       throw error;
@@ -1020,29 +1029,23 @@ function emitReplayRecoveryQuarantine(
  * Creates a fluent Node QWP sender without opening the WebSocket yet.
  * Call connect(), or let the first flush connect lazily.
  */
-export function createQwpNodeSender(
-  options: QwpNodeIngressOptions,
-  senderOptions: QwpSenderOptions = {},
-  sessionOptions: QwpIngressSessionOptions = {},
-): QwpSender {
+export function createQwpNodeSender(options: QwpNodeIngressOptions): QwpSender {
   // This factory is lazy, so without a check here the failover factory's own
   // one would not run until the first connect. Routing is configuration, and
   // a mixed scheme decides which socket carries the credentials below, so it
   // belongs with the other construction-time rejections.
   assertUniformQwpEndpointScheme(options.url, options.failoverUrls);
   return new QwpSender(
-    (signal) => connectQwpNodeIngress(options, sessionOptions, signal),
-    senderOptions,
+    (signal) => connectQwpNodeIngress(options, signal),
+    options,
   );
 }
 
 /** Opens a Node QWP connection and returns a fluent sender. */
 export async function connectQwpNodeSender(
   options: QwpNodeIngressOptions,
-  senderOptions: QwpSenderOptions = {},
-  sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpSender> {
-  const sender = createQwpNodeSender(options, senderOptions, sessionOptions);
+  const sender = createQwpNodeSender(options);
   await sender.connect();
   return sender;
 }
@@ -1052,17 +1055,14 @@ export async function connectQwpNodeSender(
  * UDP has no authentication, server ACK, durable ACK, transaction, retry, or
  * store-and-forward semantics.
  */
-export function createQwpNodeUdpSender(
-  options: QwpNodeUdpOptions,
-  senderOptions: QwpSenderOptions = {},
-): QwpSender {
-  validateUdpSenderOptions(senderOptions);
+export function createQwpNodeUdpSender(options: QwpNodeUdpOptions): QwpSender {
+  validateUdpSenderOptions(options);
   return new QwpSender(
     () => QwpNodeUdpSession.connect(options),
     {
-      ...senderOptions,
+      ...options,
       autoFlushBytes:
-        senderOptions.autoFlushBytes ?? options.maxDatagramSize ?? 1_400,
+        options.autoFlushBytes ?? options.maxDatagramSize ?? 1_400,
       transactional: false,
       gorilla: false,
       symbolDictionary: "full",
@@ -1074,15 +1074,16 @@ export function createQwpNodeUdpSender(
 /** Opens a Node UDP socket and returns a fluent fire-and-forget QWP sender. */
 export async function connectQwpNodeUdpSender(
   options: QwpNodeUdpOptions,
-  senderOptions: QwpSenderOptions = {},
 ): Promise<QwpSender> {
-  const sender = createQwpNodeUdpSender(options, senderOptions);
+  const sender = createQwpNodeUdpSender(options);
   await sender.connect();
   return sender;
 }
 
-function validateUdpSenderOptions(options: QwpSenderOptions): void {
-  if (options.transactional) {
+function validateUdpSenderOptions(options: QwpNodeUdpOptions): void {
+  // The type has no such field; this names the problem for a JavaScript
+  // caller rather than silently sending without a transaction.
+  if ((options as { transactional?: unknown }).transactional) {
     throw new RangeError("QWP UDP does not support transactions");
   }
 }
@@ -1090,7 +1091,6 @@ function validateUdpSenderOptions(options: QwpSenderOptions): void {
 /** Opens a Node WebSocket and waits for the egress SERVER_INFO handshake. */
 export async function connectQwpNodeEgress(
   options: QwpNodeEgressOptions,
-  sessionOptions: QwpEgressSessionOptions = {},
   /** Cancels an opening connection during pooled-client shutdown. */
   signal?: AbortSignal,
 ): Promise<QwpEgressSession> {
@@ -1102,16 +1102,12 @@ export async function connectQwpNodeEgress(
       (endpoint, signal) =>
         connectQwpNodeEndpoint(transport, endpoint, signal, false),
       { target: options.target, zone: options.zone },
-      sessionOptions.serverInfoTimeoutMs ??
-        QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
+      options.serverInfoTimeoutMs ?? QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
     ),
-    // The request this client puts on the wire is also the bound it enforces
-    // on the answer; without it a peer's declared row count sizes the decoder
-    // scratch on its own.
-    {
-      ...sessionOptions,
-      maxBatchRows: sessionOptions.maxBatchRows ?? options.maxBatchRows,
-    },
+    // One maxBatchRows is both the cap this client requests on the wire and
+    // the bound the session enforces on the answer; without it a peer's
+    // declared row count sizes the decoder scratch on its own.
+    options,
     signal,
   );
 }
@@ -1140,17 +1136,19 @@ export function createQwpNodeClient(
     optionsOrConfiguration,
     extraOptions,
   );
-  const slotCoordinator = createPooledSlotCoordinator(options);
-  const orphanDrainer = createPooledOrphanDrainer(options, slotCoordinator);
+  const { ingress, egress } = resolveQwpNodeClientSides(options);
+  const slotCoordinator = createPooledSlotCoordinator(ingress, options.pool);
+  const orphanDrainer = createPooledOrphanDrainer(
+    ingress,
+    options.pool,
+    slotCoordinator,
+  );
   let unsubscribeRecoveryScan: (() => void) | undefined;
   return new QwpClient(
     {
       createSender: async (slot, signal) => {
-        const ingress = pooledNodeIngressOptions(options.ingress, slot);
         const sender = createQwpNodeSender(
-          ingress,
-          options.sender,
-          options.ingressSession,
+          pooledNodeIngressOptions(ingress, slot),
         );
         const abortOpening = (): void => {
           void sender.close().catch(() => undefined);
@@ -1169,7 +1167,7 @@ export function createQwpNodeClient(
         }
       },
       createQuerySession: (_slot, signal) =>
-        connectQwpNodeEgress(options.egress, options.egressSession, signal),
+        connectQwpNodeEgress(egress, signal),
       senderSlotReservation: slotCoordinator,
       start: () => {
         if (orphanDrainer && slotCoordinator) {
@@ -1254,7 +1252,6 @@ function pooledNodeIngressOptions(
 
 function createStandaloneOrphanDrainer(
   options: QwpNodeIngressOptions,
-  sessionOptions: QwpIngressSessionOptions,
   healthTracker: QwpFailoverHealthTracker,
   slotIsNamed: boolean,
 ): QwpNodeOrphanDrainer {
@@ -1272,7 +1269,6 @@ function createStandaloneOrphanDrainer(
     );
     return createNodeOrphanDrainer(
       options,
-      sessionOptions,
       ownDirectory,
       () => true,
       healthTracker,
@@ -1280,7 +1276,6 @@ function createStandaloneOrphanDrainer(
   }
   return createNodeOrphanDrainer(
     options,
-    sessionOptions,
     dirname(ownDirectory),
     (slotName) => slotName === basename(ownDirectory),
     healthTracker,
@@ -1288,30 +1283,26 @@ function createStandaloneOrphanDrainer(
 }
 
 function createPooledOrphanDrainer(
-  options: QwpNodeClientOptions,
-  slotCoordinator?: QwpPooledSfaSlotCoordinator,
-): QwpNodeOrphanDrainer | undefined {
-  const storeAndForward = options.ingress.storeAndForward;
-  if (!storeAndForward) return undefined;
   // Recovery sessions are built from the same ingress options as the pooled
   // foreground senders, so an adopted slot negotiates the durable ACK its
   // producer requested: an ordinary OK must not advance the persisted
   // watermark for rows the caller asked to keep until they are durable.
-  const ingress: QwpNodeIngressOptions = options.ingress;
+  ingress: QwpNodeIngressOptions,
+  pool: QwpClientPoolOptions | undefined,
+  slotCoordinator?: QwpPooledSfaSlotCoordinator,
+): QwpNodeOrphanDrainer | undefined {
+  const storeAndForward = ingress.storeAndForward;
+  if (!storeAndForward) return undefined;
   const rootDirectory = storeAndForwardRoot(storeAndForward);
-  const managedSlotCount = options.pool?.senderPoolMax ?? 4;
-  const senderId = validateQwpSenderId(options.ingress.senderId ?? "sender");
+  const managedSlotCount = pool?.senderPoolMax ?? 4;
+  const senderId = validateQwpSenderId(ingress.senderId ?? "sender");
   const healthTracker = createQwpFailoverHealthTracker(
-    options.ingress.url,
-    options.ingress.failoverUrls,
-    {
-      target: options.ingress.target,
-      zone: options.ingress.zone,
-    },
+    ingress.url,
+    ingress.failoverUrls,
+    { target: ingress.target, zone: ingress.zone },
   );
   return createNodeOrphanDrainer(
     ingress,
-    options.ingressSession ?? {},
     rootDirectory,
     (slotName) => {
       const managedIndex = parseCanonicalSenderSlot(slotName, senderId);
@@ -1332,13 +1323,12 @@ function createPooledOrphanDrainer(
 
 function createNodeOrphanDrainer(
   options: QwpNodeIngressOptions,
-  sessionOptions: QwpIngressSessionOptions,
   rootDirectory: string,
   excludeSlot: (slotName: string) => boolean,
   healthTracker: QwpFailoverHealthTracker,
   slotCoordinator?: QwpPooledSfaSlotCoordinator,
 ): QwpNodeOrphanDrainer {
-  const connectionOptions = withDurableAckRequest(options, sessionOptions);
+  const connectionOptions = withDurableAckRequest(options);
   const storeAndForward = connectionOptions.storeAndForward!;
   return new QwpNodeOrphanDrainer({
     rootDirectory,
@@ -1352,27 +1342,23 @@ function createNodeOrphanDrainer(
     maxConcurrent: storeAndForward.maxBackgroundDrainers,
     scanIntervalMs: storeAndForward.orphanScanIntervalMs,
     durableAckPollIntervalMs: connectionOptions.requestDurableAck
-      ? (sessionOptions.durableAckKeepaliveMs ?? 200)
+      ? (options.durableAckKeepaliveMs ?? 200)
       : 0,
     onEvent: storeAndForward.onOrphanDrainEvent,
-    onSenderError: sessionOptions.onSenderError,
-    eventInboxCapacity: sessionOptions.connectionListenerInboxCapacity,
-    errorInboxCapacity: sessionOptions.errorInboxCapacity,
+    onSenderError: options.onSenderError,
+    eventInboxCapacity: options.connectionListenerInboxCapacity,
+    errorInboxCapacity: options.errorInboxCapacity,
     createSession: (directory, onReconnectEvent) =>
       connectQwpNodeIngressInternal(
         {
-          ...connectionOptions,
+          ...orphanIngressSessionOptions(connectionOptions, onReconnectEvent),
           senderId: undefined,
           storeAndForward: {
             ...storeAndForward,
             directory,
             drainOrphans: false,
-            // Orphan adoption is always non-blocking. Terminal endpoint-policy
-            // failures and cap-gap quarantine are selected below.
-            initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
           },
         },
-        orphanIngressSessionOptions(sessionOptions, onReconnectEvent),
         false,
         healthTracker,
       ),
@@ -1380,12 +1366,13 @@ function createNodeOrphanDrainer(
 }
 
 function createPooledSlotCoordinator(
-  options: QwpNodeClientOptions,
+  ingress: QwpNodeIngressOptions,
+  pool: QwpClientPoolOptions | undefined,
 ): QwpPooledSfaSlotCoordinator | undefined {
-  if (!options.ingress.storeAndForward) return undefined;
+  if (!ingress.storeAndForward) return undefined;
   return new QwpPooledSfaSlotCoordinator(
-    validateQwpSenderId(options.ingress.senderId ?? "sender"),
-    options.pool?.senderPoolMax ?? 4,
+    validateQwpSenderId(ingress.senderId ?? "sender"),
+    pool?.senderPoolMax ?? 4,
   );
 }
 

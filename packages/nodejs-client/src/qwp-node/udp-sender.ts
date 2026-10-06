@@ -6,6 +6,7 @@ import {
 } from "../../../client-core/src/_qwp/_core";
 import type { QwpSenderSession } from "../../../client-core/src/_qwp/_internal/sender-session";
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
+import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 
 const DEFAULT_QWP_UDP_PORT = 9007;
 const DEFAULT_MAX_DATAGRAM_SIZE = 1_400;
@@ -36,7 +37,21 @@ export interface QwpNodeUdpSocketLike {
   setMulticastInterface(multicastInterface: string): void;
 }
 
-export interface QwpNodeUdpOptions {
+/**
+ * Everything a Node QWP-over-UDP sender takes: the datagram socket and row
+ * buffering. Every datagram is self-contained and none is ever part of a
+ * transaction, so the sender's transactional and encoding options are absent.
+ */
+export interface QwpNodeUdpOptions
+  extends Omit<
+    QwpSenderOptions,
+    "transactional" | "gorilla" | "symbolDictionary"
+  > {
+  /**
+   * Soft threshold for estimated buffered column bytes; zero disables the
+   * byte trigger. Defaults to maxDatagramSize.
+   */
+  autoFlushBytes?: number;
   /** Destination hostname or IPv4 address. */
   host: string;
   /** Destination port. Defaults to the Java QWP UDP port, 9007. */

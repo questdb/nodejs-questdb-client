@@ -584,10 +584,10 @@ describe("QWP in a real browser", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const session = await qwp.connectQwpBrowserEgress(
-            { url },
-            { queryTimeoutMs: 25 },
-          );
+          const session = await qwp.connectQwpBrowserEgress({
+            url,
+            queryTimeoutMs: 25,
+          });
           try {
             const flowing = await session.query("select 1", {
               initialCredit: 1,

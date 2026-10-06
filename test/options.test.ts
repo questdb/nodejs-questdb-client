@@ -991,14 +991,9 @@ describe("Configuration string parser suite", function () {
         "'qwp.webSocket' option is supported only for the ws/wss transports",
       ],
       [
-        "https::addr=host:9000;protocol_version=1;",
-        { session: {} },
-        "'qwp.session' option is supported only for the ws/wss transports",
-      ],
-      [
         "tcp::addr=host:9009;",
-        { sender: {} },
-        "'qwp.sender' option is supported only for the ws/wss and udp transports",
+        { webSocket: {} },
+        "'qwp.webSocket' option is supported only for the ws/wss transports",
       ],
       [
         "tcps::addr=host:9009;",
@@ -1020,11 +1015,6 @@ describe("Configuration string parser suite", function () {
         { webSocket: {} },
         "'qwp.webSocket' option is supported only for the ws/wss transports",
       ],
-      [
-        "udp::addr=host:9007;",
-        { session: {} },
-        "'qwp.session' option is supported only for the ws/wss transports",
-      ],
     ] as const;
 
     for (const [configuration, qwp, message] of mismatches) {
@@ -1037,13 +1027,24 @@ describe("Configuration string parser suite", function () {
     expect(
       () =>
         new SenderOptions("ws::addr=host:9000;", {
-          qwp: { webSocket: {}, session: {}, sender: {} },
+          qwp: { webSocket: {} },
         }),
     ).not.toThrow();
+    // A section that does not exist -- one from an earlier shape of these
+    // options, say -- is rejected by name rather than skipped with everything
+    // inside it.
+    expect(
+      () =>
+        new SenderOptions("ws::addr=host:9000;", {
+          qwp: { session: {} },
+        } as never),
+    ).toThrow(
+      "unknown qwp section 'session'; expected one of 'webSocket', 'udp'",
+    );
     expect(
       () =>
         new SenderOptions("udp::addr=host:9007;", {
-          qwp: { udp: {}, sender: {} },
+          qwp: { udp: {} },
         }),
     ).not.toThrow();
     expect(
@@ -1062,9 +1063,9 @@ describe("Configuration string parser suite", function () {
         "'qwp.webSocket' option is supported only for the ws/wss transports",
       ],
       [
-        "http",
-        { sender: {} },
-        "'qwp.sender' option is supported only for the ws/wss and udp transports",
+        "tcp",
+        { webSocket: {} },
+        "'qwp.webSocket' option is supported only for the ws/wss transports",
       ],
       [
         "ws",
@@ -1075,11 +1076,6 @@ describe("Configuration string parser suite", function () {
         "udp",
         { webSocket: {} },
         "'qwp.webSocket' option is supported only for the ws/wss transports",
-      ],
-      [
-        "udp",
-        { session: {} },
-        "'qwp.session' option is supported only for the ws/wss transports",
       ],
     ] as const;
 
@@ -1115,23 +1111,14 @@ describe("Configuration string parser suite", function () {
     );
     const resolved = qwpConfig(options);
 
-    expect(String(resolved?.ingress.url)).toBe(
-      "ws://url-primary:9000/write/v4",
-    );
-    expect(resolved?.ingress.failoverUrls?.map(String)).toEqual([
+    expect(String(resolved?.url)).toBe("ws://url-primary:9000/write/v4");
+    expect(resolved?.failoverUrls?.map(String)).toEqual([
       "ws://typed-secondary:9100/custom-write",
     ]);
-    expect(resolved?.ingress).toMatchObject({
+    expect(resolved).toMatchObject({
       target: "replica",
       zone: "typed-zone",
       senderId: "typed-sender",
-    });
-    expect(resolved?.egress.failoverUrls?.map(String)).toEqual([
-      "ws://url-secondary:9001/read/v1",
-    ]);
-    expect(resolved?.egress).toMatchObject({
-      target: "primary",
-      zone: "url-zone",
     });
 
     await expect(
@@ -1518,7 +1505,7 @@ describe("Configuration string parser suite", function () {
     ).rejects.toThrow("Invalid logging function");
   });
 
-  it("rejects a non-function qwp.sender.log like the top-level one", async function () {
+  it("rejects a non-function QWP section log like the top-level one", async function () {
     // A QWP sender contains every log call, because the sink is the thing that
     // can fail and there is nowhere left to report that to. So an unvalidated
     // non-function here does not fall back to the console: it throws on every
@@ -1530,7 +1517,7 @@ describe("Configuration string parser suite", function () {
         async () =>
           await SenderOptions.fromConfig("ws::addr=host:9000;", {
             // @ts-expect-error - Testing invalid input
-            qwp: { sender: { log } },
+            qwp: { webSocket: { log } },
           }),
       ).rejects.toThrow("Invalid logging function");
       expect(
@@ -1539,7 +1526,7 @@ describe("Configuration string parser suite", function () {
             protocol: "udp",
             host: "127.0.0.1",
             port: 9009,
-            qwp: { sender: { log } },
+            qwp: { udp: { log } },
           } as never),
       ).toThrow("Invalid logging function");
     }
@@ -1548,7 +1535,7 @@ describe("Configuration string parser suite", function () {
     for (const log of [null, undefined]) {
       await expect(
         SenderOptions.fromConfig("ws::addr=host:9000;", {
-          qwp: { sender: { log } },
+          qwp: { webSocket: { log } },
         } as never),
       ).resolves.toBeDefined();
       expect(
@@ -1557,14 +1544,14 @@ describe("Configuration string parser suite", function () {
             protocol: "udp",
             host: "127.0.0.1",
             port: 9009,
-            qwp: { sender: { log } },
+            qwp: { udp: { log } },
           } as never),
       ).not.toThrow();
     }
   });
 
   it("keeps a QWP logger supplied without a top-level one", async function () {
-    // resolveQwpConfig() set `log` after spreading qwp.sender, and the QWP
+    // resolveQwpConfig() set `log` after spreading the typed section, and the QWP
     // config resolver spreads that object last, so an explicit undefined beat
     // the caller's logger and QwpSender fell back to its no-op sink. Every
     // sender-level message was lost, including the warn that completed rows
@@ -1573,24 +1560,24 @@ describe("Configuration string parser suite", function () {
     // precedence rule.
     const senderLog = () => undefined;
     const qwpOnly = await SenderOptions.fromConfig("ws::addr=host:9000;", {
-      qwp: { sender: { log: senderLog } },
+      qwp: { webSocket: { log: senderLog } },
     });
-    expect(qwpConfig(qwpOnly)?.sender?.log).toBe(senderLog);
+    expect(qwpConfig(qwpOnly)?.log).toBe(senderLog);
 
     // The top-level logger still wins when both are given.
     const both = await SenderOptions.fromConfig("ws::addr=host:9000;", {
       log: console.log,
-      qwp: { sender: { log: senderLog } },
+      qwp: { webSocket: { log: senderLog } },
     });
-    expect(qwpConfig(both)?.sender?.log).toBe(console.log);
+    expect(qwpConfig(both)?.log).toBe(console.log);
 
     // With no logger anywhere -- a bare ws::/wss:: connect string and no
     // extraOptions -- the default console logger is installed, not the no-op
     // sink, so it emits the same warnings and errors the other transports do.
     const neither = await SenderOptions.fromConfig("ws::addr=host:9000;");
-    expect(qwpConfig(neither)?.sender?.log).toBe(log);
+    expect(qwpConfig(neither)?.log).toBe(log);
     const secure = await SenderOptions.fromConfig("wss::addr=host:9000;");
-    expect(qwpConfig(secure)?.sender?.log).toBe(log);
+    expect(qwpConfig(secure)?.log).toBe(log);
   });
 
   it("can take a custom agent", async function () {

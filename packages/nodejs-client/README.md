@@ -231,14 +231,12 @@ query at a time.
 ```typescript
 import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
-const session = await connectQwpNodeEgress(
-  {
-    url: "wss://questdb.example:9000/read/v1",
-    authorization: `Bearer ${process.env.QUESTDB_TOKEN}`,
-    compression: "zstd",
-  },
-  { queryTimeoutMs: 30_000 },
-);
+const session = await connectQwpNodeEgress({
+  url: "wss://questdb.example:9000/read/v1",
+  authorization: `Bearer ${process.env.QUESTDB_TOKEN}`,
+  compression: "zstd",
+  queryTimeoutMs: 30_000,
+});
 
 try {
   const query = await session.query(

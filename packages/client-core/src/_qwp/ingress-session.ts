@@ -193,6 +193,10 @@ function planIngressFrames(
   }
 }
 
+/**
+ * Delivery options of an ingress session: acknowledgement, reconnect and
+ * replay, and notifications. Each runtime's ingress options include them.
+ */
 export interface QwpIngressSessionOptions {
   /**
    * Default timeout for waitForAcknowledged() and QwpSender.flushAndWait():

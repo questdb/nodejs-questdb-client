@@ -86,10 +86,10 @@ particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls`,
 continues to come from `addr`, because the typed object intentionally omits
 `url`.
 
-Typed `ExtraOptions.qwp` sections are transport-specific and a mismatched section
-is rejected rather than ignored: `webSocket` and `session` apply only to
-`ws::`/`wss::`, `udp` applies only to `udp::`, and `sender` applies to all three
-QWP ingress schemes. HTTP(S) and TCP(S) reject every present `qwp` section; an
+Typed `ExtraOptions.qwp` sections are transport-specific, and a mismatched or
+unknown section is rejected rather than ignored: `webSocket` applies only to
+`ws::`/`wss::` and `udp` only to `udp::`, and each takes that sender's complete
+typed options. HTTP(S) and TCP(S) reject every present `qwp` section; an
 empty `qwp: {}` remains valid for callers that build the object conditionally.
 
 ### Connection
@@ -166,12 +166,13 @@ are aliases of `sync`, `false` of `off`. When the key is not set, tuning any
 otherwise the default is `off`. That promotion follows the Java client and applies to
 the pooled client as well as to a standalone sender. The Rust and Python clients apply
 it to a standalone sender only: their pools honour only an explicit mode. The typed
-spelling is `initialConnectMode`, on the ingress session options (`qwp.session` for
-`Sender.fromConfig()`, `ingressSession` for the pooled client) or on
-`storeAndForward`; a typed value wins over the key.
+spelling is `initialConnectMode` on the ingress options (`qwp.webSocket` for
+`Sender.fromConfig()`, `ingress` for the pooled client); a typed value wins over the
+key.
 
-The `reconnect_*` and `failover_*` tuning keys have typed equivalents on the session's
-`reconnect` option with the same names in camelCase, `millis` and `ms` becoming `Ms`:
+The `reconnect_*` and `failover_*` tuning keys have typed equivalents on the `reconnect`
+option of the ingress and egress options, with the same names in camelCase, `millis` and
+`ms` becoming `Ms`:
 `reconnect_initial_backoff_millis` is `reconnectInitialBackoffMs` on ingress, and
 `failover_max_attempts` is `failoverMaxAttempts` on egress.
 
@@ -238,18 +239,18 @@ warning naming the ones it was given. `lazy_connect` is a pool key in every
 QuestDB client: the Java facade and the Rust and Python pools apply it, and
 their standalone senders ignore it too.
 
-| Key                       | Value                        | Default   | Meaning                                                                                                                         |
-| ------------------------- | ---------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `sender_pool_min`         | integer                      | `1`       | Senders kept warm.                                                                                                              |
-| `sender_pool_max`         | integer                      | `4`       | Sender ceiling.                                                                                                                 |
-| `query_pool_min`          | integer                      | `1`       | Query sessions kept warm.                                                                                                       |
-| `query_pool_max`          | integer                      | `4`       | Query-session ceiling.                                                                                                          |
-| `acquire_timeout_ms`      | integer ms                   | `5000`    | How long `borrowSender()` and `borrowQuery()` wait for a free entry.                                                            |
-| `query_close_timeout_ms`  | integer ms                   | `5000`    | Bound on the CANCEL drain when a query session closes. Also honoured by a standalone egress session built from `egressSession`. |
-| `idle_timeout_ms`         | integer ms                   | `60000`   | Idle time before a pooled entry is reaped.                                                                                      |
-| `max_lifetime_ms`         | integer ms                   | `1800000` | Absolute lifetime of a pooled entry.                                                                                            |
-| `housekeeper_interval_ms` | integer ms                   | `5000`    | How often the pool reaps aged entries.                                                                                          |
-| `lazy_connect`            | `on`, `off`, `true`, `false` | off       | Start without blocking on a first connection: ingress uses `initial_connect_retry=async` and `query_pool_min` defaults to `0`.  |
+| Key                       | Value                        | Default   | Meaning                                                                                                                        |
+| ------------------------- | ---------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `sender_pool_min`         | integer                      | `1`       | Senders kept warm.                                                                                                             |
+| `sender_pool_max`         | integer                      | `4`       | Sender ceiling.                                                                                                                |
+| `query_pool_min`          | integer                      | `1`       | Query sessions kept warm.                                                                                                      |
+| `query_pool_max`          | integer                      | `4`       | Query-session ceiling.                                                                                                         |
+| `acquire_timeout_ms`      | integer ms                   | `5000`    | How long `borrowSender()` and `borrowQuery()` wait for a free entry.                                                           |
+| `query_close_timeout_ms`  | integer ms                   | `5000`    | Bound on the CANCEL drain when a query session closes; `cancelDrainTimeoutMs` on the egress options.                           |
+| `idle_timeout_ms`         | integer ms                   | `60000`   | Idle time before a pooled entry is reaped.                                                                                     |
+| `max_lifetime_ms`         | integer ms                   | `1800000` | Absolute lifetime of a pooled entry.                                                                                           |
+| `housekeeper_interval_ms` | integer ms                   | `5000`    | How often the pool reaps aged entries.                                                                                         |
+| `lazy_connect`            | `on`, `off`, `true`, `false` | off       | Start without blocking on a first connection: ingress uses `initial_connect_retry=async` and `query_pool_min` defaults to `0`. |
 
 ### Reserved
 
@@ -331,12 +332,8 @@ const sender = await Sender.fromConfig(
           drainOrphans: true,
           maxBackgroundDrainers: 4,
         },
-      },
-      sender: {
         autoFlushRows: 10_000,
         autoFlushBytes: 4 * 1024 * 1024,
-      },
-      session: {
         reconnect: {
           reconnectMaxBackoffMs: 10_000,
         },
@@ -375,8 +372,8 @@ partial transaction behind.
 `initialConnectMode` selects startup behavior, with a journal or without one:
 `"off"` (the default) makes one fail-fast pass over the endpoints, `"sync"` retries on
 the caller for up to `reconnectMaxDurationMs`, and `"async"` returns immediately while
-the background replay loop connects. Set it on `storeAndForward` or on the ingress
-session options; when both are set they must agree. The connect-string key is
+the background replay loop connects. It is an ingress option, beside
+`storeAndForward` rather than inside it. The connect-string key is
 `initial_connect_retry`, which `Sender.fromConfig()` and the pooled client accept with
 or without `sf_dir`. Initial authentication and capability failures remain terminal, as does any
 upgrade rejection the whole cluster would repeat. A rejection scoped to the endpoint
@@ -635,7 +632,7 @@ every record-bearing child directory that is not the foreground slot is consider
 eligible. Browser senders never scan or persist local slots.
 
 An offline sender cannot inspect the server-advertised batch cap before its first
-publication. Set `qwp.session.maxBatchSizeBytes` to a value no greater than the
+publication. Set the ingress option `maxBatchSizeBytes` to a value no greater than the
 smallest target node's cap when offline startup is required.
 
 Call `flushAndWait()` when a flush must observe QuestDB's protocol ACK before
@@ -658,19 +655,15 @@ needed:
 import * as qwp from "@questdb/nodejs-client";
 import { connectQwpNodeSender } from "@questdb/nodejs-client";
 
-const sender = await connectQwpNodeSender(
-  {
-    url: "wss://questdb.example:9000/write/v4",
-    authorization: `Bearer ${token}`,
-  },
-  {
-    autoFlushRows: 5_000,
-    autoFlushBytes: 4 * 1024 * 1024,
-    autoFlushIntervalMs: 1_000,
-    symbolDictionary: "delta",
-    gorilla: true,
-  },
-);
+const sender = await connectQwpNodeSender({
+  url: "wss://questdb.example:9000/write/v4",
+  authorization: `Bearer ${token}`,
+  autoFlushRows: 5_000,
+  autoFlushBytes: 4 * 1024 * 1024,
+  autoFlushIntervalMs: 1_000,
+  symbolDictionary: "delta",
+  gorilla: true,
+});
 
 try {
   await sender
@@ -922,11 +915,12 @@ opened by `table()` whose every attempted value was nullish and therefore left i
 with zero columns. The configuration-string equivalent is
 `close_flush_timeout_millis`.
 
-These warnings, and the other sender-level diagnostics, go to `QwpSenderOptions.log`
-when it is supplied and to the same console-backed default logger the rest of the
+These warnings, and the other sender-level diagnostics, go to the sender's `log`
+option when it is supplied and to the same console-backed default logger the rest of the
 client uses when it is not, on every entry point: `Sender`, the direct
 `createQwpNodeSender()`/`createQwpBrowserSender()` factories, and pooled leases. A
-top-level `log` wins over `qwp.sender.log`; pass an explicit no-op to silence them.
+top-level `log` wins over `qwp.webSocket.log` and `qwp.udp.log`; pass an explicit
+no-op to silence them.
 `debug` messages stay below the default level, so the per-row staging diagnostics
 are not printed unless a supplied logger records them.
 
@@ -974,7 +968,7 @@ import { connectQwpBrowserSender } from "@questdb/browser-client";
 const url = new URL("/write/v4", location.href);
 url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
 
-const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+const sender = await connectQwpBrowserSender({ url, autoFlush: false });
 
 try {
   await sender.table("page_events").symbol("kind", "view").atNow();
@@ -1033,11 +1027,13 @@ example requests durable ACK, so that wait lasts until QuestDB reports the
 transaction durable:
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  { url, requestDurableAck: true },
-  { transactional: true, autoFlushRows: 10_000 },
-  { ackTimeoutMs: 30_000 },
-);
+const sender = await connectQwpBrowserSender({
+  url,
+  requestDurableAck: true,
+  transactional: true,
+  autoFlushRows: 10_000,
+  ackTimeoutMs: 30_000,
+});
 
 for (const event of events) {
   await sender
@@ -1094,8 +1090,8 @@ rejects with `QwpMemoryReplayAppendTimeoutError`; a single frame that can never 
 is rejected immediately with `QwpMemoryReplayFrameTooLargeError`, and a split logical
 batch that can never fit is rejected before its first frame with
 `QwpMemoryReplayBatchTooLargeError`. Set
-`memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on ingress session options
-to tune these bounds. The accounting includes a fixed per-frame allowance so many
+`memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on the ingress options to
+tune these bounds. The accounting includes a fixed per-frame allowance so many
 small frames cannot bypass the byte cap.
 
 In-memory publication completes once the frame enters the bounded replay queue;
@@ -1179,30 +1175,27 @@ import {
   createQwpNodeSender,
 } from "@questdb/nodejs-client";
 
-const sender = createQwpNodeSender(
-  { url: "ws://localhost:9000/write/v4" },
-  {},
-  {
-    reconnect: {
-      onEvent: (event) => console.info("QWP connection", event),
-    },
-    onProgress: (event) => {
-      if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
-        console.info("accepted through", event.sequence);
-      }
-    },
-    onError: (event) => console.error("QWP ingress", event.error),
-    onSenderError: (error) => {
-      console.error(
-        "QWP rejection",
-        error.category,
-        error.appliedPolicy,
-        error.fromFsn,
-        error.toFsn,
-      );
-    },
+const sender = createQwpNodeSender({
+  url: "ws://localhost:9000/write/v4",
+  reconnect: {
+    onEvent: (event) => console.info("QWP connection", event),
   },
-);
+  onProgress: (event) => {
+    if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
+      console.info("accepted through", event.sequence);
+    }
+  },
+  onError: (event) => console.error("QWP ingress", event.error),
+  onSenderError: (error) => {
+    console.error(
+      "QWP rejection",
+      error.category,
+      error.appliedPolicy,
+      error.fromFsn,
+      error.toFsn,
+    );
+  },
+});
 
 await sender.connect();
 console.info(sender.metrics);
@@ -1244,22 +1237,21 @@ a time.
 ```typescript
 import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
-const session = await connectQwpNodeEgress(
-  {
-    url: "wss://questdb.example:9000/read/v1",
-    failoverUrls: [
-      "wss://questdb-replica-2.example:9000/read/v1",
-      "wss://questdb-primary.example:9000/read/v1",
-    ],
-    target: "replica",
-    zone: "eu-west-1a",
-    authorization: `Bearer ${token}`,
-    compression: "zstd",
-    compressionLevel: 3,
-    maxBatchRows: 4096,
-  },
-  { queryTimeoutMs: 30_000, bufferPoolSize: 4 },
-);
+const session = await connectQwpNodeEgress({
+  url: "wss://questdb.example:9000/read/v1",
+  failoverUrls: [
+    "wss://questdb-replica-2.example:9000/read/v1",
+    "wss://questdb-primary.example:9000/read/v1",
+  ],
+  target: "replica",
+  zone: "eu-west-1a",
+  authorization: `Bearer ${token}`,
+  compression: "zstd",
+  compressionLevel: 3,
+  maxBatchRows: 4096,
+  queryTimeoutMs: 30_000,
+  bufferPoolSize: 4,
+});
 
 try {
   const query = await session.query(
@@ -1476,7 +1468,7 @@ unconsumed batches are discarded automatically. Configure `onReplayReset` on the
 query when the application must clear an accumulated prefix before batches restart
 at sequence zero. The query-scoped callback is especially important with pooled
 leases: request IDs are local to each session and cannot distinguish concurrent
-leases in one shared session-options callback. A session-level `onReplayReset`
+leases in one shared callback. An `onReplayReset` on the egress options
 remains the fallback for queries without their own callback. Both are optional
 notifications, not an opt-in. Set `reconnect: false` to use
 one fixed connection and surface failures without replay. Supplying a `reconnect`
@@ -1529,10 +1521,12 @@ const db = await connectQwpNodeClient(
 );
 ```
 
-Repeated `addr=` keys also accumulate endpoints. Programmatic overrides for
-callbacks, custom agents, store-and-forward, sender/session settings, and pool
-sizes may be passed as the second argument. The whole string is still validated
-before overrides are applied, matching the Java builder's fail-fast behavior.
+Repeated `addr=` keys also accumulate endpoints. Programmatic overrides --
+callbacks, custom agents, store-and-forward, and anything else the string does not
+spell -- may be passed as the second argument, in the sections the object form
+below takes: `cluster`, `ingress`, `egress` and `pool`. The whole string is still
+validated before overrides are applied, matching the Java builder's fail-fast
+behavior, and the endpoints always come from `addr`.
 
 A custom `wss://` agent is the WebSocket upgrade's sole TLS channel, so it
 carries its own certificate verification and cannot be combined with
@@ -1577,8 +1571,8 @@ capacity wait, a 5-second close drain, and fail-fast initial connection. Set
 A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
 the ingress frame cap from the first publication onward, before the server has
 advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.
-Raise `sf_max_segment_bytes`, or lower the cap with
-`qwp.session.maxBatchSizeBytes`, to choose a different bound. `sf_max_total_bytes`
+Raise `sf_max_segment_bytes`, or lower the cap with the ingress option
+`maxBatchSizeBytes`, to choose a different bound. `sf_max_total_bytes`
 must leave room for at least one `sf_max_segment_bytes` segment plus 32 bytes of
 headers, so with the 4 MiB segment default `sf_max_total_bytes=4m` is rejected and
 `sf_max_total_bytes=1m` requires lowering `sf_max_segment_bytes` too. Without `sf_dir`
@@ -1591,22 +1585,26 @@ The parser also supports `max_name_len` and the Java listener/error inbox
 capacity keys. Those capacities actively bound asynchronous connection and
 typed-error delivery and are reflected in ingress drop counters.
 
-The object form remains available for cases where constructing the two sides
-separately is useful:
+The same client can be described as an object. `cluster` holds the endpoints and
+the connection settings both sides share; `ingress` and `egress` take each side's
+own options -- the sender's buffering and delivery settings, and the query
+session's routing, compression and deadlines. Each derives its route from the
+cluster URL, which may be an origin, a reverse-proxy base path, or an existing
+`/write/v4` or `/read/v1` endpoint:
 
 ```typescript
 import { connectQwpNodeClient } from "@questdb/nodejs-client";
 
 const db = await connectQwpNodeClient({
-  ingress: {
-    url: "wss://questdb.example:9000/write/v4",
+  cluster: {
+    url: "wss://questdb.example:9000",
     authorization: `Bearer ${token}`,
   },
+  ingress: { autoFlushRows: 5_000 },
   egress: {
-    url: "wss://questdb.example:9000/read/v1",
-    authorization: `Bearer ${token}`,
     target: "replica",
     zone: "eu-west-1a",
+    queryTimeoutMs: 30_000,
   },
   pool: {
     senderPoolMin: 1,
@@ -1653,12 +1651,10 @@ try {
 }
 ```
 
-Browser applications can likewise describe the cluster, REST/OIDC
-authentication bootstrap, and failover order once. A cluster URL may be an
-origin, a reverse-proxy base path, or an existing `/write/v4` or `/read/v1`
-endpoint; the facade derives both protocol routes while preserving query
-parameters. Omit `sessionBootstrap.url` to derive the matching `/exec` route
-for every failover endpoint:
+Browser applications describe the cluster, REST/OIDC authentication bootstrap,
+and failover order once in the same shape, and the facade derives both protocol
+routes in the same way, preserving query parameters. Omit `sessionBootstrap.url`
+to derive the matching `/exec` route for every failover endpoint:
 
 ```typescript
 import { connectQwpBrowserClient } from "@questdb/browser-client";
@@ -1682,13 +1678,14 @@ const db = await connectQwpBrowserClient({
 });
 ```
 
-`url`, `failoverUrls`, and `sessionBootstrap` belong to `cluster` and are
-rejected if repeated under `ingress` or `egress`. Side-specific timeouts,
-WebSocket factories, durable-ACK settings, routing, and compression remain
-available as explicit overrides. An application that must connect the two sides
-differently can pass its own `createSender` and `createQuerySession` factories
-to the `QwpClient` constructor, or use `connectQwpBrowserSender()` and
-`connectQwpBrowserEgress()` directly.
+The endpoints and authentication belong to `cluster` -- `url`, `failoverUrls`,
+and `authorization` in Node.js, `sessionBootstrap` in a browser -- and are rejected
+if repeated under `ingress` or `egress`, as is any section these options do not
+have. Any other connection setting, such as a timeout or a WebSocket factory, may
+be given to one side to override the cluster's for that side. An application that
+must connect the two sides differently can pass its own `createSender` and
+`createQuerySession` factories to the `QwpClient` constructor, or use the
+standalone sender and egress functions directly.
 
 `createQwpNodeClient()` and `createQwpBrowserClient()` build the pooled facade
 without contacting the server, leaving the first connect to `connect()` or to the
@@ -1877,8 +1874,8 @@ clients, so neither package exports `QwpIngressSession` or a factory that return
 one. Code that filled `QwpTableBuffer` batches and published them through a session
 moves to `connectQwpNodeSender()` or `connectQwpBrowserSender()`. The high-level
 sender owns batching, symbol deltas, ACK tracking, auto-flush, transactions, and
-durable waits, and its third argument takes the same session options, including the
-`onResponse`, `onProgress`, and `onError` callbacks.
+durable waits, and its options include the session's, among them the `onResponse`,
+`onProgress`, and `onError` callbacks.
 
 Likewise, `QwpNodeUdpSession` is the internal transport below
 `connectQwpNodeUdpSender()`, which takes the same `QwpNodeUdpOptions`, and the
@@ -1917,7 +1914,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Query parameters             | `session.query(sql, { binds })`                               |
 | Materialized result batches  | `for await (const batch of query)`                            |
 | Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |
-| Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |
+| Egress row/buffer bounds     | `maxBatchRows` and `bufferPoolSize`                           |
 
 Unlike Java's dedicated dispatcher threads, TypeScript callback inboxes schedule work on
 later JavaScript event-loop turns. This keeps user callbacks out of protocol call stacks,

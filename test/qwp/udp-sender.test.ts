@@ -259,10 +259,12 @@ describe("QWP Node UDP sender", () => {
     // fire-and-forget contract covers: the rows that do fit must survive for
     // the caller to retry, and none of them may be counted as published.
     const socket = new FakeUdpSocket();
-    const sender = await connectQwpNodeUdpSender(
-      { host: "localhost", maxDatagramSize: 256, socketFactory: () => socket },
-      { autoFlush: false },
-    );
+    const sender = await connectQwpNodeUdpSender({
+      host: "localhost",
+      maxDatagramSize: 256,
+      socketFactory: () => socket,
+      autoFlush: false,
+    });
     for (const message of ["abc", "abc", "abc"]) {
       await sender.table("events").stringColumn("message", message).atNow();
     }
@@ -404,10 +406,11 @@ describe("QWP Node UDP sender", () => {
 
   it("rejects a zero-column row on a fresh table like the Java UDP sender", async () => {
     const socket = new FakeUdpSocket();
-    const sender = await connectQwpNodeUdpSender(
-      { host: "localhost", socketFactory: () => socket },
-      { autoFlush: false },
-    );
+    const sender = await connectQwpNodeUdpSender({
+      host: "localhost",
+      socketFactory: () => socket,
+      autoFlush: false,
+    });
 
     // Nullish values are omitted. On a table for which this sender has never
     // seen a real column, atNow() would therefore produce the degenerate
@@ -445,10 +448,11 @@ describe("QWP Node UDP sender", () => {
 
   it("applies the zero-column UDP guard to compiled writers", async () => {
     const socket = new FakeUdpSocket();
-    const sender = await connectQwpNodeUdpSender(
-      { host: "localhost", socketFactory: () => socket },
-      { autoFlush: false },
-    );
+    const sender = await connectQwpNodeUdpSender({
+      host: "localhost",
+      socketFactory: () => socket,
+      autoFlush: false,
+    });
     const events = sender.writer("events", { value: varchar() });
 
     await expect(events.row({ value: null })).rejects.toThrow(
@@ -465,13 +469,11 @@ describe("QWP Node UDP sender", () => {
 
   it("integrates UDP with the fluent sender and top-level config API", async () => {
     const directSocket = new FakeUdpSocket();
-    const direct = await connectQwpNodeUdpSender(
-      {
-        host: "localhost",
-        socketFactory: () => directSocket,
-      },
-      { autoFlush: false },
-    );
+    const direct = await connectQwpNodeUdpSender({
+      host: "localhost",
+      socketFactory: () => directSocket,
+      autoFlush: false,
+    });
     direct.table("trades").longColumn("price", 42n);
     await direct.atNow();
     await expect(direct.flush()).resolves.toBe(true);
@@ -563,9 +565,8 @@ describe("QWP Node UDP sender", () => {
     await sender.close();
   });
 
-  it("lets a typed sender section disable connection-string auto-flush", async () => {
-    // `qwp.sender` applies to every QWP ingress scheme, and a typed value wins
-    // over the same option in the connection string. The UDP path read the
+  it("lets the typed udp section disable connection-string auto-flush", async () => {
+    // A typed value wins over the same option in the connection string. The UDP path read the
     // string's auto-flush keys first, so rows left the process before the
     // explicit flush a caller had asked for by disabling automatic flushing.
     const socket = new FakeUdpSocket();
@@ -573,8 +574,7 @@ describe("QWP Node UDP sender", () => {
       "udp::addr=localhost;auto_flush=on;auto_flush_rows=1;auto_flush_interval=0;",
       {
         qwp: {
-          udp: { socketFactory: () => socket },
-          sender: { autoFlush: false },
+          udp: { socketFactory: () => socket, autoFlush: false },
         },
       },
     );
@@ -588,14 +588,13 @@ describe("QWP Node UDP sender", () => {
     await sender.close();
   });
 
-  it("lets a typed sender section retune connection-string auto-flush rows", async () => {
+  it("lets the typed udp section retune connection-string auto-flush rows", async () => {
     const socket = new FakeUdpSocket();
     const sender = await Sender.fromConfig(
       "udp::addr=localhost;auto_flush=on;auto_flush_rows=1;auto_flush_interval=0;",
       {
         qwp: {
-          udp: { socketFactory: () => socket },
-          sender: { autoFlushRows: 3 },
+          udp: { socketFactory: () => socket, autoFlushRows: 3 },
         },
       },
     );
@@ -746,21 +745,24 @@ describe("QWP Node UDP sender", () => {
   });
 
   it("rejects the transaction option that UDP cannot honor", () => {
+    // The UDP options have no `transactional`, but a JavaScript caller can
+    // still pass it and must not be left believing its rows are grouped.
     const options = {
       host: "localhost",
       socketFactory: () => new FakeUdpSocket(),
     };
     expect(() =>
-      createQwpNodeUdpSender(options, { transactional: true }),
+      createQwpNodeUdpSender({ ...options, transactional: true } as never),
     ).toThrow(/does not support transactions/);
   });
 
   it("resolves flushAndWait() once its datagrams are sent", async () => {
     const socket = new FakeUdpSocket();
-    const sender = await connectQwpNodeUdpSender(
-      { host: "localhost", socketFactory: () => socket },
-      { autoFlush: false },
-    );
+    const sender = await connectQwpNodeUdpSender({
+      host: "localhost",
+      socketFactory: () => socket,
+      autoFlush: false,
+    });
     await sender.table("events").longColumn("value", 1n).atNow();
 
     // UDP has no server acknowledgements, so the wait ends with the send.

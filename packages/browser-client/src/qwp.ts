@@ -16,6 +16,11 @@ import {
   createQwpFailoverConnectionFactory,
 } from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
+import { assertKnownQwpOptionSections } from "../../client-core/src/_qwp/_internal/option-sections";
+import {
+  qwpClusterEndpoint,
+  type QwpClusterRoute,
+} from "../../client-core/src/_qwp/_internal/cluster-endpoint";
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
 import {
   exceedsQwpTimerCeiling,
@@ -359,8 +364,14 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
   ) => QwpWebSocketLike;
 }
 
-/** Browser WebSocket options plus the ingress-only negotiation controls. */
-export interface QwpBrowserIngressOptions extends QwpBrowserWebSocketOptions {
+/**
+ * Everything a browser QWP sender takes: the connection, row buffering and
+ * flushing, and delivery -- acknowledgement, reconnect and in-memory replay.
+ */
+export interface QwpBrowserIngressOptions
+  extends QwpBrowserWebSocketOptions,
+    QwpSenderOptions,
+    QwpIngressSessionOptions {
   /**
    * Requests durable ingress ACKs through browser-visible WebSocket
    * subprotocol negotiation.
@@ -375,10 +386,15 @@ export interface QwpBrowserIngressOptions extends QwpBrowserWebSocketOptions {
   ingressNegotiationTimeoutMs?: number;
 }
 
-/** Browser WebSocket options plus protocol-level egress topology routing. */
+/**
+ * Everything a browser QWP query session takes: the connection, endpoint
+ * routing, result compression, and the session's flow control, deadlines and
+ * failover.
+ */
 export interface QwpBrowserEgressOptions
   extends QwpBrowserWebSocketOptions,
-    QwpRoutingOptions {
+    QwpRoutingOptions,
+    QwpEgressSessionOptions {
   /**
    * Requests Zstd-compressed result batches through browser-visible URL
    * negotiation. Defaults to raw for compatibility.
@@ -390,40 +406,13 @@ export interface QwpBrowserEgressOptions
    * a level to travel on.
    */
   compressionLevel?: number;
-  /** Requests a server-side RESULT_BATCH row cap. */
+  /**
+   * Requests a server-side RESULT_BATCH row cap, and rejects a batch that
+   * declares more rows: decoder scratch is sized from the declared row count
+   * and retained for the session's lifetime.
+   */
   maxBatchRows?: number;
 }
-
-/** Ingress-only overrides of a browser client's shared cluster. */
-export type QwpBrowserClientIngressOptions = Partial<
-  Pick<
-    QwpBrowserIngressOptions,
-    | "protocols"
-    | "connectTimeoutMs"
-    | "sendTimeoutMs"
-    | "closeTimeoutMs"
-    | "requestDurableAck"
-    | "ingressNegotiationTimeoutMs"
-    | "webSocketFactory"
-  >
->;
-
-/** Egress-only overrides of a browser client's shared cluster. */
-export type QwpBrowserClientEgressOptions = Partial<
-  Pick<
-    QwpBrowserEgressOptions,
-    | "protocols"
-    | "connectTimeoutMs"
-    | "sendTimeoutMs"
-    | "closeTimeoutMs"
-    | "webSocketFactory"
-    | "target"
-    | "zone"
-    | "compression"
-    | "compressionLevel"
-    | "maxBatchRows"
-  >
->;
 
 /**
  * Browser configuration for a combined pooled QWP ingress/egress client. One
@@ -437,21 +426,35 @@ export interface QwpBrowserClientOptions {
    * `/read/v1` endpoint; each side derives its own route from it.
    */
   cluster: QwpBrowserWebSocketOptions;
-  /** `url`, `failoverUrls` and `sessionBootstrap` belong to `cluster`. */
-  ingress?: QwpBrowserClientIngressOptions;
-  /** `url`, `failoverUrls` and `sessionBootstrap` belong to `cluster`. */
-  egress?: QwpBrowserClientEgressOptions;
-  sender?: QwpSenderOptions;
-  ingressSession?: QwpIngressSessionOptions;
-  egressSession?: QwpEgressSessionOptions;
+  /**
+   * The pooled senders' options. `url`, `failoverUrls` and `sessionBootstrap`
+   * belong to `cluster`; any other connection setting given here overrides
+   * the cluster's for ingress only.
+   */
+  ingress?: Omit<
+    QwpBrowserIngressOptions,
+    "url" | "failoverUrls" | "sessionBootstrap"
+  >;
+  /** The query sessions' options, on the same terms as `ingress`. */
+  egress?: Omit<
+    QwpBrowserEgressOptions,
+    "url" | "failoverUrls" | "sessionBootstrap"
+  >;
   pool?: QwpClientPoolOptions;
 }
 
-interface QwpResolvedBrowserClientOptions
-  extends Omit<QwpBrowserClientOptions, "cluster" | "ingress" | "egress"> {
+interface QwpResolvedBrowserClientOptions {
   ingress: QwpBrowserIngressOptions;
   egress: QwpBrowserEgressOptions;
+  pool?: QwpClientPoolOptions;
 }
+
+/** The connection-level subset of the ingress options a raw socket reads. */
+type QwpBrowserIngressConnectionOptions = QwpBrowserWebSocketOptions &
+  Pick<
+    QwpBrowserIngressOptions,
+    "requestDurableAck" | "ingressNegotiationTimeoutMs"
+  >;
 
 const DEFAULT_BROWSER_CONNECT_TIMEOUT_MS = 15_000;
 
@@ -490,7 +493,11 @@ function composeBrowserAbortSignals(
  * bootstrapQwpBrowserSession first so the browser can attach qdb_session.
  */
 export function connectQwpBrowserWebSocket(
-  options: QwpBrowserIngressOptions,
+  options: QwpBrowserWebSocketOptions &
+    Pick<
+      QwpBrowserIngressOptions,
+      "requestDurableAck" | "ingressNegotiationTimeoutMs"
+    >,
 ): Promise<QwpBinaryConnection> {
   return createQwpFailoverConnectionFactory(
     options.url,
@@ -502,7 +509,11 @@ export function connectQwpBrowserWebSocket(
 
 /** Creates a stateful browser endpoint walker suitable for session reconnects. */
 export function createQwpBrowserConnectionFactory(
-  options: QwpBrowserIngressOptions,
+  options: QwpBrowserWebSocketOptions &
+    Pick<
+      QwpBrowserIngressOptions,
+      "requestDurableAck" | "ingressNegotiationTimeoutMs"
+    >,
 ): QwpConnectionFactory {
   return createQwpFailoverConnectionFactory(
     options.url,
@@ -650,7 +661,7 @@ function browserNegotiationUrl(
  * the SERVER_INFO frame, so this leaves `durableAckEnabled` unset.
  */
 function browserIngressHandshake(
-  options: QwpBrowserIngressOptions,
+  options: QwpBrowserIngressConnectionOptions,
   endpoint: string | URL,
   selectedProtocol: string | undefined,
 ): QwpBinaryConnection["handshake"] {
@@ -664,7 +675,7 @@ function browserIngressHandshake(
 }
 
 function connectQwpBrowserRawEndpoint(
-  options: QwpBrowserIngressOptions,
+  options: QwpBrowserIngressConnectionOptions,
   endpoint: string | URL,
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
@@ -822,7 +833,7 @@ async function applyQwpBrowserIngressHandshake(
 }
 
 function ingressNegotiationTimeoutMs(
-  options: QwpBrowserIngressOptions,
+  options: QwpBrowserIngressConnectionOptions,
 ): number {
   const timeoutMs = options.ingressNegotiationTimeoutMs ?? 250;
   if (
@@ -843,7 +854,7 @@ function ingressNegotiationTimeoutMs(
 }
 
 async function connectQwpBrowserIngressEndpoint(
-  options: QwpBrowserIngressOptions,
+  options: QwpBrowserIngressConnectionOptions,
   endpoint: string | URL,
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
@@ -924,12 +935,11 @@ function connectQwpBrowserEgressEndpoint(
  */
 export async function connectQwpBrowserIngress(
   options: QwpBrowserIngressOptions,
-  sessionOptions: QwpIngressSessionOptions = {},
   /** Cancels a first connect still negotiating; see QwpIngressSession.connect. */
   signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
   if (
-    sessionOptions.durableAckKeepaliveMs !== undefined &&
+    options.durableAckKeepaliveMs !== undefined &&
     options.requestDurableAck !== true
   ) {
     throw new RangeError(
@@ -937,10 +947,10 @@ export async function connectQwpBrowserIngress(
     );
   }
   const effectiveSessionOptions: QwpIngressSessionOptions = {
-    ...sessionOptions,
+    ...options,
     durableAckKeepaliveMs: options.requestDurableAck
-      ? (sessionOptions.durableAckKeepaliveMs ?? 200)
-      : sessionOptions.durableAckKeepaliveMs,
+      ? (options.durableAckKeepaliveMs ?? 200)
+      : options.durableAckKeepaliveMs,
   };
   return QwpIngressSession.connect(
     createQwpBrowserConnectionFactory(options),
@@ -955,22 +965,18 @@ export async function connectQwpBrowserIngress(
  */
 export function createQwpBrowserSender(
   options: QwpBrowserIngressOptions,
-  senderOptions: QwpSenderOptions = {},
-  sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
   return new QwpSender(
-    (signal) => connectQwpBrowserIngress(options, sessionOptions, signal),
-    senderOptions,
+    (signal) => connectQwpBrowserIngress(options, signal),
+    options,
   );
 }
 
 /** Opens a browser QWP connection and returns a fluent sender. */
 export async function connectQwpBrowserSender(
   options: QwpBrowserIngressOptions,
-  senderOptions: QwpSenderOptions = {},
-  sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpSender> {
-  const sender = createQwpBrowserSender(options, senderOptions, sessionOptions);
+  const sender = createQwpBrowserSender(options);
   await sender.connect();
   return sender;
 }
@@ -978,7 +984,6 @@ export async function connectQwpBrowserSender(
 /** Opens a browser WebSocket and waits for the egress SERVER_INFO handshake. */
 export async function connectQwpBrowserEgress(
   options: QwpBrowserEgressOptions,
-  sessionOptions: QwpEgressSessionOptions = {},
   /** Cancels an opening connection during pooled-client shutdown. */
   signal?: AbortSignal,
 ): Promise<QwpEgressSession> {
@@ -989,16 +994,12 @@ export async function connectQwpBrowserEgress(
       (endpoint, signal) =>
         connectQwpBrowserEgressEndpoint(options, endpoint, signal),
       { target: options.target, zone: options.zone },
-      sessionOptions.serverInfoTimeoutMs ??
-        QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
+      options.serverInfoTimeoutMs ?? QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
     ),
-    // The request this client puts on the wire is also the bound it enforces
-    // on the answer; without it a peer's declared row count sizes the decoder
-    // scratch on its own.
-    {
-      ...sessionOptions,
-      maxBatchRows: sessionOptions.maxBatchRows ?? options.maxBatchRows,
-    },
+    // One maxBatchRows is both the cap this client requests on the wire and
+    // the bound the session enforces on the answer; without it a peer's
+    // declared row count sizes the decoder scratch on its own.
+    options,
     signal,
   );
 }
@@ -1025,29 +1026,14 @@ function assertNoBrowserClusterOptionConflicts(
 
 function browserClusterEndpoint(
   endpoint: string | URL,
-  route: "write/v4" | "read/v1",
+  route: QwpClusterRoute,
 ): URL {
-  const url =
-    endpoint instanceof URL
-      ? new URL(endpoint)
-      : new URL(endpoint, globalThis.location?.href);
-  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
-    throw new TypeError(
-      `QWP browser cluster URL must use WS or WSS: ${redactedUrlText(url)}`,
-    );
-  }
-  if (url.hash) {
-    throw new TypeError(
-      `QWP browser cluster URL cannot contain a fragment: ${redactedUrlText(url)}`,
-    );
-  }
-  const qwpRoute = /\/(?:write\/v4|read\/v1)\/?$/;
-  if (qwpRoute.test(url.pathname)) {
-    url.pathname = url.pathname.replace(qwpRoute, `/${route}`);
-  } else {
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/${route}`;
-  }
-  return url;
+  return qwpClusterEndpoint(
+    endpoint,
+    route,
+    "QWP browser cluster URL",
+    globalThis.location?.href,
+  );
 }
 
 function resolveQwpBrowserClientOptions(
@@ -1059,6 +1045,12 @@ function resolveQwpBrowserClientOptions(
       "browser client configuration requires cluster; ingress and egress hold side-specific overrides only",
     );
   }
+  assertKnownQwpOptionSections("QWP browser client", options, [
+    "cluster",
+    "ingress",
+    "egress",
+    "pool",
+  ]);
   assertNoBrowserClusterOptionConflicts("ingress", options.ingress);
   assertNoBrowserClusterOptionConflicts("egress", options.egress);
   const { url, failoverUrls, ...shared } = options.cluster;
@@ -1083,14 +1075,7 @@ function resolveQwpBrowserClientOptions(
   // would hand this client's session credentials and rows.
   assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
   assertUniformQwpEndpointScheme(egress.url, egress.failoverUrls);
-  return {
-    ingress,
-    egress,
-    sender: options.sender,
-    ingressSession: options.ingressSession,
-    egressSession: options.egressSession,
-    pool: options.pool,
-  };
+  return { ingress, egress, pool: options.pool };
 }
 
 /** Creates a lazy browser QWP client with bounded sender and query pools. */
@@ -1101,11 +1086,7 @@ export function createQwpBrowserClient(
   return new QwpClient(
     {
       createSender: async (_slot, signal) => {
-        const sender = createQwpBrowserSender(
-          resolved.ingress,
-          resolved.sender,
-          resolved.ingressSession,
-        );
+        const sender = createQwpBrowserSender(resolved.ingress);
         const abortOpening = (): void => {
           void sender.close().catch(() => undefined);
         };
@@ -1123,11 +1104,7 @@ export function createQwpBrowserClient(
         }
       },
       createQuerySession: (_slot, signal) =>
-        connectQwpBrowserEgress(
-          resolved.egress,
-          resolved.egressSession,
-          signal,
-        ),
+        connectQwpBrowserEgress(resolved.egress, signal),
     },
     resolved.pool,
   );
