@@ -282,8 +282,9 @@ const sender = await Sender.fromConfig(
 await sender.connect();
 ```
 
-Give every active producer its own journal directory. Durability,
-backpressure, capacity, orphan recovery, and shutdown behavior are covered in
+Give every active producer its own journal: its own `sf_dir`, or its own
+`sender_id` below a shared one. Durability, backpressure, capacity, orphan
+recovery, and shutdown behavior are covered in
 the [store-and-forward section of the QWP guide](https://github.com/questdb/nodejs-questdb-client/blob/main/QWP.md#store-and-forward-node-only).
 
 ## Error handling and shutdown

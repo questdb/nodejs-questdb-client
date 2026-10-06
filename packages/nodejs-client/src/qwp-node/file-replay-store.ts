@@ -84,9 +84,6 @@ const MAX_QUARANTINE_SLOT_ATTEMPTS = 64;
 // Preserve two default-sized QWP batches, mirroring Java's active+spare
 // liveness floor when the current dictionary generation consumes the cap.
 const DEFAULT_LIVE_FRAME_BYTES = 2 * 16 * 1024 * 1024;
-const DEFAULT_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
-const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
-const DEFAULT_APPEND_DEADLINE_MS = 30_000;
 const TRIM_BATCH_SIZE = 8;
 // Retry transient store faults on this cadence. Filesystem recovery does not
 // emit a capacity signal, so foreground appends poll at the same deliberately
@@ -111,6 +108,23 @@ export const QWP_SF_BACKPRESSURE_POLICY = {
 
 export type QwpSfBackpressurePolicy =
   (typeof QWP_SF_BACKPRESSURE_POLICY)[keyof typeof QWP_SF_BACKPRESSURE_POLICY];
+
+/**
+ * The journal settings a store-and-forward sender runs with when it leaves
+ * them unset, whether it is configured through the typed options or a
+ * connect string. They follow the Java client's.
+ *
+ * @internal The connect-string parser resolves the `sf_*` keys from these same
+ * values, so the two spellings cannot drift apart again.
+ */
+export const QWP_SF_DEFAULTS = {
+  maxBytes: 10 * 1024 * 1024 * 1024,
+  maxSegmentBytes: 4 * 1024 * 1024,
+  durability: QWP_SF_DURABILITY.MEMORY,
+  checkpointIntervalMs: 5_000,
+  backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
+  appendDeadlineMs: 30_000,
+} as const;
 
 interface StoredRecord {
   readonly path: string;
@@ -593,7 +607,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     if (!directory) {
       throw new RangeError("store-and-forward directory must not be empty");
     }
-    const maxBytes = options.maxBytes ?? 1024 * 1024 * 1024;
+    const maxBytes = options.maxBytes ?? QWP_SF_DEFAULTS.maxBytes;
     if (!Number.isSafeInteger(maxBytes) || maxBytes <= SEGMENT_HEADER_SIZE) {
       throw new RangeError(
         `store-and-forward maxBytes must be a safe integer greater than ${SEGMENT_HEADER_SIZE}`,
@@ -602,7 +616,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     this.directory = directory;
     this.maxBytes = maxBytes;
     this.maxSegmentBytes = validatePositiveSafeInteger(
-      options.maxSegmentBytes ?? DEFAULT_MAX_SEGMENT_BYTES,
+      options.maxSegmentBytes ?? QWP_SF_DEFAULTS.maxSegmentBytes,
       "store-and-forward maxSegmentBytes",
     );
     if (this.maxSegmentBytes > QWP_MAX_SEGMENT_BYTES) {
@@ -646,13 +660,13 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
       this.segmentFileSize,
     );
     this.durability = validateDurability(
-      options.durability ?? QWP_SF_DURABILITY.APPEND,
+      options.durability ?? QWP_SF_DEFAULTS.durability,
     );
     this.backpressurePolicy = validateBackpressurePolicy(
-      options.backpressurePolicy ?? QWP_SF_BACKPRESSURE_POLICY.ERROR,
+      options.backpressurePolicy ?? QWP_SF_DEFAULTS.backpressurePolicy,
     );
     this.checkpointIntervalMs = validateTimerDelay(
-      options.checkpointIntervalMs ?? DEFAULT_CHECKPOINT_INTERVAL_MS,
+      options.checkpointIntervalMs ?? QWP_SF_DEFAULTS.checkpointIntervalMs,
       "store-and-forward checkpointIntervalMs",
     );
     if (
@@ -665,7 +679,7 @@ export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
     }
     this.onRecoveryDataLoss = options.onRecoveryDataLoss;
     this.appendDeadlineMs = validateTimerDelay(
-      options.appendDeadlineMs ?? DEFAULT_APPEND_DEADLINE_MS,
+      options.appendDeadlineMs ?? QWP_SF_DEFAULTS.appendDeadlineMs,
       "store-and-forward appendDeadlineMs",
     );
   }
@@ -4356,9 +4370,7 @@ async function syncDirectory(directory: string): Promise<void> {
  * retryable class also failed a caller's flush() on a transient fault the
  * journal absorbs a moment later -- a provisioning or checkpoint hiccup --
  * which is neither journal exhaustion nor an append deadline, the only two
- * errors an sf_dir producer should ever see. It also split the two
- * configuration paths, since connect strings pin `wait` while the typed
- * storeAndForward object inherits this default.
+ * errors an sf_dir producer should ever see.
  *
  * So the policy decides capacity only; every other retryable fault parks
  * until appendDeadlineMs under either policy.

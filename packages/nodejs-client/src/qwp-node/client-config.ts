@@ -31,7 +31,11 @@ import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
 } from "../../../client-core/src/_qwp/_internal/timer-bounds";
-import { qwpSegmentFileSize, QWP_MAX_SEGMENT_BYTES } from "./file-replay-store";
+import {
+  qwpSegmentFileSize,
+  QWP_MAX_SEGMENT_BYTES,
+  QWP_SF_DEFAULTS,
+} from "./file-replay-store";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 import {
@@ -46,9 +50,13 @@ import { validateQwpWebSocketAgent } from "./websocket-agent";
 const DEFAULT_QWP_PORT = 9000;
 const MAX_BATCH_ROWS = 1_048_576;
 const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
-const DEFAULT_SF_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
-const DEFAULT_SF_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
-const DEFAULT_SF_APPEND_DEADLINE_MS = 30_000;
+
+/**
+ * @internal The journal slot a sender names when neither `sender_id` nor the
+ * typed `senderId` does: `<sf_dir>/default`, or `default-<slot>` for a pooled
+ * sender.
+ */
+export const QWP_DEFAULT_SENDER_ID = "default";
 
 /**
  * Legacy ILP keys that are not part of the QWP vocabulary. They are rejected
@@ -477,7 +485,7 @@ export function resolveQwpNodeClientConfig(
       requestDurableAck ??
       (durableAckKeepaliveMs === undefined ? undefined : true),
     storeAndForward,
-    senderId: validateSenderId(value("sender_id") ?? "default"),
+    senderId: validateSenderId(value("sender_id") ?? QWP_DEFAULT_SENDER_ID),
     ...buffering,
     ...delivery,
     ...definedOnly(ingressOverrides),
@@ -875,25 +883,25 @@ function parseStoreAndForward(
         values.get("sf_max_total_bytes")?.[0],
         "sf_max_total_bytes",
         1,
-      ) ?? DEFAULT_SF_MAX_TOTAL_BYTES,
+      ) ?? QWP_SF_DEFAULTS.maxBytes,
     maxSegmentBytes:
       optionalSize(
         values.get("sf_max_segment_bytes")?.[0],
         "sf_max_segment_bytes",
         1,
-      ) ?? DEFAULT_SF_MAX_SEGMENT_BYTES,
-    durability: durability ?? "memory",
+      ) ?? QWP_SF_DEFAULTS.maxSegmentBytes,
+    durability: durability ?? QWP_SF_DEFAULTS.durability,
     checkpointIntervalMs: optionalInteger(
       values.get("sf_sync_interval_millis")?.[0],
       "sf_sync_interval_millis",
       0,
     ),
-    backpressurePolicy: "wait",
+    backpressurePolicy: QWP_SF_DEFAULTS.backpressurePolicy,
     appendDeadlineMs:
       optionalPositiveInteger(
         values.get("sf_append_deadline_millis")?.[0],
         "sf_append_deadline_millis",
-      ) ?? DEFAULT_SF_APPEND_DEADLINE_MS,
+      ) ?? QWP_SF_DEFAULTS.appendDeadlineMs,
     catchUpCapGapMinEscalationWindowMs: optionalInteger(
       values.get("catch_up_cap_gap_min_escalation_window_millis")?.[0],
       "catch_up_cap_gap_min_escalation_window_millis",
@@ -944,9 +952,9 @@ function validateStoreAndForwardDependencies(
     typeof storeAndForward?.directory === "string" &&
     storeAndForward.directory.trim()
   ) {
-    const maxBytes = storeAndForward.maxBytes ?? DEFAULT_SF_MAX_TOTAL_BYTES;
+    const maxBytes = storeAndForward.maxBytes ?? QWP_SF_DEFAULTS.maxBytes;
     const maxSegmentBytes =
-      storeAndForward.maxSegmentBytes ?? DEFAULT_SF_MAX_SEGMENT_BYTES;
+      storeAndForward.maxSegmentBytes ?? QWP_SF_DEFAULTS.maxSegmentBytes;
     if (
       !Number.isSafeInteger(maxSegmentBytes) ||
       maxSegmentBytes < 1 ||

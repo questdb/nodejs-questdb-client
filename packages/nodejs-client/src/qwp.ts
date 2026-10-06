@@ -39,6 +39,7 @@ import { selectsQwpSyncInitialConnect } from "../../client-core/src/_qwp/_intern
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
 import {
   normalizeQwpNodeClientOptions,
+  QWP_DEFAULT_SENDER_ID,
   resolveQwpNodeClientConfig,
   resolveQwpNodeClientSides,
 } from "./qwp-node/client-config";
@@ -81,6 +82,7 @@ import {
   QwpNodeFileReplayStore,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreQuarantinedError,
+  QWP_SF_DEFAULTS,
 } from "./qwp-node/file-replay-store";
 import type {
   QwpNodeReplayDataLossReport,
@@ -298,16 +300,16 @@ export interface QwpNodeIngressOptions
   requestDurableAck?: boolean;
   /**
    * Upgrades the default in-memory ingress replay to persistent Node
-   * store-and-forward. Use a directory owned exclusively by this session.
+   * store-and-forward, journalled in this sender's `senderId` slot below the
+   * configured directory. No two live senders may share a slot.
    */
   storeAndForward?: QwpNodeStoreAndForwardOptions;
   /**
-   * Slot name below storeAndForward.directory.
-   *
-   * A connect string defaults it to `default`. Through the typed API it has no
-   * default: a standalone sender writes straight into `directory`, and a
-   * pooled client derives `sender-<slot>` names, or `<senderId>-<slot>` when
-   * this is set.
+   * Names this sender's journal slot below `storeAndForward.directory`, the
+   * slot root: the journal is `<directory>/<senderId>`, and a pooled client's
+   * are `<directory>/<senderId>-<slot>`. Defaults to `default`, as the
+   * `sender_id` key does. Letters, digits, underscores and hyphens only; it is
+   * not sent to the server.
    */
   senderId?: string;
 }
@@ -328,13 +330,15 @@ export interface QwpNodeReplayRecoveryEvent {
  */
 export interface QwpNodeStoreAndForwardOptions {
   /**
-   * The journal directory, which one sender owns exclusively. With `senderId`
-   * it is the slot root instead, and the journal is `<directory>/<senderId>`.
+   * The slot root. Each sender journals into its own slot below it:
+   * `<directory>/<senderId>`, with `senderId` defaulting to `default`, or
+   * `<directory>/<senderId>-<slot>` for a pooled sender. This is the layout
+   * `sf_dir` and `sender_id` describe in a connect string.
    */
   directory: string;
   /**
    * Target maximum journal size including fixed segment reservations and
-   * symbol metadata. Defaults to 1 GiB. The current symbol dictionary may
+   * symbol metadata. Defaults to 10 GiB. The current symbol dictionary may
    * exceed this target so it cannot consume the journal's live frame budget
    * before a drained close retires that dictionary generation.
    *
@@ -363,17 +367,20 @@ export interface QwpNodeStoreAndForwardOptions {
    */
   maxSegmentBytes?: number;
   /**
-   * Local persistence barrier. `append` preserves the existing fsync-per-frame
-   * behavior, `periodic` checkpoints dirty files in the background, and
-   * `memory` relies on OS page-cache writeback. Defaults to `append`.
+   * Local persistence barrier. `append` fsyncs every frame before its append
+   * resolves, `periodic` checkpoints dirty files in the background, and
+   * `memory` relies on OS page-cache writeback, which normally survives a
+   * process failure but makes no power-loss promise. Defaults to `memory`, as
+   * `sf_durability` does; choose `append` for a journal that has to survive
+   * power loss.
    */
   durability?: QwpSfDurability;
   /** Periodic durability checkpoint cadence. Defaults to 5 seconds. */
   checkpointIntervalMs?: number;
   /**
-   * Behavior when maxBytes is exhausted. `error` fails immediately; `wait`
-   * pauses the append until ACK trimming frees space or its deadline expires.
-   * Defaults to `error` for backwards compatibility.
+   * Behavior when maxBytes is exhausted. `wait` pauses the append until ACK
+   * trimming frees space or its deadline expires; `error` fails it at once
+   * with QwpReplayStoreFullError. Defaults to `wait`, as a connect string does.
    *
    * This decides journal exhaustion only. A transient retryable fault parks
    * until {@link appendDeadlineMs} under either policy, so the only errors an
@@ -396,7 +403,7 @@ export interface QwpNodeStoreAndForwardOptions {
   /**
    * Adopts sibling replay slots left by terminated producers. Standalone
    * senders default this to false; pooled clients always recover their own
-   * idle in-range and out-of-range `sender-N` slots.
+   * idle in-range and out-of-range `<senderId>-N` slots.
    */
   drainOrphans?: boolean;
   /** Maximum sibling slots drained concurrently. Defaults to 4. */
@@ -870,11 +877,10 @@ async function connectQwpNodeIngressInternal(
       },
     );
   const storeAndForward = resolveNodeStoreAndForwardOptions(connectionOptions);
-  if (storeAndForward) {
+  if (storeAndForward && options.orphanStoreAndForward !== true) {
     await warnAboutUnreachableJournal(
       storeAndForwardRoot(connectionOptions.storeAndForward!),
       storeAndForward.directory,
-      connectionOptions.senderId,
     );
   }
   if (storeAndForward && options.replayStore) {
@@ -916,7 +922,7 @@ async function connectQwpNodeIngressInternal(
     initialConnectMode === QWP_INITIAL_CONNECT_MODE.ASYNC;
   const storeBatchCap =
     storeAndForward?.maxSegmentBytes ??
-    (storeAndForward ? 4 * 1024 * 1024 : undefined);
+    (storeAndForward ? QWP_SF_DEFAULTS.maxSegmentBytes : undefined);
   const effectiveSessionOptions: QwpIngressSessionInternalOptions = {
     ...connectionOptions,
     reconnect,
@@ -934,13 +940,8 @@ async function connectQwpNodeIngressInternal(
   const orphanDrainer =
     startOrphanDrainer && storeAndForward?.drainOrphans === true
       ? createStandaloneOrphanDrainer(
-          { ...connectionOptions, senderId: undefined, storeAndForward },
+          { ...connectionOptions, storeAndForward },
           healthTracker,
-          // The options above deliberately drop senderId so the drainer's own
-          // sessions do not re-nest an already-resolved slot directory. Whether
-          // one was configured is still what decides if the parent directory is
-          // a store-and-forward group, so pass it separately.
-          connectionOptions.senderId !== undefined,
         )
       : undefined;
   const connectionFactory = createQwpNodeConnectionFactory(
@@ -1296,16 +1297,12 @@ function pooledNodeIngressOptions(
   slot: number,
 ): QwpNodeIngressOptions {
   if (!options.storeAndForward) return options;
-  const rootDirectory = storeAndForwardRoot(options.storeAndForward);
   return {
     ...options,
-    senderId: undefined,
+    // Each pooled sender journals into its own slot of the configured root.
+    senderId: `${validateQwpSenderId(options.senderId ?? QWP_DEFAULT_SENDER_ID)}-${slot}`,
     storeAndForward: {
       ...options.storeAndForward,
-      directory: join(
-        rootDirectory,
-        `${validateQwpSenderId(options.senderId ?? "sender")}-${slot}`,
-      ),
       // The client-level drainer owns sibling adoption. Per-sender scanners
       // would contend with other managed pool slots during prewarm/borrows.
       drainOrphans: false,
@@ -1316,27 +1313,12 @@ function pooledNodeIngressOptions(
 function createStandaloneOrphanDrainer(
   options: QwpNodeIngressOptions,
   healthTracker: QwpFailoverHealthTracker,
-  slotIsNamed: boolean,
 ): QwpNodeOrphanDrainer {
-  const storeAndForward = options.storeAndForward!;
-  const ownDirectory = storeAndForwardRoot(storeAndForward);
-  if (!slotIsNamed) {
-    // Without a senderId the journal is the configured directory itself, so
-    // its parent is the application's, not a store-and-forward group -- and
-    // scanning it adopted, transmitted and emptied journals from unrelated
-    // sibling directories the caller never designated. Sibling adoption needs
-    // a group root, which is exactly what naming the slot establishes.
-    log(
-      "warn",
-      `Ignoring drainOrphans for QWP store-and-forward directory '${ownDirectory}': sibling adoption scans the parent directory, so it requires a 'senderId' that makes that parent a store-and-forward group`,
-    );
-    return createNodeOrphanDrainer(
-      options,
-      ownDirectory,
-      () => true,
-      healthTracker,
-    );
-  }
+  // The journal is always a slot below the configured directory, so the slots
+  // scanned are that directory's: the store-and-forward group the caller
+  // designated, and never the application directory holding it, which once
+  // got unrelated neighbouring journals adopted, transmitted and emptied.
+  const ownDirectory = storeAndForwardRoot(options.storeAndForward!);
   return createNodeOrphanDrainer(
     options,
     dirname(ownDirectory),
@@ -1358,7 +1340,9 @@ function createPooledOrphanDrainer(
   if (!storeAndForward) return undefined;
   const rootDirectory = storeAndForwardRoot(storeAndForward);
   const managedSlotCount = pool?.senderPoolMax ?? 4;
-  const senderId = validateQwpSenderId(ingress.senderId ?? "sender");
+  const senderId = validateQwpSenderId(
+    ingress.senderId ?? QWP_DEFAULT_SENDER_ID,
+  );
   const healthTracker = createQwpFailoverHealthTracker(
     ingress.url,
     ingress.failoverUrls,
@@ -1434,7 +1418,7 @@ function createPooledSlotCoordinator(
 ): QwpPooledSfaSlotCoordinator | undefined {
   if (!ingress.storeAndForward) return undefined;
   return new QwpPooledSfaSlotCoordinator(
-    validateQwpSenderId(ingress.senderId ?? "sender"),
+    validateQwpSenderId(ingress.senderId ?? QWP_DEFAULT_SENDER_ID),
     pool?.senderPoolMax ?? 4,
   );
 }
@@ -1497,7 +1481,7 @@ class QwpPooledSfaSlotCoordinator implements QwpPoolSlotReservation {
 
 function parseCanonicalSenderSlot(
   name: string,
-  senderId = "sender",
+  senderId: string,
 ): number | undefined {
   const escapedSenderId = senderId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(`^${escapedSenderId}-(0|[1-9]\\d*)$`).exec(name);
@@ -1531,18 +1515,28 @@ function storeAndForwardRoot(
   return rootDirectory;
 }
 
+/**
+ * The journal a session opens: the `senderId` slot below the configured root,
+ * `default` unless named -- the layout a connect string's `sf_dir` and
+ * `sender_id` describe, so the typed options and the string reach the same
+ * journal. An adopted orphan is the one exception: its directory is the slot
+ * the scanner found.
+ */
 function resolveNodeStoreAndForwardOptions(
-  options: QwpNodeIngressOptions,
+  options: QwpNodeIngressInternalOptions,
 ): QwpNodeStoreAndForwardOptions | undefined {
   const storeAndForward = options.storeAndForward;
   if (!storeAndForward) return storeAndForward;
-  // Validated even when no senderId makes this function rewrite the path, so
-  // the diagnostic does not depend on an unrelated option being set.
+  // Validated for an orphan's directory too, so the diagnostic does not
+  // depend on which session reads it.
   const rootDirectory = storeAndForwardRoot(storeAndForward);
-  if (options.senderId === undefined) return storeAndForward;
+  if (options.orphanStoreAndForward === true) return storeAndForward;
   return {
     ...storeAndForward,
-    directory: join(rootDirectory, validateQwpSenderId(options.senderId)),
+    directory: join(
+      rootDirectory,
+      validateQwpSenderId(options.senderId ?? QWP_DEFAULT_SENDER_ID),
+    ),
   };
 }
 
@@ -1550,40 +1544,31 @@ function resolveNodeStoreAndForwardOptions(
 const JOURNAL_SEGMENT_SUFFIX = ".sfa";
 
 /**
- * Warns when the same configured directory already holds a journal under the
- * layout the *other* construction style would have used.
+ * Warns when the slot root itself holds journal segments.
  *
- * `senderId` decides where the journal lives: named, it is
- * `<directory>/<senderId>`; unnamed, it is `<directory>` itself. A connect
- * string always names it (`default` by default) while the typed options
- * normally do not, so moving between `Sender.fromConfig("ws::...;sf_dir=D")`
- * and `new Sender({ ...storeAndForward: { directory: D } })` -- a change that
- * looks like pure configuration style -- silently points at a different
- * journal. The unsent frames in the old one are not lost, but nothing replays
- * them, the orphan scanner cannot see them because it only inspects child
- * directories, and no error is raised. Say so instead.
+ * Every journal is a slot below the configured directory, so segments in the
+ * directory itself belong to no slot: nothing replays them, the orphan
+ * scanner cannot see them because it only inspects child directories, and no
+ * error is raised. They are what a directory naming a slot rather than its
+ * root leaves behind -- `sf_dir=/var/lib/qwp/default`, say, after an earlier
+ * `sf_dir=/var/lib/qwp` journalled into that same `default` slot -- so the
+ * unsent frames in it are not lost, only stranded. Say so instead.
  */
 async function warnAboutUnreachableJournal(
-  configuredDirectory: string,
-  resolvedDirectory: string,
-  senderId: string | undefined,
+  rootDirectory: string,
+  journalDirectory: string,
 ): Promise<void> {
-  const alternate =
-    senderId === undefined
-      ? join(configuredDirectory, "default")
-      : configuredDirectory;
-  if (alternate === resolvedDirectory) return;
   let entries: string[];
   try {
-    entries = await readdir(alternate);
+    entries = await readdir(rootDirectory);
   } catch {
     return;
   }
   if (!entries.some((entry) => entry.endsWith(JOURNAL_SEGMENT_SUFFIX))) return;
   log(
     "warn",
-    `QWP store-and-forward is using '${resolvedDirectory}', but '${alternate}' holds journal segments that nothing will replay [senderId=${senderId ?? "unset"}]. ` +
-      `A connect string names the slot ('default' unless sender_id says otherwise) and journals into <directory>/<sender_id>; typed options without a senderId journal into <directory> itself.`,
+    `QWP store-and-forward is using '${journalDirectory}', but its slot root '${rootDirectory}' holds journal segments that nothing will replay. ` +
+      `The store-and-forward directory (sf_dir) is the slot root: each journal lives in <directory>/<senderId>, where senderId (sender_id) is 'default' unless set, or in <directory>/<senderId>-<slot> for a pooled sender.`,
   );
 }
 

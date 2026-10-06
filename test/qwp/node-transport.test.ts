@@ -654,7 +654,8 @@ describe("QWP Node transport", () => {
     await listen(endpoint);
     const address = endpoint.address() as AddressInfo;
     const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-pool-"));
-    const orphanDirectory = join(rootDirectory, "sender-3");
+    // Pooled slots are `<senderId>-<slot>`, and senderId defaults to `default`.
+    const orphanDirectory = join(rootDirectory, "default-3");
     const orphan = new QwpNodeFileReplayStore({
       directory: orphanDirectory,
     });
@@ -737,7 +738,7 @@ describe("QWP Node transport", () => {
     await listen(endpoint);
     const address = endpoint.address() as AddressInfo;
     const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-pool-dur-"));
-    const orphanDirectory = join(rootDirectory, "sender-3");
+    const orphanDirectory = join(rootDirectory, "default-3");
     const orphan = new QwpNodeFileReplayStore({ directory: orphanDirectory });
     await orphan.load();
     await orphan.append({ frameSequence: 0n, payload: Uint8Array.of(1, 2, 3) });
@@ -812,7 +813,7 @@ describe("QWP Node transport", () => {
     await listen(endpoint);
     const address = endpoint.address() as AddressInfo;
     const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-pool-in-"));
-    const idleManagedDirectory = join(rootDirectory, "sender-1");
+    const idleManagedDirectory = join(rootDirectory, "default-1");
     const idleManaged = new QwpNodeFileReplayStore({
       directory: idleManagedDirectory,
     });
@@ -875,7 +876,8 @@ describe("QWP Node transport", () => {
     await listen(server);
 
     const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-recovery-"));
-    const directory = join(rootDirectory, "sender-0");
+    // The slot a session opens below its configured directory.
+    const directory = join(rootDirectory, "default");
     const seed = new QwpNodeFileReplayStore({ directory });
     await seed.load();
     await seed.append({ frameSequence: 0n, payload: Uint8Array.of(1) });
@@ -890,7 +892,7 @@ describe("QWP Node transport", () => {
       const session = await connectQwpNodeIngress({
         url: `ws://127.0.0.1:${address.port}/write/v4`,
         storeAndForward: {
-          directory,
+          directory: rootDirectory,
           onRecoveryQuarantine: (event) => {
             events.push(event.error);
             expect(event.senderError.quarantinedPath).toBe(
@@ -914,10 +916,7 @@ describe("QWP Node transport", () => {
         await session.close();
       }
 
-      const quarantineDirectory = join(
-        rootDirectory,
-        "sender-0.unreplayable-0",
-      );
+      const quarantineDirectory = join(rootDirectory, "default.unreplayable-0");
       expect(events).toHaveLength(1);
       expect(events[0]).toBeInstanceOf(QwpReplayStoreQuarantinedError);
       expect(events[0].cause).toBeInstanceOf(QwpReplayStoreCorruptionError);
@@ -1027,7 +1026,7 @@ describe("QWP Node transport", () => {
     await listen(server);
 
     const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-retry-"));
-    const directory = join(rootDirectory, "sender-0");
+    const directory = join(rootDirectory, "default");
     const payload = (value: number) => new Uint8Array(2048).fill(value & 0xff);
     const seed = new QwpNodeFileReplayStore({
       directory,
@@ -1062,7 +1061,7 @@ describe("QWP Node transport", () => {
       const session = await connectQwpNodeIngress({
         url: `ws://127.0.0.1:${address.port}/write/v4`,
         storeAndForward: {
-          directory,
+          directory: rootDirectory,
           onRecoveryQuarantine: (event) => quarantined.push(event.error),
         },
         initialConnectMode: "sync",
@@ -1074,8 +1073,8 @@ describe("QWP Node transport", () => {
       expect(senderErrors).toEqual([]);
       // The slot keeps its name: nothing was moved aside for an operator.
       const siblings = await readdir(rootDirectory);
-      expect(siblings).toContain("sender-0");
-      expect(siblings.filter((name) => name.startsWith("sender-0."))).toEqual(
+      expect(siblings).toContain("default");
+      expect(siblings.filter((name) => name.startsWith("default."))).toEqual(
         [],
       );
       // And the six frames the journal still held were replayed, not dropped.
@@ -1145,7 +1144,7 @@ describe("QWP Node transport", () => {
     await listen(server);
 
     const rootDirectory = await mkdtemp(join(tmpdir(), "qwp-node-recovery-"));
-    const directory = join(rootDirectory, "sender-0");
+    const directory = join(rootDirectory, "default");
     const dictionary = new QwpSymbolDictionary();
     const table = new QwpTableBuffer("trades");
     table
@@ -1169,7 +1168,7 @@ describe("QWP Node transport", () => {
       const session = await connectQwpNodeIngress({
         url: `ws://127.0.0.1:${address.port}/write/v4`,
         storeAndForward: {
-          directory,
+          directory: rootDirectory,
           onRecoveryQuarantine: (event) => quarantined.push(event.error),
         },
         initialConnectMode: "sync",
@@ -1180,7 +1179,7 @@ describe("QWP Node transport", () => {
       expect(quarantined).toEqual([]);
       expect((await readdir(rootDirectory)).sort()).toEqual([
         ".slot-locks",
-        "sender-0",
+        "default",
       ]);
       const verify = new QwpNodeFileReplayStore({ directory });
       await expect(verify.load()).resolves.toHaveLength(1);
@@ -1287,13 +1286,13 @@ describe("QWP Node transport", () => {
     }
   });
 
-  it("does not adopt siblings of an unnamed store-and-forward directory", async () => {
-    // Sibling adoption scans the parent of the journal directory. With a
-    // sender_id that parent is the store-and-forward group root, which is what
-    // QWP.md tells operators to dedicate. Through the typed API there is no
-    // senderId, the journal is the configured directory itself, and the parent
-    // is whatever the application happens to keep next to it -- so the drainer
-    // adopted, transmitted and emptied an unrelated neighbour's journal.
+  it("adopts orphans only below the configured directory", async () => {
+    // Sibling adoption scans the parent of the journal directory, which is the
+    // configured slot root: QWP.md tells operators to dedicate it. Typed
+    // options once journalled into the configured directory itself, so that
+    // parent was whatever the application kept next to it -- and the drainer
+    // adopted, transmitted and emptied an unrelated neighbour's journal. Every
+    // journal is a slot below the configured directory now, as with sf_dir.
     const root = await mkdtemp(join(tmpdir(), "qwp-node-siblings-"));
     const neighbour = join(root, "unrelated-neighbour");
     try {
@@ -1353,7 +1352,10 @@ describe("QWP Node transport", () => {
       await expect(sender.connect()).resolves.toBe(true);
       await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
       await expect(sender.flush()).resolves.toBe(true);
-      expect(await assignedReplaySegments(directory)).toHaveLength(1);
+      // The `default` slot, as `sf_dir` without a `sender_id` would use.
+      const journal = join(directory, "default");
+      expect(await assignedReplaySegments(journal)).toHaveLength(1);
+      expect(await assignedReplaySegments(directory)).toEqual([]);
 
       server = new WebSocketServer({ host: "127.0.0.1", port });
       server.on("headers", (headers) => {
@@ -1368,7 +1370,7 @@ describe("QWP Node transport", () => {
       await listen(server);
 
       await vi.waitFor(
-        async () => expect(await assignedReplaySegments(directory)).toEqual([]),
+        async () => expect(await assignedReplaySegments(journal)).toEqual([]),
         { timeout: 2_000 },
       );
     } finally {

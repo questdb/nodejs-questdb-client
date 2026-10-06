@@ -7479,10 +7479,13 @@ describe("QWP Node file replay store", () => {
     ).rejects.toBeInstanceOf(QwpReplayStoreSegmentTooLargeError);
     await segmented.close();
 
+    // A typed storeAndForward object with nothing set gets the connect
+    // string's defaults: page-cache durability, and appends that wait out a
+    // full journal.
     const defaults = new QwpNodeFileReplayStore({ directory });
     expect(defaults.metrics).toMatchObject({
-      durability: QWP_SF_DURABILITY.APPEND,
-      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.ERROR,
+      durability: QWP_SF_DURABILITY.MEMORY,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.WAIT,
       totalCheckpoints: 0,
       totalBackpressureStalls: 0,
     });
@@ -7880,7 +7883,11 @@ describe("QWP Node file replay store", () => {
 
   it("retries append-mode maintenance finalization after its directory sync fails", async () => {
     const directory = await trackedDirectory();
-    const store = new QwpNodeFileReplayStore({ directory, maxSegmentBytes: 1 });
+    const store = new QwpNodeFileReplayStore({
+      directory,
+      maxSegmentBytes: 1,
+      durability: QWP_SF_DURABILITY.APPEND,
+    });
     await store.load();
     for (let sequence = 0n; sequence < 3n; sequence++) {
       await store.append({
@@ -8849,7 +8856,9 @@ describe("QWP Node file replay store", () => {
     // interpolated discardedBytes instead, so a whole lost segment reached an
     // alerting consumer as "discarded 0 journal byte(s)" -- which reads as
     // nothing lost. Both channels format through the same helper now.
-    const directory = await trackedDirectory();
+    const root = await trackedDirectory();
+    // The slot a session opens below its configured directory.
+    const directory = join(root, "default");
     const first = new QwpNodeFileReplayStore({
       directory,
       maxSegmentBytes: 4096,
@@ -8884,7 +8893,7 @@ describe("QWP Node file replay store", () => {
       // recovery report is what this test is after.
       url: "ws://127.0.0.1:1/write/v4",
       storeAndForward: {
-        directory,
+        directory: root,
         maxSegmentBytes: 4096,
         durability: "memory",
       },
@@ -10084,6 +10093,9 @@ describe("QWP Node file replay store", () => {
       directory,
       maxBytes: 33,
       maxSegmentBytes: 1,
+      // Fails the over-budget append at once rather than waiting out the
+      // default deadline.
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.ERROR,
     });
     await store.load();
     await expect(
@@ -10502,18 +10514,16 @@ describe("QWP Node file replay store", () => {
     await store.close();
   }, 10_000);
 
-  it("waits out a transient fault under the default backpressure policy too", async () => {
-    // `error` is the journal-exhaustion policy, and it is the default the
-    // typed storeAndForward object inherits while connect strings pin `wait`.
-    // Applied to the whole retryable class it rejected the caller's append on
-    // a transient provisioning fault the journal absorbs a moment later --
-    // neither journal exhaustion nor an append deadline, the only two errors
-    // an sf_dir producer should see.
+  it("waits out a transient fault under the error backpressure policy too", async () => {
+    // `error` is the journal-exhaustion policy. Applied to the whole retryable
+    // class it rejected the caller's append on a transient provisioning fault
+    // the journal absorbs a moment later -- neither journal exhaustion nor an
+    // append deadline, the only two errors an sf_dir producer should see.
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,
       maxSegmentBytes: 1,
-      // No backpressurePolicy: this is the `error` default under test.
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.ERROR,
       appendDeadlineMs: 3_000,
     });
     await store.load();
@@ -10544,15 +10554,15 @@ describe("QWP Node file replay store", () => {
     await store.close();
   }, 10_000);
 
-  it("still fails an exhausted journal fast under the default policy", async () => {
+  it("still fails an exhausted journal fast under the error policy", async () => {
     // The other half of the contract: `error` must keep failing immediately on
-    // capacity, which is the backwards-compatible behaviour it documents.
+    // capacity, which is the behaviour it documents.
     const directory = await trackedDirectory();
     const store = new QwpNodeFileReplayStore({
       directory,
       maxBytes: 66,
       maxSegmentBytes: 1,
-      // No backpressurePolicy: the `error` default must still fail fast here.
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.ERROR,
       appendDeadlineMs: 30_000,
     });
     await store.load();
@@ -10931,6 +10941,7 @@ describe("QWP Node file replay store", () => {
       directory,
       maxBytes: 33,
       maxSegmentBytes: 1,
+      backpressurePolicy: QWP_SF_BACKPRESSURE_POLICY.ERROR,
     });
     await first.load();
     // Header + block metadata + this entry exceed the configured target.

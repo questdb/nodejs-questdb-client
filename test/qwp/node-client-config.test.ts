@@ -194,6 +194,49 @@ describe("QWP unified Node client configuration", () => {
     expect(tunedMemory.ingress?.initialConnectMode).toBe("sync");
   });
 
+  it("gives a typed storeAndForward object the connect string's defaults", async () => {
+    // Typed options and sf_* keys used to disagree on three journal defaults:
+    // `append` against `memory` durability, a 1 GiB against a 10 GiB cap, and
+    // failing against waiting on a full journal. Moving between
+    // Sender.fromConfig() and typed options -- a change that looks like pure
+    // configuration style -- changed all three. A typed storeAndForward object
+    // reaches the journal as given, so the journal's own defaults are the
+    // typed ones.
+    const parsed = parseQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp-typed-defaults;",
+    ).ingress.storeAndForward!;
+    const directory = await mkdtemp(join(tmpdir(), "qwp-typed-defaults-"));
+    const store = new QwpNodeFileReplayStore({ directory });
+    const journal = store as unknown as {
+      maxBytes: number;
+      maxSegmentBytes: number;
+      checkpointIntervalMs: number;
+      appendDeadlineMs: number;
+    };
+    try {
+      expect({
+        durability: store.metrics.durability,
+        backpressurePolicy: store.metrics.backpressurePolicy,
+        maxBytes: journal.maxBytes,
+        maxSegmentBytes: journal.maxSegmentBytes,
+        appendDeadlineMs: journal.appendDeadlineMs,
+      }).toEqual({
+        durability: parsed.durability,
+        backpressurePolicy: parsed.backpressurePolicy,
+        maxBytes: parsed.maxBytes,
+        maxSegmentBytes: parsed.maxSegmentBytes,
+        appendDeadlineMs: parsed.appendDeadlineMs,
+      });
+      // sf_sync_interval_millis has no default of its own, so the journal's
+      // checkpoint cadence applies to both.
+      expect(parsed.checkpointIntervalMs).toBeUndefined();
+      expect(journal.checkpointIntervalMs).toBe(5_000);
+    } finally {
+      await store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("accepts reconnect_max_duration_millis=0 as a one-attempt startup budget", async () => {
     // Accepted, as by the Rust and Python clients, and with their meaning: the
     // synchronous startup the key selects makes one attempt and does not
