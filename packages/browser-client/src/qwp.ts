@@ -1,7 +1,9 @@
 /**
  * Browser WebSocket and authentication adapter over the browser-safe QWP
  * protocol/session APIs. The package root (index.ts) re-exports its public
- * names; connectQwpBrowserIngress() is exported for the senders and tests only.
+ * names; connectQwpBrowserIngress() and createQwpBrowserConnectionFactory() are
+ * exported for the senders and tests, and connectQwpBrowserWebSocket() for
+ * tests only.
  */
 export * from "../../client-core/src/qwp";
 
@@ -346,7 +348,15 @@ export async function bootstrapQwpBrowserSession(
   );
 }
 
-/** Browser WebSocket transport and authentication, shared by both sides. */
+/**
+ * Browser WebSocket transport and authentication, shared by both sides.
+ *
+ * Browsers cannot set Authorization or X-QWP-* upgrade headers. QuestDB accepts
+ * browser upgrades when Origin and Host have the same authority, so serve the
+ * app from the QuestDB origin or route QWP through a same-origin reverse proxy.
+ * When authentication is enabled, pass `sessionBootstrap` or call
+ * bootstrapQwpBrowserSession() first so the browser can attach `qdb_session`.
+ */
 export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
   /**
    * Authenticates over REST before every WebSocket connection attempt so the
@@ -484,13 +494,13 @@ function composeBrowserAbortSignals(
 }
 
 /**
- * Opens a QWP-capable browser WebSocket.
+ * Opens one QWP-capable browser WebSocket, walking `failoverUrls` as a session
+ * would. Unlike the sender's connections, it asks for the ingress SERVER_INFO
+ * frame only when `requestDurableAck` is set.
  *
- * Browsers cannot set Authorization or X-QWP-* upgrade headers. QuestDB accepts
- * browser upgrades when Origin and Host have the same authority, so serve the
- * app from the QuestDB origin or route QWP through a same-origin reverse proxy.
- * When authentication is enabled, pass sessionBootstrap or call
- * bootstrapQwpBrowserSession first so the browser can attach qdb_session.
+ * @internal A raw connection with no session over it. The package root does
+ * not export it: the senders and connectQwpBrowserEgress() open their own
+ * connections. Tests use it to drive the upgrade directly.
  */
 export function connectQwpBrowserWebSocket(
   options: QwpBrowserWebSocketOptions &
@@ -507,7 +517,13 @@ export function connectQwpBrowserWebSocket(
   )();
 }
 
-/** Creates a stateful browser endpoint walker suitable for session reconnects. */
+/**
+ * Creates a stateful browser ingress endpoint walker suitable for session
+ * reconnects.
+ *
+ * @internal The connection factory behind createQwpBrowserSender(). The
+ * package root does not export it.
+ */
 export function createQwpBrowserConnectionFactory(
   options: QwpBrowserWebSocketOptions &
     Pick<

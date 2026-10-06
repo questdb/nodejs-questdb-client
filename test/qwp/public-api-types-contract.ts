@@ -281,6 +281,19 @@ export type NodeUdpMetrics = NodeRoot.QwpNodeUdpMetrics;
 // @ts-expect-error connectQwpNodeUdp is internal.
 export type NodeUdpFactory = typeof NodeRoot.connectQwpNodeUdp;
 
+// So are the raw connection helpers: the senders, the query sessions and the
+// pooled client open their own connections.
+// @ts-expect-error connectQwpNodeWebSocket is internal.
+export type NodeRawConnect = typeof NodeRoot.connectQwpNodeWebSocket;
+export type NodeConnectionFactory =
+  // @ts-expect-error createQwpNodeConnectionFactory is internal.
+  typeof NodeRoot.createQwpNodeConnectionFactory;
+// @ts-expect-error connectQwpBrowserWebSocket is internal.
+export type BrowserRawConnect = typeof BrowserRoot.connectQwpBrowserWebSocket;
+export type BrowserConnectionFactory =
+  // @ts-expect-error createQwpBrowserConnectionFactory is internal.
+  typeof BrowserRoot.createQwpBrowserConnectionFactory;
+
 // The sender's buffering options and the ingress session's delivery options
 // are part of each runtime's ingress options, not types of their own, and the
 // session options only an adapter sets are internal too.

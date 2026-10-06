@@ -1885,6 +1885,11 @@ internal, as in the other QuestDB clients. Configure orphan recovery with the
 `orphanScanIntervalMs`, observe it through `onOrphanDrainEvent`, and call
 `retryQwpNodeOrphanSlot()` to make a slot marked `.failed` eligible again.
 
+The raw WebSocket connectors and connection factories below the senders and query
+sessions are internal too, in both packages. The senders, `connectQwpNodeEgress()`,
+`connectQwpBrowserEgress()` and the pooled clients open and reconnect their own
+connections from the same endpoint options.
+
 `parseQwpNodeClientConfig()` is the low-level helper for turning a `ws::`/`wss::`
 connect string into the typed options object `createQwpNodeClient()` takes.
 

@@ -4,7 +4,8 @@
  */
 // The shared protocol barrel plus the browser runtime adapter. The adapter is
 // re-exported by name rather than with `export *` because qwp.ts also exports
-// the internal ingress-session factory behind its senders.
+// internal helpers: the ingress-session and connection factories behind its
+// senders and a raw WebSocket connector for tests.
 export * from "../../client-core/src/qwp";
 export {
   QwpBrowserSessionBootstrapError,
@@ -12,9 +13,7 @@ export {
   connectQwpBrowserClient,
   connectQwpBrowserEgress,
   connectQwpBrowserSender,
-  connectQwpBrowserWebSocket,
   createQwpBrowserClient,
-  createQwpBrowserConnectionFactory,
   createQwpBrowserSender,
 } from "./qwp";
 export type {

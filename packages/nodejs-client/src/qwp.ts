@@ -1,7 +1,8 @@
 /**
  * Node.js WebSocket, UDP and store-and-forward adapter over the shared QWP
  * protocol/session APIs. The package root (index.ts) re-exports its public
- * names; connectQwpNodeIngress() is exported for the senders and tests only.
+ * names; connectQwpNodeIngress() is exported for the senders and tests, and
+ * connectQwpNodeWebSocket() for tests only.
  */
 export * from "../../client-core/src/qwp";
 
@@ -476,8 +477,13 @@ function egressTransportOptions(
 }
 
 /**
- * Opens a Node QWP WebSocket with the upgrade headers required by QuestDB.
- * Set `requestDurableAck` only for an ingress (`/write/v4`) endpoint.
+ * Opens one Node QWP WebSocket with the upgrade headers required by QuestDB,
+ * walking `failoverUrls` as a session would. Set `requestDurableAck` only for
+ * an ingress (`/write/v4`) endpoint.
+ *
+ * @internal A raw connection with no session over it. The package root does
+ * not export it: the senders and connectQwpNodeEgress() open their own
+ * connections. Tests use it to drive the upgrade directly.
  */
 export function connectQwpNodeWebSocket(
   options: QwpNodeWebSocketOptions &
@@ -487,14 +493,7 @@ export function connectQwpNodeWebSocket(
 }
 
 /** Creates a stateful Node endpoint walker suitable for session reconnects. */
-export function createQwpNodeConnectionFactory(
-  options: QwpNodeWebSocketOptions &
-    Pick<QwpNodeIngressOptions, "requestDurableAck">,
-): QwpConnectionFactory {
-  return createQwpNodeConnectionFactoryInternal(options);
-}
-
-function createQwpNodeConnectionFactoryInternal(
+function createQwpNodeConnectionFactory(
   options: QwpNodeWebSocketOptions &
     Pick<QwpNodeIngressOptions, "requestDurableAck">,
   healthTracker?: QwpFailoverHealthTracker,
@@ -880,7 +879,7 @@ async function connectQwpNodeIngressInternal(
           connectionOptions.senderId !== undefined,
         )
       : undefined;
-  const connectionFactory = createQwpNodeConnectionFactoryInternal(
+  const connectionFactory = createQwpNodeConnectionFactory(
     connectionOptions,
     healthTracker,
     startOrphanDrainer,

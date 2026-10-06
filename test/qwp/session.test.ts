@@ -5,16 +5,13 @@ import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
   connectQwpBrowserEgress,
-  connectQwpBrowserWebSocket,
   createQwpBrowserClient,
-  createQwpBrowserConnectionFactory,
   createQwpBrowserSender,
   QwpBrowserSessionBootstrapError,
   QwpWebSocketLike,
 } from "../../packages/browser-client/src";
 import {
   connectQwpNodeEgress,
-  connectQwpNodeWebSocket,
   QwpDurableAckUnavailableError,
   QwpFailoverError,
   QwpRoleMismatchError,
@@ -57,8 +54,14 @@ import {
   QwpSymbolDictionary,
   readQwpVarintNumber,
 } from "../../packages/client-core/src/qwp";
-// Both are internal: neither package root exports the ingress session.
-import { connectQwpBrowserIngress } from "../../packages/browser-client/src/qwp";
+// All internal: neither package root exports the ingress session or a raw
+// connection helper.
+import {
+  connectQwpBrowserIngress,
+  connectQwpBrowserWebSocket,
+  createQwpBrowserConnectionFactory,
+} from "../../packages/browser-client/src/qwp";
+import { connectQwpNodeWebSocket } from "../../packages/nodejs-client/src/qwp";
 import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { openQwpWebSocket } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";

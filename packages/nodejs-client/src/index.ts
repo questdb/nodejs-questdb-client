@@ -23,7 +23,8 @@ export type { Logger } from "./logging";
 export { bigintToTwosComplementBytes } from "./utils";
 // QWP: the shared protocol barrel plus the Node.js runtime adapter. The adapter
 // is re-exported by name rather than with `export *` because qwp.ts also
-// exports the internal ingress-session factory behind its senders.
+// exports internal helpers: the ingress-session factory behind its senders and
+// a raw WebSocket connector for tests.
 export * from "../../client-core/src/qwp";
 export {
   QWP_ORPHAN_DRAIN_EVENT_KIND,
@@ -48,9 +49,7 @@ export {
   connectQwpNodeEgress,
   connectQwpNodeSender,
   connectQwpNodeUdpSender,
-  connectQwpNodeWebSocket,
   createQwpNodeClient,
-  createQwpNodeConnectionFactory,
   createQwpNodeSender,
   createQwpNodeUdpSender,
   parseQwpNodeClientConfig,

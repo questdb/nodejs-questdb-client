@@ -44,7 +44,6 @@ import {
   connectQwpNodeClient,
   connectQwpNodeSender,
   connectQwpNodeUdpSender,
-  connectQwpNodeWebSocket,
   parseQwpNodeClientConfig,
   retryQwpNodeOrphanSlot,
 } from "../../packages/nodejs-client/src";
@@ -60,7 +59,6 @@ import type {
   QwpNodeWebSocketOptions,
 } from "../../packages/nodejs-client/src";
 import type {
-  QwpBinaryConnection,
   QwpClient,
   QwpClientPoolOptions,
   QwpEgressQueryOptions,
@@ -115,10 +113,6 @@ const nodeEgressSignature: (
   options: QwpNodeEgressOptions,
   signal?: AbortSignal,
 ) => Promise<QwpEgressSession> = connectQwpNodeEgress;
-
-const nodeWebSocketSignature: (
-  options: QwpNodeWebSocketOptions,
-) => Promise<QwpBinaryConnection> = connectQwpNodeWebSocket;
 
 const nodeWebSocketOptionsContract: QwpNodeWebSocketOptions = {
   url: "wss://node-1.example/write/v4",
@@ -543,7 +537,6 @@ void browserClientSignature;
 void nodeSenderSignature;
 void nodeUdpSenderSignature;
 void nodeEgressSignature;
-void nodeWebSocketSignature;
 void nodeWebSocketOptionsContract;
 void nodeClientSignature;
 void poolOptionsContract;

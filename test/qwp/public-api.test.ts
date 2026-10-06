@@ -179,9 +179,7 @@ const browserRuntimeContract = [
   "connectQwpBrowserClient",
   "connectQwpBrowserEgress",
   "connectQwpBrowserSender",
-  "connectQwpBrowserWebSocket",
   "createQwpBrowserClient",
-  "createQwpBrowserConnectionFactory",
   "createQwpBrowserSender",
 ] as const;
 
@@ -209,9 +207,7 @@ const nodeRuntimeContract = [
   "connectQwpNodeEgress",
   "connectQwpNodeSender",
   "connectQwpNodeUdpSender",
-  "connectQwpNodeWebSocket",
   "createQwpNodeClient",
-  "createQwpNodeConnectionFactory",
   "createQwpNodeSender",
   "createQwpNodeUdpSender",
   "parseQwpNodeClientConfig",
@@ -320,6 +316,24 @@ describe("QWP public API contract", () => {
       "scanQwpNodeOrphanSlots",
     ]) {
       expect(node, `${name} must stay internal`).not.toHaveProperty(name);
+    }
+  });
+
+  it("keeps the raw connection helpers internal", () => {
+    // Applications connect through a sender, a query session or the pooled
+    // client, each of which opens its own connections. The raw WebSocket
+    // connectors and endpoint walkers below them are internal, so re-exposing
+    // them has to remove this test rather than merely extend the contract
+    // above.
+    for (const api of [shared, browser, node]) {
+      for (const name of [
+        "connectQwpBrowserWebSocket",
+        "connectQwpNodeWebSocket",
+        "createQwpBrowserConnectionFactory",
+        "createQwpNodeConnectionFactory",
+      ]) {
+        expect(api, `${name} must stay internal`).not.toHaveProperty(name);
+      }
     }
   });
 

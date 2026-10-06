@@ -16,7 +16,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeClient,
   connectQwpNodeEgress,
-  connectQwpNodeWebSocket,
   createQwpNodeSender,
   encodeQwpFrame,
   encodeQwpIngressFrame,
@@ -42,8 +41,12 @@ import {
   type QwpSenderError,
   writeQwpVarint,
 } from "../../packages/nodejs-client/src";
-// Internal: the package root does not export the ingress-session factory.
-import { connectQwpNodeIngress } from "../../packages/nodejs-client/src/qwp";
+// Internal: the package root exports neither the ingress-session factory nor
+// the raw WebSocket connector.
+import {
+  connectQwpNodeIngress,
+  connectQwpNodeWebSocket,
+} from "../../packages/nodejs-client/src/qwp";
 import { publishAndWait } from "./publish-and-wait";
 
 function serverInfo(

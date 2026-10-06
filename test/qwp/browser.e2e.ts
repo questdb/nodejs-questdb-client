@@ -261,14 +261,20 @@ describe("QWP in a real browser", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const connection = await qwp.createQwpBrowserConnectionFactory({
+          // The raw connection helpers are internal, so this goes through the
+          // public sender. Its connect() resolves only once SERVER_INFO has
+          // confirmed durable ACK, and the auto-flush budget it then reports
+          // is derived from that frame's batch cap.
+          const sender = await qwp.connectQwpBrowserSender({
             url,
             requestDurableAck: true,
-          })();
+            autoFlushBytes: 4 * 1024 * 1024,
+          });
           try {
-            return connection.handshake;
+            const { connected, effectiveAutoFlushBytes } = sender.metrics;
+            return { connected, effectiveAutoFlushBytes };
           } finally {
-            await connection.close();
+            await sender.close();
           }
         },
         {
@@ -284,9 +290,9 @@ describe("QWP in a real browser", () => {
         ),
       ).toBe("v1");
       expect(result).toEqual({
-        qwpVersion: 1,
-        durableAckEnabled: true,
-        maxBatchSizeBytes: 1_048_576,
+        connected: true,
+        // 90% of the advertised 1 MiB cap: the sender's safe frame budget.
+        effectiveAutoFlushBytes: Math.floor((1_048_576 * 9) / 10),
       });
     } finally {
       await page.close();
@@ -321,20 +327,22 @@ describe("QWP in a real browser", () => {
     const page = await browser.newPage();
     try {
       await page.goto(assetUrl);
-      const handshake = await page.evaluate(
+      const connected = await page.evaluate(
         async ({ moduleUrl, url, failoverUrls }) => {
           const importModule = new Function("url", "return import(url)") as (
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const connection = await qwp.createQwpBrowserConnectionFactory({
+          // A sender's first connect is one fail-fast sweep over the
+          // endpoints, so it resolves only if the sweep walks past the refusal.
+          const sender = await qwp.connectQwpBrowserSender({
             url,
             failoverUrls,
-          })();
+          });
           try {
-            return connection.handshake;
+            return sender.metrics.connected;
           } finally {
-            await connection.close();
+            await sender.close();
           }
         },
         {
@@ -346,7 +354,7 @@ describe("QWP in a real browser", () => {
 
       // The sweep reached the secondary rather than stopping at the refusal.
       expect(healthyConnections).toBe(1);
-      expect(handshake).toMatchObject({ qwpVersion: 1 });
+      expect(connected).toBe(true);
     } finally {
       await page.close();
       await closeWebSocketServer(healthy);
@@ -463,14 +471,16 @@ describe("QWP in a real browser", () => {
             url: string,
           ) => Promise<Record<string, any>>;
           const qwp = await importModule(moduleUrl);
-          const connection = await qwp.createQwpBrowserConnectionFactory({
+          const sender = await qwp.connectQwpBrowserSender({
             url,
             ingressNegotiationTimeoutMs: 10,
-          })();
+            autoFlushBytes: 4 * 1024 * 1024,
+          });
           try {
-            return connection.handshake;
+            const { connected, effectiveAutoFlushBytes } = sender.metrics;
+            return { connected, effectiveAutoFlushBytes };
           } finally {
-            await connection.close();
+            await sender.close();
           }
         },
         {
@@ -479,7 +489,12 @@ describe("QWP in a real browser", () => {
         },
       );
 
-      expect(result).toEqual({ qwpVersion: 1 });
+      // Connected without the frame, and with no server cap to narrow the
+      // configured auto-flush budget.
+      expect(result).toEqual({
+        connected: true,
+        effectiveAutoFlushBytes: 4 * 1024 * 1024,
+      });
     } finally {
       await page.close();
       await closeWebSocketServer(server);
