@@ -598,6 +598,24 @@ describe("QWP unified Node client configuration", () => {
     ).toBe("async");
   });
 
+  it("lets a typed lazyConnect override the connect string", () => {
+    // The overrides take the client's own sections, lazyConnect included, and
+    // a typed value wins over the key in either direction.
+    const typed = parseQwpNodeClientConfig("ws::addr=localhost;", {
+      lazyConnect: true,
+    });
+    expect(typed.lazyConnect).toBe(true);
+    expect(typed.ingress?.initialConnectMode).toBe("async");
+    expect(typed.pool?.queryPoolMin).toBe(0);
+
+    const disabled = parseQwpNodeClientConfig(
+      "ws::addr=localhost;lazy_connect=on;",
+      { lazyConnect: false },
+    );
+    expect(disabled.lazyConnect).toBe(false);
+    expect(disabled.ingress?.initialConnectMode).toBe("off");
+  });
+
   it("leaves lazy_connect to the pooled client", async () => {
     // The Java QuestDB facade and the Rust and Python pools apply
     // lazy_connect; their standalone senders accept it and ignore it.
