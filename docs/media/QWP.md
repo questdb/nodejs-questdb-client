@@ -667,7 +667,8 @@ const sender = await connectQwpNodeSender(
     autoFlushRows: 5_000,
     autoFlushBytes: 4 * 1024 * 1024,
     autoFlushIntervalMs: 1_000,
-    encode: { symbolDictionary: "delta", gorilla: true },
+    symbolDictionary: "delta",
+    gorilla: true,
   },
 );
 
@@ -1681,12 +1682,13 @@ const db = await connectQwpBrowserClient({
 });
 ```
 
-`url`, `failoverUrls`, and `sessionBootstrap` belong to `cluster` in this
-unified form and are rejected if repeated under `ingress` or `egress`.
-Side-specific timeouts, WebSocket factories, durable-ACK settings, routing, and
-compression remain available as explicit overrides. The original split object
-form with complete `ingress` and `egress` trees remains supported for advanced
-cases that intentionally connect the two sides differently.
+`url`, `failoverUrls`, and `sessionBootstrap` belong to `cluster` and are
+rejected if repeated under `ingress` or `egress`. Side-specific timeouts,
+WebSocket factories, durable-ACK settings, routing, and compression remain
+available as explicit overrides. An application that must connect the two sides
+differently can pass its own `createSender` and `createQuerySession` factories
+to the `QwpClient` constructor, or use `connectQwpBrowserSender()` and
+`connectQwpBrowserEgress()` directly.
 
 `createQwpNodeClient()` and `createQwpBrowserClient()` build the pooled facade
 without contacting the server, leaving the first connect to `connect()` or to the
