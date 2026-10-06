@@ -117,7 +117,7 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 | `close_flush_timeout_millis`            | integer ms       | `5000`    | Bound on `close()`'s ACK drain. `0` or negative is a fast close.       |
 | `transaction`                           | `on`, `off`      | off       | Group each flush into a per-table transaction.                         |
 | `request_durable_ack`                   | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.         |
-| `durable_ack_keepalive_interval_millis` | integer ms       | —         | Poll interval for durable-ACK progress.                                |
+| `durable_ack_keepalive_interval_millis` | integer ms       | `200`     | Durable-ACK poll interval; ignored unless `request_durable_ack=on`.    |
 | `max_name_len`                          | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                  |
 | `sender_id`                             | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.    |
 | `max_frame_rejections`                  | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation. |
@@ -885,8 +885,9 @@ acknowledgement resolves all covered waits and callers may wait for different
 sequences concurrently. When durable ACK is being tracked, the
 acknowledged watermark advances only after QuestDB reports durable progress;
 otherwise it follows ordinary protocol OK responses. Tracking needs both halves:
-the caller has to ask for durable progress (`requestDurableAck`, or
-`durableAckKeepaliveMs` directly) and the server has to confirm it. Negotiation
+the caller has to ask for durable progress with `requestDurableAck` (as in the
+Java and Rust clients, `durableAckKeepaliveMs` is ignored without it rather than
+requesting it on its own), and the server has to confirm it. Negotiation
 alone is not enough, because nothing polls for durable progress that was never
 requested — a server that offers the capability unasked leaves the watermark on
 ordinary OK ACKs rather than stalling it. `waitForAcknowledged()` resolves like
