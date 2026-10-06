@@ -847,8 +847,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   readonly ready: Promise<QwpServerInfoMessage>;
 
   /**
-   * @internal Query sessions come from connectQwpNodeEgress(),
-   * connectQwpBrowserEgress() and the pooled clients.
+   * Query sessions come from connectQwpNodeEgress(), connectQwpBrowserEgress()
+   * and the pooled clients; this constructor takes a token only the internal
+   * factories hold.
+   *
+   * @internal
+   * @hidden
    */
   constructor(
     token: typeof QWP_EGRESS_SESSION_CONSTRUCTOR,

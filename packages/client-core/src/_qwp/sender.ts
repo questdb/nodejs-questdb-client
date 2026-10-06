@@ -1085,7 +1085,13 @@ function ignoreResult(): void {}
 
 /** A reusable table-bound writer compiled from a QWP schema. */
 export class QwpTableWriter<Schema extends QwpWriterSchema> {
-  /** @internal Construct table writers with QwpSender.writer(). */
+  /**
+   * Construct table writers with QwpSender.writer(); this constructor takes a
+   * token only the sender holds.
+   *
+   * @internal
+   * @hidden
+   */
   constructor(
     token: typeof QWP_TABLE_WRITER_CONSTRUCTOR,
     readonly tableName: string,
@@ -1190,9 +1196,12 @@ export class QwpSender {
   private readonly connectAbort = new AbortController();
 
   /**
-   * @internal Obtain senders from the runtime factories, such as
-   * connectQwpNodeSender() or connectQwpBrowserSender(), or from a pooled
-   * client's borrowSender().
+   * Obtain senders from the runtime factories, such as connectQwpNodeSender()
+   * or connectQwpBrowserSender(), or from a pooled client's borrowSender();
+   * this constructor takes a token only the internal factory holds.
+   *
+   * @internal
+   * @hidden
    */
   constructor(
     token: typeof QWP_SENDER_CONSTRUCTOR,
