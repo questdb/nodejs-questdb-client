@@ -32,15 +32,13 @@ import {
   connectQwpBrowserSender,
 } from "../../packages/browser-client/src";
 import type {
-  QwpBrowserClusterOptions,
   QwpBrowserClientEgressOptions,
   QwpBrowserClientIngressOptions,
   QwpBrowserClientOptions,
+  QwpBrowserIngressOptions,
   QwpBrowserSessionBootstrapOptions,
   QwpBrowserSessionBootstrapResult,
   QwpBrowserEgressOptions,
-  QwpBrowserSplitClientOptions,
-  QwpBrowserUnifiedClientOptions,
   QwpBrowserWebSocketOptions,
 } from "../../packages/browser-client/src";
 import {
@@ -90,7 +88,7 @@ import type {
 // signature fails compilation even though TypeScript types do not exist at
 // runtime.
 const browserSenderSignature: (
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
   senderOptions?: QwpSenderOptions,
   sessionOptions?: QwpIngressSessionOptions,
 ) => Promise<QwpSender> = connectQwpBrowserSender;
@@ -228,7 +226,7 @@ const browserEgressOptionsContract: QwpBrowserEgressOptions = {
   maxBatchRows: 512,
 };
 
-const browserClusterOptionsContract: QwpBrowserClusterOptions = {
+const browserClusterOptionsContract: QwpBrowserWebSocketOptions = {
   url: "wss://node-1.example/qdb",
   failoverUrls: ["wss://node-2.example/qdb"],
   connectTimeoutMs: 5_000,
@@ -249,21 +247,35 @@ const browserEgressOverridesContract: QwpBrowserClientEgressOptions = {
   maxBatchRows: 512,
 };
 
-const browserUnifiedClientContract: QwpBrowserUnifiedClientOptions = {
+const browserClientOptionsContract: QwpBrowserClientOptions = {
   cluster: browserClusterOptionsContract,
   ingress: browserIngressOverridesContract,
   egress: browserEgressOverridesContract,
 };
 
-const browserSplitClientContract: QwpBrowserSplitClientOptions = {
-  ingress: { url: "wss://node-1.example/write/v4" },
-  egress: { url: "wss://node-1.example/read/v1" },
+// Durable ACK is negotiated on /write/v4 only, so it is not a shared or an
+// egress option on either runtime.
+const browserEgressDurableAckContract: QwpBrowserEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  // @ts-expect-error requestDurableAck is ingress-only.
+  requestDurableAck: true,
 };
 
-const browserClientOptionsContracts: readonly QwpBrowserClientOptions[] = [
-  browserUnifiedClientContract,
-  browserSplitClientContract,
-];
+const nodeEgressDurableAckContract: QwpNodeEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  // @ts-expect-error requestDurableAck is ingress-only.
+  requestDurableAck: true,
+};
+
+const nodeClientConfigOptionsContract: QwpNodeClientConfigOptions = {
+  webSocket: {
+    clientId: "typescript/contract",
+    // @ts-expect-error requestDurableAck has its own ingress section.
+    requestDurableAck: true,
+  },
+  ingress: { requestDurableAck: true },
+  egress: { target: "replica", compression: "zstd" },
+};
 
 const nodeEgressOptionsContract: QwpNodeEgressOptions = {
   url: "wss://node-1.example/read/v1",
@@ -500,6 +512,10 @@ void egressSessionOptionsContract;
 void fixedConnectionIngressContract;
 void fixedConnectionEgressContract;
 void browserEgressOptionsContract;
+void browserClientOptionsContract;
+void browserEgressDurableAckContract;
+void nodeEgressDurableAckContract;
+void nodeClientConfigOptionsContract;
 void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
 void senderSequenceContract;

@@ -36,10 +36,7 @@ import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
 } from "./_internal/timer-bounds";
-import {
-  priorQwpSenderErrorDeliveries,
-  QwpNotificationDispatcher,
-} from "./_internal/notification-dispatcher";
+import { QwpNotificationDispatcher } from "./_internal/notification-dispatcher";
 import { QWP_FLAGS_OFFSET } from "./_internal/frame-flags";
 import { safelyInvoke } from "./_internal/safe-callback";
 import {
@@ -234,13 +231,6 @@ export interface QwpIngressSessionOptions {
    * reaching memoryReplayMaxBytes. Defaults to 30 seconds.
    */
   memoryReplayAppendDeadlineMs?: number;
-  /** @internal Node adapter hook for persistent store-and-forward. */
-  replayStore?: QwpIngressReplayStore;
-  /**
-   * @internal Starts memory or persistent replay without waiting for a
-   * server. Implied by initialConnectMode `"async"`.
-   */
-  backgroundStoreAndForward?: boolean;
   /**
    * Startup policy when no server is reachable; the typed spelling of the
    * `initial_connect_retry` configuration-string key.
@@ -261,18 +251,6 @@ export interface QwpIngressSessionOptions {
    * `reconnect: false`.
    */
   initialConnectMode?: QwpInitialConnectMode;
-  /** @internal Orphan sessions may quarantine persistent catch-up cap gaps. */
-  orphanStoreAndForward?: boolean;
-  /**
-   * @internal Consecutive durable-ACK gap budget retained for orphan SF.
-   * Not capped at the host timer ceiling: compared against elapsed time only.
-   */
-  orphanDurableAckMismatchMaxDurationMs?: number;
-  /**
-   * @internal Minimum cap-gap dwell before an orphan can be quarantined.
-   * Not capped at the host timer ceiling: compared against elapsed time only.
-   */
-  catchUpCapGapMinEscalationWindowMs?: number;
   /**
    * Optional local ingress frame cap. Browsers cannot read WebSocket upgrade
    * headers, so browser applications should set this to the server's configured
@@ -316,6 +294,42 @@ export interface QwpIngressSessionOptions {
    * that times out is reported only to its caller.
    */
   onError?: (event: QwpIngressErrorEvent) => void;
+}
+
+/**
+ * @internal Session options only a runtime adapter sets.
+ *
+ * Neither package root exports this interface, so the published
+ * QwpIngressSessionOptions carry none of these handoffs.
+ */
+export interface QwpIngressSessionInternalOptions
+  extends QwpIngressSessionOptions {
+  /** Node adapter hook for persistent store-and-forward. */
+  replayStore?: QwpIngressReplayStore;
+  /**
+   * Starts memory or persistent replay without waiting for a server. Implied
+   * by initialConnectMode `"async"`.
+   */
+  backgroundStoreAndForward?: boolean;
+  /** Orphan sessions may quarantine persistent catch-up cap gaps. */
+  orphanStoreAndForward?: boolean;
+  /**
+   * Consecutive durable-ACK gap budget retained for orphan SF.
+   * Not capped at the host timer ceiling: compared against elapsed time only.
+   */
+  orphanDurableAckMismatchMaxDurationMs?: number;
+  /**
+   * Minimum cap-gap dwell before an orphan can be quarantined.
+   * Not capped at the host timer ceiling: compared against elapsed time only.
+   */
+  catchUpCapGapMinEscalationWindowMs?: number;
+  /**
+   * Counts onSenderError deliveries made before this session existed, so its
+   * metrics include them. Node store-and-forward recovery reports abandoned or
+   * quarantined journal bytes while the session is still being built, so those
+   * deliveries cannot pass through the inbox the session owns.
+   */
+  priorSenderErrorDeliveries?: () => number;
 }
 
 export const QWP_INGRESS_PROGRESS_KIND = {
@@ -471,7 +485,7 @@ export class QwpBatchTooLargeError extends RangeError {
 }
 
 function validateIngressSessionOptions(
-  options: QwpIngressSessionOptions,
+  options: QwpIngressSessionInternalOptions,
 ): void {
   validateQwpIngressReconnectBackoffs(options.reconnect);
   validateQwpInitialConnectMode(options.initialConnectMode);
@@ -633,7 +647,7 @@ export class QwpIngressSession {
 
   constructor(
     private readonly connection: QwpBinaryConnection,
-    private readonly options: QwpIngressSessionOptions = {},
+    private readonly options: QwpIngressSessionInternalOptions = {},
   ) {
     try {
       if (
@@ -708,7 +722,7 @@ export class QwpIngressSession {
 
   static async connect(
     factory: QwpConnectionFactory,
-    options: QwpIngressSessionOptions = {},
+    options: QwpIngressSessionInternalOptions = {},
     /**
      * Cancels a first connect that is still negotiating. The reconnect loop
      * owns its own controller, but the initial attempt bypasses it -- it is
@@ -892,9 +906,7 @@ export class QwpIngressSession {
       deliveredErrorNotifications:
         (transport?.deliveredErrorNotifications ?? 0) +
         (this.errorDispatcher?.metrics.delivered ?? 0) +
-        // Deliveries recovery made before this session existed. See
-        // QWP_PRIOR_SENDER_ERROR_DELIVERIES.
-        priorQwpSenderErrorDeliveries(this.options),
+        (this.options.priorSenderErrorDeliveries?.() ?? 0),
       droppedErrorNotifications:
         (transport?.droppedErrorNotifications ?? 0) +
         (this.errorDispatcher?.metrics.dropped ?? 0),

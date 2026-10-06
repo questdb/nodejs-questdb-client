@@ -3,10 +3,10 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QwpBinaryConnection,
   QwpConnectionFactory,
-  QwpEgressRoutingOptions,
   QwpFailoverAttempt,
   QwpFailoverError,
   QwpRoleMismatchError,
+  QwpRoutingOptions,
   QwpTarget,
   QwpUpgradeError,
 } from "../transport";
@@ -187,7 +187,7 @@ export interface QwpValidatedConnection {
   readonly serverZone?: string;
 }
 
-export interface QwpFailoverSelectionOptions extends QwpEgressRoutingOptions {
+export interface QwpFailoverSelectionOptions extends QwpRoutingOptions {
   /** @internal Reads protocol-level topology metadata when headers are hidden. */
   validateConnection?: (
     connection: QwpBinaryConnection,
@@ -202,7 +202,7 @@ export interface QwpFailoverSelectionOptions extends QwpEgressRoutingOptions {
 export function createQwpFailoverHealthTracker(
   preferredUrl: string | URL,
   failoverUrls: readonly (string | URL)[] | undefined,
-  options: QwpEgressRoutingOptions = {},
+  options: QwpRoutingOptions = {},
 ): QwpFailoverHealthTracker {
   return new QwpFailoverHealthTracker(
     preferredUrl,

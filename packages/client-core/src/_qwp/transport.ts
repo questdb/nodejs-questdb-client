@@ -489,16 +489,14 @@ export const QWP_TARGET = {
   REPLICA: "replica",
 } as const;
 
-/** Server role accepted by an egress connection. Defaults to `any`. */
+/** Server role a connection accepts, on ingress and egress. Defaults to `any`. */
 export type QwpTarget = (typeof QWP_TARGET)[keyof typeof QWP_TARGET];
 
-/** Browser-safe endpoint-routing controls used by QWP egress clients. */
 /**
- * Endpoint routing preferences. Named for egress, where they landed first, but
- * ingress ranks and validates its endpoints with the same machinery and honours
- * the same two keys.
+ * Browser-safe endpoint routing preferences. The ingress and egress options
+ * that include them rank and validate endpoints with the same machinery.
  */
-export interface QwpEgressRoutingOptions {
+export interface QwpRoutingOptions {
   /** Selects any readable node, a primary/standalone node, or a replica. */
   target?: QwpTarget;
   /** Opaque, case-insensitive preferred zone; cross-zone fallback stays enabled. */

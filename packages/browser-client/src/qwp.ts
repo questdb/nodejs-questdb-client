@@ -33,7 +33,7 @@ import {
   QwpBinaryConnection,
   QwpConnectionFactory,
   QwpDurableAckUnavailableError,
-  QwpEgressRoutingOptions,
+  QwpRoutingOptions,
   QwpSendClosedError,
   QWP_UPGRADE_ERROR_KIND,
   QwpUpgradeError,
@@ -341,7 +341,26 @@ export async function bootstrapQwpBrowserSession(
   );
 }
 
+/** Browser WebSocket transport and authentication, shared by both sides. */
 export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
+  /**
+   * Authenticates over REST before every WebSocket connection attempt so the
+   * browser can attach QuestDB's HttpOnly session cookies to the upgrade.
+   * Without a `url`, it targets `/exec` beside the endpoint being connected.
+   */
+  sessionBootstrap?: QwpBrowserSessionBootstrapConfig;
+  /**
+   * Test or framework hook; defaults to the browser's global WebSocket. Under
+   * a client's `cluster` it is shared, and either side may override it.
+   */
+  webSocketFactory?: (
+    url: string | URL,
+    protocols?: string | string[],
+  ) => QwpWebSocketLike;
+}
+
+/** Browser WebSocket options plus the ingress-only negotiation controls. */
+export interface QwpBrowserIngressOptions extends QwpBrowserWebSocketOptions {
   /**
    * Requests durable ingress ACKs through browser-visible WebSocket
    * subprotocol negotiation.
@@ -354,22 +373,12 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
    * a `RangeError`.
    */
   ingressNegotiationTimeoutMs?: number;
-  /**
-   * Authenticates over REST before every WebSocket connection attempt so the
-   * browser can attach QuestDB's HttpOnly session cookies to the upgrade.
-   */
-  sessionBootstrap?: QwpBrowserSessionBootstrapConfig;
-  /** Test or framework hook; defaults to the browser's global WebSocket. */
-  webSocketFactory?: (
-    url: string | URL,
-    protocols?: string | string[],
-  ) => QwpWebSocketLike;
 }
 
 /** Browser WebSocket options plus protocol-level egress topology routing. */
 export interface QwpBrowserEgressOptions
   extends QwpBrowserWebSocketOptions,
-    QwpEgressRoutingOptions {
+    QwpRoutingOptions {
   /**
    * Requests Zstd-compressed result batches through browser-visible URL
    * negotiation. Defaults to raw for compatibility.
@@ -385,24 +394,10 @@ export interface QwpBrowserEgressOptions
   maxBatchRows?: number;
 }
 
-/** Shared browser transport and authentication for one QWP cluster. */
-export interface QwpBrowserClusterOptions extends QwpWebSocketConnectOptions {
-  /**
-   * Authenticates before every connection attempt. When `url` is omitted from
-   * this bootstrap, its REST endpoint follows the active cluster endpoint.
-   */
-  sessionBootstrap?: QwpBrowserSessionBootstrapConfig;
-  /** Shared test or framework hook; either side may override it. */
-  webSocketFactory?: (
-    url: string | URL,
-    protocols?: string | string[],
-  ) => QwpWebSocketLike;
-}
-
-/** Ingress-only overrides for a unified browser cluster. */
+/** Ingress-only overrides of a browser client's shared cluster. */
 export type QwpBrowserClientIngressOptions = Partial<
   Pick<
-    QwpBrowserWebSocketOptions,
+    QwpBrowserIngressOptions,
     | "protocols"
     | "connectTimeoutMs"
     | "sendTimeoutMs"
@@ -413,7 +408,7 @@ export type QwpBrowserClientIngressOptions = Partial<
   >
 >;
 
-/** Egress-only overrides for a unified browser cluster. */
+/** Egress-only overrides of a browser client's shared cluster. */
 export type QwpBrowserClientEgressOptions = Partial<
   Pick<
     QwpBrowserEgressOptions,
@@ -430,39 +425,31 @@ export type QwpBrowserClientEgressOptions = Partial<
   >
 >;
 
-interface QwpBrowserClientBaseOptions {
+/**
+ * Browser configuration for a combined pooled QWP ingress/egress client. One
+ * endpoint list and authentication bootstrap are shared, while side-specific
+ * protocol options remain explicit.
+ */
+export interface QwpBrowserClientOptions {
+  /**
+   * Endpoints, timeouts and authentication shared by both sides. Each URL may
+   * be an origin, a reverse-proxy base path, or an existing `/write/v4` or
+   * `/read/v1` endpoint; each side derives its own route from it.
+   */
+  cluster: QwpBrowserWebSocketOptions;
+  /** `url`, `failoverUrls` and `sessionBootstrap` belong to `cluster`. */
+  ingress?: QwpBrowserClientIngressOptions;
+  /** `url`, `failoverUrls` and `sessionBootstrap` belong to `cluster`. */
+  egress?: QwpBrowserClientEgressOptions;
   sender?: QwpSenderOptions;
   ingressSession?: QwpIngressSessionOptions;
   egressSession?: QwpEgressSessionOptions;
   pool?: QwpClientPoolOptions;
 }
 
-/**
- * Recommended combined-browser form. One endpoint list and authentication
- * bootstrap are shared while side-specific protocol options remain explicit.
- */
-export interface QwpBrowserUnifiedClientOptions
-  extends QwpBrowserClientBaseOptions {
-  cluster: QwpBrowserClusterOptions;
-  ingress?: QwpBrowserClientIngressOptions;
-  egress?: QwpBrowserClientEgressOptions;
-}
-
-/** Backwards-compatible form with completely independent connection trees. */
-export interface QwpBrowserSplitClientOptions
-  extends QwpBrowserClientBaseOptions {
-  cluster?: never;
-  ingress: QwpBrowserWebSocketOptions;
-  egress: QwpBrowserEgressOptions;
-}
-
-/** Browser configuration for a combined pooled QWP ingress/egress client. */
-export type QwpBrowserClientOptions =
-  | QwpBrowserUnifiedClientOptions
-  | QwpBrowserSplitClientOptions;
-
-interface QwpResolvedBrowserClientOptions extends QwpBrowserClientBaseOptions {
-  ingress: QwpBrowserWebSocketOptions;
+interface QwpResolvedBrowserClientOptions
+  extends Omit<QwpBrowserClientOptions, "cluster" | "ingress" | "egress"> {
+  ingress: QwpBrowserIngressOptions;
   egress: QwpBrowserEgressOptions;
 }
 
@@ -503,7 +490,7 @@ function composeBrowserAbortSignals(
  * bootstrapQwpBrowserSession first so the browser can attach qdb_session.
  */
 export function connectQwpBrowserWebSocket(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
 ): Promise<QwpBinaryConnection> {
   return createQwpFailoverConnectionFactory(
     options.url,
@@ -515,7 +502,7 @@ export function connectQwpBrowserWebSocket(
 
 /** Creates a stateful browser endpoint walker suitable for session reconnects. */
 export function createQwpBrowserConnectionFactory(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
 ): QwpConnectionFactory {
   return createQwpFailoverConnectionFactory(
     options.url,
@@ -663,7 +650,7 @@ function browserNegotiationUrl(
  * the SERVER_INFO frame, so this leaves `durableAckEnabled` unset.
  */
 function browserIngressHandshake(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
   endpoint: string | URL,
   selectedProtocol: string | undefined,
 ): QwpBinaryConnection["handshake"] {
@@ -677,7 +664,7 @@ function browserIngressHandshake(
 }
 
 function connectQwpBrowserRawEndpoint(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
   endpoint: string | URL,
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
@@ -835,7 +822,7 @@ async function applyQwpBrowserIngressHandshake(
 }
 
 function ingressNegotiationTimeoutMs(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
 ): number {
   const timeoutMs = options.ingressNegotiationTimeoutMs ?? 250;
   if (
@@ -856,7 +843,7 @@ function ingressNegotiationTimeoutMs(
 }
 
 async function connectQwpBrowserIngressEndpoint(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
   endpoint: string | URL,
   signal?: AbortSignal,
 ): Promise<QwpBinaryConnection> {
@@ -936,7 +923,7 @@ function connectQwpBrowserEgressEndpoint(
  * Java, Rust and Python clients.
  */
 export async function connectQwpBrowserIngress(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
   sessionOptions: QwpIngressSessionOptions = {},
   /** Cancels a first connect still negotiating; see QwpIngressSession.connect. */
   signal?: AbortSignal,
@@ -967,7 +954,7 @@ export async function connectQwpBrowserIngress(
  * Call connect(), or let the first flush connect lazily.
  */
 export function createQwpBrowserSender(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
   senderOptions: QwpSenderOptions = {},
   sessionOptions: QwpIngressSessionOptions = {},
 ): QwpSender {
@@ -979,7 +966,7 @@ export function createQwpBrowserSender(
 
 /** Opens a browser QWP connection and returns a fluent sender. */
 export async function connectQwpBrowserSender(
-  options: QwpBrowserWebSocketOptions,
+  options: QwpBrowserIngressOptions,
   senderOptions: QwpSenderOptions = {},
   sessionOptions: QwpIngressSessionOptions = {},
 ): Promise<QwpSender> {
@@ -1066,53 +1053,43 @@ function browserClusterEndpoint(
 function resolveQwpBrowserClientOptions(
   options: QwpBrowserClientOptions,
 ): QwpResolvedBrowserClientOptions {
-  if ("cluster" in options && options.cluster !== undefined) {
-    assertNoBrowserClusterOptionConflicts("ingress", options.ingress);
-    assertNoBrowserClusterOptionConflicts("egress", options.egress);
-    const { url, failoverUrls, ...shared } = options.cluster;
-    const ingress: QwpBrowserWebSocketOptions = {
-      ...shared,
-      ...options.ingress,
-      url: browserClusterEndpoint(url, "write/v4"),
-      failoverUrls: failoverUrls?.map((endpoint) =>
-        browserClusterEndpoint(endpoint, "write/v4"),
-      ),
-    };
-    const egress: QwpBrowserEgressOptions = {
-      ...shared,
-      ...options.egress,
-      url: browserClusterEndpoint(url, "read/v1"),
-      failoverUrls: failoverUrls?.map((endpoint) =>
-        browserClusterEndpoint(endpoint, "read/v1"),
-      ),
-    };
-    // browserClusterEndpoint() checks each URL on its own; only comparing them
-    // catches a cleartext entry under a `wss` cluster, which a failover sweep
-    // would hand this client's session credentials and rows.
-    assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
-    assertUniformQwpEndpointScheme(egress.url, egress.failoverUrls);
-    return {
-      ingress,
-      egress,
-      sender: options.sender,
-      ingressSession: options.ingressSession,
-      egressSession: options.egressSession,
-      pool: options.pool,
-    };
-  }
-  if (!options.ingress || !options.egress) {
+  // The type requires it; this names it for a JavaScript caller.
+  if (!options.cluster) {
     throw new TypeError(
-      "browser client configuration requires either cluster or both ingress and egress",
+      "browser client configuration requires cluster; ingress and egress hold side-specific overrides only",
     );
   }
-  const split = options as QwpBrowserSplitClientOptions;
+  assertNoBrowserClusterOptionConflicts("ingress", options.ingress);
+  assertNoBrowserClusterOptionConflicts("egress", options.egress);
+  const { url, failoverUrls, ...shared } = options.cluster;
+  const ingress: QwpBrowserIngressOptions = {
+    ...shared,
+    ...options.ingress,
+    url: browserClusterEndpoint(url, "write/v4"),
+    failoverUrls: failoverUrls?.map((endpoint) =>
+      browserClusterEndpoint(endpoint, "write/v4"),
+    ),
+  };
+  const egress: QwpBrowserEgressOptions = {
+    ...shared,
+    ...options.egress,
+    url: browserClusterEndpoint(url, "read/v1"),
+    failoverUrls: failoverUrls?.map((endpoint) =>
+      browserClusterEndpoint(endpoint, "read/v1"),
+    ),
+  };
+  // browserClusterEndpoint() checks each URL on its own; only comparing them
+  // catches a cleartext entry under a `wss` cluster, which a failover sweep
+  // would hand this client's session credentials and rows.
+  assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
+  assertUniformQwpEndpointScheme(egress.url, egress.failoverUrls);
   return {
-    ingress: split.ingress,
-    egress: split.egress,
-    sender: split.sender,
-    ingressSession: split.ingressSession,
-    egressSession: split.egressSession,
-    pool: split.pool,
+    ingress,
+    egress,
+    sender: options.sender,
+    ingressSession: options.ingressSession,
+    egressSession: options.egressSession,
+    pool: options.pool,
   };
 }
 

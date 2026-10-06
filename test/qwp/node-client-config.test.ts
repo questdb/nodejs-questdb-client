@@ -538,10 +538,12 @@ describe("QWP unified Node client configuration", () => {
       "ws::addr=localhost;lazy_connect=on;",
     );
     expect(memoryOptions.ingress.storeAndForward).toBeUndefined();
-    expect(memoryOptions.ingressSession).toMatchObject({
-      backgroundStoreAndForward: true,
-      initialConnectMode: "async",
-    });
+    // The async mode alone selects a background start, so the returned
+    // options carry no adapter-internal flag beside it.
+    expect(memoryOptions.ingressSession?.initialConnectMode).toBe("async");
+    expect(memoryOptions.ingressSession).not.toHaveProperty(
+      "backgroundStoreAndForward",
+    );
     const client = createQwpNodeClient({
       ingress: { url: "ws://localhost:9000/write/v4" },
       egress: { url: "ws://localhost:9000/read/v1" },
@@ -624,7 +626,6 @@ describe("QWP unified Node client configuration", () => {
     );
     expect(memory?.lazyConnect).toBe(false);
     expect(memory?.ingressSession?.initialConnectMode).toBe("off");
-    expect(memory?.ingressSession?.backgroundStoreAndForward).toBeUndefined();
 
     const persistent = qwpConfig(
       await SenderOptions.fromConfig(
@@ -954,24 +955,33 @@ describe("QWP unified Node client configuration", () => {
     });
   });
 
-  it("keeps requestDurableAck on ingress when it is set as a shared override", () => {
-    // Durable ACK is negotiated on /write/v4 only. The typed webSocket block
-    // is spread into both sides, so this override also reached egress, whose
-    // upgrade then demanded an x-qwp-durable-ack response header that
-    // /read/v1 never sends -- every pooled query session failed to connect
-    // with QwpDurableAckUnavailableError while ingress worked fine.
+  it("keeps requestDurableAck on ingress", () => {
+    // Durable ACK is negotiated on /write/v4 only. As a shared webSocket
+    // override it also reached egress, whose upgrade then demanded an
+    // x-qwp-durable-ack response header that /read/v1 never sends -- every
+    // pooled query session failed to connect with
+    // QwpDurableAckUnavailableError while ingress worked fine. The typed
+    // override therefore has an ingress section of its own.
     const overridden = parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
-      webSocket: { requestDurableAck: true },
+      ingress: { requestDurableAck: true },
     });
     expect(overridden.ingress.requestDurableAck).toBe(true);
-    expect(overridden.egress.requestDurableAck).toBeUndefined();
+    expect(overridden.egress).not.toHaveProperty("requestDurableAck");
 
-    // The connect-string key has always been ingress-only; the two agree now.
+    // A typed value wins over the connect-string key, as every typed one does.
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost:9000;request_durable_ack=on;",
+        { ingress: { requestDurableAck: false } },
+      ).ingress.requestDurableAck,
+    ).toBe(false);
+
+    // The connect-string key has always been ingress-only.
     const fromString = parseQwpNodeClientConfig(
       "ws::addr=localhost:9000;request_durable_ack=on;",
     );
     expect(fromString.ingress.requestDurableAck).toBe(true);
-    expect(fromString.egress.requestDurableAck).toBeUndefined();
+    expect(fromString.egress).not.toHaveProperty("requestDurableAck");
 
     // The keepalive is also a documented direct request for durable progress.
     const keepaliveOnly = parseQwpNodeClientConfig(
@@ -979,7 +989,7 @@ describe("QWP unified Node client configuration", () => {
     );
     expect(keepaliveOnly.ingress.requestDurableAck).toBe(true);
     expect(keepaliveOnly.ingressSession.durableAckKeepaliveMs).toBe(10);
-    expect(keepaliveOnly.egress.requestDurableAck).toBeUndefined();
+    expect(keepaliveOnly.egress).not.toHaveProperty("requestDurableAck");
 
     expect(() =>
       parseQwpNodeClientConfig(
@@ -989,12 +999,26 @@ describe("QWP unified Node client configuration", () => {
       "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
     );
 
-    // Other shared webSocket overrides still reach both sides.
+    // Shared webSocket overrides still reach both sides.
     const shared = parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
-      webSocket: { requestDurableAck: true, clientId: "probe" },
+      webSocket: { clientId: "probe" },
     });
     expect(shared.ingress.clientId).toBe("probe");
     expect(shared.egress.clientId).toBe("probe");
+  });
+
+  it("routes a Sender's typed requestDurableAck to ingress", async () => {
+    // qwp.webSocket is a Sender's ingress section, so it may carry the
+    // request. Spread into the transport settings both sides share, it would
+    // never reach the ingress upgrade.
+    const resolved = qwpConfig(
+      await SenderOptions.fromConfig("ws::addr=localhost:9000;", {
+        qwp: { webSocket: { requestDurableAck: true, clientId: "probe" } },
+      }),
+    );
+    expect(resolved?.ingress.requestDurableAck).toBe(true);
+    expect(resolved?.ingress.clientId).toBe("probe");
+    expect(resolved?.egress).not.toHaveProperty("requestDurableAck");
   });
 
   it("validates cluster authorities and supports bracketed IPv6", () => {

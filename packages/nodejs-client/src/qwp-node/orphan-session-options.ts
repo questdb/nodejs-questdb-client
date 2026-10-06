@@ -1,6 +1,6 @@
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
 import type { QwpReconnectEvent } from "../../../client-core/src/_qwp/transport";
-import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
+import type { QwpIngressSessionInternalOptions } from "../../../client-core/src/_qwp/ingress-session";
 
 /**
  * @internal Derives the session options an adopted orphan slot runs under.
@@ -9,9 +9,9 @@ import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ing
  * `storeAndForward.drainOrphans`, and tests import it by path.
  */
 export function orphanIngressSessionOptions(
-  options: QwpIngressSessionOptions,
+  options: QwpIngressSessionInternalOptions,
   onReconnectEvent?: (event: QwpReconnectEvent) => void,
-): QwpIngressSessionOptions {
+): QwpIngressSessionInternalOptions {
   const configuredReconnect =
     options.reconnect === false ? undefined : options.reconnect;
   const configuredOnEvent = configuredReconnect?.onEvent;

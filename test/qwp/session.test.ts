@@ -934,6 +934,17 @@ describe("QWP WebSocket adapters", () => {
     ).toThrow("QWP browser cluster URL cannot contain a fragment");
   });
 
+  it("names the missing cluster for a JavaScript caller", () => {
+    // Complete ingress and egress trees cannot stand in for the cluster that
+    // owns the endpoints and authentication both sides share.
+    expect(() =>
+      createQwpBrowserClient({
+        ingress: { url: "wss://questdb.example/write/v4" },
+        egress: { url: "wss://questdb.example/read/v1" },
+      } as never),
+    ).toThrow("browser client configuration requires cluster");
+  });
+
   it("buffers browser messages until a consumer is attached", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
@@ -1387,7 +1398,7 @@ describe("QWP WebSocket adapters", () => {
         url: "ws://localhost:9000/write/v4",
         webSocketFactory: () => asQwpSocket(socket),
       },
-      { autoFlush: false, encode: { gorilla: false } },
+      { autoFlush: false, gorilla: false },
     );
     const connecting = sender.connect();
     socket.open();
@@ -1456,7 +1467,7 @@ describe("QWP WebSocket adapters", () => {
         url: "ws://localhost:9000/write/v4",
         webSocketFactory: () => asQwpSocket(socket),
       },
-      { autoFlush: false, encode: { gorilla: false } },
+      { autoFlush: false, gorilla: false },
       { maxBatchSizeBytes: cap },
     );
     const connecting = sender.connect();
@@ -1485,7 +1496,7 @@ describe("QWP WebSocket adapters", () => {
         url: "ws://localhost:9000/write/v4",
         webSocketFactory: () => asQwpSocket(socket),
       },
-      { autoFlush: false, encode: { gorilla: false } },
+      { autoFlush: false, gorilla: false },
       { maxBatchSizeBytes: cap },
     );
     const connecting = sender.connect();
@@ -1740,6 +1751,31 @@ describe("QWP WebSocket adapters", () => {
       level: 0,
     });
     expect(session.negotiatedZstdLevel).toBe(0);
+    await session.close();
+  });
+
+  it("never requests durable ACK on a Node egress upgrade", async () => {
+    // requestDurableAck is an ingress option, but a JavaScript caller can
+    // still set it on egress, or spread one shared object into both sides.
+    // /read/v1 never confirms durable ACK, so honouring it there would fail
+    // every query session with QwpDurableAckUnavailableError.
+    const socket = new FakeWebSocket();
+    let capturedHeaders: Record<string, string> | undefined;
+    const connecting = connectQwpNodeEgress({
+      url: "ws://localhost:9000/read/v1",
+      requestDurableAck: true,
+      webSocketFactory: (_url, options) => {
+        capturedHeaders = options.headers;
+        options.onUpgrade({});
+        return asQwpSocket(socket);
+      },
+    } as Parameters<typeof connectQwpNodeEgress>[0]);
+    socket.open();
+    socket.message(serverInfoFrame());
+
+    const session = await connecting;
+    expect(capturedHeaders).toBeDefined();
+    expect(capturedHeaders).not.toHaveProperty("X-QWP-Request-Durable-Ack");
     await session.close();
   });
 
@@ -2376,7 +2412,8 @@ describe("QwpIngressSession", () => {
       },
       {
         autoFlush: false,
-        encode: { symbolDictionary: "full", gorilla: false },
+        symbolDictionary: "full",
+        gorilla: false,
       },
       { maxBatchSizeBytes: cap },
     );

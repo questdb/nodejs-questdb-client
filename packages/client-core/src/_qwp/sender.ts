@@ -4,7 +4,6 @@ import {
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_MAX_COLUMNS_PER_TABLE,
   QwpColumnType,
-  QwpIngressEncodeOptions,
   QwpTableBuffer,
   flattenQwpArray,
   utf8Length,
@@ -49,12 +48,6 @@ export type QwpSenderLogger = (
   message: string | Error,
 ) => void;
 
-export interface QwpSenderEncodeOptions
-  extends Pick<QwpIngressEncodeOptions, "gorilla"> {
-  /** Connection-scoped deltas are the default; use `full` to opt out. */
-  symbolDictionary?: "delta" | "full";
-}
-
 /** Options for the browser-safe, fluent QWP sender. */
 export interface QwpSenderOptions {
   autoFlush?: boolean;
@@ -87,8 +80,18 @@ export interface QwpSenderOptions {
    * `RangeError`.
    */
   closeFlushTimeoutMs?: number;
-  /** QWP frame encoding options supported by the high-level sender. */
-  encode?: QwpSenderEncodeOptions;
+  /**
+   * Gorilla-compresses TIMESTAMP and TIMESTAMP_NANOS columns; a column whose
+   * deltas the encoding cannot represent is sent raw. Defaults to true. UDP
+   * senders always disable it.
+   */
+  gorilla?: boolean;
+  /**
+   * Connection-scoped symbol dictionary deltas are the default; `full` opts
+   * out, so every frame carries its own dictionaries. UDP senders always use
+   * `full`.
+   */
+  symbolDictionary?: "delta" | "full";
   log?: QwpSenderLogger;
 }
 
@@ -2874,9 +2877,8 @@ export class QwpSender {
       this.buildTable(table.name, rows),
     );
     const closesDeferredTransaction = this.hasDeferredMessages;
-    const encode = this.options.encode;
     const publishDelta =
-      (encode?.symbolDictionary ?? "delta") === "delta"
+      (this.options.symbolDictionary ?? "delta") === "delta"
         ? session.publishTablesDelta
         : undefined;
     const beforeSequence = sessionPublishedSequence(session);
@@ -2887,7 +2889,7 @@ export class QwpSender {
     const publication = (publishDelta ?? session.publishTables).call(
       session,
       wireTables,
-      { gorilla: encode?.gorilla, deferCommit },
+      { gorilla: this.options.gorilla, deferCommit },
     );
     this.totalFlushes++;
     // Transfer row ownership only after every logical frame is accepted by

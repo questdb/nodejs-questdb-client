@@ -3899,7 +3899,7 @@ describe("QWP high-level sender", () => {
     const session = new RecordingSession();
     const sender = new QwpSender(async () => session, {
       autoFlush: false,
-      encode: { symbolDictionary: "full" },
+      symbolDictionary: "full",
     });
     await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
     await sender.flush();

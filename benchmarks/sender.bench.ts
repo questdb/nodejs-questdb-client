@@ -97,7 +97,7 @@ function senderFor(
   return new QwpSender(async () => session, {
     autoFlush: false,
     closeFlushTimeoutMs: 0,
-    encode: { symbolDictionary },
+    symbolDictionary,
   });
 }
 

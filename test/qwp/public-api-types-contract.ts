@@ -29,7 +29,6 @@ export type {
   QwpEgressQueryOptions,
   QwpEgressReconnectOptions,
   QwpEgressReplayResetEvent,
-  QwpEgressRoutingOptions,
   QwpEgressSessionOptions,
   QwpEgressTransportMetrics,
   QwpEgressViewCallbackControl,
@@ -99,7 +98,7 @@ export type {
   QwpResultEndMessage,
   QwpResultRowViewCallback,
   QwpResultValue,
-  QwpSenderEncodeOptions,
+  QwpRoutingOptions,
   QwpSenderError,
   QwpSenderErrorCategory,
   QwpSenderErrorPolicy,
@@ -139,15 +138,13 @@ export type {
   QwpBrowserClientEgressOptions,
   QwpBrowserClientIngressOptions,
   QwpBrowserClientOptions,
-  QwpBrowserClusterOptions,
   QwpBrowserEgressOptions,
   QwpBrowserFetch,
+  QwpBrowserIngressOptions,
   QwpBrowserSessionAuthentication,
   QwpBrowserSessionBootstrapConfig,
   QwpBrowserSessionBootstrapOptions,
   QwpBrowserSessionBootstrapResult,
-  QwpBrowserSplitClientOptions,
-  QwpBrowserUnifiedClientOptions,
   QwpBrowserWebSocketOptions,
   QwpCacheResetMessage as BrowserQwpCacheResetMessage,
   QwpClientFactories as BrowserQwpClientFactories,
@@ -166,7 +163,6 @@ export type {
   QwpEgressQueryOptions as BrowserQwpEgressQueryOptions,
   QwpEgressReconnectOptions as BrowserQwpEgressReconnectOptions,
   QwpEgressReplayResetEvent as BrowserQwpEgressReplayResetEvent,
-  QwpEgressRoutingOptions as BrowserQwpEgressRoutingOptions,
   QwpEgressSessionOptions as BrowserQwpEgressSessionOptions,
   QwpEgressTransportMetrics as BrowserQwpEgressTransportMetrics,
   QwpEgressViewCallbackControl as BrowserQwpEgressViewCallbackControl,
@@ -219,7 +215,7 @@ export type {
   QwpResultEndMessage as BrowserQwpResultEndMessage,
   QwpResultRowViewCallback as BrowserQwpResultRowViewCallback,
   QwpResultValue as BrowserQwpResultValue,
-  QwpSenderEncodeOptions as BrowserQwpSenderEncodeOptions,
+  QwpRoutingOptions as BrowserQwpRoutingOptions,
   QwpSenderError as BrowserQwpSenderError,
   QwpSenderErrorCategory as BrowserQwpSenderErrorCategory,
   QwpSenderErrorPolicy as BrowserQwpSenderErrorPolicy,
@@ -290,3 +286,42 @@ export type NodeUdpSession = NodeRoot.QwpNodeUdpSession;
 export type NodeUdpMetrics = NodeRoot.QwpNodeUdpMetrics;
 // @ts-expect-error connectQwpNodeUdp is internal.
 export type NodeUdpFactory = typeof NodeRoot.connectQwpNodeUdp;
+
+// So is the interface carrying the session options only an adapter sets, and
+// the published session options must not regain any of its handoffs.
+// @ts-expect-error QwpIngressSessionInternalOptions is internal.
+export type NodeSessionInternals = NodeRoot.QwpIngressSessionInternalOptions;
+export type BrowserSessionInternals =
+  // @ts-expect-error QwpIngressSessionInternalOptions is internal.
+  BrowserRoot.QwpIngressSessionInternalOptions;
+type ExpectNone<T extends never> = T;
+type InternalSessionField =
+  | "replayStore"
+  | "backgroundStoreAndForward"
+  | "orphanStoreAndForward"
+  | "orphanDurableAckMismatchMaxDurationMs"
+  | "catchUpCapGapMinEscalationWindowMs"
+  | "priorSenderErrorDeliveries";
+export type NodeSessionLeaks = ExpectNone<
+  Extract<keyof NodeRoot.QwpIngressSessionOptions, InternalSessionField>
+>;
+export type BrowserSessionLeaks = ExpectNone<
+  Extract<keyof BrowserRoot.QwpIngressSessionOptions, InternalSessionField>
+>;
+
+// Durable ACK is negotiated on /write/v4 only, so neither the transport
+// options both sides share nor the egress options may carry the request.
+export type NodeSharedDurableAck = ExpectNone<
+  Extract<
+    | keyof NodeRoot.QwpNodeWebSocketOptions
+    | keyof NodeRoot.QwpNodeEgressOptions,
+    "requestDurableAck"
+  >
+>;
+export type BrowserSharedIngressNegotiation = ExpectNone<
+  Extract<
+    | keyof BrowserRoot.QwpBrowserWebSocketOptions
+    | keyof BrowserRoot.QwpBrowserEgressOptions,
+    "requestDurableAck" | "ingressNegotiationTimeoutMs"
+  >
+>;

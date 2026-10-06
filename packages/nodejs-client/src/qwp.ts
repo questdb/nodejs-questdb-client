@@ -35,7 +35,6 @@ import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
 import { selectsQwpSyncInitialConnect } from "../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
-import { withPriorQwpSenderErrorDeliveries } from "../../client-core/src/_qwp/_internal/notification-dispatcher";
 import {
   assertConsistentQwpInitialConnectMode,
   normalizeQwpNodeClientOptions,
@@ -47,9 +46,9 @@ import {
   QwpBinaryConnection,
   QwpConnectionFactory,
   QwpDurableAckUnavailableError,
-  QwpEgressRoutingOptions,
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
+  QwpRoutingOptions,
   QwpSendClosedError,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
@@ -63,6 +62,7 @@ import {
 import {
   QwpIngressSession,
   QwpIngressSessionOptions,
+  type QwpIngressSessionInternalOptions,
 } from "../../client-core/src/_qwp/ingress-session";
 import {
   createQwpDataLossSenderError,
@@ -259,12 +259,6 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
   authorization?: string;
   clientId?: string;
   maxVersion?: number;
-  /**
-   * Ingress-only. Durable ACK is negotiated on `/write/v4`; egress ignores it
-   * and egressTransportOptions() strips it, because sending the header on
-   * `/read/v1` makes every query session fail the capability check.
-   */
-  requestDurableAck?: boolean;
   /** Test hook; defaults to the Node-only `ws` implementation. */
   webSocketFactory?: (
     url: string | URL,
@@ -282,7 +276,13 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
 
 export interface QwpNodeIngressOptions
   extends QwpNodeWebSocketOptions,
-    QwpEgressRoutingOptions {
+    QwpRoutingOptions {
+  /**
+   * Requests durable ACKs on the `/write/v4` upgrade; connecting fails with
+   * QwpDurableAckUnavailableError when the server does not confirm them. The
+   * session's durableAckKeepaliveMs implies it and conflicts with `false`.
+   */
+  requestDurableAck?: boolean;
   /**
    * Upgrades the default in-memory ingress replay to persistent Node
    * store-and-forward. Use a directory owned exclusively by this session.
@@ -355,7 +355,7 @@ export interface QwpNodeStoreAndForwardOptions
 
 export interface QwpNodeEgressOptions
   extends QwpNodeWebSocketOptions,
-    QwpEgressRoutingOptions {
+    QwpRoutingOptions {
   /**
    * Requests Zstd-compressed result batches. The default is `raw`, which
    * preserves compatibility with servers that predate QWP compression.
@@ -400,6 +400,8 @@ export interface QwpNodeClientConfigOptions {
   webSocket?: Partial<Omit<QwpNodeWebSocketOptions, "url" | "failoverUrls">>;
   /** Optional persistent ingress configuration; may supply/override sf_dir. */
   storeAndForward?: QwpNodeStoreAndForwardOptions;
+  /** Ingress-only overrides. */
+  ingress?: Partial<Pick<QwpNodeIngressOptions, "requestDurableAck">>;
   /** Egress-only routing and compression overrides. */
   egress?: Partial<
     Pick<
@@ -425,10 +427,6 @@ function egressTransportOptions(
   delete transport.maxBatchRows;
   delete transport.target;
   delete transport.zone;
-  // Ingress-only: /read/v1 never answers with x-qwp-durable-ack, so leaving it
-  // set would make connectQwpNodeEndpoint() reject every query session with
-  // QwpDurableAckUnavailableError.
-  delete transport.requestDurableAck;
   const preference = compression ?? "raw";
   const acceptEncoding = encodeQwpAcceptEncoding(preference, compressionLevel);
 
@@ -452,30 +450,42 @@ function egressTransportOptions(
   return { ...transport, headers };
 }
 
-/** Opens a Node QWP WebSocket with the upgrade headers required by QuestDB. */
+/**
+ * Opens a Node QWP WebSocket with the upgrade headers required by QuestDB.
+ * Set `requestDurableAck` only for an ingress (`/write/v4`) endpoint.
+ */
 export function connectQwpNodeWebSocket(
-  options: QwpNodeWebSocketOptions,
+  options: QwpNodeWebSocketOptions &
+    Pick<QwpNodeIngressOptions, "requestDurableAck">,
 ): Promise<QwpBinaryConnection> {
   return createQwpNodeConnectionFactory(options)();
 }
 
 /** Creates a stateful Node endpoint walker suitable for session reconnects. */
 export function createQwpNodeConnectionFactory(
-  options: QwpNodeWebSocketOptions,
+  options: QwpNodeWebSocketOptions &
+    Pick<QwpNodeIngressOptions, "requestDurableAck">,
 ): QwpConnectionFactory {
   return createQwpNodeConnectionFactoryInternal(options);
 }
 
 function createQwpNodeConnectionFactoryInternal(
-  options: QwpNodeWebSocketOptions,
+  options: QwpNodeWebSocketOptions &
+    Pick<QwpNodeIngressOptions, "requestDurableAck">,
   healthTracker?: QwpFailoverHealthTracker,
   resetClassificationsAfterExhaustion = true,
 ): QwpConnectionFactory {
-  const routing = options as QwpEgressRoutingOptions;
+  const routing = options as QwpRoutingOptions;
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
-    (endpoint, signal) => connectQwpNodeEndpoint(options, endpoint, signal),
+    (endpoint, signal) =>
+      connectQwpNodeEndpoint(
+        options,
+        endpoint,
+        signal,
+        options.requestDurableAck === true,
+      ),
     {
       // Ingress used to drop these, so `target` degenerated to "accept any
       // role" and every endpoint ranked as same-zone however the caller had
@@ -507,7 +517,10 @@ function endpointUserinfo(endpoint: string | URL): string | undefined {
 function connectQwpNodeEndpoint(
   options: QwpNodeWebSocketOptions,
   endpoint: string | URL,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  // A parameter rather than an options field: the egress path passes false,
+  // so no shared options object can ask /read/v1 for durable ACK.
+  requestDurableAck: boolean,
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
   let endpointUrl: URL;
@@ -577,7 +590,7 @@ function connectQwpNodeEndpoint(
     );
   }
   if (options.authorization) headers.Authorization = options.authorization;
-  if (options.requestDurableAck) {
+  if (requestDurableAck) {
     headers["X-QWP-Request-Durable-Ack"] = "true";
   }
 
@@ -699,7 +712,7 @@ function connectQwpNodeEndpoint(
       const durableAckEnabled =
         headerValue(upgradeHeaders, "x-qwp-durable-ack")?.toLowerCase() ===
         "enabled";
-      if (options.requestDurableAck && !durableAckEnabled) {
+      if (requestDurableAck && !durableAckEnabled) {
         throw new QwpDurableAckUnavailableError(endpoint);
       }
       const contentEncoding = headerValue(
@@ -759,7 +772,7 @@ function withDurableAckRequest(
 
 async function connectQwpNodeIngressInternal(
   options: QwpNodeIngressOptions,
-  sessionOptions: QwpIngressSessionOptions,
+  sessionOptions: QwpIngressSessionInternalOptions,
   startOrphanDrainer: boolean,
   sharedHealthTracker?: QwpFailoverHealthTracker,
   signal?: AbortSignal,
@@ -828,7 +841,7 @@ async function connectQwpNodeIngressInternal(
   const storeBatchCap =
     storeAndForward?.maxSegmentBytes ??
     (storeAndForward ? 4 * 1024 * 1024 : undefined);
-  const effectiveSessionOptions: QwpIngressSessionOptions = {
+  const effectiveSessionOptions: QwpIngressSessionInternalOptions = {
     ...sessionOptions,
     reconnect,
     replayStore,
@@ -843,13 +856,8 @@ async function connectQwpNodeIngressInternal(
     durableAckKeepaliveMs: connectionOptions.requestDurableAck
       ? (sessionOptions.durableAckKeepaliveMs ?? 200)
       : sessionOptions.durableAckKeepaliveMs,
+    priorSenderErrorDeliveries: () => recoveryDeliveries.count,
   };
-  // Not a field on QwpIngressSessionOptions: that interface is published by
-  // both packages, and this is an internal handoff, not a caller option.
-  withPriorQwpSenderErrorDeliveries(
-    effectiveSessionOptions,
-    () => recoveryDeliveries.count,
-  );
   const orphanDrainer =
     startOrphanDrainer && storeAndForward?.drainOrphans === true
       ? createStandaloneOrphanDrainer(
@@ -1056,11 +1064,8 @@ export function createQwpNodeUdpSender(
       autoFlushBytes:
         senderOptions.autoFlushBytes ?? options.maxDatagramSize ?? 1_400,
       transactional: false,
-      encode: {
-        ...senderOptions.encode,
-        gorilla: false,
-        symbolDictionary: "full",
-      },
+      gorilla: false,
+      symbolDictionary: "full",
     },
     { rejectZeroColumnRows: true },
   );
@@ -1094,7 +1099,8 @@ export async function connectQwpNodeEgress(
     createQwpEgressFailoverConnectionFactory(
       transport.url,
       transport.failoverUrls,
-      (endpoint, signal) => connectQwpNodeEndpoint(transport, endpoint, signal),
+      (endpoint, signal) =>
+        connectQwpNodeEndpoint(transport, endpoint, signal, false),
       { target: options.target, zone: options.zone },
       sessionOptions.serverInfoTimeoutMs ??
         QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,

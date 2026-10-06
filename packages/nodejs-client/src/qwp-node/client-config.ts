@@ -281,14 +281,8 @@ export function resolveQwpNodeClientConfig(
     validateQwpWebSocketAgent(callerAgent, parsed.schema === "wss") ??
     configuredAgent;
 
-  // requestDurableAck is ingress-only and the ingress block below sets it
-  // explicitly. Leaving it in the shared block spread it into `egress` too,
-  // so a typed `webSocket: { requestDurableAck: true }` override made every
-  // pooled query session fail its /read/v1 capability check.
-  const sharedWebSocket = { ...definedOnly(extraOptions.webSocket) };
-  delete sharedWebSocket.requestDurableAck;
   const common = {
-    ...sharedWebSocket,
+    ...definedOnly(extraOptions.webSocket),
     connectTimeoutMs:
       extraOptions.webSocket?.connectTimeoutMs ??
       optionalPositiveInteger(value("connect_timeout"), "connect_timeout"),
@@ -455,7 +449,7 @@ export function resolveQwpNodeClientConfig(
   ] as const) as QwpTarget | undefined;
   const zone = value("zone");
   const configuredRequestDurableAck =
-    extraOptions.webSocket?.requestDurableAck ??
+    extraOptions.ingress?.requestDurableAck ??
     optionalBoolean(value("request_durable_ack"), "request_durable_ack");
   if (
     configuredRequestDurableAck === false &&
@@ -1129,9 +1123,10 @@ export function normalizeQwpNodeClientOptions(
           }
         : undefined,
     },
+    // ASYNC alone starts the session in the background; see
+    // QwpIngressSession.connect().
     ingressSession: {
       ...options.ingressSession,
-      backgroundStoreAndForward: true,
       initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
     },
     pool: { ...options.pool, queryPoolMin: 0 },

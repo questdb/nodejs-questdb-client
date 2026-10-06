@@ -105,6 +105,7 @@ function resolveQwpConfig(
     target,
     zone,
     senderId,
+    requestDurableAck,
     ...webSocketOverrides
   } = configuredWebSocket ?? {};
   const logger = options.log ?? options.qwp?.sender?.log ?? log;
@@ -122,6 +123,8 @@ function resolveQwpConfig(
   const resolved = resolveQwpNodeSenderConfig(configString, {
     webSocket: { ...webSocketOverrides, agent },
     storeAndForward,
+    // Ingress-only, so it cannot travel in the shared webSocket section.
+    ingress: { requestDurableAck },
     // The top-level logger wins, then the QWP-specific one, then the default
     // console logger -- never undefined. resolveQwpNodeClientConfig() spreads
     // this object last, so an explicit `log: undefined` overwrote a configured

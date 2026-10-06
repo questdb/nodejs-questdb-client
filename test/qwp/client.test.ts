@@ -203,19 +203,13 @@ describe("QWP browser client startup teardown", () => {
     try {
       await expect(
         connectQwpBrowserClient({
-          ingress: {
-            url: "ws://127.0.0.1:1/write/v4",
+          cluster: {
+            url: "ws://127.0.0.1:1",
             webSocketFactory: () => {
               throw new Error("offline");
             },
           },
-          egress: {
-            url: "ws://127.0.0.1:1/read/v1",
-            webSocketFactory: () => {
-              throw new Error("offline");
-            },
-          },
-        } as never),
+        }),
       ).rejects.toThrow();
       expect(closes).toHaveLength(1);
     } finally {
