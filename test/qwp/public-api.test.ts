@@ -330,6 +330,28 @@ describe("QWP public API contract", () => {
     ).not.toHaveProperty("QwpNodeFileReplayStore");
   });
 
+  it("keeps query-session construction internal", () => {
+    // A query session is the query API, so the class stays public, but it is
+    // opened by connectQwp*Egress() and the pooled clients. The factories below
+    // them are internal, the class has no static connect(), and its
+    // constructor takes a token only the runtime adapters hold.
+    for (const api of [shared, browser, node]) {
+      for (const name of [
+        "connectQwpEgressSession",
+        "createQwpEgressSession",
+      ]) {
+        expect(api, `${name} must stay internal`).not.toHaveProperty(name);
+      }
+      expect(api.QwpEgressSession).not.toHaveProperty("connect");
+      const construct = api.QwpEgressSession as unknown as new (
+        ...args: unknown[]
+      ) => unknown;
+      expect(() => new construct({})).toThrow(
+        /must be created by connectQwpNodeEgress\(\)/,
+      );
+    }
+  });
+
   it("keeps the raw connection helpers internal", () => {
     // Applications connect through a sender, a query session or the pooled
     // client, each of which opens its own connections. The raw WebSocket

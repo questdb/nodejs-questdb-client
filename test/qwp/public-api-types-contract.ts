@@ -9,7 +9,6 @@ export type {
   ExtraOptions,
   Logger,
   QwpArrayValue,
-  QwpBinaryConnection,
   QwpBindSetter,
   QwpBindType,
   QwpCacheResetMessage,
@@ -19,7 +18,6 @@ export type {
   QwpColumnBuffer,
   QwpColumnType,
   QwpConnectionCloseInfo,
-  QwpConnectionFactory,
   QwpDecimalInput,
   QwpDecimalValue,
   QwpDoubleArrayInput,
@@ -29,8 +27,6 @@ export type {
   QwpEgressQueryOptions,
   QwpEgressReconnectOptions,
   QwpEgressReplayResetEvent,
-  QwpEgressSessionOptions,
-  QwpEgressTransportMetrics,
   QwpEgressViewCallbackControl,
   QwpEgressViewQuery,
   QwpEncodedBinds,
@@ -52,7 +48,6 @@ export type {
   QwpIngressServerInfo,
   QwpIngressSymbolDictionaryDelta,
   QwpIngressTableResult,
-  QwpIngressTransportMetrics,
   QwpInitialConnectMode,
   QwpInt64,
   QwpIpv4Input,
@@ -124,7 +119,6 @@ export type {
 // this contract module's own export namespace unambiguous.
 export type {
   QwpArrayValue as BrowserQwpArrayValue,
-  QwpBinaryConnection as BrowserQwpBinaryConnection,
   QwpBindSetter as BrowserQwpBindSetter,
   QwpBindType as BrowserQwpBindType,
   QwpBrowserClientOptions,
@@ -143,7 +137,6 @@ export type {
   QwpColumnBuffer as BrowserQwpColumnBuffer,
   QwpColumnType as BrowserQwpColumnType,
   QwpConnectionCloseInfo as BrowserQwpConnectionCloseInfo,
-  QwpConnectionFactory as BrowserQwpConnectionFactory,
   QwpDecimalInput as BrowserQwpDecimalInput,
   QwpDecimalValue as BrowserQwpDecimalValue,
   QwpDoubleArrayInput as BrowserQwpDoubleArrayInput,
@@ -153,8 +146,6 @@ export type {
   QwpEgressQueryOptions as BrowserQwpEgressQueryOptions,
   QwpEgressReconnectOptions as BrowserQwpEgressReconnectOptions,
   QwpEgressReplayResetEvent as BrowserQwpEgressReplayResetEvent,
-  QwpEgressSessionOptions as BrowserQwpEgressSessionOptions,
-  QwpEgressTransportMetrics as BrowserQwpEgressTransportMetrics,
   QwpEgressViewCallbackControl as BrowserQwpEgressViewCallbackControl,
   QwpEgressViewQuery as BrowserQwpEgressViewQuery,
   QwpEncodedBinds as BrowserQwpEncodedBinds,
@@ -175,7 +166,6 @@ export type {
   QwpIngressServerInfo as BrowserQwpIngressServerInfo,
   QwpIngressSymbolDictionaryDelta as BrowserQwpIngressSymbolDictionaryDelta,
   QwpIngressTableResult as BrowserQwpIngressTableResult,
-  QwpIngressTransportMetrics as BrowserQwpIngressTransportMetrics,
   QwpInitialConnectMode as BrowserQwpInitialConnectMode,
   QwpInt64 as BrowserQwpInt64,
   QwpIpv4Input as BrowserQwpIpv4Input,
@@ -392,4 +382,63 @@ type JournalField =
   | "onRecoveryDataLoss";
 export type NodeJournalFields = ExpectNone<
   Exclude<JournalField, keyof NodeRoot.QwpNodeStoreAndForwardOptions>
+>;
+
+// A query session is the query API, but constructing one is internal: its
+// constructor takes a token only the runtime adapters hold, and it has no
+// static connect() any more. The connection layer below it -- connections,
+// their factory and their transport metrics -- is internal with it, and so are
+// the session's own options, which each runtime's egress options include.
+// @ts-expect-error QwpBinaryConnection is internal.
+export type NodeBinaryConnection = NodeRoot.QwpBinaryConnection;
+// @ts-expect-error QwpConnectionFactory is internal.
+export type NodeConnectionFactoryType = NodeRoot.QwpConnectionFactory;
+// @ts-expect-error QwpEgressSessionOptions is internal.
+export type NodeEgressSessionOptions = NodeRoot.QwpEgressSessionOptions;
+export type NodeEgressTransportMetrics =
+  // @ts-expect-error QwpEgressTransportMetrics is internal.
+  NodeRoot.QwpEgressTransportMetrics;
+export type NodeIngressTransportMetrics =
+  // @ts-expect-error QwpIngressTransportMetrics is internal.
+  NodeRoot.QwpIngressTransportMetrics;
+// @ts-expect-error QwpBinaryConnection is internal.
+export type BrowserBinaryConnection = BrowserRoot.QwpBinaryConnection;
+// @ts-expect-error QwpConnectionFactory is internal.
+export type BrowserConnectionFactoryType = BrowserRoot.QwpConnectionFactory;
+export type BrowserEgressSessionOptions =
+  // @ts-expect-error QwpEgressSessionOptions is internal.
+  BrowserRoot.QwpEgressSessionOptions;
+export type BrowserEgressTransportMetrics =
+  // @ts-expect-error QwpEgressTransportMetrics is internal.
+  BrowserRoot.QwpEgressTransportMetrics;
+export type BrowserIngressTransportMetrics =
+  // @ts-expect-error QwpIngressTransportMetrics is internal.
+  BrowserRoot.QwpIngressTransportMetrics;
+export type NodeEgressSessionConnect = ExpectNone<
+  Extract<keyof typeof NodeRoot.QwpEgressSession, "connect">
+>;
+export type BrowserEgressSessionConnect = ExpectNone<
+  Extract<keyof typeof BrowserRoot.QwpEgressSession, "connect">
+>;
+export type NodeEgressSessionToken = ExpectNone<
+  Exclude<ConstructorParameters<typeof NodeRoot.QwpEgressSession>[0], symbol>
+>;
+export type BrowserEgressSessionToken = ExpectNone<
+  Exclude<ConstructorParameters<typeof BrowserRoot.QwpEgressSession>[0], symbol>
+>;
+type EgressSessionField =
+  | "serverInfoTimeoutMs"
+  | "initialCredit"
+  | "bufferPoolSize"
+  | "queryTimeoutMs"
+  | "cancelDrainTimeoutMs"
+  | "maxBatchRows"
+  | "reconnect"
+  | "connectionListenerInboxCapacity"
+  | "onReplayReset";
+export type NodeEgressSessionFields = ExpectNone<
+  Exclude<EgressSessionField, keyof NodeRoot.QwpNodeEgressOptions>
+>;
+export type BrowserEgressSessionFields = ExpectNone<
+  Exclude<EgressSessionField, keyof BrowserRoot.QwpBrowserEgressOptions>
 >;

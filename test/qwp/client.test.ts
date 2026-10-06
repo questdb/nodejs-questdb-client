@@ -6,14 +6,12 @@ import {
   QWP_EGRESS_MESSAGE,
   QWP_SERVER_ROLE,
   QWP_STATUS,
-  QwpBinaryConnection,
   QwpByteWriter,
   QwpClient,
   QwpClientClosedError,
   QwpConnectionCloseInfo,
   QwpEgressSession,
   QwpEgressSessionClosedError,
-  QwpEgressSessionOptions,
   QwpHandshakeMetadata,
   type QwpIngressMetrics,
   QwpPoolAcquireTimeoutError,
@@ -24,6 +22,13 @@ import {
   long,
   symbol as qwpSymbol,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports these.
+import {
+  connectQwpEgressSession,
+  createQwpEgressSession,
+  type QwpEgressSessionOptions,
+} from "../../packages/client-core/src/_qwp/egress-session";
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
 import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
@@ -181,7 +186,7 @@ async function createQuerySession(
 ): Promise<QwpEgressSession> {
   const connection = new FakeConnection(`query-${slot}`);
   connections.push(connection);
-  const session = new QwpEgressSession(connection, options);
+  const session = createQwpEgressSession(connection, options);
   connection.receive(serverInfo(`node-${slot}`));
   await session.ready;
   return session;
@@ -789,7 +794,7 @@ describe("QWP pooled client", () => {
           throw new Error("sender factory should not run");
         },
         createQuerySession: async () =>
-          QwpEgressSession.connect(
+          connectQwpEgressSession(
             async () => {
               const connection = connections.shift();
               if (!connection) throw new Error("no connection available");
@@ -880,7 +885,7 @@ describe("QWP pooled client", () => {
           throw new Error("sender factory should not run");
         },
         createQuerySession: (slot) =>
-          QwpEgressSession.connect(
+          connectQwpEgressSession(
             async () => {
               const connection = wires[slot].shift();
               if (!connection) throw new Error("no connection available");
@@ -1442,7 +1447,7 @@ describe("QWP pooled client", () => {
         },
         createQuerySession: async () => {
           queryCreations++;
-          return QwpEgressSession.connect(
+          return connectQwpEgressSession(
             async () => {
               const connection = new FakeConnection(
                 `query-${connections.length}`,

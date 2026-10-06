@@ -2,7 +2,6 @@ import { QwpProtocolError } from "../_core";
 import {
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,
-  QwpBinaryConnection,
   QwpConnectionCloseInfo,
   QwpHandshakeMetadata,
   QwpSendClosedError,
@@ -10,6 +9,7 @@ import {
   QwpSendTimeoutError,
   QwpUpgradeError,
 } from "../transport";
+import type { QwpBinaryConnection } from "./binary-connection";
 import { QwpAsyncQueue } from "./async-queue";
 import { exceedsQwpTimerCeiling, QWP_MAX_TIMER_DELAY_MS } from "./timer-bounds";
 

@@ -33,7 +33,6 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,
   QwpBatchTooLargeError,
-  type QwpBinaryConnection,
   QwpByteReader,
   QwpByteWriter,
   type QwpConnectionCloseInfo,
@@ -54,6 +53,8 @@ import {
   QwpSymbolDictionary,
   readQwpVarintNumber,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports these.
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
 // All internal: neither package root exports the ingress session or a raw
 // connection helper.
 import {

@@ -31,14 +31,16 @@ import {
   QWP_MAX_TIMER_DELAY_MS,
 } from "./_internal/timer-bounds";
 import {
-  QwpBinaryConnection,
   QwpConnectionCloseInfo,
-  QwpConnectionFactory,
   QwpEgressReconnectOptions,
   QwpEgressReplayResetEvent,
   QwpHandshakeMetadata,
   QwpSendClosedError,
 } from "./transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+} from "./_internal/binary-connection";
 
 /** Immutable notification-inbox counters for an egress session. */
 export interface QwpEgressMetrics {
@@ -46,6 +48,11 @@ export interface QwpEgressMetrics {
   readonly droppedConnectionNotifications: number;
 }
 
+/**
+ * Flow control, deadlines and failover of a query session. Each runtime's
+ * egress options include them; neither package root exports this interface on
+ * its own.
+ */
 export interface QwpEgressSessionOptions {
   /**
    * SERVER_INFO handshake deadline. Defaults to 5 seconds. Capped at
@@ -791,6 +798,22 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
  * session deliberately rejects overlapping query calls. A completed query's
  * materialized batches may still be consumed while the next query runs.
  */
+const QWP_EGRESS_SESSION_CONSTRUCTOR = Symbol("QWP egress session constructor");
+
+/**
+ * The steps a reconnecting connection runs on its session to replay the active
+ * query onto a new connection. They are the session's private methods, so its
+ * constructor fills these in for the function that opened the connection.
+ */
+interface QwpEgressReplayHooks {
+  prepareConnectionReset?: (serverInfo: QwpServerInfoMessage) => Promise<void>;
+  encodeActiveQueryRequest?: (
+    serverInfo: QwpServerInfoMessage,
+    requestId: bigint,
+  ) => Uint8Array;
+  notifyReplayReset?: (event: QwpEgressReplayResetEvent) => Promise<void>;
+}
+
 export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly decoder = new QwpResultBatchDecoder();
   private readonly receiveLoop: Promise<void>;
@@ -823,10 +846,21 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   /** Initial SERVER_INFO; use serverInfo for the current post-failover snapshot. */
   readonly ready: Promise<QwpServerInfoMessage>;
 
+  /**
+   * @internal Query sessions come from connectQwpNodeEgress(),
+   * connectQwpBrowserEgress() and the pooled clients.
+   */
   constructor(
+    token: typeof QWP_EGRESS_SESSION_CONSTRUCTOR,
     private readonly connection: QwpBinaryConnection,
     options: QwpEgressSessionOptions = {},
+    replayHooks?: QwpEgressReplayHooks,
   ) {
+    if (token !== QWP_EGRESS_SESSION_CONSTRUCTOR) {
+      throw new TypeError(
+        "QWP egress sessions must be created by connectQwpNodeEgress(), connectQwpBrowserEgress() or a QWP client",
+      );
+    }
     let validated: QwpValidatedEgressSessionOptions;
     try {
       if (
@@ -834,7 +868,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         !(connection instanceof QwpReconnectingEgressConnection)
       ) {
         throw new Error(
-          "egress reconnect options require QwpEgressSession.connect(factory, options)",
+          "egress reconnect options require a reconnecting connection; open the session with connectQwpEgressSession()",
         );
       }
       validated = validateEgressSessionOptions(options);
@@ -870,83 +904,13 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         .catch(() => undefined);
     }, validated.serverInfoTimeoutMs);
     this.receiveLoop = this.consumeMessages();
-  }
-
-  static async connect(
-    factory: QwpConnectionFactory,
-    options: QwpEgressSessionOptions = {},
-    /** Cancels a connection or SERVER_INFO handshake still in progress. */
-    signal?: AbortSignal,
-  ): Promise<QwpEgressSession> {
-    const validated = validateEgressSessionOptions(options);
-    const state: { session?: QwpEgressSession } = {};
-    const reconnectOptions =
-      options.reconnect === false
-        ? undefined
-        : // Spread, not `??`: tuning one field must not discard the rest.
-          { ...QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS, ...options.reconnect };
-    const connection = reconnectOptions
-      ? await QwpReconnectingEgressConnection.connect(
-          factory,
-          reconnectOptions,
-          validated.serverInfoTimeoutMs,
-          (serverInfo) => state.session?.prepareConnectionReset(serverInfo),
-          (serverInfo, requestId) => {
-            const session = state.session;
-            if (!session) {
-              throw new QwpProtocolError(
-                "QWP egress session is unavailable while encoding a query",
-              );
-            }
-            return session.encodeActiveQueryRequest(serverInfo, requestId);
-          },
-          async (event) => {
-            const session = state.session;
-            if (!session) {
-              throw new QwpProtocolError(
-                "QWP egress session is unavailable during query replay",
-              );
-            }
-            await session.notifyReplayReset(event, options.onReplayReset);
-          },
-          options.reconnect !== undefined,
-          signal,
-          validated.connectionListenerInboxCapacity,
-        )
-      : await factory(signal);
-    let session: QwpEgressSession | undefined;
-    const abortOpening = (): void => {
-      if (session) {
-        void session
-          .close(1000, "QWP client closed while connecting")
-          .catch(() => undefined);
-      } else {
-        void connection
-          .close(1000, "QWP client closed while connecting")
-          .catch(() => undefined);
-      }
-    };
-    try {
-      if (signal?.aborted) throw new QwpSendClosedError();
-      session = new QwpEgressSession(connection, options);
-      state.session = session;
-      signal?.addEventListener("abort", abortOpening, { once: true });
-      await session.ready;
-      if (signal?.aborted) throw new QwpSendClosedError();
-      return session;
-    } catch (error) {
-      if (state.session) {
-        await state.session
-          .close(1002, "missing QWP SERVER_INFO")
-          .catch(() => undefined);
-      } else {
-        await connection
-          .close(1002, "invalid QWP egress session")
-          .catch(() => undefined);
-      }
-      throw error;
-    } finally {
-      signal?.removeEventListener("abort", abortOpening);
+    if (replayHooks) {
+      replayHooks.prepareConnectionReset = (serverInfo) =>
+        this.prepareConnectionReset(serverInfo);
+      replayHooks.encodeActiveQueryRequest = (serverInfo, requestId) =>
+        this.encodeActiveQueryRequest(serverInfo, requestId);
+      replayHooks.notifyReplayReset = (event) =>
+        this.notifyReplayReset(event, options.onReplayReset);
     }
   }
 
@@ -1658,4 +1622,112 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     this.active?.fail(this.failure);
     this.clearActive();
   }
+}
+
+/**
+ * Opens a query session over a connection factory. Unless `reconnect` is false
+ * it reconnects across endpoints and replays the active query on the new
+ * connection.
+ *
+ * @internal The runtime adapters' egress connectors call it. Neither package
+ * root exports it: applications open query sessions with
+ * connectQwpNodeEgress(), connectQwpBrowserEgress() or a pooled client.
+ */
+export async function connectQwpEgressSession(
+  factory: QwpConnectionFactory,
+  options: QwpEgressSessionOptions = {},
+  /** Cancels a connection or SERVER_INFO handshake still in progress. */
+  signal?: AbortSignal,
+): Promise<QwpEgressSession> {
+  const validated = validateEgressSessionOptions(options);
+  // Filled in by the session's constructor. Until it has run there is no
+  // query to replay, so a reset is a no-op and a replay is a protocol fault.
+  const replayHooks: QwpEgressReplayHooks = {};
+  const reconnectOptions =
+    options.reconnect === false
+      ? undefined
+      : // Spread, not `??`: tuning one field must not discard the rest.
+        { ...QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS, ...options.reconnect };
+  const connection = reconnectOptions
+    ? await QwpReconnectingEgressConnection.connect(
+        factory,
+        reconnectOptions,
+        validated.serverInfoTimeoutMs,
+        (serverInfo) => replayHooks.prepareConnectionReset?.(serverInfo),
+        (serverInfo, requestId) => {
+          if (!replayHooks.encodeActiveQueryRequest) {
+            throw new QwpProtocolError(
+              "QWP egress session is unavailable while encoding a query",
+            );
+          }
+          return replayHooks.encodeActiveQueryRequest(serverInfo, requestId);
+        },
+        async (event) => {
+          if (!replayHooks.notifyReplayReset) {
+            throw new QwpProtocolError(
+              "QWP egress session is unavailable during query replay",
+            );
+          }
+          await replayHooks.notifyReplayReset(event);
+        },
+        options.reconnect !== undefined,
+        signal,
+        validated.connectionListenerInboxCapacity,
+      )
+    : await factory(signal);
+  let session: QwpEgressSession | undefined;
+  const abortOpening = (): void => {
+    if (session) {
+      void session
+        .close(1000, "QWP client closed while connecting")
+        .catch(() => undefined);
+    } else {
+      void connection
+        .close(1000, "QWP client closed while connecting")
+        .catch(() => undefined);
+    }
+  };
+  try {
+    if (signal?.aborted) throw new QwpSendClosedError();
+    session = new QwpEgressSession(
+      QWP_EGRESS_SESSION_CONSTRUCTOR,
+      connection,
+      options,
+      replayHooks,
+    );
+    signal?.addEventListener("abort", abortOpening, { once: true });
+    await session.ready;
+    if (signal?.aborted) throw new QwpSendClosedError();
+    return session;
+  } catch (error) {
+    if (session) {
+      await session
+        .close(1002, "missing QWP SERVER_INFO")
+        .catch(() => undefined);
+    } else {
+      await connection
+        .close(1002, "invalid QWP egress session")
+        .catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", abortOpening);
+  }
+}
+
+/**
+ * Wraps one fixed connection in a query session that does not reconnect.
+ *
+ * @internal Tests drive sessions over fake connections with it; the adapters
+ * open theirs with connectQwpEgressSession().
+ */
+export function createQwpEgressSession(
+  connection: QwpBinaryConnection,
+  options: QwpEgressSessionOptions = {},
+): QwpEgressSession {
+  return new QwpEgressSession(
+    QWP_EGRESS_SESSION_CONSTRUCTOR,
+    connection,
+    options,
+  );
 }

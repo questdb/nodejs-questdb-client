@@ -63,7 +63,6 @@ import type {
   QwpClientPoolOptions,
   QwpEgressQueryOptions,
   QwpEgressSession,
-  QwpEgressSessionOptions,
   QwpEgressViewQuery,
   QwpSenderError,
   QwpQueryLease,
@@ -172,7 +171,9 @@ const queryOptionsContract: QwpEgressQueryOptions = {
   binds: (binds) => binds.setVarchar(0, "ETH-USD"),
 };
 
-const egressSessionOptionsContract: QwpEgressSessionOptions = {
+// The query session's own options travel in each runtime's egress options.
+const egressSessionOptionsContract: QwpNodeEgressOptions = {
+  url: "wss://node-1.example/read/v1",
   initialCredit: 256 * 1024,
   bufferPoolSize: 4,
   queryTimeoutMs: 30_000,
@@ -206,7 +207,8 @@ const memoryReplayIngressContract: QwpBrowserIngressOptions = {
   initialConnectMode: "async",
 };
 
-const fixedConnectionEgressContract: QwpEgressSessionOptions = {
+const fixedConnectionEgressContract: QwpBrowserEgressOptions = {
+  url: "wss://node-1.example/read/v1",
   reconnect: false,
 };
 

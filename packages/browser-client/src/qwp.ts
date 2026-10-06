@@ -38,18 +38,21 @@ import {
   QWP_VERSION,
 } from "../../client-core/src/_qwp/_core";
 import {
-  QwpBinaryConnection,
-  QwpConnectionFactory,
   QwpDurableAckUnavailableError,
   QwpRoutingOptions,
   QwpSendClosedError,
   QWP_UPGRADE_ERROR_KIND,
   QwpUpgradeError,
 } from "../../client-core/src/_qwp/transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+} from "../../client-core/src/_qwp/_internal/binary-connection";
 import {
+  connectQwpEgressSession,
   QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
-  QwpEgressSession,
-  QwpEgressSessionOptions,
+  type QwpEgressSession,
+  type QwpEgressSessionOptions,
 } from "../../client-core/src/_qwp/egress-session";
 import {
   QwpIngressSession,
@@ -1003,7 +1006,7 @@ export async function connectQwpBrowserEgress(
   /** Cancels an opening connection during pooled-client shutdown. */
   signal?: AbortSignal,
 ): Promise<QwpEgressSession> {
-  return QwpEgressSession.connect(
+  return connectQwpEgressSession(
     createQwpEgressFailoverConnectionFactory(
       options.url,
       options.failoverUrls,

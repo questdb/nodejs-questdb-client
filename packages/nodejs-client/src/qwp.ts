@@ -46,8 +46,6 @@ import {
 import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
-  QwpConnectionFactory,
   QwpDurableAckUnavailableError,
   QwpHandshakeMetadata,
   QwpRoutingOptions,
@@ -55,10 +53,15 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../../client-core/src/_qwp/transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+} from "../../client-core/src/_qwp/_internal/binary-connection";
 import {
+  connectQwpEgressSession,
   QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
-  QwpEgressSession,
-  QwpEgressSessionOptions,
+  type QwpEgressSession,
+  type QwpEgressSessionOptions,
 } from "../../client-core/src/_qwp/egress-session";
 import {
   QwpIngressSession,
@@ -1159,7 +1162,7 @@ export async function connectQwpNodeEgress(
   signal?: AbortSignal,
 ): Promise<QwpEgressSession> {
   const transport = egressTransportOptions(options);
-  return QwpEgressSession.connect(
+  return connectQwpEgressSession(
     createQwpEgressFailoverConnectionFactory(
       transport.url,
       transport.failoverUrls,

@@ -16,13 +16,15 @@ import {
 import { measureQwpIngressFrame } from "./_core/ingress";
 import {
   QWP_INITIAL_CONNECT_MODE,
-  QwpBinaryConnection,
   QwpConnectionCloseInfo,
-  QwpConnectionFactory,
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
   QwpIngressReconnectOptions,
 } from "./transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+} from "./_internal/binary-connection";
 import type { QwpIngressReplayStore } from "./_internal/replay-store";
 import {
   QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,

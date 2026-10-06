@@ -19,7 +19,6 @@ import {
   QWP_ORPHAN_FAILED_SENTINEL,
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
-  QwpEgressSession,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
   QwpReplayStoreCheckpointError,
@@ -43,7 +42,6 @@ import {
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
   QwpByteWriter,
   QwpConnectionCloseInfo,
   QwpDurableAckUnavailableError,
@@ -74,6 +72,9 @@ import {
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports these.
+import { connectQwpEgressSession } from "../../packages/client-core/src/_qwp/egress-session";
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
 import {
   publishAndWait,
   publishTablesDeltaAndWait,
@@ -874,7 +875,7 @@ describe("QWP reconnect timer bounds", () => {
       const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
       try {
         await expect(
-          QwpEgressSession.connect(factory, { reconnect }),
+          connectQwpEgressSession(factory, { reconnect }),
         ).rejects.toThrow(
           `reconnect ${name} must be no greater than ${timerCeiling}`,
         );
@@ -903,7 +904,7 @@ describe("QWP reconnect timer bounds", () => {
 
   it("accepts the timer ceiling and longer maxDuration for egress", async () => {
     const connection = new FakeConnection("primary");
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         queueMicrotask(() => connection.receive(serverInfo("primary")));
         return connection;
@@ -986,9 +987,9 @@ describe("QWP reconnect timer bounds", () => {
       const factory = vi.fn(async () => new FakeConnection("primary"));
       const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
       try {
-        await expect(
-          QwpEgressSession.connect(factory, options),
-        ).rejects.toThrow(message);
+        await expect(connectQwpEgressSession(factory, options)).rejects.toThrow(
+          message,
+        );
         expect(factory).not.toHaveBeenCalled();
         expect(setTimeoutSpy).not.toHaveBeenCalled();
       } finally {
@@ -999,7 +1000,7 @@ describe("QWP reconnect timer bounds", () => {
 
   it("accepts egress timer options at the inclusive ceiling, and zero", async () => {
     const connection = new FakeConnection("primary");
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         queueMicrotask(() => connection.receive(serverInfo("primary")));
         return connection;
@@ -5993,7 +5994,7 @@ describe("QWP egress reconnect and replay", () => {
     const second = new FakeConnection("primary");
     const connections = [first, second];
     const order: string[] = [];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6039,7 +6040,7 @@ describe("QWP egress reconnect and replay", () => {
       release = resolve;
     });
     let entered = 0;
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = new FakeConnection("primary");
         handed.push(connection);
@@ -6085,7 +6086,7 @@ describe("QWP egress reconnect and replay", () => {
     const late = new FakeConnection("secondary");
     let factoryCalls = 0;
     let releaseLate!: () => void;
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         factoryCalls++;
         if (factoryCalls === 1) {
@@ -6124,7 +6125,7 @@ describe("QWP egress reconnect and replay", () => {
     let factoryCalls = 0;
     try {
       await expect(
-        QwpEgressSession.connect(
+        connectQwpEgressSession(
           async () => {
             factoryCalls++;
             throw new QwpUpgradeError("offline", {
@@ -6152,7 +6153,7 @@ describe("QWP egress reconnect and replay", () => {
   it("enforces the total reconnect deadline while awaiting SERVER_INFO", async () => {
     const connection = new FakeConnection("primary");
     const startedAt = Date.now();
-    const connecting = QwpEgressSession.connect(async () => connection, {
+    const connecting = connectQwpEgressSession(async () => connection, {
       serverInfoTimeoutMs: 5_000,
       reconnect: {
         failoverMaxAttempts: 0,
@@ -6172,7 +6173,7 @@ describe("QWP egress reconnect and replay", () => {
     let factoryCalls = 0;
 
     await expect(
-      QwpEgressSession.connect(async () => {
+      connectQwpEgressSession(async () => {
         factoryCalls++;
         throw failure;
       }),
@@ -6186,7 +6187,7 @@ describe("QWP egress reconnect and replay", () => {
     try {
       const connection = new FakeConnection("primary");
       let factoryCalls = 0;
-      const connecting = QwpEgressSession.connect(
+      const connecting = connectQwpEgressSession(
         async () => {
           factoryCalls++;
           if (factoryCalls === 1) {
@@ -6231,7 +6232,7 @@ describe("QWP egress reconnect and replay", () => {
     // recoveries to the failover budget the loop runs forever and the query
     // never settles.
     const connections: FakeConnection[] = [];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = new FakeConnection(`node-${connections.length}`);
         connections.push(connection);
@@ -6280,7 +6281,7 @@ describe("QWP egress reconnect and replay", () => {
     // which reconnected directly and never charged the recovery budget:
     // every reconnect succeeded, so the query was re-sent without limit.
     const connections: FakeConnection[] = [];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = new FakeConnection(`node-${connections.length}`);
         connections.push(connection);
@@ -6330,7 +6331,7 @@ describe("QWP egress reconnect and replay", () => {
     // either, so charging these would end the session after
     // failoverMaxAttempts unrelated bad frames.
     const connections: FakeConnection[] = [];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = new FakeConnection(`node-${connections.length}`);
         connections.push(connection);
@@ -6369,7 +6370,7 @@ describe("QWP egress reconnect and replay", () => {
     // arrives. Once accepted, the reconnect replays nothing, so this
     // recovery cannot repeat and must not spend the query's budget.
     const connections: FakeConnection[] = [];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = new FakeConnection(`node-${connections.length}`);
         connections.push(connection);
@@ -6407,7 +6408,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const connecting = QwpEgressSession.connect(
+    const connecting = connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6446,7 +6447,7 @@ describe("QWP egress reconnect and replay", () => {
       negotiatedCompression: { codec: "zstd", level: 1 },
     });
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6479,7 +6480,7 @@ describe("QWP egress reconnect and replay", () => {
     const secondInfoReady = new Promise<void>((resolve) => {
       releaseSecondInfo = resolve;
     });
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6533,7 +6534,7 @@ describe("QWP egress reconnect and replay", () => {
     const connections = [first, second];
     const resets: bigint[] = [];
     let bindCalls = 0;
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6593,7 +6594,7 @@ describe("QWP egress reconnect and replay", () => {
     const second = new FakeConnection("secondary");
     const connections = [first, second];
     const resets: bigint[] = [];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6657,7 +6658,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6723,7 +6724,7 @@ describe("QWP egress reconnect and replay", () => {
         throw new Error("credit send failed");
       }
     };
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6774,7 +6775,7 @@ describe("QWP egress reconnect and replay", () => {
         throw new Error("credit send failed");
       }
     };
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6822,7 +6823,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6910,7 +6911,7 @@ describe("QWP egress reconnect and replay", () => {
         throw new Error("credit send failed");
       }
     };
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -6975,7 +6976,7 @@ describe("QWP egress reconnect and replay", () => {
       releaseFactory = resolve;
     });
     let connectCalls = 0;
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connectCalls++ === 0 ? first : second;
         // Hold the reconnect open so the grant is issued while it runs.
@@ -7034,7 +7035,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -7092,7 +7093,7 @@ describe("QWP egress reconnect and replay", () => {
       releaseFirstView = resolve;
     });
     let viewCalls = 0;
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -7149,7 +7150,7 @@ describe("QWP egress reconnect and replay", () => {
       expect(event.requestId).toBe(0n);
       await resetReleased;
     });
-    const session = await QwpEgressSession.connect(async () => {
+    const session = await connectQwpEgressSession(async () => {
       const connection = connections.shift();
       if (!connection) throw new Error("no connection available");
       queueMicrotask(() => connection.receive(serverInfo(connection.endpoint)));
@@ -7175,7 +7176,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(async () => {
+    const session = await connectQwpEgressSession(async () => {
       const connection = connections.shift();
       if (!connection) throw new Error("no connection available");
       queueMicrotask(() => connection.receive(serverInfo(connection.endpoint)));
@@ -7195,7 +7196,7 @@ describe("QWP egress reconnect and replay", () => {
   it("allows automatic egress failover to be disabled", async () => {
     const first = new FakeConnection("primary");
     let factoryCalls = 0;
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         factoryCalls++;
         queueMicrotask(() => first.receive(serverInfo("primary")));
@@ -7217,7 +7218,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -7256,7 +7257,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");
@@ -7310,7 +7311,7 @@ describe("QWP egress reconnect and replay", () => {
       {},
       100,
     );
-    const session = await QwpEgressSession.connect(factory, {
+    const session = await connectQwpEgressSession(factory, {
       reconnect: {
         failoverMaxAttempts: 1,
         failoverBackoffInitialMs: 0,
@@ -7359,7 +7360,7 @@ describe("QWP egress reconnect and replay", () => {
       {},
       100,
     );
-    const session = await QwpEgressSession.connect(factory, {
+    const session = await connectQwpEgressSession(factory, {
       reconnect: {
         failoverMaxAttempts: 3,
         failoverBackoffInitialMs: 0,
@@ -7384,7 +7385,7 @@ describe("QWP egress reconnect and replay", () => {
     const first = new FakeConnection("primary");
     const second = new FakeConnection("secondary");
     const connections = [first, second];
-    const session = await QwpEgressSession.connect(
+    const session = await connectQwpEgressSession(
       async () => {
         const connection = connections.shift();
         if (!connection) throw new Error("no connection available");

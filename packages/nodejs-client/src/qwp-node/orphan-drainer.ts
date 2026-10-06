@@ -13,11 +13,11 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   type QwpReconnectEvent,
   QwpConnectionCloseInfo,
-  QwpIngressTransportMetrics,
   QwpReplayRejectedError,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../../../client-core/src/_qwp/transport";
+import type { QwpIngressTransportMetrics } from "../../../client-core/src/_qwp/_internal/binary-connection";
 import {
   isQwpNodeReplayQuarantineSlotName,
   QwpReplayStoreCorruptionError,

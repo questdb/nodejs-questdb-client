@@ -13,13 +13,14 @@ import {
   QWP_COLUMN_TYPE,
   QWP_FLAG_DEFER_COMMIT,
   QWP_STATUS,
-  QwpBinaryConnection,
   QwpByteWriter,
   QwpConnectionCloseInfo,
   QwpHandshakeMetadata,
   QwpSender,
   QwpTableBuffer,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports these.
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
 import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 // Internal: the package root does not export the store-and-forward journal.
 import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";

@@ -7,12 +7,9 @@ import {
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
   QwpConnectionCloseInfo,
-  QwpConnectionFactory,
   QwpEgressReconnectOptions,
   QwpEgressReplayResetEvent,
-  QwpEgressTransportMetrics,
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpReconnectEvent,
@@ -20,6 +17,11 @@ import {
   QwpSendClosedError,
   QwpUpgradeError,
 } from "../transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+  QwpEgressTransportMetrics,
+} from "./binary-connection";
 import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import {
@@ -34,7 +36,7 @@ import { QwpNotificationDispatcher } from "./notification-dispatcher";
  * The egress reconnect policy applied when a field is not configured.
  *
  * Egress bounds a query connection so a caller is not left waiting, which is
- * why these differ from the ingress defaults. QwpEgressSession.connect()
+ * why these differ from the ingress defaults. connectQwpEgressSession()
  * spreads this under the caller's options and the constructor below reads every
  * field from the merged result, so the two layers cannot drift apart.
  */

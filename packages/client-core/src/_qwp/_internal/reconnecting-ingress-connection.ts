@@ -16,14 +16,11 @@ import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
   QwpConnectionCloseInfo,
-  QwpConnectionFactory,
   QwpDurableAckUnavailableError,
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpIngressReconnectOptions,
-  QwpIngressTransportMetrics,
   QwpInitialConnectMode,
   QwpMemoryReplayAppendTimeoutError,
   QwpMemoryReplayBatchTooLargeError,
@@ -37,6 +34,11 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+  QwpIngressTransportMetrics,
+} from "./binary-connection";
 import { defersCommit, isDurableAckPoll } from "./frame-flags";
 import type {
   QwpIngressReplayRecord,

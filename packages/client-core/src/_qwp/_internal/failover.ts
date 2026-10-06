@@ -1,8 +1,6 @@
 import {
   QWP_TARGET,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
-  QwpConnectionFactory,
   QwpFailoverAttempt,
   QwpFailoverError,
   QwpRoleMismatchError,
@@ -10,6 +8,10 @@ import {
   QwpTarget,
   QwpUpgradeError,
 } from "../transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+} from "./binary-connection";
 import { redactQwpEndpoint } from "./redact-endpoint";
 
 const HOST_STATE = {
