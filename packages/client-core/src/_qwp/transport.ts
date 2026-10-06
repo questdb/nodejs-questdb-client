@@ -677,31 +677,6 @@ export interface QwpBinaryConnection {
   close(code?: number, reason?: string): Promise<void>;
 }
 
-export interface QwpWebSocketConnectOptions {
-  url: string | URL;
-  /** Additional endpoints attempted in order when the preferred endpoint fails. */
-  failoverUrls?: readonly (string | URL)[];
-  protocols?: string | string[];
-  /**
-   * Node TCP/TLS connection deadline, or the complete opening deadline in a
-   * browser. Defaults to 15s. Capped at 2,147,483,647ms (the host timer
-   * ceiling); a larger value throws a `RangeError`.
-   */
-  connectTimeoutMs?: number;
-  /**
-   * Maximum time a send may remain queued by the WebSocket. Defaults to 15s.
-   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
-   * a `RangeError`.
-   */
-  sendTimeoutMs?: number;
-  /**
-   * Maximum time allowed for a graceful WebSocket close. Defaults to 15s.
-   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
-   * a `RangeError`.
-   */
-  closeTimeoutMs?: number;
-}
-
 /**
  * Opens one connection. The optional signal is aborted when the owning session
  * closes, so a factory that is still negotiating can tear its socket down

@@ -115,7 +115,6 @@ export type {
   QwpUpgradeTimeoutPhase,
   QwpUuidInput,
   QwpUuidValue,
-  QwpWebSocketConnectOptions,
   QwpWebSocketLike,
   QwpWriterColumn,
   QwpWriterColumnKind,
@@ -225,7 +224,6 @@ export type {
   QwpUpgradeTimeoutPhase as BrowserQwpUpgradeTimeoutPhase,
   QwpUuidInput as BrowserQwpUuidInput,
   QwpUuidValue as BrowserQwpUuidValue,
-  QwpWebSocketConnectOptions as BrowserQwpWebSocketConnectOptions,
   QwpWebSocketLike as BrowserQwpWebSocketLike,
   QwpWriterColumn as BrowserQwpWriterColumn,
   QwpWriterColumnKind as BrowserQwpWriterColumnKind,
@@ -341,4 +339,25 @@ export type BrowserSharedIngressNegotiation = ExpectNone<
     | keyof BrowserRoot.QwpBrowserEgressOptions,
     "requestDurableAck" | "ingressNegotiationTimeoutMs"
   >
+>;
+
+// The endpoints and WebSocket deadlines both runtimes read are a non-exported
+// base, published only through the runtime options that extend it -- so those
+// must keep every one of its fields.
+// @ts-expect-error QwpWebSocketConnectOptions is internal.
+export type NodeConnectOptions = NodeRoot.QwpWebSocketConnectOptions;
+// @ts-expect-error QwpWebSocketConnectOptions is internal.
+export type BrowserConnectOptions = BrowserRoot.QwpWebSocketConnectOptions;
+type SharedConnectField =
+  | "url"
+  | "failoverUrls"
+  | "protocols"
+  | "connectTimeoutMs"
+  | "sendTimeoutMs"
+  | "closeTimeoutMs";
+export type NodeConnectFields = ExpectNone<
+  Exclude<SharedConnectField, keyof NodeRoot.QwpNodeWebSocketOptions>
+>;
+export type BrowserConnectFields = ExpectNone<
+  Exclude<SharedConnectField, keyof BrowserRoot.QwpBrowserWebSocketOptions>
 >;

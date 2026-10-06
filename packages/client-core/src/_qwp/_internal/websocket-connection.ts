@@ -70,6 +70,38 @@ export interface QwpWebSocketLike {
   ): void;
 }
 
+/**
+ * Endpoints and WebSocket deadlines every runtime adapter reads: the base of
+ * QwpNodeWebSocketOptions and QwpBrowserWebSocketOptions.
+ *
+ * Neither package root exports it. The published declarations carry it only
+ * as the base of those two, whose reference pages list its fields.
+ */
+export interface QwpWebSocketConnectOptions {
+  url: string | URL;
+  /** Additional endpoints attempted in order when the preferred endpoint fails. */
+  failoverUrls?: readonly (string | URL)[];
+  protocols?: string | string[];
+  /**
+   * Node TCP/TLS connection deadline, or the complete opening deadline in a
+   * browser. Defaults to 15s. Capped at 2,147,483,647ms (the host timer
+   * ceiling); a larger value throws a `RangeError`.
+   */
+  connectTimeoutMs?: number;
+  /**
+   * Maximum time a send may remain queued by the WebSocket. Defaults to 15s.
+   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
+   * a `RangeError`.
+   */
+  sendTimeoutMs?: number;
+  /**
+   * Maximum time allowed for a graceful WebSocket close. Defaults to 15s.
+   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
+   * a `RangeError`.
+   */
+  closeTimeoutMs?: number;
+}
+
 export interface QwpWebSocketOpenOptions {
   url: string | URL;
   connectTimeoutMs?: number;

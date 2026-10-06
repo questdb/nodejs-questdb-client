@@ -10,6 +10,7 @@ export * from "../../client-core/src/qwp";
 import {
   openQwpWebSocket,
   qwpNonRetryable,
+  QwpWebSocketConnectOptions,
   QwpWebSocketLike,
   validateQwpWebSocketTimeouts,
 } from "../../client-core/src/_qwp/_internal/websocket-connection";
@@ -44,7 +45,6 @@ import {
   QwpSendClosedError,
   QWP_UPGRADE_ERROR_KIND,
   QwpUpgradeError,
-  QwpWebSocketConnectOptions,
 } from "../../client-core/src/_qwp/transport";
 import {
   QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS,
