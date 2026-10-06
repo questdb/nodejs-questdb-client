@@ -22,6 +22,8 @@ import {
   long,
   symbol as qwpSymbol,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
 // Internal: neither package root exports these.
 import {
   connectQwpEgressSession,
@@ -231,7 +233,9 @@ describe("QWP pooled client", () => {
       let releaseCreation!: () => void;
       const createSender = async (): Promise<QwpSender> => {
         const session = new FakeSenderSession();
-        const sender = new QwpSender(async () => session, { autoFlush: false });
+        const sender = createQwpSender(async () => session, {
+          autoFlush: false,
+        });
         await sender.connect();
         return sender;
       };
@@ -304,7 +308,7 @@ describe("QWP pooled client", () => {
         createSender: async () => {
           creations++;
           const session = new FakeSenderSession();
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -352,7 +356,7 @@ describe("QWP pooled client", () => {
           senderCreations++;
           if (!reachable) throw new Error("connection refused");
           const session = new FakeSenderSession();
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -521,7 +525,7 @@ describe("QWP pooled client", () => {
           senderCreations++;
           const session = new FakeSenderSession();
           senderSessions.push(session);
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -574,7 +578,7 @@ describe("QWP pooled client", () => {
           senderCreations++;
           const session = new FakeSenderSession();
           senderSessions.push(session);
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -637,7 +641,7 @@ describe("QWP pooled client", () => {
         createSender: async () => {
           const session = new FakeSenderSession();
           senderSessions.push(session);
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -684,7 +688,7 @@ describe("QWP pooled client", () => {
       return new QwpClient(
         {
           createSender: async () => {
-            const sender = new QwpSender(async () => session, {
+            const sender = createQwpSender(async () => session, {
               log: (level, message) => {
                 if (level === "warn") warnings.push(String(message));
               },
@@ -983,7 +987,7 @@ describe("QWP pooled client", () => {
           createSender: async () => {
             const session = new FakeSenderSession();
             senderSessions.push(session);
-            const sender = new QwpSender(async () => session, {
+            const sender = createQwpSender(async () => session, {
               autoFlush: false,
             });
             await sender.connect();
@@ -1061,7 +1065,7 @@ describe("QWP pooled client", () => {
               },
             },
           );
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
             closeFlushTimeoutMs: 0,
           });

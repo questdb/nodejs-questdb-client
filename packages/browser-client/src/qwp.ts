@@ -58,7 +58,11 @@ import {
   QwpIngressSession,
   QwpIngressSessionOptions,
 } from "../../client-core/src/_qwp/ingress-session";
-import { QwpSender, QwpSenderOptions } from "../../client-core/src/_qwp/sender";
+import {
+  createQwpSender,
+  type QwpSender,
+  type QwpSenderOptions,
+} from "../../client-core/src/_qwp/sender";
 import {
   QwpClient,
   QwpClientPoolOptions,
@@ -985,7 +989,7 @@ export async function connectQwpBrowserIngress(
 export function createQwpBrowserSender(
   options: QwpBrowserIngressOptions,
 ): QwpSender {
-  return new QwpSender(
+  return createQwpSender(
     (signal) => connectQwpBrowserIngress(options, signal),
     options,
   );

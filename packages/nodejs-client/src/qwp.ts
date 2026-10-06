@@ -73,7 +73,11 @@ import {
   defaultQwpSenderErrorHandler,
   type QwpSenderError,
 } from "../../client-core/src/_qwp/sender-error";
-import { QwpSender, QwpSenderOptions } from "../../client-core/src/_qwp/sender";
+import {
+  createQwpSender,
+  type QwpSender,
+  type QwpSenderOptions,
+} from "../../client-core/src/_qwp/sender";
 import {
   QwpClient,
   QwpClientPoolOptions,
@@ -1102,7 +1106,7 @@ export function createQwpNodeSender(options: QwpNodeIngressOptions): QwpSender {
   // a mixed scheme decides which socket carries the credentials below, so it
   // belongs with the other construction-time rejections.
   assertUniformQwpEndpointScheme(options.url, options.failoverUrls);
-  return new QwpSender(
+  return createQwpSender(
     (signal) => connectQwpNodeIngress(options, signal),
     options,
   );
@@ -1124,7 +1128,7 @@ export async function connectQwpNodeSender(
  */
 export function createQwpNodeUdpSender(options: QwpNodeUdpOptions): QwpSender {
   validateUdpSenderOptions(options);
-  return new QwpSender(
+  return createQwpSender(
     () => QwpNodeUdpSession.connect(options),
     {
       ...options,

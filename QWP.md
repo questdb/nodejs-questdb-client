@@ -1906,6 +1906,9 @@ connection types it took, `QwpBinaryConnection` and `QwpConnectionFactory`, are
 internal. Its flow-control, deadline and failover options are part of
 `QwpNodeEgressOptions` and `QwpBrowserEgressOptions` rather than a type of their own.
 
+Senders are obtained the same way: a `QwpSender` comes from the runtime sender
+factories or a pooled client's `borrowSender()`, and its constructor is internal.
+
 `parseQwpNodeClientConfig()` is the low-level helper for turning a `ws::`/`wss::`
 connect string into the typed options object `createQwpNodeClient()` takes.
 

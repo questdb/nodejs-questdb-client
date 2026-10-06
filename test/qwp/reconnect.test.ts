@@ -62,7 +62,6 @@ import {
   QwpReconnectExhaustedError,
   QwpReplayRejectedError,
   QwpReplayDictionaryPersistenceError,
-  QwpSender,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   encodeQwpFrame,
@@ -72,6 +71,8 @@ import {
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
 // Internal: neither package root exports these.
 import { connectQwpEgressSession } from "../../packages/client-core/src/_qwp/egress-session";
 import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
@@ -1134,7 +1135,7 @@ describe("QWP ingress reconnect and replay", () => {
     const session = await QwpIngressSession.connect(async () => connection, {
       memoryReplayMaxBytes: 1024 * 1024,
     });
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       // The fake endpoint never acknowledges, so close() must not sit out its
       // full drain budget waiting for ACKs this test deliberately withholds.
@@ -1451,7 +1452,7 @@ describe("QWP ingress reconnect and replay", () => {
       memoryReplayMaxBytes: 110,
       memoryReplayAppendDeadlineMs: 50,
     });
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
       transactional: true,
@@ -1661,7 +1662,7 @@ describe("QWP ingress reconnect and replay", () => {
     const session = await QwpIngressSession.connect(async () =>
       factoryCalls++ === 0 ? first : reconnecting,
     );
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
     });
@@ -1709,7 +1710,7 @@ describe("QWP ingress reconnect and replay", () => {
       async () => (factoryCalls++ === 0 ? first : reconnecting),
       { reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 } },
     );
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
     });
@@ -1755,7 +1756,7 @@ describe("QWP ingress reconnect and replay", () => {
       async () => (factoryCalls++ === 0 ? first : reconnecting),
       { reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 } },
     );
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
     });
@@ -1801,7 +1802,7 @@ describe("QWP ingress reconnect and replay", () => {
       },
       { reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 } },
     );
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
     });
@@ -1838,7 +1839,7 @@ describe("QWP ingress reconnect and replay", () => {
       },
       { reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 } },
     );
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
     });
@@ -3709,7 +3710,7 @@ describe("QWP ingress reconnect and replay", () => {
       reconnect: {},
       replayStore,
     });
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
 
     await expect(sender.flush()).rejects.toThrow("journal is full");
@@ -4511,7 +4512,7 @@ describe("QWP ingress reconnect and replay", () => {
       reconnect: {},
       onProgress: (event) => kinds.push(event.kind),
     });
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("events").longColumn("value", 1n).atNow();
     await sender.flush();
     await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
@@ -4597,7 +4598,7 @@ describe("QWP ingress reconnect and replay", () => {
       },
       { reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 } },
     );
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     try {
       await sender.table("events").longColumn("value", 1n).atNow();
       const outage = sender.flushAndWait(50);
@@ -5669,7 +5670,7 @@ describe("QWP ingress reconnect and replay", () => {
       replayStore: new QwpNodeFileReplayStore({ directory }),
       onResponse,
     });
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     try {
       await sender.connect();
       await vi.waitFor(() =>

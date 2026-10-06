@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { QwpSender } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
 import { createQwpBrowserSender } from "../../packages/browser-client/src";
 import {
   Sender,
@@ -58,7 +59,7 @@ describe("programmatic QWP sender logging", () => {
   it("validates log centrally across direct and factory construction", () => {
     const builders = [
       (log: unknown) =>
-        new QwpSender(
+        createQwpSender(
           async () => {
             throw new Error("session factory must stay lazy");
           },

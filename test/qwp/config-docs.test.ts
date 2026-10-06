@@ -5,8 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
-  QwpSender,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
 import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-egress-connection";
@@ -294,7 +295,7 @@ describe("QWP configuration-string reference", () => {
     // the flush machinery's own timers keep working.
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
-      const byRows = new QwpSender(async () => session);
+      const byRows = createQwpSender(async () => session);
       for (let row = 0; row < rows - 1; row++) {
         await byRows.table("t").intColumn("a", row).atNow();
       }
@@ -309,7 +310,7 @@ describe("QWP configuration-string reference", () => {
     sends.length = 0;
     vi.useFakeTimers();
     try {
-      const byInterval = new QwpSender(async () => session);
+      const byInterval = createQwpSender(async () => session);
       await byInterval.table("t").intColumn("a", 1).atNow();
       vi.advanceTimersByTime(intervalMs - 1);
       await byInterval.table("t").intColumn("a", 2).atNow();

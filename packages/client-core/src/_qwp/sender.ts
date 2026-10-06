@@ -1076,6 +1076,7 @@ function encodeQwpWriterValue(
 }
 
 const QWP_TABLE_WRITER_CONSTRUCTOR = Symbol("QWP table writer constructor");
+const QWP_SENDER_CONSTRUCTOR = Symbol("QWP sender constructor");
 
 /** Returned by at()/atNow() for a row that started no flush. */
 const SETTLED: Promise<void> = Promise.resolve();
@@ -1194,10 +1195,16 @@ export class QwpSender {
    * client's borrowSender().
    */
   constructor(
+    token: typeof QWP_SENDER_CONSTRUCTOR,
     private readonly sessionFactory: QwpSenderSessionFactory,
     private readonly options: QwpSenderOptions = {},
     constraints: QwpSenderTransportConstraints = {},
   ) {
+    if (token !== QWP_SENDER_CONSTRUCTOR) {
+      throw new TypeError(
+        "QWP senders must be created by a runtime factory such as connectQwpNodeSender() or connectQwpBrowserSender(), or by a QWP client",
+      );
+    }
     this.autoFlush = options.autoFlush ?? true;
     this.autoFlushRows = options.autoFlushRows ?? DEFAULT_AUTO_FLUSH_ROWS;
     this.autoFlushBytes = options.autoFlushBytes ?? DEFAULT_AUTO_FLUSH_BYTES;
@@ -3047,4 +3054,24 @@ function sessionAcknowledgedSequence(session: QwpSenderSession): bigint {
 
 function advancedSequence(before: bigint, after: bigint): bigint {
   return after > before ? after : -1n;
+}
+
+/**
+ * Creates a sender that publishes through the sessions a factory opens.
+ *
+ * @internal The runtime adapters' sender factories call it, and tests use it
+ * with fake sessions. Neither package root exports it: applications obtain
+ * senders from those factories or a pooled client.
+ */
+export function createQwpSender(
+  sessionFactory: QwpSenderSessionFactory,
+  options: QwpSenderOptions = {},
+  constraints: QwpSenderTransportConstraints = {},
+): QwpSender {
+  return new QwpSender(
+    QWP_SENDER_CONSTRUCTOR,
+    sessionFactory,
+    options,
+    constraints,
+  );
 }

@@ -19,6 +19,8 @@ import {
   QwpSender,
   QwpTableBuffer,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
 // Internal: neither package root exports these.
 import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
 import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
@@ -133,7 +135,7 @@ function okResponse(
 }
 
 function transactionalSender(session: QwpIngressSession): QwpSender {
-  return new QwpSender(async () => session, {
+  return createQwpSender(async () => session, {
     autoFlushRows: 1,
     autoFlushIntervalMs: 0,
     transactional: true,

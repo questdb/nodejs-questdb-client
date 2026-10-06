@@ -5,7 +5,10 @@ import {
   type QwpIngressEncodeOptions,
   type QwpTableBuffer,
 } from "../packages/client-core/src/_qwp/_core";
-import { QwpSender } from "../packages/client-core/src/_qwp/sender";
+import {
+  createQwpSender,
+  QwpSender,
+} from "../packages/client-core/src/_qwp/sender";
 import type { QwpSenderSession } from "../packages/client-core/src/_qwp/_internal/sender-session";
 import { BENCHMARK_WORKLOADS, type BenchmarkRow } from "./workloads";
 
@@ -94,7 +97,7 @@ function senderFor(
   session: EncodingSession,
   symbolDictionary: "delta" | "full",
 ): QwpSender {
-  return new QwpSender(async () => session, {
+  return createQwpSender(async () => session, {
     autoFlush: false,
     closeFlushTimeoutMs: 0,
     symbolDictionary,

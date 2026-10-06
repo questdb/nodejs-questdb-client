@@ -441,3 +441,12 @@ export type NodeEgressSessionFields = ExpectNone<
 export type BrowserEgressSessionFields = ExpectNone<
   Exclude<EgressSessionField, keyof BrowserRoot.QwpBrowserEgressOptions>
 >;
+
+// Nor can a sender be built over a session factory from outside: its
+// constructor leads with a token only the internal factory holds.
+export type NodeSenderToken = ExpectNone<
+  Exclude<ConstructorParameters<typeof NodeRoot.QwpSender>[0], symbol>
+>;
+export type BrowserSenderToken = ExpectNone<
+  Exclude<ConstructorParameters<typeof BrowserRoot.QwpSender>[0], symbol>
+>;

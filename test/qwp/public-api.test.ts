@@ -330,6 +330,24 @@ describe("QWP public API contract", () => {
     ).not.toHaveProperty("QwpNodeFileReplayStore");
   });
 
+  it("keeps sender construction internal", () => {
+    // Senders come from the runtime factories, the Node Sender and the pooled
+    // clients. The factory below them is internal, and the constructor takes a
+    // token only it holds, so a sender cannot be built over a session factory
+    // from outside.
+    for (const api of [shared, browser, node]) {
+      expect(api, "createQwpSender must stay internal").not.toHaveProperty(
+        "createQwpSender",
+      );
+      const construct = api.QwpSender as unknown as new (
+        ...args: unknown[]
+      ) => unknown;
+      expect(() => new construct(async () => undefined)).toThrow(
+        /must be created by a runtime factory/,
+      );
+    }
+  });
+
   it("keeps query-session construction internal", () => {
     // A query session is the query API, so the class stays public, but it is
     // opened by connectQwp*Egress() and the pooled clients. The factories below
