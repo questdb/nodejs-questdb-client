@@ -12,11 +12,11 @@ import {
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { QWP_MAX_SYMBOL_DICTIONARY_SIZE } from "../../../client-core/src/_qwp/_core";
-import {
+import type {
   QwpIngressReplayRecord,
   QwpIngressReplayReference,
   QwpIngressReplayStore,
-} from "../../../client-core/src/_qwp/transport";
+} from "../../../client-core/src/_qwp/_internal/replay-store";
 import {
   QwpNodeAdvisoryLock,
   QwpNodeAdvisoryLockBusyError,
@@ -27,6 +27,7 @@ import {
   qwpSegmentMaintenanceWorker,
 } from "./segment-maintenance-worker";
 import { log } from "../logging";
+import type { QwpNodeStoreAndForwardOptions } from "../qwp";
 import {
   defersCommit,
   isDurableAckPoll,
@@ -151,8 +152,8 @@ interface ScannedRecord extends QwpIngressReplayReference {
 
 /**
  * One preflighted logical batch whose suffix closes an already-open
- * transaction, admitted above {@link QwpNodeFileReplayStoreOptions.maxBytes}
- * because its retained deferred prefix cannot be acknowledged until it is sent.
+ * transaction, admitted above the `maxBytes` target because its retained
+ * deferred prefix cannot be acknowledged until it is sent.
  * Only a batch that fits its applicable standalone rounded segment allowance
  * is admitted this way. Its fixed-segment reservations are added to the
  * maximum rounded prefix; the retained dictionary is excluded from that
@@ -209,66 +210,24 @@ export interface QwpNodeReplayDataLossReport {
   readonly reason: string;
 }
 
-export interface QwpNodeFileReplayStoreOptions {
-  /** Exclusive directory used by one ingress session. */
-  directory: string;
-  /**
-   * Target maximum journal size including fixed segment reservations and
-   * symbol metadata. Defaults to 1 GiB. The current symbol dictionary may
-   * exceed this target so it cannot consume the journal's live frame budget
-   * before a drained close retires that dictionary generation.
-   *
-   * A commit whose deferred prefix already fills the journal also overshoots
-   * it, because QuestDB withholds that prefix's ACK until the commit arrives,
-   * so no amount of trimming could make room first. For fixed segment size S,
-   * reservations are capped at S * (floor(maxBytes / S) + max(floor(maxBytes / S),
-   * ceil(min(maxBytes, 32 MiB) / S))), saturated at Number.MAX_SAFE_INTEGER. The
-   * closing batch must fit the applicable standalone rounded segment allowance
-   * on its own. The retained dictionary is additive; beyond the cap appends
-   * backpressure. When S divides maxBytes exactly, this segment cap is 2 *
-   * maxBytes.
-   *
-   * Must reserve at least one whole segment -- `maxSegmentBytes + 32` for the
-   * 24-byte SFA header and the 8-byte frame header. A smaller target throws a
-   * `RangeError`, because no append could ever reserve its first segment and
-   * no acknowledgement could ever free room for one.
-   */
-  maxBytes?: number;
-  /**
-   * Maximum QWP frame payload and target segment data size. Each fixed segment
-   * reserves this value plus one record header and its 24-byte SFA header,
-   * so a maximum-sized frame still fits. Defaults to 4 MiB. With a directory,
-   * {@link QwpNodeFileReplayStoreOptions.maxBytes} must leave room for one
-   * whole segment of this size plus those 32 bytes of headers.
-   */
-  maxSegmentBytes?: number;
-  /**
-   * Local persistence barrier. `append` preserves the existing fsync-per-frame
-   * behavior, `periodic` checkpoints dirty files in the background, and
-   * `memory` relies on OS page-cache writeback. Defaults to `append`.
-   */
-  durability?: QwpSfDurability;
-  /** Periodic durability checkpoint cadence. Defaults to 5 seconds. */
-  checkpointIntervalMs?: number;
-  /**
-   * Behavior when maxBytes is exhausted. `error` fails immediately; `wait`
-   * pauses the append until ACK trimming frees space or its deadline expires.
-   * Defaults to `error` for backwards compatibility.
-   *
-   * This decides journal exhaustion only. A transient retryable fault parks
-   * until {@link appendDeadlineMs} under either policy, so the only errors an
-   * append surfaces are exhaustion and that deadline.
-   */
-  backpressurePolicy?: QwpSfBackpressurePolicy;
-  /** Per-append capacity or retryable store-fault deadline. Defaults to 30 seconds. */
-  appendDeadlineMs?: number;
-  /**
-   * Reports journal bytes abandoned during recovery. Defaults to logging at
-   * error level; recovery still succeeds, so this must never be silent.
-   */
-  onRecoveryDataLoss?: (report: QwpNodeReplayDataLossReport) => void;
-}
+/**
+ * The journal settings of {@link QwpNodeStoreAndForwardOptions}, which
+ * documents them. Here `directory` is the journal itself: the adapter has
+ * already resolved the slot below a configured root.
+ */
+export type QwpNodeFileReplayStoreOptions = Pick<
+  QwpNodeStoreAndForwardOptions,
+  | "directory"
+  | "maxBytes"
+  | "maxSegmentBytes"
+  | "durability"
+  | "checkpointIntervalMs"
+  | "backpressurePolicy"
+  | "appendDeadlineMs"
+  | "onRecoveryDataLoss"
+>;
 
+/** Journal counters, read by tests; internal, like the store itself. */
 export interface QwpNodeFileReplayStoreMetrics {
   readonly durability: QwpSfDurability;
   readonly backpressurePolicy: QwpSfBackpressurePolicy;
@@ -488,6 +447,9 @@ export class QwpReplayStoreLockedError extends QwpReplayStoreError {
  * trimming. A crash between the server ACK and local deletion can cause
  * at-least-once replay. An exclusive, lifetime lock prevents another process
  * from recovering or mutating the same directory.
+ *
+ * @internal The package root does not export it: senders build one from their
+ * `storeAndForward` options, and tests and benchmarks import it by path.
  */
 export class QwpNodeFileReplayStore implements QwpIngressReplayStore {
   private readonly directory: string;

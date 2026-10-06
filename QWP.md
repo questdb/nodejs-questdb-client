@@ -440,9 +440,9 @@ segment-rounded live-frame allowance preserved by a retained symbol dictionary,
 because no ACK or trim is needed to consume it. Waiting appenders do not hold the
 journal mutation queue, so ACK cleanup and checkpoint recovery can continue. Corruption and loss of the journal lock remain
 immediate failures.
-Direct users of `QwpNodeFileReplayStore` can inspect `metrics` for pending records
-and segments, checkpoint work, checkpoint failures, active waiters, stalls, and
-timeouts.
+A sender's `metrics.ingress` reports the journal's backlog as `pendingReplayFrames`
+and `pendingReplayBytes`, with its published and acknowledged frame watermarks as
+`replayPublishedFrameSequence` and `replayAcknowledgedFrameSequence`.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
 cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target together
@@ -1884,6 +1884,11 @@ internal, as in the other QuestDB clients. Configure orphan recovery with the
 `storeAndForward` options `drainOrphans`, `maxBackgroundDrainers` and
 `orphanScanIntervalMs`, observe it through `onOrphanDrainEvent`, and call
 `retryQwpNodeOrphanSlot()` to make a slot marked `.failed` eligible again.
+
+The store-and-forward journal is internal as well, and so is the replay store
+contract it implements: neither `QwpNodeFileReplayStore` nor `QwpIngressReplayStore`
+is exported. Configure the journal through `storeAndForward`, which takes its
+settings — `maxBytes`, `durability`, `backpressurePolicy` and the rest — directly.
 
 The raw WebSocket connectors and connection factories below the senders and query
 sessions are internal too, in both packages. The senders, `connectQwpNodeEgress()`,

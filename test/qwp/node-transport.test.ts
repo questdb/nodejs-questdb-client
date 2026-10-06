@@ -30,7 +30,6 @@ import {
   QWP_UPGRADE_TIMEOUT_PHASE,
   QwpByteWriter,
   QwpFailoverError,
-  QwpNodeFileReplayStore,
   QwpReconnectExhaustedError,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreQuarantinedError,
@@ -42,11 +41,12 @@ import {
   writeQwpVarint,
 } from "../../packages/nodejs-client/src";
 // Internal: the package root exports neither the ingress-session factory nor
-// the raw WebSocket connector.
+// the raw WebSocket connector, nor the store-and-forward journal.
 import {
   connectQwpNodeIngress,
   connectQwpNodeWebSocket,
 } from "../../packages/nodejs-client/src/qwp";
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 import { publishAndWait } from "./publish-and-wait";
 
 function serverInfo(

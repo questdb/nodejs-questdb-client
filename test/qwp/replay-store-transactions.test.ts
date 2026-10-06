@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
-  QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
 } from "../../packages/nodejs-client/src";
@@ -22,6 +21,8 @@ import {
   QwpTableBuffer,
 } from "../../packages/client-core/src/qwp";
 import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { waitForPublished } from "./publish-and-wait";
 

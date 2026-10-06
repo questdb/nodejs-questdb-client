@@ -2,10 +2,9 @@ import { mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  QWP_SF_DURABILITY,
-  QwpNodeFileReplayStore,
-} from "../../packages/nodejs-client/src";
+import { QWP_SF_DURABILITY } from "../../packages/nodejs-client/src";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 // Internal: the package root does not export the orphan drainer's scanner.
 import { scanQwpNodeOrphanSlots } from "../../packages/nodejs-client/src/qwp-node/orphan-drainer";
 

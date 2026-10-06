@@ -23,9 +23,6 @@ import {
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpIngressReconnectOptions,
-  QwpIngressReplayRecord,
-  QwpIngressReplayReference,
-  QwpIngressReplayStore,
   QwpIngressTransportMetrics,
   QwpInitialConnectMode,
   QwpMemoryReplayAppendTimeoutError,
@@ -41,6 +38,11 @@ import {
   QwpUpgradeError,
 } from "../transport";
 import { defersCommit, isDurableAckPoll } from "./frame-flags";
+import type {
+  QwpIngressReplayRecord,
+  QwpIngressReplayReference,
+  QwpIngressReplayStore,
+} from "./replay-store";
 import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import { monotonicNowMs } from "./monotonic-clock";

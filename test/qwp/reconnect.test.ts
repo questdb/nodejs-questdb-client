@@ -19,7 +19,6 @@ import {
   QWP_ORPHAN_FAILED_SENTINEL,
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
-  QwpNodeFileReplayStore,
   QwpEgressSession,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
@@ -54,9 +53,6 @@ import {
   QWP_INGRESS_PROGRESS_KIND,
   QwpIngressAckAbandonedError,
   QwpIngressSessionClosedError,
-  QwpIngressReplayRecord,
-  QwpIngressReplayReference,
-  QwpIngressReplayStore,
   QwpHandshakeMetadata,
   QwpMemoryReplayAppendTimeoutError,
   QwpMemoryReplayBatchTooLargeError,
@@ -92,10 +88,18 @@ import {
 // Internal: the package root does not export the orphan drainer.
 import { QwpNodeOrphanDrainer } from "../../packages/nodejs-client/src/qwp-node/orphan-drainer";
 import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
+// Internal: the package root exports neither the store-and-forward journal nor
+// the replay store contract it implements.
 import {
   quarantineQwpNodeReplayStore,
   qwpSegmentFileSize,
+  QwpNodeFileReplayStore,
 } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
+import type {
+  QwpIngressReplayRecord,
+  QwpIngressReplayReference,
+  QwpIngressReplayStore,
+} from "../../packages/client-core/src/_qwp/_internal/replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { QwpReconnectingIngressConnection } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { validateQwpWebSocketTimeouts } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";

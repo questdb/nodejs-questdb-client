@@ -189,7 +189,6 @@ const nodeRuntimeContract = [
   "QWP_ORPHAN_FAILED_SENTINEL",
   "QWP_SF_BACKPRESSURE_POLICY",
   "QWP_SF_DURABILITY",
-  "QwpNodeFileReplayStore",
   "QwpReplayStoreAppendTimeoutError",
   "QwpReplayStoreBatchTooLargeError",
   "QwpReplayStoreCheckpointError",
@@ -317,6 +316,18 @@ describe("QWP public API contract", () => {
     ]) {
       expect(node, `${name} must stay internal`).not.toHaveProperty(name);
     }
+  });
+
+  it("keeps the store-and-forward journal internal", () => {
+    // Store-and-forward is configured rather than constructed: storeAndForward
+    // builds the journal, and no option takes another replay store. Its
+    // policies, errors and data-loss reports stay public; re-exposing the
+    // journal has to remove this test rather than merely extend the contract
+    // above.
+    expect(
+      node,
+      "QwpNodeFileReplayStore must stay internal",
+    ).not.toHaveProperty("QwpNodeFileReplayStore");
   });
 
   it("keeps the raw connection helpers internal", () => {

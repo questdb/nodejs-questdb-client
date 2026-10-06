@@ -48,9 +48,6 @@ export type {
   QwpIngressProgressEvent,
   QwpIngressProgressKind,
   QwpIngressReconnectOptions,
-  QwpIngressReplayRecord,
-  QwpIngressReplayReference,
-  QwpIngressReplayStore,
   QwpIngressResponse,
   QwpIngressServerInfo,
   QwpIngressSymbolDictionaryDelta,
@@ -69,8 +66,6 @@ export type {
   QwpNodeClientConfigOptions,
   QwpNodeClientOptions,
   QwpNodeEgressOptions,
-  QwpNodeFileReplayStoreMetrics,
-  QwpNodeFileReplayStoreOptions,
   QwpNodeIngressOptions,
   QwpNodeOrphanDrainEvent,
   QwpNodeOrphanDrainEventKind,
@@ -175,9 +170,6 @@ export type {
   QwpIngressProgressEvent as BrowserQwpIngressProgressEvent,
   QwpIngressProgressKind as BrowserQwpIngressProgressKind,
   QwpIngressReconnectOptions as BrowserQwpIngressReconnectOptions,
-  QwpIngressReplayRecord as BrowserQwpIngressReplayRecord,
-  QwpIngressReplayReference as BrowserQwpIngressReplayReference,
-  QwpIngressReplayStore as BrowserQwpIngressReplayStore,
   QwpIngressResponse as BrowserQwpIngressResponse,
   QwpIngressServerInfo as BrowserQwpIngressServerInfo,
   QwpIngressSymbolDictionaryDelta as BrowserQwpIngressSymbolDictionaryDelta,
@@ -291,6 +283,30 @@ export type BrowserConnectionFactory =
   // @ts-expect-error createQwpBrowserConnectionFactory is internal.
   typeof BrowserRoot.createQwpBrowserConnectionFactory;
 
+// So is the store-and-forward journal, with its options and metrics, and the
+// replay store contract it implements: storeAndForward configures the one
+// persistent store, and no option takes another.
+// @ts-expect-error QwpNodeFileReplayStore is internal.
+export type NodeFileReplayStore = NodeRoot.QwpNodeFileReplayStore;
+export type NodeFileReplayStoreOptions =
+  // @ts-expect-error QwpNodeFileReplayStoreOptions is internal.
+  NodeRoot.QwpNodeFileReplayStoreOptions;
+export type NodeFileReplayStoreMetrics =
+  // @ts-expect-error QwpNodeFileReplayStoreMetrics is internal.
+  NodeRoot.QwpNodeFileReplayStoreMetrics;
+// @ts-expect-error QwpIngressReplayStore is internal.
+export type NodeReplayStore = NodeRoot.QwpIngressReplayStore;
+// @ts-expect-error QwpIngressReplayRecord is internal.
+export type NodeReplayRecord = NodeRoot.QwpIngressReplayRecord;
+// @ts-expect-error QwpIngressReplayReference is internal.
+export type NodeReplayReference = NodeRoot.QwpIngressReplayReference;
+// @ts-expect-error QwpIngressReplayStore is internal.
+export type BrowserReplayStore = BrowserRoot.QwpIngressReplayStore;
+// @ts-expect-error QwpIngressReplayRecord is internal.
+export type BrowserReplayRecord = BrowserRoot.QwpIngressReplayRecord;
+// @ts-expect-error QwpIngressReplayReference is internal.
+export type BrowserReplayReference = BrowserRoot.QwpIngressReplayReference;
+
 // The sender's buffering options and the ingress session's delivery options
 // are part of each runtime's ingress options, not types of their own, and the
 // session options only an adapter sets are internal too.
@@ -360,4 +376,19 @@ export type NodeConnectFields = ExpectNone<
 >;
 export type BrowserConnectFields = ExpectNone<
   Exclude<SharedConnectField, keyof BrowserRoot.QwpBrowserWebSocketOptions>
+>;
+
+// The journal's own settings are folded into the store-and-forward options,
+// which must keep every one of them.
+type JournalField =
+  | "directory"
+  | "maxBytes"
+  | "maxSegmentBytes"
+  | "durability"
+  | "checkpointIntervalMs"
+  | "backpressurePolicy"
+  | "appendDeadlineMs"
+  | "onRecoveryDataLoss";
+export type NodeJournalFields = ExpectNone<
+  Exclude<JournalField, keyof NodeRoot.QwpNodeStoreAndForwardOptions>
 >;

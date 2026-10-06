@@ -22,8 +22,8 @@ import {
   QwpHandshakeMetadata,
   QwpInitialConnectMode,
   QwpIngressReconnectOptions,
-  QwpIngressReplayStore,
 } from "./transport";
+import type { QwpIngressReplayStore } from "./_internal/replay-store";
 import {
   QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
   QwpReconnectingIngressConnection,
@@ -226,8 +226,8 @@ export interface QwpIngressSessionOptions {
    * per-frame bookkeeping. Defaults to 128 MiB. A transaction-closing logical
    * batch may temporarily exceed this target by up to one target-sized batch,
    * because the server cannot ACK its deferred prefix before receiving that
-   * batch. This applies in browsers and non-persistent Node sessions; custom
-   * replay stores enforce their own cap.
+   * batch. This applies in browsers and non-persistent Node sessions; a Node
+   * store-and-forward journal is bounded by its own `maxBytes` instead.
    */
   memoryReplayMaxBytes?: number;
   /**

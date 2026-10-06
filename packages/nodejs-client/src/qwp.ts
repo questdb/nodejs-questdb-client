@@ -83,8 +83,9 @@ import {
   QwpReplayStoreQuarantinedError,
 } from "./qwp-node/file-replay-store";
 import type {
-  QwpNodeFileReplayStoreOptions,
   QwpNodeReplayDataLossReport,
+  QwpSfBackpressurePolicy,
+  QwpSfDurability,
 } from "./qwp-node/file-replay-store";
 import {
   QwpNodeOrphanDrainer,
@@ -95,10 +96,13 @@ import {
   type QwpNodeUdpOptions,
 } from "./qwp-node/udp-sender";
 
+// The journal itself stays internal, as the replay store contract it implements
+// does: store-and-forward is configured through QwpNodeStoreAndForwardOptions,
+// and only what reaches a caller through it -- its policies, errors and
+// data-loss reports -- is public.
 export {
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
-  QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
   QwpReplayStoreCheckpointError,
@@ -112,8 +116,6 @@ export {
   QwpReplayStoreSegmentTooLargeError,
 } from "./qwp-node/file-replay-store";
 export type {
-  QwpNodeFileReplayStoreMetrics,
-  QwpNodeFileReplayStoreOptions,
   QwpNodeReplayDataLossReport,
   QwpSfBackpressurePolicy,
   QwpSfDurability,
@@ -319,9 +321,72 @@ export interface QwpNodeReplayRecoveryEvent {
   readonly senderError: QwpSenderError;
 }
 
-/** Node store-and-forward controls layered on the crash-safe replay journal. */
-export interface QwpNodeStoreAndForwardOptions
-  extends QwpNodeFileReplayStoreOptions {
+/**
+ * Node store-and-forward: a crash-safe journal that keeps each frame on disk
+ * until the server acknowledges it, and the recovery of journals that
+ * terminated producers left behind.
+ */
+export interface QwpNodeStoreAndForwardOptions {
+  /**
+   * The journal directory, which one sender owns exclusively. With `senderId`
+   * it is the slot root instead, and the journal is `<directory>/<senderId>`.
+   */
+  directory: string;
+  /**
+   * Target maximum journal size including fixed segment reservations and
+   * symbol metadata. Defaults to 1 GiB. The current symbol dictionary may
+   * exceed this target so it cannot consume the journal's live frame budget
+   * before a drained close retires that dictionary generation.
+   *
+   * A commit whose deferred prefix already fills the journal also overshoots
+   * it, because QuestDB withholds that prefix's ACK until the commit arrives,
+   * so no amount of trimming could make room first. For fixed segment size S,
+   * reservations are capped at S * (floor(maxBytes / S) + max(floor(maxBytes / S),
+   * ceil(min(maxBytes, 32 MiB) / S))), saturated at Number.MAX_SAFE_INTEGER. The
+   * closing batch must fit the applicable standalone rounded segment allowance
+   * on its own. The retained dictionary is additive; beyond the cap appends
+   * backpressure. When S divides maxBytes exactly, this segment cap is 2 *
+   * maxBytes.
+   *
+   * Must reserve at least one whole segment -- `maxSegmentBytes + 32` for the
+   * 24-byte SFA header and the 8-byte frame header. A smaller target throws a
+   * `RangeError`, because no append could ever reserve its first segment and
+   * no acknowledgement could ever free room for one.
+   */
+  maxBytes?: number;
+  /**
+   * Maximum QWP frame payload and target segment data size. Each fixed segment
+   * reserves this value plus one record header and its 24-byte SFA header,
+   * so a maximum-sized frame still fits. Defaults to 4 MiB. `maxBytes` must
+   * leave room for one whole segment of this size plus those 32 bytes of
+   * headers.
+   */
+  maxSegmentBytes?: number;
+  /**
+   * Local persistence barrier. `append` preserves the existing fsync-per-frame
+   * behavior, `periodic` checkpoints dirty files in the background, and
+   * `memory` relies on OS page-cache writeback. Defaults to `append`.
+   */
+  durability?: QwpSfDurability;
+  /** Periodic durability checkpoint cadence. Defaults to 5 seconds. */
+  checkpointIntervalMs?: number;
+  /**
+   * Behavior when maxBytes is exhausted. `error` fails immediately; `wait`
+   * pauses the append until ACK trimming frees space or its deadline expires.
+   * Defaults to `error` for backwards compatibility.
+   *
+   * This decides journal exhaustion only. A transient retryable fault parks
+   * until {@link appendDeadlineMs} under either policy, so the only errors an
+   * append surfaces are exhaustion and that deadline.
+   */
+  backpressurePolicy?: QwpSfBackpressurePolicy;
+  /** Per-append capacity or retryable store-fault deadline. Defaults to 30 seconds. */
+  appendDeadlineMs?: number;
+  /**
+   * Reports journal bytes abandoned during recovery. Defaults to logging at
+   * error level; recovery still succeeds, so this must never be silent.
+   */
+  onRecoveryDataLoss?: (report: QwpNodeReplayDataLossReport) => void;
   /**
    * Minimum time an orphan slot's symbol catch-up cap gap must persist before
    * it is quarantined. The gap must also be observed 16 times. Defaults to

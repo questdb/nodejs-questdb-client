@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeClient,
   createQwpNodeClient,
-  QwpNodeFileReplayStore,
   parseQwpNodeClientConfig,
   Sender,
   SenderOptions,
@@ -14,6 +13,8 @@ import {
 } from "../../packages/nodejs-client/src";
 import { qwpConfig } from "../../packages/nodejs-client/src/options";
 import { resolveQwpNodeClientSides } from "../../packages/nodejs-client/src/qwp-node/client-config";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 
 class RejectingWebSocket {
   binaryType = "";

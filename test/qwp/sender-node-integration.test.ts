@@ -11,9 +11,10 @@ import {
   QWP_MAGIC,
   QWP_STATUS,
   QwpByteWriter,
-  QwpNodeFileReplayStore,
   decodeQwpIngressSymbolDictionaryDelta,
 } from "../../packages/nodejs-client/src";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 
 function okResponse(sequence: bigint, table: string): Uint8Array {
   const encodedTable = new TextEncoder().encode(table);
