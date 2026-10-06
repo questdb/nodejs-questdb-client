@@ -57,6 +57,7 @@ import {
 import {
   QwpIngressSession,
   QwpIngressSessionOptions,
+  resolveQwpDurableAckKeepaliveMs,
 } from "../../client-core/src/_qwp/ingress-session";
 import {
   createQwpSender,
@@ -391,7 +392,8 @@ export interface QwpBrowserIngressOptions
     QwpIngressSessionOptions {
   /**
    * Requests durable ingress ACKs through browser-visible WebSocket
-   * subprotocol negotiation.
+   * subprotocol negotiation. durableAckKeepaliveMs takes effect only alongside
+   * it.
    */
   requestDurableAck?: boolean;
   /**
@@ -961,19 +963,14 @@ export async function connectQwpBrowserIngress(
   /** Cancels a first connect still negotiating; see QwpIngressSession.connect. */
   signal?: AbortSignal,
 ): Promise<QwpIngressSession> {
-  if (
-    options.durableAckKeepaliveMs !== undefined &&
-    options.requestDurableAck !== true
-  ) {
-    throw new RangeError(
-      "durableAckKeepaliveMs requires requestDurableAck=true for browser ingress",
-    );
-  }
   const effectiveSessionOptions: QwpIngressSessionOptions = {
     ...options,
-    durableAckKeepaliveMs: options.requestDurableAck
-      ? (options.durableAckKeepaliveMs ?? 200)
-      : options.durableAckKeepaliveMs,
+    // Without requestDurableAck the keepalive is ignored, as in the Java and
+    // Rust clients.
+    durableAckKeepaliveMs: resolveQwpDurableAckKeepaliveMs(
+      options.requestDurableAck,
+      options.durableAckKeepaliveMs,
+    ),
   };
   return QwpIngressSession.connect(
     createQwpBrowserConnectionFactory(options),

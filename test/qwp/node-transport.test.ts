@@ -371,7 +371,7 @@ describe("QWP Node transport", () => {
     }
   });
 
-  it("lets the keepalive option request durable ACK directly", async () => {
+  it("paces durable ACK polls with the keepalive once durable ACK is requested", async () => {
     const table = "trades";
     const sequenceTransaction = 7n;
     let requestedDurableAck: string | string[] | undefined;
@@ -401,11 +401,9 @@ describe("QWP Node transport", () => {
     });
 
     const address = server.address() as AddressInfo;
-    // Node callers may request durable tracking through the session keepalive
-    // alone. The transport must promote that request into the upgrade header;
-    // otherwise ordinary OKs silently become the public ACK watermark.
     const session = await connectQwpNodeIngress({
       url: `ws://127.0.0.1:${address.port}/write/v4`,
+      requestDurableAck: true,
       durableAckKeepaliveMs: 10,
     });
     try {
@@ -428,15 +426,62 @@ describe("QWP Node transport", () => {
     }
   });
 
-  it("rejects disabling durable ACK while requesting keepalive tracking", async () => {
+  it("ignores the keepalive option unless durable ACK is requested", async () => {
+    const requestedDurableAck: (string | string[] | undefined)[] = [];
+    let pingCount = 0;
+
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      // Offered unasked, so only the client's own request can turn on tracking.
+      headers.push("X-QWP-Durable-Ack: enabled");
+    });
+    server.on("connection", (socket, request) => {
+      requestedDurableAck.push(request.headers["x-qwp-request-durable-ack"]);
+      socket.once("message", () => {
+        socket.send(okResponse(0n, "trades", 7n));
+      });
+      socket.on("ping", () => {
+        pingCount++;
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+
+    const address = server.address() as AddressInfo;
+    // As in the Java and Rust clients, the keepalive alone neither requests
+    // durable ACKs nor conflicts with an explicit `false`. Had it reached the
+    // session anyway, the capability offered above would hold the ACK
+    // watermark for durable progress, and the ordinary OK would not advance it.
+    for (const requestDurableAck of [undefined, false]) {
+      const session = await connectQwpNodeIngress({
+        url: `ws://127.0.0.1:${address.port}/write/v4`,
+        requestDurableAck,
+        durableAckKeepaliveMs: 10,
+      });
+      try {
+        expect(session.handshake.durableAckEnabled).toBe(true);
+        await expect(
+          publishAndWait(session, Uint8Array.of(1), 1_000),
+        ).resolves.toBe(0n);
+      } finally {
+        await session.close();
+      }
+    }
+    expect(requestedDurableAck).toEqual([undefined, undefined]);
+    expect(pingCount).toBe(0);
+  });
+
+  it("still validates a keepalive it ignores", async () => {
     await expect(
       connectQwpNodeIngress({
         url: "ws://127.0.0.1:1/write/v4",
-        requestDurableAck: false,
-        durableAckKeepaliveMs: 10,
+        durableAckKeepaliveMs: -1,
       }),
     ).rejects.toThrow(
-      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
+      "durableAckKeepaliveMs must be a non-negative finite number",
     );
   });
 

@@ -266,13 +266,13 @@ export interface QwpIngressSessionOptions {
    */
   maxBatchSizeBytes?: number;
   /**
-   * Enables durable-ACK tracking. While committed table transactions await
+   * Durable-ACK keepalive interval. While committed table transactions await
    * durable upload, Node transports send WebSocket PING frames and browser
-   * transports send table-less QWP poll frames. Zero keeps tracking enabled
-   * but disables automatic polling. Factory-created browser sessions require
-   * requestDurableAck=true when this option is supplied. Capped at
-   * 2,147,483,647ms (the host timer ceiling); a larger value throws a
-   * `RangeError`.
+   * transports send table-less QWP poll frames. Takes effect only with
+   * `requestDurableAck: true`, where it defaults to 200ms; otherwise it is
+   * ignored, as in the Java and Rust clients. Zero disables the keepalive but
+   * still tracks durable progress. Capped at 2,147,483,647ms (the host timer
+   * ceiling); a larger value throws a `RangeError`.
    */
   durableAckKeepaliveMs?: number;
   /**
@@ -490,6 +490,45 @@ export class QwpBatchTooLargeError extends RangeError {
   }
 }
 
+/**
+ * @internal The keepalive interval durable ACKs get when none is configured:
+ * 200ms, as in the Java and Rust clients.
+ */
+export const QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS = 200;
+
+function validateDurableAckKeepaliveMs(keepalive: number | undefined): void {
+  if (
+    keepalive !== undefined &&
+    (!Number.isFinite(keepalive) ||
+      keepalive < 0 ||
+      exceedsQwpTimerCeiling(keepalive))
+  ) {
+    throw new RangeError(
+      `durableAckKeepaliveMs must be a non-negative finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
+  }
+}
+
+/**
+ * @internal The durableAckKeepaliveMs a runtime adapter hands its session.
+ *
+ * The session reads a defined interval as the caller's request to track
+ * durable progress, so it gets one only when the caller requested durable
+ * ACKs. Otherwise the keepalive is ignored, as in the Java and Rust clients:
+ * it neither requests durable ACKs on the caller's behalf nor conflicts with
+ * `requestDurableAck: false`. The value is validated either way, so a
+ * malformed one is not accepted merely for being unused.
+ */
+export function resolveQwpDurableAckKeepaliveMs(
+  requestDurableAck: boolean | undefined,
+  durableAckKeepaliveMs: number | undefined,
+): number | undefined {
+  validateDurableAckKeepaliveMs(durableAckKeepaliveMs);
+  return requestDurableAck === true
+    ? (durableAckKeepaliveMs ?? QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS)
+    : undefined;
+}
+
 function validateIngressSessionOptions(
   options: QwpIngressSessionInternalOptions,
 ): void {
@@ -552,17 +591,7 @@ function validateIngressSessionOptions(
       "memory replay capacity options cannot be combined with a custom replayStore",
     );
   }
-  const keepalive = options.durableAckKeepaliveMs;
-  if (
-    keepalive !== undefined &&
-    (!Number.isFinite(keepalive) ||
-      keepalive < 0 ||
-      exceedsQwpTimerCeiling(keepalive))
-  ) {
-    throw new RangeError(
-      `durableAckKeepaliveMs must be a non-negative finite number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
-    );
-  }
+  validateDurableAckKeepaliveMs(options.durableAckKeepaliveMs);
   const orphanDurableAckBudget = options.orphanDurableAckMismatchMaxDurationMs;
   if (
     orphanDurableAckBudget !== undefined &&
@@ -846,9 +875,9 @@ export class QwpIngressSession {
    * Whether this session maintains a durable watermark at all.
    *
    * The handshake flag on its own is not enough: durable targets are tracked
-   * only when the caller asked for durable progress with
-   * durableAckKeepaliveMs. The
-   * two conditions have to be read together everywhere, because a session
+   * only when the caller asked for durable progress, which reaches the session
+   * as a defined durableAckKeepaliveMs (see resolveQwpDurableAckKeepaliveMs).
+   * The two conditions have to be read together everywhere, because a session
    * that reports a watermark nothing advances is worse than one that reports
    * the ordinary ACK -- it stalls rather than degrades.
    *

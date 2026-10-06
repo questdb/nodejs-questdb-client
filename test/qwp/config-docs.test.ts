@@ -11,6 +11,10 @@ import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
 import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-egress-connection";
+import {
+  QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS,
+  resolveQwpDurableAckKeepaliveMs,
+} from "../../packages/client-core/src/_qwp/ingress-session";
 import { createQwpNodeClient } from "../../packages/nodejs-client/src";
 import { resolveQwpNodeClientConfig } from "../../packages/nodejs-client/src/qwp-node/client-config";
 import { QWP_SUPPORTED_CONFIG_KEYS } from "../../packages/nodejs-client/src/qwp-node/client-config";
@@ -255,6 +259,22 @@ describe("QWP configuration-string reference", () => {
       [...documented].filter((name) => !exported.has(name)).sort(),
     ).toEqual([]);
     expect(exported.size).toBeGreaterThan(40);
+  });
+
+  it("documents the durable-ACK keepalive default the adapters apply", async () => {
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const row =
+      /^\| `durable_ack_keepalive_interval_millis`\s*\|[^|]*\|\s*`(\d+)`\s*\|/m.exec(
+        doc,
+      );
+    if (!row) throw new Error("no numeric keepalive default documented");
+    expect(Number(row[1])).toBe(QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS);
+    expect(resolveQwpDurableAckKeepaliveMs(true, undefined)).toBe(
+      QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS,
+    );
+    // The row also says the key is ignored without request_durable_ack=on.
+    expect(resolveQwpDurableAckKeepaliveMs(undefined, 10)).toBeUndefined();
+    expect(resolveQwpDurableAckKeepaliveMs(false, 10)).toBeUndefined();
   });
 
   it("documents the auto-flush defaults the sender actually applies", async () => {

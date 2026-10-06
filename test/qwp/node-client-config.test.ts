@@ -1095,21 +1095,21 @@ describe("QWP unified Node client configuration", () => {
     expect(fromString.ingress.requestDurableAck).toBe(true);
     expect(fromString.egress).not.toHaveProperty("requestDurableAck");
 
-    // The keepalive is also a documented direct request for durable progress.
+    // As in the Java and Rust clients, the keepalive requests nothing: it is
+    // carried as set, and the sender ignores it unless durable ACK is on. Both
+    // strings below are ones those clients accept.
     const keepaliveOnly = parseQwpNodeClientConfig(
       "ws::addr=localhost:9000;durable_ack_keepalive_interval_millis=10;",
     );
-    expect(keepaliveOnly.ingress.requestDurableAck).toBe(true);
+    expect(keepaliveOnly.ingress.requestDurableAck).toBeUndefined();
     expect(keepaliveOnly.ingress.durableAckKeepaliveMs).toBe(10);
     expect(keepaliveOnly.egress).not.toHaveProperty("requestDurableAck");
 
-    expect(() =>
-      parseQwpNodeClientConfig(
-        "ws::addr=localhost:9000;request_durable_ack=off;durable_ack_keepalive_interval_millis=10;",
-      ),
-    ).toThrow(
-      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
+    const keepaliveOff = parseQwpNodeClientConfig(
+      "ws::addr=localhost:9000;request_durable_ack=off;durable_ack_keepalive_interval_millis=10;",
     );
+    expect(keepaliveOff.ingress.requestDurableAck).toBe(false);
+    expect(keepaliveOff.ingress.durableAckKeepaliveMs).toBe(10);
 
     // Shared cluster overrides still reach both sides, and the request stays
     // on ingress once the sides are resolved.

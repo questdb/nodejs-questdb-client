@@ -2785,7 +2785,54 @@ describe("QwpIngressSession", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("rejects browser durable keepalives without requesting negotiation", async () => {
+  it("ignores browser durable keepalives without requesting negotiation", async () => {
+    // As in the Java and Rust clients, the keepalive alone neither requests
+    // durable ACKs nor conflicts with an explicit `false`. The server offers
+    // the capability unasked, so a keepalive that still reached the session
+    // would hold the watermark for durable progress and poll for it.
+    vi.useFakeTimers();
+    try {
+      for (const requestDurableAck of [undefined, false]) {
+        const socket = new FakeWebSocket();
+        const offered: (string | string[] | undefined)[] = [];
+        const connecting = connectQwpBrowserIngress({
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck,
+          webSocketFactory: (_url, protocols) => {
+            offered.push(protocols);
+            return asQwpSocket(socket);
+          },
+          durableAckKeepaliveMs: 5,
+        });
+        openDurableAckBrowserSocket(socket);
+        const session = await connecting;
+        expect(offered.flat()).not.toContain(
+          QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+        );
+        expect(session.handshake.durableAckEnabled).toBe(true);
+        socket.onSend = () => {
+          socket.message(
+            ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+          );
+        };
+
+        await session.publishFrame(Uint8Array.of(1));
+        await vi.waitFor(() =>
+          expect(session.metrics.acknowledgedSequence).toBe(0n),
+        );
+        // The ordinary OK is the watermark, and no poll frame follows it.
+        expect(session.acknowledgedFrameSequence).toBe(0n);
+        await vi.advanceTimersByTimeAsync(20);
+        expect(socket.sent).toHaveLength(1);
+        expect(session.metrics.pendingDurableTables).toBe(0);
+        await session.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still validates a browser durable keepalive it ignores", async () => {
     let factoryCalls = 0;
     await expect(
       connectQwpBrowserIngress({
@@ -2794,9 +2841,11 @@ describe("QwpIngressSession", () => {
           factoryCalls++;
           return asQwpSocket(new FakeWebSocket());
         },
-        durableAckKeepaliveMs: 5,
+        durableAckKeepaliveMs: Number.NaN,
       }),
-    ).rejects.toThrow("durableAckKeepaliveMs requires requestDurableAck=true");
+    ).rejects.toThrow(
+      "durableAckKeepaliveMs must be a non-negative finite number",
+    );
     expect(factoryCalls).toBe(0);
   });
 

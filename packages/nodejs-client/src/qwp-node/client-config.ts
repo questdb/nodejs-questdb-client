@@ -463,16 +463,6 @@ export function resolveQwpNodeClientConfig(
     "replica",
   ] as const) as QwpTarget | undefined;
   const zone = value("zone");
-  const requestDurableAck =
-    ingressOverrides.requestDurableAck ??
-    optionalBoolean(value("request_durable_ack"), "request_durable_ack");
-  const durableAckKeepaliveMs =
-    ingressOverrides.durableAckKeepaliveMs ?? delivery.durableAckKeepaliveMs;
-  if (requestDurableAck === false && durableAckKeepaliveMs !== undefined) {
-    throw new RangeError(
-      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
-    );
-  }
   const ingress: NonNullable<QwpNodeClientOptions["ingress"]> = {
     // `target` and `zone` are one cluster-routing pair, and QWP.md documents
     // them under "Reconnect and failover" and promises the ingress endpoint
@@ -480,10 +470,12 @@ export function resolveQwpNodeClientConfig(
     // silently inert for writes.
     target,
     zone,
-    // The keepalive is also a documented direct request for durable progress.
-    requestDurableAck:
-      requestDurableAck ??
-      (durableAckKeepaliveMs === undefined ? undefined : true),
+    // The keepalive does not request durable ACKs: it is carried as set and
+    // ignored without them, as in the Java and Rust clients.
+    requestDurableAck: optionalBoolean(
+      value("request_durable_ack"),
+      "request_durable_ack",
+    ),
     storeAndForward,
     senderId: validateSenderId(value("sender_id") ?? QWP_DEFAULT_SENDER_ID),
     ...buffering,
