@@ -1871,7 +1871,7 @@ Review these behavioral differences before rollout:
 Roll out `ws::` per sender instance so the existing protocols can remain in service
 during migration.
 
-### Low-level QWP ingress
+### Low-level QWP APIs
 
 The ingress session below the sender is internal, as in the Java, Rust and Python
 clients, so neither package exports `QwpIngressSession` or a factory that returns
@@ -1898,6 +1898,16 @@ The raw WebSocket connectors and connection factories below the senders and quer
 sessions are internal too, in both packages. The senders, `connectQwpNodeEgress()`,
 `connectQwpBrowserEgress()` and the pooled clients open and reconnect their own
 connections from the same endpoint options.
+
+Query sessions are opened the same way. `QwpEgressSession` is what
+`connectQwpNodeEgress()`, `connectQwpBrowserEgress()` and the pooled clients return,
+but it has no static `connect()` and cannot be constructed directly, so the
+connection types it took, `QwpBinaryConnection` and `QwpConnectionFactory`, are
+internal. Its flow-control, deadline and failover options are part of
+`QwpNodeEgressOptions` and `QwpBrowserEgressOptions` rather than a type of their own.
+
+Senders are obtained the same way: a `QwpSender` comes from the runtime sender
+factories or a pooled client's `borrowSender()`, and its constructor is internal.
 
 `parseQwpNodeClientConfig()` is the low-level helper for turning a `ws::`/`wss::`
 connect string into the typed options object `createQwpNodeClient()` takes.
