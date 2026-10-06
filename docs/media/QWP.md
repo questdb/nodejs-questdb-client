@@ -320,8 +320,9 @@ const sender = await Sender.fromConfig(
         zone: "eu-west-1a",
         senderId: "producer-a",
         storeAndForward: {
-          // The slot root. `senderId` names the journal inside it, so this must
-          // not repeat that name or the journal lands in `.../producer-a/producer-a`.
+          // The slot root. The journal is `<directory>/<senderId>`, `default` when
+          // no senderId is set, so this must not repeat that name or the journal
+          // lands in `.../producer-a/producer-a`.
           directory: "/var/lib/my-service/qwp-replay",
           maxBytes: 512 * 1024 * 1024,
           durability: "periodic",
@@ -355,13 +356,14 @@ Browsers cannot observe the transport boundary, so their `connectTimeoutMs` cont
 to cover the complete WebSocket opening lifecycle and they do not expose
 `authTimeoutMs`.
 
-Give each active sender its own store-and-forward directory. The Node.js journal
-persists frames and their symbol dictionary before sending. Set
-`initialConnectMode: "async"` when a persistent sender must start while every
-endpoint is offline. `flush()` resolves once the complete logical flush reaches the
+Give each active sender its own journal slot: a store-and-forward directory of its
+own, or its own `senderId` below a shared one. The Node.js journal persists frames
+and their symbol dictionary before sending. Set `initialConnectMode: "async"` when a
+persistent sender must start while every endpoint is offline. `flush()` resolves once the complete logical flush reaches the
 configured local journal boundary; a background drainer then sends it in order, and
-`flushAndWait()` additionally waits for the server's acknowledgement. The default `"append"` boundary is locally durable,
-while `"periodic"` and `"memory"` trade that immediate guarantee for throughput.
+`flushAndWait()` additionally waits for the server's acknowledgement. The `"append"`
+boundary is locally durable, while `"periodic"` and the default `"memory"` trade that
+immediate guarantee for throughput.
 Applications can therefore keep publishing during an outage until the configured
 `maxBytes` applies backpressure. A failed journal publication leaves the high-level
 rows staged so the caller can retry. When one logical flush is split across multiple
@@ -394,15 +396,15 @@ The connect-string key
 
 `durability` controls the local persistence barrier:
 
-- `"append"` (the default for this object form) issues a data-only durability
-  barrier after every vectored positional frame write; manifest and directory
-  metadata retain full barriers; hot-spare creation and activation are durable
-  before publication resolves.
+- `"append"` issues a data-only durability barrier after every vectored positional
+  frame write; manifest and directory metadata retain full barriers; hot-spare
+  creation and activation are durable before publication resolves.
 - `"periodic"` checkpoints segment files, symbol metadata, and directory changes in the
   background. The default interval is 5 seconds, and `close()` performs a final
   checkpoint. A power failure can lose the most recent checkpoint window.
-- `"memory"` relies on operating-system writeback. It survives an orderly close and
-  normally a process failure, but it makes no power-loss durability promise.
+- `"memory"`, the default, relies on operating-system writeback. It survives an
+  orderly close and normally a process failure, but it makes no power-loss durability
+  promise.
 
 Recovery reports what it had to abandon through `onRecoveryDataLoss`, and logs it when
 no handler is supplied, so journal loss is never silent. Trailing records that never
@@ -420,17 +422,17 @@ continuously, so this is the steady state rather than an edge case, and it is wh
 `sf_durability=append` avoids the shape altogether by making each append durable before
 it is reported as accepted.
 
-The two surfaces do not share a default. `storeAndForward.durability` above
-defaults to `"append"`, while the `sf_durability` connect-string key defaults to
-`"memory"` — so a journal configured with `sf_dir=` alone never issues a
-per-append barrier, and a host crash can lose whatever writeback had not yet
-reached disk. Set `sf_durability=append` explicitly when a connect-string journal
-has to survive power loss.
+The typed options and the connect string share every store-and-forward default, as
+they share the slot layout. With `"memory"` the default, a journal configured with
+`sf_dir=` or `storeAndForward: { directory }` alone never issues a per-append
+barrier, and a host crash can lose whatever writeback had not yet reached disk. Set
+`durability: "append"` (`sf_durability=append`) when a journal has to survive power
+loss.
 
-`backpressurePolicy: "error"` preserves the existing immediate
-`QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
-ACK advances the checksummed cursor, then a bounded background trimmer deletes fully
-drained segments.
+`backpressurePolicy` decides what a full journal does to publication. The default,
+`"wait"`, pauses it until an ACK advances the checksummed cursor and a bounded
+background trimmer deletes fully drained segments; `"error"` fails it at once with
+`QwpReplayStoreFullError`.
 `appendDeadlineMs` bounds each such pause and retries of transient journal faults
 such as a briefly read-only, full, or descriptor-starved filesystem (30 seconds
 by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. A split logical
@@ -440,9 +442,9 @@ segment-rounded live-frame allowance preserved by a retained symbol dictionary,
 because no ACK or trim is needed to consume it. Waiting appenders do not hold the
 journal mutation queue, so ACK cleanup and checkpoint recovery can continue. Corruption and loss of the journal lock remain
 immediate failures.
-Direct users of `QwpNodeFileReplayStore` can inspect `metrics` for pending records
-and segments, checkpoint work, checkpoint failures, active waiters, stalls, and
-timeouts.
+A sender's `metrics.ingress` reports the journal's backlog as `pendingReplayFrames`
+and `pendingReplayBytes`, with its published and acknowledged frame watermarks as
+`replayPublishedFrameSequence` and `replayAcknowledgedFrameSequence`.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
 cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target together
@@ -1564,10 +1566,11 @@ const db = await connectQwpNodeClient(
 );
 ```
 
-For unified strings with `sf_dir`, Java-compatible defaults apply: memory
-durability, a 10 GiB total journal cap, 4 MiB journal segments, a 30-second
-capacity wait, a 5-second close drain, and fail-fast initial connection. Set
-`sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
+With `sf_dir`, Java-compatible defaults apply, and the typed `storeAndForward`
+options share them: memory durability, a 10 GiB total journal cap, 4 MiB journal
+segments, a 30-second capacity wait, a 5-second close drain, and fail-fast initial
+connection. Set `sender_id` (typed `senderId`) to name the disk slot base; pooled
+senders use `<sender_id>-<slot>`.
 A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
 the ingress frame cap from the first publication onward, before the server has
 advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.
@@ -1753,12 +1756,13 @@ when its rows must be acknowledged first.
 Pooled sender `close()` flushes completed rows, discards an unfinished row with a
 warning, and resets staging before reuse. With Node store-and-forward enabled, the
 configured directory is treated as a pool root and each stable sender slot owns a
-`sender-N` child directory, avoiding journal lock conflicts. The configured
-`senderPoolMin` remains authoritative. A client-level recovery scanner reserves and
-drains inactive canonical slots independently of foreground pool connections, both
-inside the current range and outside it after `senderPoolMax` is reduced. Foreground
-creation and recovery share an atomic slot coordinator, so neither can acquire a
-managed journal while the other owns it. This managed-slot recovery is automatic;
+`<senderId>-N` child directory, `default-N` unless `senderId` (`sender_id`) names
+it, avoiding journal lock conflicts. The configured `senderPoolMin` remains
+authoritative. A client-level recovery scanner reserves and drains inactive
+canonical slots independently of foreground pool connections, both inside the
+current range and outside it after `senderPoolMax` is reduced. Foreground creation
+and recovery share an atomic slot coordinator, so neither can acquire a managed
+journal while the other owns it. This managed-slot recovery is automatic;
 `drainOrphans: true` additionally adopts noncanonical sibling slots beneath the pool
 root.
 
@@ -1884,6 +1888,16 @@ internal, as in the other QuestDB clients. Configure orphan recovery with the
 `storeAndForward` options `drainOrphans`, `maxBackgroundDrainers` and
 `orphanScanIntervalMs`, observe it through `onOrphanDrainEvent`, and call
 `retryQwpNodeOrphanSlot()` to make a slot marked `.failed` eligible again.
+
+The store-and-forward journal is internal as well, and so is the replay store
+contract it implements: neither `QwpNodeFileReplayStore` nor `QwpIngressReplayStore`
+is exported. Configure the journal through `storeAndForward`, which takes its
+settings — `maxBytes`, `durability`, `backpressurePolicy` and the rest — directly.
+
+The raw WebSocket connectors and connection factories below the senders and query
+sessions are internal too, in both packages. The senders, `connectQwpNodeEgress()`,
+`connectQwpBrowserEgress()` and the pooled clients open and reconnect their own
+connections from the same endpoint options.
 
 `parseQwpNodeClientConfig()` is the low-level helper for turning a `ws::`/`wss::`
 connect string into the typed options object `createQwpNodeClient()` takes.

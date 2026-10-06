@@ -160,10 +160,12 @@ dictionary formats. The active segment and a pre-sized temporary hot spare keep 
 handles. A shared worker provisions spares, checkpoints files, and trims acknowledged
 segments. Recovery keeps only frame offsets in memory and reads payloads from disk as
 they are sent, so a large persisted backlog is not duplicated on the JavaScript heap.
-Set <code>drainOrphans: true</code> when sibling journal directories share a dedicated parent:
-the Node client scans and drains slots left by failed producer processes with bounded
-concurrency. Pooled QWP clients recover idle in-range and out-of-range <code>sender-N</code>
-slots automatically without raising <code>senderPoolMin</code>, including leftovers after
+Each journal is a slot below the configured directory, <code>&lt;directory&gt;/&lt;senderId&gt;</code> with
+<code>senderId</code> defaulting to <code>default</code>, as with <code>sf_dir</code> and <code>sender_id</code>. Set
+<code>drainOrphans: true</code> when producers share a dedicated directory: the Node client scans
+it and drains slots left by failed producer processes with bounded concurrency.
+Pooled QWP clients recover idle in-range and out-of-range <code>&lt;senderId&gt;-N</code> slots
+automatically without raising <code>senderPoolMin</code>, including leftovers after
 <code>senderPoolMax</code> is reduced. Terminally bad slots are marked <code>.failed</code> for inspection
 and can be re-enabled with
 <code>retryQwpNodeOrphanSlot()</code>. This persistent mode is Node-only; browser senders
