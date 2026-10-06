@@ -5,13 +5,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   QWP_ORPHAN_DRAIN_EVENT_KIND,
   QWP_ORPHAN_FAILED_SENTINEL,
-  QwpNodeOrphanDrainer,
   QwpReplayStoreCorruptionError,
   QwpReplayStoreLockedError,
   retryQwpNodeOrphanSlot,
+} from "../../packages/nodejs-client/src";
+// Internal: the package root exports neither the drainer nor its scanner.
+import {
+  QwpNodeOrphanDrainer,
   scanQwpNodeOrphanSlots,
   type QwpNodeOrphanDrainSession,
-} from "../../packages/nodejs-client/src";
+} from "../../packages/nodejs-client/src/qwp-node/orphan-drainer";
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_SENDER_ERROR_CATEGORY,

@@ -53,6 +53,7 @@ export interface QwpNodeUdpOptions {
   socketFactory?: () => QwpNodeUdpSocketLike;
 }
 
+/** @internal Datagram counters of the internal QwpNodeUdpSession. */
 export interface QwpNodeUdpMetrics {
   readonly publishedDatagramSequence: bigint;
   readonly totalDatagramsSent: number;
@@ -82,6 +83,10 @@ export class QwpUdpDatagramTooLargeError extends Error {
  * Each datagram is self-contained: it carries one table, an inline schema and
  * local symbol dictionaries. There are no ACKs, retries, transactions,
  * authentication, compression, or store-and-forward semantics.
+ *
+ * @internal The transport session behind createQwpNodeUdpSender(). As in the
+ * Java client, applications publish UDP rows through a sender, so the package
+ * root exports neither this class nor a factory that returns one.
  */
 export class QwpNodeUdpSession implements QwpSenderSession {
   readonly maxBatchSizeBytes: number;

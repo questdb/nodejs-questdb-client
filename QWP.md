@@ -292,10 +292,10 @@ discarded before transmission: it is reported through `onError` and does not adv
 self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
-fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the same
-transport from `@questdb/nodejs-client`; `createQwpNodeUdpSender()` builds the
-same sender without binding the socket yet, for a caller that wants to construct
-it eagerly and connect later.
+fit. `connectQwpNodeUdpSender()` exposes the same transport from
+`@questdb/nodejs-client`; `createQwpNodeUdpSender()` builds the same sender
+without binding the socket yet, for a caller that wants to construct it eagerly
+and connect later.
 
 UDP provides no authentication, TLS, server or durable ACK, transactions,
 reconnection, compression, or store-and-forward. Local socket errors are delivered
@@ -1878,10 +1878,16 @@ sender owns batching, symbol deltas, ACK tracking, auto-flush, transactions, and
 durable waits, and its third argument takes the same session options, including the
 `onResponse`, `onProgress`, and `onError` callbacks.
 
+Likewise, `QwpNodeUdpSession` is the internal transport below
+`connectQwpNodeUdpSender()`, which takes the same `QwpNodeUdpOptions`, and the
+store-and-forward orphan drainer (`QwpNodeOrphanDrainer`) and its slot scanner are
+internal, as in the other QuestDB clients. Configure orphan recovery with the
+`storeAndForward` options `drainOrphans`, `maxBackgroundDrainers` and
+`orphanScanIntervalMs`, observe it through `onOrphanDrainEvent`, and call
+`retryQwpNodeOrphanSlot()` to make a slot marked `.failed` eligible again.
+
 `parseQwpNodeClientConfig()` is the low-level helper for turning a `ws::`/`wss::`
-connect string into the typed options object `createQwpNodeClient()` takes, and
-`scanQwpNodeOrphanSlots()` lists the store-and-forward slots under a parent directory
-without starting a drainer.
+connect string into the typed options object `createQwpNodeClient()` takes.
 
 Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
 signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to

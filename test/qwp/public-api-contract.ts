@@ -47,12 +47,10 @@ import {
   connectQwpNodeEgress,
   connectQwpNodeClient,
   connectQwpNodeSender,
-  connectQwpNodeUdp,
   connectQwpNodeUdpSender,
   connectQwpNodeWebSocket,
   parseQwpNodeClientConfig,
   retryQwpNodeOrphanSlot,
-  scanQwpNodeOrphanSlots,
 } from "../../packages/nodejs-client/src";
 import type {
   QwpNodeClientOptions,
@@ -60,9 +58,7 @@ import type {
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
   QwpNodeUdpOptions,
-  QwpNodeUdpSession,
   QwpNodeOrphanDrainEvent,
-  QwpNodeOrphanDrainSession,
   QwpNodeReplayRecoveryEvent,
   QwpNodeStoreAndForwardOptions,
   QwpNodeWebSocketOptions,
@@ -121,10 +117,6 @@ const nodeSenderSignature: (
   sessionOptions?: QwpIngressSessionOptions,
 ) => Promise<QwpSender> = connectQwpNodeSender;
 
-const nodeUdpSignature: (
-  options: QwpNodeUdpOptions,
-) => Promise<QwpNodeUdpSession> = connectQwpNodeUdp;
-
 const nodeUdpSenderSignature: (
   options: QwpNodeUdpOptions,
   senderOptions?: QwpSenderOptions,
@@ -170,21 +162,8 @@ const poolOptionsContract: QwpClientPoolOptions = {
   housekeepingIntervalMs: 5_000,
 };
 
-const nodeOrphanScanSignature: (
-  rootDirectory: string,
-  excludeSlot?: (slotName: string) => boolean,
-) => Promise<readonly string[]> = scanQwpNodeOrphanSlots;
-
 const nodeOrphanRetrySignature: (directory: string) => Promise<void> =
   retryQwpNodeOrphanSlot;
-
-// QwpNodeOrphanDrainerOptions.createSession returns this, so anyone
-// implementing that interface must be able to name it.
-const nodeOrphanDrainSessionContract: (
-  session: QwpNodeOrphanDrainSession,
-) => Promise<void> = async (session) => {
-  await session.closed;
-};
 
 const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
   directory: "/tmp/qwp-public-api-contract",
@@ -508,16 +487,13 @@ void browserEgressSignature;
 void bootstrapSignature;
 void browserClientSignature;
 void nodeSenderSignature;
-void nodeUdpSignature;
 void nodeUdpSenderSignature;
 void nodeEgressSignature;
 void nodeWebSocketSignature;
 void nodeWebSocketOptionsContract;
 void nodeClientSignature;
 void poolOptionsContract;
-void nodeOrphanScanSignature;
 void nodeOrphanRetrySignature;
-void nodeOrphanDrainSessionContract;
 void nodeStoreAndForwardContract;
 void queryOptionsContract;
 void egressSessionOptionsContract;

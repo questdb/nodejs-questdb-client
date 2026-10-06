@@ -192,8 +192,6 @@ const nodeRuntimeContract = [
   "QWP_SF_BACKPRESSURE_POLICY",
   "QWP_SF_DURABILITY",
   "QwpNodeFileReplayStore",
-  "QwpNodeOrphanDrainer",
-  "QwpNodeUdpSession",
   "QwpReplayStoreAppendTimeoutError",
   "QwpReplayStoreBatchTooLargeError",
   "QwpReplayStoreCheckpointError",
@@ -210,7 +208,6 @@ const nodeRuntimeContract = [
   "connectQwpNodeClient",
   "connectQwpNodeEgress",
   "connectQwpNodeSender",
-  "connectQwpNodeUdp",
   "connectQwpNodeUdpSender",
   "connectQwpNodeWebSocket",
   "createQwpNodeClient",
@@ -219,7 +216,6 @@ const nodeRuntimeContract = [
   "createQwpNodeUdpSender",
   "parseQwpNodeClientConfig",
   "retryQwpNodeOrphanSlot",
-  "scanQwpNodeOrphanSlots",
 ] as const;
 
 /**
@@ -307,6 +303,23 @@ describe("QWP public API contract", () => {
       ]) {
         expect(api, `${name} must stay internal`).not.toHaveProperty(name);
       }
+    }
+  });
+
+  it("keeps the orphan drainer and the UDP session internal", () => {
+    // As in the other QuestDB clients, orphan recovery is configured through
+    // the store-and-forward options and observed through onOrphanDrainEvent,
+    // and UDP rows are published through a sender. The drainer, its slot
+    // scanner, and the UDP session with the factory that returned one are
+    // internal, so re-exposing them has to remove this test rather than merely
+    // extend the contract above.
+    for (const name of [
+      "QwpNodeOrphanDrainer",
+      "QwpNodeUdpSession",
+      "connectQwpNodeUdp",
+      "scanQwpNodeOrphanSlots",
+    ]) {
+      expect(node, `${name} must stay internal`).not.toHaveProperty(name);
     }
   });
 

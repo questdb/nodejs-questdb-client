@@ -76,13 +76,10 @@ export type {
   QwpNodeIngressOptions,
   QwpNodeOrphanDrainEvent,
   QwpNodeOrphanDrainEventKind,
-  QwpNodeOrphanDrainSession,
   QwpNodeOrphanDrainerMetrics,
-  QwpNodeOrphanDrainerOptions,
   QwpNodeReplayDataLossReport,
   QwpNodeReplayRecoveryEvent,
   QwpNodeStoreAndForwardOptions,
-  QwpNodeUdpMetrics,
   QwpNodeUdpOptions,
   QwpNodeUdpSocketLike,
   QwpNodeUpgradeRejection,
@@ -275,3 +272,20 @@ export type BrowserIngressCloseTimeout =
   BrowserRoot.QwpIngressSessionCloseTimeoutError;
 // @ts-expect-error connectQwpBrowserIngress is internal.
 export type BrowserIngressFactory = typeof BrowserRoot.connectQwpBrowserIngress;
+
+// So are the Node orphan drainer, with its options, session and slot scanner,
+// and the UDP session, with its metrics and the factory that returned one.
+// @ts-expect-error QwpNodeOrphanDrainer is internal.
+export type NodeOrphanDrainer = NodeRoot.QwpNodeOrphanDrainer;
+// @ts-expect-error QwpNodeOrphanDrainerOptions is internal.
+export type NodeOrphanDrainerOptions = NodeRoot.QwpNodeOrphanDrainerOptions;
+// @ts-expect-error QwpNodeOrphanDrainSession is internal.
+export type NodeOrphanDrainSession = NodeRoot.QwpNodeOrphanDrainSession;
+// @ts-expect-error scanQwpNodeOrphanSlots is internal.
+export type NodeOrphanScan = typeof NodeRoot.scanQwpNodeOrphanSlots;
+// @ts-expect-error QwpNodeUdpSession is internal.
+export type NodeUdpSession = NodeRoot.QwpNodeUdpSession;
+// @ts-expect-error QwpNodeUdpMetrics is internal.
+export type NodeUdpMetrics = NodeRoot.QwpNodeUdpMetrics;
+// @ts-expect-error connectQwpNodeUdp is internal.
+export type NodeUdpFactory = typeof NodeRoot.connectQwpNodeUdp;

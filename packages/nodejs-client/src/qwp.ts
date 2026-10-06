@@ -118,19 +118,17 @@ export type {
   QwpSfBackpressurePolicy,
   QwpSfDurability,
 } from "./qwp-node/file-replay-store";
+// The orphan drainer, its slot scanner and the UDP session stay internal, as in
+// the other QuestDB clients: orphan recovery is configured through
+// QwpNodeStoreAndForwardOptions and observed through onOrphanDrainEvent, and UDP
+// ingress publishes through a sender.
 export {
   QWP_ORPHAN_DRAIN_EVENT_KIND,
   QWP_ORPHAN_FAILED_SENTINEL,
-  QwpNodeOrphanDrainer,
   retryQwpNodeOrphanSlot,
-  scanQwpNodeOrphanSlots,
 } from "./qwp-node/orphan-drainer";
-export {
-  QwpNodeUdpSession,
-  QwpUdpDatagramTooLargeError,
-} from "./qwp-node/udp-sender";
+export { QwpUdpDatagramTooLargeError } from "./qwp-node/udp-sender";
 export type {
-  QwpNodeUdpMetrics,
   QwpNodeUdpOptions,
   QwpNodeUdpSocketLike,
 } from "./qwp-node/udp-sender";
@@ -138,8 +136,6 @@ export type {
   QwpNodeOrphanDrainEvent,
   QwpNodeOrphanDrainEventKind,
   QwpNodeOrphanDrainerMetrics,
-  QwpNodeOrphanDrainerOptions,
-  QwpNodeOrphanDrainSession,
 } from "./qwp-node/orphan-drainer";
 
 export type { QwpWebSocketLike } from "../../client-core/src/_qwp/_internal/websocket-connection";
@@ -1043,13 +1039,6 @@ export async function connectQwpNodeSender(
   return sender;
 }
 
-/** Opens a Node IPv4 UDP socket for fire-and-forget QWP ingress. */
-export function connectQwpNodeUdp(
-  options: QwpNodeUdpOptions,
-): Promise<QwpNodeUdpSession> {
-  return QwpNodeUdpSession.connect(options);
-}
-
 /**
  * Creates a fluent Node QWP-over-UDP sender without opening its socket yet.
  * UDP has no authentication, server ACK, durable ACK, transaction, retry, or
@@ -1061,7 +1050,7 @@ export function createQwpNodeUdpSender(
 ): QwpSender {
   validateUdpSenderOptions(senderOptions);
   return new QwpSender(
-    () => connectQwpNodeUdp(options),
+    () => QwpNodeUdpSession.connect(options),
     {
       ...senderOptions,
       autoFlushBytes:

@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
-  scanQwpNodeOrphanSlots,
 } from "../../packages/nodejs-client/src";
+// Internal: the package root does not export the orphan drainer's scanner.
+import { scanQwpNodeOrphanSlots } from "../../packages/nodejs-client/src/qwp-node/orphan-drainer";
 
 const SEGMENT_HEADER_SIZE = 24;
 const MANIFEST_FILE = "sf-manifest.bin";

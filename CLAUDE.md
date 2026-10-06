@@ -66,7 +66,7 @@ documentation, and single root build.
 
 5. **QWP core** (`packages/client-core/src/qwp/` and `packages/client-core/src/_qwp/`): Shared browser-safe protocol/session code.
 
-6. **Runtime adapters**: `packages/nodejs-client/src/qwp.ts` owns Node WebSocket, UDP, TLS, and persistence support; `packages/browser-client/src/qwp.ts` owns the browser WebSocket and authentication adapter. Each package root (`src/index.ts`) re-exports the shared `packages/client-core/src/qwp` barrel and lists its adapter's public names explicitly, so the internal ingress-session factories (`connectQwpNodeIngress`, `connectQwpBrowserIngress`) stay off the public surface. The browser package must remain free of Node built-ins, Node typings, `undici`, and `ws`.
+6. **Runtime adapters**: `packages/nodejs-client/src/qwp.ts` owns Node WebSocket, UDP, TLS, and persistence support; `packages/browser-client/src/qwp.ts` owns the browser WebSocket and authentication adapter. Each package root (`src/index.ts`) re-exports the shared `packages/client-core/src/qwp` barrel and lists its adapter's public names explicitly, so the internal ingress-session factories (`connectQwpNodeIngress`, `connectQwpBrowserIngress`) stay off the public surface. The Node orphan drainer (`QwpNodeOrphanDrainer`, `scanQwpNodeOrphanSlots`) and UDP session (`QwpNodeUdpSession`) are internal as well; tests import them from their `qwp-node/` modules. The browser package must remain free of Node built-ins, Node typings, `undici`, and `ws`.
 
 ### Protocol Versions
 

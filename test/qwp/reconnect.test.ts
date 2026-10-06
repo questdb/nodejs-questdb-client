@@ -20,7 +20,6 @@ import {
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
   QwpNodeFileReplayStore,
-  QwpNodeOrphanDrainer,
   QwpEgressSession,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
@@ -90,6 +89,8 @@ import {
   QwpIngressSession,
   QwpIngressSessionCloseTimeoutError,
 } from "../../packages/client-core/src/_qwp/ingress-session";
+// Internal: the package root does not export the orphan drainer.
+import { QwpNodeOrphanDrainer } from "../../packages/nodejs-client/src/qwp-node/orphan-drainer";
 import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
 import {
   quarantineQwpNodeReplayStore,

@@ -61,7 +61,7 @@ describe("QWP configuration-string reference", () => {
     // exports ... intended for advanced integrations" the same paragraph
     // carves out, and the generated TypeDoc reference is their documentation.
     const HIGH_LEVEL_ROLE =
-      /^(?:connect|create)Qwp(?:Node|Browser)(?:Client|Sender|Egress|Udp|UdpSender)$/;
+      /^(?:connect|create)Qwp(?:Node|Browser)(?:Client|Sender|Egress|UdpSender)$/;
 
     const entryPoints = [
       ...new Set([...Object.keys(nodeClient), ...Object.keys(browserClient)]),
@@ -70,7 +70,7 @@ describe("QWP configuration-string reference", () => {
       .sort();
     // Guards the regex itself: a rename that stops matching must not silently
     // empty this test out.
-    expect(entryPoints.length).toBeGreaterThanOrEqual(13);
+    expect(entryPoints.length).toBeGreaterThanOrEqual(12);
 
     const prose = (
       await Promise.all(

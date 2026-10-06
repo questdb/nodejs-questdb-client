@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import { Sender } from "../../packages/nodejs-client/src";
 import {
   QwpSymbolDictionary,
-  connectQwpNodeUdp,
   connectQwpNodeUdpSender,
   createQwpNodeUdpSender,
   type QwpNodeUdpSocketLike,
 } from "../../packages/nodejs-client/src";
+// Internal: the package root exports the UDP sender, not the session below it.
+import { QwpNodeUdpSession } from "../../packages/nodejs-client/src/qwp-node/udp-sender";
 import {
   decodeQwpFrame,
   QWP_COLUMN_TYPE,
@@ -129,7 +130,7 @@ describe("QWP Node UDP sender", () => {
     // it silently ignored -- and the non-delta encoder then wrote every symbol
     // in the frame as the empty string.
     const socket = new FakeUdpSocket();
-    const session = await connectQwpNodeUdp({
+    const session = await QwpNodeUdpSession.connect({
       host: "127.0.0.1",
       socketFactory: () => socket,
     });
@@ -149,7 +150,7 @@ describe("QWP Node UDP sender", () => {
 
   it("splits at row boundaries into self-contained one-table datagrams", async () => {
     const socket = new FakeUdpSocket();
-    const session = await connectQwpNodeUdp({
+    const session = await QwpNodeUdpSession.connect({
       host: "239.1.2.3",
       port: 9007,
       maxDatagramSize: 80,
@@ -196,7 +197,7 @@ describe("QWP Node UDP sender", () => {
     const slicedRows: number[] = [];
     for (const rows of [2000, 4000]) {
       const socket = new FakeUdpSocket();
-      const session = await connectQwpNodeUdp({
+      const session = await QwpNodeUdpSession.connect({
         host: "localhost",
         port: 9007,
         maxDatagramSize: 200,
@@ -236,7 +237,7 @@ describe("QWP Node UDP sender", () => {
 
   it("rejects one oversized row before sending any datagram", async () => {
     const socket = new FakeUdpSocket();
-    const session = await connectQwpNodeUdp({
+    const session = await QwpNodeUdpSession.connect({
       host: "localhost",
       maxDatagramSize: 64,
       socketFactory: () => socket,
@@ -300,7 +301,7 @@ describe("QWP Node UDP sender", () => {
     });
 
     await expect(
-      connectQwpNodeUdp({
+      QwpNodeUdpSession.connect({
         host: "localhost",
         socketFactory: () => socket,
       }),
@@ -312,7 +313,7 @@ describe("QWP Node UDP sender", () => {
     const socket = new FakeUdpSocket();
     socket.sendError = new Error("network unreachable");
     const errors: Error[] = [];
-    const session = await connectQwpNodeUdp({
+    const session = await QwpNodeUdpSession.connect({
       host: "localhost",
       socketFactory: () => socket,
       onError: (error) => errors.push(error),
@@ -349,7 +350,7 @@ describe("QWP Node UDP sender", () => {
     // settled -- and sendDatagrams() awaits each datagram, so one dropped
     // callback stranded the whole call.
     const socket = new FakeUdpSocket();
-    const session = await connectQwpNodeUdp({
+    const session = await QwpNodeUdpSession.connect({
       host: "localhost",
       socketFactory: () => socket,
     });
@@ -367,7 +368,7 @@ describe("QWP Node UDP sender", () => {
 
   it("fails the remaining datagrams of a batch that close interrupts", async () => {
     const socket = new FakeUdpSocket();
-    const session = await connectQwpNodeUdp({
+    const session = await QwpNodeUdpSession.connect({
       host: "localhost",
       maxDatagramSize: 80,
       socketFactory: () => socket,
@@ -386,14 +387,14 @@ describe("QWP Node UDP sender", () => {
     // one by one, so the whole batch vanishes with flush() still resolving.
     // Reject the configuration instead, the way multicastTtl already is.
     await expect(
-      connectQwpNodeUdp({
+      QwpNodeUdpSession.connect({
         host: "localhost",
         maxDatagramSize: 65_508,
         socketFactory: () => new FakeUdpSocket(),
       }),
     ).rejects.toThrow("QWP UDP maxDatagramSize must not exceed 65507");
 
-    const session = await connectQwpNodeUdp({
+    const session = await QwpNodeUdpSession.connect({
       host: "localhost",
       maxDatagramSize: 65_507,
       socketFactory: () => new FakeUdpSocket(),
