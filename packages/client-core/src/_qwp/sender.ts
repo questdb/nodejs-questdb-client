@@ -69,8 +69,8 @@ export interface QwpSenderOptions {
   maxNameLength?: number;
   /**
    * Keep auto-flushed rows in an open server-side transaction. An explicit
-   * flush()/commit() closes the transaction. QWP transactions are atomic per
-   * table, rather than across every table in a multi-table flush.
+   * flush() closes the transaction. QWP transactions are atomic per table,
+   * rather than across every table in a multi-table flush.
    */
   transactional?: boolean;
   /**
@@ -1947,6 +1947,8 @@ export class QwpSender {
   /**
    * Publishes completed rows to the local ingress/replay boundary without
    * waiting for a server ACK. Use flushAndWait() to also wait for the ACK.
+   * A transactional sender commits here: rows previously sent by auto-flush
+   * and any pending rows close in one group-closing frame.
    */
   // `async` so a closed or closing sender rejects rather than throwing out of
   // a method the signature says returns a Promise: a caller written as
@@ -2034,15 +2036,6 @@ export class QwpSender {
         : await this.getSession();
     if (!session) return true;
     return session.waitForAcknowledged(targetSequence, timeoutMs);
-  }
-
-  /**
-   * Commits rows previously sent by transactional auto-flush. This is an
-   * ergonomic alias for flush(); pending local rows are included in the same
-   * group-closing frame.
-   */
-  async commit(): Promise<boolean> {
-    return this.flush();
   }
 
   private enqueueFlush(deferCommit: boolean): Promise<boolean> {

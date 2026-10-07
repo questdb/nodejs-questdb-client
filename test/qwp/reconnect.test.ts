@@ -1462,9 +1462,9 @@ describe("QWP ingress reconnect and replay", () => {
     );
     expect(session.metrics.memoryReplayUsedBytes).toBeLessThanOrEqual(110);
 
-    // commit() resolves once memory replay admits the closing frame, even
+    // flush() resolves once memory replay admits the closing frame, even
     // though only that frame's ACK can trim the deferred prefix.
-    await expect(sender.commit()).resolves.toBe(true);
+    await expect(sender.flush()).resolves.toBe(true);
     await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
     expect(connection.sent[1][5] & QWP_FLAG_DEFER_COMMIT).toBe(0);
     expect(session.metrics.memoryReplayUsedBytes).toBeGreaterThan(110);

@@ -245,7 +245,7 @@ describe("QWP file replay store transaction liveness", () => {
         totalBytes: SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes,
       });
 
-      const committing = sender.commit();
+      const committing = sender.flush();
       await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
       expect(connection.sent[1][5] & QWP_FLAG_DEFER_COMMIT).toBe(0);
       await expect(committing).resolves.toBe(true);
@@ -276,7 +276,7 @@ describe("QWP file replay store transaction liveness", () => {
         .table("events")
         .symbol("kind", "retained-symbol")
         .atNow();
-      await measureSender.commit();
+      await measureSender.flush();
       await measureSender
         .table("events")
         .stringColumn("payload", "x".repeat(256))
@@ -285,7 +285,7 @@ describe("QWP file replay store transaction liveness", () => {
         .table("events")
         .stringColumn("payload", "x".repeat(256))
         .atNow();
-      await measureSender.commit();
+      await measureSender.flush();
     } finally {
       await measureSender.close();
     }
@@ -335,7 +335,7 @@ describe("QWP file replay store transaction liveness", () => {
 
     try {
       await sender.table("events").symbol("kind", "retained-symbol").atNow();
-      await sender.commit();
+      await sender.flush();
       await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
       await expect(store.loadSymbolDictionary()).resolves.toContain(
         "retained-symbol",

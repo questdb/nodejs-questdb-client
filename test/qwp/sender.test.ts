@@ -1052,7 +1052,7 @@ describe("QWP high-level sender", () => {
       pendingRows: 0,
     });
 
-    await expect(sender.commit()).resolves.toBe(true);
+    await expect(sender.flush()).resolves.toBe(true);
     expect(session.sends[1].options).toMatchObject({ deferCommit: false });
     expect(session.sends[1].tables).toEqual([]);
     expect(sender.metrics).toMatchObject({
@@ -3075,7 +3075,6 @@ describe("QWP high-level sender", () => {
     for (const call of [
       () => sender.flush(),
       () => sender.flushAndGetSequence(),
-      () => sender.commit(),
     ]) {
       let caught: unknown;
       // Deliberately not inside try/catch: a synchronous throw would escape.
@@ -3806,7 +3805,7 @@ describe("QWP high-level sender", () => {
     });
     expect(session.acknowledgedFrameSequence).toBe(-1n);
 
-    await expect(sender.commit()).resolves.toBe(true);
+    await expect(sender.flush()).resolves.toBe(true);
     expect(session.sends).toHaveLength(2);
     expect(session.sends[1].tables).toHaveLength(0);
     expect(session.sends[1]).toMatchObject({

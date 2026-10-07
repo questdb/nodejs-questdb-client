@@ -85,8 +85,8 @@ WebSockets from secure pages.
 ## Batch and commit rows
 
 Transactional mode keeps automatically emitted frames in one open server-side
-transaction. `commit()` publishes the final frame. `flushAndWait()` publishes it
-too and then waits for the server's acknowledgement, which with
+transaction. An explicit `flush()` publishes the final frame. `flushAndWait()`
+publishes it too and then waits for the server's acknowledgement, which with
 `requestDurableAck: true` means durable upload. It resolves `false` when the
 acknowledgements make no progress for its timeout (`ackTimeoutMs`); the frames
 then stay queued for delivery. Transactions are atomic per table, not across

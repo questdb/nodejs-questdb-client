@@ -291,7 +291,7 @@ await sender.close();
 
 For batches larger than the automatic flush threshold, transactional mode
 keeps each auto-flushed frame in an open server-side transaction. An explicit
-`flush()` (or its `commit()` alias) publishes the group-closing frame. Call
+`flush()` publishes the group-closing frame. Call
 `flushAndWait()` instead, or wait on the sequence returned by
 `flushAndGetSequence()`, when the call must also observe the cumulative ACK.
 QuestDB guarantees this atomicity per table; a flush that contains multiple
@@ -312,7 +312,7 @@ for (const event of events) {
     .longColumn("value", event.value)
     .at(event.timestamp, "ms");
 }
-await sender.commit();
+await sender.flush();
 await sender.close();
 ```
 
@@ -325,10 +325,10 @@ An unfinished row is not completed implicitly.
 
 The server intentionally withholds ACKs for deferred frames until commit. The
 sender pipelines transactional auto-flushes without waiting for those ACKs,
-then publishes the group-closing frame at `flush()`/`commit()`.
+then publishes the group-closing frame at `flush()`.
 `flushAndWait()` publishes the same frame and then waits for all covered ACKs;
 durable waiting starts only after the transaction commits. Closing
-without an explicit commit abandons the open transaction and logs a warning;
+without an explicit `flush()` abandons the open transaction and logs a warning;
 QuestDB rolls it back when the WebSocket disconnects.
 
 Ingress sessions expose browser-safe progress/error callbacks and immutable

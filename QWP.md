@@ -831,9 +831,9 @@ Compiled writers are also available through the regular Node `Sender` when it us
 QWP transport. Calling `writer()` for an HTTP or TCP ILP sender raises an error. A
 writer obtained from a pooled sender lease cannot be used after the lease is closed.
 
-Like the Java QWP sender, `flush()` and `commit()` resolve after the complete
-logical flush reaches the local ingress/replay publication boundary. They do
-not wait for a server ACK. `flushAndWait()` flushes the same way and then waits
+Like the Java QWP sender, `flush()` resolves after the complete logical flush
+reaches the local ingress/replay publication boundary. It does not wait for a
+server ACK. `flushAndWait()` flushes the same way and then waits
 until the server has acknowledged every frame the sender has published,
 including frames published earlier by auto-flush. It is the counterpart of the
 Java client's `drain()`:
@@ -1024,9 +1024,9 @@ const sender = await connectQwpBrowserSender({
 ### Transactions and durable acknowledgement
 
 Transactional auto-flush keeps automatically emitted frames in an open server-side
-transaction. `commit()` (an alias for `flush()`) publishes the group-closing frame.
-`flushAndWait()` commits the same way and then waits for the acknowledgement. The
-example requests durable ACK, so that wait lasts until QuestDB reports the
+transaction. An explicit `flush()` publishes the group-closing frame, as in the Java
+client. `flushAndWait()` commits the same way and then waits for the acknowledgement.
+The example requests durable ACK, so that wait lasts until QuestDB reports the
 transaction durable:
 
 ```typescript
@@ -1855,7 +1855,8 @@ Review these behavioral differences before rollout:
 - Table and column identifiers are rejected locally using the Java client's rules;
   column identity is case-insensitive and preserves the spelling first declared.
 - Large batches are split to the negotiated WebSocket payload cap.
-- QWP transactional auto-flush is per table and must be explicitly committed.
+- QWP transactional auto-flush is per table and must be committed with an explicit
+  `flush()`.
 - Browser and Node QWP ingress reconnect by default with in-memory, at-least-once
   replay. That queue has a 128 MiB cap and a bounded 30-second capacity wait by
   default. Configure Node store-and-forward when replay must survive process failure.
@@ -1930,7 +1931,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | ---------------------------- | ------------------------------------------------------------- |
 | Sender/builder configuration | `Sender.fromConfig()` in Node.js, or `connectQwp*Sender()`    |
 | Fluent table row             | `table()`, typed column methods, `at()` / `atNow()`           |
-| Local publish/commit         | `flush()` / `commit()`                                        |
+| Local publish/commit         | `flush()`                                                     |
 | Drain (flush and wait)       | `flushAndWait()`                                              |
 | Explicit ACK barrier         | `flushAndGetSequence()` plus `waitForAcknowledged()`          |
 | Durable delivery             | `requestDurableAck` plus `flushAndWait()`                     |
