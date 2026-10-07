@@ -83,10 +83,7 @@ import {
 } from "./publish-and-wait";
 // Internal: neither package root exports the ingress session or its factory.
 import { connectQwpNodeIngress } from "../../packages/nodejs-client/src/qwp";
-import {
-  QwpIngressSession,
-  QwpIngressSessionCloseTimeoutError,
-} from "../../packages/client-core/src/_qwp/ingress-session";
+import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 // Internal: the package root does not export the orphan drainer.
 import { QwpNodeOrphanDrainer } from "../../packages/nodejs-client/src/qwp-node/orphan-drainer";
 import { QwpNodeAdvisoryLock } from "../../packages/nodejs-client/src/qwp-node/advisory-lock";
@@ -1857,86 +1854,6 @@ describe("QWP ingress reconnect and replay", () => {
     expect(first.sent).toHaveLength(0);
   });
 
-  it("lets published in-memory frames reach the socket before a session closes", async () => {
-    // Publication ends at the in-memory queue, and real sockets complete their
-    // sends asynchronously. close() used to tear the connection down straight
-    // away, so frames whose publish calls had resolved were discarded unsent.
-    const connection = new FakeConnection("primary");
-    connection.onSend = () =>
-      new Promise<void>((resolve) => setTimeout(resolve, 2));
-    const session = await QwpIngressSession.connect(async () => connection);
-
-    await session.publishFrame(Uint8Array.of(1));
-    await session.publishTables([symbolTable("ETH-USD")]);
-    await session.publishFrame(Uint8Array.of(3));
-    expect(connection.sent.length).toBeLessThan(3);
-    await expect(session.close()).resolves.toBeUndefined();
-    expect(connection.sent).toHaveLength(3);
-    expect(connection.sent[2]).toEqual(Uint8Array.of(3));
-  });
-
-  it("rejects a session close that had to discard unsent in-memory frames", async () => {
-    const first = new FakeConnection("primary");
-    let calls = 0;
-    const session = await QwpIngressSession.connect(
-      async (signal?: AbortSignal) => {
-        if (calls++ === 0) return first;
-        // Offline until close() aborts the attempt.
-        return new Promise<QwpBinaryConnection>((_resolve, reject) => {
-          signal?.addEventListener("abort", () => reject(new Error("aborted")));
-        });
-      },
-      { reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 } },
-    );
-    first.drop();
-    await vi.waitFor(() => expect(calls).toBe(2));
-    await session.publishFrame(Uint8Array.of(1));
-    await session.publishFrame(Uint8Array.of(2));
-
-    vi.useFakeTimers();
-    try {
-      const closing = session.close().catch((error: unknown) => error);
-      await vi.advanceTimersByTimeAsync(4_999);
-      expect(session.metrics.pendingReplayFrames).toBe(2);
-      await vi.advanceTimersByTimeAsync(1);
-      const error = await closing;
-      expect(error).toBeInstanceOf(QwpIngressSessionCloseTimeoutError);
-      expect(error).toMatchObject({ timeoutMs: 5_000, unsentFrames: 2 });
-    } finally {
-      vi.useRealTimers();
-    }
-    // Refused rather than queued behind a drain that has already given up.
-    expect(() => session.publishFrame(Uint8Array.of(3))).toThrow(
-      QwpIngressSessionClosedError,
-    );
-  });
-
-  it("does not drain a store-and-forward journal when its session closes", async () => {
-    // Unsent journal records survive for the next session, so close() has no
-    // reason to wait for an outage to end.
-    const replayStore = new TrackingReplayStore();
-    const session = await QwpIngressSession.connect(
-      async () => {
-        throw new QwpUpgradeError("offline", {
-          kind: QWP_UPGRADE_ERROR_KIND.TRANSPORT,
-          retryable: true,
-          tryNextEndpoint: true,
-        });
-      },
-      {
-        backgroundStoreAndForward: true,
-        reconnect: { reconnectInitialBackoffMs: 10, reconnectMaxBackoffMs: 10 },
-        replayStore,
-      },
-    );
-    await session.publishFrame(Uint8Array.of(1));
-
-    const started = Date.now();
-    await expect(session.close()).resolves.toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(1_000);
-    expect(Array.from(replayStore.records.keys())).toEqual([0n]);
-  });
-
   it("keeps default RAM replay alive past the five-minute reconnect budget", async () => {
     vi.useFakeTimers();
     let session: QwpIngressSession | undefined;
@@ -1967,20 +1884,8 @@ describe("QWP ingress reconnect and replay", () => {
         session.publishFrame(Uint8Array.of(9)),
       ).resolves.toBeUndefined();
       expect(session.metrics.pendingReplayFrames).toBe(1);
-
-      // Still offline, so the frame cannot reach the socket within close()'s
-      // drain, and close() says so instead of discarding it silently.
-      const closing = session.close().catch((error: unknown) => error);
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(await closing).toMatchObject({
-        name: "QwpIngressSessionCloseTimeoutError",
-        unsentFrames: 1,
-        timeoutMs: 5_000,
-      });
     } finally {
-      const closing = session?.close().catch(() => undefined);
-      await vi.advanceTimersByTimeAsync(5_000);
-      await closing;
+      await session?.close();
       vi.useRealTimers();
     }
   });

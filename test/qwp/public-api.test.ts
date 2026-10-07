@@ -286,13 +286,12 @@ describe("QWP public API contract", () => {
 
   it("keeps the ingress session layer internal", () => {
     // As in the Java, Rust and Python clients, applications publish through a
-    // sender. The session below it, the factories that return one, and the
-    // error only its own close() throws are internal, so re-exposing them has
-    // to remove this test rather than merely extend the contract above.
+    // sender. The session below it and the factories that return one are
+    // internal, so re-exposing them has to remove this test rather than merely
+    // extend the contract above.
     for (const api of [shared, browser, node]) {
       for (const name of [
         "QwpIngressSession",
-        "QwpIngressSessionCloseTimeoutError",
         "connectQwpBrowserIngress",
         "connectQwpNodeIngress",
       ]) {

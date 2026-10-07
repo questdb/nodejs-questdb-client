@@ -41,14 +41,12 @@ export interface QwpSenderSession {
   ): Promise<boolean>;
   /** Optional socket-send boundary for RAM-backed fast close. */
   waitForPendingSends?(): Promise<void>;
-  close(code?: number, reason?: string): Promise<void>;
   /**
-   * Closes without the session's own drain of unsent frames. QwpSender has
-   * already applied a bounded drain, and reported its outcome, by the time it
-   * closes the session, so waiting again would only stretch close() past its
-   * deadline. Sessions without such a drain implement close() alone.
+   * Closes without a drain of its own. QwpSender has already applied its
+   * bounded drain, and reported the outcome, by the time it closes the
+   * session, so waiting again would only stretch close() past its deadline.
    */
-  closeWithoutDrain?(code?: number, reason?: string): Promise<void>;
+  close(code?: number, reason?: string): Promise<void>;
 }
 
 /**

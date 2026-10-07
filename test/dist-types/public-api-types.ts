@@ -227,19 +227,13 @@ export type BrowserSenderSession = BrowserRoot.QwpSenderSession;
 export type BrowserSenderSessionFactory = BrowserRoot.QwpSenderSessionFactory;
 
 // So is the ingress session below the sender, along with the factories that
-// return one and the error only its own close() throws.
+// return one.
 // @ts-expect-error QwpIngressSession is internal.
 export type NodeIngressSession = NodeRoot.QwpIngressSession;
-export type NodeIngressCloseTimeout =
-  // @ts-expect-error QwpIngressSessionCloseTimeoutError is internal.
-  NodeRoot.QwpIngressSessionCloseTimeoutError;
 // @ts-expect-error connectQwpNodeIngress is internal.
 export type NodeIngressFactory = typeof NodeRoot.connectQwpNodeIngress;
 // @ts-expect-error QwpIngressSession is internal.
 export type BrowserIngressSession = BrowserRoot.QwpIngressSession;
-export type BrowserIngressCloseTimeout =
-  // @ts-expect-error QwpIngressSessionCloseTimeoutError is internal.
-  BrowserRoot.QwpIngressSessionCloseTimeoutError;
 // @ts-expect-error connectQwpBrowserIngress is internal.
 export type BrowserIngressFactory = typeof BrowserRoot.connectQwpBrowserIngress;
 

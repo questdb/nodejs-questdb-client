@@ -620,11 +620,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   /**
    * Frames published to the replay queue whose drain has not yet handed them
    * to the socket. With the in-memory store these are lost if the connection
-   * closes, so close() waits for them; see waitForPendingSends().
+   * closes, so a fast QwpSender.close() waits for them; see
+   * waitForPendingSends().
    */
   private unsentFrames = 0;
-  /** Set by stopPublishing() once close() begins its final drain. */
-  private publishingStopped = false;
   private highestOkFrameSequence = -1n;
   private poisonFrameSequence?: bigint;
   private poisonFirstStrikeMs = 0;
@@ -1085,9 +1084,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
   send(payload: Uint8Array): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
-    if (this.closing || this.publishingStopped) {
-      return Promise.reject(new QwpSendClosedError());
-    }
+    if (this.closing) return Promise.reject(new QwpSendClosedError());
     const frame: ReplayFrame = {
       // Placeholder; the real sequence is allocated in the tail below, once
       // the journal has accepted the frame.
@@ -1101,7 +1098,6 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     };
     const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
-      if (this.publishingStopped) throw new QwpSendClosedError();
       const delta = readSymbolDictionaryDelta(frame.payload!);
       if (delta) {
         if (!this.deltaSymbolDictionaryEnabled) {
@@ -1121,16 +1117,6 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         frameSequence,
         payload: frame.payload!,
       });
-      // close() has started draining the in-memory queue for the last time.
-      // A frame admitted behind that drain would be discarded with the queue
-      // after its publication had resolved, so refuse it instead. A journal
-      // keeps it for the next session, so its publication stands.
-      if (
-        this.publishingStopped &&
-        this.store instanceof QwpMemoryReplayStore
-      ) {
-        throw new QwpSendClosedError();
-      }
       this.nextFrameSequence = frameSequence + 1n;
       frame.frameSequence = frameSequence;
       this.trackFrame(frame);
@@ -1166,24 +1152,6 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.drainTail = draining.catch((error: unknown) => {
       if (!this.closing) this.failTerminal(error);
     });
-  }
-
-  /**
-   * @internal Refuses further frames ahead of close(), so the in-memory queue
-   * can be drained to the socket without a publication slipping in behind the
-   * drain. Frames already queued keep draining.
-   */
-  stopPublishing(): void {
-    this.publishingStopped = true;
-  }
-
-  /**
-   * @internal Frames published to the in-memory replay queue that have not
-   * reached the socket yet. A persistent journal keeps its unsent frames, so
-   * this is zero for one.
-   */
-  get unsentFrameCount(): number {
-    return this.store instanceof QwpMemoryReplayStore ? this.unsentFrames : 0;
   }
 
   /**

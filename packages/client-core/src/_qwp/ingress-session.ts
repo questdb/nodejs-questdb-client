@@ -52,8 +52,6 @@ import { log } from "../logging";
 const DEFAULT_CONNECTION_LISTENER_INBOX_CAPACITY = 64;
 const DEFAULT_ERROR_INBOX_CAPACITY = 256;
 const DEFAULT_PROGRESS_INBOX_CAPACITY = 256;
-/** How long close() lets published in-memory frames reach the socket. */
-const CLOSE_DRAIN_TIMEOUT_MS = 5_000;
 
 interface PlannedIngressFrames {
   readonly frames: Uint8Array[];
@@ -454,27 +452,6 @@ export class QwpIngressAckAbandonedError extends Error {
       `QWP frame was abandoned before server acknowledgement [targetSequence=${targetSequence}, abandoned=${fromFsn}..${toFsn}]`,
     );
     this.name = "QwpIngressAckAbandonedError";
-  }
-}
-
-/**
- * close() discarded frames that had been published to the in-memory replay
- * queue but could not reach the socket before its drain deadline, typically
- * because no server was reachable. The connection is closed regardless.
- *
- * @internal Only QwpIngressSession.close() throws it. QwpSender bounds and
- * reports its own drain with QwpSenderCloseTimeoutError, so neither package
- * exports this class.
- */
-export class QwpIngressSessionCloseTimeoutError extends Error {
-  constructor(
-    readonly timeoutMs: number,
-    readonly unsentFrames: number,
-  ) {
-    super(
-      `QWP ingress session close timed out after ${timeoutMs}ms; ${unsentFrames} published frame(s) had not reached the socket and were discarded`,
-    );
-    this.name = "QwpIngressSessionCloseTimeoutError";
   }
 }
 
@@ -1293,46 +1270,21 @@ export class QwpIngressSession {
   }
 
   /**
-   * Closes the session and its connection. Frames already published to the
-   * in-memory replay queue first get up to 5 seconds to reach the socket. Any
-   * that cannot be sent in that time, typically because no server is
-   * reachable, are discarded, and close() rejects with
-   * QwpIngressSessionCloseTimeoutError once the connection is closed, or with
-   * the session's failure when it can no longer send them at all. A
-   * store-and-forward journal keeps unsent frames for the next session, so it
-   * is not drained. close() does not wait for ACKs: wait for
-   * publishedFrameSequence with waitForAcknowledged() first when the frames
-   * must be confirmed before closing.
+   * Closes the session and its connection without a drain: frames the
+   * in-memory replay queue has not handed to the socket yet are discarded,
+   * while a store-and-forward journal keeps them for the next session.
+   * QwpSender.close() drains first -- to the ACK watermark, or in a fast close
+   * to the socket -- and rejects when that drain cannot finish.
    */
   close(code = 1000, reason = ""): Promise<void> {
-    if (!this.closePromise) {
-      this.closePromise = this.closeNow(code, reason, CLOSE_DRAIN_TIMEOUT_MS);
-    }
+    if (!this.closePromise) this.closePromise = this.closeNow(code, reason);
     return this.closePromise;
   }
 
-  /**
-   * @internal Closes without draining unsent frames first. QwpSender bounds
-   * its own drain, and reports its outcome, before it closes the session.
-   */
-  closeWithoutDrain(code = 1000, reason = ""): Promise<void> {
-    if (!this.closePromise) this.closePromise = this.closeNow(code, reason, 0);
-    return this.closePromise;
-  }
-
-  private async closeNow(
-    code: number,
-    reason: string,
-    drainTimeoutMs: number,
-  ): Promise<void> {
+  private async closeNow(code: number, reason: string): Promise<void> {
     this.closing = true;
     this.clearDurablePoll();
     this.rejectAll(new QwpIngressSessionClosedError());
-    // Before the transport closes: closing it discards the in-memory queue.
-    const discarded =
-      drainTimeoutMs > 0
-        ? await this.drainUnsentFrames(drainTimeoutMs)
-        : undefined;
     const closeHooks = this.closeHooks.splice(0).map((hook) =>
       Promise.resolve()
         .then(hook)
@@ -1354,63 +1306,7 @@ export class QwpIngressSession {
       this.progressDispatcher?.close(),
       this.errorDispatcher?.close(),
     ]);
-    if (discarded) throw discarded;
     if (closeResult.status === "rejected") throw closeResult.reason;
-  }
-
-  /**
-   * Gives frames already published to the in-memory replay queue up to
-   * `timeoutMs` to reach the socket, and returns the error close() reports
-   * when some of them could not be sent. Publication used to end at the
-   * socket, so a published frame could never be left behind by close(). Now
-   * that it ends at the queue, closing straight away discarded whatever the
-   * background drainer had not sent yet -- silently, after every publish call
-   * had resolved.
-   */
-  private async drainUnsentFrames(
-    timeoutMs: number,
-  ): Promise<Error | undefined> {
-    const connection = this.connection;
-    if (!(connection instanceof QwpReconnectingIngressConnection)) {
-      // A fixed connection publishes on the socket itself.
-      return undefined;
-    }
-    let failure: unknown;
-    // Frames still on their way into the queue are refused rather than waited
-    // for: one blocked on a full queue would otherwise hold close() for its
-    // whole append deadline, and its publish call reports the refusal.
-    connection.stopPublishing();
-    const drained = connection.waitForPendingSends().then(
-      () => "drained" as const,
-      (error: unknown) => {
-        failure = error;
-        return "failed" as const;
-      },
-    );
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<"expired">((resolve) => {
-      timer = setTimeout(() => resolve("expired"), timeoutMs);
-    });
-    try {
-      const outcome = await Promise.race([drained, expired]);
-      if (outcome === "drained") return undefined;
-      if (outcome === "failed") {
-        // The frames are lost because the session can no longer send; its
-        // own failure says why better than the transport's echo of it.
-        return (
-          this.failure ??
-          (failure instanceof Error
-            ? failure
-            : new Error(`QWP ingress failed: ${failure}`))
-        );
-      }
-      const unsent = connection.unsentFrameCount;
-      return unsent > 0
-        ? new QwpIngressSessionCloseTimeoutError(timeoutMs, unsent)
-        : undefined;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
   }
 
   private async consumeMessages(): Promise<void> {

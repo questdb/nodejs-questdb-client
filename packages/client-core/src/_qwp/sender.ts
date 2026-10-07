@@ -2213,7 +2213,7 @@ export class QwpSender {
     const session = this.activeSession;
     if (session) {
       try {
-        await closeWithoutDrain(session);
+        await session.close();
       } catch (error) {
         closeError = error;
       }
@@ -2234,7 +2234,7 @@ export class QwpSender {
       try {
         await this.withCloseDeadline(
           this.sessionPromise
-            .then((connected) => closeWithoutDrain(connected))
+            .then((connected) => connected.close())
             .catch(() => undefined),
           publishDeadline,
         );
@@ -3044,17 +3044,6 @@ export class QwpSender {
 
 function sessionPublishedSequence(session: QwpSenderSession): bigint {
   return session.publishedFrameSequence;
-}
-
-/**
- * Closes a session once close() has applied its own bounded drain. Letting the
- * session drain again would add its full drain timeout to a close() that had
- * already run out of time, during exactly the outage that made it run out.
- */
-function closeWithoutDrain(session: QwpSenderSession): Promise<void> {
-  return session.closeWithoutDrain
-    ? session.closeWithoutDrain()
-    : session.close();
 }
 
 function sessionAcknowledgedSequence(session: QwpSenderSession): bigint {
