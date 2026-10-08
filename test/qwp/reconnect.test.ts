@@ -5664,9 +5664,13 @@ describe("QWP ingress reconnect and replay", () => {
       expect(sender.publishedSequence).toBe(0n);
       expect(sender.acknowledgedSequence).toBe(-1n);
 
+      // Longer than the test timeout, so only the OK itself can settle this
+      // wait. The wait's own deadline re-checks the watermark before it
+      // expires, which with a shorter timeout resolved true even when nothing
+      // woke the waiter for the hidden OK.
       const waiting = sender.waitForAcknowledged(
         sender.publishedSequence,
-        1_000,
+        60_000,
       );
       connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
       await expect(waiting).resolves.toBe(true);
