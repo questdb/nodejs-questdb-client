@@ -521,14 +521,19 @@ reusable buffer pool. Views are invalid when their callback returns; copy a byte
 view with `.slice()` or call `batch.materialize()` inside the callback to retain
 data. Tune the default four-slot pool with the session's `bufferPoolSize`.
 
-`queryTimeoutMs` sets the session's default query deadline; a per-query
-`timeoutMs` overrides it, and zero disables the deadline. When a deadline
-expires, the client rejects iteration and `query.completion` with
-`QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and waits for the terminal
-server response before accepting another query on that connection. Breaking out
-of `for await` early cancels the query too. `cancelDrainTimeoutMs` bounds that
-wait (5 seconds by default); an unresponsive cancellation closes the connection
-with `QwpEgressQueryCancelTimeoutError` instead of wedging the session.
+`queryTimeoutMs` (connect-string key `query_timeout_ms`) sets the session's
+default query timeout; a per-query `timeoutMs` overrides it, and zero disables
+it. The timeout runs from the `query()` call and covers the whole query. When it
+expires, no further batch is delivered and the client sends QWP `CANCEL`; the
+outcome then follows the server's terminal response. A statement that completed
+anyway, or a result that ended with nothing withheld, succeeds; otherwise
+iteration and `query.completion` reject with `QwpEgressQueryTimeoutError`. If the
+server does not end the query within `cancelDrainTimeoutMs` (5 seconds by
+default), the caller gets `QwpEgressQueryTimeoutError` anyway while the
+connection keeps draining the query for up to one more period; an unresponsive
+server then closes the connection with `QwpEgressQueryCancelTimeoutError`
+instead of wedging the session. A new query waits for that drain rather than
+failing. Breaking out of `for await` early cancels the query too.
 To bound only the caller's wait without cancelling, use
 `await query.awaitCompletion(timeoutMs)`. It returns `false` on timeout and leaves
 the query active, matching Java `Completion.await(timeout, unit)`. The SERVER_INFO

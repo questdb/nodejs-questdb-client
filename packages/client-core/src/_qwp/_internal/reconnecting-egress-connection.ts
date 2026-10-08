@@ -59,6 +59,7 @@ type QueryRequestEncoder = (
   serverInfo: QwpServerInfoMessage,
   requestId: bigint,
 ) => Uint8Array | Promise<Uint8Array>;
+type ConnectionLostHandler = () => void;
 
 interface PendingTerminalVerdict {
   readonly requestId: bigint;
@@ -128,6 +129,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     private readonly onConnectionReset: ConnectionResetHandler,
     private readonly encodeQueryRequest: QueryRequestEncoder,
     private readonly onReplayReset?: ReplayResetHandler,
+    private readonly onConnectionLost?: ConnectionLostHandler,
     private readonly retryInitialConnection = true,
     connectionListenerInboxCapacity = 64,
   ) {
@@ -167,6 +169,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     onConnectionReset: ConnectionResetHandler,
     encodeQueryRequest: QueryRequestEncoder,
     onReplayReset?: ReplayResetHandler,
+    onConnectionLost?: ConnectionLostHandler,
     retryInitialConnection = true,
     signal?: AbortSignal,
     connectionListenerInboxCapacity?: number,
@@ -178,6 +181,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       onConnectionReset,
       encodeQueryRequest,
       onReplayReset,
+      onConnectionLost,
       retryInitialConnection,
       connectionListenerInboxCapacity,
     );
@@ -244,9 +248,52 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     return this.sendPayload(payload, supersededByReplay);
   }
 
+  /**
+   * Sends a QUERY_REQUEST that the session may withdraw while it waits.
+   *
+   * A request issued during a reconnect waits for the replacement connection.
+   * If its query has ended by then -- its deadline passed while the connection
+   * was down -- the request is dropped rather than sent: the server would run a
+   * query nobody reads, and the session no longer holds the request a
+   * QUERY_REQUEST is re-encoded from.
+   *
+   * @internal
+   */
+  sendWithdrawable(
+    payload: Uint8Array,
+    withdrawn: () => boolean,
+  ): Promise<void> {
+    return this.sendPayload(payload, undefined, withdrawn);
+  }
+
+  /**
+   * Keeps the next reconnect from re-running a query its session has ended.
+   * Without a connection there is nothing to cancel it on, so it is simply not
+   * replayed; the session settles it when the replacement connection is up.
+   *
+   * @internal
+   */
+  dropReplay(requestId: bigint): void {
+    if (replayRequestId(this.outboundReplay) === requestId) {
+      this.outboundReplay = [];
+    }
+  }
+
+  /**
+   * Whether a terminal response for this request has been queued for the
+   * session but not yet accepted. Its outcome then reaches the session even
+   * though the connection that carried it has gone.
+   *
+   * @internal
+   */
+  hasPendingTerminal(requestId: bigint): boolean {
+    return this.pendingTerminal?.requestId === requestId;
+  }
+
   private sendPayload(
     payload: Uint8Array,
     supersededByReplay?: () => boolean,
+    withdrawn?: () => boolean,
   ): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closing) return Promise.reject(new QwpSendClosedError());
@@ -292,7 +339,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           if (accepted) releaseQueue();
         }
         const connection = await this.requireConnection();
-        if (supersededByReplay?.()) return;
+        if (supersededByReplay?.() || withdrawn?.()) return;
         const prepared = await this.prepareOutboundQuery(copy);
         this.trackOutbound(prepared);
         try {
@@ -924,6 +971,13 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.connection = undefined;
     if (closeCode !== 1000) failedConnection.deprioritizeEndpoint?.();
     void failedConnection.close(closeCode, closeReason).catch(() => undefined);
+    // Before the first attempt, so a session can settle what no longer needs a
+    // server -- an expired query, a drained one -- instead of replaying it.
+    try {
+      this.onConnectionLost?.();
+    } catch {
+      // The session's bookkeeping must not stop the reconnect.
+    }
     const reconnecting = this.connectLoop(cause, true, skipQueueBarrier);
     this.reconnectTask = reconnecting;
     try {

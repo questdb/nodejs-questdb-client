@@ -196,6 +196,14 @@ function resultEnd(
   return encodeQwpFrame(payload.toUint8Array());
 }
 
+function execDone(requestId: bigint, rowsAffected = 1n): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.EXEC_DONE).writeBigUint64(requestId);
+  payload.writeUint8(2); // operation type
+  writeQwpVarint(payload, rowsAffected);
+  return encodeQwpFrame(payload.toUint8Array());
+}
+
 function cacheReset(mask: number): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.CACHE_RESET).writeUint8(mask);
@@ -2213,15 +2221,17 @@ describe("QwpEgressSession", () => {
     expect(credit.readBigUint64()).toBe(query.requestId);
     expect(readQwpVarint(credit)).toBe(BigInt(resultFrame.byteLength));
 
-    await expect(session.query("select 2")).rejects.toThrow(
-      "a QWP query is already active",
-    );
+    // The abandoned query still drains on the connection. The next query waits
+    // for that instead of failing, as the loop above has already returned.
+    const querying = session.query("select 2");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(connection.sent).toHaveLength(3);
     connection.receive(
       queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
     );
-    await Promise.resolve();
-    await Promise.resolve();
-    const nextQuery = await session.query("select 2");
+    const nextQuery = await querying;
+    expect(connection.sent).toHaveLength(4);
     connection.receive(resultEnd(nextQuery.requestId, 0n, 0n));
     await nextQuery.completion;
     await session.close();
@@ -2317,7 +2327,7 @@ describe("QwpEgressSession", () => {
     }
   });
 
-  it("times out a query, sends CANCEL, and drains the terminal response", async () => {
+  it("cancels a query at its timeout and reports it once the server ends it", async () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
@@ -2331,12 +2341,47 @@ describe("QwpEgressSession", () => {
           initialCredit: 64,
         },
       );
+      let settled = false;
       const next = query[Symbol.asyncIterator]()
         .next()
-        .catch((error: unknown) => error);
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
 
       await vi.advanceTimersByTimeAsync(25);
 
+      // CANCEL goes out at the deadline, but the outcome waits for the server.
+      expect(connection.sent).toHaveLength(2);
+      const cancel = new QwpByteReader(connection.sent[1]);
+      expect(cancel.readUint8()).toBe(QWP_EGRESS_MESSAGE.CANCEL);
+      expect(cancel.readBigUint64()).toBe(query.requestId);
+      expect(cancel.remaining).toBe(0);
+      expect(settled).toBe(false);
+      expect(query.isDone()).toBe(false);
+      // Still running on the connection, so another query is refused.
+      await expect(session.query("select 2")).rejects.toThrow(
+        "a QWP query is already active",
+      );
+
+      // A batch past the deadline is withheld, and its credit goes back.
+      const lateBatch = firstResultBatch(query.requestId);
+      connection.receive(lateBatch);
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(3));
+      const drainCredit = new QwpByteReader(connection.sent[2]);
+      expect(drainCredit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+      expect(drainCredit.readBigUint64()).toBe(query.requestId);
+      expect(readQwpVarint(drainCredit)).toBe(BigInt(lateBatch.byteLength));
+      expect(settled).toBe(false);
+
+      // The server honours the CANCEL, which the caller sees as the timeout.
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
       await expect(next).resolves.toMatchObject({
         name: "QwpEgressQueryTimeoutError",
         requestId: query.requestId,
@@ -2345,31 +2390,6 @@ describe("QwpEgressSession", () => {
       await expect(query.completion).rejects.toBeInstanceOf(
         QwpEgressQueryTimeoutError,
       );
-      expect(connection.sent).toHaveLength(2);
-      const cancel = new QwpByteReader(connection.sent[1]);
-      expect(cancel.readUint8()).toBe(QWP_EGRESS_MESSAGE.CANCEL);
-      expect(cancel.readBigUint64()).toBe(query.requestId);
-      expect(cancel.remaining).toBe(0);
-
-      await expect(session.query("select 2")).rejects.toThrow(
-        "a QWP query is already active",
-      );
-      const lateBatch = firstResultBatch(query.requestId);
-      connection.receive(lateBatch);
-      await vi.waitFor(() => expect(connection.sent).toHaveLength(3));
-      const drainCredit = new QwpByteReader(connection.sent[2]);
-      expect(drainCredit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
-      expect(drainCredit.readBigUint64()).toBe(query.requestId);
-      expect(readQwpVarint(drainCredit)).toBe(BigInt(lateBatch.byteLength));
-      connection.receive(
-        queryError(
-          query.requestId,
-          "cancelled by client",
-          QWP_STATUS.CANCELLED,
-        ),
-      );
-      await Promise.resolve();
-      await Promise.resolve();
 
       const nextQuery = await session.query("select 2", { timeoutMs: 0 });
       connection.receive(resultEnd(nextQuery.requestId, 0n, 0n));
@@ -2381,7 +2401,7 @@ describe("QwpEgressSession", () => {
     }
   });
 
-  it("fails and closes a session when cancellation never terminates", async () => {
+  it("releases a timed-out caller after the grace period and gives up after another", async () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
@@ -2391,21 +2411,43 @@ describe("QwpEgressSession", () => {
       });
       connection.receive(serverInfo());
       const query = await session.query("select * from long_sequence(1000000)");
+      const completion = query.completion.catch((error: unknown) => error);
 
       await vi.advanceTimersByTimeAsync(25);
-      await expect(query.completion).rejects.toBeInstanceOf(
-        QwpEgressQueryTimeoutError,
-      );
-      await vi.advanceTimersByTimeAsync(50);
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      await vi.advanceTimersByTimeAsync(49);
+      expect(query.isDone()).toBe(false);
 
+      // No answer within the grace period: the caller gets the timeout.
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(completion).resolves.toMatchObject({
+        name: "QwpEgressQueryTimeoutError",
+        requestId: query.requestId,
+        timeoutMs: 25,
+      } satisfies Partial<QwpEgressQueryTimeoutError>);
+
+      // The connection drains for one more period, and a new query waits for
+      // it rather than failing.
+      const next = session
+        .query("select 2", { timeoutMs: 0 })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(49);
+      expect(connection.closeCalls).toEqual([]);
+      expect(connection.sent).toHaveLength(2);
+
+      await vi.advanceTimersByTimeAsync(1);
       expect(connection.closeCalls).toEqual([
         { code: 1011, reason: "QWP cancellation drain timed out" },
       ]);
-      await expect(session.query("select 2")).rejects.toMatchObject({
+      await expect(next).resolves.toMatchObject({
         name: "QwpEgressQueryCancelTimeoutError",
         requestId: query.requestId,
         timeoutMs: 50,
       } satisfies Partial<QwpEgressQueryCancelTimeoutError>);
+      expect(connection.sent).toHaveLength(2);
       expect(vi.getTimerCount()).toBe(0);
       await session.close();
     } finally {
@@ -2426,6 +2468,314 @@ describe("QwpEgressSession", () => {
 
       await vi.advanceTimersByTimeAsync(25);
       expect(connection.sent).toHaveLength(1);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a statement that completes past its timeout as done", async () => {
+    // EXEC_DONE means the statement has taken effect. Reporting it as timed
+    // out would invite a retry that applies it twice.
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("insert into t select * from src", {
+        timeoutMs: 25,
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(connection.sent[1][0]).toBe(QWP_EGRESS_MESSAGE.CANCEL);
+      connection.receive(execDone(query.requestId, 42n));
+
+      await expect(query.completion).resolves.toMatchObject({
+        kind: "exec-done",
+        rowsAffected: 42n,
+      });
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("completes a result that ends past its timeout with nothing withheld", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      const iterator = query[Symbol.asyncIterator]();
+      connection.receive(firstResultBatch(query.requestId));
+      await expect(iterator.next()).resolves.toMatchObject({ done: false });
+
+      await vi.advanceTimersByTimeAsync(25);
+      // Every batch reached the consumer before the deadline, so the end of
+      // the stream completes the result.
+      connection.receive(resultEnd(query.requestId));
+      await expect(iterator.next()).resolves.toEqual({
+        value: undefined,
+        done: true,
+      });
+      await expect(query.completion).resolves.toMatchObject({
+        kind: "result-end",
+        totalRows: 3n,
+      });
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports the timeout for a result that lost a batch to it", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", {
+        timeoutMs: 25,
+        initialCredit: 4096,
+      });
+      // Decoded and queued, but not consumed before the deadline.
+      const queued = firstResultBatch(query.requestId);
+      connection.receive(queued);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(connection.sent).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(15);
+      // The deadline drops the queued batch and returns its credit.
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+        QWP_EGRESS_MESSAGE.CREDIT,
+      ]);
+      const credit = new QwpByteReader(connection.sent[2]);
+      credit.readUint8();
+      expect(credit.readBigUint64()).toBe(query.requestId);
+      expect(readQwpVarint(credit)).toBe(BigInt(queued.byteLength));
+
+      // The server finished just past the deadline, but the consumer is
+      // missing rows, so the outcome is the timeout.
+      connection.receive(resultEnd(query.requestId));
+      const consumed: unknown[] = [];
+      await expect(
+        (async () => {
+          for await (const batch of query) consumed.push(batch);
+        })(),
+      ).rejects.toBeInstanceOf(QwpEgressQueryTimeoutError);
+      expect(consumed).toEqual([]);
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("withholds result views decoded ahead of the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      let releaseHandler!: () => void;
+      const handlerReleased = new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      const seen: bigint[] = [];
+      const query = await session.queryViews(
+        "select * from x",
+        async (batch) => {
+          seen.push(batch.batchSequence);
+          await handlerReleased;
+        },
+        { timeoutMs: 25, initialCredit: 4096 },
+      );
+      const first = emptyResultBatch(query.requestId, 0);
+      const second = emptyResultBatch(query.requestId, 1);
+      connection.receive(first);
+      connection.receive(second);
+      await vi.advanceTimersByTimeAsync(10);
+      // The first view is in the callback; the second is decoded ahead.
+      expect(seen).toEqual([0n]);
+
+      await vi.advanceTimersByTimeAsync(15);
+      releaseHandler();
+      await vi.advanceTimersByTimeAsync(0);
+      // The callback that was running completes; the view queued behind it
+      // never reaches the callback, and its credit is returned all the same.
+      expect(seen).toEqual([0n]);
+      const credits = connection.sent
+        .filter((payload) => payload[0] === QWP_EGRESS_MESSAGE.CREDIT)
+        .map((payload) => {
+          const reader = new QwpByteReader(payload);
+          reader.readUint8();
+          reader.readBigUint64();
+          return readQwpVarint(reader);
+        });
+      expect(credits).toEqual([
+        BigInt(first.byteLength),
+        BigInt(second.byteLength),
+      ]);
+
+      connection.receive(resultEnd(query.requestId, 0n, 1n));
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports an application cancel that precedes the timeout as a cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      await query.cancel();
+
+      await vi.advanceTimersByTimeAsync(25);
+      // The deadline sends no second CANCEL.
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+      } satisfies Partial<QwpEgressQueryError>);
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends one CANCEL however a timed-out query is ended", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      const iterator = query[Symbol.asyncIterator]();
+
+      await vi.advanceTimersByTimeAsync(25);
+      // A late cancel, and breaking out of iteration, both find it cancelled.
+      await query.cancel();
+      await iterator.return!();
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryAbandonedError,
+      );
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts a query's timeout when query() is called", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      const querying = session.query("select 1", { timeoutMs: 30 });
+      // SERVER_INFO is late, and the wait for it is part of the budget.
+      await vi.advanceTimersByTimeAsync(20);
+      connection.receive(serverInfo());
+      const query = await querying;
+      expect(connection.sent).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(9);
+      expect(connection.sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts waiting for a draining query against the next query's timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const abandoned = await session.query("select * from x");
+      connection.receive(firstResultBatch(abandoned.requestId));
+      for await (const _batch of abandoned) break;
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+
+      const waiting = session
+        .query("select 2", { timeoutMs: 30 })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(29);
+      expect(connection.sent).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      // The whole budget went on waiting, so nothing was sent for it.
+      await expect(waiting).resolves.toMatchObject({
+        name: "QwpEgressQueryTimeoutError",
+        timeoutMs: 30,
+      } satisfies Partial<QwpEgressQueryTimeoutError>);
+      expect(connection.sent).toHaveLength(2);
+
+      connection.receive(
+        queryError(
+          abandoned.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const next = await session.query("select 3", { timeoutMs: 30 });
+      expect(connection.sent).toHaveLength(3);
+      connection.receive(resultEnd(next.requestId, 0n, 0n));
+      await next.completion;
+      expect(vi.getTimerCount()).toBe(0);
       await session.close();
     } finally {
       vi.useRealTimers();
