@@ -1102,8 +1102,6 @@ describe("Configuration string parser suite", function () {
         qwp: {
           webSocket: {
             failoverUrls: ["ws://typed-secondary:9100/custom-write"],
-            target: "replica",
-            zone: "typed-zone",
             senderId: "typed-sender",
           },
         },
@@ -1115,17 +1113,35 @@ describe("Configuration string parser suite", function () {
     expect(resolved?.failoverUrls?.map(String)).toEqual([
       "ws://typed-secondary:9100/custom-write",
     ]);
-    expect(resolved).toMatchObject({
-      target: "replica",
-      zone: "typed-zone",
-      senderId: "typed-sender",
-    });
+    expect(resolved).toMatchObject({ senderId: "typed-sender" });
+    // target and zone route query sessions, and a Sender has none: writes can
+    // only land on the primary.
+    expect(resolved).not.toHaveProperty("target");
+    expect(resolved).not.toHaveProperty("zone");
 
+    // The string is still validated as a whole.
     await expect(
-      SenderOptions.fromConfig("ws::addr=url-primary:9000;target=not-a-role;", {
-        qwp: { webSocket: { target: "replica" } },
-      }),
+      SenderOptions.fromConfig("ws::addr=url-primary:9000;target=not-a-role;"),
     ).rejects.toThrow(/target/);
+  });
+
+  it("rejects typed QWP routing a Sender cannot apply", async function () {
+    // The typed section has no such fields; a JavaScript caller learns why
+    // rather than having the request dropped.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=url-primary:9000;", {
+        qwp: { webSocket: { target: "replica" } },
+      } as never),
+    ).rejects.toThrow("qwp.webSocket.target is not an ingress option");
+    expect(
+      () =>
+        new Sender({
+          protocol: "ws",
+          host: "localhost",
+          port: 9000,
+          qwp: { webSocket: { zone: "eu-west-1a" } },
+        } as SenderOptions),
+    ).toThrow("qwp.webSocket.zone is not an ingress option");
   });
 
   it("leaves QWP-only keys to the QWP schema", async function () {

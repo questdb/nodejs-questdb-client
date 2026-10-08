@@ -386,12 +386,16 @@ export const QWP_TARGET = {
   REPLICA: "replica",
 } as const;
 
-/** Server role a connection accepts, on ingress and egress. Defaults to `any`. */
+/** Server role a query session accepts. Defaults to `any`. */
 export type QwpTarget = (typeof QWP_TARGET)[keyof typeof QWP_TARGET];
 
 /**
- * Browser-safe endpoint routing preferences. The ingress and egress options
- * that include them rank and validate endpoints with the same machinery.
+ * Browser-safe endpoint routing preferences for query sessions.
+ *
+ * Ingress takes none. QuestDB accepts writes on the primary alone: a replica,
+ * or a primary still catching up, answers the `/write/v4` upgrade with 421
+ * and the role it holds, and the endpoint sweep moves on, so a sender reaches
+ * the primary whatever role or zone it could ask for.
  */
 export interface QwpRoutingOptions {
   /** Selects any readable node, a primary/standalone node, or a replica. */

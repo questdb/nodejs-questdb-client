@@ -1072,25 +1072,49 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/error_inbox_capacity/);
   });
 
-  it("routes ingress by target and zone, not only egress", () => {
-    // Both keys were parsed, validated and then applied to the egress factory
-    // alone. On the ingress side target degenerated to "accept any role" and
-    // the health tracker ran zone-blind, so every endpoint ranked as same-zone
-    // and configuration order alone decided where writes went. Through
-    // Sender.fromConfig it was total: that path uses only options.ingress, so
-    // a bogus target still threw while a valid one did nothing at all.
+  it("routes query sessions by target and zone and leaves writes to the primary", () => {
+    // Writes can only land on the primary: a replica, or a primary still
+    // catching up, answers the /write/v4 upgrade with 421 and the ingress
+    // sweep moves on. Copying both keys onto ingress as well made
+    // target=replica, the usual read-scaling setting, refuse the primary the
+    // sweep had found, so a pooled client's senders had nowhere to connect.
     const options = parseQwpNodeClientConfig(
-      "ws::addr=db-a.example:9000,db-b.example:9000;target=primary;zone=eu-west-1a;",
+      "ws::addr=db-a.example:9000,db-b.example:9000;target=replica;zone=eu-west-1a;",
     );
 
-    expect(options.ingress).toMatchObject({
-      target: "primary",
-      zone: "eu-west-1a",
-    });
     expect(options.egress).toMatchObject({
-      target: "primary",
+      target: "replica",
       zone: "eu-west-1a",
     });
+    const { ingress, egress } = resolveQwpNodeClientSides(options);
+    expect(egress).toMatchObject({ target: "replica", zone: "eu-west-1a" });
+    for (const resolved of [options.ingress, ingress]) {
+      expect(resolved).not.toHaveProperty("target");
+      expect(resolved).not.toHaveProperty("zone");
+    }
+  });
+
+  it("rejects routing where only ingress would read it", () => {
+    // The option types have no such fields, and the cluster's settings reach
+    // ingress too; a JavaScript caller learns why rather than having the
+    // routing request dropped.
+    for (const [overrides, message] of [
+      [{ ingress: { target: "primary" } }, "ingress.target is not an ingress"],
+      [{ ingress: { zone: "eu-west-1a" } }, "ingress.zone is not an ingress"],
+      [{ cluster: { target: "replica" } }, "cluster.target is not an ingress"],
+    ] as const) {
+      expect(() =>
+        parseQwpNodeClientConfig("ws::addr=localhost;", overrides as never),
+      ).toThrow(message);
+    }
+    expect(() =>
+      createQwpNodeClient({
+        cluster: { url: "ws://localhost:9000" },
+        ingress: { target: "replica" },
+      } as never),
+    ).toThrow(
+      "ingress.target is not an ingress option: QuestDB accepts writes on the primary alone, so target routes query sessions only; set it under egress instead",
+    );
   });
 
   it("keeps requestDurableAck on ingress", () => {

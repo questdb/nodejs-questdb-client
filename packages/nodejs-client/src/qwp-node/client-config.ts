@@ -166,8 +166,16 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
  * the same reasoning validateUdpUnsupportedOptions() already applies on the
  * ILP side.
  *
- * `target`, `zone`, `drain_orphans` and the store-and-forward keys are
- * deliberately absent: ingress honours all of them.
+ * `drain_orphans` and the store-and-forward keys are deliberately absent:
+ * ingress honours them.
+ *
+ * `target` and `zone` are listed: they route query sessions only, as in the
+ * Java client, whose sender accepts and ignores both. QuestDB accepts writes
+ * on the primary alone -- a replica, or a primary still catching up, answers
+ * the `/write/v4` upgrade with 421 and the ingress sweep moves on -- so there
+ * is nothing for a sender to route. Applying them to ingress was worse than
+ * inert: `target=replica`, the usual read-scaling setting, made the sweep
+ * refuse the primary it had found and left the sender nowhere to connect.
  *
  * `lazy_connect` is listed although it shapes ingress startup, because every
  * QuestDB client scopes it to the pooled facade: the Java `QuestDB` facade and
@@ -207,7 +215,32 @@ const QWP_CLIENT_ONLY_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "query_timeout_ms",
   "sender_pool_max",
   "sender_pool_min",
+  "target",
+  "zone",
 ]);
+
+/**
+ * @internal Rejects `target` and `zone` where only ingress would read them.
+ *
+ * Writes can only land on the primary, which the ingress sweep reaches through
+ * the 421 each replica answers the upgrade with (see
+ * QWP_CLIENT_ONLY_CONFIG_KEYS), so both keys route query sessions alone. The
+ * option types have no such fields; this names the mistake for a JavaScript
+ * caller rather than silently dropping a routing request.
+ */
+export function assertNoQwpIngressRouting(
+  options: object | undefined,
+  spelling: string,
+  remedy: string,
+): void {
+  const fields = options as Record<string, unknown> | undefined;
+  for (const name of ["target", "zone"] as const) {
+    if (fields?.[name] === undefined) continue;
+    throw new TypeError(
+      `${spelling}${name} is not an ingress option: QuestDB accepts writes on the primary alone, so ${name} routes query sessions only; ${remedy}`,
+    );
+  }
+}
 
 /**
  * Warns about connect-string keys a standalone `Sender` cannot honour.
@@ -472,12 +505,6 @@ export function resolveQwpNodeClientConfig(
   ] as const) as QwpTarget | undefined;
   const zone = value("zone");
   const ingress: NonNullable<QwpNodeClientOptions["ingress"]> = {
-    // `target` and `zone` are one cluster-routing pair, and QWP.md documents
-    // them under "Reconnect and failover" and promises the ingress endpoint
-    // ranking uses zone affinity. Reaching only the egress factory left both
-    // silently inert for writes.
-    target,
-    zone,
     // The keepalive does not request durable ACKs: it is carried as set and
     // ignored without them, as in the Java and Rust clients.
     requestDurableAck: optionalBoolean(
@@ -491,6 +518,10 @@ export function resolveQwpNodeClientConfig(
     ...definedOnly(ingressOverrides),
   };
   const egress: NonNullable<QwpNodeClientOptions["egress"]> = {
+    // Routing is egress-only. Writes can only land on the primary, which the
+    // ingress sweep reaches through each replica's 421 whatever these say;
+    // copied onto ingress as a role filter, target=replica refused the primary
+    // and left a pooled client's senders nowhere to connect.
     target,
     zone,
     compression: optionalEnum(value("compression"), "compression", [
@@ -1058,6 +1089,15 @@ export function normalizeQwpNodeClientOptions(
   options: QwpNodeClientOptions,
 ): QwpNodeClientOptions {
   assertKnownQwpOptionSections("QWP client", options, QWP_NODE_CLIENT_SECTIONS);
+  // The cluster's settings reach ingress as well, so routing has no place
+  // there either.
+  for (const section of ["cluster", "ingress"] as const) {
+    assertNoQwpIngressRouting(
+      options[section],
+      `${section}.`,
+      "set it under egress instead",
+    );
+  }
   validateQwpIngressReconnectBackoffs(options.ingress?.reconnect);
   validateQwpEgressReconnectBackoffs(options.egress?.reconnect);
   const initialConnectMode = options.ingress?.initialConnectMode;

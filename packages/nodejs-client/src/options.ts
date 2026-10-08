@@ -10,6 +10,7 @@ import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 // Imported directly rather than through ./qwp: these are Sender-side helpers,
 // and ./qwp is re-exported wholesale by the package root.
 import {
+  assertNoQwpIngressRouting,
   resolveQwpNodeSenderConfig,
   warnUnsupportedQwpSenderKeys,
 } from "./qwp-node/client-config";
@@ -567,6 +568,12 @@ export function validateQwpExtraOptions(
   if (options.udp !== undefined && !udp) {
     throw new Error("'qwp.udp' option is supported only for the udp transport");
   }
+  // A Sender is ingress-only, and writes can only land on the primary.
+  assertNoQwpIngressRouting(
+    options.webSocket,
+    "qwp.webSocket.",
+    "a Sender has no query side for it to route",
+  );
   // Same check the top-level logger gets, for the same reason. A QWP sender
   // contains every log call in a try/catch -- the sink is the thing that
   // failed, so there is nowhere to report its failure to -- which means a

@@ -38,6 +38,7 @@ import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/eg
 import { selectsQwpSyncInitialConnect } from "../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
 import {
+  assertNoQwpIngressRouting,
   normalizeQwpNodeClientOptions,
   QWP_DEFAULT_SENDER_ID,
   resolveQwpNodeClientConfig,
@@ -294,10 +295,13 @@ export interface QwpNodeWebSocketOptions extends QwpWebSocketConnectOptions {
  * Everything a Node QWP WebSocket sender takes: the connection, row buffering
  * and flushing, and delivery -- acknowledgement, reconnect and replay, kept in
  * memory or, with `storeAndForward`, in a crash-safe journal.
+ *
+ * There is no `target` or `zone`. Only the primary accepts writes, and the
+ * endpoint sweep reaches it through the 421 each replica answers the upgrade
+ * with; both route query sessions, on {@link QwpNodeEgressOptions}.
  */
 export interface QwpNodeIngressOptions
   extends QwpNodeWebSocketOptions,
-    QwpRoutingOptions,
     QwpSenderOptions,
     QwpIngressSessionOptions {
   /**
@@ -578,7 +582,6 @@ function createQwpNodeConnectionFactory(
   healthTracker?: QwpFailoverHealthTracker,
   resetClassificationsAfterExhaustion = true,
 ): QwpConnectionFactory {
-  const routing = options as QwpRoutingOptions;
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
@@ -590,11 +593,13 @@ function createQwpNodeConnectionFactory(
         options.requestDurableAck === true,
       ),
     {
-      // Ingress used to drop these, so `target` degenerated to "accept any
-      // role" and every endpoint ranked as same-zone however the caller had
-      // configured the cluster.
-      target: routing.target,
-      zone: routing.zone,
+      // No target or zone. Only the primary accepts a write upgrade: a
+      // replica, or a primary still catching up, answers 421 with its role,
+      // which classifies and demotes that endpoint, so the sweep reaches the
+      // primary on its own. A role filter could only refuse the endpoint the
+      // sweep found, and zone affinity does not apply to a primary, which has
+      // to be followed across zones -- the walker's own rule for
+      // target=primary.
       healthTracker,
       resetClassificationsAfterExhaustion,
     },
@@ -870,10 +875,7 @@ async function connectQwpNodeIngressInternal(
   );
   const healthTracker =
     sharedHealthTracker ??
-    createQwpFailoverHealthTracker(options.url, options.failoverUrls, {
-      target: options.target,
-      zone: options.zone,
-    });
+    createQwpFailoverHealthTracker(options.url, options.failoverUrls);
   const storeAndForward = resolveNodeStoreAndForwardOptions(options);
   if (storeAndForward && options.orphanStoreAndForward !== true) {
     await warnAboutUnreachableJournal(
@@ -1095,6 +1097,7 @@ export function createQwpNodeSender(options: QwpNodeIngressOptions): QwpSender {
   // a mixed scheme decides which socket carries the credentials below, so it
   // belongs with the other construction-time rejections.
   assertUniformQwpEndpointScheme(options.url, options.failoverUrls);
+  assertNoQwpIngressRouting(options, "", "set it on the egress options");
   return createQwpSender(
     (signal) => connectQwpNodeIngress(options, signal),
     options,
@@ -1342,7 +1345,6 @@ function createPooledOrphanDrainer(
   const healthTracker = createQwpFailoverHealthTracker(
     ingress.url,
     ingress.failoverUrls,
-    { target: ingress.target, zone: ingress.zone },
   );
   return createNodeOrphanDrainer(
     ingress,

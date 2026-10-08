@@ -681,7 +681,6 @@ describe("QWP Node transport", () => {
       headers.push("X-QWP-Version: 1");
       headers.push("X-QWP-Durable-Ack: enabled");
       headers.push("X-QuestDB-Role: PRIMARY");
-      headers.push("X-QuestDB-Zone: eu-west-1");
     });
     const received: Uint8Array[] = [];
     let pingCount = 0;
@@ -715,8 +714,6 @@ describe("QWP Node transport", () => {
     const client = await connectQwpNodeClient({
       cluster: { url: `ws://127.0.0.1:${address.port}` },
       ingress: {
-        target: "primary",
-        zone: "eu-west-1",
         requestDurableAck: true,
         durableAckKeepaliveMs: 10,
         storeAndForward: {
@@ -981,73 +978,90 @@ describe("QWP Node transport", () => {
     }
   });
 
-  it("skips an ingress endpoint whose role the target excludes", async () => {
-    // target and zone reached the egress connection factory only, so ingress
-    // matched every role and ranked every endpoint as same-zone: writes landed
-    // on whichever endpoint came first in the configuration, replica included.
-    const roleServer = async (role: string) => {
-      const instance = new WebSocketServer({ host: "127.0.0.1", port: 0 });
-      instance.on("headers", (headers) => {
-        headers.push("X-QWP-Version: 1");
-        headers.push(`X-QuestDB-Role: ${role}`);
-      });
-      instance.on("connection", (socket) => {
-        socket.on("message", () => socket.send(okResponse(0n, "trades", 1n)));
-      });
-      await listen(instance);
-      return instance;
-    };
-    const replica = await roleServer("REPLICA");
-    server = await roleServer("PRIMARY");
+  it("follows the primary past a replica's 421 whatever a shared cluster string routes", async () => {
+    // QuestDB accepts writes on the primary alone. A replica answers the
+    // /write/v4 upgrade with 421 and its role, and the primary completes it
+    // advertising PRIMARY. target and zone were once copied onto ingress as a
+    // role filter, so target=replica -- the usual read-scaling setting, in a
+    // cluster string both sides share -- refused the primary the sweep had
+    // found, and the pooled client's senders had nowhere to connect.
+    const replica = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+      verifyClient: (_info, callback) =>
+        callback(false, 421, "Misdirected Request", {
+          "X-QuestDB-Role": "REPLICA",
+        }),
+    });
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+      headers.push("X-QuestDB-Role: PRIMARY");
+    });
+    server.on("connection", (socket) => {
+      let sequence = 0n;
+      socket.on("message", () =>
+        socket.send(okResponse(sequence++, "trades", 1n)),
+      );
+    });
+    await Promise.all([listen(replica), listen(server)]);
     const replicaPort = (replica.address() as AddressInfo).port;
     const primaryPort = (server.address() as AddressInfo).port;
 
     try {
-      // The replica is preferred by configuration order, so only the role
-      // check can move the write off it.
+      // The replica comes first, so the sweep has to walk past its 421.
       const session = await connectQwpNodeIngress({
         url: `ws://127.0.0.1:${replicaPort}/write/v4`,
         failoverUrls: [`ws://127.0.0.1:${primaryPort}/write/v4`],
-        target: "primary",
       });
       try {
-        expect(session.handshake.serverRole?.toUpperCase()).toBe("PRIMARY");
+        expect(session.handshake.serverRole).toBe("PRIMARY");
         await expect(publishAndWait(session, Uint8Array.of(1))).resolves.toBe(
           0n,
         );
       } finally {
         await session.close();
       }
+
+      // The prewarmed sender alone used to fail with QwpPoolResourceError.
+      const client = await connectQwpNodeClient(
+        `ws::addr=127.0.0.1:${replicaPort},127.0.0.1:${primaryPort};` +
+          "target=replica;zone=eu-west-1a;" +
+          "sender_pool_min=1;query_pool_min=0;",
+      );
+      try {
+        const sender = await client.borrowSender();
+        try {
+          await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+          await expect(sender.flushAndWait(5_000)).resolves.toBe(true);
+        } finally {
+          await sender.close();
+        }
+      } finally {
+        await client.close();
+      }
     } finally {
-      await new Promise<void>((resolve) => replica.close(() => resolve()));
+      await closeServer(replica);
     }
   });
 
-  it("accepts an ingress endpoint that declares no role at all", async () => {
-    // Ingress reads the role from an upgrade response header, which an older
-    // server may not send and a proxy may strip. Egress always learns one from
-    // SERVER_INFO, so applying the egress rule unchanged would refuse to write
-    // to a node purely for staying silent. A server that does know its role
-    // still rejects a misdirected write itself, with a 421.
-    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
-    server.on("headers", (headers) => {
-      headers.push("X-QWP-Version: 1");
-    });
-    server.on("connection", (socket) => {
-      socket.on("message", () => socket.send(okResponse(0n, "trades", 1n)));
-    });
-    await listen(server);
-
-    const address = server.address() as AddressInfo;
-    const session = await connectQwpNodeIngress({
-      url: `ws://127.0.0.1:${address.port}/write/v4`,
-      target: "primary",
-    });
-    try {
-      await expect(publishAndWait(session, Uint8Array.of(1))).resolves.toBe(0n);
-    } finally {
-      await session.close();
-    }
+  it("rejects target and zone on a sender's own options", () => {
+    // The ingress options have no such fields; a JavaScript caller learns why
+    // rather than having the routing request dropped.
+    expect(() =>
+      createQwpNodeSender({
+        url: "ws://127.0.0.1:1/write/v4",
+        target: "primary",
+      } as never),
+    ).toThrow(
+      "target is not an ingress option: QuestDB accepts writes on the primary alone, so target routes query sessions only; set it on the egress options",
+    );
+    expect(() =>
+      createQwpNodeSender({
+        url: "ws://127.0.0.1:1/write/v4",
+        zone: "eu-west-1a",
+      } as never),
+    ).toThrow("zone is not an ingress option");
   });
 
   it("retries a recoverable slot instead of quarantining it on the first failure", async () => {

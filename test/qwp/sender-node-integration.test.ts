@@ -51,22 +51,24 @@ describe("Sender QWP integration", () => {
         if (level === "warn") target.push(String(message));
       }) as never;
 
+    // target and zone are among them: they route query sessions, and writes
+    // can only land on the primary, which a Sender reaches whatever they say.
     const sender = await Sender.fromConfig(
       "ws::addr=localhost:9000;compression=zstd;query_pool_min=4;" +
-        "target=primary;auto_flush_rows=5000;",
+        "target=primary;zone=eu;auto_flush_rows=5000;",
       { log: collect(warnings) },
     );
     await sender.close();
     expect(warnings).toEqual([
-      "Sender ignores QWP configuration keys: compression, query_pool_min; " +
-        "they configure QWP egress and the connection pools, which only " +
-        "connectQwpNodeClient() builds",
+      "Sender ignores QWP configuration keys: compression, query_pool_min, " +
+        "target, zone; they configure QWP egress and the connection pools, " +
+        "which only connectQwpNodeClient() builds",
     ]);
 
     // Ingress-side keys on their own stay silent.
     const quiet: string[] = [];
     const second = await Sender.fromConfig(
-      "ws::addr=localhost:9000;target=primary;zone=eu;" +
+      "ws::addr=localhost:9000;sender_id=producer_1;" +
         "initial_connect_retry=async;auto_flush_rows=5000;",
       { log: collect(quiet) },
     );
@@ -351,6 +353,10 @@ describe("Sender QWP integration", () => {
     server.on("headers", (headers) => {
       headers.push("X-QWP-Version: 1");
       headers.push("X-QWP-Max-Batch-Size: 1048576");
+      // QuestDB advertises the role on every write upgrade it completes. Read
+      // as an ingress role filter, the target=replica below once refused this
+      // primary, and the Sender never connected.
+      headers.push("X-QuestDB-Role: PRIMARY");
     });
     server.on("connection", (_socket, request) => {
       authorization = request.headers.authorization;

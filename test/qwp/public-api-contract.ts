@@ -302,6 +302,31 @@ const nodeEgressDurableAckContract: QwpNodeEgressOptions = {
   requestDurableAck: true,
 };
 
+// Only the primary accepts writes, and ingress reaches it through the 421 each
+// replica answers the upgrade with, so target and zone route queries alone.
+const nodeIngressRoutingContract: QwpNodeIngressOptions = {
+  url: "wss://node-1.example/write/v4",
+  // @ts-expect-error target routes query sessions only.
+  target: "primary",
+};
+
+const browserIngressRoutingContract: QwpBrowserIngressOptions = {
+  url: "wss://node-1.example/write/v4",
+  // @ts-expect-error zone routes query sessions only.
+  zone: "eu-west-1a",
+};
+
+const nodeClientIngressRoutingContract: QwpNodeClientOptions = {
+  cluster: { url: "wss://node-1.example" },
+  // @ts-expect-error target routes query sessions only.
+  ingress: { target: "replica" },
+};
+
+const senderRoutingContract: QwpExtraOptions = {
+  // @ts-expect-error A Sender has no query session for zone to route.
+  webSocket: { zone: "eu-west-1a" },
+};
+
 const nodeClientConfigOptionsContract: QwpNodeClientConfigOptions = {
   cluster: {
     clientId: "typescript/contract",
@@ -556,6 +581,10 @@ void nodeClusterOwnedContract;
 void nodeStoreStartupContract;
 void browserEgressDurableAckContract;
 void nodeEgressDurableAckContract;
+void nodeIngressRoutingContract;
+void browserIngressRoutingContract;
+void nodeClientIngressRoutingContract;
+void senderRoutingContract;
 void nodeClientConfigOptionsContract;
 void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
