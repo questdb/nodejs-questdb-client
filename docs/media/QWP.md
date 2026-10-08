@@ -81,10 +81,9 @@ connect string is the portable spelling.
 
 The complete connect string is parsed and validated before typed overrides are
 applied. When both forms set the same option, the typed value wins. In
-particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls`,
-`target`, `zone`, and `senderId` after URL parsing. The primary ingress URL
-continues to come from `addr`, because the typed object intentionally omits
-`url`.
+particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls` and
+`senderId` after URL parsing. The primary ingress URL continues to come from
+`addr`, because the typed object intentionally omits `url`.
 
 Typed `ExtraOptions.qwp` sections are transport-specific, and a mismatched or
 unknown section is rejected rather than ignored: `webSocket` applies only to
@@ -138,10 +137,17 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 | `failover_backoff_initial_ms`      | integer ms                  | `50`     | First failover delay.                                                                   |
 | `failover_backoff_max_ms`          | integer ms                  | `1000`   | Ceiling for one failover delay.                                                         |
 | `failover_max_duration_ms`         | integer ms                  | `30000`  | Budget for a failover episode.                                                          |
-| `target`                           | `any`, `primary`, `replica` | —        | Server role this client will accept, on both ingress and egress.                        |
-| `zone`                             | string                      | —        | Preferred topology zone when ranking endpoints, on both ingress and egress.             |
+| `target`                           | `any`, `primary`, `replica` | `any`    | Server role a query session accepts. Ingress ignores it.                                |
+| `zone`                             | string                      | —        | Preferred topology zone when ranking query endpoints. Ingress ignores it.               |
 
-The `reconnect_*` keys configure ingress and the `failover_*` keys egress. As in the
+The `reconnect_*` keys configure ingress and the `failover_*` keys egress, and
+`target` and `zone` route egress alone. Ingress has nothing to route: QuestDB
+accepts writes on the primary only, a replica or a primary still catching up
+answers the write upgrade with 421, and the endpoint sweep moves on, so a sender
+reaches the primary whatever these keys say. A connect string shared by both
+sides can therefore set them for its queries without affecting writes, as in
+the Java client; `Sender.fromConfig()`, which builds no query session, warns
+that it ignores them. As in the
 Java, Rust and Python clients, no reconnect setting stops an ingress session that has
 connected: it retries an outage until `close()`, and only a terminal error ends it.
 There is no ingress attempt limit, and `reconnect_max_duration_millis` bounds only a
@@ -316,8 +322,6 @@ const sender = await Sender.fromConfig(
         connectTimeoutMs: 5_000,
         authTimeoutMs: 15_000,
         failoverUrls: ["wss://questdb-dr.example:9000/write/v4"],
-        target: "any",
-        zone: "eu-west-1a",
         senderId: "producer-a",
         storeAndForward: {
           // The slot root. The journal is `<directory>/<senderId>`, `default` when
@@ -1075,10 +1079,10 @@ or keep using `maxBatchSizeBytes` as a local compatibility limit.
 
 The preferred URL and `failoverUrls` form one endpoint set. Endpoints are ranked by
 observed health (`healthy`, unknown, transient rejection, transport error, topology
-rejection) and then by zone affinity; configuration order breaks ties. Health outranks
-zone, so a known healthy cross-zone node is preferred to an untried local node. Every
-connection sweep can still try every endpoint, allowing role and health changes to
-recover. A non-orderly close demotes the selected endpoint before the next sweep.
+rejection), then, for egress with a `zone`, by zone affinity; configuration order
+breaks ties. Health outranks zone, so a known healthy cross-zone node is preferred
+to an untried local node. Every connection sweep can still try every endpoint,
+allowing role and health changes to recover. A non-orderly close demotes the selected endpoint before the next sweep.
 Each standalone Node sender/drainer family, and each pooled orphan scanner, shares one
 live health ledger among its walkers while keeping independent sweep cursors, so
 concurrent drainers cannot consume one another's endpoint attempts. After a foreground
@@ -1143,10 +1147,11 @@ the affected rows for explicit `retryQwpNodeOrphanSlot()` recovery rather than
 silently discarding them.
 
 Node.js sees the rejected upgrade status and `X-QuestDB-Role`, so a read-only replica
-or catching-up primary can be classified and skipped. Browsers deliberately expose
-an opaque upgrade error because their WebSocket API hides the HTTP response. Avoid
-placing ingress replica endpoints in a browser endpoint list unless the proxy routes
-writers to a primary.
+or catching-up primary can be classified and skipped. That is how ingress finds the
+primary, the only node that accepts writes, so it takes no `target` or `zone`.
+Browsers deliberately expose an opaque upgrade error because their WebSocket API
+hides the HTTP response. Avoid placing ingress replica endpoints in a browser
+endpoint list unless the proxy routes writers to a primary.
 
 On Node.js a `401` or `403` on the upgrade is classified as an authentication
 failure, and it is the one endpoint verdict that is terminal for the entire endpoint
@@ -1354,11 +1359,10 @@ credit window bounds server read-ahead while application work is in progress.
 
 `target` accepts `any` (the default), `primary`, or `replica`. Primary routing also
 accepts standalone servers and a primary completing catch-up, matching the Java
-client. Both keys apply to ingress and egress on Node.js. In browsers they apply
-to egress only: ingress cannot learn a server's role or zone there, because the
-WebSocket API hides the upgrade response that carries them. `zone` is an opaque,
-case-insensitive preference for `any` and `replica`;
-cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
+client. Both keys route egress only, in Node.js and browsers alike: writes always go
+to the primary, which ingress reaches through the replicas' 421 upgrade rejections
+whatever the keys say. `zone` is an opaque, case-insensitive preference for `any`
+and `replica`; cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
 followed across zones. The client validates the authoritative role and zone from the
 first QWP `SERVER_INFO` frame before accepting an endpoint, so the same guarantees
 work in browsers even though browser WebSocket APIs hide upgrade response headers.
@@ -1710,9 +1714,10 @@ const db = await connectQwpBrowserClient({
 The endpoints and authentication belong to `cluster` -- `url`, `failoverUrls`,
 and `authorization` in Node.js, `sessionBootstrap` in a browser -- and are rejected
 if repeated under `ingress` or `egress`, as is any section these options do not
-have. Any other connection setting, such as a timeout or a WebSocket factory, may
-be given to one side to override the cluster's for that side. An application that
-must connect the two sides differently can pass its own `createSender` and
+have. `target` and `zone` belong to `egress` and are rejected under `cluster` or
+`ingress`, because only the primary accepts writes. Any other connection setting,
+such as a timeout or a WebSocket factory, may be given to one side to override the
+cluster's for that side. An application that must connect the two sides differently can pass its own `createSender` and
 `createQuerySession` factories to the `QwpClient` constructor, or use the
 standalone sender and egress functions directly.
 
