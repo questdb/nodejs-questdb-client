@@ -24,7 +24,7 @@ pnpm vitest run benchmarks/*.test.ts
 
 Set `QWP_BENCH_DURABLE_ACK=1` for an additional live durable-ACK arm. The
 server must advertise durable acknowledgements. The default E2E run measures
-local WebSocket publication, protocol ACK, and local store-and-forward append
+local in-memory publication, protocol ACK, and local store-and-forward append
 as separate completion contracts.
 
 ## Workloads
@@ -75,8 +75,9 @@ performance. The directory and the baseline must live on the same filesystem.
 The live benchmark flushes every measured row so each sample contains a real
 completion boundary. Its arms are deliberately not interchangeable:
 
-- local publication means `flush()` returned once the WebSocket accepted the
-  frame;
+- local publication means `flush()` returned once the frame entered the
+  in-memory replay queue, which a background drainer then hands to the
+  WebSocket;
 - protocol ACK means `flushAndWait()` returned once QuestDB accepted the frame;
 - local SF append means `flush()` returned once the frame crossed the configured
   local persistence boundary;

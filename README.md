@@ -243,8 +243,11 @@ to also wait until QuestDB has acknowledged everything the sender published; it
 resolves `false` when the acknowledgements make no progress for its timeout, and
 the rows then stay queued for delivery. With `requestDurableAck: true` that wait
 lasts through durable upload. When Node QWP is configured with
-`qwp.webSocket.storeAndForward`, the publication boundary is the local durable
-journal; only that mode survives a process restart.
+`qwp.webSocket.storeAndForward`, the publication boundary is the local
+store-and-forward journal; only that mode survives a process restart. Its
+default `memory` durability relies on the OS page cache, which makes no
+power-loss promise; set `durability: "append"` (`sf_durability=append`) to make
+each append durable.
 Set `initialConnectMode` to `"off"` (the default), `"sync"`, or `"async"` to
 choose fail-fast, bounded blocking, or background startup, with or without a
 journal. It is an ingress option (`qwp.webSocket` for `Sender.fromConfig()`),

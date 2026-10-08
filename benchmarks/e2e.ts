@@ -126,7 +126,7 @@ it("measures QWP ingress completion boundaries", async () => {
 
   const arms: ArmOptions[] = [
     {
-      label: "flush() = local WebSocket publication",
+      label: "flush() = local in-memory publication",
       table: "bench_e2e_publication",
       configuration: () => `ws::addr=${ADDRESS};auto_flush=off`,
       extraOptions: {

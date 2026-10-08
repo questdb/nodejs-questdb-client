@@ -235,10 +235,9 @@ session that consumes it.
 ### Pool
 
 Applied by the pooled facade. A standalone sender or query client ignores
-them, with one exception noted in the table; `Sender.fromConfig()` logs a
-warning naming the ones it was given. `lazy_connect` is a pool key in every
-QuestDB client: the Java facade and the Rust and Python pools apply it, and
-their standalone senders ignore it too.
+them; `Sender.fromConfig()` logs a warning naming the ones it was given.
+`lazy_connect` is a pool key in every QuestDB client: the Java facade and the
+Rust and Python pools apply it, and their standalone senders ignore it too.
 
 | Key                       | Value                        | Default   | Meaning                                                                                                                        |
 | ------------------------- | ---------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -1876,7 +1875,10 @@ Review these behavioral differences before rollout:
 - QWP `flush()` uses the Java-compatible local-publication boundary in browsers and
   Node.js. Call `flushAndWait()` for a protocol ACK barrier; with `requestDurableAck`
   it waits through durable upload. With Node persistent store-and-forward, local
-  publication means durable journal append.
+  publication means journal append. The default `memory` durability relies on the
+  OS page cache, which normally survives a process crash but makes no power-loss
+  promise; `durability: "append"` (`sf_durability=append`) makes each append
+  durable.
 - QWP symbol dictionaries are connection-scoped and automatic.
 - Table and column identifiers are rejected locally using the Java client's rules;
   column identity is case-insensitive and preserves the spelling first declared.
