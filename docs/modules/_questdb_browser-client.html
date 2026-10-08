@@ -44,8 +44,8 @@ origin, and TLS rules to the WebSocket connection.</p>
 <p>Use <code>wss:</code> whenever the page is served over HTTPS. Browsers block insecure
 WebSockets from secure pages.</p>
 <h2 id="batch-and-commit-rows" class="tsd-anchor-link">Batch and commit rows<a href="#batch-and-commit-rows" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h2><p>Transactional mode keeps automatically emitted frames in one open server-side
-transaction. <code>commit()</code> publishes the final frame. <code>flushAndWait()</code> publishes it
-too and then waits for the server's acknowledgement, which with
+transaction. An explicit <code>flush()</code> publishes the final frame. <code>flushAndWait()</code>
+publishes it too and then waits for the server's acknowledgement, which with
 <code>requestDurableAck: true</code> means durable upload. It resolves <code>false</code> when the
 acknowledgements make no progress for its timeout (<code>ackTimeoutMs</code>); the frames
 then stay queued for delivery. Transactions are atomic per table, not across

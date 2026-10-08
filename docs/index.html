@@ -180,12 +180,12 @@ for a fixed connection. Only Node store-and-forward survives process failure.</p
 
 <p>For batches larger than the automatic flush threshold, transactional mode
 keeps each auto-flushed frame in an open server-side transaction. An explicit
-<code>flush()</code> (or its <code>commit()</code> alias) publishes the group-closing frame. Call
+<code>flush()</code> publishes the group-closing frame. Call
 <code>flushAndWait()</code> instead, or wait on the sequence returned by
 <code>flushAndGetSequence()</code>, when the call must also observe the cumulative ACK.
 QuestDB guarantees this atomicity per table; a flush that contains multiple
 tables is not one cross-table transaction.</p>
-<pre><code class="typescript"><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">sender</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-1">connectQwpBrowserSender</span><span class="hl-2">({</span><br/><span class="hl-2">  </span><span class="hl-6">url</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">autoFlushRows:</span><span class="hl-2"> </span><span class="hl-8">10_000</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">autoFlushBytes:</span><span class="hl-2"> </span><span class="hl-8">4</span><span class="hl-2"> * </span><span class="hl-8">1024</span><span class="hl-2"> * </span><span class="hl-8">1024</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">transactional:</span><span class="hl-2"> </span><span class="hl-4">true</span><span class="hl-2">,</span><br/><span class="hl-2">});</span><br/><br/><span class="hl-5">for</span><span class="hl-2"> (</span><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">event</span><span class="hl-2"> </span><span class="hl-4">of</span><span class="hl-2"> </span><span class="hl-6">events</span><span class="hl-2">) {</span><br/><span class="hl-2">  </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><br/><span class="hl-2">    .</span><span class="hl-1">table</span><span class="hl-2">(</span><span class="hl-3">&quot;events&quot;</span><span class="hl-2">)</span><br/><span class="hl-2">    .</span><span class="hl-1">symbol</span><span class="hl-2">(</span><span class="hl-3">&quot;source&quot;</span><span class="hl-2">, </span><span class="hl-6">event</span><span class="hl-2">.</span><span class="hl-6">source</span><span class="hl-2">)</span><br/><span class="hl-2">    .</span><span class="hl-1">longColumn</span><span class="hl-2">(</span><span class="hl-3">&quot;value&quot;</span><span class="hl-2">, </span><span class="hl-6">event</span><span class="hl-2">.</span><span class="hl-6">value</span><span class="hl-2">)</span><br/><span class="hl-2">    .</span><span class="hl-1">at</span><span class="hl-2">(</span><span class="hl-6">event</span><span class="hl-2">.</span><span class="hl-6">timestamp</span><span class="hl-2">, </span><span class="hl-3">&quot;ms&quot;</span><span class="hl-2">);</span><br/><span class="hl-2">}</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">commit</span><span class="hl-2">();</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">close</span><span class="hl-2">();</span>
+<pre><code class="typescript"><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">sender</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-1">connectQwpBrowserSender</span><span class="hl-2">({</span><br/><span class="hl-2">  </span><span class="hl-6">url</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">autoFlushRows:</span><span class="hl-2"> </span><span class="hl-8">10_000</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">autoFlushBytes:</span><span class="hl-2"> </span><span class="hl-8">4</span><span class="hl-2"> * </span><span class="hl-8">1024</span><span class="hl-2"> * </span><span class="hl-8">1024</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">transactional:</span><span class="hl-2"> </span><span class="hl-4">true</span><span class="hl-2">,</span><br/><span class="hl-2">});</span><br/><br/><span class="hl-5">for</span><span class="hl-2"> (</span><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">event</span><span class="hl-2"> </span><span class="hl-4">of</span><span class="hl-2"> </span><span class="hl-6">events</span><span class="hl-2">) {</span><br/><span class="hl-2">  </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><br/><span class="hl-2">    .</span><span class="hl-1">table</span><span class="hl-2">(</span><span class="hl-3">&quot;events&quot;</span><span class="hl-2">)</span><br/><span class="hl-2">    .</span><span class="hl-1">symbol</span><span class="hl-2">(</span><span class="hl-3">&quot;source&quot;</span><span class="hl-2">, </span><span class="hl-6">event</span><span class="hl-2">.</span><span class="hl-6">source</span><span class="hl-2">)</span><br/><span class="hl-2">    .</span><span class="hl-1">longColumn</span><span class="hl-2">(</span><span class="hl-3">&quot;value&quot;</span><span class="hl-2">, </span><span class="hl-6">event</span><span class="hl-2">.</span><span class="hl-6">value</span><span class="hl-2">)</span><br/><span class="hl-2">    .</span><span class="hl-1">at</span><span class="hl-2">(</span><span class="hl-6">event</span><span class="hl-2">.</span><span class="hl-6">timestamp</span><span class="hl-2">, </span><span class="hl-3">&quot;ms&quot;</span><span class="hl-2">);</span><br/><span class="hl-2">}</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">flush</span><span class="hl-2">();</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">close</span><span class="hl-2">();</span>
 </code><button type="button">Copy</button></pre>
 
 <p>QWP <code>close()</code> publishes completed rows and waits up to 5 seconds for their
@@ -196,10 +196,10 @@ rather than silently dropping them if that deadline expires.
 An unfinished row is not completed implicitly.</p>
 <p>The server intentionally withholds ACKs for deferred frames until commit. The
 sender pipelines transactional auto-flushes without waiting for those ACKs,
-then publishes the group-closing frame at <code>flush()</code>/<code>commit()</code>.
+then publishes the group-closing frame at <code>flush()</code>.
 <code>flushAndWait()</code> publishes the same frame and then waits for all covered ACKs;
 durable waiting starts only after the transaction commits. Closing
-without an explicit commit abandons the open transaction and logs a warning;
+without an explicit <code>flush()</code> abandons the open transaction and logs a warning;
 QuestDB rolls it back when the WebSocket disconnects.</p>
 <p>Ingress sessions expose browser-safe progress/error callbacks and immutable
 metrics snapshots. Reconnect events remain on <code>reconnect.onEvent</code>, keeping
@@ -293,14 +293,19 @@ credit is replenished, while the receive loop decodes ahead through the bounded
 reusable buffer pool. Views are invalid when their callback returns; copy a byte
 view with <code>.slice()</code> or call <code>batch.materialize()</code> inside the callback to retain
 data. Tune the default four-slot pool with the session's <code>bufferPoolSize</code>.</p>
-<p><code>queryTimeoutMs</code> sets the session's default query deadline; a per-query
-<code>timeoutMs</code> overrides it, and zero disables the deadline. When a deadline
-expires, the client rejects iteration and <code>query.completion</code> with
-<code>QwpEgressQueryTimeoutError</code>, sends QWP <code>CANCEL</code>, and waits for the terminal
-server response before accepting another query on that connection. Breaking out
-of <code>for await</code> early cancels the query too. <code>cancelDrainTimeoutMs</code> bounds that
-wait (5 seconds by default); an unresponsive cancellation closes the connection
-with <code>QwpEgressQueryCancelTimeoutError</code> instead of wedging the session.
+<p><code>queryTimeoutMs</code> (connect-string key <code>query_timeout_ms</code>) sets the session's
+default query timeout; a per-query <code>timeoutMs</code> overrides it, and zero disables
+it. The timeout runs from the <code>query()</code> call and covers the whole query. When it
+expires, no further batch is delivered and the client sends QWP <code>CANCEL</code>; the
+outcome then follows the server's terminal response. A statement that completed
+anyway, or a result that ended with nothing withheld, succeeds; otherwise
+iteration and <code>query.completion</code> reject with <code>QwpEgressQueryTimeoutError</code>. If the
+server does not end the query within <code>cancelDrainTimeoutMs</code> (5 seconds by
+default), the caller gets <code>QwpEgressQueryTimeoutError</code> anyway while the
+connection keeps draining the query for up to one more period; an unresponsive
+server then closes the connection with <code>QwpEgressQueryCancelTimeoutError</code>
+instead of wedging the session. A new query waits for that drain rather than
+failing. Breaking out of <code>for await</code> early cancels the query too.
 To bound only the caller's wait without cancelling, use
 <code>await query.awaitCompletion(timeoutMs)</code>. It returns <code>false</code> on timeout and leaves
 the query active, matching Java <code>Completion.await(timeout, unit)</code>. The SERVER_INFO

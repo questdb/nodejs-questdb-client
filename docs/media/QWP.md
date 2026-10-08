@@ -226,6 +226,7 @@ session that consumes it.
 | ------------------- | --------------------- | ------- | -------------------------------------------------- |
 | `max_batch_rows`    | integer, 1..1048576   | —       | Rows the server puts in one result batch.          |
 | `initial_credit`    | integer ≥ 0           | `0`     | Starting flow-control credit for a query.          |
+| `query_timeout_ms`  | integer ms            | `0`     | Default timeout of every query; `0` disables it.   |
 | `buffer_pool_size`  | integer ≥ 1           | `4`     | Reusable result buffers held per session.          |
 | `compression`       | `raw`, `zstd`, `auto` | `raw`   | Result compression to negotiate.                   |
 | `compression_level` | integer, 1..22        | —       | zstd level; requires `compression=zstd` or `auto`. |
@@ -246,7 +247,7 @@ their standalone senders ignore it too.
 | `query_pool_min`          | integer                      | `1`       | Query sessions kept warm.                                                                                                      |
 | `query_pool_max`          | integer                      | `4`       | Query-session ceiling.                                                                                                         |
 | `acquire_timeout_ms`      | integer ms                   | `5000`    | How long `borrowSender()` and `borrowQuery()` wait for a free entry.                                                           |
-| `query_close_timeout_ms`  | integer ms                   | `5000`    | Bound on the CANCEL drain when a query session closes; `cancelDrainTimeoutMs` on the egress options.                           |
+| `query_close_timeout_ms`  | integer ms                   | `5000`    | Bound on the CANCEL drain, and the grace period of a query timeout; `cancelDrainTimeoutMs` on the egress options.              |
 | `idle_timeout_ms`         | integer ms                   | `60000`   | Idle time before a pooled entry is reaped.                                                                                     |
 | `max_lifetime_ms`         | integer ms                   | `1800000` | Absolute lifetime of a pooled entry.                                                                                           |
 | `housekeeper_interval_ms` | integer ms                   | `5000`    | How often the pool reaps aged entries.                                                                                         |
@@ -831,9 +832,9 @@ Compiled writers are also available through the regular Node `Sender` when it us
 QWP transport. Calling `writer()` for an HTTP or TCP ILP sender raises an error. A
 writer obtained from a pooled sender lease cannot be used after the lease is closed.
 
-Like the Java QWP sender, `flush()` and `commit()` resolve after the complete
-logical flush reaches the local ingress/replay publication boundary. They do
-not wait for a server ACK. `flushAndWait()` flushes the same way and then waits
+Like the Java QWP sender, `flush()` resolves after the complete logical flush
+reaches the local ingress/replay publication boundary. It does not wait for a
+server ACK. `flushAndWait()` flushes the same way and then waits
 until the server has acknowledged every frame the sender has published,
 including frames published earlier by auto-flush. It is the counterpart of the
 Java client's `drain()`:
@@ -1024,9 +1025,9 @@ const sender = await connectQwpBrowserSender({
 ### Transactions and durable acknowledgement
 
 Transactional auto-flush keeps automatically emitted frames in an open server-side
-transaction. `commit()` (an alias for `flush()`) publishes the group-closing frame.
-`flushAndWait()` commits the same way and then waits for the acknowledgement. The
-example requests durable ACK, so that wait lasts until QuestDB reports the
+transaction. An explicit `flush()` publishes the group-closing frame, as in the Java
+client. `flushAndWait()` commits the same way and then waits for the acknowledgement.
+The example requests durable ACK, so that wait lasts until QuestDB reports the
 transaction durable:
 
 ```typescript
@@ -1389,18 +1390,38 @@ queue of decoded batches. Protocol credit remains the stronger end-to-end bound,
 particularly in browsers where the WebSocket implementation may buffer raw frames
 before JavaScript reads them.
 
-A session `queryTimeoutMs` supplies the default deadline; per-query `timeoutMs`
-overrides it, and zero disables it. Expiry rejects iteration and `completion` with
-`QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and drains the terminal response
-before the connection accepts another query. Breaking out of `for await` early also
-discards buffered batches, restores their flow-control credit, sends `CANCEL`, and
-rejects `completion` with `QwpEgressQueryAbandonedError`. Call `query.cancel()` for
-explicit cancellation.
+A session `queryTimeoutMs` (the `query_timeout_ms` key) supplies the default query
+timeout; per-query `timeoutMs` overrides it, and zero disables it. The timeout bounds
+the whole query, measured from the `query()` call: waiting for a previous query to
+drain, a reconnect, server execution, and the time spent consuming results, which it
+does not interrupt. When it expires, no further batch is delivered and the client
+sends QWP `CANCEL`, but the outcome waits for the server's terminal response. A
+statement that completed (`EXEC_DONE`) succeeds: it has taken effect, and reporting it
+as timed out would invite a retry that applies it twice. So does a result whose stream
+ended with nothing withheld from the consumer. Otherwise iteration and `completion`
+reject with `QwpEgressQueryTimeoutError`. A cancellation the application requested
+before the timeout is still reported as a cancellation.
+
+The grace period is `cancelDrainTimeoutMs` (the `query_close_timeout_ms` key, 5
+seconds by default). If the server has not ended the query within it, the caller is
+released with `QwpEgressQueryTimeoutError` and the connection drains the query for up
+to one more period; a server still silent then fails the session with
+`QwpEgressQueryCancelTimeoutError`. A query issued meanwhile waits for the drain
+instead of failing, and the wait counts against its own timeout. If the connection is
+lost after the timeout has expired, the timeout is reported at once and the query is
+not replayed; a request whose timeout expires while a reconnect holds it is never
+sent. The timeout is enforced by the client, and QuestDB acts on `CANCEL` between
+result batches, so a query still computing its first batch runs until it produces one.
+
+Breaking out of `for await` early also discards buffered batches, restores their
+flow-control credit, sends `CANCEL`, and rejects `completion` with
+`QwpEgressQueryAbandonedError`; the next query waits for that drain too. Call
+`query.cancel()` for explicit cancellation. A query sends at most one `CANCEL`.
 
 `await query.awaitCompletion(timeoutMs)` bounds only the caller's wait and returns
 `false` without cancelling when the timeout expires, matching Java
 `Completion.await(timeout, unit)`. `query.isDone()` reports terminal state. Use the
-query deadline options only when timeout should actively cancel the server query.
+query timeout options only when the timeout should actively cancel the server query.
 The initial and reconnect `SERVER_INFO` timeout defaults to five seconds, matching
 Java, and remains configurable through `serverInfoTimeoutMs`.
 
@@ -1408,7 +1429,9 @@ Cancellation draining is bounded by `cancelDrainTimeoutMs` (5 seconds by default
 Late batches are decoded and credited while the terminal response is pending. If the
 server does not terminate the query within the bound, the client fails with
 `QwpEgressQueryCancelTimeoutError` and closes the unusable connection instead of
-leaving the session permanently occupied.
+leaving the session permanently occupied. A reconnect does not count against the
+bound: without a connection there is nothing to drain, and a query whose consumer has
+retired is dropped rather than replayed.
 
 Node.js and browsers can request Zstd with `compression: "zstd"` or `"auto"` and a
 level from 1 through 22. Raw remains the compatibility default. Node uses
@@ -1815,7 +1838,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpEgressQueryError`                   | QuestDB returned a terminal query error                                                                     |
 | `QwpEgressSessionClosedError`           | The egress session or its connection is closed                                                              |
 | `QwpEgressQueryAbandonedError`          | Result iteration ended before the server completed the query                                                |
-| `QwpEgressQueryTimeoutError`            | The client deadline expired and cancellation began                                                          |
+| `QwpEgressQueryTimeoutError`            | The query ran past its timeout and was cancelled                                                            |
 | `QwpEgressQueryCancelTimeoutError`      | A cancelled query did not produce a terminal server response before the drain deadline                      |
 | `QwpEgressReplayRequiredError`          | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
@@ -1855,7 +1878,8 @@ Review these behavioral differences before rollout:
 - Table and column identifiers are rejected locally using the Java client's rules;
   column identity is case-insensitive and preserves the spelling first declared.
 - Large batches are split to the negotiated WebSocket payload cap.
-- QWP transactional auto-flush is per table and must be explicitly committed.
+- QWP transactional auto-flush is per table and must be committed with an explicit
+  `flush()`.
 - Browser and Node QWP ingress reconnect by default with in-memory, at-least-once
   replay. That queue has a 128 MiB cap and a bounded 30-second capacity wait by
   default. Configure Node store-and-forward when replay must survive process failure.
@@ -1930,7 +1954,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | ---------------------------- | ------------------------------------------------------------- |
 | Sender/builder configuration | `Sender.fromConfig()` in Node.js, or `connectQwp*Sender()`    |
 | Fluent table row             | `table()`, typed column methods, `at()` / `atNow()`           |
-| Local publish/commit         | `flush()` / `commit()`                                        |
+| Local publish/commit         | `flush()`                                                     |
 | Drain (flush and wait)       | `flushAndWait()`                                              |
 | Explicit ACK barrier         | `flushAndGetSequence()` plus `waitForAcknowledged()`          |
 | Durable delivery             | `requestDurableAck` plus `flushAndWait()`                     |
