@@ -226,6 +226,7 @@ session that consumes it.
 | ------------------- | --------------------- | ------- | -------------------------------------------------- |
 | `max_batch_rows`    | integer, 1..1048576   | —       | Rows the server puts in one result batch.          |
 | `initial_credit`    | integer ≥ 0           | `0`     | Starting flow-control credit for a query.          |
+| `query_timeout_ms`  | integer ms            | `0`     | Default timeout of every query; `0` disables it.   |
 | `buffer_pool_size`  | integer ≥ 1           | `4`     | Reusable result buffers held per session.          |
 | `compression`       | `raw`, `zstd`, `auto` | `raw`   | Result compression to negotiate.                   |
 | `compression_level` | integer, 1..22        | —       | zstd level; requires `compression=zstd` or `auto`. |

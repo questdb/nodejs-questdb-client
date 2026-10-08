@@ -86,7 +86,8 @@ describe("QWP unified Node client configuration", () => {
         "target=replica;zone=eu-west-1a;compression=zstd;compression_level=3;" +
         "max_batch_rows=512;initial_credit=8192;buffer_pool_size=2;" +
         "sender_pool_min=0;sender_pool_max=2;query_pool_min=1;query_pool_max=8;" +
-        "acquire_timeout_ms=2500;query_close_timeout_ms=7000;",
+        "acquire_timeout_ms=2500;query_close_timeout_ms=7000;" +
+        "query_timeout_ms=30000;",
     );
 
     expect(String(options.cluster.url)).toBe("wss://db-a.example:9443/");
@@ -129,6 +130,7 @@ describe("QWP unified Node client configuration", () => {
       initialCredit: 8192,
       bufferPoolSize: 2,
       cancelDrainTimeoutMs: 7000,
+      queryTimeoutMs: 30000,
     });
     expect(options.egress?.reconnect).toBeUndefined();
     expect(options.pool).toMatchObject({
@@ -826,6 +828,30 @@ describe("QWP unified Node client configuration", () => {
     ).not.toThrow();
   });
 
+  it("parses the default query timeout, where zero means none", () => {
+    // The key Java's QuestDB facade reads. Rejected as unknown, a connect
+    // string written for it failed here before any query ran.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=0;").egress
+        ?.queryTimeoutMs,
+    ).toBe(0);
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;").egress?.queryTimeoutMs,
+    ).toBeUndefined();
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=-1;"),
+    ).toThrow(/query_timeout_ms must be an integer between 0 and/);
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=1.5;"),
+    ).toThrow(/Invalid query_timeout_ms/);
+    // The typed override wins over the key.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=100;", {
+        egress: { queryTimeoutMs: 200 },
+      }).egress?.queryTimeoutMs,
+    ).toBe(200);
+  });
+
   it("rejects a compression level that cannot reach the wire", () => {
     // compression defaults to raw, which sends no accept-encoding header, so a
     // level on its own parsed, validated its range, and then provably did
@@ -1299,6 +1325,7 @@ describe("QWP unified Node client configuration", () => {
       "failover_backoff_initial_ms",
       "failover_backoff_max_ms",
       "query_close_timeout_ms",
+      "query_timeout_ms",
       "acquire_timeout_ms",
       "idle_timeout_ms",
       "max_lifetime_ms",

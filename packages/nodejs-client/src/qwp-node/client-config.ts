@@ -124,6 +124,7 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "failover_max_duration_ms",
   "max_batch_rows",
   "initial_credit",
+  "query_timeout_ms",
   "buffer_pool_size",
   "compression",
   "compression_level",
@@ -203,6 +204,7 @@ const QWP_CLIENT_ONLY_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "query_close_timeout_ms",
   "query_pool_max",
   "query_pool_min",
+  "query_timeout_ms",
   "sender_pool_max",
   "sender_pool_min",
 ]);
@@ -417,6 +419,12 @@ export function resolveQwpNodeClientConfig(
     cancelDrainTimeoutMs: optionalPositiveInteger(
       value("query_close_timeout_ms"),
       "query_close_timeout_ms",
+    ),
+    // Zero disables the timeout, as in the Java client.
+    queryTimeoutMs: optionalInteger(
+      value("query_timeout_ms"),
+      "query_timeout_ms",
+      0,
     ),
   };
 
