@@ -458,7 +458,8 @@ Browser durable ACKs are an in-memory delivery confirmation only. Persistent
 store-and-forward remains available exclusively through the Node.js entry
 point. In-memory ingress replay targets a 128 MiB cap and waits at most 30 seconds
 for ACK-driven trimming by default. A commit-bearing logical batch may temporarily
-raise usage to at most twice that target so a retained deferred prefix cannot deadlock;
+raise usage to at most twice that target so a retained deferred prefix cannot deadlock,
+and a durable-ACK poll is admitted above it for the same reason;
 tune `memoryReplayMaxBytes` and
 `memoryReplayAppendDeadlineMs` in the sender options when needed.
 

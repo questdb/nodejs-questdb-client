@@ -226,7 +226,9 @@ export interface QwpIngressSessionOptions {
    * per-frame bookkeeping. Defaults to 128 MiB. A transaction-closing logical
    * batch may temporarily exceed this target by up to one target-sized batch,
    * because the server cannot ACK its deferred prefix before receiving that
-   * batch. This applies in browsers and non-persistent Node sessions; a Node
+   * batch. A browser durable-ACK poll is admitted above it too, since only
+   * the durable progress it asks for can trim frames awaiting durability.
+   * This applies in browsers and non-persistent Node sessions; a Node
    * store-and-forward journal is bounded by its own `maxBytes` instead.
    */
   memoryReplayMaxBytes?: number;
@@ -1249,8 +1251,20 @@ export class QwpIngressSession {
    * progress while deferring its cumulative OK behind an open transaction, so
    * callers only wait for local publication. A rejection of the poll frame is
    * handled like a rejection of any other frame.
+   *
+   * A poll reaches the server only after the frames queued ahead of it, so
+   * none is published while some still wait for the socket. During an outage
+   * every poll would wait, each one a replay-queue entry that the reconnect
+   * then sends as a stale burst; the poll or frame already queued reaches the
+   * server first anyway, and the next keepalive tick tries again.
    */
   private publishBrowserDurableAckPoll(): Promise<void> {
+    if (
+      this.connection instanceof QwpReconnectingIngressConnection &&
+      this.connection.hasUnsentFrames
+    ) {
+      return Promise.resolve();
+    }
     return this.publishFrame(encodeQwpDurableAckPollFrame());
   }
 

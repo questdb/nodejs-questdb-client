@@ -342,7 +342,13 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     const requiredBytes =
       record.payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
     const deferCommit = defersCommit(record.payload);
-    if (requiredBytes > this.maxBytes) {
+    // A durable-ACK poll is a fixed-size control frame, and the durable
+    // progress it asks for is what trims a queue full of frames awaiting
+    // durability. Making it wait for that trimming could never succeed, so it
+    // is admitted above the target like a transaction-closing frame. The
+    // session keeps at most one poll that has not reached the socket.
+    const durableAckPoll = isDurableAckPoll(record.payload);
+    if (requiredBytes > this.maxBytes && !durableAckPoll) {
       throw new QwpMemoryReplayFrameTooLargeError(
         this.maxBytes,
         record.payload.byteLength,
@@ -352,13 +358,14 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     const preparedCloseFrame = this.matchesPreparedTransactionClose(
       record.payload,
     );
-    const changesTransaction = !isDurableAckPoll(record.payload);
+    const changesTransaction = !durableAckPoll;
     const closesOpenTransaction =
       this.transactionOpen && changesTransaction && !deferCommit;
     if (
       this.usedBytes + requiredBytes > this.maxBytes &&
       !preparedCloseFrame &&
-      !closesOpenTransaction
+      !closesOpenTransaction &&
+      !durableAckPoll
     ) {
       this.totalBackpressureStalls++;
       // Elapsed time, so a clock step cannot expire an append that has been
@@ -1152,6 +1159,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.drainTail = draining.catch((error: unknown) => {
       if (!this.closing) this.failTerminal(error);
     });
+  }
+
+  /**
+   * @internal Whether a frame published to the replay queue is still waiting
+   * for its background drain to hand it to the socket: during an outage, or
+   * while a backlog drains.
+   */
+  get hasUnsentFrames(): boolean {
+    return this.unsentFrames > 0;
   }
 
   /**

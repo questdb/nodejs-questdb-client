@@ -1096,7 +1096,10 @@ batch that can never fit is rejected before its first frame with
 `QwpMemoryReplayBatchTooLargeError`. Set
 `memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on the ingress options to
 tune these bounds. The accounting includes a fixed per-frame allowance so many
-small frames cannot bypass the byte cap.
+small frames cannot bypass the byte cap. A browser durable-ACK poll is admitted
+above the cap, because only the durable progress it asks for can trim frames that
+await durability; while frames still wait for the socket, as during an outage, no
+further poll is queued behind them.
 
 In-memory publication completes once the frame enters the bounded replay queue;
 a serialized background drainer transmits it and replays unacknowledged frames

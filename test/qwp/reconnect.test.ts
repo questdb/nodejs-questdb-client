@@ -1440,6 +1440,86 @@ describe("QWP ingress reconnect and replay", () => {
     }
   });
 
+  it("keeps durable-ACK polls from making a full replay queue fatal during an outage", async () => {
+    // FakeConnection has no ping(), so durable progress is polled with
+    // table-less frames that pass through the replay queue, as in browsers.
+    // The three acknowledged frames await durable upload and fill the queue,
+    // so a poll that had to wait for trimming would wait for the very
+    // progress only a poll can report, and its failure ended the session.
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    const durable = { qwpVersion: 1, durableAckEnabled: true };
+    const replacement = new FakeConnection("secondary", durable);
+    try {
+      const first = new FakeConnection("primary", durable);
+      let calls = 0;
+      const terminalErrors: Error[] = [];
+      session = await QwpIngressSession.connect(
+        async () => (calls++ === 0 ? first : reconnecting),
+        {
+          durableAckKeepaliveMs: 100,
+          memoryReplayMaxBytes: 195,
+          memoryReplayAppendDeadlineMs: 50,
+          onError: (event) => {
+            if (event.terminal) terminalErrors.push(event.error);
+          },
+        },
+      );
+      const poll = encodeQwpDurableAckPollFrame();
+      for (const value of [1, 2, 3]) {
+        await session.publishFrame(Uint8Array.of(value));
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.sent).toHaveLength(3);
+      first.receive(ingressResponse(QWP_STATUS.OK, 2n, [["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.metrics.pendingDurableTables).toBe(1);
+      first.drop();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The first poll of the outage enters the full queue.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(session.metrics.pendingReplayFrames).toBe(4);
+      expect(first.sent).toHaveLength(3);
+      // Ordinary frames still meet backpressure, which is not terminal.
+      const blocked = expect(
+        session.publishFrame(Uint8Array.of(4)),
+      ).rejects.toBeInstanceOf(QwpMemoryReplayAppendTimeoutError);
+      await vi.advanceTimersByTimeAsync(50);
+      await blocked;
+      // Later ticks find that poll still waiting for the socket and queue
+      // nothing behind it.
+      await vi.advanceTimersByTimeAsync(350);
+      expect(session.metrics.pendingReplayFrames).toBe(4);
+      expect(terminalErrors).toEqual([]);
+
+      releaseReconnect(replacement);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(replacement.sent).toEqual([
+        Uint8Array.of(1),
+        Uint8Array.of(2),
+        Uint8Array.of(3),
+        poll,
+      ]);
+      replacement.receive(ingressResponse(QWP_STATUS.OK, 3n, [["events", 1n]]));
+      replacement.receive(durableResponse([["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.acknowledgedFrameSequence).toBe(3n);
+      await expect(
+        session.publishFrame(Uint8Array.of(5)),
+      ).resolves.toBeUndefined();
+      expect(terminalErrors).toEqual([]);
+    } finally {
+      releaseReconnect(replacement);
+      vi.useRealTimers();
+      await session?.close();
+    }
+  });
+
   it("admits a transaction commit when its deferred prefix fills memory replay", async () => {
     // QuestDB intentionally sends no ACK for the auto-flushed deferred frame.
     // With a strict per-append cap, the tiny group-closing frame then waited
