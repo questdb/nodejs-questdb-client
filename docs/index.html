@@ -142,8 +142,11 @@ to also wait until QuestDB has acknowledged everything the sender published; it
 resolves <code>false</code> when the acknowledgements make no progress for its timeout, and
 the rows then stay queued for delivery. With <code>requestDurableAck: true</code> that wait
 lasts through durable upload. When Node QWP is configured with
-<code>qwp.webSocket.storeAndForward</code>, the publication boundary is the local durable
-journal; only that mode survives a process restart.
+<code>qwp.webSocket.storeAndForward</code>, the publication boundary is the local
+store-and-forward journal; only that mode survives a process restart. Its
+default <code>memory</code> durability relies on the OS page cache, which makes no
+power-loss promise; set <code>durability: &quot;append&quot;</code> (<code>sf_durability=append</code>) to make
+each append durable.
 Set <code>initialConnectMode</code> to <code>&quot;off&quot;</code> (the default), <code>&quot;sync&quot;</code>, or <code>&quot;async&quot;</code> to
 choose fail-fast, bounded blocking, or background startup, with or without a
 journal. It is an ingress option (<code>qwp.webSocket</code> for <code>Sender.fromConfig()</code>),
@@ -258,7 +261,8 @@ negotiated, <code>flushAndWait()</code> waits for durable upload:</p>
 store-and-forward remains available exclusively through the Node.js entry
 point. In-memory ingress replay targets a 128 MiB cap and waits at most 30 seconds
 for ACK-driven trimming by default. A commit-bearing logical batch may temporarily
-raise usage to at most twice that target so a retained deferred prefix cannot deadlock;
+raise usage to at most twice that target so a retained deferred prefix cannot deadlock,
+and a durable-ACK poll is admitted above it for the same reason;
 tune <code>memoryReplayMaxBytes</code> and
 <code>memoryReplayAppendDeadlineMs</code> in the sender options when needed.</p>
 <h3 id="zstd-compressed-qwp-egress" class="tsd-anchor-link">Zstd-compressed QWP egress<a href="#zstd-compressed-qwp-egress" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h3><p>Node.js egress clients can opt into compressed result batches during the
