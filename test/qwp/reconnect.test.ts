@@ -2861,15 +2861,21 @@ describe("QWP ingress reconnect and replay", () => {
     expect(connections[0].sent).toEqual([committed]);
     await session.publishFrame(Uint8Array.of(1));
     await vi.waitFor(() => expect(connections[0].sent).toHaveLength(2));
+    // Parked before the trim, so publishing the watermark is not enough: the
+    // waiter has to be woken too. Its timeout outlasts the test's, so a missed
+    // wake-up fails the test rather than resolving late. Frame sequences
+    // continue after the recovered frames 5 and 6.
+    const parked = session.waitForAck(7n, 60_000);
     connections[0].receive(
       ingressResponse(QWP_STATUS.OK, 1n, [["trades", 9n]]),
     );
     connections[0].receive(durableResponse([["trades", 9n]]));
 
+    await expect(parked).resolves.toBe(true);
     await vi.waitFor(() => expect(connections.length).toBe(2));
     expect(replayStore.discardCalls).toBe(1);
     expect(Array.from(replayStore.records.keys())).toEqual([]);
-    // Frame sequences continue after the recovered frames 5 and 6.
+    // A waiter arriving after the trim sees the published watermark at once.
     await expect(session.waitForAck(7n, 1_000)).resolves.toBe(true);
     expect(session.acknowledgedFrameSequence).toBe(7n);
     expect(connections[1].sent).toEqual([]);
