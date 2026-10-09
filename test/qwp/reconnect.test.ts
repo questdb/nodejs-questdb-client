@@ -819,6 +819,56 @@ describe("QWP endpoint failover", () => {
     await expect(factory()).rejects.toBe(authenticationError);
     expect(attempts).toEqual(["primary"]);
   });
+
+  it("reports each failed endpoint before trying the next one", async () => {
+    // The session raises endpoint-attempt-failed from these reports. Reporting
+    // the endpoints only when the sweep ends would delay each one by every
+    // endpoint after it, connect timeouts included.
+    const log: string[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary", "tertiary"],
+      async (endpoint) => {
+        log.push(`connect ${endpoint}`);
+        if (endpoint === "tertiary") return new FakeConnection("tertiary");
+        throw new Error(`${endpoint} unreachable`);
+      },
+    );
+
+    await expect(
+      factory(undefined, (endpoint, error) =>
+        log.push(`failed ${endpoint}: ${(error as Error).message}`),
+      ),
+    ).resolves.toMatchObject({ endpoint: "tertiary" });
+    expect(log).toEqual([
+      "connect primary",
+      "failed primary: primary unreachable",
+      "connect secondary",
+      "failed secondary: secondary unreachable",
+      "connect tertiary",
+    ]);
+  });
+
+  it("does not report the endpoints of an aborted sweep", async () => {
+    // An abort is the session closing or its deadline expiring, not a verdict
+    // on any endpoint, so the attempts it ends are not endpoint failures.
+    const abort = new AbortController();
+    const reported: string[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      async (endpoint, signal) => {
+        if (endpoint === "primary") abort.abort();
+        if (signal?.aborted) throw new Error("aborted");
+        return new FakeConnection(String(endpoint));
+      },
+    );
+
+    await expect(
+      factory(abort.signal, (endpoint) => reported.push(String(endpoint))),
+    ).rejects.toBeInstanceOf(QwpFailoverError);
+    expect(reported).toEqual([]);
+  });
 });
 
 describe("QWP reconnect timer bounds", () => {
@@ -1025,6 +1075,333 @@ describe("QWP reconnect timer bounds", () => {
     } finally {
       await session.close();
     }
+  });
+});
+
+describe("QWP connection events", () => {
+  // The kinds, and the order they fire in, are the connection-listener contract
+  // the Java, Rust, Go and Python clients share.
+  const summary = (events: readonly QwpReconnectEvent[]) =>
+    events.map(({ kind, attempt, endpoint }) => ({ kind, attempt, endpoint }));
+  const unauthorized = (url?: string) =>
+    new QwpUpgradeError("unauthorized", {
+      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+      retryable: false,
+      tryNextEndpoint: false,
+      statusCode: 401,
+      url,
+    });
+
+  it("reports each failed endpoint, then the failed sweep", async () => {
+    const events: QwpReconnectEvent[] = [];
+    let opens = 0;
+    const factory = createQwpFailoverConnectionFactory(
+      "ws://alice:s3cr3t@primary:9000/write/v4",
+      ["ws://alice:s3cr3t@secondary:9000/write/v4"],
+      async (endpoint) => {
+        // The first sweep finds both endpoints down; the second connects.
+        if (++opens <= 2) throw new Error("connection refused");
+        return new FakeConnection(String(endpoint));
+      },
+    );
+    const session = await QwpIngressSession.connect(factory, {
+      reconnect: {
+        reconnectInitialBackoffMs: 0,
+        reconnectMaxBackoffMs: 0,
+        onEvent: (event) => events.push(event),
+      },
+    });
+
+    await vi.waitFor(() => expect(events).toHaveLength(4));
+    const primary = "ws://primary:9000/write/v4";
+    const secondary = "ws://secondary:9000/write/v4";
+    expect(summary(events)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: primary,
+      },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: secondary,
+      },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ALL_ENDPOINTS_UNREACHABLE,
+        attempt: 1,
+        endpoint: secondary,
+      },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
+        attempt: 0,
+        endpoint: primary,
+      },
+    ]);
+    expect(events[2].cause).toBeInstanceOf(QwpFailoverError);
+    // The endpoint-attempt-failed events carry the configured endpoint, which
+    // is where a credential would be.
+    expect(JSON.stringify(events)).not.toContain("s3cr3t");
+    await session.close();
+  });
+
+  it("reports an authentication rejection as auth-failed alone", async () => {
+    // The rejection ends the sweep at the endpoint that returned it, so it
+    // takes the place of all-endpoints-unreachable rather than preceding it.
+    const events: QwpReconnectEvent[] = [];
+    const attempts: string[] = [];
+    const rejection = unauthorized();
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      async (endpoint) => {
+        attempts.push(String(endpoint));
+        throw rejection;
+      },
+    );
+
+    await expect(
+      QwpIngressSession.connect(factory, {
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+          onEvent: (event) => events.push(event),
+        },
+      }),
+    ).rejects.toBe(rejection);
+    expect(attempts).toEqual(["primary"]);
+    expect(summary(events)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.AUTH_FAILED,
+        attempt: 1,
+        endpoint: "primary",
+      },
+    ]);
+    expect(events[0].cause).toBe(rejection);
+  });
+
+  it("reports auth-failed from a factory that does not walk endpoints", async () => {
+    const events: QwpReconnectEvent[] = [];
+    const rejection = unauthorized("ws://primary:9000/write/v4");
+
+    await expect(
+      QwpIngressSession.connect(
+        async () => {
+          throw rejection;
+        },
+        {
+          reconnect: {
+            reconnectInitialBackoffMs: 0,
+            reconnectMaxBackoffMs: 0,
+            onEvent: (event) => events.push(event),
+          },
+        },
+      ),
+    ).rejects.toBe(rejection);
+    expect(summary(events)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.AUTH_FAILED,
+        attempt: 1,
+        endpoint: "ws://primary:9000/write/v4",
+      },
+    ]);
+  });
+
+  it("reports an endpoint that fails after opening without failing the sweep", async () => {
+    // The success events wait until the unacknowledged frames are replayed, so
+    // an endpoint that opens and then fails that replay has failed its
+    // attempt. The sweep did reach an endpoint, so none of them is unreachable.
+    const first = new FakeConnection("primary");
+    const refusing = new FakeConnection("secondary");
+    refusing.onSend = () => Promise.reject(new Error("replay write failed"));
+    const third = new FakeConnection("primary");
+    const connections = [first, refusing, third];
+    const events: QwpReconnectEvent[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = connections.shift();
+        if (!connection) throw new Error("no connection available");
+        return connection;
+      },
+      {
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+          onEvent: (event) => events.push(event),
+        },
+      },
+    );
+
+    const pending = publishAndWait(session, Uint8Array.of(1));
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.drop();
+    await vi.waitFor(() => expect(third.sent).toEqual([Uint8Array.of(1)]));
+    third.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(pending).resolves.toBe(0n);
+
+    await vi.waitFor(() => expect(events).toHaveLength(4));
+    expect(summary(events)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
+        attempt: 0,
+        endpoint: "primary",
+      },
+      { kind: QWP_RECONNECT_EVENT_KIND.DISCONNECTED, attempt: 0 },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: "secondary",
+      },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.RECONNECTED,
+        attempt: 2,
+        endpoint: "primary",
+      },
+    ]);
+    expect(events[1].previousEndpoint).toBe("primary");
+    expect(events[2].cause).toMatchObject({ message: "replay write failed" });
+    await session.close();
+  });
+
+  it("reports no failure for a sweep that close() interrupts", async () => {
+    const first = new FakeConnection("primary");
+    const events: QwpReconnectEvent[] = [];
+    let opens = 0;
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      (_endpoint, signal) => {
+        if (opens++ === 0) return Promise.resolve(first);
+        // Every later attempt is still negotiating when close() aborts it.
+        return new Promise<QwpBinaryConnection>((_resolve, reject) => {
+          const abort = () => reject(new Error("aborted"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      },
+    );
+    const session = await QwpIngressSession.connect(factory, {
+      reconnect: {
+        reconnectInitialBackoffMs: 0,
+        reconnectMaxBackoffMs: 0,
+        onEvent: (event) => events.push(event),
+      },
+    });
+
+    first.drop();
+    await vi.waitFor(() => expect(opens).toBe(2));
+    await session.close();
+    expect(events.map((event) => event.kind)).toEqual([
+      QWP_RECONNECT_EVENT_KIND.CONNECTED,
+      QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
+    ]);
+  });
+
+  it("reports no sweep failure when the startup deadline cuts a sweep short", async () => {
+    // The sweep never finished, so it cannot say every endpoint was refused;
+    // the caller learns of the deadline from the rejected connect instead.
+    const events: QwpReconnectEvent[] = [];
+    const factory = createQwpFailoverConnectionFactory(
+      "primary",
+      ["secondary"],
+      (_endpoint, signal) =>
+        new Promise<QwpBinaryConnection>((_resolve, reject) => {
+          const abort = () => reject(new Error("aborted"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        }),
+    );
+
+    await expect(
+      QwpIngressSession.connect(factory, {
+        reconnect: {
+          reconnectMaxDurationMs: 50,
+          onEvent: (event) => events.push(event),
+        },
+      }),
+    ).rejects.toBeInstanceOf(QwpReconnectExhaustedError);
+    expect(events).toEqual([]);
+  });
+
+  it("reports egress endpoint and sweep failures the same way", async () => {
+    const events: QwpReconnectEvent[] = [];
+    let opens = 0;
+    const session = await connectQwpEgressSession(
+      createQwpFailoverConnectionFactory(
+        "primary",
+        ["secondary"],
+        async (endpoint) => {
+          if (++opens <= 2) throw new Error("connection refused");
+          const connection = new FakeConnection(String(endpoint));
+          queueMicrotask(() =>
+            connection.receive(serverInfo(String(endpoint))),
+          );
+          return connection;
+        },
+      ),
+      {
+        reconnect: {
+          failoverBackoffInitialMs: 0,
+          failoverBackoffMaxMs: 0,
+          onEvent: (event) => events.push(event),
+        },
+      },
+    );
+
+    await vi.waitFor(() => expect(events).toHaveLength(4));
+    expect(summary(events)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: "primary",
+      },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: "secondary",
+      },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ALL_ENDPOINTS_UNREACHABLE,
+        attempt: 1,
+        endpoint: "secondary",
+      },
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.CONNECTED,
+        attempt: 0,
+        endpoint: "primary",
+      },
+    ]);
+    await session.close();
+  });
+
+  it("reports an egress authentication rejection as auth-failed alone", async () => {
+    const events: QwpReconnectEvent[] = [];
+    const rejection = unauthorized();
+
+    await expect(
+      connectQwpEgressSession(
+        createQwpFailoverConnectionFactory(
+          "primary",
+          ["secondary"],
+          async () => {
+            throw rejection;
+          },
+        ),
+        {
+          reconnect: {
+            failoverBackoffInitialMs: 0,
+            failoverBackoffMaxMs: 0,
+            onEvent: (event) => events.push(event),
+          },
+        },
+      ),
+    ).rejects.toBe(rejection);
+    expect(summary(events)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.AUTH_FAILED,
+        attempt: 1,
+        endpoint: "primary",
+      },
+    ]);
   });
 });
 
@@ -4048,7 +4425,7 @@ describe("QWP ingress reconnect and replay", () => {
     await expect(pending).resolves.toBe(1n);
     expect(events.map((event) => event.kind)).toEqual([
       QWP_RECONNECT_EVENT_KIND.CONNECTED,
-      QWP_RECONNECT_EVENT_KIND.RECONNECTING,
+      QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
       QWP_RECONNECT_EVENT_KIND.FAILED_OVER,
     ]);
     expect(events.every((event) => event.timestampMs > 0)).toBe(true);
@@ -6012,7 +6389,7 @@ describe("QWP egress reconnect and replay", () => {
 
     // Both connect attempts complete before the first observer call, which is
     // only possible when the events are queued rather than invoked inline --
-    // inline, `reconnecting` is emitted before the second factory call.
+    // inline, `disconnected` is emitted before the second factory call.
     const firstEventAt = order.findIndex((entry) => entry.startsWith("event:"));
     expect(order.slice(0, firstEventAt)).toEqual(["factory", "factory"]);
     await session.close();

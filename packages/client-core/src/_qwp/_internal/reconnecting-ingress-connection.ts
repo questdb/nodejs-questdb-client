@@ -53,6 +53,7 @@ import {
   validateQwpIngressReconnectBackoffs,
 } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
+import { createSweepFailureReporter } from "./sweep-events";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 import {
   createQwpDataLossSenderError,
@@ -1288,7 +1289,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     const endpointCapRejections = new Set<string>();
     if (reconnecting) {
       this.emitEvent({
-        kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
+        kind: QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
         attempt: 0,
         previousEndpoint,
         cause: initialCause,
@@ -1334,6 +1335,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         this.throwIfUnavailable();
         attempt++;
         if (reconnecting) this.totalReconnectAttempts++;
+        const sweep = createSweepFailureReporter(
+          (event) => this.emitEvent(event),
+          attempt,
+          previousEndpoint,
+          () => this.closing,
+        );
         let candidate: QwpBinaryConnection | undefined;
         try {
           if (attempt === 1 && initialConnection) {
@@ -1349,7 +1356,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             this.connectAbort = abort;
             try {
               candidate = await awaitReconnectDeadline(
-                this.factory(abort.signal),
+                this.factory(abort.signal, sweep.onEndpointFailure),
                 reconnectDeadlineMs,
                 attempt,
                 () => abort.abort(),
@@ -1420,13 +1427,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             this.connectingCandidate = undefined;
           }
           if (candidate) await candidate.close().catch(() => undefined);
-          this.emitEvent({
-            kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
-            attempt,
-            endpoint: candidate?.endpoint,
-            previousEndpoint,
-            cause: error,
-          });
+          sweep.sweepFailed(error, candidate);
           if (error instanceof QwpReconnectExhaustedError) throw error;
           const capGapError =
             error instanceof QwpCatchUpCapGapError

@@ -11,6 +11,7 @@ import {
 import type {
   QwpBinaryConnection,
   QwpConnectionFactory,
+  QwpEndpointFailureObserver,
 } from "./binary-connection";
 import { redactQwpEndpoint } from "./redact-endpoint";
 
@@ -255,7 +256,10 @@ export function createQwpFailoverConnectionFactory(
   let deferredEndpoint: number | undefined;
   let resetClassificationsBeforeSweep = false;
 
-  return async (signal?: AbortSignal): Promise<QwpBinaryConnection> => {
+  return async (
+    signal?: AbortSignal,
+    onEndpointFailure?: QwpEndpointFailureObserver,
+  ): Promise<QwpBinaryConnection> => {
     if (
       resetClassificationsBeforeSweep &&
       resetClassificationsAfterExhaustion
@@ -315,6 +319,10 @@ export function createQwpFailoverConnectionFactory(
       } catch (error) {
         healthTracker.recordFailure(index, error);
         attempts.push({ endpoint, error });
+        // An aborted attempt is the session closing or its deadline expiring,
+        // not a verdict on the endpoint, and nothing is listening for the rest
+        // of a sweep the session has already left.
+        if (!signal?.aborted) onEndpointFailure?.(endpoint, error);
         if (candidate) await candidate.close().catch(() => undefined);
         // tryNextEndpoint is a tri-state: only an explicit false short-circuits
         // the sweep. A browser cannot see the HTTP response, so every refused,

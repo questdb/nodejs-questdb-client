@@ -120,11 +120,23 @@ export interface QwpBinaryConnection {
 }
 
 /**
+ * Receives each endpoint a connection factory's sweep fails to open, as it
+ * fails and before the sweep moves on.
+ */
+export type QwpEndpointFailureObserver = (
+  endpoint: string | URL,
+  error: unknown,
+) => void;
+
+/**
  * Opens one connection. The optional signal is aborted when the owning session
  * closes, so a factory that is still negotiating can tear its socket down
- * instead of leaving it alive until its own deadline expires. Factories that
- * ignore the parameter remain assignable.
+ * instead of leaving it alive until its own deadline expires. A factory that
+ * walks several endpoints reports each failed one to `onEndpointFailure`, which
+ * is how the session raises its per-endpoint events while the sweep is still
+ * running. Factories that ignore either parameter remain assignable.
  */
 export type QwpConnectionFactory = (
   signal?: AbortSignal,
+  onEndpointFailure?: QwpEndpointFailureObserver,
 ) => Promise<QwpBinaryConnection>;

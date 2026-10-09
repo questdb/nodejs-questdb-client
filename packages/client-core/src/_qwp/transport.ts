@@ -209,12 +209,45 @@ export class QwpEgressReplayRequiredError extends Error {
   }
 }
 
+/**
+ * The kinds of `reconnect.onEvent` notification. The first seven are the
+ * connection events the Java, Rust, Go and Python clients share (Java's
+ * `SenderConnectionEvent.Kind`), so a listener ported from one of them keeps
+ * its meaning. The last three report store-and-forward conditions that only
+ * this client puts on the same stream.
+ */
 export const QWP_RECONNECT_EVENT_KIND = {
+  /** The session's first successful connection. */
   CONNECTED: "connected",
-  RECONNECTING: "reconnecting",
-  ATTEMPT_FAILED: "attempt-failed",
+  /**
+   * The active connection was lost. Fired once per outage, before the first
+   * reconnect attempt.
+   */
+  DISCONNECTED: "disconnected",
+  /** A reconnect succeeded against the endpoint that was active before. */
   RECONNECTED: "reconnected",
+  /** A reconnect succeeded against a different endpoint than before. */
   FAILED_OVER: "failed-over",
+  /**
+   * One endpoint failed: it could not be opened, or it opened and then failed
+   * before the session could use it, as when it refuses the replayed frames.
+   * Fired as each endpoint fails, before the sweep moves on.
+   */
+  ENDPOINT_ATTEMPT_FAILED: "endpoint-attempt-failed",
+  /**
+   * A sweep tried every endpoint and none accepted the connection. Fired once
+   * per failed sweep, after that sweep's `endpoint-attempt-failed` events, with
+   * `endpoint` set to the last endpoint tried.
+   */
+  ALL_ENDPOINTS_UNREACHABLE: "all-endpoints-unreachable",
+  /**
+   * The server rejected the credentials with HTTP 401 or 403. A credential
+   * applies to the whole cluster, so the sweep stops at that endpoint and no
+   * `all-endpoints-unreachable` follows. Browsers report it only when the
+   * `sessionBootstrap` request is rejected, because their WebSocket API hides
+   * the upgrade status.
+   */
+  AUTH_FAILED: "auth-failed",
   /** An unbounded SF loop is waiting for durable-ACK-capable endpoints. */
   DURABLE_ACK_UNAVAILABLE: "durable-ack-unavailable",
   /** An orphan exhausted its consecutive durable-ACK mismatch budget. */
@@ -231,6 +264,10 @@ export interface QwpReconnectEvent {
   /** One-based reconnect sweep number; zero for lifecycle-only events. */
   readonly attempt: number;
   readonly timestampMs: number;
+  /**
+   * The endpoint the event concerns; for `all-endpoints-unreachable`, the last
+   * endpoint the sweep tried.
+   */
   readonly endpoint?: string | URL;
   readonly previousEndpoint?: string | URL;
   readonly cause?: unknown;

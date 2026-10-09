@@ -29,6 +29,7 @@ import {
   validateQwpEgressReconnectBackoffs,
 } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
+import { createSweepFailureReporter } from "./sweep-events";
 import { monotonicNowMs } from "./monotonic-clock";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 
@@ -439,7 +440,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     let lastError = initialCause;
     if (reconnecting) {
       this.emitEvent({
-        kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
+        kind: QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
         attempt: 0,
         previousEndpoint,
         cause: initialCause,
@@ -472,13 +473,19 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         }
         this.throwIfUnavailable();
         attempt++;
+        const sweep = createSweepFailureReporter(
+          (event) => this.emitEvent(event),
+          attempt,
+          previousEndpoint,
+          () => this.closing,
+        );
         let candidate: QwpBinaryConnection | undefined;
         try {
           const abort = new AbortController();
           this.connectAbort = abort;
           try {
             candidate = await awaitReconnectDeadline(
-              this.factory(abort.signal),
+              this.factory(abort.signal, sweep.onEndpointFailure),
               reconnectDeadlineMs,
               attempt,
               () => abort.abort(),
@@ -569,13 +576,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           }
           if (candidate) await candidate.close().catch(() => undefined);
           if (this.closing) return;
-          this.emitEvent({
-            kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
-            attempt,
-            endpoint: candidate?.endpoint,
-            previousEndpoint,
-            cause: error,
-          });
+          sweep.sweepFailed(error, candidate);
           if (error instanceof QwpReconnectExhaustedError) throw error;
           if (!isRetryableReconnectError(error)) throw error;
           if (!reconnecting && !this.retryInitialConnection) throw error;
