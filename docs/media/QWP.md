@@ -1509,16 +1509,17 @@ transport successfully rebinds, then refreshes to the new endpoint.
 
 Re-execution is at least once: a statement may have completed before its response was
 lost, and a consumer may already have observed a prefix of SELECT rows. Queued but
-unconsumed batches are discarded automatically. Configure `onReplayReset` on the
+unconsumed batches are discarded automatically. Configure `onFailoverReset` on the
 query when the application must clear an accumulated prefix before batches restart
-at sequence zero. The query-scoped callback is especially important with pooled
-leases: request IDs are local to each session and cannot distinguish concurrent
-leases in one shared callback. An `onReplayReset` on the egress options
-remains the fallback for queries without their own callback. Both are optional
-notifications, not an opt-in. Set `reconnect: false` to use
-one fixed connection and surface failures without replay. Supplying a `reconnect`
-object tunes the failover bounds and also retains the earlier opt-in behavior of
-retrying initial connection establishment.
+at sequence zero. It runs before every replay, whether the reconnect reached another
+endpoint (a `failed-over` event) or the same one (`reconnected`). The query-scoped
+callback is especially important with pooled leases: request IDs are local to each
+session and cannot distinguish concurrent leases in one shared callback. An
+`onFailoverReset` on the egress options remains the fallback for queries without
+their own callback. Both are optional notifications, not an opt-in. Set
+`reconnect: false` to use one fixed connection and surface failures without
+replay. Supplying a `reconnect` object tunes the failover bounds and also retains
+the earlier opt-in behavior of retrying initial connection establishment.
 
 Browser egress uses the same session API:
 
@@ -1754,7 +1755,7 @@ const lease = await db.borrowQuery();
 try {
   let rowCount = 0;
   const query = await lease.query("select * from trades", {
-    onReplayReset: () => {
+    onFailoverReset: () => {
       rowCount = 0; // Drop the prefix observed before failover.
     },
   });
@@ -1860,7 +1861,6 @@ The public error classes preserve enough context for policy decisions:
 | `QwpEgressQueryAbandonedError`          | Result iteration ended before the server completed the query                                                |
 | `QwpEgressQueryTimeoutError`            | The query ran past its timeout and was cancelled                                                            |
 | `QwpEgressQueryCancelTimeoutError`      | A cancelled query did not produce a terminal server response before the drain deadline                      |
-| `QwpEgressReplayRequiredError`          | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
 Always close senders and sessions in `finally`. For a standalone sender, publication
 plus ACK draining is bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing
