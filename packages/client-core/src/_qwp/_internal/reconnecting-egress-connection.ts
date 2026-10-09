@@ -8,8 +8,8 @@ import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
   QwpConnectionCloseInfo,
+  QwpEgressFailoverResetEvent,
   QwpEgressReconnectOptions,
-  QwpEgressReplayResetEvent,
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpReconnectEvent,
@@ -50,8 +50,8 @@ export const QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS: Readonly<
   failoverMaxDurationMs: 30_000,
 };
 
-type ReplayResetHandler = (
-  event: QwpEgressReplayResetEvent,
+type FailoverResetHandler = (
+  event: QwpEgressFailoverResetEvent,
 ) => void | Promise<void>;
 type ConnectionResetHandler = (
   serverInfo: QwpServerInfoMessage,
@@ -68,12 +68,12 @@ interface PendingTerminalVerdict {
   readonly resolve: (accepted: boolean) => void;
 }
 
-class ReplayResetCallbackError extends Error {
+class FailoverResetCallbackError extends Error {
   readonly cause: unknown;
 
   constructor(cause: unknown) {
-    super("QWP egress replay reset callback failed");
-    this.name = "ReplayResetCallbackError";
+    super("QWP egress failover reset callback failed");
+    this.name = "FailoverResetCallbackError";
     this.cause = cause;
   }
 }
@@ -129,7 +129,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     private readonly serverInfoTimeoutMs: number,
     private readonly onConnectionReset: ConnectionResetHandler,
     private readonly encodeQueryRequest: QueryRequestEncoder,
-    private readonly onReplayReset?: ReplayResetHandler,
+    private readonly onFailoverReset?: FailoverResetHandler,
     private readonly onConnectionLost?: ConnectionLostHandler,
     private readonly retryInitialConnection = true,
     connectionListenerInboxCapacity = 64,
@@ -169,7 +169,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     serverInfoTimeoutMs: number,
     onConnectionReset: ConnectionResetHandler,
     encodeQueryRequest: QueryRequestEncoder,
-    onReplayReset?: ReplayResetHandler,
+    onFailoverReset?: FailoverResetHandler,
     onConnectionLost?: ConnectionLostHandler,
     retryInitialConnection = true,
     signal?: AbortSignal,
@@ -181,7 +181,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       serverInfoTimeoutMs,
       onConnectionReset,
       encodeQueryRequest,
-      onReplayReset,
+      onFailoverReset,
       onConnectionLost,
       retryInitialConnection,
       connectionListenerInboxCapacity,
@@ -236,9 +236,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
    *
    * The caller is released as soon as the grant is owned by a reconnect rather
    * than when the frame leaves: a result-view callback may be the caller, and
-   * the replay reset has to drain that very callback before it can encode the
-   * replacement request, so waiting for the connection here would leave the
-   * two waiting on each other.
+   * the reset before a replay has to drain that very callback before it can
+   * encode the replacement request, so waiting for the connection here would
+   * leave the two waiting on each other.
    *
    * @internal
    */
@@ -778,9 +778,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         "QWP egress replay is missing its QUERY_REQUEST",
       );
     }
-    if (this.onReplayReset) {
+    if (this.onFailoverReset) {
       try {
-        await this.onReplayReset(
+        await this.onFailoverReset(
           redactQwpEndpointFields({
             requestId,
             serverInfo,
@@ -790,7 +790,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           }),
         );
       } catch (error) {
-        throw new ReplayResetCallbackError(error);
+        throw new FailoverResetCallbackError(error);
       }
     }
     const request = await this.encodeReplayRequest(serverInfo, requestId);
@@ -1131,6 +1131,6 @@ function isRetryableReconnectError(error: unknown): boolean {
   }
   return !(
     error instanceof ReplayStateError ||
-    error instanceof ReplayResetCallbackError
+    error instanceof FailoverResetCallbackError
   );
 }

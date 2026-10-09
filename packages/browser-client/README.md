@@ -328,7 +328,7 @@ try {
 - An unfinished row is never completed implicitly during `flush()` or `close()`.
 - Do not share one sender between unrelated concurrent producers.
 - Re-executed queries are at least once after failover; clear already consumed
-  results in an `onReplayReset` callback when duplicate prefixes matter.
+  results in an `onFailoverReset` callback when duplicate prefixes matter.
 
 ## More documentation
 

@@ -22,11 +22,11 @@ export type {
   QwpDecimalValue,
   QwpDoubleArrayInput,
   QwpEgressCompression,
+  QwpEgressFailoverResetEvent,
   QwpEgressMessage,
   QwpEgressMetrics,
   QwpEgressQueryOptions,
   QwpEgressReconnectOptions,
-  QwpEgressReplayResetEvent,
   QwpEgressViewCallbackControl,
   QwpEgressViewQuery,
   QwpEncodedBinds,
@@ -140,11 +140,11 @@ export type {
   QwpDecimalValue as BrowserQwpDecimalValue,
   QwpDoubleArrayInput as BrowserQwpDoubleArrayInput,
   QwpEgressCompression as BrowserQwpEgressCompression,
+  QwpEgressFailoverResetEvent as BrowserQwpEgressFailoverResetEvent,
   QwpEgressMessage as BrowserQwpEgressMessage,
   QwpEgressMetrics as BrowserQwpEgressMetrics,
   QwpEgressQueryOptions as BrowserQwpEgressQueryOptions,
   QwpEgressReconnectOptions as BrowserQwpEgressReconnectOptions,
-  QwpEgressReplayResetEvent as BrowserQwpEgressReplayResetEvent,
   QwpEgressViewCallbackControl as BrowserQwpEgressViewCallbackControl,
   QwpEgressViewQuery as BrowserQwpEgressViewQuery,
   QwpEncodedBinds as BrowserQwpEncodedBinds,
@@ -428,7 +428,7 @@ type EgressSessionField =
   | "maxBatchRows"
   | "reconnect"
   | "connectionListenerInboxCapacity"
-  | "onReplayReset";
+  | "onFailoverReset";
 export type NodeEgressSessionFields = ExpectNone<
   Exclude<EgressSessionField, keyof NodeRoot.QwpNodeEgressOptions>
 >;

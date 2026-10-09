@@ -869,7 +869,7 @@ describe("QWP pooled client", () => {
     await client.close();
   });
 
-  it("routes replay resets to the active query when pooled request IDs overlap", async () => {
+  it("routes failover resets to the active query when pooled request IDs overlap", async () => {
     const primary = [
       new FakeConnection("query-0-primary"),
       new FakeConnection("query-1-primary"),
@@ -904,7 +904,7 @@ describe("QWP pooled client", () => {
                 failoverBackoffInitialMs: 0,
                 failoverBackoffMaxMs: 0,
               },
-              onReplayReset: sessionReset,
+              onFailoverReset: sessionReset,
             },
           ),
       },
@@ -927,10 +927,10 @@ describe("QWP pooled client", () => {
       secondRows = 0;
     });
     const firstQuery = await first.query("select * from first", {
-      onReplayReset: firstReset,
+      onFailoverReset: firstReset,
     });
     const secondQuery = await second.query("select * from second", {
-      onReplayReset: secondReset,
+      onFailoverReset: secondReset,
     });
     expect(firstQuery.requestId).toBe(0n);
     expect(secondQuery.requestId).toBe(0n);

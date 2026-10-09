@@ -6912,7 +6912,7 @@ describe("QWP egress reconnect and replay", () => {
           failoverBackoffInitialMs: 0,
           failoverBackoffMaxMs: 0,
         },
-        onReplayReset: (event) => {
+        onFailoverReset: (event) => {
           resets.push(event.requestId);
           expect(event.serverInfo).toMatchObject({
             nodeId: "secondary",
@@ -6968,7 +6968,7 @@ describe("QWP egress reconnect and replay", () => {
           failoverBackoffMaxMs: 0,
         },
         bufferPoolSize: 1,
-        onReplayReset: (event) => void resets.push(event.requestId),
+        onFailoverReset: (event) => void resets.push(event.requestId),
       },
     );
     const query = await session.query("select * from x");
@@ -7466,7 +7466,7 @@ describe("QWP egress reconnect and replay", () => {
           failoverBackoffInitialMs: 0,
           failoverBackoffMaxMs: 0,
         },
-        onReplayReset: (event) => void resets.push(event.requestId),
+        onFailoverReset: (event) => void resets.push(event.requestId),
       },
     );
     const query = await session.queryViews("select * from x", async () => {
@@ -7513,7 +7513,7 @@ describe("QWP egress reconnect and replay", () => {
       return connection;
     });
     const query = await session.queryViews("select 1", () => {}, {
-      onReplayReset: reset,
+      onFailoverReset: reset,
     });
     first.drop();
 
@@ -7801,7 +7801,7 @@ describe("QWP egress reconnect and replay", () => {
             failoverBackoffInitialMs: 0,
             failoverBackoffMaxMs: 0,
           },
-          onReplayReset: (event) => void resets.push(event.requestId),
+          onFailoverReset: (event) => void resets.push(event.requestId),
           ...options,
         },
       );

@@ -71,7 +71,6 @@ const sharedRuntimeContract = [
   "QwpEgressQueryCancelTimeoutError",
   "QwpEgressQueryError",
   "QwpEgressQueryTimeoutError",
-  "QwpEgressReplayRequiredError",
   "QwpEgressSession",
   "QwpEgressSessionClosedError",
   "QwpFailoverError",

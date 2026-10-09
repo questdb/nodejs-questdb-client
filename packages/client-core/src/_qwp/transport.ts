@@ -194,22 +194,6 @@ export class QwpReplayDictionaryPersistenceError extends QwpReplayDictionaryErro
 }
 
 /**
- * @deprecated Standard egress sessions now reset and replay automatically.
- * Retained for source compatibility with clients that classified the former
- * explicit-replay opt-in failure.
- */
-export class QwpEgressReplayRequiredError extends Error {
-  constructor(readonly requestId?: bigint) {
-    super(
-      `QWP egress connection was lost with an operation in flight${
-        requestId === undefined ? "" : ` [requestId=${requestId}]`
-      }; configure onReplayReset to opt into at-least-once re-execution`,
-    );
-    this.name = "QwpEgressReplayRequiredError";
-  }
-}
-
-/**
  * The kinds of `reconnect.onEvent` notification. The first seven are the
  * connection events the Java, Rust, Go and Python clients share (Java's
  * `SenderConnectionEvent.Kind`), so a listener ported from one of them keeps
@@ -367,7 +351,13 @@ export interface QwpEgressReconnectOptions {
   onEvent?: (event: QwpReconnectEvent) => void;
 }
 
-export interface QwpEgressReplayResetEvent {
+/**
+ * Passed to `onFailoverReset` just before an active query is re-executed on a
+ * replacement connection. It fires on every reconnect that replays a query,
+ * whether the new connection reached another endpoint (a `failed-over` event)
+ * or the same one (`reconnected`).
+ */
+export interface QwpEgressFailoverResetEvent {
   /** Client request being re-executed on the replacement connection. */
   readonly requestId: bigint;
   /** Authoritative SERVER_INFO received from the replacement endpoint. */
