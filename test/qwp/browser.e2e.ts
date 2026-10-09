@@ -136,6 +136,29 @@ function browserResultEnd(
   return encodeQwpFrame(payload.toUint8Array());
 }
 
+const QWP_V1_PROTOCOL = "questdb.qwp.v1";
+const CREDENTIAL_PREFIX = "questdb.qwp.authorization.";
+
+/**
+ * Decodes the credentials in a subprotocol offer by QuestDB's rules --
+ * unpadded canonical base64url of printable ASCII that neither starts nor ends
+ * with a space -- and returns their Authorization values.
+ */
+function offeredAuthorizations(protocols: ReadonlySet<string>): string[] {
+  return [...protocols]
+    .filter((protocol) => protocol.startsWith(CREDENTIAL_PREFIX))
+    .map((protocol) => {
+      const encoded = protocol.slice(CREDENTIAL_PREFIX.length);
+      expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(encoded.length % 4).not.toBe(1);
+      const decoded = Buffer.from(encoded, "base64url");
+      expect(decoded.toString("base64url")).toBe(encoded);
+      const value = decoded.toString("latin1");
+      expect(value).toMatch(/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/);
+      return value;
+    });
+}
+
 function browserCancelled(requestId: bigint): Uint8Array {
   const message = new TextEncoder().encode("cancelled by client deadline");
   const payload = new QwpByteWriter();
@@ -287,6 +310,174 @@ describe("QWP in a real browser", () => {
         qwpVersion: 1,
         durableAckEnabled: true,
         maxBatchSizeBytes: 1_048_576,
+      });
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  it("authenticates a cross-origin page through the credential subprotocol", async () => {
+    // The page is served from another port, so every upgrade below is a
+    // cross-origin one: the third-party application this path exists for.
+    // A JWT-sized token checks that the browser accepts a long subprotocol.
+    const token = `eyJ${"a".repeat(1_200)}.eyJ${"b".repeat(600)}.${"c".repeat(342)}`;
+    const upgrades: {
+      path: string;
+      origin?: string;
+      authorizations: string[];
+      selected: string | false;
+    }[] = [];
+    const server = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+      // QuestDB's selection: durable ACK when offered on ingress, otherwise
+      // questdb.qwp.v1, never the credential.
+      handleProtocols: (protocols, request) => {
+        const path = new URL(request.url!, "http://localhost").pathname;
+        const selected =
+          path.endsWith("/write/v4") &&
+          protocols.has(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL)
+            ? QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL
+            : protocols.has(QWP_V1_PROTOCOL)
+              ? QWP_V1_PROTOCOL
+              : false;
+        upgrades.push({
+          path,
+          origin: request.headers.origin,
+          authorizations: offeredAuthorizations(protocols),
+          selected,
+        });
+        return selected;
+      },
+    });
+    server.on("connection", (socket, request) => {
+      socket.send(
+        request.url!.startsWith("/read/v1")
+          ? browserServerInfo()
+          : browserIngressServerInfo(1_048_576, true),
+      );
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url, token }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          let providerCalls = 0;
+          let signalsAreAbortSignals = true;
+          const client = await qwp.connectQwpBrowserClient({
+            cluster: {
+              url,
+              auth: async ({ signal }: { signal: AbortSignal }) => {
+                providerCalls++;
+                signalsAreAbortSignals &&= signal instanceof AbortSignal;
+                return { type: "bearer", token };
+              },
+            },
+            ingress: { requestDurableAck: true },
+          });
+          try {
+            return { providerCalls, signalsAreAbortSignals };
+          } finally {
+            await client.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}`,
+          token,
+        },
+      );
+
+      expect(result).toEqual({
+        providerCalls: 2,
+        signalsAreAbortSignals: true,
+      });
+      const pageOrigin = new URL(assetUrl).origin;
+      expect(
+        upgrades.sort((left, right) => left.path.localeCompare(right.path)),
+      ).toEqual([
+        {
+          path: "/read/v1",
+          origin: pageOrigin,
+          authorizations: [`Bearer ${token}`],
+          selected: QWP_V1_PROTOCOL,
+        },
+        {
+          path: "/write/v4",
+          origin: pageOrigin,
+          authorizations: [`Bearer ${token}`],
+          selected: QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+        },
+      ]);
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  it("refuses a server that echoes the credential, in a real browser", async () => {
+    // The credential is in the offer, so a browser accepts a 101 that selects
+    // it; only the client's own check stands between that and an open session.
+    const server = new WebSocketServer({
+      host: "127.0.0.1",
+      port: 0,
+      handleProtocols: (protocols) =>
+        [...protocols].find((protocol) =>
+          protocol.startsWith(CREDENTIAL_PREFIX),
+        ) ?? false,
+    });
+    let connections = 0;
+    server.on("connection", (socket) => {
+      connections++;
+      socket.send(browserServerInfo());
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          try {
+            const session = await qwp.connectQwpBrowserEgress({
+              url,
+              auth: { type: "bearer", token: "echoed-secret" },
+            });
+            await session.close();
+            return { connected: true };
+          } catch (error) {
+            const failure = error as Record<string, unknown>;
+            return {
+              name: failure.name,
+              kind: failure.kind,
+              retryable: failure.retryable,
+              tryNextEndpoint: failure.tryNextEndpoint,
+            };
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/read/v1`,
+        },
+      );
+
+      expect(connections).toBe(1);
+      expect(result).toEqual({
+        name: "QwpUpgradeError",
+        kind: "capability-mismatch",
+        retryable: false,
+        tryNextEndpoint: false,
       });
     } finally {
       await page.close();
