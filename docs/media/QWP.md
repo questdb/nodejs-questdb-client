@@ -120,7 +120,7 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 | `max_name_len`                          | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                  |
 | `sender_id`                             | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.    |
 | `max_frame_rejections`                  | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation. |
-| `poison_min_escalation_window_millis`   | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.            |
+| `poison_min_escalation_window_millis`   | integer ms       | `5000`    | Minimum connected dwell before a poison frame may escalate.            |
 | `connection_listener_inbox_capacity`    | integer          | `64`      | Bound on the connection-event inbox before events are dropped.         |
 | `error_inbox_capacity`                  | integer          | `256`     | Bound on the `onSenderError` inbox before events are dropped.          |
 
@@ -191,7 +191,7 @@ clamp an over-large delay to about 1 ms — the longest budget you can ask for
 would otherwise become the shortest one you get. For a capped option the cap
 applies identically to the connection-string key and to the typed option that
 overrides it, and to an explicit `timeoutMs` argument such as
-`waitForAcknowledged(sequence, timeoutMs)` or `flushAndWait(timeoutMs)`.
+`waitForAck(sequence, timeoutMs)` or `flushAndWait(timeoutMs)`.
 
 Exemption is a property of the typed spelling, not of the key. `idle_timeout_ms`,
 `max_lifetime_ms` and `auto_flush_interval` keep the parser's integer range —
@@ -295,7 +295,7 @@ is created. Many hosts refuse datagrams well below that ceiling — macOS defaul
 `net.inet.udp.maxdgram` to 9216 — so keep the value at or under the path MTU unless
 the receiver is known to accept more. A datagram the operating system refuses is
 discarded before transmission: it is reported through `onError` and does not advance
-`publishedSequence` or `acknowledgedSequence`. Each datagram is
+`publishedSequence` or `ackedSequence`. Each datagram is
 self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
@@ -874,7 +874,7 @@ cumulative ACK watermark separately:
 
 ```typescript
 const sequence = await sender.flushAndGetSequence();
-if (!(await sender.waitForAcknowledged(sequence, 5_000))) {
+if (!(await sender.waitForAck(sequence, 5_000))) {
   // No ACK progress for 5 seconds. The rows are still queued.
 }
 ```
@@ -883,7 +883,7 @@ if (!(await sender.waitForAcknowledged(sequence, 5_000))) {
 highest frame sequence published by this call, or `-1n` when it published
 nothing (for example because auto-flush had already published every row).
 Waiting on `-1n` resolves `true` at once, so use `flushAndWait()` to wait for
-everything published so far. `publishedSequence` and `acknowledgedSequence`
+everything published so far. `publishedSequence` and `ackedSequence`
 expose the current immutable watermarks. ACK waits are cumulative, so one later
 acknowledgement resolves all covered waits and callers may wait for different
 sequences concurrently. When durable ACK is being tracked, the
@@ -894,7 +894,7 @@ Java and Rust clients, `durableAckKeepaliveMs` is ignored without it rather than
 requesting it on its own), and the server has to confirm it. Negotiation
 alone is not enough, because nothing polls for durable progress that was never
 requested — a server that offers the capability unasked leaves the watermark on
-ordinary OK ACKs rather than stalling it. `waitForAcknowledged()` resolves like
+ordinary OK ACKs rather than stalling it. `waitForAck()` resolves like
 `flushAndWait()`, and like the Java client's `awaitAckedFsn()` and the Python
 client's `await_acked_fsn()`: `true` once the watermark covers the sequence, and
 `false` when it makes no progress for the timeout, which leaves the session open.
@@ -1061,7 +1061,7 @@ QuestDB rolls the open server transaction back. The sender logs a warning in thi
 In browsers, durable ACK capability is negotiated with a WebSocket subprotocol;
 Node.js uses upgrade headers. Request it with `requestDurableAck: true`
 (`request_durable_ack=on` in a configuration string). The ACK watermark then
-advances only on durable progress, so `flushAndWait()`, `waitForAcknowledged()`,
+advances only on durable progress, so `flushAndWait()`, `waitForAck()`,
 and the `close()` drain all wait for durability. The ordinary OK that precedes it
 still reaches the `onResponse` session callback and the `onProgress` events of kind
 `acknowledged`, for code that has to observe both. The connection fails with
@@ -1134,7 +1134,7 @@ process or page; configuring a Node directory makes the same replay crash-safe.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` defaults to 4 consecutive strikes,
-and `poisonMinEscalationWindowMs` defaults to 5 minutes. Both conditions must be met
+and `poisonMinEscalationWindowMs` defaults to 5 seconds. Both conditions must be met
 before escalation. The window measures _connected_ dwell only: time spent unable to
 reach a server is banked and withheld, so an outage never supplies the dwell, and the
 strikes a frame has already earned survive the reconnect it caused. Normal (1000),
@@ -1979,7 +1979,7 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | Fluent table row             | `table()`, typed column methods, `at()` / `atNow()`           |
 | Local publish/commit         | `flush()`                                                     |
 | Drain (flush and wait)       | `flushAndWait()`                                              |
-| Explicit ACK barrier         | `flushAndGetSequence()` plus `waitForAcknowledged()`          |
+| Explicit ACK barrier         | `flushAndGetSequence()` plus `waitForAck()`                   |
 | Durable delivery             | `requestDurableAck` plus `flushAndWait()`                     |
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Fire-and-forget UDP ingress  | Node `udp::` or `connectQwpNodeUdpSender()`                   |
