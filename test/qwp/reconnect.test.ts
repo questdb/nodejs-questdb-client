@@ -2817,6 +2817,65 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("publishes a durable trim's watermark when retiring the recovered tail fails", async () => {
+    // The durable counterpart: a DURABLE_ACK trims the journal, then retiring
+    // the recovered uncommitted tail fails. Nothing is left to replay, so no
+    // later response would publish the watermark and the waiter stalled.
+    class DiscardFaultStore extends TrackingReplayStore {
+      discardCalls = 0;
+
+      async discardThrough(): Promise<void> {
+        this.discardCalls++;
+        throw new QwpReplayStoreError("could not persist QWP discard: EIO");
+      }
+    }
+
+    const committed = encodeQwpIngressFrame([symbolTable("ETH-USD")]);
+    const replayStore = new DiscardFaultStore();
+    replayStore.records.set(5n, committed);
+    replayStore.records.set(
+      6n,
+      encodeQwpIngressFrame([symbolTable("BTC-USD")], { deferCommit: true }),
+    );
+    const connections: FakeConnection[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const next = new FakeConnection(`endpoint-${connections.length}`, {
+          qwpVersion: 1,
+          durableAckEnabled: true,
+        });
+        connections.push(next);
+        return next;
+      },
+      {
+        replayStore,
+        ackTimeoutMs: 5_000,
+        durableAckKeepaliveMs: 0,
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+        },
+      },
+    );
+
+    expect(connections[0].sent).toEqual([committed]);
+    await session.publishFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(2));
+    connections[0].receive(
+      ingressResponse(QWP_STATUS.OK, 1n, [["trades", 9n]]),
+    );
+    connections[0].receive(durableResponse([["trades", 9n]]));
+
+    await vi.waitFor(() => expect(connections.length).toBe(2));
+    expect(replayStore.discardCalls).toBe(1);
+    expect(Array.from(replayStore.records.keys())).toEqual([]);
+    // Frame sequences continue after the recovered frames 5 and 6.
+    await expect(session.waitForAck(7n, 1_000)).resolves.toBe(true);
+    expect(session.acknowledgedFrameSequence).toBe(7n);
+    expect(connections[1].sent).toEqual([]);
+    await session.close();
+  });
+
   it("delivers a retired frame's ACK once when a stale OK also fails after retiring it", async () => {
     // Both OKs for the frame reach the catch block's delivery: the stale one
     // was persisting when a reconnect replayed the frame, and each fails to

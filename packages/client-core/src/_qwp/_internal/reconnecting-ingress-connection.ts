@@ -1868,7 +1868,19 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           this.durableWatermarks.set(table.name, table.sequenceTransaction);
         }
       }
-      await this.trimDurablePrefix();
+      try {
+        await this.trimDurablePrefix();
+      } catch (error) {
+        // As on the OK path: the store may have acknowledged and trimmed
+        // frames before a later step (recovered tail retirement) failed.
+        // Those frames are not replayed, so no later response would publish
+        // their watermark; publish it now or waitForAck() and the close drain
+        // report durable data as pending.
+        if (this.publishAcknowledgedFrameSequence()) {
+          this.notifyUnforwardedAcknowledgement();
+        }
+        throw error;
+      }
       return payload;
     }
     if (response.sequence === null) {
