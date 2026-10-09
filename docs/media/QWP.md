@@ -1212,6 +1212,19 @@ await sender.connect();
 console.info(sender.metrics);
 ```
 
+`reconnect.onEvent` receives the connection events that the Java, Rust, Go and
+Python clients deliver to their connection listeners, named by
+`QWP_RECONNECT_EVENT_KIND`: `connected` for the first connection, `disconnected`
+once per outage, `reconnected` or `failed-over` when a reconnect reaches the same
+or a different endpoint, `endpoint-attempt-failed` as each endpoint in a sweep
+fails, `all-endpoints-unreachable` once for a sweep that no endpoint accepted, and
+`auth-failed` when the server rejects the credentials, which ends the sweep. Unlike
+those clients, this one fires the success events only after the unacknowledged
+frames are replayed, so an endpoint that fails the replay is reported as
+`endpoint-attempt-failed`. `durable-ack-unavailable`,
+`durable-ack-persistent-failure` and `primary-unavailable` report store-and-forward
+conditions on the same stream. Egress sessions report the same connection events.
+
 Callbacks are placed on bounded asynchronous inboxes and never invoked inside ACK,
 reconnect, or orphan-recovery protocol stacks, on ingress and egress alike; the
 drop counters below are reported in the ingress metrics snapshot, and
