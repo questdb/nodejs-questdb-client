@@ -331,7 +331,7 @@ export interface QwpIngressReconnectOptions {
   maxFrameRejections?: number;
   /**
    * Minimum time the same frame must remain suspect before repeated
-   * rejections or non-orderly closes become terminal. Defaults to 5 minutes;
+   * rejections or non-orderly closes become terminal. Defaults to 5 seconds;
    * zero escalates as soon as maxFrameRejections is reached.
    */
   poisonMinEscalationWindowMs?: number;

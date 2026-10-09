@@ -220,6 +220,9 @@ describe("QWP configuration-string reference", () => {
     ] as const) {
       expect(documentedNumber(key), key).toBe(ingress);
     }
+    expect(documentedNumber("poison_min_escalation_window_millis")).toBe(
+      QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.poisonMinEscalationWindowMs,
+    );
     // The failover keys carry the egress reconnect defaults.
     expect(documentedNumber("failover_max_attempts")).toBe(
       QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverMaxAttempts,

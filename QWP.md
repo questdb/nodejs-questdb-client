@@ -120,7 +120,7 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 | `max_name_len`                          | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                  |
 | `sender_id`                             | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.    |
 | `max_frame_rejections`                  | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation. |
-| `poison_min_escalation_window_millis`   | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.            |
+| `poison_min_escalation_window_millis`   | integer ms       | `5000`    | Minimum connected dwell before a poison frame may escalate.            |
 | `connection_listener_inbox_capacity`    | integer          | `64`      | Bound on the connection-event inbox before events are dropped.         |
 | `error_inbox_capacity`                  | integer          | `256`     | Bound on the `onSenderError` inbox before events are dropped.          |
 
@@ -1134,7 +1134,7 @@ process or page; configuring a Node directory makes the same replay crash-safe.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` defaults to 4 consecutive strikes,
-and `poisonMinEscalationWindowMs` defaults to 5 minutes. Both conditions must be met
+and `poisonMinEscalationWindowMs` defaults to 5 seconds. Both conditions must be met
 before escalation. The window measures _connected_ dwell only: time spent unable to
 reach a server is banked and withheld, so an outage never supplies the dwell, and the
 strikes a frame has already earned survive the reconnect it caused. Normal (1000),

@@ -86,7 +86,7 @@ export const QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<
   /** Bounds a synchronous initial connect only. */
   reconnectMaxDurationMs: 300_000,
   maxFrameRejections: 4,
-  poisonMinEscalationWindowMs: 300_000,
+  poisonMinEscalationWindowMs: 5_000,
 };
 
 /**
@@ -716,14 +716,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       defaults.reconnectMaxDurationMs;
     this.maxFrameRejections =
       reconnectOptions.maxFrameRejections ?? defaults.maxFrameRejections;
-    // WRITE_ERROR and INTERNAL_ERROR are RETRIABLE by policy, but the only
+    // WRITE_ERROR and INTERNAL_ERROR are RETRIABLE by policy, so the only
     // thing separating "this frame is poison" from "the server cannot write
-    // right now" is how long the rejection persists. Five seconds did not
-    // separate them at all: a concurrent DDL, a checkpoint or a briefly full
-    // server volume outlives it easily, and with the reconnect backoff capped
-    // at reconnectMaxBackoffMs four strikes accumulate well inside that
-    // window -- so a transient server-side fault permanently killed a running
-    // producer.
+    // right now" is how long the rejection persists. The 5-second default
+    // matches the Java, Rust and Python clients; a server whose transient
+    // faults -- a concurrent DDL, a checkpoint, a briefly full volume --
+    // outlast it needs a longer window.
     this.poisonMinEscalationWindowMs =
       reconnectOptions.poisonMinEscalationWindowMs ??
       defaults.poisonMinEscalationWindowMs;
@@ -2169,8 +2167,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     // Elapsed time, not a point in time: the dwell this window measures is how
     // long a frame has stayed suspect while the client could reach a server,
     // so a wall-clock correction -- an NTP step, a VM or container resume --
-    // must not satisfy it. It used to, collapsing the five-minute guard to
-    // zero and turning a transient rejection burst into a terminal sender or a
+    // must not satisfy it. It used to, collapsing the window to zero and
+    // turning a transient rejection burst into a terminal sender or a
     // quarantined orphan slot. The two sibling episode policies in this file
     // already measure their windows this way.
     const now = monotonicNowMs();
