@@ -1811,6 +1811,11 @@ journal while the other owns it. This managed-slot recovery is automatic;
 `drainOrphans: true` additionally adopts noncanonical sibling slots beneath the pool
 root.
 
+Earlier builds named a typed pool's slots `sender-N` when `senderId` was unset. The
+pool no longer adopts those, and warns when one still holds journal segments. Rename
+each to `default-N` while no client uses the directory, or start the pool once with
+`drainOrphans: true` to replay them.
+
 ## Error handling and cleanup
 
 The public error classes preserve enough context for policy decisions:

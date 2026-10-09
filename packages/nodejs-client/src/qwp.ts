@@ -8,6 +8,7 @@ export * from "../../client-core/src/qwp";
 
 import type { Agent } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
+import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import WebSocket from "ws";
@@ -1232,13 +1233,20 @@ export function createQwpNodeClient(
       createQuerySession: (_slot, signal) =>
         connectQwpNodeEgress(egress, signal),
       senderSlotReservation: slotCoordinator,
-      start: () => {
+      start: async () => {
         if (orphanDrainer && slotCoordinator) {
           unsubscribeRecoveryScan = slotCoordinator.onAvailable(() =>
             orphanDrainer.scanNow(),
           );
         }
         orphanDrainer?.start();
+        if (ingress.storeAndForward) {
+          await warnAboutLegacyPooledSlots(
+            storeAndForwardRoot(ingress.storeAndForward),
+            validateQwpSenderId(ingress.senderId ?? QWP_DEFAULT_SENDER_ID),
+            ingress.storeAndForward.drainOrphans,
+          );
+        }
       },
       close: async () => {
         unsubscribeRecoveryScan?.();
@@ -1568,6 +1576,56 @@ async function warnAboutUnreachableJournal(
     "warn",
     `QWP store-and-forward is using '${journalDirectory}', but its slot root '${rootDirectory}' holds journal segments that nothing will replay. ` +
       `The store-and-forward directory (sf_dir) is the slot root: each journal lives in <directory>/<senderId>, where senderId (sender_id) is 'default' unless set, or in <directory>/<senderId>-<slot> for a pooled sender.`,
+  );
+}
+
+/** The slot name typed pooled clients used before senderId defaulted to `default`. */
+const LEGACY_POOLED_SLOT_NAME = /^sender-(0|[1-9]\d*)$/;
+
+/**
+ * Warns when the slot root holds journals under the `sender-<slot>` names a
+ * typed pooled client used before its senderId defaulted to `default`.
+ *
+ * The pool now journals into `<senderId>-<slot>`, and its drainer adopts only
+ * those names unless drainOrphans is set, so such a backlog is neither
+ * replayed nor reported. Like the slot-root warning, this only says so: the
+ * frames are stranded, not lost, until the slots are renamed or drained once.
+ */
+async function warnAboutLegacyPooledSlots(
+  rootDirectory: string,
+  senderId: string,
+  drainOrphans: boolean | undefined,
+): Promise<void> {
+  // A pool named `sender` still owns those slots, and drainOrphans adopts them.
+  if (drainOrphans === true || senderId === "sender") return;
+  let entries: Dirent[];
+  try {
+    entries = await readdir(rootDirectory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const stranded: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !LEGACY_POOLED_SLOT_NAME.test(entry.name)) {
+      continue;
+    }
+    let files: string[];
+    try {
+      files = await readdir(join(rootDirectory, entry.name));
+    } catch {
+      continue;
+    }
+    if (files.some((file) => file.endsWith(JOURNAL_SEGMENT_SUFFIX))) {
+      stranded.push(entry.name);
+    }
+  }
+  if (stranded.length === 0) return;
+  stranded.sort();
+  log(
+    "warn",
+    `QWP store-and-forward slot root '${rootDirectory}' holds journals in ${stranded.map((name) => `'${name}'`).join(", ")} that this pool will not replay. ` +
+      `Pooled senders journal into <directory>/<senderId>-<slot>, here '${senderId}-<slot>'; earlier builds named a typed pool's slots 'sender-<slot>'. ` +
+      `Rename each to '${senderId}-<slot>' while no client uses the directory, or set drainOrphans (drain_orphans=on) to replay them once.`,
   );
 }
 

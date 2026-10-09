@@ -1,9 +1,15 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createQwpNodeSender } from "../../packages/nodejs-client/src";
-import type { QwpSender } from "../../packages/nodejs-client/src";
+import {
+  connectQwpNodeClient,
+  createQwpNodeSender,
+} from "../../packages/nodejs-client/src";
+import type {
+  QwpNodeStoreAndForwardOptions,
+  QwpSender,
+} from "../../packages/nodejs-client/src";
 
 // The slot-root warning goes through the module logger, which binds the
 // console methods when it loads, so it is observed here rather than there.
@@ -96,5 +102,75 @@ describe("QWP store-and-forward slot root", () => {
     expect(warnings[0]).toContain(
       `its slot root '${root}' holds journal segments that nothing will replay`,
     );
+  });
+
+  describe("legacy pooled slot names", () => {
+    async function startPool(
+      directory: string,
+      options: {
+        senderId?: string;
+        drainOrphans?: boolean;
+      } = {},
+    ): Promise<void> {
+      const storeAndForward: QwpNodeStoreAndForwardOptions = {
+        directory,
+        orphanScanIntervalMs: 0,
+        drainOrphans: options.drainOrphans,
+      };
+      // Nothing listens on port 1: lazyConnect starts the client, and with it
+      // the slot scan, without a server.
+      const client = await connectQwpNodeClient({
+        cluster: { url: "ws://127.0.0.1:1" },
+        ingress: { senderId: options.senderId, storeAndForward },
+        lazyConnect: true,
+      });
+      await client.close();
+    }
+
+    async function legacySlot(root: string, name: string): Promise<void> {
+      await mkdir(join(root, name));
+      await writeFile(
+        join(root, name, "sf-0000000000000000.sfa"),
+        new Uint8Array(32),
+      );
+    }
+
+    function legacyWarnings(): string[] {
+      return logging.log.mock.calls
+        .filter(
+          ([level, message]) =>
+            level === "warn" &&
+            String(message).includes("that this pool will not replay"),
+        )
+        .map(([, message]) => String(message));
+    }
+
+    it("warns when a typed pool's earlier sender-N slots hold journals", async () => {
+      // A typed pool once named its slots `sender-<slot>`. It now journals into
+      // `default-<slot>`, and its drainer adopts only those, so the old
+      // backlog would sit unreplayed without a word.
+      const root = await slotRoot();
+      await legacySlot(root, "sender-3");
+      await legacySlot(root, "sender-0");
+      // Empty, so nothing is stranded in it.
+      await mkdir(join(root, "sender-1"));
+      await startPool(root);
+
+      const warnings = legacyWarnings();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        `slot root '${root}' holds journals in 'sender-0', 'sender-3' that this pool will not replay`,
+      );
+      expect(warnings[0]).toContain("Rename each to 'default-<slot>'");
+    });
+
+    it("does not warn when the pool drains orphans or owns the sender-N names", async () => {
+      const root = await slotRoot();
+      await legacySlot(root, "sender-2");
+      await startPool(root, { drainOrphans: true });
+      await startPool(root, { senderId: "sender" });
+
+      expect(legacyWarnings()).toEqual([]);
+    });
   });
 });
