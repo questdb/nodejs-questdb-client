@@ -1067,9 +1067,7 @@ describe("QWP reconnect timer bounds", () => {
     const connection = new FakeConnection("primary");
     const session = await QwpIngressSession.connect(async () => connection, {});
     try {
-      await expect(
-        session.waitForAcknowledged(1n, overTimerCeiling),
-      ).rejects.toThrow(
+      await expect(session.waitForAck(1n, overTimerCeiling)).rejects.toThrow(
         `QWP ACK watermark timeout must be finite and no greater than ${timerCeiling}`,
       );
     } finally {
@@ -2144,7 +2142,7 @@ describe("QWP ingress reconnect and replay", () => {
       await vi.waitFor(() => expect(replacement.sent).toHaveLength(3));
       expect(replacement.sent[0]).toEqual(first.sent[0]);
       replacement.receive(ingressResponse(QWP_STATUS.OK, 2n));
-      await expect(sender.waitForAcknowledged(2n, 1_000)).resolves.toBe(true);
+      await expect(sender.waitForAck(2n, 1_000)).resolves.toBe(true);
       expect(session.metrics.pendingReplayFrames).toBe(0);
     } finally {
       releaseReconnect(replacement);
@@ -2268,7 +2266,7 @@ describe("QWP ingress reconnect and replay", () => {
 
     first.drop();
     await vi.waitFor(() =>
-      expect(() => session.waitForAcknowledged(-1n)).toThrow("unauthorized"),
+      expect(() => session.waitForAck(-1n)).toThrow("unauthorized"),
     );
     await expect(sender.close()).resolves.toBeUndefined();
   });
@@ -2381,7 +2379,7 @@ describe("QWP ingress reconnect and replay", () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(attempts).toBeGreaterThan(20);
       expect(events).toEqual([]);
-      expect(() => session!.waitForAcknowledged(-1n)).not.toThrow();
+      expect(() => session!.waitForAck(-1n)).not.toThrow();
 
       online = true;
       await vi.advanceTimersByTimeAsync(20);
@@ -2982,7 +2980,7 @@ describe("QWP ingress reconnect and replay", () => {
     });
     expect(session.publishedFrameSequence).toBe(1n);
     expect(session.acknowledgedFrameSequence).toBe(-1n);
-    const acknowledged = session.waitForAcknowledged(1n, 1_000);
+    const acknowledged = session.waitForAck(1n, 1_000);
 
     releaseOnline();
     await vi.waitFor(() =>
@@ -2993,7 +2991,7 @@ describe("QWP ingress reconnect and replay", () => {
     await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
     expect(session.acknowledgedFrameSequence).toBe(1n);
     expect(session.metrics).toMatchObject({
-      acknowledgedSequence: 1n,
+      ackedSequence: 1n,
       pendingReplayFrames: 0,
       totalFramesSent: 2,
     });
@@ -3232,7 +3230,7 @@ describe("QWP ingress reconnect and replay", () => {
       expect(connections[0]?.sent).toEqual([Uint8Array.of(7)]),
     );
     connections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
-    await session.waitForAcknowledged(session.publishedFrameSequence);
+    await session.waitForAck(session.publishedFrameSequence);
     await session.close();
   });
 
@@ -4094,7 +4092,7 @@ describe("QWP ingress reconnect and replay", () => {
     expect(sender.metrics.pendingRows).toBe(0);
     connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
     await expect(retried).resolves.toBe(true);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
     expect(sender.metrics).toMatchObject({
       pendingRows: 0,
       totalRowsPublished: 1,
@@ -4431,7 +4429,7 @@ describe("QWP ingress reconnect and replay", () => {
     expect(events.every((event) => event.timestampMs > 0)).toBe(true);
     expect(session.metrics).toMatchObject({
       publishedSequence: 1n,
-      acknowledgedSequence: 1n,
+      ackedSequence: 1n,
       totalFramesPublished: 2,
       totalFramesSent: 3,
       totalBytesSent: 3,
@@ -4852,8 +4850,8 @@ describe("QWP ingress reconnect and replay", () => {
     await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
 
     let acknowledgedAtWake: bigint | undefined;
-    const closing = session.waitForAcknowledged(0n, 1_000).then(() => {
-      acknowledgedAtWake = session.metrics.acknowledgedSequence;
+    const closing = session.waitForAck(0n, 1_000).then(() => {
+      acknowledgedAtWake = session.metrics.ackedSequence;
       return session.close();
     });
     connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
@@ -4883,7 +4881,7 @@ describe("QWP ingress reconnect and replay", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
     await expect(closing).resolves.toBeUndefined();
-    expect(session.metrics.acknowledgedSequence).toBe(0n);
+    expect(session.metrics.ackedSequence).toBe(0n);
     expect(kinds).toContain(QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED);
   });
 
@@ -4923,13 +4921,13 @@ describe("QWP ingress reconnect and replay", () => {
     await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
     expect(session.publishedFrameSequence).toBe(7n);
 
-    const tail = session.waitForAcknowledged(6n, 1_000).then(
+    const tail = session.waitForAck(6n, 1_000).then(
       () => "acknowledged",
       (error: Error) => error.name,
     );
     const current = session
-      .waitForAcknowledged(7n, 1_000)
-      .then(() => session.metrics.acknowledgedSequence);
+      .waitForAck(7n, 1_000)
+      .then(() => session.metrics.ackedSequence);
     // One cumulative OK covers the recovered prefix and the new frame.
     connection.receive(ingressResponse(QWP_STATUS.OK, 1n));
     await vi.waitFor(() => expect(replayStore.discarding).toBe(true));
@@ -4979,7 +4977,7 @@ describe("QWP ingress reconnect and replay", () => {
       await expect(delivered).resolves.toBe(true);
       // Nothing was published twice: the replay delivered the only copy.
       expect(session.metrics.totalFramesPublished).toBe(1);
-      expect(sender.acknowledgedSequence).toBe(0n);
+      expect(sender.ackedSequence).toBe(0n);
     } finally {
       await sender.close();
     }
@@ -5736,13 +5734,11 @@ describe("QWP ingress reconnect and replay", () => {
     connection.receive(ingressResponse(QWP_STATUS.OK, 2n, [["trades", 50n]]));
     // The ordinary OKs arrive, but with durable tracking only durable progress
     // advances the ACK watermark and trims the journal.
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(2n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(2n));
     expect(Array.from(replayStore.records.keys())).toEqual([0n, 1n, 2n]);
     expect(session.acknowledgedFrameSequence).toBe(-1n);
     let watermarkSettled = false;
-    const watermark = session.waitForAcknowledged(2n, 1_000).then(() => {
+    const watermark = session.waitForAck(2n, 1_000).then(() => {
       watermarkSettled = true;
     });
 
@@ -5790,13 +5786,11 @@ describe("QWP ingress reconnect and replay", () => {
     await session.publishFrame(Uint8Array.of(2));
     await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
     connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["trades", 1n]]));
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(1n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(1n));
     expect(Array.from(replayStore.records.keys())).toEqual([1n]);
 
     let durable = false;
-    const waiting = session.waitForAcknowledged(1n).then(() => {
+    const waiting = session.waitForAck(1n).then(() => {
       durable = true;
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -6039,22 +6033,19 @@ describe("QWP ingress reconnect and replay", () => {
         expect(connection.sent).toEqual([Uint8Array.of(5)]),
       );
       expect(sender.publishedSequence).toBe(0n);
-      expect(sender.acknowledgedSequence).toBe(-1n);
+      expect(sender.ackedSequence).toBe(-1n);
 
       // Longer than the test timeout, so only the OK itself can settle this
       // wait. The wait's own deadline re-checks the watermark before it
       // expires, which with a shorter timeout resolved true even when nothing
       // woke the waiter for the hidden OK.
-      const waiting = sender.waitForAcknowledged(
-        sender.publishedSequence,
-        60_000,
-      );
+      const waiting = sender.waitForAck(sender.publishedSequence, 60_000);
       connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
       await expect(waiting).resolves.toBe(true);
-      expect(sender.acknowledgedSequence).toBe(0n);
+      expect(sender.ackedSequence).toBe(0n);
       // Recovered frames have no live send waiter, so their OK stays hidden
       // from the session even though its ACK watermark waiter must wake.
-      expect(session.metrics.acknowledgedSequence).toBe(-1n);
+      expect(session.metrics.ackedSequence).toBe(-1n);
       expect(onResponse).not.toHaveBeenCalled();
     } finally {
       await sender.close();
@@ -6136,7 +6127,7 @@ describe("QWP ingress reconnect and replay", () => {
       pendingReplayFrames: 0,
       totalFramesReplayed: 0,
     });
-    await expect(session.waitForAcknowledged(7n, 1_000)).rejects.toMatchObject({
+    await expect(session.waitForAck(7n, 1_000)).rejects.toMatchObject({
       name: "QwpIngressAckAbandonedError",
       targetSequence: 7n,
       fromFsn: 5n,
@@ -6203,7 +6194,7 @@ describe("QWP ingress reconnect and replay", () => {
     });
     expect(session.publishedFrameSequence).toBe(7n);
     await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(5n));
-    await expect(session.waitForAcknowledged(6n, 1_000)).rejects.toBeInstanceOf(
+    await expect(session.waitForAck(6n, 1_000)).rejects.toBeInstanceOf(
       QwpIngressAckAbandonedError,
     );
 
@@ -6219,7 +6210,7 @@ describe("QWP ingress reconnect and replay", () => {
       expect(await assignedReplaySegments(directory)).toEqual([]),
     );
     await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(8n));
-    await expect(session.waitForAcknowledged(8n, 1_000)).resolves.toBe(true);
+    await expect(session.waitForAck(8n, 1_000)).resolves.toBe(true);
     await session.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -6334,9 +6325,7 @@ describe("QWP ingress reconnect and replay", () => {
     const pending = publishAndWait(session, Uint8Array.of(7));
     await vi.waitFor(() => expect(connection.sent).toHaveLength(1));
     connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["trades", 42n]]));
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(0n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
     expect(await assignedReplaySegments(directory)).toHaveLength(1);
 
     // The durable ACK, not the ordinary OK, completes the wait.

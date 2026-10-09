@@ -1081,10 +1081,10 @@ describe("QWP WebSocket adapters", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     // The ordinary OK does not satisfy a durable sender; durable upload does.
     expect(settled).toBe(false);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
     socket.message(durableResponse([["events", 1n]]));
     await expect(waiting).resolves.toBe(true);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
     await sender.close();
   });
 
@@ -1384,7 +1384,7 @@ describe("QWP WebSocket adapters", () => {
     await expect(sender.flush()).resolves.toBe(true);
     expect(socket.sent).toHaveLength(1);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
     await sender.close();
   });
 
@@ -1561,7 +1561,7 @@ describe("QWP WebSocket adapters", () => {
       totalTransactionsCommitted: 1,
       ingress: {
         publishedSequence: 1n,
-        acknowledgedSequence: 1n,
+        ackedSequence: 1n,
         totalFramesPublished: 2,
         totalFramesSent: 2,
         totalAcks: 1,
@@ -1677,7 +1677,7 @@ describe("QWP WebSocket adapters", () => {
       table.nextRow();
     }
     await session.publishTables([table]);
-    await session.waitForAcknowledged(session.publishedFrameSequence);
+    await session.waitForAck(session.publishedFrameSequence);
     expect(socket.sent).toHaveLength(2);
     expect(socket.sent.every((frame) => frame.byteLength <= 4096)).toBe(true);
     await session.close();
@@ -2414,12 +2414,12 @@ describe("QwpIngressSession", () => {
     expect(sender.publishedSequence).toBe(3n);
     await vi.waitFor(() => expect(socket.sent).toHaveLength(4));
     expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1, 1]);
-    const acknowledged = sender.waitForAcknowledged(3n, 1_000);
+    const acknowledged = sender.waitForAck(3n, 1_000);
     socket.message(
       ingressResponse(QWP_STATUS.OK, 3n, undefined, [["events", 4n]]),
     );
     await expect(acknowledged).resolves.toBe(true);
-    expect(sender.acknowledgedSequence).toBe(3n);
+    expect(sender.ackedSequence).toBe(3n);
     await sender.close();
   });
 
@@ -2438,12 +2438,12 @@ describe("QwpIngressSession", () => {
     expect(session.publishedFrameSequence).toBe(1n);
     expect(session.acknowledgedFrameSequence).toBe(-1n);
 
-    const first = session.waitForAcknowledged(0n, 1_000);
-    const second = session.waitForAcknowledged(1n, 1_000);
+    const first = session.waitForAck(0n, 1_000);
+    const second = session.waitForAck(1n, 1_000);
     socket.message(ingressResponse(QWP_STATUS.OK, 1n));
     await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
     expect(session.acknowledgedFrameSequence).toBe(1n);
-    await expect(session.waitForAcknowledged(-1n)).resolves.toBe(true);
+    await expect(session.waitForAck(-1n)).resolves.toBe(true);
     await session.close();
   });
 
@@ -2459,7 +2459,7 @@ describe("QwpIngressSession", () => {
     });
 
     await session.publishFrame(Uint8Array.of(1));
-    const acknowledged = session.waitForAcknowledged(0n, 1_000);
+    const acknowledged = session.waitForAck(0n, 1_000);
     socket.message(ingressResponse(QWP_STATUS.OK, 100n));
 
     await expect(acknowledged).rejects.toBeInstanceOf(QwpProtocolError);
@@ -2483,7 +2483,7 @@ describe("QwpIngressSession", () => {
       const session = new QwpIngressSession(await connecting);
       await session.publishFrame(Uint8Array.of(1));
       const sequence = session.publishedFrameSequence;
-      const waiting = session.waitForAcknowledged(sequence, 25);
+      const waiting = session.waitForAck(sequence, 25);
 
       await vi.advanceTimersByTimeAsync(25);
       await expect(waiting).resolves.toBe(false);
@@ -2516,7 +2516,7 @@ describe("QwpIngressSession", () => {
       }
       let outcome = "pending";
       const draining = session
-        .waitForAcknowledged(2n, 100)
+        .waitForAck(2n, 100)
         .then(
           (acknowledged) =>
             (outcome = acknowledged ? "acknowledged" : "timed out"),
@@ -2535,7 +2535,7 @@ describe("QwpIngressSession", () => {
       expect(outcome).toBe("acknowledged");
 
       // Without progress the same budget runs out.
-      const stalled = session.waitForAcknowledged(3n, 100);
+      const stalled = session.waitForAck(3n, 100);
       await vi.advanceTimersByTimeAsync(100);
       await expect(stalled).resolves.toBe(false);
       expect(session.acknowledgedFrameSequence).toBe(2n);
@@ -2559,7 +2559,7 @@ describe("QwpIngressSession", () => {
       });
       await session.publishFrame(Uint8Array.of(1));
       let outcome: unknown = "pending";
-      const waiting = session.waitForAcknowledged(0n).then((acknowledged) => {
+      const waiting = session.waitForAck(0n).then((acknowledged) => {
         outcome = acknowledged;
       });
 
@@ -2585,13 +2585,13 @@ describe("QwpIngressSession", () => {
     const session = new QwpIngressSession(await connecting);
     await session.publishFrame(Uint8Array.of(1));
 
-    await expect(session.waitForAcknowledged(0n, 0)).resolves.toBe(false);
-    await expect(session.waitForAcknowledged(0n, -1)).resolves.toBe(false);
+    await expect(session.waitForAck(0n, 0)).resolves.toBe(false);
+    await expect(session.waitForAck(0n, -1)).resolves.toBe(false);
     socket.message(ingressResponse(QWP_STATUS.OK, 0n));
     await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(0n));
-    await expect(session.waitForAcknowledged(0n, 0)).resolves.toBe(true);
+    await expect(session.waitForAck(0n, 0)).resolves.toBe(true);
     for (const timeoutMs of [Number.NaN, Infinity, -Infinity, 0x7fffffff + 1]) {
-      await expect(session.waitForAcknowledged(0n, timeoutMs)).rejects.toThrow(
+      await expect(session.waitForAck(0n, timeoutMs)).rejects.toThrow(
         RangeError,
       );
     }
@@ -2613,7 +2613,7 @@ describe("QwpIngressSession", () => {
     await vi.waitFor(() => expect(session.metrics.totalNacks).toBe(1));
 
     // Thrown synchronously once the session has failed, like any other call.
-    expect(() => session.waitForAcknowledged(0n, 0)).toThrow("write failed");
+    expect(() => session.waitForAck(0n, 0)).toThrow("write failed");
     await session.close();
   });
 
@@ -2636,12 +2636,10 @@ describe("QwpIngressSession", () => {
 
     await session.publishFrame(Uint8Array.of(1));
     const sequence = session.publishedFrameSequence;
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(0n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
     expect(session.acknowledgedFrameSequence).toBe(-1n);
     let settled = false;
-    const waiting = session.waitForAcknowledged(sequence, 1_000).then(() => {
+    const waiting = session.waitForAck(sequence, 1_000).then(() => {
       settled = true;
     });
     await Promise.resolve();
@@ -2658,7 +2656,7 @@ describe("QwpIngressSession", () => {
     // targets are only tracked when the caller asked for them with
     // durableAckKeepaliveMs. A session negotiated durable -- here by a server
     // that selects the subprotocol without being asked -- then reported a
-    // watermark nothing advances: waitForAcknowledged() timed out on frames
+    // watermark nothing advances: waitForAck() timed out on frames
     // the server had already acknowledged, and close() failed with
     // "pending data may be lost" on a fully acknowledged sender.
     const socket = new FakeWebSocket();
@@ -2678,9 +2676,7 @@ describe("QwpIngressSession", () => {
 
     await session.publishFrame(Uint8Array.of(1));
     const sequence = session.publishedFrameSequence;
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(0n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
     // Nothing tracks durability here, so the cumulative OK is the watermark.
     expect(session.acknowledgedFrameSequence).toBe(0n);
     expect(
@@ -2690,9 +2686,7 @@ describe("QwpIngressSession", () => {
         }
       ).durableFrameTargets.size,
     ).toBe(0);
-    await expect(session.waitForAcknowledged(sequence, 1_000)).resolves.toBe(
-      true,
-    );
+    await expect(session.waitForAck(sequence, 1_000)).resolves.toBe(true);
     await session.close();
   });
 
@@ -2729,9 +2723,7 @@ describe("QwpIngressSession", () => {
     };
 
     await session.publishFrame(Uint8Array.of(1));
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(0n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
     expect(session.acknowledgedFrameSequence).toBe(0n);
     expect(
       (
@@ -2740,7 +2732,7 @@ describe("QwpIngressSession", () => {
         }
       ).durableFrameTargets.size,
     ).toBe(0);
-    await expect(session.waitForAcknowledged(0n, 1_000)).resolves.toBe(true);
+    await expect(session.waitForAck(0n, 1_000)).resolves.toBe(true);
     await session.close();
   });
 
@@ -2754,7 +2746,7 @@ describe("QwpIngressSession", () => {
     const session = new QwpIngressSession(await connecting);
     await session.publishFrame(Uint8Array.of(1));
     await session.publishFrame(Uint8Array.of(2));
-    const acknowledged = session.waitForAcknowledged(1n, 1_000);
+    const acknowledged = session.waitForAck(1n, 1_000);
     socket.message(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n, "write failed"));
 
     await expect(acknowledged).rejects.toMatchObject({
@@ -2817,9 +2809,7 @@ describe("QwpIngressSession", () => {
         };
 
         await session.publishFrame(Uint8Array.of(1));
-        await vi.waitFor(() =>
-          expect(session.metrics.acknowledgedSequence).toBe(0n),
-        );
+        await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
         // The ordinary OK is the watermark, and no poll frame follows it.
         expect(session.acknowledgedFrameSequence).toBe(0n);
         await vi.advanceTimersByTimeAsync(20);
@@ -2939,7 +2929,7 @@ describe("QwpIngressSession", () => {
 
     await session.publishTables([rows], { gorilla: false });
     expect(session.publishedFrameSequence).toBe(1n);
-    await session.waitForAcknowledged(1n);
+    await session.waitForAck(1n);
 
     const rowCounts = socket.sent.map(firstIngressTableRowCount);
     expect(socket.sent).toHaveLength(2);
@@ -2985,7 +2975,7 @@ describe("QwpIngressSession", () => {
 
     await session.publishTables([rows], { gorilla: false });
     expect(session.publishedFrameSequence).toBe(1n);
-    await session.waitForAcknowledged(1n);
+    await session.waitForAck(1n);
 
     const rowCounts = socket.sent.map(firstIngressTableRowCount);
     expect(socket.sent).toHaveLength(2);
@@ -3027,7 +3017,7 @@ describe("QwpIngressSession", () => {
 
     await session.publishTables(tables, { gorilla: false });
     expect(session.publishedFrameSequence).toBe(1n);
-    await session.waitForAcknowledged(1n);
+    await session.waitForAck(1n);
     expect(
       socket.sent.map((frame) => decodeQwpFrame(frame).tableCount),
     ).toEqual([32_768, 32_768]);
@@ -3059,7 +3049,7 @@ describe("QwpIngressSession", () => {
 
     await session.publishTables([rows], { gorilla: false });
     expect(session.publishedFrameSequence).toBe(3n);
-    await session.waitForAcknowledged(3n);
+    await session.waitForAck(3n);
     expect(socket.sent).toHaveLength(4);
     expect(socket.sent.every((frame) => frame.byteLength <= cap)).toBe(true);
     expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1, 1]);
@@ -3271,7 +3261,7 @@ describe("QwpIngressSession", () => {
       { startId: 0, entries: ["A"] },
       { startId: 1, entries: ["B"] },
     ]);
-    await session.waitForAcknowledged(session.publishedFrameSequence);
+    await session.waitForAck(session.publishedFrameSequence);
     await session.close();
   });
 
@@ -3304,7 +3294,7 @@ describe("QwpIngressSession", () => {
     };
     await session.publishTables([small]);
     expect(session.publishedFrameSequence).toBe(0n);
-    await expect(session.waitForAcknowledged(0n)).resolves.toBe(true);
+    await expect(session.waitForAck(0n)).resolves.toBe(true);
     await session.close();
   });
 
@@ -3328,8 +3318,8 @@ describe("QwpIngressSession", () => {
       session.publishFrame(Uint8Array.of(2)),
     ]);
     expect(session.publishedFrameSequence).toBe(1n);
-    await expect(session.waitForAcknowledged(0n)).resolves.toBe(true);
-    await expect(session.waitForAcknowledged(1n)).resolves.toBe(true);
+    await expect(session.waitForAck(0n)).resolves.toBe(true);
+    await expect(session.waitForAck(1n)).resolves.toBe(true);
     expect(socket.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
     await session.close();
   });
@@ -3448,7 +3438,7 @@ describe("QwpIngressSession", () => {
     });
     expect(session.metrics).toMatchObject({
       publishedSequence: 1n,
-      acknowledgedSequence: 0n,
+      ackedSequence: 0n,
       pendingDurableTables: 0,
       totalFramesPublished: 2,
       totalBytesPublished: 2,
@@ -3487,7 +3477,7 @@ describe("QwpIngressSession", () => {
       ),
     );
     const waits = Array.from({ length: 8 }, (_, index) =>
-      session.waitForAcknowledged(BigInt(index)),
+      session.waitForAck(BigInt(index)),
     );
     socket.message(ingressResponse(QWP_STATUS.OK, 7n));
     await expect(Promise.all(waits)).resolves.toHaveLength(8);
@@ -3523,9 +3513,7 @@ describe("QwpIngressSession", () => {
 
       await session.publishFrame(Uint8Array.of(1));
       // With durable tracking the watermark advances only after durability.
-      const durable = session.waitForAcknowledged(
-        session.publishedFrameSequence,
-      );
+      const durable = session.waitForAck(session.publishedFrameSequence);
       await vi.advanceTimersByTimeAsync(25);
       expect(socket.pingCalls).toBe(1);
       await vi.advanceTimersByTimeAsync(25);
@@ -3633,9 +3621,7 @@ describe("QwpIngressSession", () => {
       };
 
       await session.publishFrame(Uint8Array.of(1));
-      const durable = session.waitForAcknowledged(
-        session.publishedFrameSequence,
-      );
+      const durable = session.waitForAck(session.publishedFrameSequence);
       await vi.advanceTimersByTimeAsync(25);
       await expect(durable).resolves.toBe(true);
       expect(socket.sent).toHaveLength(2);
@@ -3683,7 +3669,7 @@ describe("QwpIngressSession", () => {
       await session.publishFrame(
         encodeQwpIngressFrame([longTable("trades", [1n])]),
       );
-      const durable = session.waitForAcknowledged(0n);
+      const durable = session.waitForAck(0n);
       await session.publishFrame(
         encodeQwpIngressFrame([longTable("trades", [2n])], {
           deferCommit: true,
@@ -3698,13 +3684,11 @@ describe("QwpIngressSession", () => {
       // not a failure.
       await vi.advanceTimersByTimeAsync(40);
       expect(session.metrics.lastError).toBeUndefined();
-      expect(session.metrics.acknowledgedSequence).toBe(0n);
+      expect(session.metrics.ackedSequence).toBe(0n);
 
       await session.publishFrame(encodeQwpIngressFrame([]));
-      await vi.waitFor(() =>
-        expect(session.metrics.acknowledgedSequence).toBe(3n),
-      );
-      const committed = session.waitForAcknowledged(3n);
+      await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(3n));
+      const committed = session.waitForAck(3n);
       socket.message(durableResponse([["trades", 43n]]));
       await expect(committed).resolves.toBe(true);
       expect(session.metrics.lastError).toBeUndefined();

@@ -332,8 +332,8 @@ class Sender {
   }
 
   /** Highest cumulative QWP ACK watermark, or -1n when unavailable. */
-  get acknowledgedSequence(): bigint {
-    return this.qwpSender?.acknowledgedSequence ?? -1n;
+  get ackedSequence(): bigint {
+    return this.qwpSender?.ackedSequence ?? -1n;
   }
 
   /**
@@ -344,12 +344,12 @@ class Sender {
    * waiting. Non-QWP transports resolve true for a negative sequence, which
    * flushAndGetSequence() returns for them.
    */
-  async waitForAcknowledged(
+  async waitForAck(
     targetSequence: bigint,
     timeoutMs?: number,
   ): Promise<boolean> {
     if (this.qwpSender) {
-      return this.qwpSender.waitForAcknowledged(targetSequence, timeoutMs);
+      return this.qwpSender.waitForAck(targetSequence, timeoutMs);
     }
     if (typeof targetSequence !== "bigint") {
       throw new TypeError("QWP ACK target sequence must be a bigint");

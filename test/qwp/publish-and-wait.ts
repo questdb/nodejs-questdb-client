@@ -25,16 +25,16 @@ export function publishAndWait(
 /**
  * Waits for the ACK watermark to cover everything published so far and
  * resolves with that frame sequence. A latched session failure rejects here
- * rather than throwing synchronously, as waitForAcknowledged() itself does,
- * and so does a wait that times out: a test expecting an ACK should fail
- * loudly rather than carry on with a sequence nothing acknowledged.
+ * rather than throwing synchronously, as waitForAck() itself does, and so does
+ * a wait that times out: a test expecting an ACK should fail loudly rather than
+ * carry on with a sequence nothing acknowledged.
  */
 export async function waitForPublished(
   session: QwpIngressSession,
   timeoutMs?: number,
 ): Promise<bigint> {
   const sequence = session.publishedFrameSequence;
-  if (!(await session.waitForAcknowledged(sequence, timeoutMs))) {
+  if (!(await session.waitForAck(sequence, timeoutMs))) {
     throw new Error(
       `the QWP ACK watermark did not reach frame ${sequence} in time`,
     );

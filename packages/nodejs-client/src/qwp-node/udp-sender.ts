@@ -221,7 +221,7 @@ export class QwpNodeUdpSession implements QwpSenderSession {
    * UDP has no server acknowledgements, so a datagram counts as acknowledged
    * once it is sent: this resolves true for any published sequence.
    */
-  waitForAcknowledged(targetSequence: bigint): Promise<boolean> {
+  waitForAck(targetSequence: bigint): Promise<boolean> {
     this.assertOpen();
     if (targetSequence > this.sequence) {
       return Promise.reject(
@@ -297,7 +297,7 @@ export class QwpNodeUdpSession implements QwpSenderSession {
           // both publishedFrameSequence and acknowledgedFrameSequence, so
           // counting a datagram the kernel refused reported rows that never
           // left the host as delivered: flushAndGetSequence() returned a
-          // sequence covering them and waitForAcknowledged() resolved on it.
+          // sequence covering them and waitForAck() resolved on it.
           this.reportError(
             describeSendFailure(
               error,

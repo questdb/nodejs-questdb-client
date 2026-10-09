@@ -35,10 +35,7 @@ export interface QwpSenderSession {
    * when it makes no progress for `timeoutMs`; zero or less checks without
    * waiting. Rejects with the session's failure once it can no longer advance.
    */
-  waitForAcknowledged(
-    targetSequence: bigint,
-    timeoutMs?: number,
-  ): Promise<boolean>;
+  waitForAck(targetSequence: bigint, timeoutMs?: number): Promise<boolean>;
   /** Optional socket-send boundary for RAM-backed fast close. */
   waitForPendingSends?(): Promise<void>;
   /**

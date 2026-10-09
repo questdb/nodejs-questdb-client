@@ -268,12 +268,12 @@ describe("Sender QWP integration", () => {
       .atNow();
     await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
     await vi.waitFor(() => expect(acknowledge).toBeTypeOf("function"));
-    const acknowledged = sender.waitForAcknowledged(0n, 1_000);
+    const acknowledged = sender.waitForAck(0n, 1_000);
     acknowledge!();
     await expect(acknowledged).resolves.toBe(true);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
     await sender.close();
 
     expect(authorization).toBe("Bearer secret");
@@ -328,7 +328,7 @@ describe("Sender QWP integration", () => {
       expect(settled).toBe(false);
       acknowledge!();
       await expect(waiting).resolves.toBe(true);
-      expect(sender.acknowledgedSequence).toBe(0n);
+      expect(sender.ackedSequence).toBe(0n);
 
       // Unacknowledged, the wait runs out and reports false. The frame stays
       // queued, so the next wait needs no second copy of it.
@@ -557,7 +557,7 @@ describe("Sender QWP integration", () => {
     await expect(sender.close()).resolves.toBeUndefined();
     expect(frames).toHaveLength(1);
     expect(ackSent).toBe(true);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
   });
 
   it("releases the store-and-forward slot before close() returns", async () => {
@@ -642,7 +642,7 @@ describe("Sender QWP integration", () => {
       name: "QwpSenderCloseTimeoutError",
       timeoutMs: 25,
       targetSequence: 0n,
-      acknowledgedSequence: -1n,
+      ackedSequence: -1n,
     });
     expect(frames).toHaveLength(1);
   });

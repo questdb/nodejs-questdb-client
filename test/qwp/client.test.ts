@@ -157,7 +157,7 @@ class FakeSenderSession implements QwpSenderSession {
     return Promise.resolve();
   }
 
-  waitForAcknowledged(): Promise<boolean> {
+  waitForAck(): Promise<boolean> {
     return Promise.resolve(true);
   }
 

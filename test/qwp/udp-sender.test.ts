@@ -325,7 +325,7 @@ describe("QWP Node UDP sender", () => {
     // must not move: `sequence` backs both publishedFrameSequence and
     // acknowledgedFrameSequence, so advancing it over a datagram that never
     // left the host reported those rows as delivered -- flushAndGetSequence()
-    // returned a sequence covering them and waitForAcknowledged() resolved.
+    // returned a sequence covering them and waitForAck() resolved.
     await expect(
       session.publishTables([longTable(1)]),
     ).resolves.toBeUndefined();
@@ -338,7 +338,7 @@ describe("QWP Node UDP sender", () => {
       totalDatagramsSent: 0,
       totalSendErrors: 1,
     });
-    await expect(session.waitForAcknowledged(0n)).rejects.toThrow(
+    await expect(session.waitForAck(0n)).rejects.toThrow(
       /has not been published/,
     );
     await session.close();
@@ -768,7 +768,7 @@ describe("QWP Node UDP sender", () => {
     // UDP has no server acknowledgements, so the wait ends with the send.
     await expect(sender.flushAndWait()).resolves.toBe(true);
     expect(socket.packets).toHaveLength(1);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
     await sender.close();
   });
 });

@@ -47,7 +47,7 @@ class EncodingSession implements QwpSenderSession {
   }
 
   /** Every frame counts as acknowledged once it is encoded. */
-  async waitForAcknowledged(): Promise<boolean> {
+  async waitForAck(): Promise<boolean> {
     return true;
   }
 

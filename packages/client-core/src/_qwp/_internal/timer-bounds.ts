@@ -20,7 +20,7 @@ export function exceedsQwpTimerCeiling(value: number): boolean {
 }
 
 /**
- * Validates the timeout of an ACK wait (waitForAcknowledged, flushAndWait):
+ * Validates the timeout of an ACK wait (waitForAck, flushAndWait):
  * any finite value up to the host timer ceiling. Zero or less is valid and
  * means a check that does not wait, as in the Java client.
  */

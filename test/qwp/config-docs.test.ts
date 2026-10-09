@@ -306,7 +306,7 @@ describe("QWP configuration-string reference", () => {
       async publishTablesDelta(tables: readonly { rowCount: number }[]) {
         sends.push(tables[0].rowCount);
       },
-      async waitForAcknowledged() {},
+      async waitForAck() {},
       async close() {},
     } as unknown as QwpSenderSession;
 

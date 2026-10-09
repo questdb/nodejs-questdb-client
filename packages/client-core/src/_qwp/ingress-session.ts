@@ -199,7 +199,7 @@ function planIngressFrames(
  */
 export interface QwpIngressSessionOptions {
   /**
-   * Default timeout for waitForAcknowledged() and QwpSender.flushAndWait():
+   * Default timeout for waitForAck() and QwpSender.flushAndWait():
    * how long a wait may go without the ACK watermark advancing. Defaults to
    * 15 seconds. Capped at 2,147,483,647ms (the host timer ceiling); a larger
    * value throws a `RangeError`.
@@ -296,8 +296,8 @@ export interface QwpIngressSessionOptions {
   /** Monotonic send/accept/durability notifications. Callback errors are ignored. */
   onProgress?: (event: QwpIngressProgressEvent) => void;
   /**
-   * Server rejections and terminal session failures. A waitForAcknowledged()
-   * that times out is reported only to its caller.
+   * Server rejections and terminal session failures. A waitForAck() that times
+   * out is reported only to its caller.
    */
   onError?: (event: QwpIngressErrorEvent) => void;
 }
@@ -352,7 +352,7 @@ export interface QwpIngressMetrics {
   /** Highest client-session sequence allocated, or -1 before the first send. */
   readonly publishedSequence: bigint;
   /** Highest client-session sequence covered by a successful cumulative ACK. */
-  readonly acknowledgedSequence: bigint;
+  readonly ackedSequence: bigint;
   readonly pendingDurableTables: number;
   readonly totalFramesPublished: number;
   readonly totalBytesPublished: number;
@@ -602,7 +602,7 @@ function validateIngressSessionOptions(
  *
  * Publications are serialized to preserve the server's zero-based wire
  * sequence. Successful ACKs are cumulative, so the ACK watermark covers every
- * frame through the acknowledged sequence; waitForAcknowledged() observes it.
+ * frame through the acknowledged sequence; waitForAck() observes it.
  *
  * @internal The layer below QwpSender. As in the Java, Rust and Python
  * clients, applications publish through a sender instead, so neither package
@@ -881,7 +881,7 @@ export class QwpIngressSession {
     // reports durable-ACK support the caller never asked for -- or a session
     // built directly on a durable-capable connection without
     // durableAckKeepaliveMs -- left this pinned at -1n while the server's
-    // cumulative OK had already landed, so waitForAcknowledged() timed out on
+    // cumulative OK had already landed, so waitForAck() timed out on
     // acknowledged frames and close() failed with QwpSenderCloseTimeoutError
     // and "pending data may be lost" on a fully acknowledged sender.
     return this.durableAckTracked
@@ -893,7 +893,7 @@ export class QwpIngressSession {
     const transport = this.connection.getIngressMetrics?.();
     return Object.freeze({
       publishedSequence: this.nextSequence - 1n,
-      acknowledgedSequence: this.acknowledgedSequence,
+      ackedSequence: this.acknowledgedSequence,
       pendingDurableTables: this.pendingDurableTargets.size,
       totalFramesPublished: this.totalFramesPublished,
       totalBytesPublished: this.totalBytesPublished,
@@ -944,7 +944,7 @@ export class QwpIngressSession {
    * resolves once every frame is published locally: in the journal with Node
    * store-and-forward, in the in-memory replay queue for other reconnecting
    * sessions, or on the WebSocket for a fixed connection. Pass
-   * publishedFrameSequence to waitForAcknowledged() to wait for the ACK.
+   * publishedFrameSequence to waitForAck() to wait for the ACK.
    */
   publishTables(
     tables: readonly QwpTableBuffer[],
@@ -1074,8 +1074,8 @@ export class QwpIngressSession {
   /**
    * Publishes one pre-encoded frame without waiting for its server ACK. Like
    * publishTables(), this resolves once the frame is published locally; pass
-   * publishedFrameSequence to waitForAcknowledged() to wait for the ACK, or
-   * observe acceptance through the progress callbacks.
+   * publishedFrameSequence to waitForAck() to wait for the ACK, or observe
+   * acceptance through the progress callbacks.
    */
   publishFrame(frame: Uint8Array): Promise<void> {
     this.throwIfUnavailable();
@@ -1166,7 +1166,7 @@ export class QwpIngressSession {
    * tracking the watermark advances only after durability. A negative target
    * is already satisfied.
    */
-  waitForAcknowledged(
+  waitForAck(
     targetSequence: bigint,
     timeoutMs = this.options.ackTimeoutMs ?? 15_000,
   ): Promise<boolean> {

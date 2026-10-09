@@ -102,20 +102,20 @@ export interface QwpSenderOptions {
 export class QwpSenderCloseTimeoutError extends Error {
   readonly timeoutMs: number;
   readonly targetSequence: bigint;
-  readonly acknowledgedSequence: bigint;
+  readonly ackedSequence: bigint;
 
   constructor(
     timeoutMs: number,
     targetSequence: bigint,
-    acknowledgedSequence: bigint,
+    ackedSequence: bigint,
   ) {
     super(
-      `QWP sender close timed out after ${timeoutMs}ms [targetSequence=${targetSequence}, acknowledgedSequence=${acknowledgedSequence}]; pending data may be lost`,
+      `QWP sender close timed out after ${timeoutMs}ms [targetSequence=${targetSequence}, ackedSequence=${ackedSequence}]; pending data may be lost`,
     );
     this.name = "QwpSenderCloseTimeoutError";
     this.timeoutMs = timeoutMs;
     this.targetSequence = targetSequence;
-    this.acknowledgedSequence = acknowledgedSequence;
+    this.ackedSequence = ackedSequence;
   }
 }
 
@@ -1962,8 +1962,8 @@ export class QwpSender {
   /**
    * Publishes pending rows without waiting for their server ACK and returns
    * the highest frame sequence published by this call, or -1n when it
-   * published nothing. Pass the result to waitForAcknowledged() to wait for
-   * that frame; flushAndWait() waits for everything published so far.
+   * published nothing. Pass the result to waitForAck() to wait for that frame;
+   * flushAndWait() waits for everything published so far.
    */
   async flushAndGetSequence(): Promise<bigint> {
     return this.enqueueSequenceFlush(false);
@@ -1991,14 +1991,11 @@ export class QwpSender {
     if (!session) return true;
     // The commit boundary, not the published watermark: the latter can end in
     // a recovered transaction tail that is retired instead of acknowledged.
-    return session.waitForAcknowledged(
-      this.lastCommitBoundarySequence,
-      timeoutMs,
-    );
+    return session.waitForAck(this.lastCommitBoundarySequence, timeoutMs);
   }
 
   /** Highest cumulative ACK watermark, or -1n before acknowledgement. */
-  get acknowledgedSequence(): bigint {
+  get ackedSequence(): bigint {
     return this.activeSession
       ? sessionAcknowledgedSequence(this.activeSession)
       : -1n;
@@ -2021,7 +2018,7 @@ export class QwpSender {
    * without waiting. Rejects when the server rejects a covered frame or the
    * session can no longer deliver.
    */
-  async waitForAcknowledged(
+  async waitForAck(
     targetSequence: bigint,
     timeoutMs?: number,
   ): Promise<boolean> {
@@ -2035,7 +2032,7 @@ export class QwpSender {
         ? undefined
         : await this.getSession();
     if (!session) return true;
-    return session.waitForAcknowledged(targetSequence, timeoutMs);
+    return session.waitForAck(targetSequence, timeoutMs);
   }
 
   private enqueueFlush(deferCommit: boolean): Promise<boolean> {
@@ -2180,7 +2177,7 @@ export class QwpSender {
         // The absolute close deadline bounds this wait even though the
         // watermark wait itself restarts its timeout on progress.
         const acknowledged = await this.withCloseDeadline(
-          session.waitForAcknowledged(target, remaining),
+          session.waitForAck(target, remaining),
           drainDeadline,
         );
         if (!acknowledged) throw this.closeTimeoutError();
@@ -2873,7 +2870,7 @@ export class QwpSender {
       (deferCommit || !this.hasDeferredMessages)
     ) {
       // Surfaces a latched session failure even when there is nothing to send.
-      if (this.activeSession) await this.activeSession.waitForAcknowledged(-1n);
+      if (this.activeSession) await this.activeSession.waitForAck(-1n);
       return { flushed: false, sequence: -1n };
     }
     const session = await this.getSession();

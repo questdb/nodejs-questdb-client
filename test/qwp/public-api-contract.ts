@@ -375,17 +375,17 @@ function senderSequenceContract(sender: QwpSender): void {
   const published: Promise<bigint> = sender.flushAndGetSequence();
   const drained: Promise<boolean> = sender.flushAndWait(5_000);
   const drainedByDefault: Promise<boolean> = sender.flushAndWait();
-  const senderWait: Promise<boolean> = sender.waitForAcknowledged(0n, 5_000);
-  const senderCheck: Promise<boolean> = sender.waitForAcknowledged(0n, 0);
+  const senderWait: Promise<boolean> = sender.waitForAck(0n, 5_000);
+  const senderCheck: Promise<boolean> = sender.waitForAck(0n, 0);
   const senderPublished: bigint = sender.publishedSequence;
-  const senderAcknowledged: bigint = sender.acknowledgedSequence;
+  const senderAcked: bigint = sender.ackedSequence;
   void published;
   void drained;
   void drainedByDefault;
   void senderWait;
   void senderCheck;
   void senderPublished;
-  void senderAcknowledged;
+  void senderAcked;
 }
 
 /**
@@ -414,15 +414,15 @@ function rootSenderSequenceContract(sender: Sender): void {
   const cancelled: Sender = sender.cancelRow();
   const published: Promise<bigint> = sender.flushAndGetSequence();
   const drained: Promise<boolean> = sender.flushAndWait(5_000);
-  const wait: Promise<boolean> = sender.waitForAcknowledged(0n, 5_000);
+  const wait: Promise<boolean> = sender.waitForAck(0n, 5_000);
   const publishedWatermark: bigint = sender.publishedSequence;
-  const acknowledgedWatermark: bigint = sender.acknowledgedSequence;
+  const ackedWatermark: bigint = sender.ackedSequence;
   void cancelled;
   void published;
   void drained;
   void wait;
   void publishedWatermark;
-  void acknowledgedWatermark;
+  void ackedWatermark;
 }
 
 function compiledWriterContract(sender: QwpSender, rootSender: Sender): void {

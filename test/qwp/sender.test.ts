@@ -84,10 +84,7 @@ class RecordingSession implements QwpSenderSession {
   }
 
   /** Nothing acknowledges later, so an uncovered target times out at once. */
-  async waitForAcknowledged(
-    target: bigint,
-    timeoutMs?: number,
-  ): Promise<boolean> {
+  async waitForAck(target: bigint, timeoutMs?: number): Promise<boolean> {
     this.waits.push({ target, timeoutMs });
     return target <= this.acknowledgedFrameSequence;
   }
@@ -145,7 +142,7 @@ class PublishingSession extends RecordingSession {
     return this.publishTables(tables, options);
   }
 
-  async waitForAcknowledged(target: bigint): Promise<boolean> {
+  async waitForAck(target: bigint): Promise<boolean> {
     if (target > this.acknowledgedFrameSequence) {
       this.acknowledgedFrameSequence = target;
     }
@@ -159,7 +156,7 @@ class WatermarkSession extends PublishingSession {
     resolve: (acknowledged: boolean) => void;
   }>();
 
-  waitForAcknowledged(target: bigint): Promise<boolean> {
+  waitForAck(target: bigint): Promise<boolean> {
     if (target < 0n || this.acknowledgedFrameSequence >= target) {
       return Promise.resolve(true);
     }
@@ -429,7 +426,7 @@ describe("QWP high-level sender", () => {
     expect(session.publicationAttempts).toBe(1);
     expect(session.acknowledgedFrameSequence).toBe(-1n);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
 
     session.acknowledgedFrameSequence = 0n;
     await sender.close();
@@ -504,7 +501,7 @@ describe("QWP high-level sender", () => {
     const closed = new QwpIngressSessionClosedError();
     let failure: Error = rejection;
     class FailingWaitSession extends RecordingSession {
-      override async waitForAcknowledged(target: bigint): Promise<boolean> {
+      override async waitForAck(target: bigint): Promise<boolean> {
         if (target >= 0n) throw failure;
         return true;
       }
@@ -943,10 +940,10 @@ describe("QWP high-level sender", () => {
 
     await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
 
     let acknowledged = false;
-    const waiting = sender.waitForAcknowledged(0n, 1_000).then(() => {
+    const waiting = sender.waitForAck(0n, 1_000).then(() => {
       acknowledged = true;
     });
     await Promise.resolve();
@@ -954,7 +951,7 @@ describe("QWP high-level sender", () => {
 
     session.acknowledgeThrough(0n);
     await waiting;
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
     // A flush that publishes nothing has no frame sequence to return.
     await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
     await sender.close();
@@ -970,7 +967,7 @@ describe("QWP high-level sender", () => {
 
     await sender.table("events").longColumn("value", 1n).atNow();
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
     await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
     expect(session.sends).toHaveLength(1);
 
@@ -1240,7 +1237,7 @@ describe("QWP high-level sender", () => {
       name: "QwpSenderCloseTimeoutError",
       timeoutMs: 10,
       targetSequence: 0n,
-      acknowledgedSequence: -1n,
+      ackedSequence: -1n,
     } satisfies Partial<QwpSenderCloseTimeoutError>);
     expect(session.sends).toHaveLength(1);
     expect(session.closeCount).toBe(1);
@@ -1262,7 +1259,7 @@ describe("QWP high-level sender", () => {
     class ElapsingSession extends WatermarkSession {
       private readonly rejecters = new Set<(error: Error) => void>();
 
-      override waitForAcknowledged(): Promise<boolean> {
+      override waitForAck(): Promise<boolean> {
         // Real code reaches this when the publication lands on the deadline,
         // a window of microseconds. Forcing the skew here makes it certain.
         skewMs = 10_000;
@@ -3967,7 +3964,7 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
         this.acknowledgedFrameSequence = ++this.publishedFrameSequence;
       }
 
-      async waitForAcknowledged(target: bigint): Promise<boolean> {
+      async waitForAck(target: bigint): Promise<boolean> {
         if (target > this.acknowledgedFrameSequence) {
           throw new Error("the fake acknowledges every frame it publishes");
         }
