@@ -2224,8 +2224,11 @@ describe("QWP ingress reconnect and replay", () => {
       );
       await vi.advanceTimersByTimeAsync(5_001);
       releaseReconnect(replacement);
+      // The error reports the 5 s it waited, not the configured zero.
       expect(await outcome).toMatchObject({
         name: "QwpSenderCloseTimeoutError",
+        timeoutMs: 5_000,
+        message: expect.stringContaining("timed out after 5000ms"),
       });
       expect(replacement.sent).toHaveLength(0);
       expect(sender.metrics.closed).toBe(true);

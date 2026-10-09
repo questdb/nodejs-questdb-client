@@ -2128,11 +2128,7 @@ export class QwpSender {
       this.closeFlushTimeoutMs > 0
         ? Date.now() + this.closeFlushTimeoutMs
         : undefined;
-    const publishDeadline =
-      Date.now() +
-      (this.closeFlushTimeoutMs > 0
-        ? this.closeFlushTimeoutMs
-        : DEFAULT_CLOSE_FLUSH_TIMEOUT_MS);
+    const publishDeadline = Date.now() + this.closePublishTimeoutMs;
     let terminalError: unknown;
 
     try {
@@ -2258,10 +2254,21 @@ export class QwpSender {
     if (closeError !== undefined) throw closeError;
   }
 
+  /**
+   * The bound close() actually applies. A fast close still bounds publication
+   * by the default, and its timeout error must report that wait, not the
+   * configured zero.
+   */
+  private get closePublishTimeoutMs(): number {
+    return this.closeFlushTimeoutMs > 0
+      ? this.closeFlushTimeoutMs
+      : DEFAULT_CLOSE_FLUSH_TIMEOUT_MS;
+  }
+
   private closeTimeoutError(): QwpSenderCloseTimeoutError {
     const session = this.activeSession;
     return new QwpSenderCloseTimeoutError(
-      this.closeFlushTimeoutMs,
+      this.closePublishTimeoutMs,
       this.lastCommitBoundarySequence,
       session ? sessionAcknowledgedSequence(session) : -1n,
     );
