@@ -610,6 +610,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private nextFrameSequence = 0n;
   private nextClientSequence = 0n;
   private publishedFrameSequence = -1n;
+  /** See getRecoveredCommitFrameSequence(). Fixed once recovery has run. */
+  private readonly recoveredCommitFrameSequence: bigint;
   /** Highest frame sequence the replay store has acknowledged. */
   private storeAcknowledgedFrameSequence = -1n;
   /**
@@ -786,6 +788,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
     this.nextFrameSequence = previous + 1n;
     this.publishedFrameSequence = previous;
+    // A recovered tail after the last commit is retired rather than
+    // acknowledged, so the commit before it is the last frame an ACK covers.
+    this.recoveredCommitFrameSequence = recoveredDiscardTail
+      ? (recoveredDiscardTail.predecessorSequence ?? -1n)
+      : previous;
   }
 
   static async connect(
@@ -1010,6 +1017,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
    */
   getPublishedFrameSequence(): bigint {
     return this.publishedFrameSequence;
+  }
+
+  /**
+   * The last frame recovered from the replay store that a server ACK will
+   * cover, or -1n. Recovered frames count as published, but a deferred tail
+   * that recovery retires is never acknowledged.
+   */
+  getRecoveredCommitFrameSequence(): bigint {
+    return this.recoveredCommitFrameSequence;
   }
 
   getIngressMetrics(): QwpIngressTransportMetrics {
@@ -2498,6 +2514,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // connectLoop retries its failures, so route this one the same way.
       // Deterministic corruption still escapes and stays terminal.
       if (!isRetryableReconnectError(error)) throw error;
+      // The same currency check as the success path below. A reconnect that
+      // completed during the read has already replayed every transmitted frame
+      // and skipped this one, so marking it transmitted here would leave it
+      // with no sender at all: requestReconnect() ignores the dead connection,
+      // and the replacement's next cumulative ACK would delete its journal
+      // record. Retry the read against the current connection instead.
+      if (this.connection !== connection || this.generation !== generation) {
+        return false;
+      }
       // Nothing reached the wire, so the frame is deliberately kept off the
       // wire log; marking it transmitted is what puts it in replayInto()'s
       // resend set, exactly as the batch-cap branch above does.

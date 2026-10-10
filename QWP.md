@@ -205,8 +205,8 @@ inside a rescheduling loop, accept any safe integer and are deliberately exempt:
 `poison_min_escalation_window_millis` and
 `catch_up_cap_gap_min_escalation_window_millis`, together with the typed
 spellings `reconnectMaxDurationMs`, `failoverMaxDurationMs`, `poisonMinEscalationWindowMs`,
-`catchUpCapGapMinEscalationWindowMs`, `idleTimeoutMs`, `maxLifetimeMs`,
-`autoFlushIntervalMs` and `durableAckPollIntervalMs`.
+`catchUpCapGapMinEscalationWindowMs`, `idleTimeoutMs`, `maxLifetimeMs` and
+`autoFlushIntervalMs`.
 
 ### Store-and-forward (Node only)
 
@@ -839,8 +839,9 @@ Like the Java QWP sender, `flush()` resolves after the complete logical flush
 reaches the local ingress/replay publication boundary. It does not wait for a
 server ACK. `flushAndWait()` flushes the same way and then waits
 until the server has acknowledged every frame the sender has published,
-including frames published earlier by auto-flush. It is the counterpart of the
-Java client's `drain()`:
+including frames published earlier by auto-flush and, once the sender has
+connected, the frames a store-and-forward journal recovered from an earlier
+process. It is the counterpart of the Java client's `drain()`:
 
 ```typescript
 await sender
@@ -863,11 +864,13 @@ and Python clients, so an outage runs it out while a large backlog that keeps
 draining does not. `false` means only that the wait ran out: the frames remain
 queued and are still delivered, and sending the rows again would deliver them
 twice. As in the Java client's `drain()`, a `timeoutMs` of zero or less flushes and
-then checks the watermark without waiting. A server rejection, a session that can
-no longer deliver (closed or failed terminally), and a recovered frame retired
-without an ACK reject instead. A transactional sender commits its open transaction
-first. Over UDP, which has no server acknowledgements, `flushAndWait()` resolves
-`true` once the datagrams are sent.
+then checks the watermark without waiting. A server rejection and a session that
+can no longer deliver (closed or failed terminally) reject instead. Recovered
+frames are waited for up to their last commit: a deferred tail that crash recovery
+retires without sending is never acknowledged, so it is not waited for. A
+transactional sender commits its open transaction first. Over UDP, which has no
+server acknowledgements, `flushAndWait()` resolves `true` once the datagrams are
+sent.
 
 To wait for one particular flush instead, publish first and wait for the
 cumulative ACK watermark separately:
@@ -1471,8 +1474,8 @@ The connect helpers also enforce that request on what comes back: a `RESULT_BATC
 declaring more rows than were asked for is rejected as a `QwpProtocolError` before
 any column is read. Decoder scratch is sized from the declared row count and
 retained per buffer-pool slot for reuse, so an answer above the request would set
-the session's memory floor for its lifetime. Set `maxBatchRows` on the session
-options to bound a session built directly from a connection; left unset, the cell
+the session's memory floor for its lifetime. One `maxBatchRows` is both the cap
+requested on the wire and the bound enforced on the answer; left unset, the cell
 cap below is the only bound.
 
 A single `RESULT_BATCH` may declare at most `QWP_MAX_CELLS_PER_BATCH` cells --
@@ -1577,9 +1580,10 @@ behavior, and the endpoints always come from `addr`.
 A custom `wss://` agent is the WebSocket upgrade's sole TLS channel, so it
 carries its own certificate verification and cannot be combined with
 `tls_verify`, `tls_roots`, or `tls_roots_password` — that combination is
-rejected rather than silently dropping either. Configure verification on the
-agent instead. Agents are validated per endpoint. A `ws` endpoint takes a plain
-`http.Agent`; an `https.Agent` there is rejected. A `wss` endpoint takes any
+rejected rather than silently dropping either, whether the agent is given under
+`cluster` or to one side as `ingress.agent` or `egress.agent`. Configure
+verification on the agent instead. Agents are validated per endpoint. A `ws`
+endpoint takes a plain `http.Agent`; an `https.Agent` there is rejected. A `wss` endpoint takes any
 agent that can serve the scheme, so a tunnelling agent such as
 `https-proxy-agent`, `socks-proxy-agent` or `proxy-agent` works even though it
 extends `http.Agent` rather than `https.Agent`. Node performs that check itself
@@ -1610,11 +1614,12 @@ const db = await connectQwpNodeClient(
 );
 ```
 
-With `sf_dir`, Java-compatible defaults apply, and the typed `storeAndForward`
-options share them: memory durability, a 10 GiB total journal cap, 4 MiB journal
-segments, a 30-second capacity wait, a 5-second close drain, and fail-fast initial
-connection. Set `sender_id` (typed `senderId`) to name the disk slot base; pooled
-senders use `<sender_id>-<slot>`.
+With `sf_dir`, the journal follows the Java client's defaults, and the typed
+`storeAndForward` options share them: memory durability, a 10 GiB total journal
+cap, 4 MiB journal segments, a 30-second capacity wait, and fail-fast initial
+connection. The close drain keeps its 5-second default, as in the Rust and Python
+clients; Java's builder waits 60 seconds. Set `sender_id` (typed `senderId`) to
+name the disk slot base; pooled senders use `<sender_id>-<slot>`.
 A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
 the ingress frame cap from the first publication onward, before the server has
 advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.

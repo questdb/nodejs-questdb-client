@@ -312,12 +312,14 @@ class Sender {
 
   /**
    * Flushes pending rows and, for QWP, waits until the server has acknowledged
-   * every frame this sender has published. Resolves false when the QWP ACK
-   * watermark makes no progress for `timeoutMs` (the session's ackTimeoutMs
-   * by default); the frames then remain queued and are still delivered, so do
-   * not send them again. A `timeoutMs` of zero or less flushes and then
-   * checks without waiting. Non-QWP transports flush normally and resolve
-   * true: they expose no ACK watermark to wait on.
+   * every frame this sender has published, including the frames a
+   * store-and-forward journal recovered once the sender has connected.
+   * Resolves false when the QWP ACK watermark makes no progress for
+   * `timeoutMs` (the session's ackTimeoutMs by default); the frames then
+   * remain queued and are still delivered, so do not send them again. A
+   * `timeoutMs` of zero or less flushes and then checks without waiting.
+   * Non-QWP transports flush normally and resolve true: they expose no ACK
+   * watermark to wait on.
    */
   async flushAndWait(timeoutMs?: number): Promise<boolean> {
     if (this.qwpSender) return this.qwpSender.flushAndWait(timeoutMs);

@@ -1,9 +1,9 @@
-/**
- * Node.js WebSocket, UDP and store-and-forward adapter over the shared QWP
- * protocol/session APIs. The package root (index.ts) re-exports its public
- * names; connectQwpNodeIngress() is exported for the senders and tests, and
- * connectQwpNodeWebSocket() for tests only.
- */
+// Node.js WebSocket, UDP and store-and-forward adapter over the shared QWP
+// protocol/session APIs. The package root (index.ts) re-exports its public
+// names; connectQwpNodeIngress() is exported for the senders and tests, and
+// connectQwpNodeWebSocket() for tests only. A line comment, not a doc comment:
+// declaration bundling would attach a doc comment here to the first public
+// declaration that follows it.
 export * from "../../client-core/src/qwp";
 
 import type { Agent } from "node:http";
@@ -38,8 +38,8 @@ import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/
 import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/egress-limits";
 import { selectsQwpSyncInitialConnect } from "../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
+import { assertNoQwpIngressRouting } from "../../client-core/src/_qwp/_internal/option-sections";
 import {
-  assertNoQwpIngressRouting,
   normalizeQwpNodeClientOptions,
   QWP_DEFAULT_SENDER_ID,
   resolveQwpNodeClientConfig,

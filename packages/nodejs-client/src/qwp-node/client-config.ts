@@ -22,7 +22,10 @@ import {
   validateQwpIngressReconnectBackoffs,
 } from "../../../client-core/src/_qwp/_internal/reconnect-backoff";
 import { assertUniformQwpEndpointScheme } from "../../../client-core/src/_qwp/_internal/failover";
-import { assertKnownQwpOptionSections } from "../../../client-core/src/_qwp/_internal/option-sections";
+import {
+  assertKnownQwpOptionSections,
+  assertNoQwpIngressRouting,
+} from "../../../client-core/src/_qwp/_internal/option-sections";
 import {
   qwpClusterEndpoint,
   type QwpClusterRoute,
@@ -220,29 +223,6 @@ const QWP_CLIENT_ONLY_CONFIG_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * @internal Rejects `target` and `zone` where only ingress would read them.
- *
- * Writes can only land on the primary, which the ingress sweep reaches through
- * the 421 each replica answers the upgrade with (see
- * QWP_CLIENT_ONLY_CONFIG_KEYS), so both keys route query sessions alone. The
- * option types have no such fields; this names the mistake for a JavaScript
- * caller rather than silently dropping a routing request.
- */
-export function assertNoQwpIngressRouting(
-  options: object | undefined,
-  spelling: string,
-  remedy: string,
-): void {
-  const fields = options as Record<string, unknown> | undefined;
-  for (const name of ["target", "zone"] as const) {
-    if (fields?.[name] === undefined) continue;
-    throw new TypeError(
-      `${spelling}${name} is not an ingress option: QuestDB accepts writes on the primary alone, so ${name} routes query sessions only; ${remedy}`,
-    );
-  }
-}
-
-/**
  * Warns about connect-string keys a standalone `Sender` cannot honour.
  *
  * Warned rather than rejected on purpose. One connect string is meant to be
@@ -331,6 +311,17 @@ export function resolveQwpNodeClientConfig(
     throw new Error(
       "a custom QWP WebSocket agent cannot be combined with tls_verify, tls_roots, or tls_roots_password; configure TLS on the agent itself",
     );
+  }
+  if (configuredAgent) {
+    // The same combination on one side: its agent replaces the cluster's on
+    // that side alone, so the string's verification would silently apply to
+    // the other side only.
+    for (const side of ["ingress", "egress"] as const) {
+      if (!extraOptions[side]?.agent) continue;
+      throw new Error(
+        `a custom QWP WebSocket agent cannot be combined with tls_verify, tls_roots, or tls_roots_password; ${side}.agent would replace them for ${side} alone, so configure TLS on the agent itself`,
+      );
+    }
   }
   const agent =
     validateQwpWebSocketAgent(callerAgent, parsed.schema === "wss") ??

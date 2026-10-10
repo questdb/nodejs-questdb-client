@@ -839,6 +839,14 @@ export class QwpIngressSession {
         : Math.min(this.localMaxBatchSizeBytes, serverBatchCap);
   }
 
+  /**
+   * The last frame a store-and-forward journal recovered from an earlier
+   * process that a server ACK will cover, or -1n when nothing was recovered.
+   */
+  get recoveredCommitFrameSequence(): bigint {
+    return this.connection.getRecoveredCommitFrameSequence?.() ?? -1n;
+  }
+
   /** Highest stable frame sequence published by this session/transport. */
   get publishedFrameSequence(): bigint {
     // Read through the narrow accessor when the transport has one: this getter

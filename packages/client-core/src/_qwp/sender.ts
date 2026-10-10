@@ -1971,17 +1971,18 @@ export class QwpSender {
 
   /**
    * Flushes pending rows, then waits until the server has acknowledged every
-   * frame this sender has published. Resolves true once they are acknowledged
-   * and false when the ACK watermark makes no progress for `timeoutMs`
-   * (the session's ackTimeoutMs, 15 seconds by default); the timeout restarts
-   * whenever the watermark advances. As in the Java client's drain(), a
-   * `timeoutMs` of zero or less flushes and then checks without waiting.
-   * After false the frames remain queued and are still delivered, so do not
-   * publish them again. Rejects when the server rejects a frame or the
-   * session can no longer deliver. With durable ACK requested, the wait covers
-   * durable upload. A transactional sender commits its open transaction
-   * first. Over UDP, which has no server acknowledgements, this resolves true
-   * once the datagrams are sent.
+   * frame this sender has published, including the frames a store-and-forward
+   * journal recovered from an earlier process once the sender has connected.
+   * Resolves true once they are acknowledged and false when the ACK watermark
+   * makes no progress for `timeoutMs` (the session's ackTimeoutMs, 15 seconds
+   * by default); the timeout restarts whenever the watermark advances. As in
+   * the Java client's drain(), a `timeoutMs` of zero or less flushes and then
+   * checks without waiting. After false the frames remain queued and are
+   * still delivered, so do not publish them again. Rejects when the server
+   * rejects a frame or the session can no longer deliver. With durable ACK
+   * requested, the wait covers durable upload. A transactional sender commits
+   * its open transaction first. Over UDP, which has no server
+   * acknowledgements, this resolves true once the datagrams are sent.
    */
   async flushAndWait(timeoutMs?: number): Promise<boolean> {
     this.throwIfUnavailable();
@@ -1989,9 +1990,19 @@ export class QwpSender {
     await this.flush();
     const session = this.activeSession;
     if (!session) return true;
-    // The commit boundary, not the published watermark: the latter can end in
-    // a recovered transaction tail that is retired instead of acknowledged.
-    return session.waitForAck(this.lastCommitBoundarySequence, timeoutMs);
+    // Commit boundaries, not the published watermark: the latter can end in a
+    // recovered transaction tail that is retired instead of acknowledged. The
+    // frames a journal recovered count as published, as Java's drain() counts
+    // them, up to the last commit among them; without that, a restarted
+    // sender with nothing new to flush reported an unacknowledged backlog as
+    // acknowledged.
+    const recovered = session.recoveredCommitFrameSequence ?? -1n;
+    return session.waitForAck(
+      recovered > this.lastCommitBoundarySequence
+        ? recovered
+        : this.lastCommitBoundarySequence,
+      timeoutMs,
+    );
   }
 
   /** Highest cumulative ACK watermark, or -1n before acknowledgement. */

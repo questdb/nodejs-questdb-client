@@ -10,14 +10,16 @@ import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
 // Imported directly rather than through ./qwp: these are Sender-side helpers,
 // and ./qwp is re-exported wholesale by the package root.
 import {
-  assertNoQwpIngressRouting,
   resolveQwpNodeSenderConfig,
   warnUnsupportedQwpSenderKeys,
 } from "./qwp-node/client-config";
 // Imported directly for the same reason: a Sender-side guard on routing the
 // QWP schema never saw, kept out of the package root's re-export.
 import { assertUniformQwpEndpointScheme } from "../../client-core/src/_qwp/_internal/failover";
-import { assertKnownQwpOptionSections } from "../../client-core/src/_qwp/_internal/option-sections";
+import {
+  assertKnownQwpOptionSections,
+  assertNoQwpIngressRouting,
+} from "../../client-core/src/_qwp/_internal/option-sections";
 import type { QwpNodeIngressOptions, QwpNodeUdpOptions } from "./qwp";
 
 /**

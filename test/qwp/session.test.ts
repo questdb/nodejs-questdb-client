@@ -12,6 +12,8 @@ import {
 } from "../../packages/browser-client/src";
 import {
   connectQwpNodeEgress,
+  createQwpNodeClient,
+  createQwpNodeSender,
   QwpDurableAckUnavailableError,
   QwpFailoverError,
   QwpRoleMismatchError,
@@ -378,6 +380,76 @@ describe("QWP endpoint credential redaction", () => {
       "wss://<redacted>@<invalid-url>",
     );
     expect(malformed.message).not.toContain("s3cr3t");
+  });
+
+  it("strips userinfo from an endpoint written without its scheme", () => {
+    // Without `ws://` the URL parser reads `alice:` as the scheme and finds no
+    // userinfo, so the password reached the message verbatim. QuestDB's own
+    // default credentials fit this shape exactly.
+    for (const [endpoint, redacted] of [
+      [
+        "alice:s3cr3t@questdb.example:9000/write/v4",
+        "<redacted>@questdb.example:9000/write/v4",
+      ],
+      [
+        "//alice:s3cr3t@questdb.example:9000",
+        "//<redacted>@questdb.example:9000",
+      ],
+      ["alice_1:s3cr3t@questdb.example", "<redacted>@questdb.example"],
+      ["alice:p@ss/w0rd@questdb.example", "<redacted>@questdb.example"],
+    ] as const) {
+      const failover = new QwpFailoverError([
+        { endpoint, error: new Error("refused") },
+      ]);
+      expect(failover.attempts[0].endpoint).toBe(redacted);
+      expect(failover.message).not.toMatch(/s3cr3t|p@ss|w0rd/);
+    }
+    const parsed = new QwpFailoverError([
+      {
+        endpoint: new URL("alice:s3cr3t@questdb.example:9000"),
+        error: new Error("refused"),
+      },
+    ]);
+    expect(parsed.attempts[0].endpoint).toBe("<redacted>@questdb.example:9000");
+    // Relative browser endpoints carry no userinfo and stay readable.
+    const relative = new QwpFailoverError([
+      { endpoint: "/proxy/@team/write/v4", error: new Error("refused") },
+    ]);
+    expect(relative.attempts[0].endpoint).toBe("/proxy/@team/write/v4");
+  });
+
+  it("keeps the password out of scheme-less cluster URL errors", () => {
+    for (const url of [
+      "admin:s3cr3t@questdb.example:9000",
+      "//admin:s3cr3t@questdb.example:9000",
+    ]) {
+      const node = () => createQwpNodeClient({ cluster: { url } });
+      expect(node).toThrow(/QWP cluster URL/);
+      expect(node).not.toThrow(/s3cr3t/);
+      const browser = () => createQwpBrowserClient({ cluster: { url } });
+      expect(browser).toThrow(/QWP browser cluster URL/);
+      expect(browser).not.toThrow(/s3cr3t/);
+    }
+    // A failover entry written the same way, under a cluster and on a
+    // sender's own endpoint list, which is compared with the primary's scheme.
+    const clusterFailover = () =>
+      createQwpNodeClient({
+        cluster: {
+          url: "ws://questdb.example:9000",
+          failoverUrls: ["admin:s3cr3t@backup.example:9000"],
+        },
+      });
+    expect(clusterFailover).toThrow(/QWP cluster URL must use WS or WSS/);
+    expect(clusterFailover).not.toThrow(/s3cr3t/);
+    const senderFailover = () =>
+      createQwpNodeSender({
+        url: "ws://questdb.example:9000/write/v4",
+        failoverUrls: ["admin:s3cr3t@backup.example:9000/write/v4"],
+      });
+    expect(senderFailover).toThrow(
+      /uses 'admin' but the preferred endpoint uses 'ws'/,
+    );
+    expect(senderFailover).not.toThrow(/s3cr3t/);
   });
 
   it("resolves a relative browser primary before checking failover schemes", () => {
@@ -921,6 +993,32 @@ describe("QWP WebSocket adapters", () => {
     ).toThrow(
       "egress.sessionBootstrap must be configured once under cluster.sessionBootstrap",
     );
+  });
+
+  it("rejects target and zone where only browser ingress would read them", async () => {
+    // A cluster target used to route egress without a word, and an ingress
+    // zone was dropped; Node rejects both, and QWP.md says both clients do.
+    for (const options of [
+      { cluster: { url: "wss://questdb.example", target: "replica" } },
+      { cluster: { url: "wss://questdb.example", zone: "eu" } },
+      { cluster: { url: "wss://questdb.example" }, ingress: { zone: "eu" } },
+    ]) {
+      expect(() => createQwpBrowserClient(options as never)).toThrow(
+        /is not an ingress option.*set it under egress instead/,
+      );
+    }
+    expect(() =>
+      createQwpBrowserSender({
+        url: "wss://questdb.example/write/v4",
+        target: "replica",
+      } as never),
+    ).toThrow(/target is not an ingress option/);
+    // Query sessions keep both.
+    const client = createQwpBrowserClient({
+      cluster: { url: "wss://questdb.example" },
+      egress: { target: "replica", zone: "eu" },
+    });
+    await client.close();
   });
 
   it("validates unified browser cluster URLs before opening a socket", () => {

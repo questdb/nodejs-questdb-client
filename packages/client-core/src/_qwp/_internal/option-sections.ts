@@ -22,3 +22,26 @@ export function assertKnownQwpOptionSections(
     }
   }
 }
+
+/**
+ * Rejects `target` and `zone` where only ingress would read them.
+ *
+ * Writes can only land on the primary, which the ingress sweep reaches through
+ * the 421 each replica answers the upgrade with, so both keys route query
+ * sessions alone. The option types have no such fields; this names the
+ * mistake for a JavaScript caller rather than silently dropping a routing
+ * request.
+ */
+export function assertNoQwpIngressRouting(
+  options: object | null | undefined,
+  spelling: string,
+  remedy: string,
+): void {
+  const fields = options as Record<string, unknown> | null | undefined;
+  for (const name of ["target", "zone"] as const) {
+    if (fields?.[name] === undefined) continue;
+    throw new TypeError(
+      `${spelling}${name} is not an ingress option: QuestDB accepts writes on the primary alone, so ${name} routes query sessions only; ${remedy}`,
+    );
+  }
+}

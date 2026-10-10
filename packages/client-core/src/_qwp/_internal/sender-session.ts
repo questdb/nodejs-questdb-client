@@ -22,6 +22,11 @@ export interface QwpSenderSession {
   readonly publishedFrameSequence: bigint;
   /** Highest frame sequence covered by the cumulative ACK watermark. */
   readonly acknowledgedFrameSequence: bigint;
+  /**
+   * The last frame recovered from a replay journal that a server ACK will
+   * cover, or -1n. Sessions without a journal leave it undefined.
+   */
+  readonly recoveredCommitFrameSequence?: bigint;
   publishTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,

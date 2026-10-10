@@ -443,9 +443,10 @@ protocol-level PING frames. A poll completes once published: durable progress
 arrives independently, and an open deferred transaction may intentionally
 prevent the server from sending a cumulative OK for that poll.
 `durableAckKeepaliveMs` takes effect only with `requestDurableAck: true` and is
-otherwise ignored, as in the Java and Rust clients; manual polls reject locally
-when the capability was not negotiated. Once it is
-negotiated, `flushAndWait()` waits for durable upload:
+otherwise ignored, as in the Java and Rust clients. A server that does not select
+the durable-ACK subprotocol fails the connection with
+`QwpDurableAckUnavailableError`. Once it is negotiated, `flushAndWait()` waits for
+durable upload:
 
 ```typescript
 const sender = await connectQwpBrowserSender({

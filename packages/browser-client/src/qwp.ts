@@ -1,10 +1,9 @@
-/**
- * Browser WebSocket and authentication adapter over the browser-safe QWP
- * protocol/session APIs. The package root (index.ts) re-exports its public
- * names; connectQwpBrowserIngress() and createQwpBrowserConnectionFactory() are
- * exported for the senders and tests, and connectQwpBrowserWebSocket() for
- * tests only.
- */
+// Browser WebSocket and authentication adapter over the browser-safe QWP
+// protocol/session APIs. The package root (index.ts) re-exports its public
+// names; connectQwpBrowserIngress() and createQwpBrowserConnectionFactory() are
+// exported for the senders and tests, and connectQwpBrowserWebSocket() for
+// tests only. A line comment, not a doc comment: declaration bundling would
+// attach a doc comment here to the first public declaration that follows it.
 export * from "../../client-core/src/qwp";
 
 import {
@@ -19,7 +18,10 @@ import {
   createQwpFailoverConnectionFactory,
 } from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
-import { assertKnownQwpOptionSections } from "../../client-core/src/_qwp/_internal/option-sections";
+import {
+  assertKnownQwpOptionSections,
+  assertNoQwpIngressRouting,
+} from "../../client-core/src/_qwp/_internal/option-sections";
 import {
   qwpClusterEndpoint,
   type QwpClusterRoute,
@@ -986,6 +988,9 @@ export async function connectQwpBrowserIngress(
 export function createQwpBrowserSender(
   options: QwpBrowserIngressOptions,
 ): QwpSender {
+  // The browser ingress factory never routes, so target and zone would be
+  // dropped without a word; Node's createQwpNodeSender() rejects them too.
+  assertNoQwpIngressRouting(options, "", "set it on the egress options");
   return createQwpSender(
     (signal) => connectQwpBrowserIngress(options, signal),
     options,
@@ -1073,6 +1078,16 @@ function resolveQwpBrowserClientOptions(
   ]);
   assertNoBrowserClusterOptionConflicts("ingress", options.ingress);
   assertNoBrowserClusterOptionConflicts("egress", options.egress);
+  // The cluster's settings reach ingress as well, so routing has no place
+  // there either: a cluster target used to route egress silently, and an
+  // ingress zone was dropped. Node rejects both the same way.
+  for (const section of ["cluster", "ingress"] as const) {
+    assertNoQwpIngressRouting(
+      options[section],
+      `${section}.`,
+      "set it under egress instead",
+    );
+  }
   const { url, failoverUrls, ...shared } = options.cluster;
   const ingress: QwpBrowserIngressOptions = {
     ...shared,

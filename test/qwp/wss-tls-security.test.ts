@@ -157,6 +157,33 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     ).toThrow(/custom QWP WebSocket agent cannot be combined/);
   });
 
+  it("rejects one side's caller agent combined with the string's TLS keys", () => {
+    // A side's agent replaces the cluster's for that side alone, so accepting
+    // it applied the string's verification to the other side only: tls_roots
+    // was dropped for one side, or tls_verify=on lost to an agent that skips
+    // verification and then sent that side's credentials anyway.
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig(
+        `wss::addr=localhost;tls_roots=${CA_PATH};`,
+        { ingress: { agent: new https.Agent() } },
+      ),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined.*ingress\.agent/);
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;tls_verify=on;", {
+        egress: { agent: new https.Agent({ rejectUnauthorized: false }) },
+      }),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined.*egress\.agent/);
+  });
+
+  it("keeps one side's caller agent when no TLS keys are set", () => {
+    const agent = new https.Agent();
+    const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;", {
+      egress: { agent },
+    });
+    expect(options.egress?.agent).toBe(agent);
+    expect(options.cluster.agent).toBeUndefined();
+  });
+
   it("keeps a caller agent when no TLS keys are set", () => {
     // Without tls_verify/tls_roots the caller owns TLS through their agent, so
     // it passes through unchanged rather than being rejected.

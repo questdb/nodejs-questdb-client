@@ -62,6 +62,7 @@ import {
   QwpReconnectExhaustedError,
   QwpReplayRejectedError,
   QwpReplayDictionaryPersistenceError,
+  QwpSendClosedError,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
   encodeQwpFrame,
@@ -3171,6 +3172,74 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("sends a frame whose journal read fails after a reconnect installed the replacement", async () => {
+    // The same parked read, but failing transiently once it resumes. The
+    // replacement had nothing to replay -- the frame was not on the wire yet --
+    // so marking the frame transmitted and asking the dead connection to
+    // reconnect stranded it: it never reached the replacement, whose next
+    // cumulative OK then deleted its journal record as acknowledged.
+    let failRead!: (error: Error) => void;
+    const parked = new Promise<never>((_resolve, reject) => {
+      failRead = reject;
+    });
+    void parked.catch(() => undefined);
+    class FailingParkedReadStore extends LazyTrackingReplayStore {
+      parkNextRead = false;
+
+      override async readPayload(frameSequence: bigint): Promise<Uint8Array> {
+        if (this.parkNextRead) {
+          this.parkNextRead = false;
+          await parked;
+        }
+        return super.readPayload(frameSequence);
+      }
+    }
+
+    const connections: FakeConnection[] = [];
+    const replayStore = new FailingParkedReadStore();
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const connection = new FakeConnection(`node-${connections.length}`);
+        connections.push(connection);
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+        },
+        replayStore,
+      },
+    );
+
+    // Acknowledge frame 1 first, so the replacement has nothing to replay.
+    await session.publishFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(connections[0].sent).toHaveLength(1));
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+
+    replayStore.parkNextRead = true;
+    await session.publishFrame(Uint8Array.of(2));
+    connections[0].drop();
+    await vi.waitFor(() => expect(connections.length).toBe(2));
+    failRead(
+      new QwpReplayStoreError(
+        "could not trim QWP store-and-forward segment [firstSequence=0]",
+      ),
+    );
+
+    await session.publishFrame(Uint8Array.of(3));
+    await vi.waitFor(() =>
+      expect(
+        connections[1].sent.map((payload) => payload[payload.length - 1]),
+      ).toEqual([2, 3]),
+    );
+    connections[1].receive(ingressResponse(QWP_STATUS.OK, 1n));
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+    await session.close();
+  });
+
   it("retries a transient journal read instead of latching the sender", async () => {
     // A store read can fail transiently -- a briefly full or read-only
     // filesystem parks the trim failure for about a second and the store
@@ -6121,6 +6190,77 @@ describe("QWP ingress reconnect and replay", () => {
     }
   });
 
+  it("waits in flushAndWait() for the backlog a Node journal recovered", async () => {
+    const directory = await createTemporaryDirectory();
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({ frameSequence: 0n, payload: Uint8Array.of(5) });
+    await seed.append({ frameSequence: 1n, payload: Uint8Array.of(6) });
+    await seed.close();
+
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: {},
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+    });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
+    try {
+      await sender.connect();
+      await vi.waitFor(() =>
+        expect(connection.sent).toEqual([Uint8Array.of(5), Uint8Array.of(6)]),
+      );
+      expect(sender.publishedSequence).toBe(1n);
+      // Nothing new to flush, but the recovered frames count as published, as
+      // they do for Java's drain(). A zero timeout checks without waiting.
+      await expect(sender.flushAndWait(0)).resolves.toBe(false);
+
+      const waiting = sender.flushAndWait(60_000);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 1n));
+      await expect(waiting).resolves.toBe(true);
+      expect(sender.ackedSequence).toBe(1n);
+    } finally {
+      await sender.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("waits in flushAndWait() for a recovered commit but not for its retired tail", async () => {
+    const directory = await createTemporaryDirectory();
+    const committed = encodeQwpIngressFrame([symbolTable("ETH-USD")]);
+    const deferred = encodeQwpIngressFrame([symbolTable("BTC-USD")], {
+      deferCommit: true,
+    });
+    const seed = new QwpNodeFileReplayStore({ directory });
+    await seed.load();
+    await seed.append({ frameSequence: 5n, payload: committed });
+    await seed.append({ frameSequence: 6n, payload: deferred });
+    await seed.close();
+
+    const connection = new FakeConnection("primary");
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: {},
+      replayStore: new QwpNodeFileReplayStore({ directory }),
+    });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
+    try {
+      await sender.connect();
+      expect(connection.sent).toEqual([committed]);
+      expect(sender.publishedSequence).toBe(6n);
+      await expect(sender.flushAndWait(0)).resolves.toBe(false);
+
+      // The commit is acknowledged. The deferred frame after it is retired
+      // rather than acknowledged, so it must neither hold the wait open nor
+      // reject it as abandoned.
+      const waiting = sender.flushAndWait(60_000);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n));
+      await expect(waiting).resolves.toBe(true);
+      expect(sender.ackedSequence).toBe(5n);
+    } finally {
+      await sender.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("recovers a Node journal before new frames and removes it after ACK", async () => {
     const directory = await createTemporaryDirectory();
     const seed = new QwpNodeFileReplayStore({ directory });
@@ -7926,6 +8066,77 @@ describe("QWP egress reconnect and replay", () => {
         expect(requestIdOf(replacement.sent[0])).toBe(next.requestId);
         replacement.receive(resultEnd(next.requestId));
         await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("still ends an expired query after a replacement fails before its replay", async () => {
+      // A replacement that answers the upgrade and then cannot take the replay
+      // -- a node shutting down during a rolling restart -- has already run the
+      // session's reset, which marks the connection present again. The outage
+      // went on, yet the expired query then waited out the grace period and
+      // was replayed on the next replacement.
+      vi.useFakeTimers();
+      try {
+        const primary = new FakeConnection("primary");
+        const failing = new FakeConnection("failing");
+        failing.onSend = () => Promise.reject(new QwpSendClosedError());
+        const replacement = new FakeConnection("secondary");
+        let releaseReplacement!: () => void;
+        const replacementHeld = new Promise<void>((resolve) => {
+          releaseReplacement = resolve;
+        });
+        const resets: bigint[] = [];
+        const opened = [primary, failing, replacement];
+        let next = 0;
+        const session = await connectQwpEgressSession(
+          async () => {
+            const connection = opened[Math.min(next++, opened.length - 1)];
+            if (connection === replacement) await replacementHeld;
+            queueMicrotask(() =>
+              connection.receive(serverInfo(connection.endpoint)),
+            );
+            return connection;
+          },
+          {
+            reconnect: {
+              failoverMaxAttempts: 3,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+            },
+            onFailoverReset: (event) => void resets.push(event.requestId),
+          },
+        );
+        const query = await session.query("select * from x", {
+          timeoutMs: 25,
+        });
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.drop();
+
+        await vi.advanceTimersByTimeAsync(25);
+        // The failing replacement took the reset, and its replay never left.
+        expect(resets).toEqual([query.requestId]);
+        expect(kinds(failing)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        // Still no server can answer, so the timeout is reported at the
+        // deadline rather than after the grace period.
+        expect(query.isDone()).toBe(true);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryTimeoutError",
+          requestId: query.requestId,
+        });
+
+        releaseReplacement();
+        const following = await session.query("select 2");
+        // The expired query is not run again on the replacement connection.
+        expect(resets).toEqual([query.requestId]);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(following.requestId);
+        replacement.receive(resultEnd(following.requestId));
+        await expect(following.completion).resolves.toMatchObject({
           kind: "result-end",
         });
         await session.close();

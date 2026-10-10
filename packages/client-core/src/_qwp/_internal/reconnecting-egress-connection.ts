@@ -576,6 +576,18 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           }
           if (candidate) await candidate.close().catch(() => undefined);
           if (this.closing) return;
+          // A candidate that failed after SERVER_INFO -- typically when the
+          // replay could not be sent -- may already have run the session's
+          // reset, which marks the connection present again. The outage goes
+          // on, so the session hears of it again: otherwise an expired query
+          // waited out its grace period and was replayed on the next endpoint.
+          if (reconnecting && candidate) {
+            try {
+              this.onConnectionLost?.();
+            } catch {
+              // The session's bookkeeping must not stop the reconnect.
+            }
+          }
           sweep.sweepFailed(error, candidate);
           if (error instanceof QwpReconnectExhaustedError) throw error;
           if (!isRetryableReconnectError(error)) throw error;

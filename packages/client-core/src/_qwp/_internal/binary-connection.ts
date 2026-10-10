@@ -91,6 +91,14 @@ export interface QwpBinaryConnection {
    */
   getPublishedFrameSequence?(): bigint;
 
+  /**
+   * Highest frame sequence recovered from a persistent replay store that a
+   * server acknowledgement will cover: the last recovered commit, below any
+   * deferred tail that recovery retires instead of replaying. -1n when
+   * nothing was recovered.
+   */
+  getRecoveredCommitFrameSequence?(): bigint;
+
   /** Resolves a session sequence to its stable replay FSN. */
   getIngressFrameSequence?(clientSequence: bigint): bigint | undefined;
 
