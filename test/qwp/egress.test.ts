@@ -1106,9 +1106,10 @@ describe("QWP result batch decoder", () => {
   it("byte-swaps every decoded Gorilla word on a big-endian host in both decoders", async () => {
     // NATIVE_LITTLE_ENDIAN is fixed when result-batch.ts loads, and no CI host
     // is big-endian. Make its Uint16Array.of(1) probe see big-endian storage
-    // and load a fresh copy: on this little-endian host, the swap that turns a
+    // and load a fresh copy: on a little-endian host, the swap that turns a
     // big-endian host's words into little-endian int64 bytes then shows up as
-    // byte-reversed int32 halves in every decoded value.
+    // byte-reversed int32 halves in every decoded value. On a big-endian host
+    // the probe sees the truth, so the values must decode unchanged.
     const NativeUint16Array = Uint16Array;
     class BigEndianUint16Array extends NativeUint16Array {
       static of(...items: number[]) {
@@ -1149,6 +1150,9 @@ describe("QWP result batch decoder", () => {
       bytes.setInt32(4, Number(BigInt.asIntN(32, value >> 32n)), false);
       return bytes.getBigInt64(0, true);
     });
+    const littleEndianHost =
+      new Uint8Array(NativeUint16Array.of(1).buffer)[0] === 1;
+    const expected = littleEndianHost ? swapped : values;
     const frame = gorillaFrame(
       values.length,
       [["ts", QWP_COLUMN_TYPE.TIMESTAMP]],
@@ -1159,7 +1163,7 @@ describe("QWP result batch decoder", () => {
     );
     expect(
       decodeBothWays(frame, new bigEndian!.QwpResultBatchDecoder()),
-    ).toEqual({ decoded: [swapped], viewed: [swapped] });
+    ).toEqual({ decoded: [expected], viewed: [expected] });
   });
 
   it("decodes identifiers at the defensive egress byte bound", () => {
