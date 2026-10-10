@@ -1161,9 +1161,32 @@ describe("QWP result batch decoder", () => {
         payload.writeBytes(encodeQwpGorilla(values));
       },
     );
-    expect(
-      decodeBothWays(frame, new bigEndian!.QwpResultBatchDecoder()),
-    ).toEqual({ decoded: [expected], viewed: [expected] });
+    // decode() reads through a BigInt64Array on a little-endian host only;
+    // while this copy decodes, make such reads big-endian as well.
+    class BigEndianBigInt64Array extends BigInt64Array {
+      constructor(buffer: ArrayBufferLike, byteOffset: number, length: number) {
+        super(length);
+        const view = new DataView(buffer, byteOffset, length * 8);
+        for (let index = 0; index < length; index++) {
+          this[index] = view.getBigInt64(index * 8, false);
+        }
+      }
+    }
+    const previousBigInt64Array = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "BigInt64Array",
+    )!;
+    Object.defineProperty(globalThis, "BigInt64Array", {
+      ...previousBigInt64Array,
+      value: BigEndianBigInt64Array,
+    });
+    let decoded: ReturnType<typeof decodeBothWays>;
+    try {
+      decoded = decodeBothWays(frame, new bigEndian!.QwpResultBatchDecoder());
+    } finally {
+      Object.defineProperty(globalThis, "BigInt64Array", previousBigInt64Array);
+    }
+    expect(decoded).toEqual({ decoded: [expected], viewed: [expected] });
   });
 
   it("decodes identifiers at the defensive egress byte bound", () => {

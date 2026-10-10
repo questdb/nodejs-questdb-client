@@ -2014,11 +2014,19 @@ export class QwpResultBatchDecoder {
       count,
       this.timestampWords,
     ));
+    const values = new Array<bigint>(count);
+    if (NATIVE_LITTLE_ENDIAN) {
+      // DataView.getBigInt64 roughly halved decode() throughput in the V8 of
+      // Node 20 and 22. A BigInt64Array reads native byte order, so only a
+      // little-endian host can read the little-endian words through one.
+      const int64s = new BigInt64Array(words.buffer, words.byteOffset, count);
+      for (let index = 0; index < count; index++) values[index] = int64s[index];
+      return values;
+    }
     // Deliberately not shared with readInt64Values: with one loop serving
     // both, V8 ran this path up to 2x slower, depending on which caller it
     // optimized the loop for first.
     const view = new DataView(words.buffer, words.byteOffset, count * 8);
-    const values = new Array<bigint>(count);
     for (let index = 0; index < count; index++) {
       values[index] = view.getBigInt64(index * 8, true);
     }
