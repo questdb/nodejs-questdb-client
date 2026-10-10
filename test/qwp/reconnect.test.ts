@@ -6341,9 +6341,10 @@ describe("QWP ingress reconnect and replay", () => {
       fromFsn: 5n,
       toFsn: 7n,
     } satisfies Partial<QwpIngressAckAbandonedError>);
-    // Segment unlink precedes the asynchronous maintenance finalization that
-    // removes the recovery watermark; neither the unlink nor the abandonment
-    // notification implies that finalization has completed yet.
+    // The watermark outlives the segments on purpose: maintenance removes it
+    // only once their deletion is durable, after an ownership check and a
+    // directory sync. So wait for it like the segments above; a single read
+    // here raced that tail on slow CI runners.
     await vi.waitFor(async () =>
       expect(await readdir(directory)).not.toContain(".ack-watermark"),
     );

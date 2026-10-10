@@ -435,6 +435,25 @@ credentialed CORS), otherwise the browser may decline to store or send the
 HttpOnly cookies. JavaScript deliberately never reads `qdb_session` or the
 Enterprise `qdbServiceAccount` cookie.
 
+A web application served from its own origin authenticates with `auth`
+instead, once the server lists that origin in `qwp.browser.allowed.origins`;
+QuestDB ignores cookies on such a cross-origin upgrade. The client sends the
+credential with every WebSocket upgrade as a subprotocol, so use `wss:`. Pass
+a function to supply a fresh OIDC access token before every connect,
+reconnect, and failover attempt. `auth` cannot be combined with
+`sessionBootstrap`:
+
+```typescript
+const sender = await connectQwpBrowserSender({
+  url: "wss://questdb.example.com:9000/write/v4",
+  auth: async ({ signal }) => ({
+    type: "bearer",
+    token: await identityProvider.getAccessToken({ signal }),
+  }),
+  autoFlush: false,
+});
+```
+
 Browsers can request durable ingress acknowledgements without custom HTTP
 headers. The client offers a QWP WebSocket subprotocol and verifies that the
 server selected it before sending data. Browser keepalives use side-effect-free,

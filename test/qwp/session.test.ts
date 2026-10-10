@@ -2487,6 +2487,635 @@ describe("QWP WebSocket adapters", () => {
   });
 });
 
+// Literal wire strings rather than the client's constants: these pin the
+// contract QuestDB implements, which a renamed constant must not move.
+const QWP_V1_PROTOCOL = "questdb.qwp.v1";
+const CREDENTIAL_PREFIX = "questdb.qwp.authorization.";
+
+function offeredProtocols(
+  protocols: string | string[] | undefined,
+): readonly string[] {
+  if (protocols === undefined) return [];
+  return typeof protocols === "string" ? [protocols] : protocols;
+}
+
+/**
+ * Decodes a credential offer by QuestDB's rules and returns the Authorization
+ * value: exactly one credential, unpadded canonical base64url, decoding to
+ * printable ASCII that neither starts nor ends with a space.
+ */
+function decodeBrowserCredential(
+  protocols: string | string[] | undefined,
+): string {
+  const credentials = offeredProtocols(protocols).filter((protocol) =>
+    protocol.startsWith(CREDENTIAL_PREFIX),
+  );
+  expect(credentials).toHaveLength(1);
+  const encoded = credentials[0].slice(CREDENTIAL_PREFIX.length);
+  expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+  expect(encoded.length % 4).not.toBe(1);
+  const decoded = Buffer.from(encoded, "base64url");
+  expect(decoded.toString("base64url")).toBe(encoded);
+  const value = decoded.toString("latin1");
+  expect(value).toMatch(/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/);
+  return value;
+}
+
+/**
+ * A socket that answers a browser upgrade the way QuestDB does: it selects
+ * durable ACK when offered, otherwise questdb.qwp.v1, never the credential,
+ * and then sends the SERVER_INFO its endpoint begins with.
+ */
+function questDbBrowserSocket(
+  url: string | URL,
+  protocols: string | string[] | undefined,
+): FakeWebSocket {
+  const offer = offeredProtocols(protocols);
+  const socket = new FakeWebSocket();
+  socket.protocol = offer.includes(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL)
+    ? QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL
+    : offer.includes(QWP_V1_PROTOCOL)
+      ? QWP_V1_PROTOCOL
+      : "";
+  const egress = new URL(url).pathname.endsWith("/read/v1");
+  queueMicrotask(() => {
+    socket.open();
+    socket.message(
+      egress
+        ? serverInfoFrame()
+        : ingressServerInfo(
+            1_048_576,
+            socket.protocol === QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+          ),
+    );
+  });
+  return socket;
+}
+
+describe("QWP browser credential authentication", () => {
+  it("offers questdb.qwp.v1 and an unpadded base64url credential on ingress", async () => {
+    const token = "q~t1?Zx";
+    // Standard base64 of this value needs all three characters a subprotocol
+    // cannot carry, so the offer below proves the URL-safe unpadded form.
+    expect(Buffer.from(`Bearer ${token}`).toString("base64")).toBe(
+      "QmVhcmVyIHF+dDE/Wng=",
+    );
+    let requestUrl: URL | undefined;
+    let offered: string | string[] | undefined;
+    const session = await connectQwpBrowserIngress({
+      url: "wss://questdb.example/write/v4",
+      auth: { type: "bearer", token },
+      webSocketFactory: (url, protocols) => {
+        requestUrl = new URL(url);
+        offered = protocols;
+        return asQwpSocket(questDbBrowserSocket(url, protocols));
+      },
+    });
+    try {
+      expect(offered).toEqual([
+        QWP_V1_PROTOCOL,
+        `${CREDENTIAL_PREFIX}QmVhcmVyIHF-dDE_Wng`,
+      ]);
+      expect(decodeBrowserCredential(offered)).toBe(`Bearer ${token}`);
+      // The credential travels in the subprotocol offer alone.
+      expect([...requestUrl!.searchParams.keys()]).toEqual([
+        "qwp_browser_handshake",
+      ]);
+      expect(session.handshake.maxBatchSizeBytes).toBe(1_048_576);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("sends Basic credentials as the Authorization value on the query path", async () => {
+    const offers: (string | string[] | undefined)[] = [];
+    const connect = (
+      username: string,
+      password: string,
+    ): Promise<{ close(): Promise<void> }> =>
+      connectQwpBrowserEgress({
+        url: "wss://questdb.example/read/v1",
+        auth: { type: "basic", username, password },
+        webSocketFactory: (url, protocols) => {
+          offers.push(protocols);
+          return asQwpSocket(questDbBrowserSocket(url, protocols));
+        },
+      });
+
+    await (await connect("admin", "quest")).close();
+    // The pairing QuestDB's own test fixture decodes.
+    expect(offers[0]).toEqual([
+      QWP_V1_PROTOCOL,
+      `${CREDENTIAL_PREFIX}QmFzaWMgWVdSdGFXNDZjWFZsYzNRPQ`,
+    ]);
+    expect(decodeBrowserCredential(offers[0])).toBe("Basic YWRtaW46cXVlc3Q=");
+
+    // Non-ASCII credentials travel inside the Basic value's own base64.
+    await (await connect("zoë", "pässwörd ok")).close();
+    expect(decodeBrowserCredential(offers[1])).toBe(
+      `Basic ${Buffer.from("zoë:pässwörd ok", "utf8").toString("base64")}`,
+    );
+  });
+
+  it("offers durable ACK instead of questdb.qwp.v1 when requested", async () => {
+    let offered: string | string[] | undefined;
+    const session = await connectQwpBrowserIngress({
+      url: "wss://questdb.example/write/v4",
+      requestDurableAck: true,
+      auth: { type: "bearer", token: "rest-token" },
+      webSocketFactory: (url, protocols) => {
+        offered = protocols;
+        return asQwpSocket(questDbBrowserSocket(url, protocols));
+      },
+    });
+    try {
+      expect(offered).toEqual([
+        QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+        expect.stringMatching(/^questdb\.qwp\.authorization\./),
+      ]);
+      expect(decodeBrowserCredential(offered)).toBe("Bearer rest-token");
+      expect(session.handshake.durableAckEnabled).toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("keeps caller protocols and never offers durable ACK on the query path", async () => {
+    const offers: (string | string[] | undefined)[] = [];
+    const webSocketFactory = (
+      url: string | URL,
+      protocols?: string | string[],
+    ): QwpWebSocketLike => {
+      offers.push(protocols);
+      return asQwpSocket(questDbBrowserSocket(url, protocols));
+    };
+    const url = "wss://questdb.example/read/v1";
+
+    // A JavaScript caller can still hand egress an ingress-only key.
+    await (
+      await connectQwpBrowserEgress({
+        url,
+        protocols: ["application.v1", QWP_V1_PROTOCOL],
+        // @ts-expect-error requestDurableAck is ingress-only.
+        requestDurableAck: true,
+        auth: { type: "bearer", token: "rest-token" },
+        webSocketFactory,
+      })
+    ).close();
+    expect(offers[0]).toEqual([
+      "application.v1",
+      QWP_V1_PROTOCOL,
+      expect.stringMatching(/^questdb\.qwp\.authorization\./),
+    ]);
+
+    // Without auth the offer stays exactly what the caller configured: a
+    // server that predates questdb.qwp.v1 would select nothing from it.
+    await (
+      await connectQwpBrowserEgress({
+        url,
+        protocols: ["application.v1"],
+        webSocketFactory,
+      })
+    ).close();
+    await (await connectQwpBrowserEgress({ url, webSocketFactory })).close();
+    expect(offers.slice(1)).toEqual([["application.v1"], undefined]);
+  });
+
+  it("calls the auth provider before every connect, failover, and reconnect attempt", async () => {
+    let providerCalls = 0;
+    const providerSignals: AbortSignal[] = [];
+    const attempts: { host: string; authorization: string }[] = [];
+    const sockets: FakeWebSocket[] = [];
+    const session = await connectQwpBrowserIngress({
+      url: "wss://node-a.example/write/v4",
+      failoverUrls: ["wss://node-b.example/write/v4"],
+      auth: async ({ signal }) => {
+        providerSignals.push(signal);
+        return { type: "bearer", token: `token-${++providerCalls}` };
+      },
+      webSocketFactory: (url, protocols) => {
+        const host = new URL(url).hostname;
+        attempts.push({
+          host,
+          authorization: decodeBrowserCredential(protocols),
+        });
+        if (host === "node-a.example") {
+          // Refused, as a browser reports it: an opaque error and close.
+          const refused = new FakeWebSocket();
+          queueMicrotask(() => {
+            refused.error();
+            refused.close(1006, "");
+          });
+          return asQwpSocket(refused);
+        }
+        const socket = questDbBrowserSocket(url, protocols);
+        sockets.push(socket);
+        return asQwpSocket(socket);
+      },
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
+    try {
+      expect(attempts).toEqual([
+        { host: "node-a.example", authorization: "Bearer token-1" },
+        { host: "node-b.example", authorization: "Bearer token-2" },
+      ]);
+
+      sockets[0].close(1006, "dropped");
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      // Which endpoint the reconnect sweep tries first depends on health
+      // bookkeeping; that every attempt asked for a fresh credential does not.
+      expect(attempts.map((attempt) => attempt.authorization)).toEqual(
+        Array.from(
+          { length: providerCalls },
+          (_, index) => `Bearer token-${index + 1}`,
+        ),
+      );
+      expect(providerCalls).toBeGreaterThanOrEqual(3);
+      expect(
+        providerSignals.every(
+          (signal) => signal instanceof AbortSignal && !signal.aborted,
+        ),
+      ).toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("includes a stalled auth provider in the connection deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let providerSignal: AbortSignal | undefined;
+      let webSocketFactoryCalls = 0;
+      const connecting = connectQwpBrowserWebSocket({
+        url: "wss://questdb.example/write/v4",
+        connectTimeoutMs: 25,
+        auth: ({ signal }) => {
+          providerSignal = signal;
+          return new Promise(() => undefined);
+        },
+        webSocketFactory: () => {
+          webSocketFactoryCalls++;
+          return asQwpSocket(new FakeWebSocket());
+        },
+      });
+      const rejected = expect(connecting).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
+        message: "QWP WebSocket connection timed out after 25ms",
+      } satisfies Partial<QwpUpgradeError>);
+
+      expect(providerSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(25);
+      await rejected;
+      expect(providerSignal?.aborted).toBe(true);
+      expect(webSocketFactoryCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts an auth provider still pending when its session closes", async () => {
+    let providerCalls = 0;
+    let reconnectSignal: AbortSignal | undefined;
+    const sockets: FakeWebSocket[] = [];
+    const session = await connectQwpBrowserIngress({
+      url: "wss://questdb.example/write/v4",
+      connectTimeoutMs: 30_000,
+      auth: ({ signal }) => {
+        if (++providerCalls === 1) {
+          return { type: "bearer", token: "first" };
+        }
+        reconnectSignal = signal;
+        return new Promise(() => undefined);
+      },
+      webSocketFactory: (url, protocols) => {
+        const socket = questDbBrowserSocket(url, protocols);
+        sockets.push(socket);
+        return asQwpSocket(socket);
+      },
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
+
+    sockets[0].close(1006, "dropped");
+    await vi.waitFor(() => expect(providerCalls).toBe(2));
+    expect(reconnectSignal?.aborted).toBe(false);
+    await session.close();
+    expect(reconnectSignal?.aborted).toBe(true);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("fails an attempt whose auth provider throws without walking the endpoints", async () => {
+    const failure = new Error("identity provider unavailable");
+    let providerCalls = 0;
+    const attempted: string[] = [];
+    const webSocketFactory = (url: string | URL): QwpWebSocketLike => {
+      attempted.push(new URL(url).hostname);
+      return asQwpSocket(new FakeWebSocket());
+    };
+    await expect(
+      connectQwpBrowserIngress({
+        url: "wss://node-a.example/write/v4",
+        failoverUrls: ["wss://node-b.example/write/v4"],
+        auth: () => {
+          providerCalls++;
+          throw failure;
+        },
+        webSocketFactory,
+      }),
+    ).rejects.toMatchObject({
+      name: "QwpUpgradeError",
+      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+      retryable: true,
+      tryNextEndpoint: false,
+      cause: failure,
+    } satisfies Partial<QwpUpgradeError>);
+    expect(providerCalls).toBe(1);
+    expect(attempted).toEqual([]);
+
+    // A provider that knows retrying cannot help says so like the rest of the
+    // client does.
+    await expect(
+      connectQwpBrowserWebSocket({
+        url: "wss://node-a.example/write/v4",
+        auth: async () => {
+          throw Object.assign(new Error("signed out"), { retryable: false });
+        },
+        webSocketFactory,
+      }),
+    ).rejects.toMatchObject({
+      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+      retryable: false,
+    });
+    expect(attempted).toEqual([]);
+  });
+
+  it("retries a failed auth provider during reconnect", async () => {
+    let providerCalls = 0;
+    const sockets: FakeWebSocket[] = [];
+    const authorizations: string[] = [];
+    const session = await connectQwpBrowserIngress({
+      url: "wss://questdb.example/write/v4",
+      auth: async () => {
+        if (++providerCalls === 2) throw new Error("token refresh failed");
+        return { type: "bearer", token: `token-${providerCalls}` };
+      },
+      webSocketFactory: (url, protocols) => {
+        authorizations.push(decodeBrowserCredential(protocols));
+        const socket = questDbBrowserSocket(url, protocols);
+        sockets.push(socket);
+        return asQwpSocket(socket);
+      },
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
+
+    const pending = publishAndWait(session, Uint8Array.of(1));
+    await vi.waitFor(() => expect(sockets[0].sent).toHaveLength(1));
+    sockets[0].close(1006, "connection lost");
+
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    expect(providerCalls).toBe(3);
+    expect(authorizations).toEqual(["Bearer token-1", "Bearer token-3"]);
+    await vi.waitFor(() => expect(sockets[1].sent).toEqual(sockets[0].sent));
+    sockets[1].message(ingressResponse(QWP_STATUS.OK, 0n));
+    await expect(pending).resolves.toBe(0n);
+    await session.close();
+  });
+
+  it("rejects an invalid credential from the auth provider without retrying", async () => {
+    let webSocketFactoryCalls = 0;
+    const webSocketFactory = (): QwpWebSocketLike => {
+      webSocketFactoryCalls++;
+      return asQwpSocket(new FakeWebSocket());
+    };
+    for (const [credential, reason] of [
+      [{ type: "bearer", token: "not a token" }, "visible ASCII"],
+      [{ type: "bearer", token: "" }, "bearer token cannot be empty"],
+      [undefined, "must be a"],
+    ] as const) {
+      const error = await connectQwpBrowserWebSocket({
+        url: "wss://node-a.example/write/v4",
+        failoverUrls: ["wss://node-b.example/write/v4"],
+        auth: () => credential as never,
+        webSocketFactory,
+      }).then(
+        () => undefined,
+        (reason: unknown) => reason as QwpUpgradeError,
+      );
+      expect(error).toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+        retryable: false,
+        tryNextEndpoint: false,
+      } satisfies Partial<QwpUpgradeError>);
+      expect(error?.message).toContain(
+        "QWP browser auth provider returned an invalid credential",
+      );
+      expect(error?.message).toContain(reason);
+      expect(error?.message).not.toContain("not a token");
+    }
+    expect(webSocketFactoryCalls).toBe(0);
+  });
+
+  it("validates a fixed auth credential before opening a socket", async () => {
+    let webSocketFactoryCalls = 0;
+    const webSocketFactory = (): QwpWebSocketLike => {
+      webSocketFactoryCalls++;
+      return asQwpSocket(new FakeWebSocket());
+    };
+    const url = "wss://questdb.example/write/v4";
+    for (const [auth, message] of [
+      [
+        { type: "bearer", token: "" },
+        "browser auth bearer token cannot be empty",
+      ],
+      [{ type: "bearer", token: "two words" }, "visible ASCII characters"],
+      [{ type: "bearer", token: "t\u00f6ken" }, "visible ASCII characters"],
+      [{ type: "bearer", token: "token\n" }, "cannot contain CR or LF"],
+      [
+        { type: "basic", username: "", password: "quest" },
+        "browser auth username cannot be empty",
+      ],
+      [
+        { type: "basic", username: "ad:min", password: "quest" },
+        "browser auth username cannot contain ':'",
+      ],
+      [null, "browser auth credential must be a"],
+      [{ type: "digest" }, "unsupported browser auth credential type 'digest'"],
+    ] as const) {
+      expect(() =>
+        createQwpBrowserConnectionFactory({
+          url,
+          auth: auth as never,
+          webSocketFactory,
+        }),
+      ).toThrow(message);
+      // The sender connects lazily but still refuses the option up front.
+      expect(() =>
+        createQwpBrowserSender({ url, auth: auth as never, webSocketFactory }),
+      ).toThrow(message);
+      await expect(
+        connectQwpBrowserEgress({
+          url: "wss://questdb.example/read/v1",
+          auth: auth as never,
+          webSocketFactory,
+        }),
+      ).rejects.toThrow(message);
+    }
+    expect(webSocketFactoryCalls).toBe(0);
+    // No error quotes the credential it rejects.
+    let rejection: unknown;
+    try {
+      createQwpBrowserConnectionFactory({
+        url,
+        auth: { type: "bearer", token: "secret value" },
+      });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(TypeError);
+    expect(String(rejection)).not.toContain("secret");
+  });
+
+  it("rejects auth combined with sessionBootstrap at every entry point", async () => {
+    const conflict =
+      "auth cannot be combined with sessionBootstrap; configure exactly one of them";
+    const options = {
+      auth: { type: "bearer", token: "rest-token" },
+      sessionBootstrap: {
+        authentication: { type: "bearer", token: "rest-token" },
+      },
+      webSocketFactory: () => {
+        throw new Error("no WebSocket may open");
+      },
+    } as const;
+    const ingress = { ...options, url: "wss://questdb.example/write/v4" };
+    const egress = { ...options, url: "wss://questdb.example/read/v1" };
+
+    expect(() => connectQwpBrowserWebSocket(ingress)).toThrow(conflict);
+    expect(() => createQwpBrowserConnectionFactory(ingress)).toThrow(conflict);
+    expect(() => createQwpBrowserSender(ingress)).toThrow(conflict);
+    await expect(connectQwpBrowserIngress(ingress)).rejects.toThrow(conflict);
+    await expect(connectQwpBrowserEgress(egress)).rejects.toThrow(conflict);
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: { ...options, url: "wss://questdb.example" },
+      }),
+    ).toThrow(conflict);
+  });
+
+  it("rejects a credential among the caller's protocols when auth is set", () => {
+    const url = "wss://questdb.example/write/v4";
+    const credential = `${CREDENTIAL_PREFIX}QmVhcmVyIHQ`;
+    const message = `protocols cannot contain a ${CREDENTIAL_PREFIX}* credential when auth is set`;
+    for (const protocols of [credential, ["application.v1", credential]]) {
+      expect(() =>
+        createQwpBrowserConnectionFactory({
+          url,
+          protocols,
+          auth: { type: "bearer", token: "rest-token" },
+        }),
+      ).toThrow(message);
+    }
+    // A unified client's per-side override meets the shared auth only after
+    // the merge.
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: {
+          url: "wss://questdb.example",
+          auth: { type: "bearer", token: "rest-token" },
+        },
+        egress: { protocols: [credential] },
+      }),
+    ).toThrow(message);
+  });
+
+  it("shares cluster auth across ingress and egress", async () => {
+    const attempts: { path: string; authorization: string }[] = [];
+    const providerSignals: AbortSignal[] = [];
+    const client = await connectQwpBrowserClient({
+      cluster: {
+        url: "wss://questdb.example/qdb",
+        auth: ({ signal }) => {
+          providerSignals.push(signal);
+          return { type: "bearer", token: "oidc-access-token" };
+        },
+        webSocketFactory: (url, protocols) => {
+          attempts.push({
+            path: new URL(url).pathname,
+            authorization: decodeBrowserCredential(protocols),
+          });
+          return asQwpSocket(questDbBrowserSocket(url, protocols));
+        },
+      },
+    });
+    try {
+      expect(attempts.sort((a, b) => a.path.localeCompare(b.path))).toEqual([
+        { path: "/qdb/read/v1", authorization: "Bearer oidc-access-token" },
+        { path: "/qdb/write/v4", authorization: "Bearer oidc-access-token" },
+      ]);
+      expect(providerSignals).toHaveLength(2);
+    } finally {
+      await client.close();
+    }
+
+    for (const side of ["ingress", "egress"] as const) {
+      expect(() =>
+        createQwpBrowserClient({
+          cluster: { url: "wss://questdb.example" },
+          [side]: { auth: { type: "bearer", token: "other-token" } },
+        } as never),
+      ).toThrow(`${side}.auth must be configured once under cluster.auth`);
+    }
+  });
+
+  it("treats a server that echoes the credential as a server defect", async () => {
+    for (const path of ["write/v4", "read/v1"]) {
+      const attempted: string[] = [];
+      const sockets: FakeWebSocket[] = [];
+      const connecting =
+        path === "write/v4"
+          ? connectQwpBrowserIngress
+          : (options: Parameters<typeof connectQwpBrowserEgress>[0]) =>
+              connectQwpBrowserEgress(options);
+      const error = await connecting({
+        url: `wss://node-a.example/${path}`,
+        failoverUrls: [`wss://node-b.example/${path}`],
+        auth: { type: "bearer", token: "echoed-secret" },
+        webSocketFactory: (url, protocols) => {
+          attempted.push(new URL(url).hostname);
+          const socket = new FakeWebSocket();
+          sockets.push(socket);
+          // Selects the credential, which is in the offer, so a browser
+          // accepts the handshake.
+          socket.protocol = offeredProtocols(protocols).find((protocol) =>
+            protocol.startsWith(CREDENTIAL_PREFIX),
+          )!;
+          queueMicrotask(() => socket.open());
+          return asQwpSocket(socket);
+        },
+      }).then(
+        () => undefined,
+        (reason: unknown) => reason as QwpUpgradeError,
+      );
+
+      expect(error).toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+        retryable: false,
+        tryNextEndpoint: false,
+      } satisfies Partial<QwpUpgradeError>);
+      expect(error?.message).toMatch(/server defect/);
+      expect(JSON.stringify(error)).not.toContain(CREDENTIAL_PREFIX);
+      expect(error?.message).not.toContain(
+        Buffer.from("Bearer echoed-secret").toString("base64url"),
+      );
+      // The exposure is not repeated on the rest of the cluster.
+      expect(attempted).toEqual(["node-a.example"]);
+      expect(sockets[0].closeCalls).toHaveLength(1);
+    }
+  });
+});
+
 describe("QwpIngressSession", () => {
   it("returns the highest split-frame sequence from the browser sender", async () => {
     const socket = new FakeWebSocket();

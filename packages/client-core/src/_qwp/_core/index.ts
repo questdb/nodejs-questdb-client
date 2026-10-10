@@ -2,7 +2,13 @@ export * from "./bytes";
 export * from "./binds";
 export * from "./compression";
 export * from "./constants";
-export * from "./durable-ack";
+// Named, unlike its neighbours: the credential subprotocol helpers in this
+// module are browser-adapter internals, not public API of either package.
+export {
+  addQwpDurableAckWebSocketProtocol,
+  isQwpDurableAckWebSocketProtocol,
+  QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+} from "./durable-ack";
 export * from "./egress";
 export * from "./errors";
 export * from "./frame";

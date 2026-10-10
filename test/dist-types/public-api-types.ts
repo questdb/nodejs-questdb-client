@@ -120,6 +120,8 @@ export type {
   QwpArrayValue as BrowserQwpArrayValue,
   QwpBindSetter as BrowserQwpBindSetter,
   QwpBindType as BrowserQwpBindType,
+  QwpBrowserAuthContext,
+  QwpBrowserAuthProvider,
   QwpBrowserClientOptions,
   QwpBrowserEgressOptions,
   QwpBrowserFetch,

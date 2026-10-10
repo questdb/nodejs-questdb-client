@@ -32,6 +32,8 @@ import {
   connectQwpBrowserSender,
 } from "../../packages/browser-client/src";
 import type {
+  QwpBrowserAuthContext,
+  QwpBrowserAuthProvider,
   QwpBrowserClientOptions,
   QwpBrowserIngressOptions,
   QwpBrowserSessionBootstrapOptions,
@@ -231,6 +233,39 @@ const browserClusterOptionsContract: QwpBrowserWebSocketOptions = {
   },
 };
 
+// A provider may return the credential directly or through a promise, and may
+// ignore its context; the signal is always an AbortSignal.
+const browserAuthProviderContract: QwpBrowserAuthProvider = async (
+  context: QwpBrowserAuthContext,
+) => {
+  const signal: AbortSignal = context.signal;
+  void signal;
+  return { type: "bearer", token: "oidc-access-token" };
+};
+
+const browserAuthOptionsContracts: readonly QwpBrowserWebSocketOptions[] = [
+  {
+    url: "wss://node-1.example/write/v4",
+    auth: { type: "bearer", token: "rest-token" },
+  },
+  {
+    url: "wss://node-1.example/write/v4",
+    auth: { type: "basic", username: "admin", password: "quest" },
+  },
+  { url: "wss://node-1.example/write/v4", auth: browserAuthProviderContract },
+  {
+    url: "wss://node-1.example/write/v4",
+    auth: () => ({ type: "bearer", token: "rest-token" }),
+  },
+];
+
+const browserClusterAuthContract: QwpBrowserClientOptions = {
+  cluster: {
+    url: "wss://node-1.example/qdb",
+    auth: browserAuthProviderContract,
+  },
+};
+
 const browserClientOptionsContract: QwpBrowserClientOptions = {
   cluster: browserClusterOptionsContract,
   ingress: {
@@ -254,6 +289,8 @@ const browserClusterOwnedContract: QwpBrowserClientOptions = {
   cluster: browserClusterOptionsContract,
   // @ts-expect-error url belongs to cluster.
   ingress: { url: "wss://node-3.example/write/v4" },
+  // @ts-expect-error auth belongs to cluster.
+  egress: { auth: browserAuthProviderContract },
 };
 
 const nodeClientOptionsContract: QwpNodeClientOptions = {
@@ -574,6 +611,8 @@ void egressSessionOptionsContract;
 void fixedConnectionIngressContract;
 void fixedConnectionEgressContract;
 void browserEgressOptionsContract;
+void browserAuthOptionsContracts;
+void browserClusterAuthContract;
 void browserClientOptionsContract;
 void browserClusterOwnedContract;
 void nodeClientOptionsContract;
