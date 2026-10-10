@@ -243,6 +243,16 @@ routes should be served from the same browser origin (or configured with
 credentialed CORS), otherwise the browser may decline to store or send the
 HttpOnly cookies. JavaScript deliberately never reads <code>qdb_session</code> or the
 Enterprise <code>qdbServiceAccount</code> cookie.</p>
+<p>A web application served from its own origin authenticates with <code>auth</code>
+instead, once the server lists that origin in <code>qwp.browser.allowed.origins</code>;
+QuestDB ignores cookies on such a cross-origin upgrade. The client sends the
+credential with every WebSocket upgrade as a subprotocol, so use <code>wss:</code>. Pass
+a function to supply a fresh OIDC access token before every connect,
+reconnect, and failover attempt. <code>auth</code> cannot be combined with
+<code>sessionBootstrap</code>:</p>
+<pre><code class="typescript"><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">sender</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-1">connectQwpBrowserSender</span><span class="hl-2">({</span><br/><span class="hl-2">  </span><span class="hl-6">url:</span><span class="hl-2"> </span><span class="hl-3">&quot;wss://questdb.example.com:9000/write/v4&quot;</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-1">auth</span><span class="hl-6">:</span><span class="hl-2"> </span><span class="hl-4">async</span><span class="hl-2"> ({ </span><span class="hl-6">signal</span><span class="hl-2"> }) </span><span class="hl-4">=&gt;</span><span class="hl-2"> ({</span><br/><span class="hl-2">    </span><span class="hl-6">type:</span><span class="hl-2"> </span><span class="hl-3">&quot;bearer&quot;</span><span class="hl-2">,</span><br/><span class="hl-2">    </span><span class="hl-6">token:</span><span class="hl-2"> </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">identityProvider</span><span class="hl-2">.</span><span class="hl-1">getAccessToken</span><span class="hl-2">({ </span><span class="hl-6">signal</span><span class="hl-2"> }),</span><br/><span class="hl-2">  }),</span><br/><span class="hl-2">  </span><span class="hl-6">autoFlush:</span><span class="hl-2"> </span><span class="hl-4">false</span><span class="hl-2">,</span><br/><span class="hl-2">});</span>
+</code><button type="button">Copy</button></pre>
+
 <p>Browsers can request durable ingress acknowledgements without custom HTTP
 headers. The client offers a QWP WebSocket subprotocol and verifies that the
 server selected it before sending data. Browser keepalives use side-effect-free,
