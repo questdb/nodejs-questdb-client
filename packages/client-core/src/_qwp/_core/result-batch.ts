@@ -1,6 +1,8 @@
 import { decodeUtf8, QwpByteReader } from "./bytes";
 import {
   QWP_COLUMN_TYPE,
+  QWP_ENCODING_GORILLA,
+  QWP_ENCODING_UNCOMPRESSED,
   QWP_FLAG_DELTA_SYMBOL_DICTIONARY,
   QWP_FLAG_GORILLA,
   QWP_FLAG_ZSTD,
@@ -130,7 +132,8 @@ class QwpResultColumnViewLayout {
   arrayLengths?: Int32Array;
   scale?: number;
   precisionBits?: number;
-  private timestampStorage?: Uint8Array;
+  /** Decoded Gorilla timestamps, as low/high int32 word pairs. */
+  timestampWords?: Int32Array;
   readonly localSymbols: string[] = [];
 
   reset(schema: QwpResultColumnSchema, rowCount: number): void {
@@ -185,15 +188,6 @@ class QwpResultColumnViewLayout {
   ensureArrayLengths(size: number): Int32Array {
     this.arrayLengths = ensureInt32Capacity(this.arrayLengths, size);
     return this.arrayLengths;
-  }
-
-  timestampBytes(size: number): Uint8Array {
-    if (!this.timestampStorage || this.timestampStorage.byteLength < size) {
-      let capacity = Math.max(64, this.timestampStorage?.byteLength ?? 0);
-      while (capacity < size) capacity *= 2;
-      this.timestampStorage = new Uint8Array(capacity);
-    }
-    return this.timestampStorage.subarray(0, size);
   }
 
   isNull(row: number): boolean {
@@ -1086,35 +1080,6 @@ interface NullLayout {
   nonNullCount: number;
 }
 
-class QwpBitReader {
-  private bitPosition = 0;
-
-  constructor(private readonly bytes: Uint8Array) {}
-
-  get bytesConsumed(): number {
-    return Math.ceil(this.bitPosition / 8);
-  }
-
-  readBit(): number {
-    if (this.bitPosition >= this.bytes.length * 8) {
-      throw new QwpProtocolError("truncated QWP Gorilla bitstream");
-    }
-    const result =
-      (this.bytes[this.bitPosition >>> 3] >>> (this.bitPosition & 7)) & 1;
-    this.bitPosition++;
-    return result;
-  }
-
-  readSigned(bitCount: number): bigint {
-    let value = 0n;
-    for (let bit = 0; bit < bitCount; bit++) {
-      if (this.readBit() !== 0) value |= 1n << BigInt(bit);
-    }
-    const sign = 1n << BigInt(bitCount - 1);
-    return (value & sign) === 0n ? value : value - (1n << BigInt(bitCount));
-  }
-}
-
 function readCount(
   reader: QwpByteReader,
   maximum: number,
@@ -1216,48 +1181,169 @@ function readStringValues(
   return values;
 }
 
-function decodeGorillaValues(reader: QwpByteReader, count: number): bigint[] {
+/**
+ * Whether typed arrays store words least-significant byte first. The Gorilla
+ * decoder writes each int64 as two int32 words through an Int32Array, which
+ * gives the little-endian bytes column views read only on such a host.
+ */
+const NATIVE_LITTLE_ENDIAN = new Uint8Array(Uint16Array.of(1).buffer)[0] === 1;
+
+/**
+ * Reads the encoding byte that leads every timestamp column of a
+ * Gorilla-flagged batch: true for Gorilla, false when raw int64 values follow.
+ */
+function readGorillaEncoding(reader: QwpByteReader): boolean {
+  const encoding = reader.readUint8("timestamp encoding");
+  if (encoding === QWP_ENCODING_UNCOMPRESSED) return false;
+  if (encoding !== QWP_ENCODING_GORILLA) {
+    throw new QwpProtocolError(`unknown timestamp encoding: ${encoding}`);
+  }
+  return true;
+}
+
+/**
+ * Decodes a Gorilla-encoded timestamp column of `count` values into `storage`,
+ * grown when too small, and returns it. Value `i` occupies words `2i` (low)
+ * and `2i + 1` (high), whose bytes form a little-endian int64 on every host.
+ *
+ * Two raw int64 timestamps lead the stream. Every later value is one prefix
+ * code, packed least-significant bit first: `0` repeats the previous delta,
+ * while `10`, `110`, `1110`, and `1111` add a signed 7-, 9-, 12-, or 32-bit
+ * delta-of-delta to it.
+ *
+ * The loop does no BigInt work. Bits come from a 32-bit accumulator rather
+ * than one read per bit, and the int64 delta and timestamp are carried as
+ * int32 halves with explicit carries, wrapping modulo 2^64 exactly as
+ * BigInt.asIntN(64, ...) does. Against the per-bit BigInt decoder it
+ * replaced, 10,000-row column views decode 3-32x faster in V8 -- least for a
+ * constant interval, most for irregular timestamps -- and over 60x faster in
+ * JavaScriptCore.
+ */
+function decodeGorillaTimestamps(
+  reader: QwpByteReader,
+  count: number,
+  storage: Int32Array | undefined,
+): Int32Array {
   if (count < 3) {
     throw new QwpProtocolError(
       `Gorilla-encoded column has fewer than three values: ${count}`,
     );
   }
-  const first = reader.readBigInt64("first Gorilla timestamp");
-  const second = reader.readBigInt64("second Gorilla timestamp");
-  const values = [first, second];
-  const bits = new QwpBitReader(
-    reader.bytes.subarray(reader.position, reader.position + reader.remaining),
-  );
-  let previousTimestamp = second;
-  let previousDelta = BigInt.asIntN(64, second - first);
-  for (let index = 2; index < count; index++) {
-    let deltaOfDelta: bigint;
-    let prefixOnes = 0;
-    while (prefixOnes < 4 && bits.readBit() !== 0) prefixOnes++;
-    switch (prefixOnes) {
-      case 0:
-        deltaOfDelta = 0n;
-        break;
-      case 1:
-        deltaOfDelta = bits.readSigned(7);
-        break;
-      case 2:
-        deltaOfDelta = bits.readSigned(9);
-        break;
-      case 3:
-        deltaOfDelta = bits.readSigned(12);
-        break;
-      default:
-        deltaOfDelta = bits.readSigned(32);
-    }
-    const delta = BigInt.asIntN(64, previousDelta + deltaOfDelta);
-    const timestamp = BigInt.asIntN(64, previousTimestamp + delta);
-    values.push(timestamp);
-    previousDelta = delta;
-    previousTimestamp = timestamp;
+  const firstLo = reader.readInt32("first Gorilla timestamp");
+  const firstHi = reader.readInt32("first Gorilla timestamp");
+  let lo = reader.readInt32("second Gorilla timestamp");
+  let hi = reader.readInt32("second Gorilla timestamp");
+  const bytes = reader.bytes;
+  const start = reader.position;
+  const end = start + reader.remaining;
+  // Every value after the first two takes at least one bit. Checked before
+  // the storage grows, so a row count the payload cannot back allocates
+  // nothing.
+  if ((end - start) * 8 < count - 2) {
+    throw new QwpProtocolError("truncated QWP Gorilla bitstream");
   }
-  reader.readBytes(bits.bytesConsumed, "Gorilla bitstream");
-  return values;
+  const words = ensureInt32Capacity(storage, count * 2);
+  words[0] = firstLo;
+  words[1] = firstHi;
+  words[2] = lo;
+  words[3] = hi;
+  // delta = second - first, modulo 2^64.
+  let deltaLo = (lo - firstLo) | 0;
+  let deltaHi = (hi - firstHi - (lo >>> 0 < firstLo >>> 0 ? 1 : 0)) | 0;
+
+  // Unread bits, the next one in bit 0; bits from bitCount upward are zero.
+  // Every `>>>` is followed by `| 0` so the accumulator stays int32, matching
+  // the `|=` refill: mixing in the uint32 a bare `>>>` yields made this loop
+  // up to 1.9x slower in V8.
+  let bits = 0;
+  let bitCount = 0;
+  let next = start;
+  let index = 2;
+  while (index < count) {
+    // Refill to at least 25 bits, enough for every code but `1111`. Bytes past
+    // the end read as zero: whether the stream held every consumed bit is
+    // checked once, after the loop.
+    while (bitCount <= 24) {
+      bits |= (next < end ? bytes[next] : 0) << bitCount;
+      next++;
+      bitCount += 8;
+    }
+    if ((bits & 1) === 0) {
+      // A run of `0` codes repeats the delta: emit every one buffered in the
+      // accumulator at once, the common case for a constant interval.
+      let run = bits === 0 ? bitCount : 31 - Math.clz32(bits & -bits);
+      if (run > count - index) run = count - index;
+      bits = run < 32 ? (bits >>> run) | 0 : 0;
+      bitCount -= run;
+      for (const stop = index + run; index < stop; index++) {
+        const sum = (lo + deltaLo) | 0;
+        hi = (hi + deltaHi + (sum >>> 0 < lo >>> 0 ? 1 : 0)) | 0;
+        lo = sum;
+        words[index * 2] = lo;
+        words[index * 2 + 1] = hi;
+      }
+      continue;
+    }
+    let deltaOfDelta: number;
+    if ((bits & 2) === 0) {
+      deltaOfDelta = (bits << 23) >> 25; // `10`, signed 7 bits
+      bits = (bits >>> 9) | 0;
+      bitCount -= 9;
+    } else if ((bits & 4) === 0) {
+      deltaOfDelta = (bits << 20) >> 23; // `110`, signed 9 bits
+      bits = (bits >>> 12) | 0;
+      bitCount -= 12;
+    } else if ((bits & 8) === 0) {
+      deltaOfDelta = (bits << 16) >> 20; // `1110`, signed 12 bits
+      bits = (bits >>> 16) | 0;
+      bitCount -= 16;
+    } else {
+      // `1111`, then 32 bits: more than one refill guarantees, so the value
+      // is read as two 16-bit halves.
+      const low = (bits >>> 4) & 0xffff;
+      bits = (bits >>> 20) | 0;
+      bitCount -= 20;
+      while (bitCount <= 24) {
+        bits |= (next < end ? bytes[next] : 0) << bitCount;
+        next++;
+        bitCount += 8;
+      }
+      deltaOfDelta = ((bits & 0xffff) << 16) | low;
+      bits = (bits >>> 16) | 0;
+      bitCount -= 16;
+    }
+    // delta += deltaOfDelta, sign-extended to 64 bits; then timestamp += delta.
+    let sum = (deltaLo + deltaOfDelta) | 0;
+    deltaHi =
+      (deltaHi + (deltaOfDelta >> 31) + (sum >>> 0 < deltaLo >>> 0 ? 1 : 0)) |
+      0;
+    deltaLo = sum;
+    sum = (lo + deltaLo) | 0;
+    hi = (hi + deltaHi + (sum >>> 0 < lo >>> 0 ? 1 : 0)) | 0;
+    lo = sum;
+    words[index * 2] = lo;
+    words[index * 2 + 1] = hi;
+    index++;
+  }
+  const consumedBits = (next - start) * 8 - bitCount;
+  if (consumedBits > (end - start) * 8) {
+    throw new QwpProtocolError("truncated QWP Gorilla bitstream");
+  }
+  reader.readBytes(Math.ceil(consumedBits / 8), "Gorilla bitstream");
+  if (!NATIVE_LITTLE_ENDIAN) swapWordBytes(words, count * 2);
+  return words;
+}
+
+/** Reverses the byte order of each of the first `length` words, in place. */
+function swapWordBytes(words: Int32Array, length: number): void {
+  for (let index = 0; index < length; index++) {
+    const word = words[index];
+    words[index] =
+      (word << 24) |
+      ((word & 0xff00) << 8) |
+      ((word >>> 8) & 0xff00) |
+      (word >>> 24);
+  }
 }
 
 // Array.from({ length }, mapper) takes the generic array-like path; a
@@ -1408,24 +1494,6 @@ function readFixedWidthValues(
   }
 }
 
-function readTimestampValues(
-  reader: QwpByteReader,
-  count: number,
-  gorilla: boolean,
-): bigint[] {
-  if (!gorilla) {
-    return readInt64Values(reader, count, "timestamp value");
-  }
-  const encoding = reader.readUint8("timestamp encoding");
-  if (encoding === 0) {
-    return readInt64Values(reader, count, "timestamp value");
-  }
-  if (encoding !== 1) {
-    throw new QwpProtocolError(`unknown timestamp encoding: ${encoding}`);
-  }
-  return decodeGorillaValues(reader, count);
-}
-
 function readArrayValue(
   reader: QwpByteReader,
   type: QwpColumnType,
@@ -1498,6 +1566,11 @@ export class QwpResultBatchDecoder {
   private readonly viewBatches: QwpResultBatchView[] = [];
   private readonly viewLayouts: QwpResultColumnViewLayout[][] = [];
   private readonly viewLayoutPools: QwpResultColumnViewLayout[][] = [];
+  /**
+   * Gorilla scratch for decode(). Retained across batches like the view
+   * layouts' storage, and grown only for a stream long enough to back it.
+   */
+  private timestampWords?: Int32Array;
   private schema?: QwpResultColumnSchema[];
   private expectedBatchSequence = 0n;
 
@@ -1916,69 +1989,48 @@ export class QwpResultBatchDecoder {
     flags: number,
   ): void {
     const count = layout.nonNullCount;
-    if ((flags & QWP_FLAG_GORILLA) === 0) {
+    if ((flags & QWP_FLAG_GORILLA) === 0 || !readGorillaEncoding(reader)) {
       this.readFixedView(reader, layout, count, 8, "timestamp values");
       return;
     }
-    const encoding = reader.readUint8("timestamp encoding");
-    if (encoding === 0) {
-      this.readFixedView(reader, layout, count, 8, "timestamp values");
-      return;
+    const words = (layout.timestampWords = decodeGorillaTimestamps(
+      reader,
+      count,
+      layout.timestampWords,
+    ));
+    layout.setValues(new Uint8Array(words.buffer, words.byteOffset, count * 8));
+  }
+
+  private readTimestampValues(
+    reader: QwpByteReader,
+    count: number,
+    flags: number,
+  ): bigint[] {
+    if ((flags & QWP_FLAG_GORILLA) === 0 || !readGorillaEncoding(reader)) {
+      return readInt64Values(reader, count, "timestamp value");
     }
-    if (encoding !== 1) {
-      throw new QwpProtocolError(`unknown timestamp encoding: ${encoding}`);
+    const words = (this.timestampWords = decodeGorillaTimestamps(
+      reader,
+      count,
+      this.timestampWords,
+    ));
+    const values = new Array<bigint>(count);
+    if (NATIVE_LITTLE_ENDIAN) {
+      // DataView.getBigInt64 roughly halved decode() throughput in the V8 of
+      // Node 20 and 22. A BigInt64Array reads native byte order, so only a
+      // little-endian host can read the little-endian words through one.
+      const int64s = new BigInt64Array(words.buffer, words.byteOffset, count);
+      for (let index = 0; index < count; index++) values[index] = int64s[index];
+      return values;
     }
-    if (count < 3) {
-      throw new QwpProtocolError(
-        `Gorilla-encoded column has fewer than three values: ${count}`,
-      );
+    // Deliberately not shared with readInt64Values: with one loop serving
+    // both, V8 ran this path up to 2x slower, depending on which caller it
+    // optimized the loop for first.
+    const view = new DataView(words.buffer, words.byteOffset, count * 8);
+    for (let index = 0; index < count; index++) {
+      values[index] = view.getBigInt64(index * 8, true);
     }
-    const bytes = layout.timestampBytes(count * 8);
-    const decoded = new DataView(
-      bytes.buffer,
-      bytes.byteOffset,
-      bytes.byteLength,
-    );
-    const first = reader.readBigInt64("first Gorilla timestamp");
-    const second = reader.readBigInt64("second Gorilla timestamp");
-    decoded.setBigInt64(0, first, true);
-    decoded.setBigInt64(8, second, true);
-    const bits = new QwpBitReader(
-      reader.bytes.subarray(
-        reader.position,
-        reader.position + reader.remaining,
-      ),
-    );
-    let previousTimestamp = second;
-    let previousDelta = BigInt.asIntN(64, second - first);
-    for (let index = 2; index < count; index++) {
-      let deltaOfDelta: bigint;
-      let prefixOnes = 0;
-      while (prefixOnes < 4 && bits.readBit() !== 0) prefixOnes++;
-      switch (prefixOnes) {
-        case 0:
-          deltaOfDelta = 0n;
-          break;
-        case 1:
-          deltaOfDelta = bits.readSigned(7);
-          break;
-        case 2:
-          deltaOfDelta = bits.readSigned(9);
-          break;
-        case 3:
-          deltaOfDelta = bits.readSigned(12);
-          break;
-        default:
-          deltaOfDelta = bits.readSigned(32);
-      }
-      const delta = BigInt.asIntN(64, previousDelta + deltaOfDelta);
-      const timestamp = BigInt.asIntN(64, previousTimestamp + delta);
-      decoded.setBigInt64(index * 8, timestamp, true);
-      previousDelta = delta;
-      previousTimestamp = timestamp;
-    }
-    reader.readBytes(bits.bytesConsumed, "Gorilla bitstream");
-    layout.setValues(bytes);
+    return values;
   }
 
   private readColumn(
@@ -2016,11 +2068,7 @@ export class QwpResultBatchDecoder {
       case QWP_COLUMN_TYPE.DATE:
       case QWP_COLUMN_TYPE.TIMESTAMP:
       case QWP_COLUMN_TYPE.TIMESTAMP_NANOS:
-        dense = readTimestampValues(
-          reader,
-          count,
-          (flags & QWP_FLAG_GORILLA) !== 0,
-        );
+        dense = this.readTimestampValues(reader, count, flags);
         break;
       case QWP_COLUMN_TYPE.VARCHAR:
         dense = readStringValues(reader, count, false);

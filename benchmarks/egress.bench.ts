@@ -12,6 +12,7 @@ import {
   QwpResultBatchDecoder,
   writeQwpVarint,
 } from "../packages/client-core/src/_qwp/_core";
+import { random } from "./workloads";
 
 const ROWS = 10_000;
 let sink = 0;
@@ -69,6 +70,32 @@ function resultFrame(rowCount: number): Uint8Array {
       ),
     ),
   );
+  return encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1);
+}
+
+// Gorilla decoding cost depends on the delta-of-delta code widths, so on how
+// irregular the intervals are.
+const GORILLA_SERIES: Record<string, (next: () => number) => bigint> = {
+  // Every delta-of-delta is zero: one bit per value.
+  "constant 1 ms": () => 1_000n,
+  // 50 us of jitter either way: mostly 9-bit codes.
+  "jittered 1 ms": (next) => 1_000n + BigInt(Math.floor(next() * 101) - 50),
+  // Exponential gaps averaging 1 s: mostly 36-bit codes.
+  "irregular 1 s": (next) =>
+    BigInt(Math.floor(-Math.log(1 - next()) * 1_000_000)),
+};
+
+function timestampResultFrame(timestamps: readonly bigint[]): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(1n);
+  writeQwpVarint(payload, 0); // batch sequence
+  writeString(payload, "bench_timestamps");
+  writeQwpVarint(payload, timestamps.length);
+  writeQwpVarint(payload, 1);
+  writeString(payload, "timestamp");
+  payload.writeUint8(QWP_COLUMN_TYPE.TIMESTAMP);
+  payload.writeUint8(0).writeUint8(1); // no nulls, Gorilla encoded
+  payload.writeBytes(encodeQwpGorilla(timestamps));
   return encodeQwpFrame(payload.toUint8Array(), QWP_FLAG_GORILLA, 1);
 }
 
@@ -139,6 +166,31 @@ describe("QWP egress batch decoding", () => {
     const batch = new QwpResultBatchDecoder().decode(compressed);
     sink += batch.rowCount + Number(batch.columns[0].values[0]);
   });
+});
+
+describe("QWP Gorilla timestamp decoding", () => {
+  for (const [name, interval] of Object.entries(GORILLA_SERIES)) {
+    const next = random(3);
+    let timestamp = 1_700_000_000_000_000n;
+    const message = decodeQwpEgressMessage(
+      timestampResultFrame(
+        Array.from({ length: ROWS }, () => (timestamp += interval(next))),
+      ),
+    );
+    if (message.kind !== "result-batch") {
+      throw new Error("Gorilla benchmark frame is not a result batch");
+    }
+    // One long-lived decoder, as an egress session keeps.
+    const decoder = new QwpResultBatchDecoder();
+    bench(`materialized / ${name} / ${ROWS} rows`, () => {
+      decoder.resetQuerySchema();
+      sink += decoder.decode(message).rowCount;
+    });
+    bench(`column view / ${name} / ${ROWS} rows`, () => {
+      decoder.resetQuerySchema();
+      sink += decoder.decodeView(message).rowCount;
+    });
+  }
 });
 
 export const egressBenchmarkSink = (): number => sink;
