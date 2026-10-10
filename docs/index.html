@@ -251,9 +251,10 @@ protocol-level PING frames. A poll completes once published: durable progress
 arrives independently, and an open deferred transaction may intentionally
 prevent the server from sending a cumulative OK for that poll.
 <code>durableAckKeepaliveMs</code> takes effect only with <code>requestDurableAck: true</code> and is
-otherwise ignored, as in the Java and Rust clients; manual polls reject locally
-when the capability was not negotiated. Once it is
-negotiated, <code>flushAndWait()</code> waits for durable upload:</p>
+otherwise ignored, as in the Java and Rust clients. A server that does not select
+the durable-ACK subprotocol fails the connection with
+<code>QwpDurableAckUnavailableError</code>. Once it is negotiated, <code>flushAndWait()</code> waits for
+durable upload:</p>
 <pre><code class="typescript"><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">sender</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-1">connectQwpBrowserSender</span><span class="hl-2">({</span><br/><span class="hl-2">  </span><span class="hl-6">url</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">requestDurableAck:</span><span class="hl-2"> </span><span class="hl-4">true</span><span class="hl-2">,</span><br/><span class="hl-2">  </span><span class="hl-6">autoFlush:</span><span class="hl-2"> </span><span class="hl-4">false</span><span class="hl-2">,</span><br/><span class="hl-2">});</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">table</span><span class="hl-2">(</span><span class="hl-3">&quot;events&quot;</span><span class="hl-2">).</span><span class="hl-1">longColumn</span><span class="hl-2">(</span><span class="hl-3">&quot;value&quot;</span><span class="hl-2">, </span><span class="hl-8">42</span><span class="hl-4">n</span><span class="hl-2">).</span><span class="hl-1">atNow</span><span class="hl-2">();</span><br/><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">durable</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">flushAndWait</span><span class="hl-2">();</span>
 </code><button type="button">Copy</button></pre>
 
