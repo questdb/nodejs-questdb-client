@@ -13,7 +13,9 @@ no additional public import paths.
 - Streaming queries with typed bind variables and result batches
 - Automatic batching, reconnect, failover, and acknowledgement tracking
 - Transactional ingestion and durable acknowledgement negotiation
-- REST, OIDC, and Basic authentication through HttpOnly session cookies
+- REST, OIDC, and Basic authentication, either through HttpOnly session
+  cookies or, for third-party web applications, sent with each WebSocket
+  upgrade
 - ESM, CommonJS, and bundled TypeScript declarations
 - No Node.js built-ins, Node.js typings, `ws`, or `undici`
 
@@ -52,7 +54,9 @@ import { connectQwpBrowserSender } from "@questdb/browser-client";
 
 Serve QuestDB's QWP route from the application's origin, either directly or
 through a reverse proxy. The browser will then apply the page's normal cookie,
-origin, and TLS rules to the WebSocket connection.
+origin, and TLS rules to the WebSocket connection. An application served from
+another origin connects directly instead; see
+[Third-party web applications](#third-party-web-applications).
 
 ```typescript
 import { connectQwpBrowserSender } from "@questdb/browser-client";
@@ -161,7 +165,20 @@ addresses, geohashes, binary values, and arrays.
 
 ## Authentication
 
-Browser JavaScript cannot add an `Authorization` header to a WebSocket upgrade.
+Browser JavaScript cannot add an `Authorization` header to a WebSocket upgrade,
+so the client authenticates in one of two ways:
+
+- **Session cookies**, for an application served from QuestDB's origin or
+  through a same-origin reverse proxy. The client authenticates over REST, and
+  QuestDB sets an HttpOnly session cookie that the browser sends with the
+  upgrade.
+- **`auth`**, for a third-party web application served from its own origin.
+  The client sends the credential with every upgrade, in its subprotocol offer.
+
+A connection accepts one or the other, not both.
+
+### Session cookies
+
 Authenticate over REST first so QuestDB can set an HttpOnly session cookie. The
 browser then sends that cookie during the QWP WebSocket upgrade.
 
@@ -205,9 +222,65 @@ not run an interactive OIDC flow; the application obtains access tokens from
 its identity provider.
 
 The bootstrap request uses credentials. Prefer serving `/exec`, `/write/v4`,
-and `/read/v1` from the application's origin. Cross-origin deployments require
-credentialed CORS and cookie attributes that permit the browser to store and
-send the session cookie. JavaScript never reads the HttpOnly cookie.
+and `/read/v1` from the application's origin. JavaScript never reads the
+HttpOnly cookie. An application on another origin should use `auth` instead:
+QuestDB ignores cookies on a cross-origin QWP upgrade.
+
+### Third-party web applications
+
+An application served from its own origin, such as `https://app.example.com`,
+connects to QuestDB directly once the server lists that exact origin:
+
+```
+# QuestDB server.conf
+qwp.browser.allowed.origins=https://app.example.com
+```
+
+Pass the credential as `auth`. REST and OIDC tokens use the `bearer` form, and
+`{ type: "basic", username, password }` is accepted too:
+
+```typescript
+import { connectQwpBrowserSender } from "@questdb/browser-client";
+
+const sender = await connectQwpBrowserSender({
+  url: "wss://questdb.example.com:9000/write/v4",
+  auth: { type: "bearer", token: restToken },
+});
+```
+
+An OIDC access token expires, so pass a function instead. The client calls it
+before every initial connect, reconnect, and failover attempt, so a long-lived
+sender or query session keeps working with each refreshed token:
+
+```typescript
+const sender = await connectQwpBrowserSender({
+  url: "wss://questdb.example.com:9000/write/v4",
+  auth: async ({ signal }) => ({
+    type: "bearer",
+    token: await identityProvider.getAccessToken({ signal }),
+  }),
+});
+```
+
+The `signal` aborts when the connection attempt is abandoned, and time spent in
+the function counts against `connectTimeoutMs`. If the function throws, the
+attempt fails with a `QwpUpgradeError` of kind `authentication` whose `cause` is
+the thrown error; reconnects retry it with backoff unless that error carries
+`retryable: false`.
+
+- Use `wss:`. The credential travels in the upgrade request's
+  `Sec-WebSocket-Protocol` header, base64url-encoded but not encrypted.
+- QuestDB accepts the credential only from a listed origin; a page served from
+  QuestDB's own origin must be listed too, or keep using session cookies. It
+  creates no session and ignores cookies on these upgrades, so the connection
+  runs as the credential's own principal; `serviceAccount` assumption is not
+  available this way.
+- QuestDB never selects the credential as the connection's subprotocol. The
+  client treats a server that does as defective and closes the connection
+  without retrying or trying another endpoint.
+- With authentication disabled, a listed origin needs no credential.
+- The server must support `qwp.browser.allowed.origins`. The allowlist covers
+  only the QWP routes; it does not enable CORS for REST.
 
 ## Stream query results
 

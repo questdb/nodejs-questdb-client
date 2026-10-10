@@ -33,6 +33,8 @@ import {
   connectQwpBrowserSender,
 } from "../../packages/browser-client/src";
 import type {
+  QwpBrowserAuthContext,
+  QwpBrowserAuthProvider,
   QwpBrowserClusterOptions,
   QwpBrowserClientEgressOptions,
   QwpBrowserClientIngressOptions,
@@ -269,6 +271,37 @@ const browserClusterOptionsContract: QwpBrowserClusterOptions = {
   sessionBootstrap: {
     authentication: { type: "bearer", token: "oidc-token" },
   },
+};
+
+// A provider may return the credential directly or through a promise, and may
+// ignore its context; the signal is always an AbortSignal.
+const browserAuthProviderContract: QwpBrowserAuthProvider = async (
+  context: QwpBrowserAuthContext,
+) => {
+  const signal: AbortSignal = context.signal;
+  void signal;
+  return { type: "bearer", token: "oidc-access-token" };
+};
+
+const browserAuthOptionsContracts: readonly QwpBrowserWebSocketOptions[] = [
+  {
+    url: "wss://node-1.example/write/v4",
+    auth: { type: "bearer", token: "rest-token" },
+  },
+  {
+    url: "wss://node-1.example/write/v4",
+    auth: { type: "basic", username: "admin", password: "quest" },
+  },
+  { url: "wss://node-1.example/write/v4", auth: browserAuthProviderContract },
+  {
+    url: "wss://node-1.example/write/v4",
+    auth: () => ({ type: "bearer", token: "rest-token" }),
+  },
+];
+
+const browserClusterAuthContract: QwpBrowserClusterOptions = {
+  url: "wss://node-1.example/qdb",
+  auth: browserAuthProviderContract,
 };
 
 const browserIngressOverridesContract: QwpBrowserClientIngressOptions = {
@@ -550,6 +583,8 @@ void egressSessionOptionsContract;
 void fixedConnectionIngressContract;
 void fixedConnectionEgressContract;
 void browserEgressOptionsContract;
+void browserAuthOptionsContracts;
+void browserClusterAuthContract;
 void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
 void senderSequenceContract;

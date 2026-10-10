@@ -48,6 +48,12 @@ import {
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
 import {
+  isQwpAuthorizationWebSocketProtocol,
+  QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX,
+  QWP_V1_WEBSOCKET_PROTOCOL,
+  qwpBrowserWebSocketProtocols,
+} from "../../packages/client-core/src/_qwp/_core/durable-ack";
+import {
   decodeUtf8,
   encodeUtf8,
   utf8Length,
@@ -250,6 +256,71 @@ describe("QWP browser durable-ACK negotiation", () => {
         QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
       ]),
     ).toEqual(["application.v1", QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL]);
+  });
+
+  it("keeps the offer unchanged when no credential is offered", () => {
+    // A browser fails a handshake whose response selects none of its offers,
+    // so adding questdb.qwp.v1 here would break every server that predates it.
+    expect(qwpBrowserWebSocketProtocols(undefined, false)).toBeUndefined();
+    expect(qwpBrowserWebSocketProtocols("application.v1", false)).toBe(
+      "application.v1",
+    );
+    const protocols = ["application.v1"];
+    const offer = qwpBrowserWebSocketProtocols(protocols, false);
+    expect(offer).toEqual(["application.v1"]);
+    expect(offer).not.toBe(protocols);
+    expect(qwpBrowserWebSocketProtocols(undefined, true)).toBe(
+      QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+    );
+  });
+
+  it("pairs a credential with exactly one dialect the server selects", () => {
+    const credential = `${QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX}QmVhcmVyIHQ`;
+    expect(qwpBrowserWebSocketProtocols(undefined, false, credential)).toEqual([
+      QWP_V1_WEBSOCKET_PROTOCOL,
+      credential,
+    ]);
+    // Ingress selects durable ACK in preference, and the credential gate
+    // accepts it as the dialect, so it replaces questdb.qwp.v1.
+    expect(qwpBrowserWebSocketProtocols(undefined, true, credential)).toEqual([
+      QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+      credential,
+    ]);
+    const protocols = ["application.v1", QWP_V1_WEBSOCKET_PROTOCOL];
+    expect(qwpBrowserWebSocketProtocols(protocols, false, credential)).toEqual([
+      "application.v1",
+      QWP_V1_WEBSOCKET_PROTOCOL,
+      credential,
+    ]);
+    expect(protocols).toEqual(["application.v1", QWP_V1_WEBSOCKET_PROTOCOL]);
+    expect(
+      qwpBrowserWebSocketProtocols("application.v1", false, credential),
+    ).toEqual(["application.v1", QWP_V1_WEBSOCKET_PROTOCOL, credential]);
+  });
+
+  it("recognizes credential subprotocols by their prefix alone", () => {
+    expect(
+      isQwpAuthorizationWebSocketProtocol(
+        `${QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX}QmVhcmVyIHQ`,
+      ),
+    ).toBe(true);
+    expect(
+      isQwpAuthorizationWebSocketProtocol(
+        QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX,
+      ),
+    ).toBe(true);
+    for (const protocol of [
+      undefined,
+      "",
+      QWP_V1_WEBSOCKET_PROTOCOL,
+      QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+      "questdb.qwp.authorization",
+      "x-questdb.qwp.authorization.QmVhcmVyIHQ",
+    ]) {
+      expect(isQwpAuthorizationWebSocketProtocol(protocol), protocol).toBe(
+        false,
+      );
+    }
   });
 
   it("encodes a side-effect-free table-less durable progress poll", () => {

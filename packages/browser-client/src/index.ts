@@ -21,13 +21,17 @@ import {
   QWP_MAX_TIMER_DELAY_MS,
 } from "../../client-core/src/_qwp/_internal/timer-bounds";
 import {
-  addQwpDurableAckWebSocketProtocol,
   decodeQwpIngressServerInfo,
   encodeQwpAcceptEncoding,
   isQwpDurableAckWebSocketProtocol,
   QwpEgressCompression,
   QWP_VERSION,
 } from "../../client-core/src/_qwp/_core";
+import {
+  isQwpAuthorizationWebSocketProtocol,
+  QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX,
+  qwpBrowserWebSocketProtocols,
+} from "../../client-core/src/_qwp/_core/durable-ack";
 import {
   QwpBinaryConnection,
   QwpConnectionFactory,
@@ -55,6 +59,12 @@ import {
 
 export type { QwpWebSocketLike } from "../../client-core/src/_qwp/_internal/websocket-connection";
 
+/**
+ * A browser credential: HTTP Basic, or a QuestDB REST token or OIDC access
+ * token sent as a Bearer token. `sessionBootstrap` exchanges it over REST for
+ * QuestDB's HttpOnly session cookies; `auth` sends it with every QWP WebSocket
+ * upgrade instead.
+ */
 export type QwpBrowserSessionAuthentication =
   | {
       /** HTTP Basic authentication. */
@@ -67,6 +77,36 @@ export type QwpBrowserSessionAuthentication =
       type: "bearer";
       token: string;
     };
+
+/** Describes the connection attempt a {@link QwpBrowserAuthProvider} serves. */
+export interface QwpBrowserAuthContext {
+  /**
+   * Aborted when the attempt is abandoned, because its `connectTimeoutMs`
+   * deadline expired or its session closed. Pass it to a token refresh so the
+   * refresh is cancelled together with the attempt.
+   */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * Supplies the credential for one QWP WebSocket connection attempt.
+ *
+ * The client calls it before every initial connect, reconnect, and failover
+ * attempt, and keeps nothing it returns. A provider that returns the current
+ * OIDC access token, refreshing it when it is about to expire, therefore keeps
+ * a long-lived sender or query session authenticated across token expiry.
+ * Time spent here counts against `connectTimeoutMs`.
+ *
+ * A provider that throws fails the attempt with a {@link QwpUpgradeError} of
+ * kind `authentication` whose `cause` is the thrown value, without trying the
+ * remaining endpoints. Reconnects retry it with backoff unless the thrown value
+ * carries `retryable: false`.
+ */
+export type QwpBrowserAuthProvider = (
+  context: QwpBrowserAuthContext,
+) =>
+  | QwpBrowserSessionAuthentication
+  | PromiseLike<QwpBrowserSessionAuthentication>;
 
 export type QwpBrowserFetch = (
   input: string | URL,
@@ -156,66 +196,231 @@ async function readBoundedBootstrapErrorBody(
   return new TextDecoder().decode(bytes.subarray(0, length));
 }
 
+/**
+ * Validates a credential. `label` prefixes errors about one of its fields and
+ * `subject` names the whole credential; no error quotes the credential itself.
+ */
 function validateAuthentication(
   authentication: QwpBrowserSessionAuthentication,
+  label = "browser session",
+  subject = "browser session authentication",
 ): void {
+  if (typeof authentication !== "object" || authentication === null) {
+    throw new TypeError(
+      `${subject} must be a { type: "basic" } or { type: "bearer" } object`,
+    );
+  }
   if (authentication.type === "basic") {
     if (!authentication.username) {
-      throw new TypeError("browser session username cannot be empty");
+      throw new TypeError(`${label} username cannot be empty`);
     }
     if (authentication.username.includes(":")) {
-      throw new TypeError("browser session username cannot contain ':'");
+      throw new TypeError(`${label} username cannot contain ':'`);
     }
     if (/\r|\n/.test(authentication.username + authentication.password)) {
-      throw new TypeError(
-        "browser session credentials cannot contain CR or LF",
-      );
+      throw new TypeError(`${label} credentials cannot contain CR or LF`);
     }
     return;
   }
   if (authentication.type === "bearer") {
     if (!authentication.token) {
-      throw new TypeError("browser session bearer token cannot be empty");
+      throw new TypeError(`${label} bearer token cannot be empty`);
     }
     if (/\r|\n/.test(authentication.token)) {
-      throw new TypeError(
-        "browser session bearer token cannot contain CR or LF",
-      );
+      throw new TypeError(`${label} bearer token cannot contain CR or LF`);
     }
     return;
   }
   throw new TypeError(
-    `unsupported browser session authentication type '${String((authentication as { type?: unknown }).type)}'`,
+    `unsupported ${subject} type '${String((authentication as { type?: unknown }).type)}'`,
   );
 }
 
-function encodeBase64Utf8(value: string): string {
-  const alphabet =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  const bytes = new TextEncoder().encode(value);
+const BASE64_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64URL_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function encodeBase64(
+  bytes: Uint8Array,
+  alphabet: string,
+  padding: string,
+): string {
   let result = "";
   for (let index = 0; index < bytes.length; index += 3) {
     const first = bytes[index];
-    const second = bytes[index + 1];
-    const third = bytes[index + 2];
+    const second: number | undefined = bytes[index + 1];
+    const third: number | undefined = bytes[index + 2];
     result += alphabet[first >>> 2];
     result += alphabet[((first & 0x03) << 4) | ((second ?? 0) >>> 4)];
     result +=
       second === undefined
-        ? "="
+        ? padding
         : alphabet[((second & 0x0f) << 2) | ((third ?? 0) >>> 6)];
-    result += third === undefined ? "=" : alphabet[third & 0x3f];
+    result += third === undefined ? padding : alphabet[third & 0x3f];
   }
   return result;
 }
 
+/** Standard padded base64, the encoding HTTP Basic credentials use. */
+function encodeBase64Utf8(value: string): string {
+  return encodeBase64(new TextEncoder().encode(value), BASE64_ALPHABET, "=");
+}
+
+/**
+ * Unpadded base64url. Standard base64 emits `+`, `/`, and `=`, none of which
+ * may appear in a WebSocket subprotocol, so a browser refuses to offer a
+ * credential encoded that way and QuestDB refuses to decode one.
+ */
+function encodeBase64UrlUtf8(value: string): string {
+  return encodeBase64(new TextEncoder().encode(value), BASE64URL_ALPHABET, "");
+}
+
 function authorizationHeader(
   authentication: QwpBrowserSessionAuthentication,
+  label?: string,
+  subject?: string,
 ): string {
-  validateAuthentication(authentication);
+  validateAuthentication(authentication, label, subject);
   return authentication.type === "basic"
     ? `Basic ${encodeBase64Utf8(`${authentication.username}:${authentication.password}`)}`
     : `Bearer ${authentication.token}`;
+}
+
+const QWP_BROWSER_AUTH_LABEL = "browser auth";
+
+/**
+ * The subprotocol that carries `authentication` through a WebSocket upgrade:
+ * its HTTP `Authorization` value, base64url-encoded without padding.
+ *
+ * QuestDB decodes that value only when it is printable ASCII that neither
+ * starts nor ends with a space. A Basic value always is, because the username
+ * and password travel inside its own base64. A bearer token is spliced in
+ * verbatim, so one with a space, a control character, or a non-ASCII
+ * character is refused here, where the error can say why, rather than sent
+ * to a 401 the browser never shows.
+ */
+function browserCredentialProtocol(
+  authentication: QwpBrowserSessionAuthentication,
+): string {
+  const authorization = authorizationHeader(
+    authentication,
+    QWP_BROWSER_AUTH_LABEL,
+    `${QWP_BROWSER_AUTH_LABEL} credential`,
+  );
+  if (
+    authentication.type === "bearer" &&
+    !/^[\x21-\x7e]+$/.test(authentication.token)
+  ) {
+    throw new TypeError(
+      `${QWP_BROWSER_AUTH_LABEL} bearer token must contain only visible ASCII characters`,
+    );
+  }
+  return (
+    QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX +
+    encodeBase64UrlUtf8(authorization)
+  );
+}
+
+function protocolList(
+  protocols: string | readonly string[] | undefined,
+): readonly string[] {
+  if (protocols === undefined) return [];
+  return typeof protocols === "string" ? [protocols] : protocols;
+}
+
+/**
+ * Rejects an `auth` configuration that could never authenticate.
+ *
+ * Runs when a public entry point accepts the options, so the mistake surfaces
+ * there, and again before every connection attempt, where it is marked
+ * non-retryable: no retry can fix an option.
+ */
+function validateBrowserAuthOptions(options: {
+  auth?: QwpBrowserSessionAuthentication | QwpBrowserAuthProvider;
+  sessionBootstrap?: QwpBrowserSessionBootstrapConfig;
+  protocols?: string | readonly string[];
+}): void {
+  const { auth } = options;
+  if (auth === undefined) return;
+  // One or the other decides how the upgrade authenticates. QuestDB ignores
+  // the session cookie on an upgrade that offers a credential, so a bootstrap
+  // alongside `auth` would only issue cookies nothing uses.
+  if (options.sessionBootstrap) {
+    throw new TypeError(
+      "auth cannot be combined with sessionBootstrap; configure exactly one of them",
+    );
+  }
+  if (typeof auth !== "function") browserCredentialProtocol(auth);
+  // A second credential makes QuestDB refuse the whole offer.
+  if (
+    protocolList(options.protocols).some(isQwpAuthorizationWebSocketProtocol)
+  ) {
+    throw new TypeError(
+      `protocols cannot contain a ${QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX}* credential when auth is set`,
+    );
+  }
+}
+
+/** Resolves `auth` for one connection attempt into its credential subprotocol. */
+async function resolveBrowserCredentialProtocol(
+  auth: QwpBrowserSessionAuthentication | QwpBrowserAuthProvider,
+  endpoint: string | URL,
+  signal: AbortSignal,
+): Promise<string> {
+  if (typeof auth !== "function") return browserCredentialProtocol(auth);
+  let authentication: QwpBrowserSessionAuthentication;
+  try {
+    authentication = await auth({ signal });
+  } catch (error) {
+    // The credential does not depend on the endpoint, so the next one would
+    // fail the same way: stop the sweep and leave the retry to reconnect
+    // backoff. A provider that knows retrying cannot help says so the way the
+    // rest of the client does, with `retryable: false`.
+    throw new QwpUpgradeError("QWP browser auth provider failed", {
+      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+      retryable:
+        (error as { retryable?: unknown } | null | undefined)?.retryable !==
+        false,
+      tryNextEndpoint: false,
+      url: endpoint,
+      cause: error,
+    });
+  }
+  try {
+    return browserCredentialProtocol(authentication);
+  } catch (error) {
+    throw new QwpUpgradeError(
+      `QWP browser auth provider returned an invalid credential: ${(error as Error).message}`,
+      {
+        kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+        retryable: false,
+        tryNextEndpoint: false,
+        url: endpoint,
+        cause: error,
+      },
+    );
+  }
+}
+
+/**
+ * A server that selects the credential subprotocol has copied the secret into
+ * its 101 response, where proxies and response logging can record it. QuestDB
+ * never does: it selects `questdb.qwp.v1` or durable ACK. This is therefore a
+ * server defect, not a negotiation outcome, and since every node of a cluster
+ * normally runs the same build, walking the endpoint list or retrying would
+ * only repeat the exposure.
+ */
+function credentialEchoError(endpoint: string | URL): QwpUpgradeError {
+  return new QwpUpgradeError(
+    "QWP server selected the browser credential as its WebSocket subprotocol, echoing the credential in its upgrade response; this is a server defect",
+    {
+      kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+      retryable: false,
+      tryNextEndpoint: false,
+      url: endpoint,
+    },
+  );
 }
 
 /**
@@ -356,8 +561,25 @@ export interface QwpBrowserWebSocketOptions extends QwpWebSocketConnectOptions {
   /**
    * Authenticates over REST before every WebSocket connection attempt so the
    * browser can attach QuestDB's HttpOnly session cookies to the upgrade.
+   * Cannot be combined with `auth`.
    */
   sessionBootstrap?: QwpBrowserSessionBootstrapConfig;
+  /**
+   * Authenticates every WebSocket upgrade with a credential carried in its
+   * subprotocol offer instead of a session cookie. This is how a web
+   * application served from another origin, which QuestDB lists in
+   * `qwp.browser.allowed.origins`, connects. Pass a fixed credential, or a
+   * {@link QwpBrowserAuthProvider} the client calls before every connect,
+   * reconnect, and failover attempt, for example to supply a refreshed OIDC
+   * access token.
+   *
+   * QuestDB accepts the credential only from a listed origin: a page served
+   * from QuestDB's own origin must be listed too, or keep using
+   * `sessionBootstrap`. It creates no session for the credential and ignores
+   * cookies on the upgrade. Use `wss:`: the credential travels in the opening
+   * HTTP request. Cannot be combined with `sessionBootstrap`.
+   */
+  auth?: QwpBrowserSessionAuthentication | QwpBrowserAuthProvider;
   /** Test or framework hook; defaults to the browser's global WebSocket. */
   webSocketFactory?: (
     url: string | URL,
@@ -389,8 +611,16 @@ export interface QwpBrowserClusterOptions extends QwpWebSocketConnectOptions {
   /**
    * Authenticates before every connection attempt. When `url` is omitted from
    * this bootstrap, its REST endpoint follows the active cluster endpoint.
+   * Cannot be combined with `auth`.
    */
   sessionBootstrap?: QwpBrowserSessionBootstrapConfig;
+  /**
+   * Credential sent with every ingress and egress WebSocket upgrade; see
+   * {@link QwpBrowserWebSocketOptions.auth}. A provider is called before every
+   * connection attempt of either side. Cannot be combined with
+   * `sessionBootstrap`.
+   */
+  auth?: QwpBrowserSessionAuthentication | QwpBrowserAuthProvider;
   /** Shared test or framework hook; either side may override it. */
   webSocketFactory?: (
     url: string | URL,
@@ -496,14 +726,16 @@ function composeBrowserAbortSignals(
  * Opens a QWP-capable browser WebSocket.
  *
  * Browsers cannot set Authorization or X-QWP-* upgrade headers. QuestDB accepts
- * browser upgrades when Origin and Host have the same authority, so serve the
- * app from the QuestDB origin or route QWP through a same-origin reverse proxy.
- * When authentication is enabled, pass sessionBootstrap or call
- * bootstrapQwpBrowserSession first so the browser can attach qdb_session.
+ * browser upgrades when Origin and Host have the same authority, or when the
+ * server lists the Origin in `qwp.browser.allowed.origins`. When
+ * authentication is enabled, a same-origin app can pass sessionBootstrap or
+ * call bootstrapQwpBrowserSession first so the browser can attach
+ * qdb_session; an app on a listed origin passes `auth` instead.
  */
 export function connectQwpBrowserWebSocket(
   options: QwpBrowserWebSocketOptions,
 ): Promise<QwpBinaryConnection> {
+  validateBrowserAuthOptions(options);
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
@@ -516,6 +748,7 @@ export function connectQwpBrowserWebSocket(
 export function createQwpBrowserConnectionFactory(
   options: QwpBrowserWebSocketOptions,
 ): QwpConnectionFactory {
+  validateBrowserAuthOptions(options);
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
@@ -528,7 +761,7 @@ async function connectQwpBrowserEndpoint(
   options: QwpBrowserWebSocketOptions,
   endpoint: string | URL,
   requestEndpoint: string | URL,
-  protocols: string | string[] | undefined,
+  requestDurableAck: boolean,
   signal: AbortSignal | undefined,
   completeHandshake: (
     selectedProtocol: string | undefined,
@@ -538,6 +771,11 @@ async function connectQwpBrowserEndpoint(
   ) => Promise<QwpBinaryConnection> = async (connection) => connection,
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
+  try {
+    validateBrowserAuthOptions(options);
+  } catch (error) {
+    throw error instanceof Error ? qwpNonRetryable(error) : error;
+  }
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_BROWSER_CONNECT_TIMEOUT_MS;
   const openingAbort = new AbortController();
@@ -581,7 +819,15 @@ async function connectQwpBrowserEndpoint(
   }
 
   const opening = (async (): Promise<QwpBinaryConnection> => {
-    if (options.sessionBootstrap) {
+    let credentialProtocol: string | undefined;
+    if (options.auth !== undefined) {
+      if (openingAbort.signal.aborted) throw new QwpSendClosedError();
+      credentialProtocol = await resolveBrowserCredentialProtocol(
+        options.auth,
+        endpoint,
+        openingAbort.signal,
+      );
+    } else if (options.sessionBootstrap) {
       const bootstrapAbort = composeBrowserAbortSignals([
         openingAbort.signal,
         options.sessionBootstrap.signal,
@@ -613,14 +859,28 @@ async function connectQwpBrowserEndpoint(
         }
         return new WebSocketConstructor(url, protocols);
       });
-    const socket = factory(requestEndpoint, protocols);
+    const socket = factory(
+      requestEndpoint,
+      qwpBrowserWebSocketProtocols(
+        options.protocols,
+        requestDurableAck,
+        credentialProtocol,
+      ),
+    );
     openedConnection = await openQwpWebSocket(socket, {
       signal: openingAbort.signal,
       url: endpoint,
       connectTimeoutMs,
       sendTimeoutMs: options.sendTimeoutMs,
       closeTimeoutMs: options.closeTimeoutMs,
-      completeHandshake: () => completeHandshake(socket.protocol),
+      completeHandshake: () => {
+        // Checked whoever put the credential in the offer, and before the
+        // selection is read for anything else.
+        if (isQwpAuthorizationWebSocketProtocol(socket.protocol)) {
+          throw credentialEchoError(endpoint);
+        }
+        return completeHandshake(socket.protocol);
+      },
       opaqueErrors: true,
     });
     return finishOpening(openedConnection);
@@ -692,14 +952,11 @@ function connectQwpBrowserRawEndpoint(
   const requestEndpoint = requestDurableAck
     ? browserNegotiationUrl(endpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1")
     : endpoint;
-  const protocols = requestDurableAck
-    ? addQwpDurableAckWebSocketProtocol(options.protocols)
-    : options.protocols;
   return connectQwpBrowserEndpoint(
     options,
     endpoint,
     requestEndpoint,
-    protocols,
+    requestDurableAck,
     signal,
     (selectedProtocol) =>
       browserIngressHandshake(options, endpoint, selectedProtocol),
@@ -864,9 +1121,7 @@ async function connectQwpBrowserIngressEndpoint(
     options,
     endpoint,
     browserNegotiationUrl(endpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1"),
-    options.requestDurableAck
-      ? addQwpDurableAckWebSocketProtocol(options.protocols)
-      : options.protocols,
+    options.requestDurableAck === true,
     signal,
     (selectedProtocol) =>
       browserIngressHandshake(options, endpoint, selectedProtocol),
@@ -914,11 +1169,13 @@ function connectQwpBrowserEgressEndpoint(
       String(maxBatchRows),
     );
   }
+  // Never durable ACK, which only ingress negotiates: an egress upgrade whose
+  // only dialect is durable ACK selects nothing, and a browser fails that.
   return connectQwpBrowserEndpoint(
     options,
     endpoint,
     requestEndpoint,
-    options.protocols,
+    false,
     signal,
     () => ({
       qwpVersion: QWP_VERSION,
@@ -969,6 +1226,9 @@ export function createQwpBrowserSender(
       "awaitDurableAck cannot be combined with requestDurableAck=false",
     );
   }
+  // The sender connects lazily; without this a bad `auth` would surface only
+  // from the first connect() or flush().
+  validateBrowserAuthOptions(options);
   return new QwpSender(
     (signal) =>
       connectQwpBrowserIngress(
@@ -1002,6 +1262,7 @@ export async function connectQwpBrowserEgress(
   /** Cancels an opening connection during pooled-client shutdown. */
   signal?: AbortSignal,
 ): Promise<QwpEgressSession> {
+  validateBrowserAuthOptions(options);
   return QwpEgressSession.connect(
     createQwpEgressFailoverConnectionFactory(
       options.url,
@@ -1027,6 +1288,7 @@ const CLUSTER_OWNED_BROWSER_OPTION_NAMES = [
   "url",
   "failoverUrls",
   "sessionBootstrap",
+  "auth",
 ] as const;
 
 function assertNoBrowserClusterOptionConflicts(
@@ -1098,6 +1360,10 @@ function resolveQwpBrowserClientOptions(
     // would hand this client's session credentials and rows.
     assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
     assertUniformQwpEndpointScheme(egress.url, egress.failoverUrls);
+    // After the merge: a side's own `protocols` override meets the shared
+    // `auth` only here.
+    validateBrowserAuthOptions(ingress);
+    validateBrowserAuthOptions(egress);
     return {
       ingress,
       egress,
@@ -1113,6 +1379,8 @@ function resolveQwpBrowserClientOptions(
     );
   }
   const split = options as QwpBrowserSplitClientOptions;
+  validateBrowserAuthOptions(split.ingress);
+  validateBrowserAuthOptions(split.egress);
   return {
     ingress: split.ingress,
     egress: split.egress,
