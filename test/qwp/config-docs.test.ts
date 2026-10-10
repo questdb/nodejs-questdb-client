@@ -5,11 +5,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   QWP_DEFAULT_EGRESS_BUFFER_POOL_SIZE,
   QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
-  QwpSender,
-  type QwpSenderSession,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
+import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../packages/client-core/src/_qwp/_internal/reconnecting-egress-connection";
+import {
+  QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS,
+  resolveQwpDurableAckKeepaliveMs,
+} from "../../packages/client-core/src/_qwp/ingress-session";
 import { createQwpNodeClient } from "../../packages/nodejs-client/src";
 import { resolveQwpNodeClientConfig } from "../../packages/nodejs-client/src/qwp-node/client-config";
 import { QWP_SUPPORTED_CONFIG_KEYS } from "../../packages/nodejs-client/src/qwp-node/client-config";
@@ -49,8 +54,8 @@ describe("QWP configuration-string reference", () => {
     // The converse of the check above, which only proved that a name the prose
     // mentions exists. Nothing proved the other direction, so a high-level
     // constructor could be exported, pinned by the public-API contract, and
-    // still appear in no prose document at all -- which is how
-    // connectQwpNodeIngress() and connectQwpBrowserIngress() shipped
+    // still appear in no prose document at all -- which is how the bare
+    // ingress-session factories, since made internal, once shipped
     // undiscoverable while QWP.md's public API policy claimed to cover "the
     // documented high-level constructors, session classes, errors, constants,
     // and option signatures".
@@ -61,7 +66,7 @@ describe("QWP configuration-string reference", () => {
     // exports ... intended for advanced integrations" the same paragraph
     // carves out, and the generated TypeDoc reference is their documentation.
     const HIGH_LEVEL_ROLE =
-      /^(?:connect|create)Qwp(?:Node|Browser)(?:Client|Sender|Ingress|Egress|Udp|UdpSender)$/;
+      /^(?:connect|create)Qwp(?:Node|Browser)(?:Client|Sender|Egress|UdpSender)$/;
 
     const entryPoints = [
       ...new Set([...Object.keys(nodeClient), ...Object.keys(browserClient)]),
@@ -70,7 +75,7 @@ describe("QWP configuration-string reference", () => {
       .sort();
     // Guards the regex itself: a rename that stops matching must not silently
     // empty this test out.
-    expect(entryPoints.length).toBeGreaterThanOrEqual(14);
+    expect(entryPoints.length).toBeGreaterThanOrEqual(12);
 
     const prose = (
       await Promise.all(
@@ -106,7 +111,6 @@ describe("QWP configuration-string reference", () => {
       "QwpTableWriter",
       "QwpQueryLease",
       "QwpResultBatchView",
-      "QwpIngressSession",
     ].filter((name) => !prose.includes(name));
     expect(undocumented).toEqual([]);
   });
@@ -186,8 +190,7 @@ describe("QWP configuration-string reference", () => {
     // The pool constants are module-private, so assert against the values a
     // default client really reports.
     const client = createQwpNodeClient({
-      ingress: { url: "ws://127.0.0.1:1/write/v4" },
-      egress: { url: "ws://127.0.0.1:1/read/v1" },
+      cluster: { url: "ws://127.0.0.1:1" },
     });
     try {
       const metrics = client.metrics;
@@ -199,35 +202,39 @@ describe("QWP configuration-string reference", () => {
       await client.close();
     }
 
-    // Ingress and egress disagree on the reconnect defaults, so those cells
-    // carry both, in that order.
-    for (const [key, ingress, egress] of [
-      ["reconnect_initial_backoff_millis", "initialBackoffMs"],
-      ["reconnect_max_backoff_millis", "maxBackoffMs"],
-      ["reconnect_max_duration_millis", "maxDurationMs"],
-    ].map(([key, field]) => [
-      key,
-      QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS[
-        field as keyof typeof QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS
+    // The reconnect_* keys configure ingress only, as in the Java client;
+    // egress failover is tuned by the failover_* keys below.
+    for (const [key, ingress] of [
+      [
+        "reconnect_initial_backoff_millis",
+        QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.reconnectInitialBackoffMs,
       ],
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS[
-        field as keyof typeof QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS
+      [
+        "reconnect_max_backoff_millis",
+        QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.reconnectMaxBackoffMs,
       ],
-    ]) as [string, number, number][]) {
-      expect(documented(key), key).toBe(`\`${ingress}\` / \`${egress}\``);
+      [
+        "reconnect_max_duration_millis",
+        QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.reconnectMaxDurationMs,
+      ],
+    ] as const) {
+      expect(documentedNumber(key), key).toBe(ingress);
     }
-    // The failover keys share the egress reconnect defaults.
+    expect(documentedNumber("poison_min_escalation_window_millis")).toBe(
+      QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS.poisonMinEscalationWindowMs,
+    );
+    // The failover keys carry the egress reconnect defaults.
     expect(documentedNumber("failover_max_attempts")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxAttempts,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverMaxAttempts,
     );
     expect(documentedNumber("failover_backoff_initial_ms")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.initialBackoffMs,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverBackoffInitialMs,
     );
     expect(documentedNumber("failover_backoff_max_ms")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxBackoffMs,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverBackoffMaxMs,
     );
     expect(documentedNumber("failover_max_duration_ms")).toBe(
-      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.maxDurationMs,
+      QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS.failoverMaxDurationMs,
     );
   });
 
@@ -257,6 +264,22 @@ describe("QWP configuration-string reference", () => {
     expect(exported.size).toBeGreaterThan(40);
   });
 
+  it("documents the durable-ACK keepalive default the adapters apply", async () => {
+    const doc = await readFile(path.join(ROOT, "QWP.md"), "utf8");
+    const row =
+      /^\| `durable_ack_keepalive_interval_millis`\s*\|[^|]*\|\s*`(\d+)`\s*\|/m.exec(
+        doc,
+      );
+    if (!row) throw new Error("no numeric keepalive default documented");
+    expect(Number(row[1])).toBe(QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS);
+    expect(resolveQwpDurableAckKeepaliveMs(true, undefined)).toBe(
+      QWP_DEFAULT_DURABLE_ACK_KEEPALIVE_MS,
+    );
+    // The row also says the key is ignored without request_durable_ack=on.
+    expect(resolveQwpDurableAckKeepaliveMs(undefined, 10)).toBeUndefined();
+    expect(resolveQwpDurableAckKeepaliveMs(false, 10)).toBeUndefined();
+  });
+
   it("documents the auto-flush defaults the sender actually applies", async () => {
     // These two rows read "—" while every sibling gave a number, so a reader
     // had no way to learn that ws:: batches 75x smaller and flushes 10x more
@@ -283,10 +306,7 @@ describe("QWP configuration-string reference", () => {
       async publishTablesDelta(tables: readonly { rowCount: number }[]) {
         sends.push(tables[0].rowCount);
       },
-      async sendTables() {
-        return { status: 0, sequence: 0n, tables: [] };
-      },
-      async waitForDurable() {},
+      async waitForAck() {},
       async close() {},
     } as unknown as QwpSenderSession;
 
@@ -298,7 +318,7 @@ describe("QWP configuration-string reference", () => {
     // the flush machinery's own timers keep working.
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
-      const byRows = new QwpSender(async () => session);
+      const byRows = createQwpSender(async () => session);
       for (let row = 0; row < rows - 1; row++) {
         await byRows.table("t").intColumn("a", row).atNow();
       }
@@ -313,7 +333,7 @@ describe("QWP configuration-string reference", () => {
     sends.length = 0;
     vi.useFakeTimers();
     try {
-      const byInterval = new QwpSender(async () => session);
+      const byInterval = createQwpSender(async () => session);
       await byInterval.table("t").intColumn("a", 1).atNow();
       vi.advanceTimersByTime(intervalMs - 1);
       await byInterval.table("t").intColumn("a", 2).atNow();
@@ -355,7 +375,7 @@ describe("QWP configuration-string reference", () => {
     // The row says a segment default is also the frame cap; that only holds
     // if the ingress session really receives it.
     expect(
-      resolved.ingressSession?.maxBatchSizeBytes ??
+      resolved.ingress?.maxBatchSizeBytes ??
         resolved.ingress.storeAndForward?.maxSegmentBytes,
     ).toBe(documented("sf_max_segment_bytes"));
 
@@ -364,7 +384,7 @@ describe("QWP configuration-string reference", () => {
     expect(
       resolveQwpNodeClientConfig(
         "ws::addr=localhost;initial_connect_retry=async;",
-      ).ingressSession?.initialConnectMode,
+      ).ingress?.initialConnectMode,
     ).toBe("async");
   });
 });

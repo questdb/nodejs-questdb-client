@@ -1,6 +1,9 @@
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
-import type { QwpReconnectEvent } from "../../../client-core/src/_qwp/transport";
-import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
+import {
+  QWP_INITIAL_CONNECT_MODE,
+  type QwpReconnectEvent,
+} from "../../../client-core/src/_qwp/transport";
+import type { QwpIngressSessionInternalOptions } from "../../../client-core/src/_qwp/ingress-session";
 
 /**
  * @internal Derives the session options an adopted orphan slot runs under.
@@ -8,22 +11,21 @@ import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ing
  * Not re-exported by the package root: it is reachable only through
  * `storeAndForward.drainOrphans`, and tests import it by path.
  */
-export function orphanIngressSessionOptions(
-  options: QwpIngressSessionOptions,
-  onReconnectEvent?: (event: QwpReconnectEvent) => void,
-): QwpIngressSessionOptions {
+export function orphanIngressSessionOptions<
+  T extends QwpIngressSessionInternalOptions,
+>(options: T, onReconnectEvent?: (event: QwpReconnectEvent) => void): T {
   const configuredReconnect =
     options.reconnect === false ? undefined : options.reconnect;
   const configuredOnEvent = configuredReconnect?.onEvent;
   return {
     ...options,
-    // No foreground caller remains to retry orphan bytes, so transport
-    // outages stay retryable for the drainer's lifetime. Authentication,
-    // protocol, and poison-frame failures remain terminal and quarantined.
+    // No foreground caller remains to retry orphan bytes. The adopted slot
+    // connects in the background and, like every connected session, retries
+    // transport outages until close(), so they stay retryable for the
+    // drainer's lifetime. Authentication, protocol, and poison-frame failures
+    // remain terminal and quarantined.
     reconnect: {
       ...configuredReconnect,
-      maxAttempts: 0,
-      maxDurationMs: 0,
       onEvent: (event) => {
         // This wrapper is the notification inbox's handler, and the inbox waits
         // on whatever the handler returns before it delivers the next event.
@@ -46,11 +48,15 @@ export function orphanIngressSessionOptions(
     },
     replayStore: undefined,
     backgroundStoreAndForward: undefined,
-    initialConnectMode: undefined,
+    // Orphan adoption is always non-blocking. Terminal endpoint-policy
+    // failures and cap-gap quarantine are selected by orphanStoreAndForward.
+    initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
     orphanStoreAndForward: true,
+    // Java also bounds an orphan's durable-ACK gap by
+    // reconnect_max_duration_millis.
     orphanDurableAckMismatchMaxDurationMs:
       options.orphanDurableAckMismatchMaxDurationMs ??
-      configuredReconnect?.maxDurationMs ??
+      configuredReconnect?.reconnectMaxDurationMs ??
       300_000,
     onResponse: undefined,
     onDurableAck: undefined,

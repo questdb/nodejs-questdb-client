@@ -81,15 +81,14 @@ connect string is the portable spelling.
 
 The complete connect string is parsed and validated before typed overrides are
 applied. When both forms set the same option, the typed value wins. In
-particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls`,
-`target`, `zone`, and `senderId` after URL parsing. The primary ingress URL
-continues to come from `addr`, because the typed object intentionally omits
-`url`.
+particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls` and
+`senderId` after URL parsing. The primary ingress URL continues to come from
+`addr`, because the typed object intentionally omits `url`.
 
-Typed `ExtraOptions.qwp` sections are transport-specific and a mismatched section
-is rejected rather than ignored: `webSocket` and `session` apply only to
-`ws::`/`wss::`, `udp` applies only to `udp::`, and `sender` applies to all three
-QWP ingress schemes. HTTP(S) and TCP(S) reject every present `qwp` section; an
+Typed `ExtraOptions.qwp` sections are transport-specific, and a mismatched or
+unknown section is rejected rather than ignored: `webSocket` applies only to
+`ws::`/`wss::` and `udp` only to `udp::`, and each takes that sender's complete
+typed options. HTTP(S) and TCP(S) reject every present `qwp` section; an
 empty `qwp: {}` remains valid for callers that build the object conditionally.
 
 ### Connection
@@ -117,36 +116,71 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 | `close_flush_timeout_millis`            | integer ms       | `5000`    | Bound on `close()`'s ACK drain. `0` or negative is a fast close.       |
 | `transaction`                           | `on`, `off`      | off       | Group each flush into a per-table transaction.                         |
 | `request_durable_ack`                   | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.         |
-| `durable_ack_keepalive_interval_millis` | integer ms       | —         | Poll interval for durable-ACK progress.                                |
+| `durable_ack_keepalive_interval_millis` | integer ms       | `200`     | Durable-ACK poll interval; ignored unless `request_durable_ack=on`.    |
 | `max_name_len`                          | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                  |
 | `sender_id`                             | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.    |
 | `max_frame_rejections`                  | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation. |
-| `poison_min_escalation_window_millis`   | integer ms       | `300000`  | Minimum connected dwell before a poison frame may escalate.            |
+| `poison_min_escalation_window_millis`   | integer ms       | `5000`    | Minimum connected dwell before a poison frame may escalate.            |
 | `connection_listener_inbox_capacity`    | integer          | `64`      | Bound on the connection-event inbox before events are dropped.         |
 | `error_inbox_capacity`                  | integer          | `256`     | Bound on the `onSenderError` inbox before events are dropped.          |
 
 ### Reconnect and failover
 
-| Key                                | Value                       | Default            | Meaning                                                                                                   |
-| ---------------------------------- | --------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------- |
-| `reconnect_initial_backoff_millis` | integer ms                  | `100` / `50`       | First reconnect delay; grows exponentially with jitter.                                                   |
-| `reconnect_max_backoff_millis`     | integer ms                  | `5000` / `1000`    | Ceiling for one reconnect delay.                                                                          |
-| `reconnect_max_duration_millis`    | integer ms ≥ 0              | `300000` / `30000` | Budget for a reconnect episode; `0` disables the deadline. The QWP replacement for ILP's `retry_timeout`. |
-| `failover`                         | `on`, `off`                 | on                 | Enables endpoint failover for egress.                                                                     |
-| `failover_max_attempts`            | integer ≥ 1                 | `8`                | Failover attempts before giving up.                                                                       |
-| `failover_backoff_initial_ms`      | integer ms                  | `50`               | First failover delay.                                                                                     |
-| `failover_backoff_max_ms`          | integer ms                  | `1000`             | Ceiling for one failover delay.                                                                           |
-| `failover_max_duration_ms`         | integer ms                  | `30000`            | Budget for a failover episode.                                                                            |
-| `target`                           | `any`, `primary`, `replica` | —                  | Server role this client will accept, on both ingress and egress.                                          |
-| `zone`                             | string                      | —                  | Preferred topology zone when ranking endpoints, on both ingress and egress.                               |
+| Key                                | Value                       | Default  | Meaning                                                                                 |
+| ---------------------------------- | --------------------------- | -------- | --------------------------------------------------------------------------------------- |
+| `reconnect_initial_backoff_millis` | integer ms                  | `100`    | First ingress reconnect delay; grows exponentially with jitter.                         |
+| `reconnect_max_backoff_millis`     | integer ms                  | `5000`   | Ceiling for one ingress reconnect delay.                                                |
+| `reconnect_max_duration_millis`    | integer ms ≥ 0              | `300000` | Budget for a synchronous ingress startup; reconnects ignore it. `0` allows one attempt. |
+| `initial_connect_retry`            | `off`, `sync`, `async`      | `off`    | Ingress startup policy while no server is reachable, with or without `sf_dir`.          |
+| `failover`                         | `on`, `off`                 | on       | Enables endpoint failover for egress.                                                   |
+| `failover_max_attempts`            | integer ≥ 1                 | `8`      | Failover attempts before giving up.                                                     |
+| `failover_backoff_initial_ms`      | integer ms                  | `50`     | First failover delay.                                                                   |
+| `failover_backoff_max_ms`          | integer ms                  | `1000`   | Ceiling for one failover delay.                                                         |
+| `failover_max_duration_ms`         | integer ms                  | `30000`  | Budget for a failover episode.                                                          |
+| `target`                           | `any`, `primary`, `replica` | `any`    | Server role a query session accepts. Ingress ignores it.                                |
+| `zone`                             | string                      | —        | Preferred topology zone when ranking query endpoints. Ingress ignores it.               |
 
-The three `reconnect_*` defaults differ by side, shown here as ingress / egress.
-Ingress additionally defaults to unlimited attempts, because a running producer
-must outlast any outage; egress stops after 8. The `failover_*` keys configure
-egress only and share the egress reconnect defaults. Zero disables a duration
-budget on both sides, matching `QwpReconnectOptions.maxDurationMs`; the backoff
-keys require a positive value, because a zero delay is a hot retry loop rather
-than a documented mode.
+The `reconnect_*` keys configure ingress and the `failover_*` keys egress, and
+`target` and `zone` route egress alone. Ingress has nothing to route: QuestDB
+accepts writes on the primary only, a replica or a primary still catching up
+answers the write upgrade with 421, and the endpoint sweep moves on, so a sender
+reaches the primary whatever these keys say. A connect string shared by both
+sides can therefore set them for its queries without affecting writes, as in
+the Java client; `Sender.fromConfig()`, which builds no query session, warns
+that it ignores them. As in the
+Java, Rust and Python clients, no reconnect setting stops an ingress session that has
+connected: it retries an outage until `close()`, and only a terminal error ends it.
+There is no ingress attempt limit, and `reconnect_max_duration_millis` bounds only a
+synchronous startup (`initial_connect_retry=sync`), failing it with
+`QwpReconnectExhaustedError`. An asynchronous startup (`initial_connect_retry=async`,
+or the pooled client's `lazy_connect`) is not bounded either. Egress instead bounds
+each failover episode by `failover_max_attempts` and `failover_max_duration_ms`. A
+zero `reconnect_max_duration_millis` allows a synchronous startup one attempt and no
+retries, as in the Rust and Python clients (Java rejects it); a zero
+`failover_max_duration_ms` disables the egress deadline, as in the Java and Rust
+clients. The backoff keys require a positive value, because a zero delay is a hot
+retry loop rather than a documented mode.
+
+`initial_connect_retry` decides what the first ingress connection does while no
+server is reachable, for the memory replay queue and `sf_dir` alike. `off` makes one
+pass over the endpoints and fails fast; `sync` retries on the caller for up to
+`reconnect_max_duration_millis`; `async` returns at once and connects in the
+background, retrying until `close()`, while published rows wait in the replay queue.
+As in the Java and Rust parsers, the value is case-insensitive, and `on` and `true`
+are aliases of `sync`, `false` of `off`. When the key is not set, tuning any
+`reconnect_*` key selects `sync`, so the budget you wrote also governs startup;
+otherwise the default is `off`. That promotion follows the Java client and applies to
+the pooled client as well as to a standalone sender. The Rust and Python clients apply
+it to a standalone sender only: their pools honour only an explicit mode. The typed
+spelling is `initialConnectMode` on the ingress options (`qwp.webSocket` for
+`Sender.fromConfig()`, `ingress` for the pooled client); a typed value wins over the
+key.
+
+The `reconnect_*` and `failover_*` tuning keys have typed equivalents on the `reconnect`
+option of the ingress and egress options, with the same names in camelCase, `millis` and
+`ms` becoming `Ms`:
+`reconnect_initial_backoff_millis` is `reconnectInitialBackoffMs` on ingress, and
+`failover_max_attempts` is `failoverMaxAttempts` on egress.
 
 #### Timer bounds
 
@@ -157,7 +191,7 @@ clamp an over-large delay to about 1 ms — the longest budget you can ask for
 would otherwise become the shortest one you get. For a capped option the cap
 applies identically to the connection-string key and to the typed option that
 overrides it, and to an explicit `timeoutMs` argument such as
-`waitForAcknowledged(sequence, timeoutMs)`.
+`waitForAck(sequence, timeoutMs)` or `flushAndWait(timeoutMs)`.
 
 Exemption is a property of the typed spelling, not of the key. `idle_timeout_ms`,
 `max_lifetime_ms` and `auto_flush_interval` keep the parser's integer range —
@@ -170,9 +204,9 @@ inside a rescheduling loop, accept any safe integer and are deliberately exempt:
 `reconnect_max_duration_millis`, `failover_max_duration_ms`,
 `poison_min_escalation_window_millis` and
 `catch_up_cap_gap_min_escalation_window_millis`, together with the typed
-spellings `maxDurationMs`, `poisonMinEscalationWindowMs`,
-`catchUpCapGapMinEscalationWindowMs`, `idleTimeoutMs`, `maxLifetimeMs`,
-`autoFlushIntervalMs` and `durableAckPollIntervalMs`.
+spellings `reconnectMaxDurationMs`, `failoverMaxDurationMs`, `poisonMinEscalationWindowMs`,
+`catchUpCapGapMinEscalationWindowMs`, `idleTimeoutMs`, `maxLifetimeMs` and
+`autoFlushIntervalMs`.
 
 ### Store-and-forward (Node only)
 
@@ -188,7 +222,6 @@ session that consumes it.
 | `sf_max_segment_bytes`                          | integer bytes                  | `4194304`     | Size of one segment file, and with it the ingress frame cap, since a frame must fit a segment. With `sf_dir`, `sf_max_total_bytes` must leave room for one whole segment of this size plus 32 bytes of headers. Set, it caps a frame without `sf_dir` too. |
 | `sf_sync_interval_millis`                       | integer ms                     | —             | Checkpoint interval when `sf_durability=periodic`.                                                                                                                                                                                                         |
 | `sf_append_deadline_millis`                     | integer ms                     | `30000`       | How long an append waits for space or a retryable journal fault.                                                                                                                                                                                           |
-| `initial_connect_retry`                         | `off`, `sync`, `async`         | `off`         | Startup policy when the server is unreachable. Applies to the memory replay queue as well as to `sf_dir`.                                                                                                                                                  |
 | `drain_orphans`                                 | `on`, `off`                    | off           | Adopt and drain journals left by crashed producers.                                                                                                                                                                                                        |
 | `max_background_drainers`                       | integer                        | —             | Concurrent orphan drainers.                                                                                                                                                                                                                                |
 | `catch_up_cap_gap_min_escalation_window_millis` | integer ms                     | `300000`      | Minimum dwell before an orphan symbol-dictionary cap gap is quarantined. Requires `sf_dir`.                                                                                                                                                                |
@@ -199,6 +232,7 @@ session that consumes it.
 | ------------------- | --------------------- | ------- | -------------------------------------------------- |
 | `max_batch_rows`    | integer, 1..1048576   | —       | Rows the server puts in one result batch.          |
 | `initial_credit`    | integer ≥ 0           | `0`     | Starting flow-control credit for a query.          |
+| `query_timeout_ms`  | integer ms            | `0`     | Default timeout of every query; `0` disables it.   |
 | `buffer_pool_size`  | integer ≥ 1           | `4`     | Reusable result buffers held per session.          |
 | `compression`       | `raw`, `zstd`, `auto` | `raw`   | Result compression to negotiate.                   |
 | `compression_level` | integer, 1..22        | —       | zstd level; requires `compression=zstd` or `auto`. |
@@ -207,20 +241,22 @@ session that consumes it.
 ### Pool
 
 Applied by the pooled facade. A standalone sender or query client ignores
-them, with one exception noted in the table.
+them; `Sender.fromConfig()` logs a warning naming the ones it was given.
+`lazy_connect` is a pool key in every QuestDB client: the Java facade and the
+Rust and Python pools apply it, and their standalone senders ignore it too.
 
-| Key                       | Value       | Default   | Meaning                                                                                                                         |
-| ------------------------- | ----------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `sender_pool_min`         | integer     | `1`       | Senders kept warm.                                                                                                              |
-| `sender_pool_max`         | integer     | `4`       | Sender ceiling.                                                                                                                 |
-| `query_pool_min`          | integer     | `1`       | Query sessions kept warm.                                                                                                       |
-| `query_pool_max`          | integer     | `4`       | Query-session ceiling.                                                                                                          |
-| `acquire_timeout_ms`      | integer ms  | `5000`    | How long `borrowSender()` and `borrowQuery()` wait for a free entry.                                                            |
-| `query_close_timeout_ms`  | integer ms  | `5000`    | Bound on the CANCEL drain when a query session closes. Also honoured by a standalone egress session built from `egressSession`. |
-| `idle_timeout_ms`         | integer ms  | `60000`   | Idle time before a pooled entry is reaped.                                                                                      |
-| `max_lifetime_ms`         | integer ms  | `1800000` | Absolute lifetime of a pooled entry.                                                                                            |
-| `housekeeper_interval_ms` | integer ms  | `5000`    | How often the pool reaps aged entries.                                                                                          |
-| `lazy_connect`            | `on`, `off` | off       | Start without blocking on a first connection.                                                                                   |
+| Key                       | Value                        | Default   | Meaning                                                                                                                        |
+| ------------------------- | ---------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `sender_pool_min`         | integer                      | `1`       | Senders kept warm.                                                                                                             |
+| `sender_pool_max`         | integer                      | `4`       | Sender ceiling.                                                                                                                |
+| `query_pool_min`          | integer                      | `1`       | Query sessions kept warm.                                                                                                      |
+| `query_pool_max`          | integer                      | `4`       | Query-session ceiling.                                                                                                         |
+| `acquire_timeout_ms`      | integer ms                   | `5000`    | How long `borrowSender()` and `borrowQuery()` wait for a free entry.                                                           |
+| `query_close_timeout_ms`  | integer ms                   | `5000`    | Bound on the CANCEL drain, and the grace period of a query timeout; `cancelDrainTimeoutMs` on the egress options.              |
+| `idle_timeout_ms`         | integer ms                   | `60000`   | Idle time before a pooled entry is reaped.                                                                                     |
+| `max_lifetime_ms`         | integer ms                   | `1800000` | Absolute lifetime of a pooled entry.                                                                                           |
+| `housekeeper_interval_ms` | integer ms                   | `5000`    | How often the pool reaps aged entries.                                                                                         |
+| `lazy_connect`            | `on`, `off`, `true`, `false` | off       | Start without blocking on a first connection: ingress uses `initial_connect_retry=async` and `query_pool_min` defaults to `0`. |
 
 ### Reserved
 
@@ -259,14 +295,14 @@ is created. Many hosts refuse datagrams well below that ceiling — macOS defaul
 `net.inet.udp.maxdgram` to 9216 — so keep the value at or under the path MTU unless
 the receiver is known to accept more. A datagram the operating system refuses is
 discarded before transmission: it is reported through `onError` and does not advance
-`publishedSequence` or `acknowledgedSequence`. Each datagram is
+`publishedSequence` or `ackedSequence`. Each datagram is
 self-contained, contains exactly one table, and uses an inline schema plus
 table-local symbol dictionaries. Batches are split at row boundaries;
 `QwpUdpDatagramTooLargeError` is raised before transmission when one row cannot
-fit. `connectQwpNodeUdpSender()` and `connectQwpNodeUdp()` expose the same
-transport from `@questdb/nodejs-client`; `createQwpNodeUdpSender()` builds the
-same sender without binding the socket yet, for a caller that wants to construct
-it eagerly and connect later.
+fit. `connectQwpNodeUdpSender()` exposes the same transport from
+`@questdb/nodejs-client`; `createQwpNodeUdpSender()` builds the same sender
+without binding the socket yet, for a caller that wants to construct it eagerly
+and connect later.
 
 UDP provides no authentication, TLS, server or durable ACK, transactions,
 reconnection, compression, or store-and-forward. Local socket errors are delivered
@@ -286,12 +322,11 @@ const sender = await Sender.fromConfig(
         connectTimeoutMs: 5_000,
         authTimeoutMs: 15_000,
         failoverUrls: ["wss://questdb-dr.example:9000/write/v4"],
-        target: "any",
-        zone: "eu-west-1a",
         senderId: "producer-a",
         storeAndForward: {
-          // The slot root. `senderId` names the journal inside it, so this must
-          // not repeat that name or the journal lands in `.../producer-a/producer-a`.
+          // The slot root. The journal is `<directory>/<senderId>`, `default` when
+          // no senderId is set, so this must not repeat that name or the journal
+          // lands in `.../producer-a/producer-a`.
           directory: "/var/lib/my-service/qwp-replay",
           maxBytes: 512 * 1024 * 1024,
           durability: "periodic",
@@ -302,16 +337,10 @@ const sender = await Sender.fromConfig(
           drainOrphans: true,
           maxBackgroundDrainers: 4,
         },
-      },
-      sender: {
-        awaitDurableAck: true,
         autoFlushRows: 10_000,
         autoFlushBytes: 4 * 1024 * 1024,
-      },
-      session: {
         reconnect: {
-          maxAttempts: 0,
-          maxDurationMs: 0,
+          reconnectMaxBackoffMs: 10_000,
         },
       },
     },
@@ -331,14 +360,14 @@ Browsers cannot observe the transport boundary, so their `connectTimeoutMs` cont
 to cover the complete WebSocket opening lifecycle and they do not expose
 `authTimeoutMs`.
 
-Give each active sender its own store-and-forward directory. The Node.js journal
-persists frames and their symbol dictionary before sending. Set
-`initialConnectMode: "async"` when a persistent sender must start while every
-endpoint is offline. Unless
-`awaitServerAck: true` or `awaitDurableAck: true` is selected, `flush()` resolves once
-the complete logical flush reaches the configured local journal boundary; a background
-drainer then sends it in order. The default `"append"` boundary is locally durable,
-while `"periodic"` and `"memory"` trade that immediate guarantee for throughput.
+Give each active sender its own journal slot: a store-and-forward directory of its
+own, or its own `senderId` below a shared one. The Node.js journal persists frames
+and their symbol dictionary before sending. Set `initialConnectMode: "async"` when a
+persistent sender must start while every endpoint is offline. `flush()` resolves once the complete logical flush reaches the
+configured local journal boundary; a background drainer then sends it in order, and
+`flushAndWait()` additionally waits for the server's acknowledgement. The `"append"`
+boundary is locally durable, while `"periodic"` and the default `"memory"` trade that
+immediate guarantee for throughput.
 Applications can therefore keep publishing during an outage until the configured
 `maxBytes` applies backpressure. A failed journal publication leaves the high-level
 rows staged so the caller can retry. When one logical flush is split across multiple
@@ -346,24 +375,24 @@ deferred frames, the client checks that every frame can fit before journalling t
 prefix; an undersized journal therefore rejects without leaving an unacknowledgeable
 partial transaction behind.
 
-`initialConnectMode` selects persistent startup behavior: `"off"` (the default)
-makes one
-fail-fast attempt, `"sync"` retries on the caller within the configured reconnect
-budget, and `"async"` returns immediately while
-the background replay loop connects. `Sender.fromConfig()` also accepts
-`initial_connect_retry=off|sync|async` when `qwp.webSocket.storeAndForward` is
-supplied. Initial authentication and capability failures remain terminal, as does any
+`initialConnectMode` selects startup behavior, with a journal or without one:
+`"off"` (the default) makes one fail-fast pass over the endpoints, `"sync"` retries on
+the caller for up to `reconnectMaxDurationMs`, and `"async"` returns immediately while
+the background replay loop connects. It is an ingress option, beside
+`storeAndForward` rather than inside it. The connect-string key is
+`initial_connect_retry`, which `Sender.fromConfig()` and the pooled client accept with
+or without `sf_dir`. Initial authentication and capability failures remain terminal, as does any
 upgrade rejection the whole cluster would repeat. A rejection scoped to the endpoint
 that returned it — the statuses that keep the sweep walking, `404` among them — is
 retried instead of ending the sender, because a producer under `"async"` has already
 been handed rows by the time the first attempt runs.
-When no mode is explicit, configuring any reconnect duration/backoff key promotes
-the initial connection to `"sync"`, so that budget also governs startup.
-After a foreground persistent sender has connected successfully at least once, every
-one of these failures is retried indefinitely so credential rotation and rolling
-capability changes cannot strand its journal. The configured reconnect attempt/duration budget
-therefore bounds `"sync"` startup and non-persistent reconnects, not steady-state
-foreground store-and-forward recovery.
+When no mode is explicit, setting `reconnectMaxDurationMs`, `reconnectInitialBackoffMs`
+or `reconnectMaxBackoffMs` (or the matching `reconnect_*` key) promotes the initial
+connection to `"sync"`, so that budget also governs startup, as in the Java client.
+After a foreground persistent sender, or one started with `"async"`, has connected
+successfully at least once, every one of these failures is retried indefinitely so
+credential rotation and rolling capability changes cannot strand its queued rows. `reconnectMaxDurationMs` bounds only
+`"sync"` startup; no setting bounds a reconnect after the first connection.
 
 The connect-string key
 `catch_up_cap_gap_min_escalation_window_millis` is the equivalent of
@@ -371,15 +400,15 @@ The connect-string key
 
 `durability` controls the local persistence barrier:
 
-- `"append"` (the default for this object form) issues a data-only durability
-  barrier after every vectored positional frame write; manifest and directory
-  metadata retain full barriers; hot-spare creation and activation are durable
-  before publication resolves.
+- `"append"` issues a data-only durability barrier after every vectored positional
+  frame write; manifest and directory metadata retain full barriers; hot-spare
+  creation and activation are durable before publication resolves.
 - `"periodic"` checkpoints segment files, symbol metadata, and directory changes in the
   background. The default interval is 5 seconds, and `close()` performs a final
   checkpoint. A power failure can lose the most recent checkpoint window.
-- `"memory"` relies on operating-system writeback. It survives an orderly close and
-  normally a process failure, but it makes no power-loss durability promise.
+- `"memory"`, the default, relies on operating-system writeback. It survives an
+  orderly close and normally a process failure, but it makes no power-loss durability
+  promise.
 
 Recovery reports what it had to abandon through `onRecoveryDataLoss`, and logs it when
 no handler is supplied, so journal loss is never silent. Trailing records that never
@@ -397,17 +426,17 @@ continuously, so this is the steady state rather than an edge case, and it is wh
 `sf_durability=append` avoids the shape altogether by making each append durable before
 it is reported as accepted.
 
-The two surfaces do not share a default. `storeAndForward.durability` above
-defaults to `"append"`, while the `sf_durability` connect-string key defaults to
-`"memory"` — so a journal configured with `sf_dir=` alone never issues a
-per-append barrier, and a host crash can lose whatever writeback had not yet
-reached disk. Set `sf_durability=append` explicitly when a connect-string journal
-has to survive power loss.
+The typed options and the connect string share every store-and-forward default, as
+they share the slot layout. With `"memory"` the default, a journal configured with
+`sf_dir=` or `storeAndForward: { directory }` alone never issues a per-append
+barrier, and a host crash can lose whatever writeback had not yet reached disk. Set
+`durability: "append"` (`sf_durability=append`) when a journal has to survive power
+loss.
 
-`backpressurePolicy: "error"` preserves the existing immediate
-`QwpReplayStoreFullError` behavior. Set it to `"wait"` to pause publication until an
-ACK advances the checksummed cursor, then a bounded background trimmer deletes fully
-drained segments.
+`backpressurePolicy` decides what a full journal does to publication. The default,
+`"wait"`, pauses it until an ACK advances the checksummed cursor and a bounded
+background trimmer deletes fully drained segments; `"error"` fails it at once with
+`QwpReplayStoreFullError`.
 `appendDeadlineMs` bounds each such pause and retries of transient journal faults
 such as a briefly read-only, full, or descriptor-starved filesystem (30 seconds
 by default). Expiry raises `QwpReplayStoreAppendTimeoutError`. A split logical
@@ -417,9 +446,9 @@ segment-rounded live-frame allowance preserved by a retained symbol dictionary,
 because no ACK or trim is needed to consume it. Waiting appenders do not hold the
 journal mutation queue, so ACK cleanup and checkpoint recovery can continue. Corruption and loss of the journal lock remain
 immediate failures.
-Direct users of `QwpNodeFileReplayStore` can inspect `metrics` for pending records
-and segments, checkpoint work, checkpoint failures, active waiters, stalls, and
-timeouts.
+A sender's `metrics.ingress` reports the journal's backlog as `pendingReplayFrames`
+and `pendingReplayBytes`, with its published and acknowledged frame watermarks as
+`replayPublishedFrameSequence` and `replayAcknowledgedFrameSequence`.
 
 The persisted symbol dictionary is monotonic for one open journal generation and
 cannot be reclaimed by an ACK alone. It counts toward the `maxBytes` target together
@@ -588,10 +617,10 @@ recovery.
 Blocking (`off` or `sync`) foreground startup fails immediately if every usable
 endpoint lacks durable-ACK support. Asynchronous foreground startup and steady-state
 store-and-forward reconnects retain their records and retry through rolling upgrades.
-An orphan slot retries a consecutive durable-ACK capability-gap episode until either
-16 connection sweeps or the configured reconnect `maxDurationMs` is reached, then it
-is quarantined behind `.failed` (`maxDurationMs: 0` disables only the time half of
-the budget). A transport outage or an all-replica window resets both halves of this
+An orphan slot retries a consecutive durable-ACK capability-gap episode until it has
+lasted both 16 connection sweeps and the configured `reconnectMaxDurationMs`, then it
+is quarantined behind `.failed` (with `reconnectMaxDurationMs: 0` the time half is
+spent at once, so the 16 sweeps decide). A transport outage or an all-replica window resets both halves of this
 orphan budget; neither transient condition can itself quarantine persisted data. The
 `durable-ack-unavailable`,
 `durable-ack-persistent-failure`, and `primary-unavailable` orphan events expose the
@@ -609,13 +638,13 @@ every record-bearing child directory that is not the foreground slot is consider
 eligible. Browser senders never scan or persist local slots.
 
 An offline sender cannot inspect the server-advertised batch cap before its first
-publication. Set `qwp.session.maxBatchSizeBytes` to a value no greater than the
+publication. Set the ingress option `maxBatchSizeBytes` to a value no greater than the
 smallest target node's cap when offline startup is required.
 
-Set `awaitServerAck: true` when a particular flush must observe QuestDB's protocol ACK
-before returning. `awaitDurableAck: true` implies server-ACK waiting and additionally
-waits for replicated/durable progress. Browser senders use the in-memory replay
-publication boundary by default and do not offer persistent disk publication.
+Call `flushAndWait()` when a flush must observe QuestDB's protocol ACK before
+returning; with `requestDurableAck: true` it waits for replicated/durable progress
+instead. Browser senders use the in-memory replay publication boundary and do not offer
+persistent disk publication.
 
 A crash after the server accepts a frame but before local acknowledgement cleanup can
 replay that frame, so delivery is at least once. Applications that require exactly-once
@@ -632,18 +661,15 @@ needed:
 import * as qwp from "@questdb/nodejs-client";
 import { connectQwpNodeSender } from "@questdb/nodejs-client";
 
-const sender = await connectQwpNodeSender(
-  {
-    url: "wss://questdb.example:9000/write/v4",
-    authorization: `Bearer ${token}`,
-  },
-  {
-    autoFlushRows: 5_000,
-    autoFlushBytes: 4 * 1024 * 1024,
-    autoFlushIntervalMs: 1_000,
-    encode: { symbolDictionary: "delta", gorilla: true },
-  },
-);
+const sender = await connectQwpNodeSender({
+  url: "wss://questdb.example:9000/write/v4",
+  authorization: `Bearer ${token}`,
+  autoFlushRows: 5_000,
+  autoFlushBytes: 4 * 1024 * 1024,
+  autoFlushIntervalMs: 1_000,
+  symbolDictionary: "delta",
+  gorilla: true,
+});
 
 try {
   await sender
@@ -809,13 +835,13 @@ Compiled writers are also available through the regular Node `Sender` when it us
 QWP transport. Calling `writer()` for an HTTP or TCP ILP sender raises an error. A
 writer obtained from a pooled sender lease cannot be used after the lease is closed.
 
-Like the Java QWP sender, `flush()` and `commit()` resolve after the complete
-logical flush reaches the local ingress/replay publication boundary. They do
-not wait for a server ACK by default. Set `awaitServerAck: true` for an
-implicit ACK barrier, or use the explicit sequence API below.
-
-For producer-controlled acknowledgement barriers, publish first and wait for the
-cumulative ACK watermark separately:
+Like the Java QWP sender, `flush()` resolves after the complete logical flush
+reaches the local ingress/replay publication boundary. It does not wait for a
+server ACK. `flushAndWait()` flushes the same way and then waits
+until the server has acknowledged every frame the sender has published,
+including frames published earlier by auto-flush and, once the sender has
+connected, the frames a store-and-forward journal recovered from an earlier
+process. It is the counterpart of the Java client's `drain()`:
 
 ```typescript
 await sender
@@ -824,24 +850,59 @@ await sender
   .longColumn("sequence", 43n)
   .atNow();
 
-const sequence = await sender.flushAndGetSequence();
-await sender.waitForAcknowledged(sequence, 5_000);
+if (!(await sender.flushAndWait(5_000))) {
+  // No ACK progress for 5 seconds. The rows are still queued and will be
+  // delivered, so do not send them again.
+}
 ```
 
-`flushAndGetSequence()` always resolves at the publication boundary, independently
-of `awaitServerAck`, and returns the highest stable frame sequence published by that
-call. It returns `-1n` when there was nothing to publish. `publishedSequence` and
-`acknowledgedSequence` expose the current immutable watermarks. ACK waits are
-cumulative, so one later acknowledgement resolves all covered waits and callers may
-wait for different sequences concurrently. When durable ACK is being tracked, the
+`flushAndWait(timeoutMs)` resolves `true` once everything published is
+acknowledged, and `false` when the ACK watermark makes no progress for
+`timeoutMs`. The timeout defaults to the session's `ackTimeoutMs` (15 seconds,
+programmatic-only) and restarts whenever the watermark advances, as in the Rust
+and Python clients, so an outage runs it out while a large backlog that keeps
+draining does not. `false` means only that the wait ran out: the frames remain
+queued and are still delivered, and sending the rows again would deliver them
+twice. As in the Java client's `drain()`, a `timeoutMs` of zero or less flushes and
+then checks the watermark without waiting. A server rejection and a session that
+can no longer deliver (closed or failed terminally) reject instead. Recovered
+frames are waited for up to their last commit: a deferred tail that crash recovery
+retires without sending is never acknowledged, so it is not waited for. A
+transactional sender commits its open transaction first. Over UDP, which has no
+server acknowledgements, `flushAndWait()` resolves `true` once the datagrams are
+sent.
+
+To wait for one particular flush instead, publish first and wait for the
+cumulative ACK watermark separately:
+
+```typescript
+const sequence = await sender.flushAndGetSequence();
+if (!(await sender.waitForAck(sequence, 5_000))) {
+  // No ACK progress for 5 seconds. The rows are still queued.
+}
+```
+
+`flushAndGetSequence()` resolves at the publication boundary and returns the
+highest frame sequence published by this call, or `-1n` when it published
+nothing (for example because auto-flush had already published every row).
+Waiting on `-1n` resolves `true` at once, so use `flushAndWait()` to wait for
+everything published so far. `publishedSequence` and `ackedSequence`
+expose the current immutable watermarks. ACK waits are cumulative, so one later
+acknowledgement resolves all covered waits and callers may wait for different
+sequences concurrently. When durable ACK is being tracked, the
 acknowledged watermark advances only after QuestDB reports durable progress;
 otherwise it follows ordinary protocol OK responses. Tracking needs both halves:
-the caller has to ask for durable progress (`requestDurableAck`, or
-`durableAckKeepaliveMs` directly) and the server has to confirm it. Negotiation
+the caller has to ask for durable progress with `requestDurableAck` (as in the
+Java and Rust clients, `durableAckKeepaliveMs` is ignored without it rather than
+requesting it on its own), and the server has to confirm it. Negotiation
 alone is not enough, because nothing polls for durable progress that was never
 requested — a server that offers the capability unasked leaves the watermark on
-ordinary OK ACKs rather than stalling it. A deadline failure raises
-`QwpIngressAckTimeoutError` without closing an otherwise healthy session.
+ordinary OK ACKs rather than stalling it. `waitForAck()` resolves like
+`flushAndWait()`, and like the Java client's `awaitAckedFsn()` and the Python
+client's `await_acked_fsn()`: `true` once the watermark covers the sequence, and
+`false` when it makes no progress for the timeout, which leaves the session open.
+A timeout of zero or less checks the watermark without waiting, as in the Java
+client; a session that has failed still throws.
 If crash recovery retires an incomplete deferred transaction that QuestDB never
 received, its frame range does not advance this watermark. Waiting on one of those
 frames rejects with `QwpIngressAckAbandonedError`; later frames can still be sent and
@@ -851,19 +912,25 @@ Rows are staged until an auto-flush boundary or an explicit `flush()`. A `null` 
 `undefined` column value omits that column from the row. `atNow()` asks QuestDB to
 assign the designated timestamp; `at(value, unit)` sends an explicit `ns`, `us`, or
 `ms` timestamp. `close()` publishes completed rows and waits for the committed-frame
-ACK watermark for up to `closeFlushTimeoutMs` (5 seconds by default, matching the
-Java client). Set it to `0` or a negative value for a fast close, which publishes
-without the ACK drain; publication itself stays bounded, so `close()` always
-returns. An unfinished row is still discarded with a warning, including a row
+ACK watermark for up to `closeFlushTimeoutMs` (5 seconds by default, as in the Rust
+and Python clients; the Java client's builder and configuration string default to
+60 seconds). Set it to `0` or a negative value for a fast close, which skips
+the ACK drain but still waits up to 5 seconds for RAM-backed frames to reach
+the socket. If they cannot be sent in that time, `close()` rejects with
+`QwpSenderCloseTimeoutError` rather than silently discarding them, and if the
+session can no longer send them at all it rejects with that failure. A failure
+that left nothing unsent does not make a fast close reject. An unfinished
+row is still discarded with a warning, including a row
 opened by `table()` whose every attempted value was nullish and therefore left it
 with zero columns. The configuration-string equivalent is
 `close_flush_timeout_millis`.
 
-These warnings, and the other sender-level diagnostics, go to `QwpSenderOptions.log`
-when it is supplied and to the same console-backed default logger the rest of the
+These warnings, and the other sender-level diagnostics, go to the sender's `log`
+option when it is supplied and to the same console-backed default logger the rest of the
 client uses when it is not, on every entry point: `Sender`, the direct
 `createQwpNodeSender()`/`createQwpBrowserSender()` factories, and pooled leases. A
-top-level `log` wins over `qwp.sender.log`; pass an explicit no-op to silence them.
+top-level `log` wins over `qwp.webSocket.log` and `qwp.udp.log`; pass an explicit
+no-op to silence them.
 `debug` messages stay below the default level, so the per-row staging diagnostics
 are not printed unless a supplied logger records them.
 
@@ -900,31 +967,6 @@ deltas, tracks acknowledgements, and splits multi-row batches at the smaller of 
 client cap and the server-advertised cap. One row that cannot fit is rejected with
 `QwpBatchTooLargeError` before it is sent.
 
-Low-level Node sessions expose `publishFrame()`, `publishTables()`, and
-`publishTablesDelta()` for local-publication semantics. Their `send*()` counterparts
-continue to return the server ACK. Use the publication methods only with persistent
-store-and-forward when local durability is the intended completion boundary.
-`sendFrameWithPublication()`, `sendTablesWithPublication()`, and
-`sendTablesDeltaWithPublication()` expose both boundaries from one operation: await
-`publication` before releasing retryable source rows, then await `acknowledgement`
-when server acceptance is also required. If a split logical batch cannot be fully
-journaled, its unattempted suffix is suppressed and the operation's publication
-promise rejects.
-
-A custom `QwpSenderSession` with no optional publication method uses its required
-`sendTables()` method's ACK promise as the publication boundary, so an asynchronous
-failure retains the sender's rows for retry. Such a session cannot support deferred
-transactional auto-flush: the server withholds that ACK until commit, so transactional
-mode also requires one of the explicit publication-boundary methods. Automatic
-symbol-delta planning is serialized by `sendTablesDelta()` and
-`publishTablesDelta()`. The synchronous `sendTablesDeltaWithPublication()` form
-cannot wait behind an in-flight delta publication and rejects an overlapping call;
-await its `publication` promise before starting another.
-
-Leaving `acknowledgement` unawaited is safe. The session observes it, so an ACK
-deadline or a `close()` that rejects a frame still in flight cannot surface as an
-unhandled rejection, and both still reach `onError` and the metrics snapshot.
-
 ### Browser ingress
 
 Browser applications must use the browser entry point and a same-origin WebSocket
@@ -938,7 +980,7 @@ import { connectQwpBrowserSender } from "@questdb/browser-client";
 const url = new URL("/write/v4", location.href);
 url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
 
-const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+const sender = await connectQwpBrowserSender({ url, autoFlush: false });
 
 try {
   await sender.table("page_events").symbol("kind", "view").atNow();
@@ -1050,20 +1092,19 @@ of a cluster normally runs the same build.
 ### Transactions and durable acknowledgement
 
 Transactional auto-flush keeps automatically emitted frames in an open server-side
-transaction. `commit()` (an alias for `flush()`) publishes the group-closing frame.
-The example also waits for its cumulative durable acknowledgement because it enables
-`awaitDurableAck`:
+transaction. An explicit `flush()` publishes the group-closing frame, as in the Java
+client. `flushAndWait()` commits the same way and then waits for the acknowledgement.
+The example requests durable ACK, so that wait lasts until QuestDB reports the
+transaction durable:
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  { url, requestDurableAck: true },
-  {
-    transactional: true,
-    autoFlushRows: 10_000,
-    awaitDurableAck: true,
-    durableAckTimeoutMs: 30_000,
-  },
-);
+const sender = await connectQwpBrowserSender({
+  url,
+  requestDurableAck: true,
+  transactional: true,
+  autoFlushRows: 10_000,
+  ackTimeoutMs: 30_000,
+});
 
 for (const event of events) {
   await sender
@@ -1072,7 +1113,9 @@ for (const event of events) {
     .longColumn("value", event.value)
     .at(event.timestamp, "ms");
 }
-await sender.commit();
+if (!(await sender.flushAndWait())) {
+  // No durable progress for 30 seconds; the transaction is still queued.
+}
 ```
 
 Transactions are atomic per table, not across all tables in one flush. Closing a
@@ -1080,8 +1123,12 @@ sender publishes locally staged transactional rows but does not implicitly commi
 QuestDB rolls the open server transaction back. The sender logs a warning in this case.
 
 In browsers, durable ACK capability is negotiated with a WebSocket subprotocol;
-Node.js uses upgrade headers. Setting `awaitDurableAck` automatically requests the
-capability unless `requestDurableAck` was set explicitly. The connection fails with
+Node.js uses upgrade headers. Request it with `requestDurableAck: true`
+(`request_durable_ack=on` in a configuration string). The ACK watermark then
+advances only on durable progress, so `flushAndWait()`, `waitForAck()`,
+and the `close()` drain all wait for durability. The ordinary OK that precedes it
+still reaches the `onResponse` session callback and the `onProgress` events of kind
+`acknowledged`, for code that has to observe both. The connection fails with
 `QwpDurableAckUnavailableError` when the server does not confirm it. Browser durable
 tracking is in memory only. Persistent store-and-forward is intentionally Node-only.
 
@@ -1096,10 +1143,10 @@ or keep using `maxBatchSizeBytes` as a local compatibility limit.
 
 The preferred URL and `failoverUrls` form one endpoint set. Endpoints are ranked by
 observed health (`healthy`, unknown, transient rejection, transport error, topology
-rejection) and then by zone affinity; configuration order breaks ties. Health outranks
-zone, so a known healthy cross-zone node is preferred to an untried local node. Every
-connection sweep can still try every endpoint, allowing role and health changes to
-recover. A non-orderly close demotes the selected endpoint before the next sweep.
+rejection), then, for egress with a `zone`, by zone affinity; configuration order
+breaks ties. Health outranks zone, so a known healthy cross-zone node is preferred
+to an untried local node. Every connection sweep can still try every endpoint,
+allowing role and health changes to recover. A non-orderly close demotes the selected endpoint before the next sweep.
 Each standalone Node sender/drainer family, and each pooled orphan scanner, shares one
 live health ledger among its walkers while keeping independent sweep cursors, so
 concurrent drainers cannot consume one another's endpoint attempts. After a foreground
@@ -1114,15 +1161,29 @@ rejects with `QwpMemoryReplayAppendTimeoutError`; a single frame that can never 
 is rejected immediately with `QwpMemoryReplayFrameTooLargeError`, and a split logical
 batch that can never fit is rejected before its first frame with
 `QwpMemoryReplayBatchTooLargeError`. Set
-`memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on ingress session options
-to tune these bounds. The accounting includes a fixed per-frame allowance so many
-small frames cannot bypass the byte cap.
+`memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on the ingress options to
+tune these bounds. The accounting includes a fixed per-frame allowance so many
+small frames cannot bypass the byte cap. A browser durable-ACK poll is admitted
+above the cap, because only the durable progress it asks for can trim frames that
+await durability; while frames still wait for the socket, as during an outage, no
+further poll is queued behind them.
 
-The default memory policy uses full-jitter backoff from 100 ms to 5 seconds and a
-five-minute per-outage deadline; the initial connection remains fail-fast. Set
-`reconnect: false` for one fixed connection. Supplying a `reconnect` object tunes the
-bounds, emits lifecycle events through `onEvent`, and retains the earlier opt-in
-behavior of retrying initial connection establishment.
+In-memory publication completes once the frame enters the bounded replay queue;
+a serialized background drainer transmits it and replays unacknowledged frames
+on reconnect. Only a full queue blocks publication (for at most the append
+deadline); this memory is lost if the process exits. The default memory policy
+uses full-jitter backoff from 100 ms to 5 seconds and, once connected, retries
+every outage until `close()` or a terminal error, as the Java, Rust and Python
+clients do. The session's `initialConnectMode` chooses the startup, in browsers as in
+Node: `"async"` returns at once and connects in the background while publications
+wait in this queue. Without it, the initial connection is a single attempt unless
+`reconnectMaxDurationMs`, `reconnectInitialBackoffMs` or `reconnectMaxBackoffMs` is
+set, the same settings that select a synchronous startup in the Java client and in
+standalone Rust and Python senders; it then retries for up to
+`reconnectMaxDurationMs` (5 minutes by default). A `reconnect` object that only sets
+`onEvent` or the poison-frame limits leaves it a single attempt. No setting bounds the
+reconnects after the first connection. Set `reconnect: false` for one fixed
+connection; it accepts no `initialConnectMode` other than `"off"`.
 
 QuestDB stops processing a connection's later frames after any ingress NACK so a
 cumulative ACK cannot advance across the rejected sequence. Reconnecting sessions
@@ -1131,15 +1192,13 @@ session instead becomes terminal and closes immediately after reporting the NACK
 create a new session before sending more rows.
 
 Each retry delay is selected between zero and the current exponential ceiling,
-preventing clients disconnected together from retrying in lockstep. Configured attempt
-and duration bounds apply to browser/memory reconnect and Node `"sync"` startup. A
-Node foreground store-and-forward replay loop remains unbounded after startup. Without
+preventing clients disconnected together from retrying in lockstep. Without
 `storeAndForward`, both Node and browser ingress replay only for the lifetime of the
 process or page; configuring a Node directory makes the same replay crash-safe.
 
 Ingress also detects a replay head that is repeatedly NACKed or followed by a
 non-orderly WebSocket close. `maxFrameRejections` defaults to 4 consecutive strikes,
-and `poisonMinEscalationWindowMs` defaults to 5 minutes. Both conditions must be met
+and `poisonMinEscalationWindowMs` defaults to 5 seconds. Both conditions must be met
 before escalation. The window measures _connected_ dwell only: time spent unable to
 reach a server is banked and withheld, so an outage never supplies the dwell, and the
 strikes a frame has already earned survive the reconnect it caused. Normal (1000),
@@ -1152,16 +1211,17 @@ the affected rows for explicit `retryQwpNodeOrphanSlot()` recovery rather than
 silently discarding them.
 
 Node.js sees the rejected upgrade status and `X-QuestDB-Role`, so a read-only replica
-or catching-up primary can be classified and skipped. Browsers deliberately expose
-an opaque upgrade error because their WebSocket API hides the HTTP response. Avoid
-placing ingress replica endpoints in a browser endpoint list unless the proxy routes
-writers to a primary.
+or catching-up primary can be classified and skipped. That is how ingress finds the
+primary, the only node that accepts writes, so it takes no `target` or `zone`.
+Browsers deliberately expose an opaque upgrade error because their WebSocket API
+hides the HTTP response. Avoid placing ingress replica endpoints in a browser
+endpoint list unless the proxy routes writers to a primary.
 
 On Node.js a `401` or `403` on the upgrade is classified as an authentication
 failure, and it is the one endpoint verdict that is terminal for the entire endpoint
 set rather than for the endpoint that returned it. It short-circuits the sweep: the
-endpoints ranked after it are never tried, and the reconnect loop rethrows before the
-attempt and duration budgets are consulted, so no reconnect setting extends it. A
+endpoints ranked after it are never tried, and the reconnect loop rethrows it without
+retrying, so no reconnect setting extends it. A
 credential is cluster-wide, so a node rejecting it reports a configuration error that
 walking on to a peer would only mask; the Java client applies the same rule. Every
 other rejected status keeps the sweep walking, including `404`, which one node can
@@ -1190,34 +1250,44 @@ import {
   createQwpNodeSender,
 } from "@questdb/nodejs-client";
 
-const sender = createQwpNodeSender(
-  { url: "ws://localhost:9000/write/v4" },
-  {},
-  {
-    reconnect: {
-      onEvent: (event) => console.info("QWP connection", event),
-    },
-    onProgress: (event) => {
-      if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
-        console.info("accepted through", event.sequence);
-      }
-    },
-    onError: (event) => console.error("QWP ingress", event.error),
-    onSenderError: (error) => {
-      console.error(
-        "QWP rejection",
-        error.category,
-        error.appliedPolicy,
-        error.fromFsn,
-        error.toFsn,
-      );
-    },
+const sender = createQwpNodeSender({
+  url: "ws://localhost:9000/write/v4",
+  reconnect: {
+    onEvent: (event) => console.info("QWP connection", event),
   },
-);
+  onProgress: (event) => {
+    if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
+      console.info("accepted through", event.sequence);
+    }
+  },
+  onError: (event) => console.error("QWP ingress", event.error),
+  onSenderError: (error) => {
+    console.error(
+      "QWP rejection",
+      error.category,
+      error.appliedPolicy,
+      error.fromFsn,
+      error.toFsn,
+    );
+  },
+});
 
 await sender.connect();
 console.info(sender.metrics);
 ```
+
+`reconnect.onEvent` receives the connection events that the Java, Rust, Go and
+Python clients deliver to their connection listeners, named by
+`QWP_RECONNECT_EVENT_KIND`: `connected` for the first connection, `disconnected`
+once per outage, `reconnected` or `failed-over` when a reconnect reaches the same
+or a different endpoint, `endpoint-attempt-failed` as each endpoint in a sweep
+fails, `all-endpoints-unreachable` once for a sweep that no endpoint accepted, and
+`auth-failed` when the server rejects the credentials, which ends the sweep. Unlike
+those clients, this one fires the success events only after the unacknowledged
+frames are replayed, so an endpoint that fails the replay is reported as
+`endpoint-attempt-failed`. `durable-ack-unavailable`,
+`durable-ack-persistent-failure` and `primary-unavailable` report store-and-forward
+conditions on the same stream. Egress sessions report the same connection events.
 
 Callbacks are placed on bounded asynchronous inboxes and never invoked inside ACK,
 reconnect, or orphan-recovery protocol stacks, on ingress and egress alike; the
@@ -1255,22 +1325,21 @@ a time.
 ```typescript
 import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
-const session = await connectQwpNodeEgress(
-  {
-    url: "wss://questdb.example:9000/read/v1",
-    failoverUrls: [
-      "wss://questdb-replica-2.example:9000/read/v1",
-      "wss://questdb-primary.example:9000/read/v1",
-    ],
-    target: "replica",
-    zone: "eu-west-1a",
-    authorization: `Bearer ${token}`,
-    compression: "zstd",
-    compressionLevel: 3,
-    maxBatchRows: 4096,
-  },
-  { queryTimeoutMs: 30_000, bufferPoolSize: 4 },
-);
+const session = await connectQwpNodeEgress({
+  url: "wss://questdb.example:9000/read/v1",
+  failoverUrls: [
+    "wss://questdb-replica-2.example:9000/read/v1",
+    "wss://questdb-primary.example:9000/read/v1",
+  ],
+  target: "replica",
+  zone: "eu-west-1a",
+  authorization: `Bearer ${token}`,
+  compression: "zstd",
+  compressionLevel: 3,
+  maxBatchRows: 4096,
+  queryTimeoutMs: 30_000,
+  bufferPoolSize: 4,
+});
 
 try {
   const query = await session.query(
@@ -1367,11 +1436,10 @@ credit window bounds server read-ahead while application work is in progress.
 
 `target` accepts `any` (the default), `primary`, or `replica`. Primary routing also
 accepts standalone servers and a primary completing catch-up, matching the Java
-client. Both keys apply to ingress and egress on Node.js. In browsers they apply
-to egress only: ingress cannot learn a server's role or zone there, because the
-WebSocket API hides the upgrade response that carries them. `zone` is an opaque,
-case-insensitive preference for `any` and `replica`;
-cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
+client. Both keys route egress only, in Node.js and browsers alike: writes always go
+to the primary, which ingress reaches through the replicas' 421 upgrade rejections
+whatever the keys say. `zone` is an opaque, case-insensitive preference for `any`
+and `replica`; cross-zone endpoints remain eligible. It is ignored for `primary`, which must be
 followed across zones. The client validates the authoritative role and zone from the
 first QWP `SERVER_INFO` frame before accepting an endpoint, so the same guarantees
 work in browsers even though browser WebSocket APIs hide upgrade response headers.
@@ -1405,18 +1473,38 @@ queue of decoded batches. Protocol credit remains the stronger end-to-end bound,
 particularly in browsers where the WebSocket implementation may buffer raw frames
 before JavaScript reads them.
 
-A session `queryTimeoutMs` supplies the default deadline; per-query `timeoutMs`
-overrides it, and zero disables it. Expiry rejects iteration and `completion` with
-`QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and drains the terminal response
-before the connection accepts another query. Breaking out of `for await` early also
-discards buffered batches, restores their flow-control credit, sends `CANCEL`, and
-rejects `completion` with `QwpEgressQueryAbandonedError`. Call `query.cancel()` for
-explicit cancellation.
+A session `queryTimeoutMs` (the `query_timeout_ms` key) supplies the default query
+timeout; per-query `timeoutMs` overrides it, and zero disables it. The timeout bounds
+the whole query, measured from the `query()` call: waiting for a previous query to
+drain, a reconnect, server execution, and the time spent consuming results, which it
+does not interrupt. When it expires, no further batch is delivered and the client
+sends QWP `CANCEL`, but the outcome waits for the server's terminal response. A
+statement that completed (`EXEC_DONE`) succeeds: it has taken effect, and reporting it
+as timed out would invite a retry that applies it twice. So does a result whose stream
+ended with nothing withheld from the consumer. Otherwise iteration and `completion`
+reject with `QwpEgressQueryTimeoutError`. A cancellation the application requested
+before the timeout is still reported as a cancellation.
+
+The grace period is `cancelDrainTimeoutMs` (the `query_close_timeout_ms` key, 5
+seconds by default). If the server has not ended the query within it, the caller is
+released with `QwpEgressQueryTimeoutError` and the connection drains the query for up
+to one more period; a server still silent then fails the session with
+`QwpEgressQueryCancelTimeoutError`. A query issued meanwhile waits for the drain
+instead of failing, and the wait counts against its own timeout. If the connection is
+lost after the timeout has expired, the timeout is reported at once and the query is
+not replayed; a request whose timeout expires while a reconnect holds it is never
+sent. The timeout is enforced by the client, and QuestDB acts on `CANCEL` between
+result batches, so a query still computing its first batch runs until it produces one.
+
+Breaking out of `for await` early also discards buffered batches, restores their
+flow-control credit, sends `CANCEL`, and rejects `completion` with
+`QwpEgressQueryAbandonedError`; the next query waits for that drain too. Call
+`query.cancel()` for explicit cancellation. A query sends at most one `CANCEL`.
 
 `await query.awaitCompletion(timeoutMs)` bounds only the caller's wait and returns
 `false` without cancelling when the timeout expires, matching Java
 `Completion.await(timeout, unit)`. `query.isDone()` reports terminal state. Use the
-query deadline options only when timeout should actively cancel the server query.
+query timeout options only when the timeout should actively cancel the server query.
 The initial and reconnect `SERVER_INFO` timeout defaults to five seconds, matching
 Java, and remains configurable through `serverInfoTimeoutMs`.
 
@@ -1424,7 +1512,9 @@ Cancellation draining is bounded by `cancelDrainTimeoutMs` (5 seconds by default
 Late batches are decoded and credited while the terminal response is pending. If the
 server does not terminate the query within the bound, the client fails with
 `QwpEgressQueryCancelTimeoutError` and closes the unusable connection instead of
-leaving the session permanently occupied.
+leaving the session permanently occupied. A reconnect does not count against the
+bound: without a connection there is nothing to drain, and a query whose consumer has
+retired is dropped rather than replayed.
 
 Node.js and browsers can request Zstd with `compression: "zstd"` or `"auto"` and a
 level from 1 through 22. Raw remains the compatibility default. Node uses
@@ -1445,8 +1535,8 @@ The connect helpers also enforce that request on what comes back: a `RESULT_BATC
 declaring more rows than were asked for is rejected as a `QwpProtocolError` before
 any column is read. Decoder scratch is sized from the declared row count and
 retained per buffer-pool slot for reuse, so an answer above the request would set
-the session's memory floor for its lifetime. Set `maxBatchRows` on the session
-options to bound a session built directly from a connection; left unset, the cell
+the session's memory floor for its lifetime. One `maxBatchRows` is both the cap
+requested on the wire and the bound enforced on the answer; left unset, the cell
 cap below is the only bound.
 
 A single `RESULT_BATCH` may declare at most `QWP_MAX_CELLS_PER_BATCH` cells --
@@ -1483,12 +1573,17 @@ transport successfully rebinds, then refreshes to the new endpoint.
 
 Re-execution is at least once: a statement may have completed before its response was
 lost, and a consumer may already have observed a prefix of SELECT rows. Queued but
-unconsumed batches are discarded automatically. Configure `onReplayReset` when the
-application must clear an accumulated prefix before batches restart at sequence zero;
-the callback is an optional notification, not an opt-in. Set `reconnect: false` to use
-one fixed connection and surface failures without replay. Supplying a `reconnect`
-object tunes the failover bounds and also retains the earlier opt-in behavior of
-retrying initial connection establishment.
+unconsumed batches are discarded automatically. Configure `onFailoverReset` on the
+query when the application must clear an accumulated prefix before batches restart
+at sequence zero. It runs before every replay, whether the reconnect reached another
+endpoint (a `failed-over` event) or the same one (`reconnected`). The query-scoped
+callback is especially important with pooled leases: request IDs are local to each
+session and cannot distinguish concurrent leases in one shared callback. An
+`onFailoverReset` on the egress options remains the fallback for queries without
+their own callback. Both are optional notifications, not an opt-in. Set
+`reconnect: false` to use one fixed connection and surface failures without
+replay. Supplying a `reconnect` object tunes the failover bounds and also retains
+the earlier opt-in behavior of retrying initial connection establishment.
 
 Browser egress uses the same session API:
 
@@ -1536,17 +1631,20 @@ const db = await connectQwpNodeClient(
 );
 ```
 
-Repeated `addr=` keys also accumulate endpoints. Programmatic overrides for
-callbacks, custom agents, store-and-forward, sender/session settings, and pool
-sizes may be passed as the second argument. The whole string is still validated
-before overrides are applied, matching the Java builder's fail-fast behavior.
+Repeated `addr=` keys also accumulate endpoints. Programmatic overrides --
+callbacks, custom agents, store-and-forward, and anything else the string does not
+spell -- may be passed as the second argument, in the sections the object form
+below takes: `cluster`, `ingress`, `egress` and `pool`. The whole string is still
+validated before overrides are applied, matching the Java builder's fail-fast
+behavior, and the endpoints always come from `addr`.
 
 A custom `wss://` agent is the WebSocket upgrade's sole TLS channel, so it
 carries its own certificate verification and cannot be combined with
 `tls_verify`, `tls_roots`, or `tls_roots_password` — that combination is
-rejected rather than silently dropping either. Configure verification on the
-agent instead. Agents are validated per endpoint. A `ws` endpoint takes a plain
-`http.Agent`; an `https.Agent` there is rejected. A `wss` endpoint takes any
+rejected rather than silently dropping either, whether the agent is given under
+`cluster` or to one side as `ingress.agent` or `egress.agent`. Configure
+verification on the agent instead. Agents are validated per endpoint. A `ws`
+endpoint takes a plain `http.Agent`; an `https.Agent` there is rejected. A `wss` endpoint takes any
 agent that can serve the scheme, so a tunnelling agent such as
 `https-proxy-agent`, `socks-proxy-agent` or `proxy-agent` works even though it
 extends `http.Agent` rather than `https.Agent`. Node performs that check itself
@@ -1561,12 +1659,15 @@ Node's `pfx` option represents client private-key/certificate identity, not
 additional trusted roots. Export the CA certificates to PEM and omit the
 password key.
 
-Set `lazy_connect=on` to tolerate an unavailable cluster during startup. In the
-JavaScript client, ingress uses memory replay by default, or persistent replay when
-`sf_dir` is present, with `initial_connect_retry=async`; egress uses
-`query_pool_min=0` and connects on the first query. Explicit
+Set `lazy_connect=on` (or `true`, in any case) to tolerate an unavailable cluster
+during startup. In the JavaScript client, ingress uses memory replay by default, or
+persistent replay when `sf_dir` is present, with `initial_connect_retry=async`; egress
+uses `query_pool_min=0` and connects on the first query. Explicit
 `initial_connect_retry=off|sync` or a positive `query_pool_min` conflicts with
-`lazy_connect` and is rejected before the client is created:
+`lazy_connect` and is rejected before the client is created. As in the Java, Rust and
+Python clients, the key belongs to the pooled client: `Sender.fromConfig()` validates
+it, warns, and otherwise ignores it, so a standalone sender that must start while the
+cluster is down sets `initial_connect_retry=async` instead:
 
 ```typescript
 const db = await connectQwpNodeClient(
@@ -1574,15 +1675,17 @@ const db = await connectQwpNodeClient(
 );
 ```
 
-For unified strings with `sf_dir`, Java-compatible defaults apply: memory
-durability, a 10 GiB total journal cap, 4 MiB journal segments, a 30-second
-capacity wait, a 5-second close drain, and fail-fast initial connection. Set
-`sender_id` to name the disk slot base; pooled senders use `<sender_id>-<slot>`.
+With `sf_dir`, the journal follows the Java client's defaults, and the typed
+`storeAndForward` options share them: memory durability, a 10 GiB total journal
+cap, 4 MiB journal segments, a 30-second capacity wait, and fail-fast initial
+connection. The close drain keeps its 5-second default, as in the Rust and Python
+clients; Java's builder waits 60 seconds. Set `sender_id` (typed `senderId`) to
+name the disk slot base; pooled senders use `<sender_id>-<slot>`.
 A frame must fit a segment, so with `sf_dir` the 4 MiB segment default is also
 the ingress frame cap from the first publication onward, before the server has
 advertised its own: a row batch above it fails with `QwpBatchTooLargeError`.
-Raise `sf_max_segment_bytes`, or lower the cap with
-`qwp.session.maxBatchSizeBytes`, to choose a different bound. `sf_max_total_bytes`
+Raise `sf_max_segment_bytes`, or lower the cap with the ingress option
+`maxBatchSizeBytes`, to choose a different bound. `sf_max_total_bytes`
 must leave room for at least one `sf_max_segment_bytes` segment plus 32 bytes of
 headers, so with the 4 MiB segment default `sf_max_total_bytes=4m` is rejected and
 `sf_max_total_bytes=1m` requires lowering `sf_max_segment_bytes` too. Without `sf_dir`
@@ -1595,22 +1698,26 @@ The parser also supports `max_name_len` and the Java listener/error inbox
 capacity keys. Those capacities actively bound asynchronous connection and
 typed-error delivery and are reflected in ingress drop counters.
 
-The object form remains available for cases where constructing the two sides
-separately is useful:
+The same client can be described as an object. `cluster` holds the endpoints and
+the connection settings both sides share; `ingress` and `egress` take each side's
+own options -- the sender's buffering and delivery settings, and the query
+session's routing, compression and deadlines. Each derives its route from the
+cluster URL, which may be an origin, a reverse-proxy base path, or an existing
+`/write/v4` or `/read/v1` endpoint:
 
 ```typescript
 import { connectQwpNodeClient } from "@questdb/nodejs-client";
 
 const db = await connectQwpNodeClient({
-  ingress: {
-    url: "wss://questdb.example:9000/write/v4",
+  cluster: {
+    url: "wss://questdb.example:9000",
     authorization: `Bearer ${token}`,
   },
+  ingress: { autoFlushRows: 5_000 },
   egress: {
-    url: "wss://questdb.example:9000/read/v1",
-    authorization: `Bearer ${token}`,
     target: "replica",
     zone: "eu-west-1a",
+    queryTimeoutMs: 30_000,
   },
   pool: {
     senderPoolMin: 1,
@@ -1657,12 +1764,10 @@ try {
 }
 ```
 
-Browser applications can likewise describe the cluster, REST/OIDC
-authentication bootstrap, and failover order once. A cluster URL may be an
-origin, a reverse-proxy base path, or an existing `/write/v4` or `/read/v1`
-endpoint; the facade derives both protocol routes while preserving query
-parameters. Omit `sessionBootstrap.url` to derive the matching `/exec` route
-for every failover endpoint:
+Browser applications describe the cluster, REST/OIDC authentication bootstrap,
+and failover order once in the same shape, and the facade derives both protocol
+routes in the same way, preserving query parameters. Omit `sessionBootstrap.url`
+to derive the matching `/exec` route for every failover endpoint:
 
 ```typescript
 import { connectQwpBrowserClient } from "@questdb/browser-client";
@@ -1686,12 +1791,15 @@ const db = await connectQwpBrowserClient({
 });
 ```
 
-`url`, `failoverUrls`, `sessionBootstrap`, and `auth` belong to `cluster` in
-this unified form and are rejected if repeated under `ingress` or `egress`.
-Side-specific timeouts, WebSocket factories, durable-ACK settings, routing, and
-compression remain available as explicit overrides. The original split object
-form with complete `ingress` and `egress` trees remains supported for advanced
-cases that intentionally connect the two sides differently.
+The endpoints and authentication belong to `cluster` -- `url`, `failoverUrls`,
+and `authorization` in Node.js, `sessionBootstrap` or `auth` in a browser -- and are rejected
+if repeated under `ingress` or `egress`, as is any section these options do not
+have. `target` and `zone` belong to `egress` and are rejected under `cluster` or
+`ingress`, because only the primary accepts writes. Any other connection setting,
+such as a timeout or a WebSocket factory, may be given to one side to override the
+cluster's for that side. An application that must connect the two sides differently can pass its own `createSender` and
+`createQuerySession` factories to the `QwpClient` constructor, or use the
+standalone sender and egress functions directly.
 
 `createQwpNodeClient()` and `createQwpBrowserClient()` build the pooled facade
 without contacting the server, leaving the first connect to `connect()` or to the
@@ -1706,13 +1814,39 @@ exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active
 query sends `CANCEL` and waits for the session's bounded cancellation drain; a
 connection that cannot drain is closed instead of being handed to another borrower.
+For a pooled query that accumulates consumed results, use a per-query reset callback:
+
+```typescript
+const lease = await db.borrowQuery();
+try {
+  let rowCount = 0;
+  const query = await lease.query("select * from trades", {
+    onFailoverReset: () => {
+      rowCount = 0; // Drop the prefix observed before failover.
+    },
+  });
+  for await (const batch of query) rowCount += batch.rowCount;
+  await query.completion;
+} finally {
+  await lease.close();
+}
+```
+
+The callback is awaited before replay, overrides the session default for this
+query, and works with both `query()` and `queryViews()`. `requestId` alone is not
+a unique key across pooled query sessions.
 Each query lease exposes the same refreshed snapshot as `lease.serverInfo`; accessing
 it after returning the lease raises `QwpClientClosedError` rather than exposing a
 pooled connection now owned by another borrower.
 The shared housekeeper closes excess connections after `idleTimeoutMs` and recycles
 connections older than `maxLifetimeMs` once they are idle, while always retaining
-each configured pool minimum. Set either timeout to zero to disable that policy;
-`housekeepingIntervalMs` controls how quickly an expired idle connection is noticed.
+each configured pool minimum. An idle RAM-backed sender with unacknowledged
+frames is retained until its replay queue drains; otherwise idle retirement
+would discard frames that a completed `flush()` handed to memory during an
+outage. Journal-backed senders can still retire because their pending frames
+survive in the store-and-forward directory. Set either timeout to zero to
+disable that policy; `housekeepingIntervalMs` controls how quickly an expired
+idle connection is noticed.
 Prefer returning application-owned leases before calling `QwpClient.close()`.
 If shutdown races a borrower, it rejects queued borrowers, closes idle connections,
 and cancels active queries before closing every borrowed query connection. A query
@@ -1721,19 +1855,32 @@ shutdown; subsequent operations on it fail as closed. Borrowed senders remain un
 their producer's ownership: shutdown waits up to `acquireTimeoutMs` (capped at five
 seconds) for them to return and never closes a sender underneath its borrower. A
 sender returned during or after shutdown is closed instead of re-entering the pool,
-while a sender that outlives the bounded wait owns its eventual teardown.
+while a sender that outlives the bounded wait owns its eventual teardown. Closing a
+pooled sender is best effort, as in the Java, Rust and Python pools: if it fails,
+typically because its close drain timed out with frames still unacknowledged, the
+sender logs a warning through its `log` option and neither `QwpClient.close()` nor
+the returned lease's `close()` rejects. A store-and-forward sender's warning notes
+that its unacknowledged frames remain in the journal for the next process; an
+in-memory sender's are lost. Call `flushAndWait()` on a lease before returning it
+when its rows must be acknowledged first.
 
 Pooled sender `close()` flushes completed rows, discards an unfinished row with a
 warning, and resets staging before reuse. With Node store-and-forward enabled, the
 configured directory is treated as a pool root and each stable sender slot owns a
-`sender-N` child directory, avoiding journal lock conflicts. The configured
-`senderPoolMin` remains authoritative. A client-level recovery scanner reserves and
-drains inactive canonical slots independently of foreground pool connections, both
-inside the current range and outside it after `senderPoolMax` is reduced. Foreground
-creation and recovery share an atomic slot coordinator, so neither can acquire a
-managed journal while the other owns it. This managed-slot recovery is automatic;
+`<senderId>-N` child directory, `default-N` unless `senderId` (`sender_id`) names
+it, avoiding journal lock conflicts. The configured `senderPoolMin` remains
+authoritative. A client-level recovery scanner reserves and drains inactive
+canonical slots independently of foreground pool connections, both inside the
+current range and outside it after `senderPoolMax` is reduced. Foreground creation
+and recovery share an atomic slot coordinator, so neither can acquire a managed
+journal while the other owns it. This managed-slot recovery is automatic;
 `drainOrphans: true` additionally adopts noncanonical sibling slots beneath the pool
 root.
+
+Earlier builds named a typed pool's slots `sender-N` when `senderId` was unset. The
+pool no longer adopts those, and warns when one still holds journal segments. Rename
+each to `default-N` while no client uses the directory, or start the pool once with
+`drainOrphans: true` to replay them.
 
 ## Error handling and cleanup
 
@@ -1754,18 +1901,17 @@ The public error classes preserve enough context for policy decisions:
 | `QwpSendError`                          | Base class for a frame that could not be handed to the transport                                            |
 | `QwpSendClosedError`                    | The WebSocket was closed, or not open, when a frame was sent                                                |
 | `QwpSendTimeoutError`                   | A send did not drain before its deadline; delivery is unknown                                               |
-| `QwpSenderCloseTimeoutError`            | Sender shutdown could not publish and ACK-drain all committed ingress frames within its deadline            |
+| `QwpSenderCloseTimeoutError`            | Sender shutdown could not publish, transmit RAM-backed frames, or ACK-drain committed frames in time        |
 | `QwpIngressNackError`                   | QuestDB rejected an ingress frame                                                                           |
-| `QwpIngressAckTimeoutError`             | The cumulative ingress ACK watermark did not reach the requested sequence before its deadline               |
 | `QwpIngressAckAbandonedError`           | A recovered frame was deliberately retired without a server ACK                                             |
-| `QwpIngressSessionClosedError`          | The ingress session is closed; frames still in flight are rejected with it                                  |
+| `QwpIngressSessionClosedError`          | The ingress session is closed; pending ACK waits are rejected with it                                       |
 | `QwpBatchTooLargeError`                 | One encoded row cannot fit the effective ingress cap                                                        |
 | `QwpWriterRowError`                     | A compiled object-row writer rejected a value, naming its table, column and row                             |
 | `QwpUdpDatagramTooLargeError`           | One encoded row exceeds `max_datagram_size` and is rejected before transmission                             |
 | `QwpMemoryReplayFrameTooLargeError`     | One frame cannot fit the in-memory replay budget                                                            |
 | `QwpMemoryReplayBatchTooLargeError`     | One split logical batch cannot fit the in-memory replay budget                                              |
 | `QwpMemoryReplayAppendTimeoutError`     | The in-memory replay queue did not regain capacity before its append deadline                               |
-| `QwpReconnectExhaustedError`            | The configured reconnect boundary was reached                                                               |
+| `QwpReconnectExhaustedError`            | A synchronous ingress startup or an egress failover episode ran out of its reconnect budget                 |
 | `QwpReplayRejectedError`                | A replayed frame was rejected and retained for inspection                                                   |
 | `QwpReplayDictionaryError`              | A replay store cannot preserve the dictionary its delta frames require                                      |
 | `QwpReplayDictionaryPersistenceError`   | A dictionary sidecar append failed before its delta frame was published; retrying the batch is safe         |
@@ -1784,18 +1930,16 @@ The public error classes preserve enough context for policy decisions:
 | `QwpEgressQueryError`                   | QuestDB returned a terminal query error                                                                     |
 | `QwpEgressSessionClosedError`           | The egress session or its connection is closed                                                              |
 | `QwpEgressQueryAbandonedError`          | Result iteration ended before the server completed the query                                                |
-| `QwpEgressQueryTimeoutError`            | The client deadline expired and cancellation began                                                          |
+| `QwpEgressQueryTimeoutError`            | The query ran past its timeout and was cancelled                                                            |
 | `QwpEgressQueryCancelTimeoutError`      | A cancelled query did not produce a terminal server response before the drain deadline                      |
-| `QwpEgressReplayRequiredError`          | Deprecated compatibility type from the former explicit replay opt-in                                        |
 
 Always close senders and sessions in `finally`. For a standalone sender, publication
 plus ACK draining is bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing
 handshake is bounded by `closeTimeoutMs`. A sender from `borrowSender()` is a _lease_:
-its `close()` flushes and returns the slot rather than closing the socket, so it is
-bounded by the session's `ackTimeoutMs` (15 seconds by default, and programmatic-only)
-rather than by `closeFlushTimeoutMs`. To bound a pooled hand-back yourself, use
-`flushAndGetSequence()` followed by `waitForAcknowledged(sequence, timeoutMs)` before
-returning the lease. In Node, `connectTimeoutMs` bounds the transport
+its `close()` flushes to the publication boundary and returns the slot rather than
+closing the socket, so it neither waits for the server's ACK nor applies
+`closeFlushTimeoutMs`. Call `flushAndWait(timeoutMs)` before returning the lease when
+its rows must be acknowledged first. In Node, `connectTimeoutMs` bounds the transport
 connection and `authTimeoutMs` the authenticated upgrade, the latter inheriting
 the former unless it is set. `closeTimeoutMs` inherits it too: a peer that accepted the
 upgrade and then stopped answering makes the closing handshake run to its full budget,
@@ -1817,15 +1961,19 @@ For the common fluent API, migration is primarily a transport change:
 
 Review these behavioral differences before rollout:
 
-- QWP `flush()` uses the Java-compatible local-publication boundary by default in
-  browsers and Node.js. Set `awaitServerAck` for a protocol ACK barrier, or
-  `awaitDurableAck` to wait through durable upload. With Node persistent
-  store-and-forward, local publication means durable journal append.
+- QWP `flush()` uses the Java-compatible local-publication boundary in browsers and
+  Node.js. Call `flushAndWait()` for a protocol ACK barrier; with `requestDurableAck`
+  it waits through durable upload. With Node persistent store-and-forward, local
+  publication means journal append. The default `memory` durability relies on the
+  OS page cache, which normally survives a process crash but makes no power-loss
+  promise; `durability: "append"` (`sf_durability=append`) makes each append
+  durable.
 - QWP symbol dictionaries are connection-scoped and automatic.
 - Table and column identifiers are rejected locally using the Java client's rules;
   column identity is case-insensitive and preserves the spelling first declared.
 - Large batches are split to the negotiated WebSocket payload cap.
-- QWP transactional auto-flush is per table and must be explicitly committed.
+- QWP transactional auto-flush is per table and must be committed with an explicit
+  `flush()`.
 - Browser and Node QWP ingress reconnect by default with in-memory, at-least-once
   replay. That queue has a 128 MiB cap and a bounded 30-second capacity wait by
   default. Configure Node store-and-forward when replay must survive process failure.
@@ -1842,72 +1990,46 @@ Review these behavioral differences before rollout:
 Roll out `ws::` per sender instance so the existing protocols can remain in service
 during migration.
 
-### Low-level QWP ingress
+### Low-level QWP APIs
 
-Code that manually creates `QwpTableBuffer` and calls
-`QwpIngressSession.sendTables()` can normally move to `connectQwpNodeSender()` or
-`connectQwpBrowserSender()`. Keep low-level sessions only when an application needs
-to produce encoded table buffers itself. The high-level sender owns batching, symbol
-deltas, ACK tracking, auto-flush, transactions, and durable waits.
+The ingress session below the sender is internal, as in the Java, Rust and Python
+clients, so neither package exports `QwpIngressSession` or a factory that returns
+one. Code that filled `QwpTableBuffer` batches and published them through a session
+moves to `connectQwpNodeSender()` or `connectQwpBrowserSender()`. The high-level
+sender owns batching, symbol deltas, ACK tracking, auto-flush, transactions, and
+durable waits, and its options include the session's, among them the `onResponse`,
+`onProgress`, and `onError` callbacks.
 
-When a bare session really is what you want, `connectQwpNodeIngress()` and
-`connectQwpBrowserIngress()` open one and hand back a connected
-`QwpIngressSession`. Both take the same runtime-specific connection options as
-their `*Sender()` counterparts -- so `requestDurableAck` belongs with the
-connection, not with the session options -- plus optional session options and an
-`AbortSignal` that cancels a first connect still negotiating:
+Likewise, `QwpNodeUdpSession` is the internal transport below
+`connectQwpNodeUdpSender()`, which takes the same `QwpNodeUdpOptions`, and the
+store-and-forward orphan drainer (`QwpNodeOrphanDrainer`) and its slot scanner are
+internal, as in the other QuestDB clients. Configure orphan recovery with the
+`storeAndForward` options `drainOrphans`, `maxBackgroundDrainers` and
+`orphanScanIntervalMs`, observe it through `onOrphanDrainEvent`, and call
+`retryQwpNodeOrphanSlot()` to make a slot marked `.failed` eligible again.
 
-```typescript
-import {
-  QWP_COLUMN_TYPE,
-  QwpTableBuffer,
-  connectQwpNodeIngress,
-} from "@questdb/nodejs-client";
+The store-and-forward journal is internal as well, and so is the replay store
+contract it implements: neither `QwpNodeFileReplayStore` nor `QwpIngressReplayStore`
+is exported. Configure the journal through `storeAndForward`, which takes its
+settings — `maxBytes`, `durability`, `backpressurePolicy` and the rest — directly.
 
-const session = await connectQwpNodeIngress({
-  url: "wss://questdb.example:9000/write/v4",
-  authorization: `Bearer ${token}`,
-  requestDurableAck: true,
-});
+The raw WebSocket connectors and connection factories below the senders and query
+sessions are internal too, in both packages. The senders, `connectQwpNodeEgress()`,
+`connectQwpBrowserEgress()` and the pooled clients open and reconnect their own
+connections from the same endpoint options.
 
-try {
-  const trades = new QwpTableBuffer("trades");
-  // getOrCreateColumn() reserves this row's cell and returns the column to
-  // append the value to. It returns null when the row already set that
-  // column, because the first value of a row wins.
-  trades
-    .getOrCreateColumn("symbol", QWP_COLUMN_TYPE.SYMBOL)!
-    .values.push("ETH-USD");
-  trades.getOrCreateColumn("price", QWP_COLUMN_TYPE.DOUBLE)!.values.push(2615.54);
-  // The designated timestamp is the column with an empty name.
-  trades
-    .getOrCreateColumn("", QWP_COLUMN_TYPE.TIMESTAMP_NANOS)!
-    .values.push(1_723_000_000_000_000_000n);
-  trades.nextRow();
+Query sessions are opened the same way. `QwpEgressSession` is what
+`connectQwpNodeEgress()`, `connectQwpBrowserEgress()` and the pooled clients return,
+but it has no static `connect()` and cannot be constructed directly, so the
+connection types it took, `QwpBinaryConnection` and `QwpConnectionFactory`, are
+internal. Its flow-control, deadline and failover options are part of
+`QwpNodeEgressOptions` and `QwpBrowserEgressOptions` rather than a type of their own.
 
-  // Resolves on the server's acknowledgement of this batch.
-  const response = await session.sendTables([trades]);
-  if (response.sequence !== null) {
-    // Redundant straight after sendTables(); use it to wait for a watermark
-    // reached by sends this code did not await. The target is a bigint.
-    await session.waitForAcknowledged(response.sequence);
-  }
-} finally {
-  await session.close();
-}
-```
+Senders are obtained the same way: a `QwpSender` comes from the runtime sender
+factories or a pooled client's `borrowSender()`, and its constructor is internal.
 
-These two entry points are the supported way to obtain a connected
-`QwpIngressSession`, and the one to prefer. The class and the connection
-factories are exported too, so `new QwpIngressSession(connection)` and
-`QwpIngressSession.connect(factory)` over `connectQwpNodeWebSocket()` /
-`createQwpNodeConnectionFactory()` (and their browser counterparts) are
-supported as well; they exist for applications that supply their own transport.
-Importing from an internal path instead of a package root is what is not
-supported. `parseQwpNodeClientConfig()` is the matching low-level helper for
-turning a `ws::`/`wss::` connect string into the typed options object those
-constructors take, and `scanQwpNodeOrphanSlots()` lists the store-and-forward
-slots under a parent directory without starting a drainer.
+`parseQwpNodeClientConfig()` is the low-level helper for turning a `ws::`/`wss::`
+connect string into the typed options object `createQwpNodeClient()` takes.
 
 Low-level `LONG`, `DATE`, and timestamp cells accept either a `bigint` within the
 signed 64-bit range or a safe integer `number`. `LONG_ARRAY` applies the same rule to
@@ -1926,16 +2048,16 @@ acknowledgement, and persistent replay—but uses runtime-specific connection fa
 | ---------------------------- | ------------------------------------------------------------- |
 | Sender/builder configuration | `Sender.fromConfig()` in Node.js, or `connectQwp*Sender()`    |
 | Fluent table row             | `table()`, typed column methods, `at()` / `atNow()`           |
-| Local publish/commit         | `flush()` / `commit()`                                        |
-| Explicit ACK barrier         | `flushAndGetSequence()` plus `waitForAcknowledged()`          |
-| Durable delivery             | `requestDurableAck` plus `awaitDurableAck`                    |
+| Local publish/commit         | `flush()`                                                     |
+| Drain (flush and wait)       | `flushAndWait()`                                              |
+| Explicit ACK barrier         | `flushAndGetSequence()` plus `waitForAck()`                   |
+| Durable delivery             | `requestDurableAck` plus `flushAndWait()`                     |
 | Store-and-forward            | Node `storeAndForward`; intentionally unavailable in browsers |
 | Fire-and-forget UDP ingress  | Node `udp::` or `connectQwpNodeUdpSender()`                   |
 | Query parameters             | `session.query(sql, { binds })`                               |
-| Bare ingress session         | `connectQwpNodeIngress()` / `connectQwpBrowserIngress()`      |
 | Materialized result batches  | `for await (const batch of query)`                            |
 | Reusable result views        | `queryViews()` with column views or `forEachRow()` row views  |
-| Egress row/buffer bounds     | `maxBatchRows` and session `bufferPoolSize`                   |
+| Egress row/buffer bounds     | `maxBatchRows` and `bufferPoolSize`                           |
 
 Unlike Java's dedicated dispatcher threads, TypeScript callback inboxes schedule work on
 later JavaScript event-loop turns. This keeps user callbacks out of protocol call stacks,

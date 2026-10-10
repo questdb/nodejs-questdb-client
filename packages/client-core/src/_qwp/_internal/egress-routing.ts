@@ -3,11 +3,11 @@ import {
   QWP_SERVER_ROLE,
   QwpProtocolError,
 } from "../_core";
-import {
+import { QwpSendClosedError } from "../transport";
+import type {
   QwpBinaryConnection,
   QwpConnectionFactory,
-  QwpSendClosedError,
-} from "../transport";
+} from "./binary-connection";
 import {
   createQwpFailoverConnectionFactory,
   QwpFailoverSelectionOptions,

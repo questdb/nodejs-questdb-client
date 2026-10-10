@@ -121,7 +121,12 @@ export class QwpFailoverError extends Error {
   }
 }
 
-/** A configured QWP reconnect policy exhausted its retry boundary. */
+/**
+ * A QWP reconnect budget ran out: a synchronous ingress initial connect
+ * reached reconnectMaxDurationMs, or an egress failover episode reached
+ * failoverMaxAttempts or failoverMaxDurationMs. A connected ingress session does not raise
+ * it, because its reconnects are not bounded.
+ */
 export class QwpReconnectExhaustedError extends Error {
   readonly cause: unknown;
 
@@ -189,131 +194,44 @@ export class QwpReplayDictionaryPersistenceError extends QwpReplayDictionaryErro
 }
 
 /**
- * @deprecated Standard egress sessions now reset and replay automatically.
- * Retained for source compatibility with clients that classified the former
- * explicit-replay opt-in failure.
+ * The kinds of `reconnect.onEvent` notification. The first seven are the
+ * connection events the Java, Rust, Go and Python clients share (Java's
+ * `SenderConnectionEvent.Kind`), so a listener ported from one of them keeps
+ * its meaning. The last three report store-and-forward conditions that only
+ * this client puts on the same stream.
  */
-export class QwpEgressReplayRequiredError extends Error {
-  constructor(readonly requestId?: bigint) {
-    super(
-      `QWP egress connection was lost with an operation in flight${
-        requestId === undefined ? "" : ` [requestId=${requestId}]`
-      }; configure onReplayReset to opt into at-least-once re-execution`,
-    );
-    this.name = "QwpEgressReplayRequiredError";
-  }
-}
-
-export interface QwpIngressReplayRecord {
-  readonly frameSequence: bigint;
-  readonly payload: Uint8Array;
-}
-
-/** Lightweight durable-frame descriptor used by disk-backed replay stores. */
-export interface QwpIngressReplayReference {
-  readonly frameSequence: bigint;
-  readonly payloadLength: number;
-}
-
-/** Browser-safe abstraction; Node supplies a persistent filesystem implementation. */
-export interface QwpIngressReplayStore {
-  load(): Promise<readonly QwpIngressReplayRecord[]>;
-  /**
-   * Opens and validates the journal without materializing every payload.
-   * Implementations that provide this must also provide `readPayload`.
-   */
-  loadReferences?(): Promise<readonly QwpIngressReplayReference[]>;
-  /** Reads one previously loaded durable payload on demand. */
-  readPayload?(frameSequence: bigint): Promise<Uint8Array>;
-  /**
-   * @internal Waits until every payload in one logical batch can be appended
-   * without an ACK between frames. Implementations must not mutate the journal.
-   */
-  prepareAppendBatch?(payloads: readonly Uint8Array[]): Promise<void>;
-  append(record: QwpIngressReplayRecord): Promise<void>;
-  acknowledgeThrough(frameSequence: bigint): Promise<void>;
-  /**
-   * @internal Removes a local prefix without representing it as a server ACK.
-   * Persistent stores should provide this when recovery can abandon frames.
-   *
-   * "Without representing it as a server ACK" is about the transport's public
-   * watermark, which the caller leaves alone. The removal itself must be as
-   * durable as `acknowledgeThrough`'s: a discarded prefix that a later `load()`
-   * can still see is a prefix this client reported abandoned and then sent
-   * anyway.
-   */
-  discardThrough?(frameSequence: bigint): Promise<void>;
-  /** Loads the durable, dense symbol prefix used by persisted delta frames. */
-  loadSymbolDictionary?(): Promise<readonly string[]>;
-  /** Persists new dense entries before a delta frame is made replayable. */
-  appendSymbolDictionary?(
-    startId: number,
-    entries: readonly string[],
-  ): Promise<void>;
-  /**
-   * Atomically replaces an unusable dictionary after surviving committed
-   * frames prove that its complete ID space can be reconstructed.
-   */
-  replaceSymbolDictionary?(entries: readonly string[]): Promise<void>;
-  close(): Promise<void>;
-}
-
-/**
- * @internal Notification-inbox metrics exposed by reconnecting egress transports.
- *
- * Egress dispatches reconnect events through the same bounded inbox as ingress,
- * and it drops the oldest entry the same way. Without a reader the drop counter
- * was unobservable, so a run of discarded events was indistinguishable from a
- * healthy one: `attempt` resets on every success, so the delivered stream
- * carries no gap to infer from.
- */
-export interface QwpEgressTransportMetrics {
-  readonly deliveredConnectionNotifications: number;
-  readonly droppedConnectionNotifications: number;
-}
-
-/** Physical ingress delivery counters maintained by reconnecting transports. */
-export interface QwpIngressTransportMetrics {
-  /** Highest stable replay-frame sequence handed to the transport. */
-  readonly publishedFrameSequence: bigint;
-  /** Highest replay-frame sequence removed after a server acknowledgement. */
-  readonly acknowledgedFrameSequence: bigint;
-  /** Stable frame ranges retired without ever receiving a server ACK. */
-  readonly abandonedFrameRanges?: readonly {
-    readonly fromFsn: bigint;
-    readonly toFsn: bigint;
-  }[];
-  readonly pendingReplayFrames: number;
-  readonly pendingReplayBytes: number;
-  /** Configured cap for the built-in memory replay store. */
-  readonly memoryReplayMaxBytes?: number;
-  /** Estimated payload and record-bookkeeping bytes charged to that cap. */
-  readonly memoryReplayUsedBytes?: number;
-  readonly waitingMemoryReplayAppends: number;
-  readonly totalMemoryReplayBackpressureStalls: number;
-  readonly totalMemoryReplayAppendTimeouts: number;
-  /** Physical WebSocket sends, including replay and dictionary catch-up. */
-  readonly totalFramesSent: number;
-  readonly totalBytesSent: number;
-  readonly totalFramesReplayed: number;
-  readonly totalBytesReplayed: number;
-  readonly totalReconnectAttempts: number;
-  readonly totalReconnectsSucceeded: number;
-  readonly totalFailovers: number;
-  readonly totalReconnectErrors: number;
-  readonly totalServerNacks: number;
-  readonly deliveredConnectionNotifications?: number;
-  readonly droppedConnectionNotifications?: number;
-  readonly deliveredErrorNotifications?: number;
-  readonly droppedErrorNotifications?: number;
-}
-
 export const QWP_RECONNECT_EVENT_KIND = {
+  /** The session's first successful connection. */
   CONNECTED: "connected",
-  RECONNECTING: "reconnecting",
-  ATTEMPT_FAILED: "attempt-failed",
+  /**
+   * The active connection was lost. Fired once per outage, before the first
+   * reconnect attempt.
+   */
+  DISCONNECTED: "disconnected",
+  /** A reconnect succeeded against the endpoint that was active before. */
   RECONNECTED: "reconnected",
+  /** A reconnect succeeded against a different endpoint than before. */
   FAILED_OVER: "failed-over",
+  /**
+   * One endpoint failed: it could not be opened, or it opened and then failed
+   * before the session could use it, as when it refuses the replayed frames.
+   * Fired as each endpoint fails, before the sweep moves on.
+   */
+  ENDPOINT_ATTEMPT_FAILED: "endpoint-attempt-failed",
+  /**
+   * A sweep tried every endpoint and none accepted the connection. Fired once
+   * per failed sweep, after that sweep's `endpoint-attempt-failed` events, with
+   * `endpoint` set to the last endpoint tried.
+   */
+  ALL_ENDPOINTS_UNREACHABLE: "all-endpoints-unreachable",
+  /**
+   * The server rejected the credentials with HTTP 401 or 403. A credential
+   * applies to the whole cluster, so the sweep stops at that endpoint and no
+   * `all-endpoints-unreachable` follows. Browsers report it only when the
+   * `sessionBootstrap` request is rejected, because their WebSocket API hides
+   * the upgrade status.
+   */
+  AUTH_FAILED: "auth-failed",
   /** An unbounded SF loop is waiting for durable-ACK-capable endpoints. */
   DURABLE_ACK_UNAVAILABLE: "durable-ack-unavailable",
   /** An orphan exhausted its consecutive durable-ACK mismatch budget. */
@@ -330,6 +248,10 @@ export interface QwpReconnectEvent {
   /** One-based reconnect sweep number; zero for lifecycle-only events. */
   readonly attempt: number;
   readonly timestampMs: number;
+  /**
+   * The endpoint the event concerns; for `all-endpoints-unreachable`, the last
+   * endpoint the sweep tried.
+   */
   readonly endpoint?: string | URL;
   readonly previousEndpoint?: string | URL;
   readonly cause?: unknown;
@@ -338,14 +260,15 @@ export interface QwpReconnectEvent {
 }
 
 /**
- * Initial connection policy for an ingress reconnect session. Public browser
- * and memory-only helpers resolve their default internally; Node persistent
- * store-and-forward exposes all three modes.
+ * Initial connection policy for an ingress reconnect session: the values of the
+ * `initialConnectMode` ingress option, which browser and Node senders accept
+ * with or without a store-and-forward journal. The `initial_connect_retry`
+ * connect-string key selects the same modes.
  */
 export const QWP_INITIAL_CONNECT_MODE = {
   /** Try once on the caller and fail immediately. */
   OFF: "off",
-  /** Retry on the caller within the configured reconnect budget. */
+  /** Retry on the caller until reconnectMaxDurationMs elapses. */
   SYNC: "sync",
   /** Return immediately and connect on the background replay loop. */
   ASYNC: "async",
@@ -355,50 +278,86 @@ export type QwpInitialConnectMode =
   (typeof QWP_INITIAL_CONNECT_MODE)[keyof typeof QWP_INITIAL_CONNECT_MODE];
 
 /**
- * Reconnect tuning shared by ingress and egress. The two sides ship different
- * defaults, so every field below documents both; an unset field keeps its own
- * side's default rather than the other's.
+ * Ingress reconnect and replay policy: the `reconnect` option of an ingress
+ * session.
  *
- * The ingress defaults favour survival -- a producer holding buffered or
- * journalled rows must outlast an outage rather than give up on it -- while
- * egress bounds a query connection so a caller is not left waiting.
+ * As in the Java, Rust and Python clients, a session that has connected is
+ * not stopped by any configured limit. Transport and endpoint failures are
+ * retried until close(), and only a terminal error ends the session.
+ * reconnectMaxDurationMs bounds a synchronous initial connect only.
  */
-export interface QwpReconnectOptions {
+export interface QwpIngressReconnectOptions {
   /**
-   * Maximum connection sweeps per outage; zero is unlimited.
-   * Ingress defaults to zero, egress to 8.
+   * Full-jitter ceiling before the first failed connection sweep is retried.
+   * Must not exceed 2_147_483_647ms. Defaults to 100ms.
    */
-  maxAttempts?: number;
+  reconnectInitialBackoffMs?: number;
   /**
-   * Full-jitter ceiling before the first failed sweep is retried. Must not
-   * exceed 2_147_483_647ms. Ingress defaults to 100ms, egress to 50ms.
+   * Full-jitter exponential-backoff ceiling. Must not exceed 2_147_483_647ms.
+   * Defaults to 5 seconds.
    */
-  initialBackoffMs?: number;
+  reconnectMaxBackoffMs?: number;
   /**
-   * Full-jitter exponential-backoff ceiling. Must not exceed
-   * 2_147_483_647ms. Ingress defaults to 5s, egress to 1s.
+   * How long a synchronous initial connect keeps retrying before it fails
+   * with QwpReconnectExhaustedError. Defaults to 5 minutes. Zero allows one
+   * attempt and no retries, as in the Rust and Python clients; the attempt
+   * itself is not cut short. Reconnects after the first connection do not
+   * consult it, and neither does an initial connect that runs in the
+   * background (initialConnectMode `"async"`, which Node's
+   * `initial_connect_retry=async` and the pooled client's `lazy_connect` also
+   * select): both retry until close() or a terminal error.
    */
-  maxBackoffMs?: number;
+  reconnectMaxDurationMs?: number;
   /**
-   * Total reconnect deadline; zero disables the deadline.
-   * Ingress defaults to 5 minutes, egress to 30s.
-   */
-  maxDurationMs?: number;
-  /**
-   * Consecutive retriable rejections of one ingress frame before it is treated
-   * as poison and retained for inspection. Defaults to 4. Ingress only.
+   * Consecutive retriable rejections of one frame before it is treated as
+   * poison and retained for inspection. Defaults to 4.
    */
   maxFrameRejections?: number;
   /**
-   * Minimum time the same ingress frame must remain suspect before repeated
-   * rejections or non-orderly closes become terminal. Defaults to 5 minutes;
-   * zero escalates as soon as maxFrameRejections is reached. Ingress only.
+   * Minimum time the same frame must remain suspect before repeated
+   * rejections or non-orderly closes become terminal. Defaults to 5 seconds;
+   * zero escalates as soon as maxFrameRejections is reached.
    */
   poisonMinEscalationWindowMs?: number;
   onEvent?: (event: QwpReconnectEvent) => void;
 }
 
-export interface QwpEgressReplayResetEvent {
+/**
+ * Egress failover policy: the `reconnect` option of an egress session. Unlike
+ * ingress, each failover episode is bounded, so a caller waiting for a query
+ * result is not left waiting through a long outage.
+ */
+export interface QwpEgressReconnectOptions {
+  /**
+   * Maximum connection sweeps per failover episode; zero is unlimited.
+   * Defaults to 8.
+   */
+  failoverMaxAttempts?: number;
+  /**
+   * Full-jitter ceiling before the first failed connection sweep is retried.
+   * Must not exceed 2_147_483_647ms. Defaults to 50ms.
+   */
+  failoverBackoffInitialMs?: number;
+  /**
+   * Full-jitter exponential-backoff ceiling. Must not exceed 2_147_483_647ms.
+   * Defaults to 1 second.
+   */
+  failoverBackoffMaxMs?: number;
+  /**
+   * Deadline for one failover episode; zero disables it. Defaults to 30
+   * seconds.
+   */
+  failoverMaxDurationMs?: number;
+  onEvent?: (event: QwpReconnectEvent) => void;
+}
+
+/**
+ * Passed to `onFailoverReset` just before an active query is re-executed on a
+ * replacement connection. It fires on every reconnect that replays a query,
+ * whether the new connection reached another endpoint (a `failed-over` event)
+ * or the same one (`reconnected`).
+ */
+export interface QwpEgressFailoverResetEvent {
   /** Client request being re-executed on the replacement connection. */
   readonly requestId: bigint;
   /** Authoritative SERVER_INFO received from the replacement endpoint. */
@@ -454,16 +413,18 @@ export const QWP_TARGET = {
   REPLICA: "replica",
 } as const;
 
-/** Server role accepted by an egress connection. Defaults to `any`. */
+/** Server role a query session accepts. Defaults to `any`. */
 export type QwpTarget = (typeof QWP_TARGET)[keyof typeof QWP_TARGET];
 
-/** Browser-safe endpoint-routing controls used by QWP egress clients. */
 /**
- * Endpoint routing preferences. Named for egress, where they landed first, but
- * ingress ranks and validates its endpoints with the same machinery and honours
- * the same two keys.
+ * Browser-safe endpoint routing preferences for query sessions.
+ *
+ * Ingress takes none. QuestDB accepts writes on the primary alone: a replica,
+ * or a primary still catching up, answers the `/write/v4` upgrade with 421
+ * and the role it holds, and the endpoint sweep moves on, so a sender reaches
+ * the primary whatever role or zone it could ask for.
  */
-export interface QwpEgressRoutingOptions {
+export interface QwpRoutingOptions {
   /** Selects any readable node, a primary/standalone node, or a replica. */
   target?: QwpTarget;
   /** Opaque, case-insensitive preferred zone; cross-zone fallback stays enabled. */
@@ -581,100 +542,3 @@ export interface QwpHandshakeMetadata {
   /** Server zone advertised on a successful upgrade, when available. */
   readonly serverZone?: string;
 }
-
-/**
- * Normalized binary connection consumed by QWP sessions.
- *
- * Adapters buffer messages until the single async iterator consumes them, so
- * unsolicited frames such as egress SERVER_INFO cannot race session startup.
- */
-export interface QwpBinaryConnection {
-  readonly messages: AsyncIterable<Uint8Array>;
-  readonly closed: Promise<QwpConnectionCloseInfo>;
-  readonly handshake: QwpHandshakeMetadata;
-  /** @internal Recovered ingress dictionary supplied by replay connections. */
-  readonly ingressSymbolDictionary?: readonly string[];
-  /** @internal False after replay dictionary persistence becomes unavailable. */
-  readonly ingressDeltaSymbolDictionaryEnabled?: boolean;
-  /** @internal True when the transport dispatches typed sender errors itself. */
-  readonly managesIngressSenderErrors?: boolean;
-  /** Endpoint backing this connection, when supplied by its adapter. */
-  readonly endpoint?: string | URL;
-
-  /** @internal Physical delivery metrics exposed by replaying transports. */
-  getIngressMetrics?(): QwpIngressTransportMetrics;
-
-  /** @internal Notification-inbox metrics exposed by reconnecting transports. */
-  getEgressMetrics?(): QwpEgressTransportMetrics;
-
-  /**
-   * @internal Published watermark alone, for the flush path.
-   *
-   * Transports that expose this must keep it consistent with
-   * {@link getIngressMetrics}'s `publishedFrameSequence`; callers fall back to
-   * the full snapshot when it is absent.
-   */
-  getPublishedFrameSequence?(): bigint;
-
-  /** @internal Resolves a session sequence to its stable replay FSN. */
-  getIngressFrameSequence?(clientSequence: bigint): bigint | undefined;
-
-  /**
-   * @internal Reserves a client sequence for a split-batch suffix suppressed
-   * before send(), keeping replay ACK translation aligned with the session.
-   */
-  skipIngressClientSequence?(): void;
-
-  /**
-   * @internal Serializes a whole logical batch capacity check before its first
-   * frame is sent, preventing a deferred prefix from consuming the only space
-   * needed by its commit-bearing suffix.
-   */
-  prepareIngressBatch?(payloads: readonly Uint8Array[]): Promise<void>;
-
-  /**
-   * @internal Marks this endpoint as temporarily unsuitable and asks a stateful
-   * connection factory to start its next sweep at another configured endpoint.
-   */
-  deprioritizeEndpoint?(): void;
-
-  send(payload: Uint8Array): Promise<void>;
-  /** Sends an RFC 6455 PING when the underlying runtime supports it. */
-  ping?(): Promise<void>;
-  close(code?: number, reason?: string): Promise<void>;
-}
-
-export interface QwpWebSocketConnectOptions {
-  url: string | URL;
-  /** Additional endpoints attempted in order when the preferred endpoint fails. */
-  failoverUrls?: readonly (string | URL)[];
-  protocols?: string | string[];
-  /**
-   * Node TCP/TLS connection deadline, or the complete opening deadline in a
-   * browser. Defaults to 15s. Capped at 2,147,483,647ms (the host timer
-   * ceiling); a larger value throws a `RangeError`.
-   */
-  connectTimeoutMs?: number;
-  /**
-   * Maximum time a send may remain queued by the WebSocket. Defaults to 15s.
-   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
-   * a `RangeError`.
-   */
-  sendTimeoutMs?: number;
-  /**
-   * Maximum time allowed for a graceful WebSocket close. Defaults to 15s.
-   * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
-   * a `RangeError`.
-   */
-  closeTimeoutMs?: number;
-}
-
-/**
- * Opens one connection. The optional signal is aborted when the owning session
- * closes, so a factory that is still negotiating can tear its socket down
- * instead of leaving it alive until its own deadline expires. Factories that
- * ignore the parameter remain assignable.
- */
-export type QwpConnectionFactory = (
-  signal?: AbortSignal,
-) => Promise<QwpBinaryConnection>;

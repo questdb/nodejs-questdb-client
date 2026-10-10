@@ -1,15 +1,18 @@
 import {
   QWP_TARGET,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
-  QwpConnectionFactory,
-  QwpEgressRoutingOptions,
   QwpFailoverAttempt,
   QwpFailoverError,
   QwpRoleMismatchError,
+  QwpRoutingOptions,
   QwpTarget,
   QwpUpgradeError,
 } from "../transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+  QwpEndpointFailureObserver,
+} from "./binary-connection";
 import { redactQwpEndpoint } from "./redact-endpoint";
 
 const HOST_STATE = {
@@ -187,7 +190,7 @@ export interface QwpValidatedConnection {
   readonly serverZone?: string;
 }
 
-export interface QwpFailoverSelectionOptions extends QwpEgressRoutingOptions {
+export interface QwpFailoverSelectionOptions extends QwpRoutingOptions {
   /** @internal Reads protocol-level topology metadata when headers are hidden. */
   validateConnection?: (
     connection: QwpBinaryConnection,
@@ -202,7 +205,7 @@ export interface QwpFailoverSelectionOptions extends QwpEgressRoutingOptions {
 export function createQwpFailoverHealthTracker(
   preferredUrl: string | URL,
   failoverUrls: readonly (string | URL)[] | undefined,
-  options: QwpEgressRoutingOptions = {},
+  options: QwpRoutingOptions = {},
 ): QwpFailoverHealthTracker {
   return new QwpFailoverHealthTracker(
     preferredUrl,
@@ -253,7 +256,10 @@ export function createQwpFailoverConnectionFactory(
   let deferredEndpoint: number | undefined;
   let resetClassificationsBeforeSweep = false;
 
-  return async (signal?: AbortSignal): Promise<QwpBinaryConnection> => {
+  return async (
+    signal?: AbortSignal,
+    onEndpointFailure?: QwpEndpointFailureObserver,
+  ): Promise<QwpBinaryConnection> => {
     if (
       resetClassificationsBeforeSweep &&
       resetClassificationsAfterExhaustion
@@ -313,6 +319,10 @@ export function createQwpFailoverConnectionFactory(
       } catch (error) {
         healthTracker.recordFailure(index, error);
         attempts.push({ endpoint, error });
+        // An aborted attempt is the session closing or its deadline expiring,
+        // not a verdict on the endpoint, and nothing is listening for the rest
+        // of a sweep the session has already left.
+        if (!signal?.aborted) onEndpointFailure?.(endpoint, error);
         if (candidate) await candidate.close().catch(() => undefined);
         // tryNextEndpoint is a tri-state: only an explicit false short-circuits
         // the sweep. A browser cannot see the HTTP response, so every refused,
@@ -359,14 +369,6 @@ function normalizeRole(role: string | undefined): string | undefined {
 function matchesTarget(role: string | undefined, target: QwpTarget): boolean {
   if (target === QWP_TARGET.ANY) return true;
   const normalized = normalizeRole(role);
-  // An endpoint that declares no role is accepted whatever the target. Egress
-  // always learns one from SERVER_INFO, but ingress reads it from an upgrade
-  // response header that an older server may not send and a proxy may strip,
-  // and refusing to write to a node purely because it stayed silent would take
-  // a working deployment offline. A server that does know its role still
-  // rejects a misdirected write itself, with the 421 this client classifies as
-  // ROLE_REJECTED.
-  if (normalized === undefined) return true;
   if (target === QWP_TARGET.REPLICA) return normalized === "REPLICA";
   return (
     normalized === "PRIMARY" ||

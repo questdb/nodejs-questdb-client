@@ -29,34 +29,25 @@ import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
   connectQwpBrowserEgress,
-  connectQwpBrowserIngress,
   connectQwpBrowserSender,
 } from "../../packages/browser-client/src";
 import type {
   QwpBrowserAuthContext,
   QwpBrowserAuthProvider,
-  QwpBrowserClusterOptions,
-  QwpBrowserClientEgressOptions,
-  QwpBrowserClientIngressOptions,
   QwpBrowserClientOptions,
+  QwpBrowserIngressOptions,
   QwpBrowserSessionBootstrapOptions,
   QwpBrowserSessionBootstrapResult,
   QwpBrowserEgressOptions,
-  QwpBrowserSplitClientOptions,
-  QwpBrowserUnifiedClientOptions,
   QwpBrowserWebSocketOptions,
 } from "../../packages/browser-client/src";
 import {
   connectQwpNodeEgress,
   connectQwpNodeClient,
-  connectQwpNodeIngress,
   connectQwpNodeSender,
-  connectQwpNodeUdp,
   connectQwpNodeUdpSender,
-  connectQwpNodeWebSocket,
   parseQwpNodeClientConfig,
   retryQwpNodeOrphanSlot,
-  scanQwpNodeOrphanSlots,
 } from "../../packages/nodejs-client/src";
 import type {
   QwpNodeClientOptions,
@@ -64,24 +55,17 @@ import type {
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
   QwpNodeUdpOptions,
-  QwpNodeUdpSession,
   QwpNodeOrphanDrainEvent,
-  QwpNodeOrphanDrainSession,
   QwpNodeReplayRecoveryEvent,
   QwpNodeStoreAndForwardOptions,
   QwpNodeWebSocketOptions,
 } from "../../packages/nodejs-client/src";
 import type {
-  QwpBinaryConnection,
   QwpClient,
   QwpClientPoolOptions,
   QwpEgressQueryOptions,
   QwpEgressSession,
-  QwpEgressSessionOptions,
   QwpEgressViewQuery,
-  QwpIngressSession,
-  QwpIngressSessionOptions,
-  QwpIngressSendResult,
   QwpSenderError,
   QwpQueryLease,
   QwpResultBatchView,
@@ -90,7 +74,6 @@ import type {
   QwpResultRowViewCallback,
   QwpServerInfoMessage,
   QwpSender,
-  QwpSenderOptions,
   QwpTableWriter,
   QwpWriterRow,
 } from "../../packages/nodejs-client/src";
@@ -100,22 +83,15 @@ import type {
 // signature fails compilation even though TypeScript types do not exist at
 // runtime.
 const browserSenderSignature: (
-  options: QwpBrowserWebSocketOptions,
-  senderOptions?: QwpSenderOptions,
-  sessionOptions?: QwpIngressSessionOptions,
+  options: QwpBrowserIngressOptions,
 ) => Promise<QwpSender> = connectQwpBrowserSender;
 
 const defaultSenderErrorHandlerSignature: (error: QwpSenderError) => void =
   defaultQwpSenderErrorHandler;
 
-const browserIngressSignature: (
-  options: QwpBrowserWebSocketOptions,
-  sessionOptions?: QwpIngressSessionOptions,
-) => Promise<QwpIngressSession> = connectQwpBrowserIngress;
-
 const browserEgressSignature: (
   options: QwpBrowserEgressOptions,
-  sessionOptions?: QwpEgressSessionOptions,
+  signal?: AbortSignal,
 ) => Promise<QwpEgressSession> = connectQwpBrowserEgress;
 
 const bootstrapSignature: (
@@ -128,32 +104,16 @@ const browserClientSignature: (
 
 const nodeSenderSignature: (
   options: QwpNodeIngressOptions,
-  senderOptions?: QwpSenderOptions,
-  sessionOptions?: QwpIngressSessionOptions,
 ) => Promise<QwpSender> = connectQwpNodeSender;
-
-const nodeUdpSignature: (
-  options: QwpNodeUdpOptions,
-) => Promise<QwpNodeUdpSession> = connectQwpNodeUdp;
 
 const nodeUdpSenderSignature: (
   options: QwpNodeUdpOptions,
-  senderOptions?: QwpSenderOptions,
 ) => Promise<QwpSender> = connectQwpNodeUdpSender;
-
-const nodeIngressSignature: (
-  options: QwpNodeIngressOptions,
-  sessionOptions?: QwpIngressSessionOptions,
-) => Promise<QwpIngressSession> = connectQwpNodeIngress;
 
 const nodeEgressSignature: (
   options: QwpNodeEgressOptions,
-  sessionOptions?: QwpEgressSessionOptions,
+  signal?: AbortSignal,
 ) => Promise<QwpEgressSession> = connectQwpNodeEgress;
-
-const nodeWebSocketSignature: (
-  options: QwpNodeWebSocketOptions,
-) => Promise<QwpBinaryConnection> = connectQwpNodeWebSocket;
 
 const nodeWebSocketOptionsContract: QwpNodeWebSocketOptions = {
   url: "wss://node-1.example/write/v4",
@@ -186,21 +146,8 @@ const poolOptionsContract: QwpClientPoolOptions = {
   housekeepingIntervalMs: 5_000,
 };
 
-const nodeOrphanScanSignature: (
-  rootDirectory: string,
-  excludeSlot?: (slotName: string) => boolean,
-) => Promise<readonly string[]> = scanQwpNodeOrphanSlots;
-
 const nodeOrphanRetrySignature: (directory: string) => Promise<void> =
   retryQwpNodeOrphanSlot;
-
-// QwpNodeOrphanDrainerOptions.createSession returns this, so anyone
-// implementing that interface must be able to name it.
-const nodeOrphanDrainSessionContract: (
-  session: QwpNodeOrphanDrainSession,
-) => Promise<void> = async (session) => {
-  await session.closed;
-};
 
 const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
   directory: "/tmp/qwp-public-api-contract",
@@ -218,6 +165,7 @@ const nodeStoreAndForwardContract: QwpNodeStoreAndForwardOptions = {
 };
 
 const queryOptionsContract: QwpEgressQueryOptions = {
+  onFailoverReset: (event) => void event.requestId,
   initialCredit: 1024,
   autoCredit: true,
   timeoutMs: 30_000,
@@ -225,7 +173,9 @@ const queryOptionsContract: QwpEgressQueryOptions = {
   binds: (binds) => binds.setVarchar(0, "ETH-USD"),
 };
 
-const egressSessionOptionsContract: QwpEgressSessionOptions = {
+// The query session's own options travel in each runtime's egress options.
+const egressSessionOptionsContract: QwpNodeEgressOptions = {
+  url: "wss://node-1.example/read/v1",
   initialCredit: 256 * 1024,
   bufferPoolSize: 4,
   queryTimeoutMs: 30_000,
@@ -233,7 +183,12 @@ const egressSessionOptionsContract: QwpEgressSessionOptions = {
   maxBatchRows: 4096,
 };
 
-const fixedConnectionIngressContract: QwpIngressSessionOptions = {
+const fixedConnectionIngressContract: QwpNodeIngressOptions = {
+  url: "wss://node-1.example/write/v4",
+  autoFlushRows: 1_000,
+  transactional: true,
+  gorilla: false,
+  symbolDictionary: "full",
   reconnect: false,
   connectionListenerInboxCapacity: 64,
   errorInboxCapacity: 256,
@@ -247,12 +202,15 @@ const fixedConnectionIngressContract: QwpIngressSessionOptions = {
     ],
 };
 
-const memoryReplayIngressContract: QwpIngressSessionOptions = {
+const memoryReplayIngressContract: QwpBrowserIngressOptions = {
+  url: "wss://node-1.example/write/v4",
   memoryReplayMaxBytes: 128 * 1024 * 1024,
   memoryReplayAppendDeadlineMs: 30_000,
+  initialConnectMode: "async",
 };
 
-const fixedConnectionEgressContract: QwpEgressSessionOptions = {
+const fixedConnectionEgressContract: QwpBrowserEgressOptions = {
+  url: "wss://node-1.example/read/v1",
   reconnect: false,
 };
 
@@ -262,9 +220,11 @@ const browserEgressOptionsContract: QwpBrowserEgressOptions = {
   target: "replica",
   zone: "eu-west-1a",
   maxBatchRows: 512,
+  queryTimeoutMs: 30_000,
+  reconnect: { failoverMaxAttempts: 3 },
 };
 
-const browserClusterOptionsContract: QwpBrowserClusterOptions = {
+const browserClusterOptionsContract: QwpBrowserWebSocketOptions = {
   url: "wss://node-1.example/qdb",
   failoverUrls: ["wss://node-2.example/qdb"],
   connectTimeoutMs: 5_000,
@@ -299,38 +259,126 @@ const browserAuthOptionsContracts: readonly QwpBrowserWebSocketOptions[] = [
   },
 ];
 
-const browserClusterAuthContract: QwpBrowserClusterOptions = {
-  url: "wss://node-1.example/qdb",
-  auth: browserAuthProviderContract,
+const browserClusterAuthContract: QwpBrowserClientOptions = {
+  cluster: {
+    url: "wss://node-1.example/qdb",
+    auth: browserAuthProviderContract,
+  },
 };
 
-const browserIngressOverridesContract: QwpBrowserClientIngressOptions = {
-  requestDurableAck: true,
-  ingressNegotiationTimeoutMs: 1_000,
-};
-
-const browserEgressOverridesContract: QwpBrowserClientEgressOptions = {
-  target: "replica",
-  zone: "eu-west-1a",
-  compression: "zstd",
-  maxBatchRows: 512,
-};
-
-const browserUnifiedClientContract: QwpBrowserUnifiedClientOptions = {
+const browserClientOptionsContract: QwpBrowserClientOptions = {
   cluster: browserClusterOptionsContract,
-  ingress: browserIngressOverridesContract,
-  egress: browserEgressOverridesContract,
+  ingress: {
+    requestDurableAck: true,
+    ingressNegotiationTimeoutMs: 1_000,
+    autoFlushRows: 1_000,
+    ackTimeoutMs: 30_000,
+  },
+  egress: {
+    target: "replica",
+    zone: "eu-west-1a",
+    compression: "zstd",
+    maxBatchRows: 512,
+    queryTimeoutMs: 30_000,
+  },
+  pool: poolOptionsContract,
 };
 
-const browserSplitClientContract: QwpBrowserSplitClientOptions = {
-  ingress: { url: "wss://node-1.example/write/v4" },
-  egress: { url: "wss://node-1.example/read/v1" },
+// The cluster owns the endpoints and authentication on both runtimes.
+const browserClusterOwnedContract: QwpBrowserClientOptions = {
+  cluster: browserClusterOptionsContract,
+  // @ts-expect-error url belongs to cluster.
+  ingress: { url: "wss://node-3.example/write/v4" },
+  // @ts-expect-error auth belongs to cluster.
+  egress: { auth: browserAuthProviderContract },
 };
 
-const browserClientOptionsContracts: readonly QwpBrowserClientOptions[] = [
-  browserUnifiedClientContract,
-  browserSplitClientContract,
-];
+const nodeClientOptionsContract: QwpNodeClientOptions = {
+  cluster: {
+    url: "wss://node-1.example",
+    failoverUrls: ["wss://node-2.example"],
+    authorization: "Bearer token",
+    connectTimeoutMs: 5_000,
+  },
+  ingress: {
+    requestDurableAck: true,
+    autoFlushRows: 1_000,
+    initialConnectMode: "async",
+    storeAndForward: { directory: "/tmp/qwp-public-api-contract" },
+  },
+  egress: { target: "replica", compression: "zstd", queryTimeoutMs: 30_000 },
+  pool: poolOptionsContract,
+  lazyConnect: true,
+};
+
+const nodeClusterOwnedContract: QwpNodeClientOptions = {
+  cluster: { url: "wss://node-1.example" },
+  // @ts-expect-error authorization belongs to cluster.
+  egress: { authorization: "Bearer other" },
+};
+
+// The journal has no startup policy of its own; initialConnectMode is the
+// ingress options' alone.
+const nodeStoreStartupContract: QwpNodeStoreAndForwardOptions = {
+  directory: "/tmp/qwp-public-api-contract",
+  // @ts-expect-error initialConnectMode is an ingress option.
+  initialConnectMode: "async",
+};
+
+// Durable ACK is negotiated on /write/v4 only, so it is not a shared or an
+// egress option on either runtime.
+const browserEgressDurableAckContract: QwpBrowserEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  // @ts-expect-error requestDurableAck is ingress-only.
+  requestDurableAck: true,
+};
+
+const nodeEgressDurableAckContract: QwpNodeEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  // @ts-expect-error requestDurableAck is ingress-only.
+  requestDurableAck: true,
+};
+
+// Only the primary accepts writes, and ingress reaches it through the 421 each
+// replica answers the upgrade with, so target and zone route queries alone.
+const nodeIngressRoutingContract: QwpNodeIngressOptions = {
+  url: "wss://node-1.example/write/v4",
+  // @ts-expect-error target routes query sessions only.
+  target: "primary",
+};
+
+const browserIngressRoutingContract: QwpBrowserIngressOptions = {
+  url: "wss://node-1.example/write/v4",
+  // @ts-expect-error zone routes query sessions only.
+  zone: "eu-west-1a",
+};
+
+const nodeClientIngressRoutingContract: QwpNodeClientOptions = {
+  cluster: { url: "wss://node-1.example" },
+  // @ts-expect-error target routes query sessions only.
+  ingress: { target: "replica" },
+};
+
+const senderRoutingContract: QwpExtraOptions = {
+  // @ts-expect-error A Sender has no query session for zone to route.
+  webSocket: { zone: "eu-west-1a" },
+};
+
+const nodeClientConfigOptionsContract: QwpNodeClientConfigOptions = {
+  cluster: {
+    clientId: "typescript/contract",
+    // @ts-expect-error requestDurableAck is an ingress option.
+    requestDurableAck: true,
+  },
+  ingress: {
+    requestDurableAck: true,
+    autoFlushRows: 1_000,
+    storeAndForward: { directory: "/tmp/qwp-public-api-contract" },
+  },
+  egress: { target: "replica", compression: "zstd", initialCredit: 1024 },
+  pool: poolOptionsContract,
+  lazyConnect: true,
+};
 
 const nodeEgressOptionsContract: QwpNodeEgressOptions = {
   url: "wss://node-1.example/read/v1",
@@ -342,55 +390,39 @@ const nodeEgressOptionsContract: QwpNodeEgressOptions = {
 const qwpExtraOptionsContract: QwpExtraOptions = {
   webSocket: {
     requestDurableAck: true,
+    initialConnectMode: "sync",
     storeAndForward: {
       directory: "/tmp/qwp-public-api-contract",
-      initialConnectMode: "sync",
       catchUpCapGapMinEscalationWindowMs: 300_000,
     },
-  },
-  sender: {
     transactional: true,
     autoFlushBytes: 4 * 1024 * 1024,
     maxNameLength: 255,
     closeFlushTimeoutMs: 5_000,
-    awaitDurableAck: true,
-  },
-  session: {
-    reconnect: { maxAttempts: 3 },
+    reconnect: { reconnectMaxDurationMs: 30_000 },
   },
   udp: {
     maxDatagramSize: 1_400,
     multicastTtl: 1,
+    autoFlushRows: 100,
   },
 };
 
-function senderSequenceContract(
-  sender: QwpSender,
-  session: QwpIngressSession,
-): void {
+function senderSequenceContract(sender: QwpSender): void {
   const published: Promise<bigint> = sender.flushAndGetSequence();
-  const senderWait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
+  const drained: Promise<boolean> = sender.flushAndWait(5_000);
+  const drainedByDefault: Promise<boolean> = sender.flushAndWait();
+  const senderWait: Promise<boolean> = sender.waitForAck(0n, 5_000);
+  const senderCheck: Promise<boolean> = sender.waitForAck(0n, 0);
   const senderPublished: bigint = sender.publishedSequence;
-  const senderAcknowledged: bigint = sender.acknowledgedSequence;
-  const sessionWait: Promise<void> = session.waitForAcknowledged(0n, 5_000);
-  const sessionPublished: bigint = session.publishedFrameSequence;
-  const sessionAcknowledged: bigint = session.acknowledgedFrameSequence;
-  const tracked: QwpIngressSendResult = session.sendFrameWithPublication(
-    new Uint8Array(),
-  );
-  const localPublication: Promise<void> = tracked.publication;
-  const serverAcknowledgement = tracked.acknowledgement;
-  const trackedSequence: bigint = tracked.sequence;
+  const senderAcked: bigint = sender.ackedSequence;
   void published;
+  void drained;
+  void drainedByDefault;
   void senderWait;
+  void senderCheck;
   void senderPublished;
-  void senderAcknowledged;
-  void sessionWait;
-  void sessionPublished;
-  void sessionAcknowledged;
-  void localPublication;
-  void serverAcknowledgement;
-  void trackedSequence;
+  void senderAcked;
 }
 
 /**
@@ -418,14 +450,16 @@ function ilpTypeExportContract(
 function rootSenderSequenceContract(sender: Sender): void {
   const cancelled: Sender = sender.cancelRow();
   const published: Promise<bigint> = sender.flushAndGetSequence();
-  const wait: Promise<void> = sender.waitForAcknowledged(0n, 5_000);
+  const drained: Promise<boolean> = sender.flushAndWait(5_000);
+  const wait: Promise<boolean> = sender.waitForAck(0n, 5_000);
   const publishedWatermark: bigint = sender.publishedSequence;
-  const acknowledgedWatermark: bigint = sender.acknowledgedSequence;
+  const ackedWatermark: bigint = sender.ackedSequence;
   void cancelled;
   void published;
+  void drained;
   void wait;
   void publishedWatermark;
-  void acknowledgedWatermark;
+  void ackedWatermark;
 }
 
 function compiledWriterContract(sender: QwpSender, rootSender: Sender): void {
@@ -560,23 +594,17 @@ const rootExtraOptionsContract: ExtraOptions = {
 
 void browserSenderSignature;
 void defaultSenderErrorHandlerSignature;
-void browserIngressSignature;
 void memoryReplayIngressContract;
 void browserEgressSignature;
 void bootstrapSignature;
 void browserClientSignature;
 void nodeSenderSignature;
-void nodeUdpSignature;
 void nodeUdpSenderSignature;
-void nodeIngressSignature;
 void nodeEgressSignature;
-void nodeWebSocketSignature;
 void nodeWebSocketOptionsContract;
 void nodeClientSignature;
 void poolOptionsContract;
-void nodeOrphanScanSignature;
 void nodeOrphanRetrySignature;
-void nodeOrphanDrainSessionContract;
 void nodeStoreAndForwardContract;
 void queryOptionsContract;
 void egressSessionOptionsContract;
@@ -585,6 +613,18 @@ void fixedConnectionEgressContract;
 void browserEgressOptionsContract;
 void browserAuthOptionsContracts;
 void browserClusterAuthContract;
+void browserClientOptionsContract;
+void browserClusterOwnedContract;
+void nodeClientOptionsContract;
+void nodeClusterOwnedContract;
+void nodeStoreStartupContract;
+void browserEgressDurableAckContract;
+void nodeEgressDurableAckContract;
+void nodeIngressRoutingContract;
+void browserIngressRoutingContract;
+void nodeClientIngressRoutingContract;
+void senderRoutingContract;
+void nodeClientConfigOptionsContract;
 void nodeEgressOptionsContract;
 void rootExtraOptionsContract;
 void senderSequenceContract;

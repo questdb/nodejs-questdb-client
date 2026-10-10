@@ -5,17 +5,15 @@ import {
   bootstrapQwpBrowserSession,
   connectQwpBrowserClient,
   connectQwpBrowserEgress,
-  connectQwpBrowserIngress,
-  connectQwpBrowserWebSocket,
   createQwpBrowserClient,
-  createQwpBrowserConnectionFactory,
   createQwpBrowserSender,
   QwpBrowserSessionBootstrapError,
   QwpWebSocketLike,
 } from "../../packages/browser-client/src";
 import {
   connectQwpNodeEgress,
-  connectQwpNodeWebSocket,
+  createQwpNodeClient,
+  createQwpNodeSender,
   QwpDurableAckUnavailableError,
   QwpFailoverError,
   QwpRoleMismatchError,
@@ -37,7 +35,6 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   QWP_UPGRADE_TIMEOUT_PHASE,
   QwpBatchTooLargeError,
-  type QwpBinaryConnection,
   QwpByteReader,
   QwpByteWriter,
   type QwpConnectionCloseInfo,
@@ -47,12 +44,9 @@ import {
   encodeQwpFrame,
   encodeQwpIngressFrame,
   QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
-  QwpIngressAckTimeoutError,
   QwpIngressNackError,
   QwpProtocolError,
   QwpIngressResponse,
-  QwpIngressSession,
-  QwpIngressSessionClosedError,
   type QwpSenderError,
   QwpTableBuffer,
   QwpSendClosedError,
@@ -61,8 +55,20 @@ import {
   QwpSymbolDictionary,
   readQwpVarintNumber,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports these.
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
+// All internal: neither package root exports the ingress session or a raw
+// connection helper.
+import {
+  connectQwpBrowserIngress,
+  connectQwpBrowserWebSocket,
+  createQwpBrowserConnectionFactory,
+} from "../../packages/browser-client/src/qwp";
+import { connectQwpNodeWebSocket } from "../../packages/nodejs-client/src/qwp";
+import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import { openQwpWebSocket } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
+import { publishAndWait, waitForPublished } from "./publish-and-wait";
 
 type Listener = (event: unknown) => void;
 
@@ -374,6 +380,76 @@ describe("QWP endpoint credential redaction", () => {
       "wss://<redacted>@<invalid-url>",
     );
     expect(malformed.message).not.toContain("s3cr3t");
+  });
+
+  it("strips userinfo from an endpoint written without its scheme", () => {
+    // Without `ws://` the URL parser reads `alice:` as the scheme and finds no
+    // userinfo, so the password reached the message verbatim. QuestDB's own
+    // default credentials fit this shape exactly.
+    for (const [endpoint, redacted] of [
+      [
+        "alice:s3cr3t@questdb.example:9000/write/v4",
+        "<redacted>@questdb.example:9000/write/v4",
+      ],
+      [
+        "//alice:s3cr3t@questdb.example:9000",
+        "//<redacted>@questdb.example:9000",
+      ],
+      ["alice_1:s3cr3t@questdb.example", "<redacted>@questdb.example"],
+      ["alice:p@ss/w0rd@questdb.example", "<redacted>@questdb.example"],
+    ] as const) {
+      const failover = new QwpFailoverError([
+        { endpoint, error: new Error("refused") },
+      ]);
+      expect(failover.attempts[0].endpoint).toBe(redacted);
+      expect(failover.message).not.toMatch(/s3cr3t|p@ss|w0rd/);
+    }
+    const parsed = new QwpFailoverError([
+      {
+        endpoint: new URL("alice:s3cr3t@questdb.example:9000"),
+        error: new Error("refused"),
+      },
+    ]);
+    expect(parsed.attempts[0].endpoint).toBe("<redacted>@questdb.example:9000");
+    // Relative browser endpoints carry no userinfo and stay readable.
+    const relative = new QwpFailoverError([
+      { endpoint: "/proxy/@team/write/v4", error: new Error("refused") },
+    ]);
+    expect(relative.attempts[0].endpoint).toBe("/proxy/@team/write/v4");
+  });
+
+  it("keeps the password out of scheme-less cluster URL errors", () => {
+    for (const url of [
+      "admin:s3cr3t@questdb.example:9000",
+      "//admin:s3cr3t@questdb.example:9000",
+    ]) {
+      const node = () => createQwpNodeClient({ cluster: { url } });
+      expect(node).toThrow(/QWP cluster URL/);
+      expect(node).not.toThrow(/s3cr3t/);
+      const browser = () => createQwpBrowserClient({ cluster: { url } });
+      expect(browser).toThrow(/QWP browser cluster URL/);
+      expect(browser).not.toThrow(/s3cr3t/);
+    }
+    // A failover entry written the same way, under a cluster and on a
+    // sender's own endpoint list, which is compared with the primary's scheme.
+    const clusterFailover = () =>
+      createQwpNodeClient({
+        cluster: {
+          url: "ws://questdb.example:9000",
+          failoverUrls: ["admin:s3cr3t@backup.example:9000"],
+        },
+      });
+    expect(clusterFailover).toThrow(/QWP cluster URL must use WS or WSS/);
+    expect(clusterFailover).not.toThrow(/s3cr3t/);
+    const senderFailover = () =>
+      createQwpNodeSender({
+        url: "ws://questdb.example:9000/write/v4",
+        failoverUrls: ["admin:s3cr3t@backup.example:9000/write/v4"],
+      });
+    expect(senderFailover).toThrow(
+      /uses 'admin' but the preferred endpoint uses 'ws'/,
+    );
+    expect(senderFailover).not.toThrow(/s3cr3t/);
   });
 
   it("resolves a relative browser primary before checking failover schemes", () => {
@@ -770,18 +846,16 @@ describe("QWP WebSocket adapters", () => {
     vi.useFakeTimers();
     try {
       const socket = new FakeWebSocket();
-      const connecting = connectQwpBrowserIngress(
-        {
-          url: "wss://questdb.example/write/v4",
-          connectTimeoutMs: 25,
-          ingressNegotiationTimeoutMs: 1_000,
-          webSocketFactory: () => {
-            queueMicrotask(() => socket.open());
-            return asQwpSocket(socket);
-          },
+      const connecting = connectQwpBrowserIngress({
+        url: "wss://questdb.example/write/v4",
+        connectTimeoutMs: 25,
+        ingressNegotiationTimeoutMs: 1_000,
+        webSocketFactory: () => {
+          queueMicrotask(() => socket.open());
+          return asQwpSocket(socket);
         },
-        { reconnect: false },
-      );
+        reconnect: false,
+      });
       const rejected = expect(connecting).rejects.toMatchObject({
         name: "QwpUpgradeError",
         kind: QWP_UPGRADE_ERROR_KIND.TIMEOUT,
@@ -921,6 +995,32 @@ describe("QWP WebSocket adapters", () => {
     );
   });
 
+  it("rejects target and zone where only browser ingress would read them", async () => {
+    // A cluster target used to route egress without a word, and an ingress
+    // zone was dropped; Node rejects both, and QWP.md says both clients do.
+    for (const options of [
+      { cluster: { url: "wss://questdb.example", target: "replica" } },
+      { cluster: { url: "wss://questdb.example", zone: "eu" } },
+      { cluster: { url: "wss://questdb.example" }, ingress: { zone: "eu" } },
+    ]) {
+      expect(() => createQwpBrowserClient(options as never)).toThrow(
+        /is not an ingress option.*set it under egress instead/,
+      );
+    }
+    expect(() =>
+      createQwpBrowserSender({
+        url: "wss://questdb.example/write/v4",
+        target: "replica",
+      } as never),
+    ).toThrow(/target is not an ingress option/);
+    // Query sessions keep both.
+    const client = createQwpBrowserClient({
+      cluster: { url: "wss://questdb.example" },
+      egress: { target: "replica", zone: "eu" },
+    });
+    await client.close();
+  });
+
   it("validates unified browser cluster URLs before opening a socket", () => {
     expect(() =>
       createQwpBrowserClient({
@@ -932,6 +1032,25 @@ describe("QWP WebSocket adapters", () => {
         cluster: { url: "wss://questdb.example/#fragment" },
       }),
     ).toThrow("QWP browser cluster URL cannot contain a fragment");
+  });
+
+  it("names the missing cluster for a JavaScript caller", () => {
+    // Complete ingress and egress trees cannot stand in for the cluster that
+    // owns the endpoints and authentication both sides share.
+    expect(() =>
+      createQwpBrowserClient({
+        ingress: { url: "wss://questdb.example/write/v4" },
+        egress: { url: "wss://questdb.example/read/v1" },
+      } as never),
+    ).toThrow("browser client configuration requires cluster");
+    // A section from an earlier shape of these options is rejected by name
+    // rather than skipped with every setting inside it.
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: { url: "wss://questdb.example" },
+        sender: { autoFlush: false },
+      } as never),
+    ).toThrow("unknown QWP browser client section 'sender'");
   });
 
   it("buffers browser messages until a consumer is attached", async () => {
@@ -1030,46 +1149,70 @@ describe("QWP WebSocket adapters", () => {
     } satisfies Partial<QwpDurableAckUnavailableError>);
   });
 
-  it("requests browser durable ACKs when the high-level sender awaits them", async () => {
+  it("waits for durable upload in a browser sender's flushAndWait()", async () => {
     const socket = new FakeWebSocket();
     socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
     let capturedProtocols: string | string[] | undefined;
-    const sender = createQwpBrowserSender(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: (_url, protocols) => {
-          capturedProtocols = protocols;
-          return asQwpSocket(socket);
-        },
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      requestDurableAck: true,
+      webSocketFactory: (_url, protocols) => {
+        capturedProtocols = protocols;
+        return asQwpSocket(socket);
       },
-      { awaitDurableAck: true },
-    );
+      autoFlush: false,
+    });
     const connecting = sender.connect();
     openDurableAckBrowserSocket(socket);
-
     await expect(connecting).resolves.toBe(true);
     expect(capturedProtocols).toBe(QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL);
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    let settled = false;
+    const waiting = sender.flushAndWait().finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.message(
+      ingressResponse(QWP_STATUS.OK, 0n, undefined, [["events", 1n]]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The ordinary OK does not satisfy a durable sender; durable upload does.
+    expect(settled).toBe(false);
+    expect(sender.ackedSequence).toBe(-1n);
+    socket.message(durableResponse([["events", 1n]]));
+    await expect(waiting).resolves.toBe(true);
+    expect(sender.ackedSequence).toBe(0n);
     await sender.close();
   });
 
-  it("rejects contradictory browser durable ACK sender options before connecting", () => {
-    let factoryCalls = 0;
-    expect(() =>
-      createQwpBrowserSender(
-        {
-          url: "ws://localhost:9000/write/v4",
-          requestDurableAck: false,
-          webSocketFactory: () => {
-            factoryCalls++;
-            return asQwpSocket(new FakeWebSocket());
-          },
-        },
-        { awaitDurableAck: true },
-      ),
-    ).toThrow(
-      "awaitDurableAck cannot be combined with requestDurableAck=false",
-    );
-    expect(factoryCalls).toBe(0);
+  it("rejects flushAndWait() when the server rejects a frame", async () => {
+    const socket = new FakeWebSocket();
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+      autoFlush: false,
+      reconnect: false,
+      onError: () => undefined,
+      onSenderError: () => undefined,
+    });
+    const connecting = sender.connect();
+    socket.open();
+    socket.message(ingressServerInfo(1_024));
+    await connecting;
+    socket.onSend = () => {
+      socket.message(
+        ingressResponse(QWP_STATUS.WRITE_ERROR, 0n, "write failed"),
+      );
+    };
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    // A rejection is not a timeout: it throws instead of resolving false.
+    await expect(sender.flushAndWait()).rejects.toMatchObject({
+      name: "QwpIngressNackError",
+      response: { sequence: 0n, errorMessage: "write failed" },
+    } satisfies QwpIngressNackMatch);
+    await sender.close().catch(() => undefined);
   });
 
   it("walks browser failover endpoints when the upgrade error is opaque", async () => {
@@ -1130,27 +1273,25 @@ describe("QWP WebSocket adapters", () => {
     // the upgrade used to find nothing to cancel: the socket and its deadline
     // stayed alive for up to connectTimeoutMs after close() had resolved.
     const sockets: FakeWebSocket[] = [];
-    const session = await connectQwpBrowserIngress(
-      {
-        url: "ws://stalls.example/write/v4",
-        connectTimeoutMs: 30_000,
-        webSocketFactory: () => {
-          const socket = new FakeWebSocket();
-          sockets.push(socket);
-          if (sockets.length === 1) {
-            queueMicrotask(() => {
-              socket.open();
-              socket.message(ingressServerInfo(128));
-            });
-          }
-          // Every replacement is left hanging mid-upgrade.
-          return asQwpSocket(socket);
-        },
+    const session = await connectQwpBrowserIngress({
+      url: "ws://stalls.example/write/v4",
+      connectTimeoutMs: 30_000,
+      webSocketFactory: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        if (sockets.length === 1) {
+          queueMicrotask(() => {
+            socket.open();
+            socket.message(ingressServerInfo(128));
+          });
+        }
+        // Every replacement is left hanging mid-upgrade.
+        return asQwpSocket(socket);
       },
-      // Reconnection is a session policy, not a socket option; passing it in
+      ...// Reconnection is a session policy, not a socket option; passing it in
       // the first argument silently dropped it and left the default backoff.
-      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 } },
-    );
+      { reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 } },
+    });
 
     sockets[0].close(1006, "dropped");
     await vi.waitFor(() => expect(sockets.length).toBeGreaterThan(1));
@@ -1167,38 +1308,36 @@ describe("QWP WebSocket adapters", () => {
     let bootstrapCalls = 0;
     let reconnectBootstrapSignal: AbortSignal | null | undefined;
     let rejectReconnectBootstrap: ((error: Error) => void) | undefined;
-    const session = await connectQwpBrowserIngress(
-      {
-        url: "ws://stalls.example/write/v4",
-        connectTimeoutMs: 30_000,
-        sessionBootstrap: {
-          authentication: { type: "bearer", token: "rest-token" },
-          fetch: async (_input, init) => {
-            bootstrapCalls++;
-            if (bootstrapCalls === 1) {
-              return new Response("{}", { status: 200 });
-            }
-            reconnectBootstrapSignal = init?.signal;
-            return new Promise<Response>((_resolve, reject) => {
-              rejectReconnectBootstrap = reject;
-              reconnectBootstrapSignal?.addEventListener(
-                "abort",
-                () => reject(new Error("bootstrap aborted")),
-                { once: true },
-              );
-            });
-          },
-        },
-        webSocketFactory: () => {
-          queueMicrotask(() => {
-            socket.open();
-            socket.message(ingressServerInfo(128));
+    const session = await connectQwpBrowserIngress({
+      url: "ws://stalls.example/write/v4",
+      connectTimeoutMs: 30_000,
+      sessionBootstrap: {
+        authentication: { type: "bearer", token: "rest-token" },
+        fetch: async (_input, init) => {
+          bootstrapCalls++;
+          if (bootstrapCalls === 1) {
+            return new Response("{}", { status: 200 });
+          }
+          reconnectBootstrapSignal = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            rejectReconnectBootstrap = reject;
+            reconnectBootstrapSignal?.addEventListener(
+              "abort",
+              () => reject(new Error("bootstrap aborted")),
+              { once: true },
+            );
           });
-          return asQwpSocket(socket);
         },
       },
-      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 } },
-    );
+      webSocketFactory: () => {
+        queueMicrotask(() => {
+          socket.open();
+          socket.message(ingressServerInfo(128));
+        });
+        return asQwpSocket(socket);
+      },
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
 
     socket.close(1006, "dropped");
     await vi.waitFor(() => expect(bootstrapCalls).toBe(2));
@@ -1273,17 +1412,14 @@ describe("QWP WebSocket adapters", () => {
       },
     });
 
-    const pending = session.sendFrame(Uint8Array.of(1));
+    const pending = publishAndWait(session, Uint8Array.of(1));
     await vi.waitFor(() => expect(sockets[0].sent).toHaveLength(1));
     sockets[0].close(1006, "connection lost");
 
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
     await vi.waitFor(() => expect(sockets[1].sent).toEqual(sockets[0].sent));
     sockets[1].message(ingressResponse(QWP_STATUS.OK, 0n));
-    await expect(pending).resolves.toMatchObject({
-      status: QWP_STATUS.OK,
-      sequence: 0n,
-    });
+    await expect(pending).resolves.toBe(0n);
     expect(session.metrics.totalFramesReplayed).toBe(1);
     await session.close();
   });
@@ -1291,40 +1427,32 @@ describe("QWP WebSocket adapters", () => {
   it("retries a rate-limited browser bootstrap during reconnect", async () => {
     const sockets: FakeWebSocket[] = [];
     const bootstrapStatuses: number[] = [];
-    const session = await connectQwpBrowserIngress(
-      {
-        url: "ws://localhost:9000/write/v4",
-        sessionBootstrap: {
-          authentication: { type: "bearer", token: "access-token" },
-          fetch: async () => {
-            const status = bootstrapStatuses.length === 1 ? 429 : 200;
-            bootstrapStatuses.push(status);
-            return new Response(status === 429 ? "rate limited" : "{}", {
-              status,
-              statusText: status === 429 ? "Too Many Requests" : "OK",
-            });
-          },
-        },
-        webSocketFactory: () => {
-          const socket = new FakeWebSocket();
-          sockets.push(socket);
-          queueMicrotask(() => {
-            socket.open();
-            socket.message(ingressServerInfo(128));
+    const session = await connectQwpBrowserIngress({
+      url: "ws://localhost:9000/write/v4",
+      sessionBootstrap: {
+        authentication: { type: "bearer", token: "access-token" },
+        fetch: async () => {
+          const status = bootstrapStatuses.length === 1 ? 429 : 200;
+          bootstrapStatuses.push(status);
+          return new Response(status === 429 ? "rate limited" : "{}", {
+            status,
+            statusText: status === 429 ? "Too Many Requests" : "OK",
           });
-          return asQwpSocket(socket);
         },
       },
-      {
-        reconnect: {
-          initialBackoffMs: 0,
-          maxBackoffMs: 0,
-          maxAttempts: 3,
-        },
+      webSocketFactory: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        queueMicrotask(() => {
+          socket.open();
+          socket.message(ingressServerInfo(128));
+        });
+        return asQwpSocket(socket);
       },
-    );
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
 
-    const pending = session.sendFrame(Uint8Array.of(1));
+    const pending = publishAndWait(session, Uint8Array.of(1));
     await vi.waitFor(() => expect(sockets[0].sent).toHaveLength(1));
     sockets[0].close(1006, "connection lost");
 
@@ -1332,23 +1460,19 @@ describe("QWP WebSocket adapters", () => {
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
     await vi.waitFor(() => expect(sockets[1].sent).toEqual(sockets[0].sent));
     sockets[1].message(ingressResponse(QWP_STATUS.OK, 0n));
-    await expect(pending).resolves.toMatchObject({
-      status: QWP_STATUS.OK,
-      sequence: 0n,
-    });
+    await expect(pending).resolves.toBe(0n);
     expect(session.metrics.totalFramesReplayed).toBe(1);
     await session.close();
   });
 
   it("uses the local-publication flush boundary in browsers by default", async () => {
     const socket = new FakeWebSocket();
-    const sender = createQwpBrowserSender(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      { autoFlush: false, closeFlushTimeoutMs: 0 },
-    );
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
     const connecting = sender.connect();
     socket.open();
     socket.message(ingressServerInfo(1_024));
@@ -1358,19 +1482,18 @@ describe("QWP WebSocket adapters", () => {
     await expect(sender.flush()).resolves.toBe(true);
     expect(socket.sent).toHaveLength(1);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
     await sender.close();
   });
 
   it("splits fluent browser rows under the negotiated server cap", async () => {
     const socket = new FakeWebSocket();
-    const sender = createQwpBrowserSender(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      { autoFlush: false, encode: { gorilla: false } },
-    );
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+      autoFlush: false,
+      gorilla: false,
+    });
     const connecting = sender.connect();
     socket.open();
     socket.message(ingressServerInfo(128));
@@ -1433,14 +1556,13 @@ describe("QWP WebSocket adapters", () => {
       dictionary: sizingDictionary,
       confirmedMaxSymbolId: -1,
     }).byteLength;
-    const sender = createQwpBrowserSender(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      { autoFlush: false, encode: { gorilla: false } },
-      { maxBatchSizeBytes: cap },
-    );
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+      autoFlush: false,
+      gorilla: false,
+      maxBatchSizeBytes: cap,
+    });
     const connecting = sender.connect();
     socket.open();
     await connecting;
@@ -1462,14 +1584,13 @@ describe("QWP WebSocket adapters", () => {
   it("retains an over-cap batch at flush and discards it on close", async () => {
     const socket = new FakeWebSocket();
     const cap = 200;
-    const sender = createQwpBrowserSender(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      { autoFlush: false, encode: { gorilla: false } },
-      { maxBatchSizeBytes: cap },
-    );
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+      autoFlush: false,
+      gorilla: false,
+      maxBatchSizeBytes: cap,
+    });
     const connecting = sender.connect();
     socket.open();
     await connecting;
@@ -1499,18 +1620,14 @@ describe("QWP WebSocket adapters", () => {
 
   it("pipelines transactional browser auto-flush until an explicit commit ACK", async () => {
     const socket = new FakeWebSocket();
-    const sender = createQwpBrowserSender(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      {
-        autoFlushRows: 1,
-        autoFlushIntervalMs: 0,
-        transactional: true,
-      },
-      { ackTimeoutMs: 10 },
-    );
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+      transactional: true,
+      ackTimeoutMs: 10,
+    });
     socket.onSend = () => {
       if (socket.sent.length === 2) {
         socket.message(
@@ -1542,7 +1659,7 @@ describe("QWP WebSocket adapters", () => {
       totalTransactionsCommitted: 1,
       ingress: {
         publishedSequence: 1n,
-        acknowledgedSequence: 1n,
+        ackedSequence: 1n,
         totalFramesPublished: 2,
         totalFramesSent: 2,
         totalAcks: 1,
@@ -1644,7 +1761,7 @@ describe("QWP WebSocket adapters", () => {
     });
     expect(session.maxBatchSizeBytes).toBe(4096);
     await expect(
-      session.sendFrame(new Uint8Array(4097)),
+      session.publishFrame(new Uint8Array(4097)),
     ).rejects.toBeInstanceOf(QwpBatchTooLargeError);
     socket.onSend = () => {
       const sequence = BigInt(socket.sent.length - 1);
@@ -1657,7 +1774,8 @@ describe("QWP WebSocket adapters", () => {
         .values.push(suffix.repeat(3_000));
       table.nextRow();
     }
-    await session.sendTables([table]);
+    await session.publishTables([table]);
+    await session.waitForAck(session.publishedFrameSequence);
     expect(socket.sent).toHaveLength(2);
     expect(socket.sent.every((frame) => frame.byteLength <= 4096)).toBe(true);
     await session.close();
@@ -1721,6 +1839,31 @@ describe("QWP WebSocket adapters", () => {
       level: 0,
     });
     expect(session.negotiatedZstdLevel).toBe(0);
+    await session.close();
+  });
+
+  it("never requests durable ACK on a Node egress upgrade", async () => {
+    // requestDurableAck is an ingress option, but a JavaScript caller can
+    // still set it on egress, or spread one shared object into both sides.
+    // /read/v1 never confirms durable ACK, so honouring it there would fail
+    // every query session with QwpDurableAckUnavailableError.
+    const socket = new FakeWebSocket();
+    let capturedHeaders: Record<string, string> | undefined;
+    const connecting = connectQwpNodeEgress({
+      url: "ws://localhost:9000/read/v1",
+      requestDurableAck: true,
+      webSocketFactory: (_url, options) => {
+        capturedHeaders = options.headers;
+        options.onUpgrade({});
+        return asQwpSocket(socket);
+      },
+    } as Parameters<typeof connectQwpNodeEgress>[0]);
+    socket.open();
+    socket.message(serverInfoFrame());
+
+    const session = await connecting;
+    expect(capturedHeaders).toBeDefined();
+    expect(capturedHeaders).not.toHaveProperty("X-QWP-Request-Durable-Ack");
     await session.close();
   });
 
@@ -2508,11 +2651,12 @@ describe("QWP browser credential authentication", () => {
     };
     const url = "wss://questdb.example/read/v1";
 
-    // The split client form accepts ingress-only keys on egress options.
+    // A JavaScript caller can still hand egress an ingress-only key.
     await (
       await connectQwpBrowserEgress({
         url,
         protocols: ["application.v1", QWP_V1_PROTOCOL],
+        // @ts-expect-error requestDurableAck is ingress-only.
         requestDurableAck: true,
         auth: { type: "bearer", token: "rest-token" },
         webSocketFactory,
@@ -2542,36 +2686,34 @@ describe("QWP browser credential authentication", () => {
     const providerSignals: AbortSignal[] = [];
     const attempts: { host: string; authorization: string }[] = [];
     const sockets: FakeWebSocket[] = [];
-    const session = await connectQwpBrowserIngress(
-      {
-        url: "wss://node-a.example/write/v4",
-        failoverUrls: ["wss://node-b.example/write/v4"],
-        auth: async ({ signal }) => {
-          providerSignals.push(signal);
-          return { type: "bearer", token: `token-${++providerCalls}` };
-        },
-        webSocketFactory: (url, protocols) => {
-          const host = new URL(url).hostname;
-          attempts.push({
-            host,
-            authorization: decodeBrowserCredential(protocols),
-          });
-          if (host === "node-a.example") {
-            // Refused, as a browser reports it: an opaque error and close.
-            const refused = new FakeWebSocket();
-            queueMicrotask(() => {
-              refused.error();
-              refused.close(1006, "");
-            });
-            return asQwpSocket(refused);
-          }
-          const socket = questDbBrowserSocket(url, protocols);
-          sockets.push(socket);
-          return asQwpSocket(socket);
-        },
+    const session = await connectQwpBrowserIngress({
+      url: "wss://node-a.example/write/v4",
+      failoverUrls: ["wss://node-b.example/write/v4"],
+      auth: async ({ signal }) => {
+        providerSignals.push(signal);
+        return { type: "bearer", token: `token-${++providerCalls}` };
       },
-      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 } },
-    );
+      webSocketFactory: (url, protocols) => {
+        const host = new URL(url).hostname;
+        attempts.push({
+          host,
+          authorization: decodeBrowserCredential(protocols),
+        });
+        if (host === "node-a.example") {
+          // Refused, as a browser reports it: an opaque error and close.
+          const refused = new FakeWebSocket();
+          queueMicrotask(() => {
+            refused.error();
+            refused.close(1006, "");
+          });
+          return asQwpSocket(refused);
+        }
+        const socket = questDbBrowserSocket(url, protocols);
+        sockets.push(socket);
+        return asQwpSocket(socket);
+      },
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
     try {
       expect(attempts).toEqual([
         { host: "node-a.example", authorization: "Bearer token-1" },
@@ -2636,25 +2778,23 @@ describe("QWP browser credential authentication", () => {
     let providerCalls = 0;
     let reconnectSignal: AbortSignal | undefined;
     const sockets: FakeWebSocket[] = [];
-    const session = await connectQwpBrowserIngress(
-      {
-        url: "wss://questdb.example/write/v4",
-        connectTimeoutMs: 30_000,
-        auth: ({ signal }) => {
-          if (++providerCalls === 1) {
-            return { type: "bearer", token: "first" };
-          }
-          reconnectSignal = signal;
-          return new Promise(() => undefined);
-        },
-        webSocketFactory: (url, protocols) => {
-          const socket = questDbBrowserSocket(url, protocols);
-          sockets.push(socket);
-          return asQwpSocket(socket);
-        },
+    const session = await connectQwpBrowserIngress({
+      url: "wss://questdb.example/write/v4",
+      connectTimeoutMs: 30_000,
+      auth: ({ signal }) => {
+        if (++providerCalls === 1) {
+          return { type: "bearer", token: "first" };
+        }
+        reconnectSignal = signal;
+        return new Promise(() => undefined);
       },
-      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0 } },
-    );
+      webSocketFactory: (url, protocols) => {
+        const socket = questDbBrowserSocket(url, protocols);
+        sockets.push(socket);
+        return asQwpSocket(socket);
+      },
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
 
     sockets[0].close(1006, "dropped");
     await vi.waitFor(() => expect(providerCalls).toBe(2));
@@ -2713,24 +2853,22 @@ describe("QWP browser credential authentication", () => {
     let providerCalls = 0;
     const sockets: FakeWebSocket[] = [];
     const authorizations: string[] = [];
-    const session = await connectQwpBrowserIngress(
-      {
-        url: "wss://questdb.example/write/v4",
-        auth: async () => {
-          if (++providerCalls === 2) throw new Error("token refresh failed");
-          return { type: "bearer", token: `token-${providerCalls}` };
-        },
-        webSocketFactory: (url, protocols) => {
-          authorizations.push(decodeBrowserCredential(protocols));
-          const socket = questDbBrowserSocket(url, protocols);
-          sockets.push(socket);
-          return asQwpSocket(socket);
-        },
+    const session = await connectQwpBrowserIngress({
+      url: "wss://questdb.example/write/v4",
+      auth: async () => {
+        if (++providerCalls === 2) throw new Error("token refresh failed");
+        return { type: "bearer", token: `token-${providerCalls}` };
       },
-      { reconnect: { initialBackoffMs: 0, maxBackoffMs: 0, maxAttempts: 3 } },
-    );
+      webSocketFactory: (url, protocols) => {
+        authorizations.push(decodeBrowserCredential(protocols));
+        const socket = questDbBrowserSocket(url, protocols);
+        sockets.push(socket);
+        return asQwpSocket(socket);
+      },
+      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+    });
 
-    const pending = session.sendFrame(Uint8Array.of(1));
+    const pending = publishAndWait(session, Uint8Array.of(1));
     await vi.waitFor(() => expect(sockets[0].sent).toHaveLength(1));
     sockets[0].close(1006, "connection lost");
 
@@ -2739,10 +2877,7 @@ describe("QWP browser credential authentication", () => {
     expect(authorizations).toEqual(["Bearer token-1", "Bearer token-3"]);
     await vi.waitFor(() => expect(sockets[1].sent).toEqual(sockets[0].sent));
     sockets[1].message(ingressResponse(QWP_STATUS.OK, 0n));
-    await expect(pending).resolves.toMatchObject({
-      status: QWP_STATUS.OK,
-      sequence: 0n,
-    });
+    await expect(pending).resolves.toBe(0n);
     await session.close();
   });
 
@@ -2866,7 +3001,6 @@ describe("QWP browser credential authentication", () => {
         cluster: { ...options, url: "wss://questdb.example" },
       }),
     ).toThrow(conflict);
-    expect(() => createQwpBrowserClient({ ingress, egress })).toThrow(conflict);
   });
 
   it("rejects a credential among the caller's protocols when auth is set", () => {
@@ -2988,17 +3122,14 @@ describe("QwpIngressSession", () => {
     const cap = encodeQwpIngressFrame([longTable("events", [1n])], {
       gorilla: false,
     }).byteLength;
-    const sender = createQwpBrowserSender(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      {
-        autoFlush: false,
-        encode: { symbolDictionary: "full", gorilla: false },
-      },
-      { maxBatchSizeBytes: cap },
-    );
+    const sender = createQwpBrowserSender({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+      autoFlush: false,
+      symbolDictionary: "full",
+      gorilla: false,
+      maxBatchSizeBytes: cap,
+    });
     const connecting = sender.connect();
     socket.open();
     await connecting;
@@ -3008,13 +3139,14 @@ describe("QwpIngressSession", () => {
 
     await expect(sender.flushAndGetSequence()).resolves.toBe(3n);
     expect(sender.publishedSequence).toBe(3n);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(4));
     expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1, 1]);
-    const acknowledged = sender.waitForAcknowledged(3n, 1_000);
+    const acknowledged = sender.waitForAck(3n, 1_000);
     socket.message(
       ingressResponse(QWP_STATUS.OK, 3n, undefined, [["events", 4n]]),
     );
-    await expect(acknowledged).resolves.toBeUndefined();
-    expect(sender.acknowledgedSequence).toBe(3n);
+    await expect(acknowledged).resolves.toBe(true);
+    expect(sender.ackedSequence).toBe(3n);
     await sender.close();
   });
 
@@ -3033,15 +3165,12 @@ describe("QwpIngressSession", () => {
     expect(session.publishedFrameSequence).toBe(1n);
     expect(session.acknowledgedFrameSequence).toBe(-1n);
 
-    const first = session.waitForAcknowledged(0n, 1_000);
-    const second = session.waitForAcknowledged(1n, 1_000);
+    const first = session.waitForAck(0n, 1_000);
+    const second = session.waitForAck(1n, 1_000);
     socket.message(ingressResponse(QWP_STATUS.OK, 1n));
-    await expect(Promise.all([first, second])).resolves.toEqual([
-      undefined,
-      undefined,
-    ]);
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
     expect(session.acknowledgedFrameSequence).toBe(1n);
-    await expect(session.waitForAcknowledged(-1n)).resolves.toBeUndefined();
+    await expect(session.waitForAck(-1n)).resolves.toBe(true);
     await session.close();
   });
 
@@ -3057,7 +3186,7 @@ describe("QwpIngressSession", () => {
     });
 
     await session.publishFrame(Uint8Array.of(1));
-    const acknowledged = session.waitForAcknowledged(0n, 1_000);
+    const acknowledged = session.waitForAck(0n, 1_000);
     socket.message(ingressResponse(QWP_STATUS.OK, 100n));
 
     await expect(acknowledged).rejects.toBeInstanceOf(QwpProtocolError);
@@ -3069,7 +3198,7 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
-  it("times out an independent ACK watermark wait without closing the session", async () => {
+  it("resolves false when an ACK watermark wait times out, without closing the session", async () => {
     vi.useFakeTimers();
     try {
       const socket = new FakeWebSocket();
@@ -3081,21 +3210,15 @@ describe("QwpIngressSession", () => {
       const session = new QwpIngressSession(await connecting);
       await session.publishFrame(Uint8Array.of(1));
       const sequence = session.publishedFrameSequence;
-      const waiting = session.waitForAcknowledged(sequence, 25);
-      const timedOut = expect(waiting).rejects.toEqual(
-        expect.objectContaining({
-          name: "QwpIngressAckTimeoutError",
-          targetSequence: 0n,
-          acknowledgedSequence: -1n,
-          timeoutMs: 25,
-        } satisfies Partial<QwpIngressAckTimeoutError>),
-      );
+      const waiting = session.waitForAck(sequence, 25);
 
       await vi.advanceTimersByTimeAsync(25);
-      await timedOut;
-      expect(session.metrics.lastError).toBeInstanceOf(
-        QwpIngressAckTimeoutError,
-      );
+      await expect(waiting).resolves.toBe(false);
+      expect(session.acknowledgedFrameSequence).toBe(-1n);
+      // An expired wait is the caller's verdict, not a session failure: it is
+      // neither latched as lastError nor reported to onError or the logger.
+      expect(session.metrics.lastError).toBeUndefined();
+      expect(session.metrics.totalErrors).toBe(0);
       await expect(
         session.publishFrame(Uint8Array.of(2)),
       ).resolves.toBeUndefined();
@@ -3105,17 +3228,131 @@ describe("QwpIngressSession", () => {
     }
   });
 
+  it("restarts an ACK watermark wait's timeout whenever the watermark advances", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const session = new QwpIngressSession(await connecting);
+      for (let index = 1; index <= 4; index++) {
+        await session.publishFrame(Uint8Array.of(index));
+      }
+      let outcome = "pending";
+      const draining = session
+        .waitForAck(2n, 100)
+        .then(
+          (acknowledged) =>
+            (outcome = acknowledged ? "acknowledged" : "timed out"),
+        );
+
+      // The wait takes 240ms in all, but every ACK lands inside its 100ms
+      // budget, so a backlog that keeps draining is never cut off.
+      await vi.advanceTimersByTimeAsync(80);
+      socket.message(ingressResponse(QWP_STATUS.OK, 0n));
+      await vi.advanceTimersByTimeAsync(80);
+      socket.message(ingressResponse(QWP_STATUS.OK, 1n));
+      await vi.advanceTimersByTimeAsync(80);
+      expect(outcome).toBe("pending");
+      socket.message(ingressResponse(QWP_STATUS.OK, 2n));
+      await draining;
+      expect(outcome).toBe("acknowledged");
+
+      // Without progress the same budget runs out.
+      const stalled = session.waitForAck(3n, 100);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(stalled).resolves.toBe(false);
+      expect(session.acknowledgedFrameSequence).toBe(2n);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defaults an ACK watermark wait's timeout to ackTimeoutMs", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const session = new QwpIngressSession(await connecting, {
+        ackTimeoutMs: 40,
+      });
+      await session.publishFrame(Uint8Array.of(1));
+      let outcome: unknown = "pending";
+      const waiting = session.waitForAck(0n).then((acknowledged) => {
+        outcome = acknowledged;
+      });
+
+      await vi.advanceTimersByTimeAsync(39);
+      expect(outcome).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      await waiting;
+      expect(outcome).toBe(false);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("checks the ACK watermark without waiting for a zero or negative timeout", async () => {
+    // As in the Java client's awaitAckedFsn(): the current state, at once.
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting);
+    await session.publishFrame(Uint8Array.of(1));
+
+    await expect(session.waitForAck(0n, 0)).resolves.toBe(false);
+    await expect(session.waitForAck(0n, -1)).resolves.toBe(false);
+    socket.message(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(session.acknowledgedFrameSequence).toBe(0n));
+    await expect(session.waitForAck(0n, 0)).resolves.toBe(true);
+    for (const timeoutMs of [Number.NaN, Infinity, -Infinity, 0x7fffffff + 1]) {
+      await expect(session.waitForAck(0n, timeoutMs)).rejects.toThrow(
+        RangeError,
+      );
+    }
+    await session.close();
+  });
+
+  it("reports a rejection, not false, from a check that does not wait", async () => {
+    const socket = new FakeWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const session = new QwpIngressSession(await connecting, {
+      onError: () => undefined,
+    });
+    await session.publishFrame(Uint8Array.of(1));
+    socket.message(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n, "write failed"));
+    await vi.waitFor(() => expect(session.metrics.totalNacks).toBe(1));
+
+    // Thrown synchronously once the session has failed, like any other call.
+    expect(() => session.waitForAck(0n, 0)).toThrow("write failed");
+    await session.close();
+  });
+
   it("uses the durable watermark when durable ACKs are negotiated", async () => {
     const socket = new FakeWebSocket();
     socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
-    const connecting = connectQwpBrowserIngress(
-      {
-        url: "ws://localhost:9000/write/v4",
-        requestDurableAck: true,
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      { durableAckKeepaliveMs: 0 },
-    );
+    const connecting = connectQwpBrowserIngress({
+      url: "ws://localhost:9000/write/v4",
+      requestDurableAck: true,
+      webSocketFactory: () => asQwpSocket(socket),
+      durableAckKeepaliveMs: 0,
+    });
     openDurableAckBrowserSocket(socket);
     const session = await connecting;
     socket.onSend = () => {
@@ -3126,12 +3363,10 @@ describe("QwpIngressSession", () => {
 
     await session.publishFrame(Uint8Array.of(1));
     const sequence = session.publishedFrameSequence;
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(0n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
     expect(session.acknowledgedFrameSequence).toBe(-1n);
     let settled = false;
-    const waiting = session.waitForAcknowledged(sequence, 1_000).then(() => {
+    const waiting = session.waitForAck(sequence, 1_000).then(() => {
       settled = true;
     });
     await Promise.resolve();
@@ -3148,18 +3383,15 @@ describe("QwpIngressSession", () => {
     // targets are only tracked when the caller asked for them with
     // durableAckKeepaliveMs. A session negotiated durable -- here by a server
     // that selects the subprotocol without being asked -- then reported a
-    // watermark nothing advances: waitForAcknowledged() timed out on frames
+    // watermark nothing advances: waitForAck() timed out on frames
     // the server had already acknowledged, and close() failed with
     // "pending data may be lost" on a fully acknowledged sender.
     const socket = new FakeWebSocket();
     socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
-    const connecting = connectQwpBrowserIngress(
-      {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      {},
-    );
+    const connecting = connectQwpBrowserIngress({
+      url: "ws://localhost:9000/write/v4",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
     openDurableAckBrowserSocket(socket);
     const session = await connecting;
     expect(session.handshake.durableAckEnabled).toBe(true);
@@ -3171,9 +3403,7 @@ describe("QwpIngressSession", () => {
 
     await session.publishFrame(Uint8Array.of(1));
     const sequence = session.publishedFrameSequence;
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(0n),
-    );
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
     // Nothing tracks durability here, so the cumulative OK is the watermark.
     expect(session.acknowledgedFrameSequence).toBe(0n);
     expect(
@@ -3183,9 +3413,7 @@ describe("QwpIngressSession", () => {
         }
       ).durableFrameTargets.size,
     ).toBe(0);
-    await expect(
-      session.waitForAcknowledged(sequence, 1_000),
-    ).resolves.toBeUndefined();
+    await expect(session.waitForAck(sequence, 1_000)).resolves.toBe(true);
     await session.close();
   });
 
@@ -3221,10 +3449,8 @@ describe("QwpIngressSession", () => {
       );
     };
 
-    await session.sendFrame(Uint8Array.of(1));
-    await vi.waitFor(() =>
-      expect(session.metrics.acknowledgedSequence).toBe(0n),
-    );
+    await session.publishFrame(Uint8Array.of(1));
+    await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
     expect(session.acknowledgedFrameSequence).toBe(0n);
     expect(
       (
@@ -3233,9 +3459,7 @@ describe("QwpIngressSession", () => {
         }
       ).durableFrameTargets.size,
     ).toBe(0);
-    await expect(
-      session.waitForAcknowledged(0n, 1_000),
-    ).resolves.toBeUndefined();
+    await expect(session.waitForAck(0n, 1_000)).resolves.toBe(true);
     await session.close();
   });
 
@@ -3249,7 +3473,7 @@ describe("QwpIngressSession", () => {
     const session = new QwpIngressSession(await connecting);
     await session.publishFrame(Uint8Array.of(1));
     await session.publishFrame(Uint8Array.of(2));
-    const acknowledged = session.waitForAcknowledged(1n, 1_000);
+    const acknowledged = session.waitForAck(1n, 1_000);
     socket.message(ingressResponse(QWP_STATUS.WRITE_ERROR, 0n, "write failed"));
 
     await expect(acknowledged).rejects.toMatchObject({
@@ -3280,20 +3504,65 @@ describe("QwpIngressSession", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("rejects browser durable keepalives without requesting negotiation", async () => {
+  it("ignores browser durable keepalives without requesting negotiation", async () => {
+    // As in the Java and Rust clients, the keepalive alone neither requests
+    // durable ACKs nor conflicts with an explicit `false`. The server offers
+    // the capability unasked, so a keepalive that still reached the session
+    // would hold the watermark for durable progress and poll for it.
+    vi.useFakeTimers();
+    try {
+      for (const requestDurableAck of [undefined, false]) {
+        const socket = new FakeWebSocket();
+        const offered: (string | string[] | undefined)[] = [];
+        const connecting = connectQwpBrowserIngress({
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck,
+          webSocketFactory: (_url, protocols) => {
+            offered.push(protocols);
+            return asQwpSocket(socket);
+          },
+          durableAckKeepaliveMs: 5,
+        });
+        openDurableAckBrowserSocket(socket);
+        const session = await connecting;
+        expect(offered.flat()).not.toContain(
+          QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL,
+        );
+        expect(session.handshake.durableAckEnabled).toBe(true);
+        socket.onSend = () => {
+          socket.message(
+            ingressResponse(QWP_STATUS.OK, 0n, undefined, [["trades", 42n]]),
+          );
+        };
+
+        await session.publishFrame(Uint8Array.of(1));
+        await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(0n));
+        // The ordinary OK is the watermark, and no poll frame follows it.
+        expect(session.acknowledgedFrameSequence).toBe(0n);
+        await vi.advanceTimersByTimeAsync(20);
+        expect(socket.sent).toHaveLength(1);
+        expect(session.metrics.pendingDurableTables).toBe(0);
+        await session.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still validates a browser durable keepalive it ignores", async () => {
     let factoryCalls = 0;
     await expect(
-      connectQwpBrowserIngress(
-        {
-          url: "ws://localhost:9000/write/v4",
-          webSocketFactory: () => {
-            factoryCalls++;
-            return asQwpSocket(new FakeWebSocket());
-          },
+      connectQwpBrowserIngress({
+        url: "ws://localhost:9000/write/v4",
+        webSocketFactory: () => {
+          factoryCalls++;
+          return asQwpSocket(new FakeWebSocket());
         },
-        { durableAckKeepaliveMs: 5 },
-      ),
-    ).rejects.toThrow("durableAckKeepaliveMs requires requestDurableAck=true");
+        durableAckKeepaliveMs: Number.NaN,
+      }),
+    ).rejects.toThrow(
+      "durableAckKeepaliveMs must be a non-negative finite number",
+    );
     expect(factoryCalls).toBe(0);
   });
 
@@ -3307,18 +3576,14 @@ describe("QwpIngressSession", () => {
         webSocketFactory: () => asQwpSocket(socket),
       });
       socket.open();
-      const session = new QwpIngressSession(await connecting, {
-        ackTimeoutMs: 60_000,
-      });
+      const session = new QwpIngressSession(await connecting);
       const sending = session
-        .sendFrame(Uint8Array.of(1))
+        .publishFrame(Uint8Array.of(1))
         .catch((error: unknown) => error);
       await vi.advanceTimersByTimeAsync(0);
 
       await expect(session.close()).resolves.toBeUndefined();
-      await expect(sending).resolves.toBeInstanceOf(
-        QwpIngressSessionClosedError,
-      );
+      await expect(sending).resolves.toBeInstanceOf(QwpSendClosedError);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -3337,7 +3602,9 @@ describe("QwpIngressSession", () => {
     });
     expect(session.maxBatchSizeBytes).toBe(3);
 
-    await expect(session.sendFrame(Uint8Array.of(1, 2, 3, 4))).rejects.toEqual(
+    await expect(
+      session.publishFrame(Uint8Array.of(1, 2, 3, 4)),
+    ).rejects.toEqual(
       expect.objectContaining({
         name: "QwpBatchTooLargeError",
         batchSizeBytes: 4,
@@ -3349,109 +3616,10 @@ describe("QwpIngressSession", () => {
     socket.onSend = () => {
       socket.message(ingressResponse(QWP_STATUS.OK, 0n));
     };
-    await expect(
-      session.sendFrame(Uint8Array.of(1, 2, 3)),
-    ).resolves.toMatchObject({ sequence: 0n });
+    await expect(publishAndWait(session, Uint8Array.of(1, 2, 3))).resolves.toBe(
+      0n,
+    );
     await session.close();
-  });
-
-  it("contains an acknowledgement nobody awaited", async () => {
-    // QWP.md documents `acknowledgement` as optional: await `publication`
-    // before releasing retryable source rows, and `acknowledgement` only when
-    // server acceptance is also required. The session rejects it anyway, from
-    // paths the caller never asked about -- the ACK deadline, and rejectAll()
-    // in close() -- and under Node's default unhandled-rejection mode that
-    // terminated the producer roughly ackTimeoutMs into any outage, and again
-    // on close() with a frame still in flight. Following the documented
-    // pattern must not kill the process.
-    const unhandled: unknown[] = [];
-    const collect = (reason: unknown) => unhandled.push(reason);
-    process.on("unhandledRejection", collect);
-    try {
-      const socket = new FakeWebSocket();
-      const connecting = connectQwpBrowserWebSocket({
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      });
-      socket.open();
-      // The server accepts the frames and never answers them.
-      const session = new QwpIngressSession(await connecting, {
-        ackTimeoutMs: 5,
-      });
-
-      const timedOut = session.sendFrameWithPublication(
-        encodeQwpIngressFrame([longTable("trades", [1n])]),
-      );
-      await timedOut.publication;
-      // Trigger one: the ACK deadline elapses with nothing observing it.
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      expect(unhandled).toEqual([]);
-
-      const closed = session.sendFrameWithPublication(
-        encodeQwpIngressFrame([longTable("trades", [2n])]),
-      );
-      await closed.publication;
-      // Trigger two: close() rejects whatever is still pending.
-      await session.close();
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(unhandled).toEqual([]);
-
-      // Containment must not swallow: a caller who does await still sees it.
-      await expect(timedOut.acknowledgement).rejects.toThrow(
-        /timed out waiting for QWP ACK/,
-      );
-      await expect(closed.acknowledgement).rejects.toBeInstanceOf(
-        QwpIngressSessionClosedError,
-      );
-    } finally {
-      process.off("unhandledRejection", collect);
-    }
-  });
-
-  it("contains the aggregate acknowledgements the same way", async () => {
-    // A split batch and the delta-dictionary path each build a fresh promise
-    // with Promise.all(), so the per-frame containment above does not reach
-    // them. The delta aggregate also carries the publication rejection.
-    const unhandled: unknown[] = [];
-    const collect = (reason: unknown) => unhandled.push(reason);
-    process.on("unhandledRejection", collect);
-    try {
-      const socket = new FakeWebSocket();
-      const connecting = connectQwpBrowserWebSocket({
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      });
-      socket.open();
-      const cap = encodeQwpIngressFrame([longTable("trades", [1n])], {
-        gorilla: false,
-      }).byteLength;
-      const session = new QwpIngressSession(await connecting, {
-        maxBatchSizeBytes: cap,
-      });
-
-      const split = session.sendTablesWithPublication(
-        [longTable("trades", [1n, 2n])],
-        { gorilla: false },
-      );
-      const delta = session.sendTablesDeltaWithPublication([
-        symbolTable("events", ["a"]),
-      ]);
-      await Promise.all([split.publication, delta.publication]);
-      expect(socket.sent.length).toBeGreaterThan(2);
-
-      await session.close();
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(unhandled).toEqual([]);
-
-      await expect(split.acknowledgement).rejects.toBeInstanceOf(
-        QwpIngressSessionClosedError,
-      );
-      await expect(delta.acknowledgement).rejects.toBeInstanceOf(
-        QwpIngressSessionClosedError,
-      );
-    } finally {
-      process.off("unhandledRejection", collect);
-    }
   });
 
   it("splits a table over the row cap instead of failing the whole batch", async () => {
@@ -3486,9 +3654,9 @@ describe("QwpIngressSession", () => {
       );
     };
 
-    await expect(
-      session.sendTables([rows], { gorilla: false }),
-    ).resolves.toMatchObject({ sequence: 1n });
+    await session.publishTables([rows], { gorilla: false });
+    expect(session.publishedFrameSequence).toBe(1n);
+    await session.waitForAck(1n);
 
     const rowCounts = socket.sent.map(firstIngressTableRowCount);
     expect(socket.sent).toHaveLength(2);
@@ -3532,9 +3700,9 @@ describe("QwpIngressSession", () => {
       );
     };
 
-    await expect(
-      session.sendTables([rows], { gorilla: false }),
-    ).resolves.toMatchObject({ sequence: 1n });
+    await session.publishTables([rows], { gorilla: false });
+    expect(session.publishedFrameSequence).toBe(1n);
+    await session.waitForAck(1n);
 
     const rowCounts = socket.sent.map(firstIngressTableRowCount);
     expect(socket.sent).toHaveLength(2);
@@ -3574,9 +3742,9 @@ describe("QwpIngressSession", () => {
       socket.message(ingressResponse(QWP_STATUS.OK, sequence));
     };
 
-    await expect(
-      session.sendTables(tables, { gorilla: false }),
-    ).resolves.toMatchObject({ sequence: 1n });
+    await session.publishTables(tables, { gorilla: false });
+    expect(session.publishedFrameSequence).toBe(1n);
+    await session.waitForAck(1n);
     expect(
       socket.sent.map((frame) => decodeQwpFrame(frame).tableCount),
     ).toEqual([32_768, 32_768]);
@@ -3606,12 +3774,9 @@ describe("QwpIngressSession", () => {
       );
     };
 
-    await expect(
-      session.sendTables([rows], { gorilla: false }),
-    ).resolves.toMatchObject({
-      sequence: 3n,
-      tables: [{ name: "events", sequenceTransaction: 4n }],
-    });
+    await session.publishTables([rows], { gorilla: false });
+    expect(session.publishedFrameSequence).toBe(3n);
+    await session.waitForAck(3n);
     expect(socket.sent).toHaveLength(4);
     expect(socket.sent.every((frame) => frame.byteLength <= cap)).toBe(true);
     expect(socket.sent.map(firstIngressTableRowCount)).toEqual([1, 1, 1, 1]);
@@ -3626,7 +3791,7 @@ describe("QwpIngressSession", () => {
       0,
     ]);
 
-    await session.sendTables([longTable("events", [50n, 60n])], {
+    await session.publishTables([longTable("events", [50n, 60n])], {
       gorilla: false,
       deferCommit: true,
     });
@@ -3674,7 +3839,7 @@ describe("QwpIngressSession", () => {
         return original.call(this);
       });
     try {
-      await session.sendTables([rows], { gorilla: false });
+      await session.publishTables([rows], { gorilla: false });
     } finally {
       spy.mockRestore();
     }
@@ -3711,7 +3876,7 @@ describe("QwpIngressSession", () => {
       );
     };
 
-    await session.sendTablesDelta([rows]);
+    await session.publishTablesDelta([rows]);
     expect(socket.sent).toHaveLength(3);
     expect(socket.sent.every((frame) => frame.byteLength <= cap)).toBe(true);
     expect(
@@ -3733,16 +3898,16 @@ describe("QwpIngressSession", () => {
     ]);
 
     await expect(
-      session.sendTablesDelta([symbolTable("trades", ["x".repeat(cap)])]),
+      session.publishTablesDelta([symbolTable("trades", ["x".repeat(cap)])]),
     ).rejects.toBeInstanceOf(QwpBatchTooLargeError);
     expect(socket.sent).toHaveLength(3);
 
-    await session.sendTablesDelta([symbolTable("trades", [symbols[0]])]);
+    await session.publishTablesDelta([symbolTable("trades", [symbols[0]])]);
     expect(decodeQwpIngressSymbolDictionaryDelta(socket.sent[3])).toEqual({
       startId: 3,
       entries: [],
     });
-    await session.sendTablesDelta([symbolTable("trades", ["symbol-3333"])]);
+    await session.publishTablesDelta([symbolTable("trades", ["symbol-3333"])]);
     expect(decodeQwpIngressSymbolDictionaryDelta(socket.sent[4])).toEqual({
       startId: 3,
       entries: ["symbol-3333"],
@@ -3814,8 +3979,8 @@ describe("QwpIngressSession", () => {
       );
     };
 
-    const first = session.sendTablesDelta([symbolTable("trades", ["A"])]);
-    const second = session.sendTablesDelta([symbolTable("trades", ["B"])]);
+    const first = session.publishTablesDelta([symbolTable("trades", ["A"])]);
+    const second = session.publishTablesDelta([symbolTable("trades", ["B"])]);
     await expect(Promise.all([first, second])).resolves.toHaveLength(2);
     expect(
       socket.sent.map((frame) => decodeQwpIngressSymbolDictionaryDelta(frame)),
@@ -3823,15 +3988,7 @@ describe("QwpIngressSession", () => {
       { startId: 0, entries: ["A"] },
       { startId: 1, entries: ["B"] },
     ]);
-
-    const held = session.sendTablesDeltaWithPublication([
-      symbolTable("trades", ["C"]),
-    ]);
-    expect(() =>
-      session.sendTablesDeltaWithPublication([symbolTable("trades", ["D"])]),
-    ).toThrow(/overlapping sendTablesDeltaWithPublication/);
-    await held.publication;
-    await held.acknowledgement;
+    await session.waitForAck(session.publishedFrameSequence);
     await session.close();
   });
 
@@ -3853,7 +4010,7 @@ describe("QwpIngressSession", () => {
       .values.push("x".repeat(cap));
     oversized.nextRow();
 
-    await expect(session.sendTables([oversized])).rejects.toMatchObject({
+    await expect(session.publishTables([oversized])).rejects.toMatchObject({
       name: "QwpBatchTooLargeError",
       maxBatchSizeBytes: cap,
     } satisfies Partial<QwpBatchTooLargeError>);
@@ -3862,13 +4019,13 @@ describe("QwpIngressSession", () => {
     socket.onSend = () => {
       socket.message(ingressResponse(QWP_STATUS.OK, 0n));
     };
-    await expect(session.sendTables([small])).resolves.toMatchObject({
-      sequence: 0n,
-    });
+    await session.publishTables([small]);
+    expect(session.publishedFrameSequence).toBe(0n);
+    await expect(session.waitForAck(0n)).resolves.toBe(true);
     await session.close();
   });
 
-  it("registers ACK waiters before sending and preserves call order", async () => {
+  it("preserves publication order and covers frames acknowledged during their send", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
       url: "ws://localhost:9000/write/v4",
@@ -3882,12 +4039,14 @@ describe("QwpIngressSession", () => {
       socket.message(ingressResponse(QWP_STATUS.OK, sequence++));
     };
 
-    const first = session.sendFrame(Uint8Array.of(1));
-    const second = session.sendFrame(Uint8Array.of(2));
-    await expect(Promise.all([first, second])).resolves.toMatchObject([
-      { status: QWP_STATUS.OK, sequence: 0n },
-      { status: QWP_STATUS.OK, sequence: 1n },
+    // The server answers inside send(), before any wait can be registered.
+    await Promise.all([
+      session.publishFrame(Uint8Array.of(1)),
+      session.publishFrame(Uint8Array.of(2)),
     ]);
+    expect(session.publishedFrameSequence).toBe(1n);
+    await expect(session.waitForAck(0n)).resolves.toBe(true);
+    await expect(session.waitForAck(1n)).resolves.toBe(true);
     expect(socket.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
     await session.close();
   });
@@ -3972,16 +4131,16 @@ describe("QwpIngressSession", () => {
       );
     };
 
-    await expect(session.sendFrame(Uint8Array.of(1))).resolves.toMatchObject({
-      sequence: 0n,
-    });
+    await expect(publishAndWait(session, Uint8Array.of(1))).resolves.toBe(0n);
     socket.message(durableResponse([["events", 7n]]));
     await vi.waitFor(() =>
       expect(progress).toContain(
         QWP_INGRESS_PROGRESS_KIND.DURABLE_ACKNOWLEDGED,
       ),
     );
-    await expect(session.sendFrame(Uint8Array.of(2))).rejects.toMatchObject({
+    await expect(
+      publishAndWait(session, Uint8Array.of(2)),
+    ).rejects.toMatchObject({
       name: "QwpIngressNackError",
     });
 
@@ -4006,9 +4165,7 @@ describe("QwpIngressSession", () => {
     });
     expect(session.metrics).toMatchObject({
       publishedSequence: 1n,
-      acknowledgedSequence: 0n,
-      pendingResponses: 0,
-      pendingResponseBytes: 0,
+      ackedSequence: 0n,
       pendingDurableTables: 0,
       totalFramesPublished: 2,
       totalBytesPublished: 2,
@@ -4032,43 +4189,6 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
-  it("starts the ingress ACK deadline after send backpressure clears", async () => {
-    vi.useFakeTimers();
-    try {
-      const socket = new FakeBackpressuredWebSocket();
-      const connecting = connectQwpBrowserWebSocket({
-        url: "ws://localhost:9000/write/v4",
-        sendTimeoutMs: 100,
-        webSocketFactory: () => asQwpSocket(socket),
-      });
-      socket.open();
-      const session = new QwpIngressSession(await connecting, {
-        ackTimeoutMs: 25,
-      });
-      let settled = false;
-      const outcome = session.sendFrame(Uint8Array.of(1)).catch((error) => {
-        settled = true;
-        return error;
-      });
-
-      await vi.advanceTimersByTimeAsync(25);
-      expect(settled).toBe(false);
-      socket.drain();
-      await vi.advanceTimersByTimeAsync(4);
-      await vi.advanceTimersByTimeAsync(23);
-      expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(2);
-      await expect(outcome).resolves.toEqual(
-        expect.objectContaining({
-          message: expect.stringMatching(/timed out.*sequence=0/i),
-        }),
-      );
-      await session.close();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it("resolves every covered waiter from a cumulative ACK", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
@@ -4077,20 +4197,18 @@ describe("QwpIngressSession", () => {
     });
     socket.open();
     const session = new QwpIngressSession(await connecting);
-    socket.onSend = () => {
-      if (socket.sent.length === 8) {
-        socket.message(ingressResponse(QWP_STATUS.OK, 7n));
-      }
-    };
 
-    const sends = Array.from({ length: 8 }, (_, index) =>
-      session.sendFrame(Uint8Array.of(index)),
-    );
-    await expect(Promise.all(sends)).resolves.toEqual(
-      Array.from({ length: 8 }, () =>
-        expect.objectContaining({ status: QWP_STATUS.OK, sequence: 7n }),
+    await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        session.publishFrame(Uint8Array.of(index)),
       ),
     );
+    const waits = Array.from({ length: 8 }, (_, index) =>
+      session.waitForAck(BigInt(index)),
+    );
+    socket.message(ingressResponse(QWP_STATUS.OK, 7n));
+    await expect(Promise.all(waits)).resolves.toHaveLength(8);
+    expect(session.acknowledgedFrameSequence).toBe(7n);
     await session.close();
   });
 
@@ -4120,12 +4238,13 @@ describe("QwpIngressSession", () => {
         );
       };
 
-      const ack = await session.sendFrame(Uint8Array.of(1));
-      const durable = session.waitForDurable(ack);
+      await session.publishFrame(Uint8Array.of(1));
+      // With durable tracking the watermark advances only after durability.
+      const durable = session.waitForAck(session.publishedFrameSequence);
       await vi.advanceTimersByTimeAsync(25);
       expect(socket.pingCalls).toBe(1);
       await vi.advanceTimersByTimeAsync(25);
-      await expect(durable).resolves.toBeUndefined();
+      await expect(durable).resolves.toBe(true);
       expect(socket.pingCalls).toBe(2);
 
       await vi.advanceTimersByTimeAsync(100);
@@ -4154,13 +4273,12 @@ describe("QwpIngressSession", () => {
         );
       };
 
-      const ack = await session.sendFrame(Uint8Array.of(1));
+      await expect(publishAndWait(session, Uint8Array.of(1))).resolves.toBe(0n);
       await vi.advanceTimersByTimeAsync(20);
       expect(socket.sent).toHaveLength(1);
       expect(session.metrics.pendingDurableTables).toBe(0);
-      await expect(session.waitForDurable(ack)).rejects.toThrow(
-        "durable ACK was not negotiated",
-      );
+      // Nothing tracks durability, so the ordinary OK is the watermark.
+      expect(session.acknowledgedFrameSequence).toBe(0n);
       await expect(session.pollDurableAck()).rejects.toThrow(
         "durable ACK was not negotiated",
       );
@@ -4208,18 +4326,14 @@ describe("QwpIngressSession", () => {
     try {
       const socket = new FakeWebSocket();
       socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
-      const connecting = connectQwpBrowserIngress(
-        {
-          url: "ws://localhost:9000/write/v4",
-          requestDurableAck: true,
-          ingressNegotiationTimeoutMs: 1_000,
-          webSocketFactory: () => asQwpSocket(socket),
-        },
-        {
-          ackTimeoutMs: 100,
-          durableAckKeepaliveMs: 25,
-        },
-      );
+      const connecting = connectQwpBrowserIngress({
+        url: "ws://localhost:9000/write/v4",
+        requestDurableAck: true,
+        ingressNegotiationTimeoutMs: 1_000,
+        webSocketFactory: () => asQwpSocket(socket),
+        ackTimeoutMs: 100,
+        durableAckKeepaliveMs: 25,
+      });
       openDurableAckBrowserSocket(socket);
       const session = await connecting;
       socket.onSend = () => {
@@ -4233,10 +4347,10 @@ describe("QwpIngressSession", () => {
         socket.message(ingressResponse(QWP_STATUS.OK, 1n));
       };
 
-      const ack = await session.sendFrame(Uint8Array.of(1));
-      const durable = session.waitForDurable(ack);
+      await session.publishFrame(Uint8Array.of(1));
+      const durable = session.waitForAck(session.publishedFrameSequence);
       await vi.advanceTimersByTimeAsync(25);
-      await expect(durable).resolves.toBeUndefined();
+      await expect(durable).resolves.toBe(true);
       expect(socket.sent).toHaveLength(2);
       expect(socket.sent[1]).toEqual(encodeQwpDurableAckPollFrame());
 
@@ -4248,23 +4362,19 @@ describe("QwpIngressSession", () => {
     }
   });
 
-  it("does not ACK-timeout a browser durable poll behind a deferred frame", async () => {
+  it("polls browser durability behind a deferred frame without failing the session", async () => {
     vi.useFakeTimers();
     try {
       const socket = new FakeWebSocket();
       socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
-      const connecting = connectQwpBrowserIngress(
-        {
-          url: "ws://localhost:9000/write/v4",
-          requestDurableAck: true,
-          ingressNegotiationTimeoutMs: 1_000,
-          webSocketFactory: () => asQwpSocket(socket),
-        },
-        {
-          ackTimeoutMs: 20,
-          durableAckKeepaliveMs: 5,
-        },
-      );
+      const connecting = connectQwpBrowserIngress({
+        url: "ws://localhost:9000/write/v4",
+        requestDurableAck: true,
+        ingressNegotiationTimeoutMs: 1_000,
+        webSocketFactory: () => asQwpSocket(socket),
+        ackTimeoutMs: 20,
+        durableAckKeepaliveMs: 5,
+      });
       openDurableAckBrowserSocket(socket);
       const session = await connecting;
       socket.onSend = () => {
@@ -4283,40 +4393,32 @@ describe("QwpIngressSession", () => {
         }
       };
 
-      const committed = await session.sendFrame(
+      await session.publishFrame(
         encodeQwpIngressFrame([longTable("trades", [1n])]),
       );
-      const durable = session.waitForDurable(committed);
-      const deferred = session.sendFrameWithPublication(
+      const durable = session.waitForAck(0n);
+      await session.publishFrame(
         encodeQwpIngressFrame([longTable("trades", [2n])], {
           deferCommit: true,
         }),
       );
-      await deferred.publication;
-      let deferredState: "pending" | "resolved" | "rejected" = "pending";
-      void deferred.acknowledgement.then(
-        () => {
-          deferredState = "resolved";
-        },
-        () => {
-          deferredState = "rejected";
-        },
-      );
 
       await vi.advanceTimersByTimeAsync(5);
-      await expect(durable).resolves.toBeUndefined();
+      await expect(durable).resolves.toBe(true);
       expect(socket.sent[2]).toEqual(encodeQwpDurableAckPollFrame());
 
+      // The poll stays unacknowledged behind the open transaction, which is
+      // not a failure.
       await vi.advanceTimersByTimeAsync(40);
-      expect(deferredState).toBe("pending");
       expect(session.metrics.lastError).toBeUndefined();
+      expect(session.metrics.ackedSequence).toBe(0n);
 
-      const commit = session.sendFrame(encodeQwpIngressFrame([]));
-      await expect(commit).resolves.toMatchObject({ sequence: 3n });
-      await expect(deferred.acknowledgement).resolves.toMatchObject({
-        sequence: 3n,
-      });
-      expect(session.metrics.pendingResponses).toBe(0);
+      await session.publishFrame(encodeQwpIngressFrame([]));
+      await vi.waitFor(() => expect(session.metrics.ackedSequence).toBe(3n));
+      const committed = session.waitForAck(3n);
+      socket.message(durableResponse([["trades", 43n]]));
+      await expect(committed).resolves.toBe(true);
+      expect(session.metrics.lastError).toBeUndefined();
       await session.close();
     } finally {
       vi.useRealTimers();
@@ -4326,18 +4428,14 @@ describe("QwpIngressSession", () => {
   it("still terminates a browser session when a durable poll is NACKed", async () => {
     const socket = new FakeWebSocket();
     socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
-    const connecting = connectQwpBrowserIngress(
-      {
-        url: "ws://localhost:9000/write/v4",
-        requestDurableAck: true,
-        ingressNegotiationTimeoutMs: 1_000,
-        webSocketFactory: () => asQwpSocket(socket),
-      },
-      {
-        onError: () => undefined,
-        onSenderError: () => undefined,
-      },
-    );
+    const connecting = connectQwpBrowserIngress({
+      url: "ws://localhost:9000/write/v4",
+      requestDurableAck: true,
+      ingressNegotiationTimeoutMs: 1_000,
+      webSocketFactory: () => asQwpSocket(socket),
+      onError: () => undefined,
+      onSenderError: () => undefined,
+    });
     openDurableAckBrowserSocket(socket);
     const session = await connecting;
     socket.onSend = () => {
@@ -4355,7 +4453,7 @@ describe("QwpIngressSession", () => {
     await session.close();
   });
 
-  it("fails all pipelined frames and closes a fixed session after a NACK", async () => {
+  it("fails every pending ACK wait and closes a fixed session after a NACK", async () => {
     const socket = new FakeWebSocket();
     const connecting = connectQwpBrowserWebSocket({
       url: "ws://localhost:9000/write/v4",
@@ -4373,8 +4471,8 @@ describe("QwpIngressSession", () => {
       }
     };
 
-    const first = session.sendFrame(Uint8Array.of(1));
-    const second = session.sendFrame(Uint8Array.of(2));
+    const first = publishAndWait(session, Uint8Array.of(1));
+    const second = publishAndWait(session, Uint8Array.of(2));
     await expect(first).rejects.toMatchObject({
       name: "QwpIngressNackError",
       response: { sequence: 0n, errorMessage: "write failed" },
@@ -4384,7 +4482,9 @@ describe("QwpIngressSession", () => {
       response: { sequence: 0n, errorMessage: "write failed" },
     } satisfies QwpIngressNackMatch);
     expect(socket.sent).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
-    expect(() => session.sendFrame(Uint8Array.of(3))).toThrow("write failed");
+    expect(() => session.publishFrame(Uint8Array.of(3))).toThrow(
+      "write failed",
+    );
     expect(socket.closeCalls).toContainEqual({
       code: 1002,
       reason: "QWP ingress pipeline rejected",
@@ -4411,39 +4511,18 @@ describe("QwpIngressSession", () => {
       .values.push("ETH-USD");
     table.nextRow();
 
-    await expect(session.sendTablesDelta([table])).rejects.toMatchObject({
+    await session.publishTablesDelta([table]);
+    await expect(waitForPublished(session)).rejects.toMatchObject({
       name: "QwpIngressNackError",
       response: { status: QWP_STATUS.DICTIONARY_GAP },
     });
-    expect(() => session.sendFrame(Uint8Array.of(2))).toThrow(/missing prefix/);
+    expect(() => session.publishFrame(Uint8Array.of(2))).toThrow(
+      /missing prefix/,
+    );
     expect(socket.closeCalls).toContainEqual({
       code: 1002,
       reason: "QWP symbol dictionary gap",
     });
     await session.close();
-  });
-
-  it("times out an ACK without losing session closeability", async () => {
-    vi.useFakeTimers();
-    try {
-      const socket = new FakeWebSocket();
-      const connecting = connectQwpBrowserWebSocket({
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory: () => asQwpSocket(socket),
-      });
-      socket.open();
-      const session = new QwpIngressSession(await connecting, {
-        ackTimeoutMs: 25,
-      });
-      const response = session.sendFrame(Uint8Array.of(1));
-      const rejected = expect(response).rejects.toThrow(
-        /timed out.*sequence=0/i,
-      );
-      await vi.advanceTimersByTimeAsync(25);
-      await rejected;
-      await session.close();
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

@@ -64,10 +64,10 @@ import { connectQwpBrowserSender } from "@questdb/browser-client";
 const writeUrl = new URL("/write/v4", window.location.href);
 writeUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 
-const sender = await connectQwpBrowserSender(
-  { url: writeUrl },
-  { autoFlush: false },
-);
+const sender = await connectQwpBrowserSender({
+  url: writeUrl,
+  autoFlush: false,
+});
 
 try {
   await sender
@@ -89,21 +89,23 @@ WebSockets from secure pages.
 ## Batch and commit rows
 
 Transactional mode keeps automatically emitted frames in one open server-side
-transaction. `commit()` publishes the final frame. Transactions are atomic per
-table, not across every table in one flush.
+transaction. An explicit `flush()` publishes the final frame. `flushAndWait()`
+publishes it too and then waits for the server's acknowledgement, which with
+`requestDurableAck: true` means durable upload. It resolves `false` when the
+acknowledgements make no progress for its timeout (`ackTimeoutMs`); the frames
+then stay queued for delivery. Transactions are atomic per table, not across
+every table in one flush.
 
 ```typescript
 import { connectQwpBrowserSender } from "@questdb/browser-client";
 
-const sender = await connectQwpBrowserSender(
-  { url: writeUrl, requestDurableAck: true },
-  {
-    transactional: true,
-    autoFlushRows: 10_000,
-    awaitDurableAck: true,
-    durableAckTimeoutMs: 30_000,
-  },
-);
+const sender = await connectQwpBrowserSender({
+  url: writeUrl,
+  requestDurableAck: true,
+  transactional: true,
+  autoFlushRows: 10_000,
+  ackTimeoutMs: 30_000,
+});
 
 try {
   for (const event of [
@@ -117,7 +119,9 @@ try {
       .at(event.timestamp, "ms");
   }
 
-  await sender.commit();
+  if (!(await sender.flushAndWait())) {
+    console.warn("not yet durable; the transaction is still queued");
+  }
 } finally {
   await sender.close();
 }
@@ -126,6 +130,20 @@ try {
 Browser replay is held in memory and survives reconnects only while the page is
 alive. Persistent store-and-forward is intentionally available only from the
 Node.js package.
+
+`initialConnectMode` chooses how the first connection behaves while QuestDB
+is unreachable. With `initialConnectMode: "async"`,
+`connectQwpBrowserSender()` returns at once and connects in the background,
+and rows published meanwhile wait in the memory replay queue. `"sync"` retries
+for up to `reconnect.reconnectMaxDurationMs` before failing, and the default
+`"off"` makes a single attempt.
+
+```typescript
+const sender = await connectQwpBrowserSender({
+  url: writeUrl,
+  initialConnectMode: "async",
+});
+```
 
 ## Type-safe object rows
 
@@ -293,16 +311,14 @@ import { connectQwpBrowserEgress } from "@questdb/browser-client";
 const readUrl = new URL("/read/v1", window.location.href);
 readUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 
-const session = await connectQwpBrowserEgress(
-  {
-    url: readUrl,
-    compression: "zstd",
-    sessionBootstrap: {
-      authentication: { type: "bearer", token: oidcOrRestAccessToken },
-    },
+const session = await connectQwpBrowserEgress({
+  url: readUrl,
+  compression: "zstd",
+  sessionBootstrap: {
+    authentication: { type: "bearer", token: oidcOrRestAccessToken },
   },
-  { queryTimeoutMs: 30_000 },
-);
+  queryTimeoutMs: 30_000,
+});
 
 try {
   const query = await session.query(
@@ -385,7 +401,7 @@ try {
 - An unfinished row is never completed implicitly during `flush()` or `close()`.
 - Do not share one sender between unrelated concurrent producers.
 - Re-executed queries are at least once after failover; clear already consumed
-  results in an `onReplayReset` callback when duplicate prefixes matter.
+  results in an `onFailoverReset` callback when duplicate prefixes matter.
 
 ## More documentation
 

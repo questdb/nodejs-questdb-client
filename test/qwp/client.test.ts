@@ -6,25 +6,34 @@ import {
   QWP_EGRESS_MESSAGE,
   QWP_SERVER_ROLE,
   QWP_STATUS,
-  QwpBinaryConnection,
   QwpByteWriter,
   QwpClient,
   QwpClientClosedError,
   QwpConnectionCloseInfo,
   QwpEgressSession,
   QwpEgressSessionClosedError,
-  QwpEgressSessionOptions,
   QwpHandshakeMetadata,
-  QwpIngressResponse,
+  type QwpIngressMetrics,
   QwpPoolAcquireTimeoutError,
   type QwpPoolSlotReservation,
   QwpSender,
-  QwpSenderSession,
+  QwpSenderCloseTimeoutError,
   designatedTimestamp,
   long,
   symbol as qwpSymbol,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
+// Internal: neither package root exports these.
+import {
+  connectQwpEgressSession,
+  createQwpEgressSession,
+  type QwpEgressSessionOptions,
+} from "../../packages/client-core/src/_qwp/egress-session";
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
+import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
+import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 
 function writeString(writer: QwpByteWriter, value: string): void {
   const encoded = new TextEncoder().encode(value);
@@ -142,30 +151,33 @@ class FakeSenderSession implements QwpSenderSession {
   publishedFrameSequence = -1n;
   acknowledgedFrameSequence = -1n;
 
-  sendTables(): Promise<QwpIngressResponse> {
-    this.flushes++;
-    const sequence = ++this.publishedFrameSequence;
-    this.acknowledgedFrameSequence = sequence;
-    return Promise.resolve({
-      status: QWP_STATUS.OK,
-      sequence,
-      tables: [],
-    });
-  }
-
   publishTables(): Promise<void> {
     this.flushes++;
     this.acknowledgedFrameSequence = ++this.publishedFrameSequence;
     return Promise.resolve();
   }
 
-  waitForDurable(): Promise<void> {
-    return Promise.resolve();
+  waitForAck(): Promise<boolean> {
+    return Promise.resolve(true);
   }
 
   close(): Promise<void> {
     this.closes++;
     return Promise.resolve();
+  }
+}
+
+/** A sender session reporting where its unacknowledged frames are kept. */
+class ReplayingFakeSenderSession extends FakeSenderSession {
+  constructor(private readonly memoryReplayMaxBytes?: number) {
+    super();
+  }
+
+  get metrics(): QwpIngressMetrics {
+    return {
+      replayPublishedFrameSequence: this.publishedFrameSequence,
+      memoryReplayMaxBytes: this.memoryReplayMaxBytes,
+    } as unknown as QwpIngressMetrics;
   }
 }
 
@@ -176,7 +188,7 @@ async function createQuerySession(
 ): Promise<QwpEgressSession> {
   const connection = new FakeConnection(`query-${slot}`);
   connections.push(connection);
-  const session = new QwpEgressSession(connection, options);
+  const session = createQwpEgressSession(connection, options);
   connection.receive(serverInfo(`node-${slot}`));
   await session.ready;
   return session;
@@ -198,19 +210,13 @@ describe("QWP browser client startup teardown", () => {
     try {
       await expect(
         connectQwpBrowserClient({
-          ingress: {
-            url: "ws://127.0.0.1:1/write/v4",
+          cluster: {
+            url: "ws://127.0.0.1:1",
             webSocketFactory: () => {
               throw new Error("offline");
             },
           },
-          egress: {
-            url: "ws://127.0.0.1:1/read/v1",
-            webSocketFactory: () => {
-              throw new Error("offline");
-            },
-          },
-        } as never),
+        }),
       ).rejects.toThrow();
       expect(closes).toHaveLength(1);
     } finally {
@@ -227,7 +233,9 @@ describe("QWP pooled client", () => {
       let releaseCreation!: () => void;
       const createSender = async (): Promise<QwpSender> => {
         const session = new FakeSenderSession();
-        const sender = new QwpSender(async () => session, { autoFlush: false });
+        const sender = createQwpSender(async () => session, {
+          autoFlush: false,
+        });
         await sender.connect();
         return sender;
       };
@@ -300,7 +308,7 @@ describe("QWP pooled client", () => {
         createSender: async () => {
           creations++;
           const session = new FakeSenderSession();
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -348,7 +356,7 @@ describe("QWP pooled client", () => {
           senderCreations++;
           if (!reachable) throw new Error("connection refused");
           const session = new FakeSenderSession();
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -517,7 +525,7 @@ describe("QWP pooled client", () => {
           senderCreations++;
           const session = new FakeSenderSession();
           senderSessions.push(session);
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -570,7 +578,7 @@ describe("QWP pooled client", () => {
           senderCreations++;
           const session = new FakeSenderSession();
           senderSessions.push(session);
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -633,7 +641,7 @@ describe("QWP pooled client", () => {
         createSender: async () => {
           const session = new FakeSenderSession();
           senderSessions.push(session);
-          const sender = new QwpSender(async () => session, {
+          const sender = createQwpSender(async () => session, {
             autoFlush: false,
           });
           await sender.connect();
@@ -665,6 +673,67 @@ describe("QWP pooled client", () => {
     await closing;
     expect(senderSessions[0].flushes).toBe(1);
     expect(senderSessions[0].closes).toBe(1);
+  });
+
+  it("logs a pooled sender's failed close instead of failing shutdown", async () => {
+    // As in the Java, Rust and Python pools, a sender that cannot close
+    // cleanly -- here a close drain that timed out -- is reported as a
+    // warning, and neither client.close() nor the lease that triggered the
+    // close rejects. A store-and-forward sender's warning says its frames
+    // survive in the journal; an in-memory sender's does not.
+    const timeout = new QwpSenderCloseTimeoutError(5_000, 0n, -1n);
+    const clientWith = (warnings: string[], memoryReplayMaxBytes?: number) => {
+      const session = new ReplayingFakeSenderSession(memoryReplayMaxBytes);
+      session.close = () => Promise.reject(timeout);
+      return new QwpClient(
+        {
+          createSender: async () => {
+            const sender = createQwpSender(async () => session, {
+              log: (level, message) => {
+                if (level === "warn") warnings.push(String(message));
+              },
+            });
+            await sender.connect();
+            return sender;
+          },
+          createQuerySession: async () => {
+            throw new Error("query factory should not run");
+          },
+        },
+        {
+          senderPoolMin: 0,
+          senderPoolMax: 1,
+          queryPoolMin: 0,
+          queryPoolMax: 1,
+          acquireTimeoutMs: 0,
+        },
+      );
+    };
+    const journalNote = "remain in the store-and-forward journal";
+
+    for (const memoryReplayMaxBytes of [undefined, 128 * 1024 * 1024]) {
+      // An idle sender closed by shutdown.
+      const idleWarnings: string[] = [];
+      const idle = clientWith(idleWarnings, memoryReplayMaxBytes);
+      await (await idle.borrowSender()).close();
+      await expect(idle.close()).resolves.toBeUndefined();
+
+      // A lease returned after shutdown, which closes its sender itself.
+      const returnedWarnings: string[] = [];
+      const returned = clientWith(returnedWarnings, memoryReplayMaxBytes);
+      const borrowed = await returned.borrowSender();
+      await returned.close();
+      await expect(borrowed.close()).resolves.toBeUndefined();
+
+      for (const warnings of [idleWarnings, returnedWarnings]) {
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("Closing a pooled QWP sender failed");
+        expect(warnings[0]).toContain(timeout.message);
+        expect(warnings[0].includes(journalNote)).toBe(
+          memoryReplayMaxBytes === undefined,
+        );
+      }
+    }
   });
 
   it("runs independently borrowed query connections concurrently", async () => {
@@ -729,7 +798,7 @@ describe("QWP pooled client", () => {
           throw new Error("sender factory should not run");
         },
         createQuerySession: async () =>
-          QwpEgressSession.connect(
+          connectQwpEgressSession(
             async () => {
               const connection = connections.shift();
               if (!connection) throw new Error("no connection available");
@@ -752,9 +821,9 @@ describe("QWP pooled client", () => {
             },
             {
               reconnect: {
-                maxAttempts: 1,
-                initialBackoffMs: 0,
-                maxBackoffMs: 0,
+                failoverMaxAttempts: 1,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
               },
             },
           ),
@@ -800,6 +869,113 @@ describe("QWP pooled client", () => {
     await client.close();
   });
 
+  it("routes failover resets to the active query when pooled request IDs overlap", async () => {
+    const primary = [
+      new FakeConnection("query-0-primary"),
+      new FakeConnection("query-1-primary"),
+    ];
+    const replacement = [
+      new FakeConnection("query-0-replacement"),
+      new FakeConnection("query-1-replacement"),
+    ];
+    const wires = primary.map((connection, slot) => [
+      connection,
+      replacement[slot],
+    ]);
+    const sessionReset = vi.fn();
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: (slot) =>
+          connectQwpEgressSession(
+            async () => {
+              const connection = wires[slot].shift();
+              if (!connection) throw new Error("no connection available");
+              queueMicrotask(() =>
+                connection.receive(serverInfo(connection.endpoint)),
+              );
+              return connection;
+            },
+            {
+              reconnect: {
+                failoverMaxAttempts: 1,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
+              },
+              onFailoverReset: sessionReset,
+            },
+          ),
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 2,
+      },
+    );
+
+    const first = await client.borrowQuery();
+    const second = await client.borrowQuery();
+    let firstRows = 0;
+    let secondRows = 0;
+    const firstReset = vi.fn(() => {
+      firstRows = 0;
+    });
+    const secondReset = vi.fn(() => {
+      secondRows = 0;
+    });
+    const firstQuery = await first.query("select * from first", {
+      onFailoverReset: firstReset,
+    });
+    const secondQuery = await second.query("select * from second", {
+      onFailoverReset: secondReset,
+    });
+    expect(firstQuery.requestId).toBe(0n);
+    expect(secondQuery.requestId).toBe(0n);
+
+    const firstBatches = firstQuery[Symbol.asyncIterator]();
+    const secondBatches = secondQuery[Symbol.asyncIterator]();
+    primary[0].receive(emptyResultBatch(0n));
+    primary[1].receive(emptyResultBatch(0n));
+    await firstBatches.next();
+    firstRows++;
+    await secondBatches.next();
+    secondRows++;
+
+    primary[0].drop();
+    await vi.waitFor(() => expect(firstReset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(replacement[0].sent).toHaveLength(1));
+    expect(firstReset).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 0n }),
+    );
+    expect(secondReset).not.toHaveBeenCalled();
+    expect(sessionReset).not.toHaveBeenCalled();
+    expect(firstRows).toBe(0);
+    expect(secondRows).toBe(1);
+
+    replacement[0].receive(emptyResultBatch(0n));
+    replacement[0].receive(resultEnd(0n));
+    await firstBatches.next();
+    firstRows++;
+
+    primary[1].drop();
+    await vi.waitFor(() => expect(secondReset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(replacement[1].sent).toHaveLength(1));
+    expect(firstReset).toHaveBeenCalledOnce();
+    expect(sessionReset).not.toHaveBeenCalled();
+    expect([firstRows, secondRows]).toEqual([1, 0]);
+    replacement[1].receive(emptyResultBatch(0n));
+    replacement[1].receive(resultEnd(0n));
+    await secondBatches.next();
+    secondRows++;
+    await Promise.all([firstQuery.completion, secondQuery.completion]);
+    expect([firstRows, secondRows]).toEqual([1, 1]);
+    await Promise.all([first.close(), second.close()]);
+    await client.close();
+  });
+
   it("reaps idle excess connections without shrinking below pool minimums", async () => {
     vi.useFakeTimers();
     try {
@@ -811,7 +987,7 @@ describe("QWP pooled client", () => {
           createSender: async () => {
             const session = new FakeSenderSession();
             senderSessions.push(session);
-            const sender = new QwpSender(async () => session, {
+            const sender = createQwpSender(async () => session, {
               autoFlush: false,
             });
             await sender.connect();
@@ -863,6 +1039,89 @@ describe("QWP pooled client", () => {
         2,
       );
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an idle RAM sender until its offline publications are acknowledged", async () => {
+    vi.useFakeTimers();
+    const primary = new FakeConnection("primary");
+    const replacement = new FakeConnection("replacement");
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    let factoryCalls = 0;
+    let session!: QwpIngressSession;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          session = await QwpIngressSession.connect(
+            async () => (factoryCalls++ === 0 ? primary : reconnecting),
+            {
+              reconnect: {
+                reconnectInitialBackoffMs: 0,
+                reconnectMaxBackoffMs: 0,
+              },
+            },
+          );
+          const sender = createQwpSender(async () => session, {
+            autoFlush: false,
+            closeFlushTimeoutMs: 0,
+          });
+          await sender.connect();
+          return sender;
+        },
+        createQuerySession: async () => {
+          throw new Error("query factory should not run");
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        idleTimeoutMs: 100,
+        maxLifetimeMs: 0,
+        housekeepingIntervalMs: 100,
+      },
+    );
+    try {
+      const lease = await client.borrowSender();
+      primary.drop();
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+      await lease.table("events").longColumn("value", 123n).atNow();
+      await expect(lease.flush()).resolves.toBe(true);
+      expect(primary.sent).toHaveLength(0);
+      expect(session.metrics).toMatchObject({
+        pendingReplayFrames: 1,
+        memoryReplayMaxBytes: expect.any(Number),
+      });
+      await lease.close();
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(client.metrics.senders).toMatchObject({ total: 1, available: 1 });
+      expect(replacement.sent).toHaveLength(0);
+
+      releaseReconnect(replacement);
+      await vi.waitFor(() => expect(replacement.sent).toHaveLength(1));
+      replacement.receive(
+        new QwpByteWriter()
+          .writeUint8(QWP_STATUS.OK)
+          .writeBigUint64(0n)
+          .writeUint16(0)
+          .toUint8Array(),
+      );
+      await vi.waitFor(() =>
+        expect(session.metrics.pendingReplayFrames).toBe(0),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      expect(client.metrics.senders.total).toBe(0);
+    } finally {
+      releaseReconnect(replacement);
+      const closing = client.close();
+      await vi.advanceTimersByTimeAsync(5_001);
+      await closing.catch(() => undefined);
       vi.useRealTimers();
     }
   });
@@ -1192,7 +1451,7 @@ describe("QWP pooled client", () => {
         },
         createQuerySession: async () => {
           queryCreations++;
-          return QwpEgressSession.connect(
+          return connectQwpEgressSession(
             async () => {
               const connection = new FakeConnection(
                 `query-${connections.length}`,
@@ -1206,10 +1465,10 @@ describe("QWP pooled client", () => {
             {
               cancelDrainTimeoutMs: 20,
               reconnect: {
-                initialBackoffMs: 0,
-                maxBackoffMs: 0,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
                 // Documented as disabling the reconnect deadline entirely.
-                maxDurationMs: 0,
+                failoverMaxDurationMs: 0,
               },
             },
           );

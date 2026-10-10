@@ -5,13 +5,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   connectQwpNodeClient,
   createQwpNodeClient,
-  QwpNodeFileReplayStore,
   parseQwpNodeClientConfig,
   Sender,
   SenderOptions,
   type QwpNodeClientOptions,
   type QwpWebSocketLike,
 } from "../../packages/nodejs-client/src";
+import { qwpConfig } from "../../packages/nodejs-client/src/options";
+import { resolveQwpNodeClientSides } from "../../packages/nodejs-client/src/qwp-node/client-config";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 
 class RejectingWebSocket {
   binaryType = "";
@@ -83,29 +86,39 @@ describe("QWP unified Node client configuration", () => {
         "target=replica;zone=eu-west-1a;compression=zstd;compression_level=3;" +
         "max_batch_rows=512;initial_credit=8192;buffer_pool_size=2;" +
         "sender_pool_min=0;sender_pool_max=2;query_pool_min=1;query_pool_max=8;" +
-        "acquire_timeout_ms=2500;query_close_timeout_ms=7000;",
+        "acquire_timeout_ms=2500;query_close_timeout_ms=7000;" +
+        "query_timeout_ms=30000;",
     );
 
-    expect(String(options.ingress.url)).toBe(
-      "wss://db-a.example:9443/write/v4",
-    );
-    expect(options.ingress.failoverUrls?.map(String)).toEqual([
-      "wss://db-b.example:9000/write/v4",
-      "wss://db-c.example:9555/write/v4",
-    ]);
-    expect(String(options.egress.url)).toBe("wss://db-a.example:9443/read/v1");
-    expect(options.egress.failoverUrls?.map(String)).toEqual([
-      "wss://db-b.example:9000/read/v1",
-      "wss://db-c.example:9555/read/v1",
+    expect(String(options.cluster.url)).toBe("wss://db-a.example:9443/");
+    expect(options.cluster.failoverUrls?.map(String)).toEqual([
+      "wss://db-b.example:9000/",
+      "wss://db-c.example:9555/",
     ]);
     const authorization = `Basic ${Buffer.from(
       "admin:s;ecret",
       "utf8",
     ).toString("base64")}`;
-    expect(options.ingress.authorization).toBe(authorization);
-    expect(options.egress.authorization).toBe(authorization);
-    expect(options.ingress.clientId).toBe("typescript-test");
-    expect(options.egress.clientId).toBe("typescript-test");
+    expect(options.cluster.authorization).toBe(authorization);
+    expect(options.cluster.clientId).toBe("typescript-test");
+
+    // Each side derives its own route on every endpoint, and inherits the
+    // shared authentication and client identity.
+    const { ingress, egress } = resolveQwpNodeClientSides(options);
+    expect(String(ingress.url)).toBe("wss://db-a.example:9443/write/v4");
+    expect(ingress.failoverUrls?.map(String)).toEqual([
+      "wss://db-b.example:9000/write/v4",
+      "wss://db-c.example:9555/write/v4",
+    ]);
+    expect(String(egress.url)).toBe("wss://db-a.example:9443/read/v1");
+    expect(egress.failoverUrls?.map(String)).toEqual([
+      "wss://db-b.example:9000/read/v1",
+      "wss://db-c.example:9555/read/v1",
+    ]);
+    for (const side of [ingress, egress]) {
+      expect(side.authorization).toBe(authorization);
+      expect(side.clientId).toBe("typescript-test");
+    }
     expect(options.egress).toMatchObject({
       target: "replica",
       zone: "eu-west-1a",
@@ -113,12 +126,13 @@ describe("QWP unified Node client configuration", () => {
       compressionLevel: 3,
       maxBatchRows: 512,
     });
-    expect(options.egressSession).toMatchObject({
+    expect(options.egress).toMatchObject({
       initialCredit: 8192,
       bufferPoolSize: 2,
       cancelDrainTimeoutMs: 7000,
+      queryTimeoutMs: 30000,
     });
-    expect(options.egressSession?.reconnect).toBeUndefined();
+    expect(options.egress?.reconnect).toBeUndefined();
     expect(options.pool).toMatchObject({
       senderPoolMin: 0,
       senderPoolMax: 2,
@@ -136,8 +150,8 @@ describe("QWP unified Node client configuration", () => {
     expect(options.lazyConnect).toBe(true);
     expect(options.ingress.storeAndForward).toMatchObject({
       directory: "/tmp/qwp-unified-test",
-      initialConnectMode: "async",
     });
+    expect(options.ingress.initialConnectMode).toBe("async");
     expect(options.pool?.queryPoolMin).toBe(0);
   });
 
@@ -153,49 +167,118 @@ describe("QWP unified Node client configuration", () => {
       durability: "memory",
       backpressurePolicy: "wait",
       appendDeadlineMs: 30_000,
-      initialConnectMode: "off",
     });
+    // The journal has no startup policy of its own.
+    expect(defaults.ingress.storeAndForward).not.toHaveProperty(
+      "initialConnectMode",
+    );
     expect(defaults.ingress.senderId).toBe("default");
-    expect(defaults.ingressSession?.initialConnectMode).toBe("off");
-    expect(defaults.sender).toMatchObject({
+    expect(defaults.ingress?.initialConnectMode).toBe("off");
+    expect(defaults.ingress).toMatchObject({
       closeFlushTimeoutMs: 5_000,
       maxNameLength: 127,
     });
     expect(
       parseQwpNodeClientConfig(
         "ws::addr=localhost;close_flush_timeout_millis=-1;",
-      ).sender?.closeFlushTimeoutMs,
+      ).ingress?.closeFlushTimeoutMs,
     ).toBe(-1);
 
     const tuned = parseQwpNodeClientConfig(
       "ws::addr=localhost;sf_dir=/tmp/qwp-unified-test;reconnect_max_duration_millis=1234;",
     );
-    expect(tuned.ingress.storeAndForward?.initialConnectMode).toBe("sync");
-    expect(tuned.ingressSession?.initialConnectMode).toBe("sync");
+    expect(tuned.ingress?.initialConnectMode).toBe("sync");
 
     const tunedMemory = parseQwpNodeClientConfig(
       "ws::addr=localhost;reconnect_initial_backoff_millis=25;",
     );
     expect(tunedMemory.ingress.storeAndForward).toBeUndefined();
-    expect(tunedMemory.ingressSession?.initialConnectMode).toBe("sync");
+    expect(tunedMemory.ingress?.initialConnectMode).toBe("sync");
   });
 
-  it("accepts reconnect_max_duration_millis=0 as the disabled deadline", async () => {
-    // Zero is the documented "no reconnect deadline" state: both reconnecting
-    // connections gate their deadline on maxDurationMs > 0, and the egress
-    // failover_max_duration_ms key already accepts it. Requiring a positive
-    // value here made the documented state unreachable from the portable
-    // connection-string spelling, on both public entry points.
-    const disabled = parseQwpNodeClientConfig(
+  it("gives a typed storeAndForward object the connect string's defaults", async () => {
+    // Typed options and sf_* keys used to disagree on three journal defaults:
+    // `append` against `memory` durability, a 1 GiB against a 10 GiB cap, and
+    // failing against waiting on a full journal. Moving between
+    // Sender.fromConfig() and typed options -- a change that looks like pure
+    // configuration style -- changed all three. A typed storeAndForward object
+    // reaches the journal as given, so the journal's own defaults are the
+    // typed ones.
+    const parsed = parseQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp-typed-defaults;",
+    ).ingress.storeAndForward!;
+    const directory = await mkdtemp(join(tmpdir(), "qwp-typed-defaults-"));
+    const store = new QwpNodeFileReplayStore({ directory });
+    const journal = store as unknown as {
+      maxBytes: number;
+      maxSegmentBytes: number;
+      checkpointIntervalMs: number;
+      appendDeadlineMs: number;
+    };
+    try {
+      expect({
+        durability: store.metrics.durability,
+        backpressurePolicy: store.metrics.backpressurePolicy,
+        maxBytes: journal.maxBytes,
+        maxSegmentBytes: journal.maxSegmentBytes,
+        appendDeadlineMs: journal.appendDeadlineMs,
+      }).toEqual({
+        durability: parsed.durability,
+        backpressurePolicy: parsed.backpressurePolicy,
+        maxBytes: parsed.maxBytes,
+        maxSegmentBytes: parsed.maxSegmentBytes,
+        appendDeadlineMs: parsed.appendDeadlineMs,
+      });
+      // sf_sync_interval_millis has no default of its own, so the journal's
+      // checkpoint cadence applies to both.
+      expect(parsed.checkpointIntervalMs).toBeUndefined();
+      expect(journal.checkpointIntervalMs).toBe(5_000);
+    } finally {
+      await store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts reconnect_max_duration_millis=0 as a one-attempt startup budget", async () => {
+    // Accepted, as by the Rust and Python clients, and with their meaning: the
+    // synchronous startup the key selects makes one attempt and does not
+    // retry. Java rejects zero.
+    const zero = parseQwpNodeClientConfig(
       "ws::addr=localhost;reconnect_max_duration_millis=0;",
-    ).ingressSession?.reconnect;
-    expect(disabled).toBeTruthy();
-    expect(disabled ? disabled.maxDurationMs : -1).toBe(0);
+    );
+    const reconnect = zero.ingress?.reconnect;
+    expect(reconnect).toBeTruthy();
+    expect(reconnect ? reconnect.reconnectMaxDurationMs : -1).toBe(0);
+    expect(zero.ingress?.initialConnectMode).toBe("sync");
     await expect(
       SenderOptions.fromConfig(
         "ws::addr=localhost:9000;reconnect_max_duration_millis=0;",
       ),
     ).resolves.toBeDefined();
+
+    let attempts = 0;
+    const sender = await Sender.fromConfig(
+      "ws::addr=offline.example;reconnect_max_duration_millis=0;",
+      {
+        qwp: {
+          webSocket: {
+            webSocketFactory: () => {
+              attempts++;
+              return new RejectingWebSocket() as unknown as QwpWebSocketLike;
+            },
+          },
+        },
+      },
+    );
+    try {
+      await expect(sender.connect()).rejects.toMatchObject({
+        name: "QwpReconnectExhaustedError",
+        attempts: 1,
+      });
+      expect(attempts).toBe(1);
+    } finally {
+      await sender.close().catch(() => undefined);
+    }
     // A negative budget is still a configuration error.
     expect(() =>
       parseQwpNodeClientConfig(
@@ -209,7 +292,7 @@ describe("QWP unified Node client configuration", () => {
       "ws::addr=localhost;failover=off;",
     );
 
-    expect(options.egressSession?.reconnect).toBe(false);
+    expect(options.egress?.reconnect).toBe(false);
   });
 
   it("fails fast on the default persistent initial connection", async () => {
@@ -218,7 +301,7 @@ describe("QWP unified Node client configuration", () => {
     const client = createQwpNodeClient(
       `ws::addr=offline.example;sf_dir=${directory};sender_pool_max=1;query_pool_min=0;`,
       {
-        webSocket: {
+        cluster: {
           webSocketFactory: (_url, { onConnected }) => {
             attempts++;
             onConnected();
@@ -257,7 +340,7 @@ describe("QWP unified Node client configuration", () => {
         connectQwpNodeClient(
           `ws::addr=offline.example;sf_dir=${directory};sender_pool_max=1;query_pool_min=0;`,
           {
-            webSocket: {
+            cluster: {
               webSocketFactory: (_url, { onConnected }) => {
                 onConnected();
                 return new RejectingWebSocket() as unknown as QwpWebSocketLike;
@@ -287,9 +370,8 @@ describe("QWP unified Node client configuration", () => {
       resolveSocket = resolve;
     });
     const client = createQwpNodeClient({
-      ingress: { url: "ws://localhost:9000/write/v4" },
+      cluster: { url: "ws://localhost:9000" },
       egress: {
-        url: "ws://localhost:9000/read/v1",
         authTimeoutMs: 30_000,
         webSocketFactory: (_url, { onConnected }) => {
           const socket = new PendingWebSocket();
@@ -331,7 +413,7 @@ describe("QWP unified Node client configuration", () => {
       client = await connectQwpNodeClient(
         `ws::addr=offline.example;sf_dir=${directory};sender_id=producer_1;lazy_connect=on;sender_pool_max=1;`,
         {
-          webSocket: {
+          cluster: {
             webSocketFactory: (url, { onConnected }) => {
               attemptedPaths.push(new URL(url).pathname);
               onConnected();
@@ -351,19 +433,70 @@ describe("QWP unified Node client configuration", () => {
     }
   });
 
-  it("starts lazy memory-buffered ingress without sf_dir", async () => {
+  it("shuts a store-and-forward pool down during an outage with its frames journalled", async () => {
+    // The pooled sender's close drain times out because no server is
+    // reachable, but its frames stay in the journal for the next process:
+    // shutdown succeeds and the warning says where the frames are.
+    const directory = await mkdtemp(join(tmpdir(), "qwp-pool-sf-close-"));
+    const warnings: string[] = [];
+    try {
+      const client = await connectQwpNodeClient(
+        `ws::addr=offline.example;sf_dir=${directory};sender_id=producer;lazy_connect=on;sender_pool_max=1;`,
+        {
+          cluster: {
+            webSocketFactory: (_url, { onConnected }) => {
+              onConnected();
+              return new RejectingWebSocket() as unknown as QwpWebSocketLike;
+            },
+          },
+          ingress: {
+            closeFlushTimeoutMs: 50,
+            log: (level, message) => {
+              if (level === "warn") warnings.push(String(message));
+            },
+          },
+        },
+      );
+      const sender = await client.borrowSender();
+      await sender.table("events").longColumn("value", 42n).atNow();
+      await sender.flush();
+      await sender.close();
+
+      await expect(client.close()).resolves.toBeUndefined();
+      expect(warnings).toEqual([
+        expect.stringMatching(
+          /^Closing a pooled QWP sender failed: QWP sender close timed out.*remain in the store-and-forward journal/,
+        ),
+      ]);
+      const journal = new QwpNodeFileReplayStore({
+        directory: join(directory, "producer-0"),
+      });
+      await expect(journal.load()).resolves.toHaveLength(1);
+      await journal.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("warns about undelivered lazy memory ingress on client shutdown", async () => {
     const attemptedPaths: string[] = [];
+    const warnings: string[] = [];
     const client = await connectQwpNodeClient(
       "ws::addr=offline.example;lazy_connect=on;sender_pool_max=1;",
       {
-        webSocket: {
+        cluster: {
           webSocketFactory: (url, { onConnected }) => {
             attemptedPaths.push(new URL(url).pathname);
             onConnected();
             return new RejectingWebSocket() as unknown as QwpWebSocketLike;
           },
         },
-        sender: { closeFlushTimeoutMs: 0 },
+        ingress: {
+          closeFlushTimeoutMs: 0,
+          log: (level, message) => {
+            if (level === "warn") warnings.push(String(message));
+          },
+        },
       },
     );
     try {
@@ -376,48 +509,41 @@ describe("QWP unified Node client configuration", () => {
       expect(sender.metrics.totalRowsPublished).toBe(1);
       await sender.close();
     } finally {
-      await client.close();
+      vi.useFakeTimers();
+      try {
+        // Shutdown itself succeeds, as in the Java, Rust and Python pools;
+        // the frames it could not send are reported as a warning.
+        const closing = expect(client.close()).resolves.toBeUndefined();
+        await vi.advanceTimersByTimeAsync(5_001);
+        await closing;
+      } finally {
+        vi.useRealTimers();
+      }
     }
+    expect(warnings).toEqual([
+      expect.stringMatching(
+        /^Closing a pooled QWP sender failed: QWP sender close timed out.*pending data may be lost$/,
+      ),
+    ]);
   });
 
-  it("lets a typed store-and-forward startup mode win over the connect string", () => {
-    // QWP.md documents `initialConnectMode` as the typed spelling of the
-    // startup policy and states that a typed value wins. The session field is
-    // the internal half of the same policy, so deriving it from the string's
-    // default manufactured a conflict out of the documented override.
+  it("lets a typed startup mode win over the connect string", () => {
+    // QWP.md documents `initialConnectMode` as the typed spelling of
+    // `initial_connect_retry`, and a typed value wins -- with a journal too,
+    // which has no startup policy of its own.
     for (const suffix of ["", "initial_connect_retry=off;"]) {
       const resolved = parseQwpNodeClientConfig(
         `ws::addr=localhost;sf_dir=/tmp/qwp;${suffix}`,
-        {
-          storeAndForward: {
-            directory: "/tmp/qwp",
-            initialConnectMode: "async",
-          },
-        },
+        { ingress: { initialConnectMode: "async" } },
       );
-      expect(resolved.ingress.storeAndForward?.initialConnectMode).toBe(
-        "async",
-      );
-      expect(resolved.ingressSession?.initialConnectMode).toBe("async");
+      expect(resolved.ingress?.initialConnectMode).toBe("async");
     }
 
     // Without a typed override the connect string still decides.
     const fromString = parseQwpNodeClientConfig(
       "ws::addr=localhost;sf_dir=/tmp/qwp;initial_connect_retry=sync;",
     );
-    expect(fromString.ingress.storeAndForward?.initialConnectMode).toBe("sync");
-    expect(fromString.ingressSession?.initialConnectMode).toBe("sync");
-
-    // A typed session mode that genuinely disagrees is still a conflict.
-    expect(() =>
-      parseQwpNodeClientConfig("ws::addr=localhost;sf_dir=/tmp/qwp;", {
-        storeAndForward: {
-          directory: "/tmp/qwp",
-          initialConnectMode: "async",
-        },
-        ingressSession: { initialConnectMode: "sync" },
-      }),
-    ).toThrow(/initialConnectMode.*differs/);
+    expect(fromString.ingress?.initialConnectMode).toBe("sync");
   });
 
   it("rejects lazy startup conflicts before constructing the client", async () => {
@@ -433,33 +559,208 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/lazyConnect requires queryPoolMin=0/);
     expect(() =>
       createQwpNodeClient({
+        cluster: { url: "ws://localhost:9000" },
         ingress: {
-          url: "ws://localhost:9000/write/v4",
-          storeAndForward: {
-            directory: "/tmp/qwp",
-            initialConnectMode: "off",
-          },
+          initialConnectMode: "sync",
+          storeAndForward: { directory: "/tmp/qwp" },
         },
-        egress: { url: "ws://localhost:9000/read/v1" },
-        ingressSession: { initialConnectMode: "sync" },
+        lazyConnect: true,
       }),
-    ).toThrow(/initialConnectMode.*differs/);
+    ).toThrow(/lazyConnect requires.*initialConnectMode='async'/);
     const memoryOptions = parseQwpNodeClientConfig(
       "ws::addr=localhost;lazy_connect=on;",
     );
     expect(memoryOptions.ingress.storeAndForward).toBeUndefined();
-    expect(memoryOptions.ingressSession).toMatchObject({
-      backgroundStoreAndForward: true,
-      initialConnectMode: "async",
-    });
+    // The async mode alone selects a background start, so the returned
+    // options carry no adapter-internal flag beside it.
+    expect(memoryOptions.ingress?.initialConnectMode).toBe("async");
+    expect(memoryOptions.ingress).not.toHaveProperty(
+      "backgroundStoreAndForward",
+    );
     const client = createQwpNodeClient({
-      ingress: { url: "ws://localhost:9000/write/v4" },
-      egress: { url: "ws://localhost:9000/read/v1" },
+      cluster: { url: "ws://localhost:9000" },
       lazyConnect: true,
       pool: { senderPoolMin: 0 },
     });
     expect(client.metrics.senders.minimum).toBe(0);
     await client.close();
+  });
+
+  it("reads lazy_connect and initial_connect_retry as the Java and Rust parsers do", () => {
+    // The Java, Rust and Python docs all spell the flag lazy_connect=true,
+    // which this parser used to reject; Rust also ignores case for both keys,
+    // and Java for initial_connect_retry.
+    for (const flag of ["on", "true", "ON", "True"]) {
+      expect(
+        parseQwpNodeClientConfig(`ws::addr=localhost;lazy_connect=${flag};`)
+          .lazyConnect,
+      ).toBe(true);
+    }
+    for (const flag of ["off", "false", "OFF", "False"]) {
+      expect(
+        parseQwpNodeClientConfig(`ws::addr=localhost;lazy_connect=${flag};`)
+          .lazyConnect,
+      ).toBe(false);
+    }
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;lazy_connect=yes;"),
+    ).toThrow(
+      "Invalid lazy_connect: 'yes', accepted values: 'on', 'off', 'true', 'false'",
+    );
+
+    for (const [value, mode] of [
+      ["ASYNC", "async"],
+      ["Sync", "sync"],
+      ["On", "sync"],
+      ["TRUE", "sync"],
+      ["Off", "off"],
+      ["false", "off"],
+    ] as const) {
+      expect(
+        parseQwpNodeClientConfig(
+          `ws::addr=localhost;initial_connect_retry=${value};`,
+        ).ingress?.initialConnectMode,
+      ).toBe(mode);
+    }
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;initial_connect_retry=later;",
+      ),
+    ).toThrow(
+      "Invalid initial_connect_retry: 'later', accepted values: 'on', 'off', 'true', 'false', 'sync', 'async'",
+    );
+
+    // The lazy_connect conflict check reads the parsed mode, so it is
+    // case-insensitive as well.
+    expect(() =>
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;lazy_connect=true;initial_connect_retry=SYNC;",
+      ),
+    ).toThrow(/lazyConnect requires.*initialConnectMode='async'/);
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;lazy_connect=TRUE;initial_connect_retry=Async;",
+      ).ingress?.initialConnectMode,
+    ).toBe("async");
+  });
+
+  it("lets a typed lazyConnect override the connect string", () => {
+    // The overrides take the client's own sections, lazyConnect included, and
+    // a typed value wins over the key in either direction.
+    const typed = parseQwpNodeClientConfig("ws::addr=localhost;", {
+      lazyConnect: true,
+    });
+    expect(typed.lazyConnect).toBe(true);
+    expect(typed.ingress?.initialConnectMode).toBe("async");
+    expect(typed.pool?.queryPoolMin).toBe(0);
+
+    const disabled = parseQwpNodeClientConfig(
+      "ws::addr=localhost;lazy_connect=on;",
+      { lazyConnect: false },
+    );
+    expect(disabled.lazyConnect).toBe(false);
+    expect(disabled.ingress?.initialConnectMode).toBe("off");
+  });
+
+  it("leaves lazy_connect to the pooled client", async () => {
+    // The Java QuestDB facade and the Rust and Python pools apply
+    // lazy_connect; their standalone senders accept it and ignore it.
+    const log = () => undefined;
+    const memory = qwpConfig(
+      await SenderOptions.fromConfig(
+        "ws::addr=localhost:9000;lazy_connect=on;",
+        {
+          log,
+        },
+      ),
+    );
+    // A Sender resolves to its ingress options alone, and lazy_connect left
+    // their startup policy at its fail-fast default.
+    expect(memory?.initialConnectMode).toBe("off");
+
+    const persistent = qwpConfig(
+      await SenderOptions.fromConfig(
+        "ws::addr=localhost:9000;lazy_connect=on;sf_dir=/tmp/qwp-lazy-sender;",
+        { log },
+      ),
+    );
+    expect(persistent?.storeAndForward).toBeDefined();
+    expect(persistent?.initialConnectMode).toBe("off");
+
+    // Ignored, so it neither suppresses the reconnect promotion nor conflicts
+    // with the keys the pooled client's lazy contract rejects.
+    expect(
+      qwpConfig(
+        await SenderOptions.fromConfig(
+          "ws::addr=localhost:9000;lazy_connect=on;reconnect_max_duration_millis=1000;",
+          { log },
+        ),
+      )?.initialConnectMode,
+    ).toBe("sync");
+    expect(
+      qwpConfig(
+        await SenderOptions.fromConfig(
+          "ws::addr=localhost:9000;lazy_connect=on;query_pool_min=1;initial_connect_retry=sync;",
+          { log },
+        ),
+      )?.initialConnectMode,
+    ).toBe("sync");
+
+    // Its value is still validated, like every key in the shared vocabulary.
+    await expect(
+      SenderOptions.fromConfig("ws::addr=localhost:9000;lazy_connect=maybe;", {
+        log,
+      }),
+    ).rejects.toThrow(/Invalid lazy_connect: 'maybe'/);
+
+    // The pooled client keeps applying it.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;lazy_connect=on;").ingress
+        ?.initialConnectMode,
+    ).toBe("async");
+  });
+
+  it("resolves typed startup overrides against the connect string", () => {
+    // A typed initialConnectMode wins over the string, with a journal too.
+    const typedOverride = parseQwpNodeClientConfig(
+      "ws::addr=localhost;sf_dir=/tmp/qwp;",
+      { ingress: { initialConnectMode: "async" } },
+    );
+    expect(typedOverride.ingress?.initialConnectMode).toBe("async");
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;initial_connect_retry=sync;",
+        { ingress: { initialConnectMode: "off" } },
+      ).ingress?.initialConnectMode,
+    ).toBe("off");
+
+    // Promotion reads the reconnect policy the session will run, and a typed
+    // `reconnect` replaces the string's whole object.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        ingress: { reconnect: { reconnectMaxDurationMs: 30_000 } },
+      }).ingress?.initialConnectMode,
+    ).toBe("sync");
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;reconnect_max_duration_millis=30000;",
+        { ingress: { reconnect: { onEvent: () => undefined } } },
+      ).ingress?.initialConnectMode,
+    ).toBe("off");
+
+    // Typed values are validated up front, and lazyConnect needs reconnect.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        ingress: { initialConnectMode: "later" as never },
+      }),
+    ).toThrow("ingress.initialConnectMode must be 'off', 'sync', or 'async'");
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;lazy_connect=on;", {
+        ingress: { reconnect: false },
+      }),
+    ).toThrow(
+      "conflicting configuration: lazyConnect requires ingress reconnect",
+    );
   });
 
   it("validates ingress, egress, pool, and shared conflicts up front", () => {
@@ -527,6 +828,30 @@ describe("QWP unified Node client configuration", () => {
     ).not.toThrow();
   });
 
+  it("parses the default query timeout, where zero means none", () => {
+    // The key Java's QuestDB facade reads. Rejected as unknown, a connect
+    // string written for it failed here before any query ran.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=0;").egress
+        ?.queryTimeoutMs,
+    ).toBe(0);
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;").egress?.queryTimeoutMs,
+    ).toBeUndefined();
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=-1;"),
+    ).toThrow(/query_timeout_ms must be an integer between 0 and/);
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=1.5;"),
+    ).toThrow(/Invalid query_timeout_ms/);
+    // The typed override wins over the key.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;query_timeout_ms=100;", {
+        egress: { queryTimeoutMs: 200 },
+      }).egress?.queryTimeoutMs,
+    ).toBe(200);
+  });
+
   it("rejects a compression level that cannot reach the wire", () => {
     // compression defaults to raw, which sends no accept-encoding header, so a
     // level on its own parsed, validated its range, and then provably did
@@ -585,44 +910,115 @@ describe("QWP unified Node client configuration", () => {
       "ws::addr=localhost;auto_flush_rows=5000;auto_flush_interval=7000;" +
       "error_inbox_capacity=512;query_pool_max=6;";
     const baseline = parseQwpNodeClientConfig(connectString);
-    expect(baseline.sender).toMatchObject({
+    expect(baseline.ingress).toMatchObject({
       autoFlushRows: 5000,
       autoFlushIntervalMs: 7000,
     });
 
     const overridden = parseQwpNodeClientConfig(connectString, {
-      sender: { autoFlushRows: undefined, autoFlushIntervalMs: undefined },
-      ingressSession: { errorInboxCapacity: undefined },
+      ingress: {
+        autoFlushRows: undefined,
+        autoFlushIntervalMs: undefined,
+        errorInboxCapacity: undefined,
+      },
       pool: { queryPoolMax: undefined },
     });
-    expect(overridden.sender).toMatchObject({
+    expect(overridden.ingress).toMatchObject({
       autoFlushRows: 5000,
       autoFlushIntervalMs: 7000,
     });
-    expect(overridden.ingressSession?.errorInboxCapacity).toBe(512);
+    expect(overridden.ingress?.errorInboxCapacity).toBe(512);
     expect(overridden.pool?.queryPoolMax).toBe(6);
 
     // A value that is actually supplied still wins.
     expect(
       parseQwpNodeClientConfig(connectString, {
-        sender: { autoFlushRows: 10 },
-      }).sender?.autoFlushRows,
+        ingress: { autoFlushRows: 10 },
+      }).ingress?.autoFlushRows,
     ).toBe(10);
   });
 
-  it("keeps the existing object API and accepts a string in the same facade", async () => {
-    const legacy: QwpNodeClientOptions = {
-      ingress: { url: "ws://localhost:9000/write/v4" },
-      egress: { url: "ws://localhost:9000/read/v1" },
+  it("accepts the object form and a string in the same facade", async () => {
+    const typed: QwpNodeClientOptions = {
+      cluster: { url: "ws://localhost:9000" },
       pool: { senderPoolMin: 0, queryPoolMin: 0 },
     };
-    const objectClient = createQwpNodeClient(legacy);
+    const objectClient = createQwpNodeClient(typed);
     const stringClient = createQwpNodeClient(
       "ws::addr=localhost;sender_pool_min=0;query_pool_min=0;",
     );
     expect(objectClient.metrics.senders.minimum).toBe(0);
     expect(stringClient.metrics.queries.minimum).toBe(0);
     await Promise.all([objectClient.close(), stringClient.close()]);
+  });
+
+  it("derives both sides from a typed cluster", () => {
+    // A cluster URL may be an origin, a reverse-proxy base path, or an
+    // existing route; each side derives its own and keeps the query.
+    const { ingress, egress } = resolveQwpNodeClientSides({
+      cluster: {
+        url: "wss://node-a.example/qdb?tenant=blue",
+        failoverUrls: ["wss://node-b.example/qdb/read/v1?tenant=blue"],
+        authorization: "Bearer shared",
+        connectTimeoutMs: 1_000,
+      },
+      ingress: { autoFlushRows: 10, connectTimeoutMs: 2_000 },
+      egress: { compression: "zstd" },
+    });
+    expect(String(ingress.url)).toBe(
+      "wss://node-a.example/qdb/write/v4?tenant=blue",
+    );
+    expect(ingress.failoverUrls?.map(String)).toEqual([
+      "wss://node-b.example/qdb/write/v4?tenant=blue",
+    ]);
+    expect(String(egress.url)).toBe(
+      "wss://node-a.example/qdb/read/v1?tenant=blue",
+    );
+    // Shared settings reach both sides; a side's own value wins for it alone.
+    expect(ingress).toMatchObject({
+      authorization: "Bearer shared",
+      autoFlushRows: 10,
+      connectTimeoutMs: 2_000,
+    });
+    expect(egress).toMatchObject({
+      authorization: "Bearer shared",
+      compression: "zstd",
+      connectTimeoutMs: 1_000,
+    });
+  });
+
+  it("rejects misplaced and unknown client sections", () => {
+    // Endpoints and authentication are configured once, under cluster.
+    expect(() =>
+      createQwpNodeClient({
+        cluster: { url: "ws://localhost:9000" },
+        ingress: { authorization: "Bearer other" },
+      } as never),
+    ).toThrow(
+      "ingress.authorization must be configured once under cluster.authorization",
+    );
+    expect(() =>
+      createQwpNodeClient({
+        cluster: { url: "ws://localhost:9000" },
+        egress: { url: "ws://elsewhere:9000/read/v1" },
+      } as never),
+    ).toThrow("egress.url must be configured once under cluster.url");
+    expect(() => createQwpNodeClient({ ingress: {} } as never)).toThrow(
+      "QWP client configuration requires cluster",
+    );
+    // A section from an earlier shape of these options would drop every
+    // setting inside it without a word, so it is rejected by name.
+    expect(() =>
+      createQwpNodeClient({
+        cluster: { url: "ws://localhost:9000" },
+        ingressSession: { ackTimeoutMs: 1_000 },
+      } as never),
+    ).toThrow("unknown QWP client section 'ingressSession'");
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        webSocket: { clientId: "probe" },
+      } as never),
+    ).toThrow("unknown QWP client override section 'webSocket'");
   });
 
   it("rejects duplicate and unknown active keys", () => {
@@ -644,10 +1040,10 @@ describe("QWP unified Node client configuration", () => {
         "max_name_len=512;sender_id=producer_1;sf_max_segment_bytes=8m;" +
         "sf_max_total_bytes=64m;sf_append_deadline_millis=1234;",
     );
-    expect(options.ingress.agent).toBeDefined();
-    expect(options.sender?.maxNameLength).toBe(512);
+    expect(options.cluster.agent).toBeDefined();
+    expect(options.ingress?.maxNameLength).toBe(512);
     expect(options.ingress.senderId).toBe("producer_1");
-    expect(options.ingressSession).toMatchObject({
+    expect(options.ingress).toMatchObject({
       maxBatchSizeBytes: 8 * 1024 * 1024,
       memoryReplayMaxBytes: 64 * 1024 * 1024,
       memoryReplayAppendDeadlineMs: 1234,
@@ -676,76 +1072,131 @@ describe("QWP unified Node client configuration", () => {
     ).toThrow(/error_inbox_capacity/);
   });
 
-  it("routes ingress by target and zone, not only egress", () => {
-    // Both keys were parsed, validated and then applied to the egress factory
-    // alone. On the ingress side target degenerated to "accept any role" and
-    // the health tracker ran zone-blind, so every endpoint ranked as same-zone
-    // and configuration order alone decided where writes went. Through
-    // Sender.fromConfig it was total: that path uses only options.ingress, so
-    // a bogus target still threw while a valid one did nothing at all.
+  it("routes query sessions by target and zone and leaves writes to the primary", () => {
+    // Writes can only land on the primary: a replica, or a primary still
+    // catching up, answers the /write/v4 upgrade with 421 and the ingress
+    // sweep moves on. Copying both keys onto ingress as well made
+    // target=replica, the usual read-scaling setting, refuse the primary the
+    // sweep had found, so a pooled client's senders had nowhere to connect.
     const options = parseQwpNodeClientConfig(
-      "ws::addr=db-a.example:9000,db-b.example:9000;target=primary;zone=eu-west-1a;",
+      "ws::addr=db-a.example:9000,db-b.example:9000;target=replica;zone=eu-west-1a;",
     );
 
-    expect(options.ingress).toMatchObject({
-      target: "primary",
-      zone: "eu-west-1a",
-    });
     expect(options.egress).toMatchObject({
-      target: "primary",
+      target: "replica",
       zone: "eu-west-1a",
     });
+    const { ingress, egress } = resolveQwpNodeClientSides(options);
+    expect(egress).toMatchObject({ target: "replica", zone: "eu-west-1a" });
+    for (const resolved of [options.ingress, ingress]) {
+      expect(resolved).not.toHaveProperty("target");
+      expect(resolved).not.toHaveProperty("zone");
+    }
   });
 
-  it("keeps requestDurableAck on ingress when it is set as a shared override", () => {
-    // Durable ACK is negotiated on /write/v4 only. The typed webSocket block
-    // is spread into both sides, so this override also reached egress, whose
-    // upgrade then demanded an x-qwp-durable-ack response header that
-    // /read/v1 never sends -- every pooled query session failed to connect
-    // with QwpDurableAckUnavailableError while ingress worked fine.
+  it("rejects routing where only ingress would read it", () => {
+    // The option types have no such fields, and the cluster's settings reach
+    // ingress too; a JavaScript caller learns why rather than having the
+    // routing request dropped.
+    for (const [overrides, message] of [
+      [{ ingress: { target: "primary" } }, "ingress.target is not an ingress"],
+      [{ ingress: { zone: "eu-west-1a" } }, "ingress.zone is not an ingress"],
+      [{ cluster: { target: "replica" } }, "cluster.target is not an ingress"],
+    ] as const) {
+      expect(() =>
+        parseQwpNodeClientConfig("ws::addr=localhost;", overrides as never),
+      ).toThrow(message);
+    }
+    expect(() =>
+      createQwpNodeClient({
+        cluster: { url: "ws://localhost:9000" },
+        ingress: { target: "replica" },
+      } as never),
+    ).toThrow(
+      "ingress.target is not an ingress option: QuestDB accepts writes on the primary alone, so target routes query sessions only; set it under egress instead",
+    );
+  });
+
+  it("keeps requestDurableAck on ingress", () => {
+    // Durable ACK is negotiated on /write/v4 only. As a shared webSocket
+    // override it also reached egress, whose upgrade then demanded an
+    // x-qwp-durable-ack response header that /read/v1 never sends -- every
+    // pooled query session failed to connect with
+    // QwpDurableAckUnavailableError while ingress worked fine. The typed
+    // override therefore has an ingress section of its own.
     const overridden = parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
-      webSocket: { requestDurableAck: true },
+      ingress: { requestDurableAck: true },
     });
     expect(overridden.ingress.requestDurableAck).toBe(true);
-    expect(overridden.egress.requestDurableAck).toBeUndefined();
+    expect(overridden.egress).not.toHaveProperty("requestDurableAck");
 
-    // The connect-string key has always been ingress-only; the two agree now.
+    // A typed value wins over the connect-string key, as every typed one does.
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost:9000;request_durable_ack=on;",
+        { ingress: { requestDurableAck: false } },
+      ).ingress.requestDurableAck,
+    ).toBe(false);
+
+    // The connect-string key has always been ingress-only.
     const fromString = parseQwpNodeClientConfig(
       "ws::addr=localhost:9000;request_durable_ack=on;",
     );
     expect(fromString.ingress.requestDurableAck).toBe(true);
-    expect(fromString.egress.requestDurableAck).toBeUndefined();
+    expect(fromString.egress).not.toHaveProperty("requestDurableAck");
 
-    // The keepalive is also a documented direct request for durable progress.
+    // As in the Java and Rust clients, the keepalive requests nothing: it is
+    // carried as set, and the sender ignores it unless durable ACK is on. Both
+    // strings below are ones those clients accept.
     const keepaliveOnly = parseQwpNodeClientConfig(
       "ws::addr=localhost:9000;durable_ack_keepalive_interval_millis=10;",
     );
-    expect(keepaliveOnly.ingress.requestDurableAck).toBe(true);
-    expect(keepaliveOnly.ingressSession.durableAckKeepaliveMs).toBe(10);
-    expect(keepaliveOnly.egress.requestDurableAck).toBeUndefined();
+    expect(keepaliveOnly.ingress.requestDurableAck).toBeUndefined();
+    expect(keepaliveOnly.ingress.durableAckKeepaliveMs).toBe(10);
+    expect(keepaliveOnly.egress).not.toHaveProperty("requestDurableAck");
 
-    expect(() =>
-      parseQwpNodeClientConfig(
-        "ws::addr=localhost:9000;request_durable_ack=off;durable_ack_keepalive_interval_millis=10;",
-      ),
-    ).toThrow(
-      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
+    const keepaliveOff = parseQwpNodeClientConfig(
+      "ws::addr=localhost:9000;request_durable_ack=off;durable_ack_keepalive_interval_millis=10;",
     );
+    expect(keepaliveOff.ingress.requestDurableAck).toBe(false);
+    expect(keepaliveOff.ingress.durableAckKeepaliveMs).toBe(10);
 
-    // Other shared webSocket overrides still reach both sides.
-    const shared = parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
-      webSocket: { requestDurableAck: true, clientId: "probe" },
+    // Shared cluster overrides still reach both sides, and the request stays
+    // on ingress once the sides are resolved.
+    const shared = resolveQwpNodeClientSides(
+      parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
+        cluster: { clientId: "probe" },
+        ingress: { requestDurableAck: true },
+      }),
+    );
+    expect(shared.ingress).toMatchObject({
+      clientId: "probe",
+      requestDurableAck: true,
     });
-    expect(shared.ingress.clientId).toBe("probe");
     expect(shared.egress.clientId).toBe("probe");
+    expect(shared.egress).not.toHaveProperty("requestDurableAck");
+  });
+
+  it("routes a Sender's typed requestDurableAck to ingress", async () => {
+    // qwp.webSocket is a Sender's ingress section, so it may carry the
+    // request. Spread into the transport settings both sides share, it would
+    // never reach the ingress upgrade.
+    const resolved = qwpConfig(
+      await SenderOptions.fromConfig("ws::addr=localhost:9000;", {
+        qwp: { webSocket: { requestDurableAck: true, clientId: "probe" } },
+      }),
+    );
+    expect(resolved?.requestDurableAck).toBe(true);
+    expect(resolved?.clientId).toBe("probe");
   });
 
   it("validates cluster authorities and supports bracketed IPv6", () => {
     const options = parseQwpNodeClientConfig(
       "ws::addr=[::1],[2001:db8::2]:9443;sender_pool_min=0;query_pool_min=0;",
     );
-    expect(String(options.ingress.url)).toBe("ws://[::1]:9000/write/v4");
-    expect(options.egress.failoverUrls?.map(String)).toEqual([
+    const { ingress, egress } = resolveQwpNodeClientSides(options);
+    expect(String(ingress.url)).toBe("ws://[::1]:9000/write/v4");
+    expect(egress.failoverUrls?.map(String)).toEqual([
       "ws://[2001:db8::2]:9443/read/v1",
     ]);
     for (const address of ["host:", "host:0", "host:65536", "::1"]) {
@@ -800,89 +1251,84 @@ describe("QWP unified Node client configuration", () => {
 
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=localhost;", {
-        ingressSession: {
-          reconnect: { initialBackoffMs: overTimerCeiling },
-        },
+        ingress: { reconnect: { reconnectInitialBackoffMs: overTimerCeiling } },
       }),
     ).toThrow(
-      `reconnect initialBackoffMs must be no greater than ${timerCeiling}`,
+      `reconnect reconnectInitialBackoffMs must be no greater than ${timerCeiling}`,
     );
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=localhost;", {
-        egressSession: {
-          reconnect: { maxBackoffMs: overTimerCeiling },
-        },
+        egress: { reconnect: { failoverBackoffMaxMs: overTimerCeiling } },
       }),
-    ).toThrow(`reconnect maxBackoffMs must be no greater than ${timerCeiling}`);
+    ).toThrow(
+      `reconnect failoverBackoffMaxMs must be no greater than ${timerCeiling}`,
+    );
 
     const parsed = parseQwpNodeClientConfig("ws::addr=localhost;", {
-      ingressSession: {
+      ingress: {
         reconnect: {
-          initialBackoffMs: timerCeiling,
-          maxBackoffMs: timerCeiling,
-          maxDurationMs: overTimerCeiling,
+          reconnectInitialBackoffMs: timerCeiling,
+          reconnectMaxBackoffMs: timerCeiling,
+          reconnectMaxDurationMs: overTimerCeiling,
           poisonMinEscalationWindowMs: overTimerCeiling,
         },
       },
-      egressSession: {
+      egress: {
         reconnect: {
-          initialBackoffMs: timerCeiling,
-          maxBackoffMs: timerCeiling,
-          maxDurationMs: overTimerCeiling,
+          failoverBackoffInitialMs: timerCeiling,
+          failoverBackoffMaxMs: timerCeiling,
+          failoverMaxDurationMs: overTimerCeiling,
         },
       },
     });
-    expect(parsed.ingressSession?.reconnect).toMatchObject({
-      initialBackoffMs: timerCeiling,
-      maxBackoffMs: timerCeiling,
-      maxDurationMs: overTimerCeiling,
+    expect(parsed.ingress?.reconnect).toMatchObject({
+      reconnectInitialBackoffMs: timerCeiling,
+      reconnectMaxBackoffMs: timerCeiling,
+      reconnectMaxDurationMs: overTimerCeiling,
       poisonMinEscalationWindowMs: overTimerCeiling,
     });
-    expect(parsed.egressSession?.reconnect).toMatchObject({
-      initialBackoffMs: timerCeiling,
-      maxBackoffMs: timerCeiling,
-      maxDurationMs: overTimerCeiling,
+    expect(parsed.egress?.reconnect).toMatchObject({
+      failoverBackoffInitialMs: timerCeiling,
+      failoverBackoffMaxMs: timerCeiling,
+      failoverMaxDurationMs: overTimerCeiling,
     });
 
     const webSocketFactory = vi.fn(
       () => new PendingWebSocket() as unknown as QwpWebSocketLike,
     );
     const baseOptions: QwpNodeClientOptions = {
-      ingress: {
-        url: "ws://localhost:9000/write/v4",
-        webSocketFactory,
-      },
-      egress: {
-        url: "ws://localhost:9000/read/v1",
-        webSocketFactory,
-      },
+      cluster: { url: "ws://localhost:9000", webSocketFactory },
       lazyConnect: true,
     };
     expect(() =>
       createQwpNodeClient({
         ...baseOptions,
-        ingressSession: {
-          reconnect: { initialBackoffMs: overTimerCeiling },
+        ingress: {
+          reconnect: { reconnectInitialBackoffMs: overTimerCeiling },
         },
       }),
     ).toThrow(
-      `reconnect initialBackoffMs must be no greater than ${timerCeiling}`,
+      `reconnect reconnectInitialBackoffMs must be no greater than ${timerCeiling}`,
     );
     expect(() =>
       createQwpNodeClient({
         ...baseOptions,
-        egressSession: {
-          reconnect: { maxBackoffMs: overTimerCeiling },
+        egress: {
+          reconnect: { failoverBackoffMaxMs: overTimerCeiling },
         },
       }),
-    ).toThrow(`reconnect maxBackoffMs must be no greater than ${timerCeiling}`);
+    ).toThrow(
+      `reconnect failoverBackoffMaxMs must be no greater than ${timerCeiling}`,
+    );
     // A valid client at the inclusive ceiling still constructs, and lazyConnect
     // defers every socket to the first borrow. Asserting the factory is unused
     // only means something once construction has actually succeeded.
     const lazyClient = createQwpNodeClient({
       ...baseOptions,
-      ingressSession: { reconnect: { initialBackoffMs: timerCeiling } },
-      egressSession: { reconnect: { maxBackoffMs: timerCeiling } },
+      ingress: {
+        reconnect: { reconnectInitialBackoffMs: timerCeiling },
+      },
+      egress: { reconnect: { failoverBackoffMaxMs: timerCeiling } },
     });
     expect(webSocketFactory).not.toHaveBeenCalled();
     await lazyClient.close();
@@ -903,6 +1349,7 @@ describe("QWP unified Node client configuration", () => {
       "failover_backoff_initial_ms",
       "failover_backoff_max_ms",
       "query_close_timeout_ms",
+      "query_timeout_ms",
       "acquire_timeout_ms",
       "idle_timeout_ms",
       "max_lifetime_ms",
@@ -919,34 +1366,34 @@ describe("QWP unified Node client configuration", () => {
     expect(
       parseQwpNodeClientConfig(
         "wss::addr=host:9000;auth_timeout_ms=2147483647;",
-      ).ingress.authTimeoutMs,
+      ).cluster.authTimeoutMs,
     ).toBe(2147483647);
     expect(
       parseQwpNodeClientConfig(
         "wss::addr=host:9000;reconnect_initial_backoff_millis=2147483647;reconnect_max_backoff_millis=2147483647;",
-      ).ingressSession?.reconnect,
+      ).ingress?.reconnect,
     ).toMatchObject({
-      initialBackoffMs: 2147483647,
-      maxBackoffMs: 2147483647,
+      reconnectInitialBackoffMs: 2147483647,
+      reconnectMaxBackoffMs: 2147483647,
     });
     expect(
       parseQwpNodeClientConfig(
         "wss::addr=host:9000;failover_backoff_initial_ms=2147483647;failover_backoff_max_ms=2147483647;",
-      ).egressSession?.reconnect,
+      ).egress?.reconnect,
     ).toMatchObject({
-      initialBackoffMs: 2147483647,
-      maxBackoffMs: 2147483647,
+      failoverBackoffInitialMs: 2147483647,
+      failoverBackoffMaxMs: 2147483647,
     });
     // Elapsed-duration budgets and escalation windows do not feed raw timers.
     const longWindow = parseQwpNodeClientConfig(
       "wss::addr=host:9000;sf_dir=/tmp/qwp;reconnect_max_duration_millis=2147483648;poison_min_escalation_window_millis=2147483648;failover_max_duration_ms=2147483648;catch_up_cap_gap_min_escalation_window_millis=2147483648;",
     );
-    expect(longWindow.ingressSession?.reconnect).toMatchObject({
-      maxDurationMs: 2147483648,
+    expect(longWindow.ingress?.reconnect).toMatchObject({
+      reconnectMaxDurationMs: 2147483648,
       poisonMinEscalationWindowMs: 2147483648,
     });
-    expect(longWindow.egressSession?.reconnect).toMatchObject({
-      maxDurationMs: 2147483648,
+    expect(longWindow.egress?.reconnect).toMatchObject({
+      failoverMaxDurationMs: 2147483648,
     });
     expect(longWindow.ingress.storeAndForward).toMatchObject({
       catchUpCapGapMinEscalationWindowMs: 2147483648,
@@ -1020,9 +1467,11 @@ describe("QWP unified Node client configuration", () => {
     // Typed overrides go through the same merged-options validation.
     expect(() =>
       parseQwpNodeClientConfig("ws::addr=host:9000;sf_dir=/tmp/qwp;", {
-        storeAndForward: {
-          directory: "/tmp/qwp",
-          maxSegmentBytes: 0x1_0000_0000,
+        ingress: {
+          storeAndForward: {
+            directory: "/tmp/qwp",
+            maxSegmentBytes: 0x1_0000_0000,
+          },
         },
       }),
     ).toThrow(message);
@@ -1066,7 +1515,7 @@ describe("QWP unified Node client configuration", () => {
     ).not.toThrow();
     expect(
       parseQwpNodeClientConfig("ws::addr=host:9000;sf_max_total_bytes=1m;")
-        .ingressSession?.memoryReplayMaxBytes,
+        .ingress?.memoryReplayMaxBytes,
     ).toBe(1024 * 1024);
   });
 });
@@ -1111,7 +1560,7 @@ describe("store-and-forward requires a directory", () => {
     let captured: unknown;
     try {
       parseQwpNodeClientConfig("ws::addr=127.0.0.1:9000;sf_dir=/tmp/qwp;", {
-        storeAndForward: { directory: 5 as unknown as string },
+        ingress: { storeAndForward: { directory: 5 as unknown as string } },
       });
     } catch (error: unknown) {
       captured = error;

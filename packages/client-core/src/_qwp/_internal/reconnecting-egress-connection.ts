@@ -7,26 +7,29 @@ import {
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
   QwpConnectionCloseInfo,
-  QwpConnectionFactory,
-  QwpEgressReplayResetEvent,
-  QwpEgressTransportMetrics,
+  QwpEgressFailoverResetEvent,
+  QwpEgressReconnectOptions,
   QwpFailoverError,
   QwpHandshakeMetadata,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
-  QwpReconnectOptions,
   QwpSendClosedError,
   QwpUpgradeError,
 } from "../transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+  QwpEgressTransportMetrics,
+} from "./binary-connection";
 import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import {
   jitterReconnectDelayMs,
-  validateQwpReconnectBackoffs,
+  validateQwpEgressReconnectBackoffs,
 } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
+import { createSweepFailureReporter } from "./sweep-events";
 import { monotonicNowMs } from "./monotonic-clock";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 
@@ -34,26 +37,21 @@ import { QwpNotificationDispatcher } from "./notification-dispatcher";
  * The egress reconnect policy applied when a field is not configured.
  *
  * Egress bounds a query connection so a caller is not left waiting, which is
- * why these differ from the ingress defaults. QwpEgressSession.connect()
+ * why these differ from the ingress defaults. connectQwpEgressSession()
  * spreads this under the caller's options and the constructor below reads every
  * field from the merged result, so the two layers cannot drift apart.
  */
 export const QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS: Readonly<
-  Required<
-    Omit<
-      QwpReconnectOptions,
-      "onEvent" | "maxFrameRejections" | "poisonMinEscalationWindowMs"
-    >
-  >
+  Required<Omit<QwpEgressReconnectOptions, "onEvent">>
 > = {
-  maxAttempts: 8,
-  initialBackoffMs: 50,
-  maxBackoffMs: 1_000,
-  maxDurationMs: 30_000,
+  failoverMaxAttempts: 8,
+  failoverBackoffInitialMs: 50,
+  failoverBackoffMaxMs: 1_000,
+  failoverMaxDurationMs: 30_000,
 };
 
-type ReplayResetHandler = (
-  event: QwpEgressReplayResetEvent,
+type FailoverResetHandler = (
+  event: QwpEgressFailoverResetEvent,
 ) => void | Promise<void>;
 type ConnectionResetHandler = (
   serverInfo: QwpServerInfoMessage,
@@ -62,6 +60,7 @@ type QueryRequestEncoder = (
   serverInfo: QwpServerInfoMessage,
   requestId: bigint,
 ) => Uint8Array | Promise<Uint8Array>;
+type ConnectionLostHandler = () => void;
 
 interface PendingTerminalVerdict {
   readonly requestId: bigint;
@@ -69,12 +68,12 @@ interface PendingTerminalVerdict {
   readonly resolve: (accepted: boolean) => void;
 }
 
-class ReplayResetCallbackError extends Error {
+class FailoverResetCallbackError extends Error {
   readonly cause: unknown;
 
   constructor(cause: unknown) {
-    super("QWP egress replay reset callback failed");
-    this.name = "ReplayResetCallbackError";
+    super("QWP egress failover reset callback failed");
+    this.name = "FailoverResetCallbackError";
     this.cause = cause;
   }
 }
@@ -126,11 +125,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
 
   private constructor(
     private readonly factory: QwpConnectionFactory,
-    private readonly reconnectOptions: QwpReconnectOptions,
+    private readonly reconnectOptions: QwpEgressReconnectOptions,
     private readonly serverInfoTimeoutMs: number,
     private readonly onConnectionReset: ConnectionResetHandler,
     private readonly encodeQueryRequest: QueryRequestEncoder,
-    private readonly onReplayReset?: ReplayResetHandler,
+    private readonly onFailoverReset?: FailoverResetHandler,
+    private readonly onConnectionLost?: ConnectionLostHandler,
     private readonly retryInitialConnection = true,
     connectionListenerInboxCapacity = 64,
   ) {
@@ -141,12 +141,15 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         connectionListenerInboxCapacity,
       );
     }
-    this.maxAttempts = reconnectOptions.maxAttempts ?? defaults.maxAttempts;
+    this.maxAttempts =
+      reconnectOptions.failoverMaxAttempts ?? defaults.failoverMaxAttempts;
     this.initialBackoffMs =
-      reconnectOptions.initialBackoffMs ?? defaults.initialBackoffMs;
-    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? defaults.maxBackoffMs;
+      reconnectOptions.failoverBackoffInitialMs ??
+      defaults.failoverBackoffInitialMs;
+    this.maxBackoffMs =
+      reconnectOptions.failoverBackoffMaxMs ?? defaults.failoverBackoffMaxMs;
     this.maxDurationMs =
-      reconnectOptions.maxDurationMs ?? defaults.maxDurationMs;
+      reconnectOptions.failoverMaxDurationMs ?? defaults.failoverMaxDurationMs;
     validateReconnectPolicy(
       this.maxAttempts,
       this.initialBackoffMs,
@@ -162,11 +165,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
 
   static async connect(
     factory: QwpConnectionFactory,
-    reconnectOptions: QwpReconnectOptions,
+    reconnectOptions: QwpEgressReconnectOptions,
     serverInfoTimeoutMs: number,
     onConnectionReset: ConnectionResetHandler,
     encodeQueryRequest: QueryRequestEncoder,
-    onReplayReset?: ReplayResetHandler,
+    onFailoverReset?: FailoverResetHandler,
+    onConnectionLost?: ConnectionLostHandler,
     retryInitialConnection = true,
     signal?: AbortSignal,
     connectionListenerInboxCapacity?: number,
@@ -177,7 +181,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       serverInfoTimeoutMs,
       onConnectionReset,
       encodeQueryRequest,
-      onReplayReset,
+      onFailoverReset,
+      onConnectionLost,
       retryInitialConnection,
       connectionListenerInboxCapacity,
     );
@@ -231,9 +236,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
    *
    * The caller is released as soon as the grant is owned by a reconnect rather
    * than when the frame leaves: a result-view callback may be the caller, and
-   * the replay reset has to drain that very callback before it can encode the
-   * replacement request, so waiting for the connection here would leave the
-   * two waiting on each other.
+   * the reset before a replay has to drain that very callback before it can
+   * encode the replacement request, so waiting for the connection here would
+   * leave the two waiting on each other.
    *
    * @internal
    */
@@ -244,9 +249,52 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     return this.sendPayload(payload, supersededByReplay);
   }
 
+  /**
+   * Sends a QUERY_REQUEST that the session may withdraw while it waits.
+   *
+   * A request issued during a reconnect waits for the replacement connection.
+   * If its query has ended by then -- its deadline passed while the connection
+   * was down -- the request is dropped rather than sent: the server would run a
+   * query nobody reads, and the session no longer holds the request a
+   * QUERY_REQUEST is re-encoded from.
+   *
+   * @internal
+   */
+  sendWithdrawable(
+    payload: Uint8Array,
+    withdrawn: () => boolean,
+  ): Promise<void> {
+    return this.sendPayload(payload, undefined, withdrawn);
+  }
+
+  /**
+   * Keeps the next reconnect from re-running a query its session has ended.
+   * Without a connection there is nothing to cancel it on, so it is simply not
+   * replayed; the session settles it when the replacement connection is up.
+   *
+   * @internal
+   */
+  dropReplay(requestId: bigint): void {
+    if (replayRequestId(this.outboundReplay) === requestId) {
+      this.outboundReplay = [];
+    }
+  }
+
+  /**
+   * Whether a terminal response for this request has been queued for the
+   * session but not yet accepted. Its outcome then reaches the session even
+   * though the connection that carried it has gone.
+   *
+   * @internal
+   */
+  hasPendingTerminal(requestId: bigint): boolean {
+    return this.pendingTerminal?.requestId === requestId;
+  }
+
   private sendPayload(
     payload: Uint8Array,
     supersededByReplay?: () => boolean,
+    withdrawn?: () => boolean,
   ): Promise<void> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closing) return Promise.reject(new QwpSendClosedError());
@@ -292,7 +340,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           if (accepted) releaseQueue();
         }
         const connection = await this.requireConnection();
-        if (supersededByReplay?.()) return;
+        if (supersededByReplay?.() || withdrawn?.()) return;
         const prepared = await this.prepareOutboundQuery(copy);
         this.trackOutbound(prepared);
         try {
@@ -392,7 +440,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     let lastError = initialCause;
     if (reconnecting) {
       this.emitEvent({
-        kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
+        kind: QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
         attempt: 0,
         previousEndpoint,
         cause: initialCause,
@@ -425,13 +473,19 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         }
         this.throwIfUnavailable();
         attempt++;
+        const sweep = createSweepFailureReporter(
+          (event) => this.emitEvent(event),
+          attempt,
+          previousEndpoint,
+          () => this.closing,
+        );
         let candidate: QwpBinaryConnection | undefined;
         try {
           const abort = new AbortController();
           this.connectAbort = abort;
           try {
             candidate = await awaitReconnectDeadline(
-              this.factory(abort.signal),
+              this.factory(abort.signal, sweep.onEndpointFailure),
               reconnectDeadlineMs,
               attempt,
               () => abort.abort(),
@@ -522,13 +576,19 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           }
           if (candidate) await candidate.close().catch(() => undefined);
           if (this.closing) return;
-          this.emitEvent({
-            kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
-            attempt,
-            endpoint: candidate?.endpoint,
-            previousEndpoint,
-            cause: error,
-          });
+          // A candidate that failed after SERVER_INFO -- typically when the
+          // replay could not be sent -- may already have run the session's
+          // reset, which marks the connection present again. The outage goes
+          // on, so the session hears of it again: otherwise an expired query
+          // waited out its grace period and was replayed on the next endpoint.
+          if (reconnecting && candidate) {
+            try {
+              this.onConnectionLost?.();
+            } catch {
+              // The session's bookkeeping must not stop the reconnect.
+            }
+          }
+          sweep.sweepFailed(error, candidate);
           if (error instanceof QwpReconnectExhaustedError) throw error;
           if (!isRetryableReconnectError(error)) throw error;
           if (!reconnecting && !this.retryInitialConnection) throw error;
@@ -730,9 +790,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         "QWP egress replay is missing its QUERY_REQUEST",
       );
     }
-    if (this.onReplayReset) {
+    if (this.onFailoverReset) {
       try {
-        await this.onReplayReset(
+        await this.onFailoverReset(
           redactQwpEndpointFields({
             requestId,
             serverInfo,
@@ -742,7 +802,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           }),
         );
       } catch (error) {
-        throw new ReplayResetCallbackError(error);
+        throw new FailoverResetCallbackError(error);
       }
     }
     const request = await this.encodeReplayRequest(serverInfo, requestId);
@@ -826,15 +886,16 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     // it (recoverProtocolFailure) -- reproduces on the replacement connection.
     // Each connect SUCCEEDS, so connectLoop's own budget is never consumed and
     // the retry would otherwise run forever, rotating the whole cluster.
-    // Charge these recoveries to the same maxAttempts/maxDurationMs budget
-    // instead, the way the Java client counts every re-submission of one
-    // execute() against failover_max_attempts and failover_max_duration.
+    // Charge these recoveries to the same failoverMaxAttempts and
+    // failoverMaxDurationMs budget instead, the way the Java client counts
+    // every re-submission of one execute() against failover_max_attempts and
+    // failover_max_duration.
     if (this.protocolRecoveries === 0) {
       this.protocolRecoveryStartedAt = monotonicNowMs();
     }
     this.protocolRecoveries++;
-    // `>` not `>=`: maxAttempts counts reconnects here, as it does in
-    // connectLoop, so maxAttempts=1 still permits one recovery.
+    // `>` not `>=`: failoverMaxAttempts counts reconnects here, as it does in
+    // connectLoop, so failoverMaxAttempts=1 still permits one recovery.
     const attemptsExhausted =
       this.maxAttempts > 0 && this.protocolRecoveries > this.maxAttempts;
     const durationExhausted =
@@ -923,6 +984,13 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.connection = undefined;
     if (closeCode !== 1000) failedConnection.deprioritizeEndpoint?.();
     void failedConnection.close(closeCode, closeReason).catch(() => undefined);
+    // Before the first attempt, so a session can settle what no longer needs a
+    // server -- an expired query, a drained one -- instead of replaying it.
+    try {
+      this.onConnectionLost?.();
+    } catch {
+      // The session's bookkeeping must not stop the reconnect.
+    }
     const reconnecting = this.connectLoop(cause, true, skipQueueBarrier);
     this.reconnectTask = reconnecting;
     try {
@@ -965,8 +1033,8 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     // treatment the ingress connection gives the identical callback. Invoked
     // inline, a user observer ran on the reconnect stack: the time it spent
     // was added to the outage it was reporting, and because these events are
-    // emitted inside the window checked against maxDurationMs, a slow one
-    // could exhaust a budget and turn a recoverable outage into a terminal
+    // emitted inside the window checked against failoverMaxDurationMs, a slow
+    // one could exhaust a budget and turn a recoverable outage into a terminal
     // QwpReconnectExhaustedError. An async observer also had nothing bounding
     // or counting its concurrent invocations.
     this.connectionDispatcher?.offer(
@@ -1039,20 +1107,21 @@ function validateReconnectPolicy(
 ): void {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 0) {
     throw new RangeError(
-      "reconnect maxAttempts must be a non-negative safe integer",
+      "reconnect failoverMaxAttempts must be a non-negative safe integer",
     );
   }
-  validateQwpReconnectBackoffs({ initialBackoffMs, maxBackoffMs });
-  for (const [name, value] of [["maxDurationMs", maxDurationMs]] as const) {
-    if (!Number.isFinite(value) || value < 0) {
-      throw new RangeError(
-        `reconnect ${name} must be a non-negative finite number`,
-      );
-    }
+  validateQwpEgressReconnectBackoffs({
+    failoverBackoffInitialMs: initialBackoffMs,
+    failoverBackoffMaxMs: maxBackoffMs,
+  });
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs < 0) {
+    throw new RangeError(
+      "reconnect failoverMaxDurationMs must be a non-negative finite number",
+    );
   }
   if (maxBackoffMs < initialBackoffMs) {
     throw new RangeError(
-      "reconnect maxBackoffMs must be greater than or equal to initialBackoffMs",
+      "reconnect failoverBackoffMaxMs must be greater than or equal to failoverBackoffInitialMs",
     );
   }
 }
@@ -1074,6 +1143,6 @@ function isRetryableReconnectError(error: unknown): boolean {
   }
   return !(
     error instanceof ReplayStateError ||
-    error instanceof ReplayResetCallbackError
+    error instanceof FailoverResetCallbackError
   );
 }

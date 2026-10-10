@@ -8,12 +8,12 @@ import {
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_STATUS,
   QwpIngressEncodeOptions,
-  QwpIngressResponse,
+  QwpIngressNackError,
+  QwpIngressSessionClosedError,
   QwpByteWriter,
   QwpResultBatchDecoder,
   QwpSender,
   QwpSenderCloseTimeoutError,
-  QwpSenderSession,
   QwpTableBuffer,
   QwpWriterRowError,
   binary,
@@ -47,67 +47,21 @@ import {
   varchar,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
+import type { QwpSenderSession } from "../../packages/client-core/src/_qwp/_internal/sender-session";
 
 class RecordingSession implements QwpSenderSession {
   readonly sends: {
     tables: readonly QwpTableBuffer[];
     options?: QwpIngressEncodeOptions;
   }[] = [];
-  readonly durable: QwpIngressResponse[] = [];
+  readonly waits: { target: bigint; timeoutMs?: number }[] = [];
   deltaSendCount = 0;
   publicationCount = 0;
   closeCount = 0;
   publishedFrameSequence = -1n;
   acknowledgedFrameSequence = -1n;
-
-  async sendTables(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse> {
-    this.sends.push({ tables, options });
-    const sequence = ++this.publishedFrameSequence;
-    this.acknowledgedFrameSequence = sequence;
-    return {
-      status: QWP_STATUS.OK,
-      sequence,
-      tables: tables.map((table) => ({
-        name: table.name,
-        sequenceTransaction: BigInt(table.rowCount),
-      })),
-    };
-  }
-
-  sendTablesDelta(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<QwpIngressResponse> {
-    this.deltaSendCount++;
-    return this.sendTables(tables, options);
-  }
-
-  sendTablesWithPublication(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ) {
-    const acknowledgement = this.sendTables(tables, options);
-    return {
-      sequence: this.publishedFrameSequence,
-      publication: Promise.resolve(),
-      acknowledgement,
-    };
-  }
-
-  sendTablesDeltaWithPublication(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ) {
-    const acknowledgement = this.sendTablesDelta(tables, options);
-    return {
-      sequence: this.publishedFrameSequence,
-      publication: Promise.resolve(),
-      acknowledgement,
-    };
-  }
 
   async publishTables(
     tables: readonly QwpTableBuffer[],
@@ -116,6 +70,8 @@ class RecordingSession implements QwpSenderSession {
     this.publicationCount++;
     this.sends.push({ tables, options });
     const sequence = ++this.publishedFrameSequence;
+    // The fake server acknowledges a commit-bearing frame at once, and with
+    // it the deferred frames of the transaction it closes.
     if (!options?.deferCommit) this.acknowledgedFrameSequence = sequence;
   }
 
@@ -127,59 +83,40 @@ class RecordingSession implements QwpSenderSession {
     await this.publishTables(tables, options);
   }
 
-  async waitForDurable(response: QwpIngressResponse): Promise<void> {
-    this.durable.push(response);
+  /** Nothing acknowledges later, so an uncovered target times out at once. */
+  async waitForAck(target: bigint, timeoutMs?: number): Promise<boolean> {
+    this.waits.push({ target, timeoutMs });
+    return target <= this.acknowledgedFrameSequence;
   }
 
   async close(): Promise<void> {
     this.closeCount++;
-  }
-}
-
-class CommitAwareSession extends RecordingSession {
-  private readonly deferred: {
-    resolve: (response: QwpIngressResponse) => void;
-  }[] = [];
-
-  override sendTables(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse> {
-    this.sends.push({ tables, options });
-    const sequence = ++this.publishedFrameSequence;
-    const response = {
-      status: QWP_STATUS.OK,
-      sequence,
-      tables: tables.map((table) => ({
-        name: table.name,
-        sequenceTransaction: BigInt(table.rowCount),
-      })),
-    } satisfies QwpIngressResponse;
-    if (options?.deferCommit) {
-      return new Promise((resolve) => this.deferred.push({ resolve }));
-    }
-    this.acknowledgedFrameSequence = sequence;
-    for (const pending of this.deferred.splice(0)) pending.resolve(response);
-    return Promise.resolve(response);
   }
 }
 
 class ClosingUnblocksSession extends RecordingSession {
-  private rejectSend?: (error: Error) => void;
+  private rejectPublication?: (error: Error) => void;
 
-  sendTables(
+  override publishTables(
     tables: readonly QwpTableBuffer[],
     options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse> {
+  ): Promise<void> {
     this.sends.push({ tables, options });
     return new Promise((_resolve, reject) => {
-      this.rejectSend = reject;
+      this.rejectPublication = reject;
     });
+  }
+
+  override publishTablesDelta(
+    tables: readonly QwpTableBuffer[],
+    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
+  ): Promise<void> {
+    return this.publishTables(tables, options);
   }
 
   async close(): Promise<void> {
     this.closeCount++;
-    this.rejectSend?.(new Error("session closed"));
+    this.rejectPublication?.(new Error("session closed"));
   }
 }
 
@@ -205,22 +142,23 @@ class PublishingSession extends RecordingSession {
     return this.publishTables(tables, options);
   }
 
-  async waitForAcknowledged(target: bigint): Promise<void> {
+  async waitForAck(target: bigint): Promise<boolean> {
     if (target > this.acknowledgedFrameSequence) {
       this.acknowledgedFrameSequence = target;
     }
+    return true;
   }
 }
 
 class WatermarkSession extends PublishingSession {
   private readonly waiters = new Set<{
     target: bigint;
-    resolve: () => void;
+    resolve: (acknowledged: boolean) => void;
   }>();
 
-  waitForAcknowledged(target: bigint): Promise<void> {
+  waitForAck(target: bigint): Promise<boolean> {
     if (target < 0n || this.acknowledgedFrameSequence >= target) {
-      return Promise.resolve();
+      return Promise.resolve(true);
     }
     return new Promise((resolve) => this.waiters.add({ target, resolve }));
   }
@@ -230,21 +168,8 @@ class WatermarkSession extends PublishingSession {
     for (const waiter of this.waiters) {
       if (waiter.target > sequence) continue;
       this.waiters.delete(waiter);
-      waiter.resolve();
+      waiter.resolve(true);
     }
-  }
-}
-
-class DeferredWatermarkSession extends PublishingSession {
-  override sendTablesDelta(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<QwpIngressResponse> {
-    if (!options?.deferCommit) return super.sendTablesDelta(tables, options);
-    this.deltaSendCount++;
-    this.sends.push({ tables, options });
-    this.publishedFrameSequence++;
-    return new Promise<QwpIngressResponse>(() => undefined);
   }
 }
 
@@ -354,7 +279,7 @@ describe("QWP high-level sender", () => {
     // validateColumnCall(), and README.md documents the nullish rule as shared
     // by both, so the two must agree.
     const build = () =>
-      new QwpSender(async () => new PublishingSession(), {
+      createQwpSender(async () => new PublishingSession(), {
         autoFlush: false,
         maxNameLength: 16,
       });
@@ -439,7 +364,7 @@ describe("QWP high-level sender", () => {
       close: (sender: QwpSender) => Promise<void>,
     ): Promise<QwpTableBuffer> => {
       const session = new RecordingSession();
-      const sender = new QwpSender(async () => session, { autoFlush: false });
+      const sender = createQwpSender(async () => session, { autoFlush: false });
       sender.table("t").symbol("sym", null).stringColumn("v", undefined);
       await close(sender);
       await sender.flush();
@@ -474,7 +399,7 @@ describe("QWP high-level sender", () => {
     // the ILP path accepts has to survive this path too. 2^62 is past
     // Number.MAX_SAFE_INTEGER, where a `number` would already have rounded.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender
       .table("events")
       .intColumn("value", 2n ** 62n)
@@ -494,31 +419,166 @@ describe("QWP high-level sender", () => {
 
   it("uses the Java-compatible local-publication flush boundary by default", async () => {
     const session = new PublishingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("events").longColumn("value", 42n).atNow();
 
     await expect(sender.flush()).resolves.toBe(true);
     expect(session.publicationAttempts).toBe(1);
     expect(session.acknowledgedFrameSequence).toBe(-1n);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
 
     session.acknowledgedFrameSequence = 0n;
     await sender.close();
   });
 
-  it("retains explicit server-ACK flush behavior", async () => {
-    const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, {
-      autoFlush: false,
-      awaitServerAck: true,
-    });
-    await sender.table("events").longColumn("value", 42n).atNow();
+  it("flushes and then waits for every published frame in flushAndWait()", async () => {
+    const session = new WatermarkSession();
+    const sender = createQwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await sender.flush();
+    await sender.table("events").longColumn("value", 2n).atNow();
 
-    await expect(sender.flush()).resolves.toBe(true);
-    expect(session.deltaSendCount).toBe(1);
-    expect(session.publicationCount).toBe(0);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    let settled = false;
+    const waiting = sender.flushAndWait().finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(session.publishedFrameSequence).toBe(1n));
+    expect(sender.metrics.pendingRows).toBe(0);
+    // The frame published by the earlier flush() is not enough.
+    session.acknowledgeThrough(0n);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    session.acknowledgeThrough(1n);
+    await expect(waiting).resolves.toBe(true);
+    expect(session.publicationAttempts).toBe(2);
+    await sender.close();
+  });
+
+  it("returns false from flushAndWait() when the ACK wait times out", async () => {
+    class UnacknowledgedSession extends RecordingSession {
+      override async publishTables(
+        tables: readonly QwpTableBuffer[],
+        options?: QwpIngressEncodeOptions,
+      ): Promise<void> {
+        this.publicationCount++;
+        this.sends.push({ tables, options });
+        this.publishedFrameSequence++;
+      }
+    }
+    const session = new UnacknowledgedSession();
+    const sender = createQwpSender(async () => session, {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
+    await sender.table("events").longColumn("value", 1n).atNow();
+
+    await expect(sender.flushAndWait(25)).resolves.toBe(false);
+    expect(session.waits).toEqual([{ target: 0n, timeoutMs: 25 }]);
+    // The rows were handed over, not lost: they stay with the session and
+    // are neither staged again nor published twice.
+    expect(sender.metrics).toMatchObject({
+      pendingRows: 0,
+      totalRowsPublished: 1,
+    });
+    // Omitting the timeout leaves the choice to the session's ackTimeoutMs.
+    await expect(sender.flushAndWait()).resolves.toBe(false);
+    expect(session.waits.at(-1)).toEqual({ target: 0n, timeoutMs: undefined });
+    expect(session.sends).toHaveLength(1);
+
+    session.acknowledgedFrameSequence = 0n;
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    await sender.close();
+  });
+
+  it("rejects flushAndWait() when the server rejects a frame or the session dies", async () => {
+    const rejection = new QwpIngressNackError({
+      status: QWP_STATUS.WRITE_ERROR,
+      sequence: 0n,
+      tables: [],
+      errorMessage: "write failed",
+    });
+    const closed = new QwpIngressSessionClosedError();
+    let failure: Error = rejection;
+    class FailingWaitSession extends RecordingSession {
+      override async waitForAck(target: bigint): Promise<boolean> {
+        if (target >= 0n) throw failure;
+        return true;
+      }
+    }
+    const sender = createQwpSender(async () => new FailingWaitSession(), {
+      autoFlush: false,
+    });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await expect(sender.flushAndWait()).rejects.toBe(rejection);
+
+    failure = closed;
+    await expect(sender.flushAndWait()).rejects.toBe(closed);
+    await sender.close().catch(() => undefined);
+  });
+
+  it("validates the flushAndWait() timeout before publishing", async () => {
+    const session = new RecordingSession();
+    const sender = createQwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 1n).atNow();
+
+    for (const timeoutMs of [Number.NaN, Infinity, -Infinity, 0x7fffffff + 1]) {
+      await expect(sender.flushAndWait(timeoutMs)).rejects.toThrow(RangeError);
+    }
+    expect(session.sends).toHaveLength(0);
+    expect(sender.metrics.pendingRows).toBe(1);
+    await expect(sender.flushAndWait(0x7fffffff)).resolves.toBe(true);
+    await sender.close();
+  });
+
+  it("flushes, then checks without waiting, for a zero or negative flushAndWait() timeout", async () => {
+    // As in the Java client's drain(): the flush still happens, and the
+    // session is asked to check the watermark rather than wait for it.
+    const session = new RecordingSession();
+    const sender = createQwpSender(async () => session, { autoFlush: false });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    await expect(sender.flushAndWait(0)).resolves.toBe(true);
+    await sender.table("events").longColumn("value", 2n).atNow();
+    await expect(sender.flushAndWait(-1)).resolves.toBe(true);
+    expect(session.sends).toHaveLength(2);
+    expect(session.waits).toEqual([
+      { target: 0n, timeoutMs: 0 },
+      { target: 1n, timeoutMs: -1 },
+    ]);
+    await sender.close();
+  });
+
+  it("commits a transaction and waits for its commit frame in flushAndWait()", async () => {
+    const session = new RecordingSession();
+    const sender = createQwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
+      transactional: true,
+    });
+    await sender.table("events").longColumn("value", 1n).atNow();
+    expect(session.sends.map((send) => send.options?.deferCommit)).toEqual([
+      true,
+    ]);
+
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    expect(session.sends.map((send) => send.options?.deferCommit)).toEqual([
+      true,
+      false,
+    ]);
+    expect(session.waits.at(-1)?.target).toBe(1n);
+    expect(sender.metrics.totalTransactionsCommitted).toBe(1);
+    await sender.close();
+  });
+
+  it("resolves flushAndWait() without connecting when nothing was published", async () => {
+    let factoryCalls = 0;
+    const sender = createQwpSender(async () => {
+      factoryCalls++;
+      return new RecordingSession();
+    });
+
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    expect(factoryCalls).toBe(0);
     await sender.close();
   });
 
@@ -528,7 +588,7 @@ describe("QWP high-level sender", () => {
     // totalRowsPublished, so rows whose frames had already entered the session
     // went uncounted forever -- the counter skewed permanently low.
     const session = new HeldPublicationSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     for (let value = 0; value < 5; value++) {
       await sender.table("t").intColumn("v", value).atNow();
     }
@@ -550,33 +610,29 @@ describe("QWP high-level sender", () => {
 
   it("validates the byte auto-flush threshold", () => {
     const session = new RecordingSession();
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          autoFlushBytes: -1,
-        }),
+    expect(() =>
+      createQwpSender(async () => session, {
+        autoFlushBytes: -1,
+      }),
     ).toThrow(/autoFlushBytes must be a non-negative safe integer/);
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          autoFlushBytes: 1.5,
-        }),
+    expect(() =>
+      createQwpSender(async () => session, {
+        autoFlushBytes: 1.5,
+      }),
     ).toThrow(/autoFlushBytes must be a non-negative safe integer/);
   });
 
   it("validates the close flush timeout", () => {
     const session = new RecordingSession();
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          closeFlushTimeoutMs: -1,
-        }),
+    expect(() =>
+      createQwpSender(async () => session, {
+        closeFlushTimeoutMs: -1,
+      }),
     ).not.toThrow();
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          closeFlushTimeoutMs: 1.5,
-        }),
+    expect(() =>
+      createQwpSender(async () => session, {
+        closeFlushTimeoutMs: 1.5,
+      }),
     ).toThrow(/closeFlushTimeoutMs must be a safe integer/);
   });
 
@@ -584,54 +640,42 @@ describe("QWP high-level sender", () => {
     const timerCeiling = 0x7fffffff;
     const overTimerCeiling = timerCeiling + 1;
     const session = new RecordingSession();
-    // Both land in a raw setTimeout, where a larger delay is clamped to ~1ms.
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          closeFlushTimeoutMs: overTimerCeiling,
-        }),
+    // It lands in a raw setTimeout, where a larger delay is clamped to ~1ms.
+    expect(() =>
+      createQwpSender(async () => session, {
+        closeFlushTimeoutMs: overTimerCeiling,
+      }),
     ).toThrow(
       `closeFlushTimeoutMs must be a safe integer no greater than ${timerCeiling}`,
     );
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          durableAckTimeoutMs: overTimerCeiling,
-        }),
-    ).toThrow(
-      `durableAckTimeoutMs must be a positive number no greater than ${timerCeiling}`,
-    );
     // The inclusive ceiling, and the documented zero/negative "skip the drain"
     // spellings, all stay legal.
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          closeFlushTimeoutMs: timerCeiling,
-          durableAckTimeoutMs: timerCeiling,
-        }),
+    expect(() =>
+      createQwpSender(async () => session, {
+        closeFlushTimeoutMs: timerCeiling,
+      }),
     ).not.toThrow();
-    expect(
-      () => new QwpSender(async () => session, { closeFlushTimeoutMs: -1 }),
+    expect(() =>
+      createQwpSender(async () => session, { closeFlushTimeoutMs: -1 }),
     ).not.toThrow();
-    expect(
-      () => new QwpSender(async () => session, { closeFlushTimeoutMs: 0 }),
+    expect(() =>
+      createQwpSender(async () => session, { closeFlushTimeoutMs: 0 }),
     ).not.toThrow();
     // autoFlushIntervalMs is compared against an elapsed clock, never armed.
-    expect(
-      () =>
-        new QwpSender(async () => session, {
-          autoFlushIntervalMs: overTimerCeiling,
-        }),
+    expect(() =>
+      createQwpSender(async () => session, {
+        autoFlushIntervalMs: overTimerCeiling,
+      }),
     ).not.toThrow();
   });
 
   it("applies a configurable UTF-8 identifier byte length", async () => {
     const session = new RecordingSession();
-    expect(
-      () => new QwpSender(async () => session, { maxNameLength: 15 }),
+    expect(() =>
+      createQwpSender(async () => session, { maxNameLength: 15 }),
     ).toThrow(/maxNameLength must be a safe integer of at least 16/);
 
-    const defaultSender = new QwpSender(async () => session);
+    const defaultSender = createQwpSender(async () => session);
     expect(() => defaultSender.table("t".repeat(128))).toThrow(
       /table name too long.*maxLength=127/,
     );
@@ -643,7 +687,7 @@ describe("QWP high-level sender", () => {
     ).toThrow(/column name too long.*maxLength=127/);
     await defaultSender.close();
 
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       maxNameLength: 256,
     });
@@ -659,7 +703,7 @@ describe("QWP high-level sender", () => {
 
   it("uses case-insensitive column identity in the fluent sender", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender
       .table("events")
@@ -678,7 +722,7 @@ describe("QWP high-level sender", () => {
 
   it("rejects illegal identifiers before publishing", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     expect(() => sender.table("bad/table")).toThrow(
       /table name contains illegal characters/,
@@ -694,7 +738,7 @@ describe("QWP high-level sender", () => {
     // Staged names skip revalidation, so each case below checks that the skip
     // applies only to the exact spelling that was validated.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     // An invalid name fails on every attempt, not only the first.
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -772,7 +816,7 @@ describe("QWP high-level sender", () => {
 
   it("rejects rather than throws from at() and atNow()", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     let pending: Promise<void> | undefined;
     expect(() => {
@@ -805,7 +849,7 @@ describe("QWP high-level sender", () => {
   it("auto-flushes writer row streams and rejects bad writer rows", async () => {
     const session = new RecordingSession();
     // Pin the interval off so a slow runner cannot add a time-based flush.
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 2,
       autoFlushIntervalMs: 0,
     });
@@ -833,7 +877,7 @@ describe("QWP high-level sender", () => {
   it("rejects writer.row() with the auto-flush it starts", async () => {
     class FailingSession extends RecordingSession {
       fail = true;
-      // flush() publishes locally by default, so fail the publication.
+      // flush() ends at local publication, so fail the publication.
       override async publishTables(
         tables: readonly QwpTableBuffer[],
         options?: QwpIngressEncodeOptions,
@@ -843,7 +887,7 @@ describe("QWP high-level sender", () => {
       }
     }
     const session = new FailingSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
     });
@@ -862,7 +906,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("rejects an over-long column name without case-folding it", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     // An upper-case first letter sends qwpColumnNameKey() down its per-code-unit
@@ -891,18 +935,15 @@ describe("QWP high-level sender", () => {
 
   it("returns a publication sequence and waits for its ACK independently", async () => {
     const session = new WatermarkSession();
-    const sender = new QwpSender(async () => session, {
-      autoFlush: false,
-      awaitServerAck: true,
-    });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("events").longColumn("value", 42n).atNow();
 
     await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
 
     let acknowledged = false;
-    const waiting = sender.waitForAcknowledged(0n, 1_000).then(() => {
+    const waiting = sender.waitForAck(0n, 1_000).then(() => {
       acknowledged = true;
     });
     await Promise.resolve();
@@ -910,17 +951,51 @@ describe("QWP high-level sender", () => {
 
     session.acknowledgeThrough(0n);
     await waiting;
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
+    // A flush that publishes nothing has no frame sequence to return.
     await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
     await sender.close();
   });
 
-  it("returns the commit sequence without awaiting deferred transaction ACKs", async () => {
-    const session = new DeferredWatermarkSession();
-    const sender = new QwpSender(async () => session, {
+  it("returns -1n from flushAndGetSequence() when auto-flush already published the rows", async () => {
+    const session = new WatermarkSession();
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
-      awaitServerAck: true,
+    });
+    await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
+
+    await sender.table("events").longColumn("value", 1n).atNow();
+    expect(sender.publishedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(-1n);
+    await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
+    expect(session.sends).toHaveLength(1);
+
+    // flushAndWait() is the barrier for everything published so far.
+    let acknowledged: boolean | undefined;
+    const waiting = sender.flushAndWait(1_000).then((result) => {
+      acknowledged = result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acknowledged).toBeUndefined();
+    session.acknowledgeThrough(0n);
+    await waiting;
+    expect(acknowledged).toBe(true);
+
+    await sender.table("events").longColumn("value", 2n).atNow();
+    await expect(sender.flushAndGetSequence()).resolves.toBe(-1n);
+    expect(session.sends).toHaveLength(2);
+    expect(sender.publishedSequence).toBe(1n);
+    session.acknowledgeThrough(1n);
+    await expect(sender.flush()).resolves.toBe(false);
+    await sender.close();
+  });
+
+  it("returns the commit frame's sequence from a transactional flushAndGetSequence()", async () => {
+    const session = new PublishingSession();
+    const sender = createQwpSender(async () => session, {
+      autoFlushRows: 1,
+      autoFlushIntervalMs: 0,
       transactional: true,
     });
 
@@ -934,12 +1009,9 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
-  it("retains rows until publication-only flush succeeds", async () => {
+  it("retains rows until the flush's publication succeeds", async () => {
     const session = new PublishingSession();
-    const sender = new QwpSender(async () => session, {
-      autoFlush: false,
-      awaitServerAck: false,
-    });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("events").longColumn("value", 42n).atNow();
 
     session.failPublication = true;
@@ -964,10 +1036,9 @@ describe("QWP high-level sender", () => {
 
   it("publishes transactional auto-flushes without waiting for ACKs", async () => {
     const session = new PublishingSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
-      awaitServerAck: false,
       transactional: true,
     });
 
@@ -978,7 +1049,7 @@ describe("QWP high-level sender", () => {
       pendingRows: 0,
     });
 
-    await expect(sender.commit()).resolves.toBe(true);
+    await expect(sender.flush()).resolves.toBe(true);
     expect(session.sends[1].options).toMatchObject({ deferCommit: false });
     expect(session.sends[1].tables).toEqual([]);
     expect(sender.metrics).toMatchObject({
@@ -990,9 +1061,8 @@ describe("QWP high-level sender", () => {
 
   it("bounds an in-flight flush before closing its session", async () => {
     const session = new ClosingUnblocksSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
-      awaitServerAck: true,
       closeFlushTimeoutMs: 10,
     });
     await sender.table("events").longColumn("value", 42n).atNow();
@@ -1012,7 +1082,7 @@ describe("QWP high-level sender", () => {
 
   it("publishes completed rows and drains their ACK on close", async () => {
     const session = new WatermarkSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 1_000,
     });
@@ -1040,7 +1110,7 @@ describe("QWP high-level sender", () => {
     // real one, and the memoized close promise replayed that rejection for
     // good -- while the transport underneath was already closed.
     const session = new WatermarkSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
       log: () => {
@@ -1067,20 +1137,20 @@ describe("QWP high-level sender", () => {
     const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
     try {
       vi.resetModules();
-      const { QwpSender: FreshQwpSender } = await import(
-        "../../packages/client-core/src/qwp"
+      const { createQwpSender: createFreshQwpSender } = await import(
+        "../../packages/client-core/src/_qwp/sender"
       );
       const unfinished =
         "QWP sender contains 0 completed row(s) and 1 unfinished column(s) which will be lost";
 
-      const silent = new FreshQwpSender(async () => new RecordingSession(), {
+      const silent = createFreshQwpSender(async () => new RecordingSession(), {
         autoFlush: false,
       });
       silent.table("events").longColumn("value", 1n);
       await silent.close();
       expect(warn.mock.calls.map(([message]) => message)).toEqual([unfinished]);
 
-      const nullLogger = new FreshQwpSender(
+      const nullLogger = createFreshQwpSender(
         async () => new RecordingSession(),
         {
           autoFlush: false,
@@ -1096,10 +1166,13 @@ describe("QWP high-level sender", () => {
 
       // An explicitly supplied logger still wins outright.
       const supplied: [string, string | Error][] = [];
-      const explicit = new FreshQwpSender(async () => new RecordingSession(), {
-        autoFlush: false,
-        log: (level, message) => supplied.push([level, message]),
-      });
+      const explicit = createFreshQwpSender(
+        async () => new RecordingSession(),
+        {
+          autoFlush: false,
+          log: (level, message) => supplied.push([level, message]),
+        },
+      );
       explicit.table("events").longColumn("value", 1n);
       await explicit.close();
       expect(supplied).toEqual([["warn", unfinished]]);
@@ -1107,7 +1180,7 @@ describe("QWP high-level sender", () => {
 
       // Staging logs one debug message per row. The shared logger drops debug
       // below the info criticality, so the new default cannot spam a console.
-      const busy = new FreshQwpSender(async () => new RecordingSession(), {
+      const busy = createFreshQwpSender(async () => new RecordingSession(), {
         autoFlush: false,
       });
       for (let row = 0; row < 5; row++) {
@@ -1125,7 +1198,7 @@ describe("QWP high-level sender", () => {
 
   it("warns when an all-nullish fluent row is discarded unfinished", async () => {
     const directLogs: string[] = [];
-    const direct = new QwpSender(async () => new RecordingSession(), {
+    const direct = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
       log: (level, message) => {
         if (level === "warn") directLogs.push(String(message));
@@ -1138,7 +1211,7 @@ describe("QWP high-level sender", () => {
     ]);
 
     const pooledLogs: string[] = [];
-    const pooled = new QwpSender(async () => new RecordingSession(), {
+    const pooled = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
       log: (level, message) => {
         if (level === "warn") pooledLogs.push(String(message));
@@ -1154,7 +1227,7 @@ describe("QWP high-level sender", () => {
 
   it("closes and reports when the close ACK drain times out", async () => {
     const session = new WatermarkSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 10,
     });
@@ -1164,7 +1237,7 @@ describe("QWP high-level sender", () => {
       name: "QwpSenderCloseTimeoutError",
       timeoutMs: 10,
       targetSequence: 0n,
-      acknowledgedSequence: -1n,
+      ackedSequence: -1n,
     } satisfies Partial<QwpSenderCloseTimeoutError>);
     expect(session.sends).toHaveLength(1);
     expect(session.closeCount).toBe(1);
@@ -1186,11 +1259,11 @@ describe("QWP high-level sender", () => {
     class ElapsingSession extends WatermarkSession {
       private readonly rejecters = new Set<(error: Error) => void>();
 
-      override waitForAcknowledged(): Promise<void> {
+      override waitForAck(): Promise<boolean> {
         // Real code reaches this when the publication lands on the deadline,
         // a window of microseconds. Forcing the skew here makes it certain.
         skewMs = 10_000;
-        return new Promise<void>((_resolve, reject) => {
+        return new Promise<boolean>((_resolve, reject) => {
           this.rejecters.add(reject);
         });
       }
@@ -1211,7 +1284,7 @@ describe("QWP high-level sender", () => {
     vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
     try {
       const session = new ElapsingSession();
-      const sender = new QwpSender(async () => session, {
+      const sender = createQwpSender(async () => session, {
         autoFlush: false,
         closeFlushTimeoutMs: 1_000,
       });
@@ -1232,7 +1305,7 @@ describe("QWP high-level sender", () => {
 
   it("publishes on close without draining when the timeout is zero", async () => {
     const session = new WatermarkSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
     });
@@ -1246,7 +1319,7 @@ describe("QWP high-level sender", () => {
 
   it("uses the existing Sender fluent API and preserves an unfinished row", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender
       .table("trades")
@@ -1289,7 +1362,7 @@ describe("QWP high-level sender", () => {
 
   it("supports QWP-specific types without exposing QwpTableBuffer", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender
       .table("typed")
@@ -1368,7 +1441,7 @@ describe("QWP high-level sender", () => {
     }
 
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.writer("compiled", { ip: ipv4() }).row({ ip: materialized });
     await sender.table("fluent").ipv4Column("ip", viewed).atNow();
     await sender.flush();
@@ -1407,7 +1480,7 @@ describe("QWP high-level sender", () => {
     };
 
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const writer = sender.writer("locations", { location: geohash(5) });
     await writer.row({ location: decodedGeohash(materialized) });
     await writer.row({ location: decodedGeohash(viewed) });
@@ -1421,7 +1494,7 @@ describe("QWP high-level sender", () => {
 
   it("accepts signed and unsigned packed IPv4 boundaries", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender
       .table("bounds")
       .ipv4Column("signed_min", -0x80000000)
@@ -1445,7 +1518,7 @@ describe("QWP high-level sender", () => {
     // optional field onto it got "Cannot convert null to a BigInt" and a
     // silently discarded row.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender
       .table("hashes")
@@ -1466,7 +1539,7 @@ describe("QWP high-level sender", () => {
 
   it("rolls back the whole current row when a setter fails", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     sender.table("events").floatColumn("discarded", 1.5);
     expect(() => sender.stringColumn("bad", 42 as unknown as string)).toThrow(
@@ -1485,7 +1558,7 @@ describe("QWP high-level sender", () => {
       write: (sender: QwpSender) => QwpSender,
     ): Promise<number> => {
       const session = new RecordingSession();
-      const sender = new QwpSender(async () => session, { autoFlush: false });
+      const sender = createQwpSender(async () => session, { autoFlush: false });
       await write(sender.table("t")).atNow();
       await sender.flush();
       return encodeQwpIngressFrame(
@@ -1524,7 +1597,7 @@ describe("QWP high-level sender", () => {
       }
     }
 
-    const sender = new QwpSender(async () => new StallingSession(), {
+    const sender = createQwpSender(async () => new StallingSession(), {
       autoFlush: false,
       closeFlushTimeoutMs: 0,
     });
@@ -1544,7 +1617,7 @@ describe("QWP high-level sender", () => {
 
   it("rolls back the row when a symbol value cannot be converted", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     // symbol() takes `unknown` and stringifies it, so the conversion itself can
     // throw. A null-prototype object has no toString; querystring.parse() and
@@ -1566,7 +1639,7 @@ describe("QWP high-level sender", () => {
 
   it("does not merge a later row into one abandoned by a symbol failure", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     sender.table("events").longColumn("value", 1n);
     expect(() => sender.symbol("tag", { toString: null } as unknown)).toThrow();
@@ -1589,7 +1662,7 @@ describe("QWP high-level sender", () => {
 
   it("does not let a discarded row pin the table schema", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     // 'a' only ever appeared in a row that was thrown away, so nothing about
     // it reached QuestDB and it must not constrain the column's type.
@@ -1604,7 +1677,7 @@ describe("QWP high-level sender", () => {
 
   it("does not let a cancelled row pin the table schema", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     sender.table("events").longColumn("a", 1n).cancelRow();
     await sender.table("events").stringColumn("a", "x").atNow();
@@ -1617,7 +1690,7 @@ describe("QWP high-level sender", () => {
 
   it("still pins the schema learned from a row that was published", () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     // The rollback must not weaken per-table type consistency: this row was
     // completed, so its column types are real.
@@ -1629,7 +1702,7 @@ describe("QWP high-level sender", () => {
 
   it("keeps an earlier row's schema when a later row is discarded", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("events").longColumn("a", 1n).atNow();
     // Discarding this row may only roll back what this row introduced ('b'),
@@ -1647,7 +1720,7 @@ describe("QWP high-level sender", () => {
 
   it("does not accumulate tables created by rows that were discarded", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("kept").longColumn("value", 1n).atNow();
     for (let index = 0; index < 100; index++) {
@@ -1669,7 +1742,7 @@ describe("QWP high-level sender", () => {
     // therefore rejected every more precise value for the sender's lifetime,
     // while ILP v3 accepted the same sequence.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("fx").decimalColumnText("price", 1).atNow();
     await sender.flush();
@@ -1687,7 +1760,7 @@ describe("QWP high-level sender", () => {
 
   it("releases a published decimal scale while unrelated rows remain staged", async () => {
     const session = new HeldPublicationSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("fx").decimalColumnText("price", "1").atNow();
     const flushing = sender.flush();
@@ -1713,7 +1786,7 @@ describe("QWP high-level sender", () => {
 
   it("releases a decimal scale retained only by a cancelled open row", async () => {
     const session = new HeldPublicationSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("fx").decimalColumnText("price", "1").atNow();
     sender.table("fx").decimalColumnText("price", "2");
@@ -1733,7 +1806,7 @@ describe("QWP high-level sender", () => {
 
   it("keeps a decimal column's type after releasing its frame scale", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("fx").decimal64Column("price", 125n, 2).atNow();
     await sender.flush();
@@ -1769,7 +1842,7 @@ describe("QWP high-level sender", () => {
     // setDecimalScale() keeps only the first, so the later value went out at
     // the earlier scale -- off by a power of ten, with no error at all.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     // Frame 0 locks scale 2 on 'price'.
     await sender.table("fx").decimalColumnText("price", "1.25").atNow();
@@ -1797,7 +1870,7 @@ describe("QWP high-level sender", () => {
     // Within a frame the scale still locks on the first value and later rows
     // are rescaled onto it, because the wire format can only carry one.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("fx").decimalColumnText("price", 1.25).atNow();
     await sender.table("fx").decimalColumnText("price", 2).atNow();
@@ -1825,7 +1898,7 @@ describe("QWP high-level sender", () => {
     // availability, row-state and column-name checks. That made this one
     // spelling silently accept call sites every other spelling rejects.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     // No table selected yet.
     expect(() => sender.decimalColumn("d", new Int8Array(0), 2)).toThrow(
@@ -1862,7 +1935,7 @@ describe("QWP high-level sender", () => {
 
   it("accepts and copies a Uint8Array created in another realm", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const foreign = runInNewContext("new Uint8Array([1, 2, 3])") as Uint8Array;
     const foreignUuid = runInNewContext(
       "Uint8Array.from({ length: 16 }, (_, index) => index)",
@@ -1915,7 +1988,7 @@ describe("QWP high-level sender", () => {
     // so a genuine Int8Array from a same-origin iframe threw and discarded the
     // row -- while binaryColumn() next door accepted a foreign Uint8Array.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const foreign = runInNewContext("new Int8Array([-1, 0, 1])") as Int8Array;
     const foreignNull = runInNewContext("new Int8Array(0)") as Int8Array;
     const foreignOversized = runInNewContext("new Int8Array(33)") as Int8Array;
@@ -1957,7 +2030,7 @@ describe("QWP high-level sender", () => {
     // addColumn()'s try. A detached buffer therefore threw past failRow() and
     // left the sender inside a half-built row that the next atNow() published.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("events").longColumn("value", 1n).atNow();
 
@@ -1987,7 +2060,7 @@ describe("QWP high-level sender", () => {
     // wall, the sender was permanently unusable, and the rows staged before
     // the over-wide one could never be sent.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("wide").longColumn("keeper", 1n).atNow();
 
@@ -2012,7 +2085,7 @@ describe("QWP high-level sender", () => {
 
   it("rejects an over-wide compiled writer schema when it is compiled", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const schema: Record<string, ReturnType<typeof long>> = {};
     for (let index = 0; index < QWP_MAX_COLUMNS_PER_TABLE + 1; index++) {
       schema[`c${index}`] = long();
@@ -2031,7 +2104,7 @@ describe("QWP high-level sender", () => {
     // releaseStagedRows(): flush() and close() then raised it forever and the
     // staged rows could be neither sent nor discarded.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     const half = QWP_MAX_COLUMNS_PER_TABLE / 2;
     const first: Record<string, ReturnType<typeof long>> = {};
@@ -2066,7 +2139,7 @@ describe("QWP high-level sender", () => {
 
   it("keeps the sender usable after a failed row, without losing staged rows", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("events").longColumn("value", 1n).atNow();
     sender.table("events").symbol("kind", "start");
@@ -2086,7 +2159,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("refuses to continue a failed row implicitly", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
 
@@ -2106,7 +2179,7 @@ describe("QWP high-level sender", () => {
 
   it("releases the row when the designated timestamp is rejected", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     sender.table("events").longColumn("value", 1n);
     await expect(sender.at(1.5, "us")).rejects.toThrow(/safe integer/);
@@ -2118,7 +2191,7 @@ describe("QWP high-level sender", () => {
 
   it("cancelRow() discards the row in progress and its table selection", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("events").longColumn("value", 1n).atNow();
     sender.table("events").longColumn("value", 99n).cancelRow();
@@ -2134,7 +2207,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("cancelRow() leaves a closed sender alone", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     await sender.close();
@@ -2143,7 +2216,7 @@ describe("QWP high-level sender", () => {
 
   it("compiles a typed table writer and appends object rows", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const trades = sender.writer("trades", {
       symbol: qwpSymbol(),
       side: qwpSymbol(),
@@ -2242,7 +2315,7 @@ describe("QWP high-level sender", () => {
 
   it("compiles the remaining QuestDB column types into object rows", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed", {
       created_date: date(),
       letter: char(),
@@ -2398,7 +2471,7 @@ describe("QWP high-level sender", () => {
 
   it("accepts exact number decimals rendered in exponent notation", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed_decimals", {
       fraction: decimal128(20),
       whole128: decimal128(0),
@@ -2457,7 +2530,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("still enforces decimal scale and width after expanding exponents", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     const typed = sender.writer("typed_decimals", {
@@ -2484,7 +2557,7 @@ describe("QWP high-level sender", () => {
     // QWP parser used to apply an exponent-less grammar to strings only, so
     // "1e3" threw and the row was discarded while the equal number 1e3 staged.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed_decimals", {
       whole: decimal64(0),
       fraction: decimal64(4),
@@ -2530,7 +2603,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("still rejects decimal text that is not a number", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     const typed = sender.writer("typed_decimals", { whole: decimal64(0) });
@@ -2589,7 +2662,7 @@ describe("QWP high-level sender", () => {
 
   it("accepts exact decimal text with more than 1024 removable zeros", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed_decimals", {
       whole: decimal64(0),
       timestamp: designatedTimestamp("ns"),
@@ -2624,7 +2697,7 @@ describe("QWP high-level sender", () => {
     const overWidth = "9".repeat(100_000);
     const allZero = "0".repeat(100_000);
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const writers = [
       [sender.writer("decimal64", { value: decimal64(0) }), 64],
       [sender.writer("decimal128", { value: decimal128(0) }), 128],
@@ -2686,7 +2759,7 @@ describe("QWP high-level sender", () => {
 
   it("accepts only the exact signed boundaries for decimal text", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const boundaries = [
       {
         bits: 64,
@@ -2749,7 +2822,7 @@ describe("QWP high-level sender", () => {
     // digits on both sides of the point, so a workload moved from an ILP
     // connect string to a ws:// one had those rows rejected locally.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed_decimals", {
       half: decimal64(2),
       signed_half: decimal64(2),
@@ -2826,7 +2899,7 @@ describe("QWP high-level sender", () => {
     // row could hand 10n ** 1e8 to the rescale and block the event loop for
     // seconds -- freezing every timer, ACK deadline and sibling sender on it --
     // before rejecting the row anyway.
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     const typed = sender.writer("typed_decimals", { price: decimal64(2) });
@@ -2865,7 +2938,7 @@ describe("QWP high-level sender", () => {
       0x14, 0x17, 0x40, 0x00,
     ]);
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender.table("t").uuidColumn("id", text).atNow();
     await sender.table("t").uuidColumn("id", canonical).atNow();
@@ -2897,7 +2970,7 @@ describe("QWP high-level sender", () => {
     // locks it on the first value and rescales later ones onto it, so do the
     // same rather than rejecting every row after the first.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("fx").decimalColumnText("mid", "1.500").atNow();
     await sender.table("fx").decimalColumnText("mid", "2.25").atNow();
     await sender.table("fx").decimalColumnText("mid", "3").atNow();
@@ -2912,7 +2985,7 @@ describe("QWP high-level sender", () => {
 
   it("ignores a duplicate decimal before reconciling its scale", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     await sender
       .table("fx")
@@ -2932,7 +3005,7 @@ describe("QWP high-level sender", () => {
 
   it("rejects a decimal the column's locked scale cannot represent", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("fx").decimalColumnText("mid", "1.5").atNow();
     // Scale 1 cannot carry 2.25 without dropping a digit, which is the one
     // case the Java client reports instead of rescaling.
@@ -2949,7 +3022,7 @@ describe("QWP high-level sender", () => {
     // changed the column type and the row was discarded. Java takes the width
     // from the overload; the untyped setter therefore pins the widest.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("fx").decimalColumn("mid", 12_345n, 2).atNow();
     await sender
       .table("fx")
@@ -2968,7 +3041,7 @@ describe("QWP high-level sender", () => {
     // TIMESTAMP and TIMESTAMP_NANOS are distinct column types; the Java client
     // rejects the second unit rather than promoting the column.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("t").timestampColumn("seen", 5n, "us").atNow();
     expect(() =>
       sender.table("t").timestampColumn("seen", 7_000n, "ns"),
@@ -2978,7 +3051,7 @@ describe("QWP high-level sender", () => {
 
   it("still rejects a genuine column family change", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("t").longColumn("v", 1n).atNow();
     expect(() => sender.table("t").stringColumn("v", "two")).toThrow(
       /column type mismatch for 'v'/,
@@ -2992,14 +3065,13 @@ describe("QWP high-level sender", () => {
     // becomes an uncaught exception when the caller is a timer or an event
     // handler -- the shape a periodic flush racing shutdown actually has.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("t").intColumn("a", 1).atNow();
     await sender.close();
 
     for (const call of [
       () => sender.flush(),
       () => sender.flushAndGetSequence(),
-      () => sender.commit(),
     ]) {
       let caught: unknown;
       // Deliberately not inside try/catch: a synchronous throw would escape.
@@ -3019,7 +3091,7 @@ describe("QWP high-level sender", () => {
     // expected to exit hung for that long.
     let received: AbortSignal | undefined;
     let settleConnect!: (session: QwpSenderSession) => void;
-    const sender = new QwpSender(
+    const sender = createQwpSender(
       (signal) => {
         received = signal;
         return new Promise<QwpSenderSession>((resolve) => {
@@ -3055,7 +3127,7 @@ describe("QWP high-level sender", () => {
     const firstConnect = new Promise<QwpSenderSession>((_, reject) => {
       failFirstConnect = reject;
     });
-    const sender = new QwpSender(
+    const sender = createQwpSender(
       async () => {
         sessions++;
         return sessions === 1 ? firstConnect : new RecordingSession();
@@ -3081,7 +3153,7 @@ describe("QWP high-level sender", () => {
     // The enqueue still has to run synchronously on the call, so two flushes
     // issued without awaiting cannot drop or duplicate staged rows.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.table("t").intColumn("a", 1).atNow();
     const first = sender.flush();
     await sender.table("t").intColumn("a", 2).atNow();
@@ -3097,7 +3169,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("validates fixed precision and scale when compiling the schema", () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     expect(() => geohash(0)).toThrow(/between 1 and 60 bits/);
@@ -3114,7 +3186,7 @@ describe("QWP high-level sender", () => {
 
   it("rejects values that do not fit the compiled column type", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed", {
       letter: char(),
       payload: binary(),
@@ -3185,7 +3257,7 @@ describe("QWP high-level sender", () => {
       return value as unknown[];
     };
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const rank32 = new Array(QWP_MAX_ARRAY_DIMENSIONS).fill(1);
     const rank33 = new Array(QWP_MAX_ARRAY_DIMENSIONS + 1).fill(1);
 
@@ -3245,7 +3317,7 @@ describe("QWP high-level sender", () => {
     expect(QWP_MAX_ARRAY_DIMENSION_LENGTH).toBe(268_435_455);
 
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const typed = sender.writer("typed", { samples: doubleArray() });
 
     await typed.row({
@@ -3295,7 +3367,7 @@ describe("QWP high-level sender", () => {
     // compiled writer used to reject it with "row must contain at least one
     // non-null value" -- an error documented nowhere; the two APIs must agree.
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const events = sender.writer("events", {
       side: qwpSymbol(),
       price: float64(),
@@ -3321,7 +3393,7 @@ describe("QWP high-level sender", () => {
   it("still requires a designated timestamp in every writer row", async () => {
     // Dropping the all-nullish guard must not weaken the one field QWP.md says
     // is required in every row when the schema declares it.
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     const trades = sender.writer("trades", {
@@ -3337,7 +3409,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("reconciles compiled precision and scale with the fluent row API", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     const typed = sender.writer("typed", { location: geohash(20) });
@@ -3351,7 +3423,7 @@ describe("QWP high-level sender", () => {
 
   it("rejects a wrong-typed geohash or decimal value at the call site", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
 
     // None of these was rejected by the BigInt range guard: a non-numeric
     // string makes both comparisons undefined, and everything else compares
@@ -3422,7 +3494,7 @@ describe("QWP high-level sender", () => {
     let armed = true;
     let frames = 0;
 
-    // flush() publishes locally by default, so park that rather than sendTables.
+    // flush() ends at local publication, so park the publication.
     class ParkingSession extends RecordingSession {
       override async publishTables(
         tables: readonly QwpTableBuffer[],
@@ -3438,7 +3510,7 @@ describe("QWP high-level sender", () => {
       }
     }
 
-    const sender = new QwpSender(async () => new ParkingSession(), {
+    const sender = createQwpSender(async () => new ParkingSession(), {
       autoFlush: true,
       autoFlushRows: 3,
       closeFlushTimeoutMs: 0,
@@ -3479,7 +3551,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("reports an open fluent row ahead of object-row validation", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     const trades = sender.writer("trades", {
@@ -3507,7 +3579,7 @@ describe("QWP high-level sender", () => {
 
   it("rejects invalid object rows without poisoning writer state", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const trades = sender.writer("trades", {
       symbol: qwpSymbol(),
       price: double(),
@@ -3557,7 +3629,7 @@ describe("QWP high-level sender", () => {
   });
 
   it("rejects unknown keys and invalid compiled schemas", async () => {
-    const sender = new QwpSender(async () => new RecordingSession(), {
+    const sender = createQwpSender(async () => new RecordingSession(), {
       autoFlush: false,
     });
     const trades = sender.writer("trades", {
@@ -3590,7 +3662,7 @@ describe("QWP high-level sender", () => {
 
   it("keeps compiled rows atomic across concurrent calls and sender reset", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     const events = sender.writer("events", {
       value: long(),
       timestamp: designatedTimestamp("ns"),
@@ -3608,23 +3680,9 @@ describe("QWP high-level sender", () => {
     expect(column(session.sends[0].tables[0], "value").values).toEqual([3n]);
   });
 
-  it("can await durable ACKs and auto-flush by row count", async () => {
-    const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, {
-      autoFlushRows: 1,
-      autoFlushIntervalMs: 0,
-      awaitDurableAck: true,
-    });
-
-    await sender.table("events").longColumn("value", 42n).atNow();
-    expect(session.sends).toHaveLength(1);
-    expect(session.durable).toHaveLength(1);
-    await expect(sender.flush()).resolves.toBe(false);
-  });
-
   it("auto-flushes by estimated buffered bytes", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 0,
       autoFlushBytes: 16,
       autoFlushIntervalMs: 0,
@@ -3648,7 +3706,7 @@ describe("QWP high-level sender", () => {
 
   it("counts variable-width values by UTF-8 and binary payload bytes", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 0,
       autoFlushBytes: 13,
       autoFlushIntervalMs: 0,
@@ -3669,7 +3727,7 @@ describe("QWP high-level sender", () => {
     const session = Object.assign(new RecordingSession(), {
       maxBatchSizeBytes: 20,
     });
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 0,
       autoFlushBytes: 100,
       autoFlushIntervalMs: 0,
@@ -3690,7 +3748,7 @@ describe("QWP high-level sender", () => {
     const session = Object.assign(new RecordingSession(), {
       maxBatchSizeBytes: 20,
     });
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 0,
       autoFlushBytes: 0,
       autoFlushIntervalMs: 0,
@@ -3708,11 +3766,10 @@ describe("QWP high-level sender", () => {
   it("preserves pending byte accounting when publication fails", async () => {
     const session = new PublishingSession();
     session.failPublication = true;
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 0,
       autoFlushBytes: 8,
       autoFlushIntervalMs: 0,
-      awaitServerAck: false,
     });
 
     await expect(
@@ -3726,13 +3783,14 @@ describe("QWP high-level sender", () => {
     await sender.close();
   });
 
-  it("defers transactional auto-flush and commits without waiting on its withheld ACK", async () => {
-    const session = new CommitAwareSession();
-    const sender = new QwpSender(async () => session, {
+  it("defers transactional auto-flush and commits without waiting for an ACK", async () => {
+    // The server withholds the deferred frame's ACK until the commit, so
+    // neither the auto-flush nor the commit may wait for one.
+    const session = new RecordingSession();
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
       transactional: true,
-      awaitDurableAck: true,
     });
 
     await expect(
@@ -3742,15 +3800,15 @@ describe("QWP high-level sender", () => {
     expect(session.sends[0]).toMatchObject({
       options: { deferCommit: true },
     });
-    expect(session.durable).toHaveLength(0);
+    expect(session.acknowledgedFrameSequence).toBe(-1n);
 
-    await expect(sender.commit()).resolves.toBe(true);
+    await expect(sender.flush()).resolves.toBe(true);
     expect(session.sends).toHaveLength(2);
     expect(session.sends[1].tables).toHaveLength(0);
     expect(session.sends[1]).toMatchObject({
       options: { deferCommit: false },
     });
-    expect(session.durable).toHaveLength(1);
+    expect(session.waits).toEqual([]);
     expect(sender.metrics).toMatchObject({
       totalRowsStaged: 1,
       totalRowsPublished: 1,
@@ -3768,8 +3826,8 @@ describe("QWP high-level sender", () => {
   });
 
   it("uses an explicit data flush to close a deferred transaction", async () => {
-    const session = new CommitAwareSession();
-    const sender = new QwpSender(async () => session, {
+    const session = new RecordingSession();
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 2,
       autoFlushIntervalMs: 0,
       transactional: true,
@@ -3788,9 +3846,9 @@ describe("QWP high-level sender", () => {
   });
 
   it("warns when close abandons an uncommitted transactional auto-flush", async () => {
-    const session = new CommitAwareSession();
+    const session = new RecordingSession();
     const messages: (string | Error)[] = [];
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlushRows: 1,
       autoFlushIntervalMs: 0,
       transactional: true,
@@ -3810,7 +3868,7 @@ describe("QWP high-level sender", () => {
   it("publishes staged transactional rows without implicitly committing them", async () => {
     const session = new PublishingSession();
     const messages: (string | Error)[] = [];
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
       transactional: true,
       closeFlushTimeoutMs: 0,
@@ -3833,9 +3891,9 @@ describe("QWP high-level sender", () => {
 
   it("allows the high-level sender to opt out of symbol deltas", async () => {
     const session = new RecordingSession();
-    const sender = new QwpSender(async () => session, {
+    const sender = createQwpSender(async () => session, {
       autoFlush: false,
-      encode: { symbolDictionary: "full" },
+      symbolDictionary: "full",
     });
     await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
     await sender.flush();
@@ -3858,7 +3916,7 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
     word0: bigint,
   ): Promise<ReturnType<typeof column>["values"]> => {
     const session = new PublishingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.connect();
     sender.table("t").long256Column("hash", word0, 0n, 0n, 0n);
     await sender.atNow();
@@ -3873,7 +3931,7 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
 
   it("matches what the compiled writer accepts for the same words", async () => {
     const session = new PublishingSession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
+    const sender = createQwpSender(async () => session, { autoFlush: false });
     await sender.connect();
     const writer = sender.writer("t", {
       hash: long256(),
@@ -3893,25 +3951,25 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
   });
 
   it("sends through a session that implements only the required members", async () => {
-    // QwpSenderSession requires sendTables, waitForDurable and close; the
-    // publication split, the delta variants and the ACK watermark are all
-    // optional capabilities. A default-configured sender nonetheless took the
-    // publication-only path and threw when publishTables was absent, so a
-    // session that satisfied the published interface could not send at all:
-    // flush() rejected, close() rejected too, and the staged row was reported
-    // lost. Fall back to the one method the interface does require.
+    // publishTablesDelta is optional: a session without it, such as UDP's,
+    // publishes full symbol values through publishTables instead.
     class RequiredOnlySession implements QwpSenderSession {
       readonly sent: (readonly QwpTableBuffer[])[] = [];
+      publishedFrameSequence = -1n;
+      acknowledgedFrameSequence = -1n;
       closeCalls = 0;
 
-      async sendTables(
-        tables: readonly QwpTableBuffer[],
-      ): Promise<QwpIngressResponse> {
+      async publishTables(tables: readonly QwpTableBuffer[]): Promise<void> {
         this.sent.push(tables);
-        return { status: QWP_STATUS.OK, sequence: 0n, tables: [] };
+        this.acknowledgedFrameSequence = ++this.publishedFrameSequence;
       }
 
-      async waitForDurable(): Promise<void> {}
+      async waitForAck(target: bigint): Promise<boolean> {
+        if (target > this.acknowledgedFrameSequence) {
+          throw new Error("the fake acknowledges every frame it publishes");
+        }
+        return true;
+      }
 
       async close(): Promise<void> {
         this.closeCalls++;
@@ -3919,57 +3977,25 @@ describe("QWP long256 words accept either 64-bit spelling", () => {
     }
 
     const session = new RequiredOnlySession();
-    const sender = new QwpSender(async () => session);
-    await sender.table("events").longColumn("value", 42n).atNow();
+    const sender = createQwpSender(async () => session);
+    await sender.table("events").symbol("kind", "trade").atNow();
 
-    await expect(sender.flush()).resolves.toBe(true);
+    await expect(sender.flushAndWait()).resolves.toBe(true);
     expect(session.sent).toHaveLength(1);
     expect(session.sent[0][0].name).toBe("events");
+    expect(column(session.sent[0][0], "kind").values).toEqual(["trade"]);
     expect(sender.metrics).toMatchObject({
       pendingRows: 0,
       totalRowsPublished: 1,
       totalFlushFailures: 0,
     });
 
-    // close() must not demand the optional ACK watermark either.
     await expect(sender.close()).resolves.toBeUndefined();
     expect(session.closeCalls).toBe(1);
-    expect(sender.metrics.pendingRows).toBe(0);
-  });
-
-  it("retains required-only session rows until its asynchronous send succeeds", async () => {
-    class FlakyRequiredOnlySession implements QwpSenderSession {
-      attempts = 0;
-
-      async sendTables(): Promise<QwpIngressResponse> {
-        if (this.attempts++ === 0) throw new Error("publication failed");
-        return { status: QWP_STATUS.OK, sequence: 0n, tables: [] };
-      }
-
-      async waitForDurable(): Promise<void> {}
-      async close(): Promise<void> {}
-    }
-
-    const session = new FlakyRequiredOnlySession();
-    const sender = new QwpSender(async () => session, { autoFlush: false });
-    await sender.table("events").longColumn("value", 42n).atNow();
-
-    await expect(sender.flush()).rejects.toThrow("publication failed");
-    expect(sender.metrics).toMatchObject({
-      pendingRows: 1,
-      totalRowsPublished: 0,
-      totalFlushFailures: 1,
-    });
-    await expect(sender.flush()).resolves.toBe(true);
-    expect(sender.metrics).toMatchObject({
-      pendingRows: 0,
-      totalRowsPublished: 1,
-    });
-    await sender.close();
   });
 
   it("still rejects a word wider than 64 bits", () => {
-    const sender = new QwpSender(async () => new PublishingSession(), {
+    const sender = createQwpSender(async () => new PublishingSession(), {
       autoFlush: false,
     });
     expect(() =>

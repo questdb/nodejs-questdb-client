@@ -303,6 +303,19 @@ class QwpResourcePool<T> {
         index++;
         continue;
       }
+      if (this.resource === "sender") {
+        const replay = (entry.value as QwpSender).metrics.ingress;
+        if (
+          replay?.memoryReplayMaxBytes !== undefined &&
+          replay.pendingReplayFrames > 0
+        ) {
+          // The RAM queue belongs to this sender. Retiring it now would erase
+          // published frames, which its close could only log. Recheck after an
+          // ACK trims the queue.
+          index++;
+          continue;
+        }
+      }
       this.available.splice(index, 1);
       this.all.delete(entry.slot);
       reaped.push(entry);
@@ -490,6 +503,11 @@ class QwpResourcePool<T> {
     }
   }
 
+  /**
+   * Teardown is best effort, as in the Java, Rust and Python pools: neither
+   * shutdown nor a lease return fails because one resource could not close
+   * cleanly. A sender reports such a failure itself, as a logged warning.
+   */
   private destroy(entry: PoolEntry<T>): Promise<void> {
     if (!entry.destroyPromise) {
       entry.destroyPromise = this.destroyResource(entry.value)
@@ -631,7 +649,7 @@ export class QwpClient {
       validated.idleTimeoutMs,
       validated.maxLifetimeMs,
       factories.createSender,
-      (sender) => sender.close(),
+      (sender) => sender.closeForPool(),
       false,
       factories.senderSlotReservation,
     );

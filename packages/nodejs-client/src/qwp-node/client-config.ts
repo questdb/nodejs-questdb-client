@@ -6,31 +6,60 @@ import type {
   QwpNodeEgressOptions,
   QwpNodeIngressOptions,
   QwpNodeStoreAndForwardOptions,
+  QwpNodeWebSocketOptions,
 } from "../qwp";
 import type { Logger } from "../logging";
 import type { QwpClientPoolOptions } from "../../../client-core/src/_qwp/client";
 import type { QwpEgressSessionOptions } from "../../../client-core/src/_qwp/egress-session";
-import { QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
+import {
+  QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
+  selectsQwpSyncInitialConnect,
+  validateQwpInitialConnectMode,
+} from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS } from "../../../client-core/src/_qwp/_internal/reconnecting-egress-connection";
+import {
+  validateQwpEgressReconnectBackoffs,
+  validateQwpIngressReconnectBackoffs,
+} from "../../../client-core/src/_qwp/_internal/reconnect-backoff";
+import { assertUniformQwpEndpointScheme } from "../../../client-core/src/_qwp/_internal/failover";
+import {
+  assertKnownQwpOptionSections,
+  assertNoQwpIngressRouting,
+} from "../../../client-core/src/_qwp/_internal/option-sections";
+import {
+  qwpClusterEndpoint,
+  type QwpClusterRoute,
+} from "../../../client-core/src/_qwp/_internal/cluster-endpoint";
 import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
 } from "../../../client-core/src/_qwp/_internal/timer-bounds";
-import { qwpSegmentFileSize, QWP_MAX_SEGMENT_BYTES } from "./file-replay-store";
+import {
+  qwpSegmentFileSize,
+  QWP_MAX_SEGMENT_BYTES,
+  QWP_SF_DEFAULTS,
+} from "./file-replay-store";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
-import type {
-  QwpReconnectOptions,
-  QwpTarget,
+import {
+  QWP_INITIAL_CONNECT_MODE,
+  type QwpEgressReconnectOptions,
+  type QwpIngressReconnectOptions,
+  type QwpInitialConnectMode,
+  type QwpTarget,
 } from "../../../client-core/src/_qwp/transport";
 import { validateQwpWebSocketAgent } from "./websocket-agent";
 
 const DEFAULT_QWP_PORT = 9000;
 const MAX_BATCH_ROWS = 1_048_576;
 const DEFAULT_CLOSE_FLUSH_TIMEOUT_MS = 5_000;
-const DEFAULT_SF_MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
-const DEFAULT_SF_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
-const DEFAULT_SF_APPEND_DEADLINE_MS = 30_000;
+
+/**
+ * @internal The journal slot a sender names when neither `sender_id` nor the
+ * typed `senderId` does: `<sf_dir>/default`, or `default-<slot>` for a pooled
+ * sender.
+ */
+export const QWP_DEFAULT_SENDER_ID = "default";
 
 /**
  * Legacy ILP keys that are not part of the QWP vocabulary. They are rejected
@@ -98,6 +127,7 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "failover_max_duration_ms",
   "max_batch_rows",
   "initial_credit",
+  "query_timeout_ms",
   "buffer_pool_size",
   "compression",
   "compression_level",
@@ -139,12 +169,28 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
  * the same reasoning validateUdpUnsupportedOptions() already applies on the
  * ILP side.
  *
- * `lazy_connect`, `target`, `zone`, `drain_orphans` and the store-and-forward
- * keys are deliberately absent: ingress honours all of them.
+ * `drain_orphans` and the store-and-forward keys are deliberately absent:
+ * ingress honours them.
+ *
+ * `target` and `zone` are listed: they route query sessions only, as in the
+ * Java client, whose sender accepts and ignores both. QuestDB accepts writes
+ * on the primary alone -- a replica, or a primary still catching up, answers
+ * the `/write/v4` upgrade with 421 and the ingress sweep moves on -- so there
+ * is nothing for a sender to route. Applying them to ingress was worse than
+ * inert: `target=replica`, the usual read-scaling setting, made the sweep
+ * refuse the primary it had found and left the sender nowhere to connect.
+ *
+ * `lazy_connect` is listed although it shapes ingress startup, because every
+ * QuestDB client scopes it to the pooled facade: the Java `QuestDB` facade and
+ * the Rust and Python pools apply it, and their standalone senders accept and
+ * ignore it. A Sender honouring it started in the background where the same
+ * string started fail-fast everywhere else, and it rejected pool combinations
+ * -- `query_pool_min=1` -- that no standalone sender reads. A Sender that has
+ * to start without a server sets `initial_connect_retry=async` instead.
  *
  * The `failover*` keys are not among those. QWP.md scopes them to egress, and
- * parseEgressReconnect() is their only reader, so they reach `egressSession`
- * and nothing else -- the same discarded section `initial_credit` lands in.
+ * parseEgressReconnect() is their only reader, so they reach the `egress`
+ * section and nothing else -- the same discarded section `initial_credit` lands in.
  * Listing them here alongside it was the omission: ingress endpoint sweeping
  * is unconditional and reads none of them, so a Sender given a cluster string
  * that tuned or disabled failover applied none of it and said nothing, while
@@ -163,13 +209,17 @@ const QWP_CLIENT_ONLY_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "housekeeper_interval_ms",
   "idle_timeout_ms",
   "initial_credit",
+  "lazy_connect",
   "max_batch_rows",
   "max_lifetime_ms",
   "query_close_timeout_ms",
   "query_pool_max",
   "query_pool_min",
+  "query_timeout_ms",
   "sender_pool_max",
   "sender_pool_min",
+  "target",
+  "zone",
 ]);
 
 /**
@@ -194,7 +244,10 @@ export function warnUnsupportedQwpSenderKeys(
   logger(
     "warn",
     `Sender ignores QWP configuration key${unsupported.length > 1 ? "s" : ""}: ${unsupported.join(", ")}; ` +
-      "they configure QWP egress and the connection pools, which only connectQwpNodeClient() builds",
+      "they configure QWP egress and the connection pools, which only connectQwpNodeClient() builds" +
+      (unsupported.includes("lazy_connect")
+        ? "; set initial_connect_retry=async for a Sender that must start without a server"
+        : ""),
   );
 }
 
@@ -203,20 +256,37 @@ interface ParsedConfig {
   readonly values: ReadonlyMap<string, readonly string[]>;
 }
 
+/**
+ * The entry point a connect string configures: the pooled facade, or a
+ * standalone `Sender`, which validates the pool-level `lazy_connect` flag but
+ * does not act on it.
+ */
+export type QwpNodeConfigScope = "client" | "sender";
+
 /** Parses one ws/wss cluster string into the combined Node facade options. */
 export function resolveQwpNodeClientConfig(
   configurationString: string,
   extraOptions: QwpNodeClientConfigOptions = {},
+  scope: QwpNodeConfigScope = "client",
 ): QwpNodeClientOptions {
+  assertKnownQwpOptionSections(
+    "QWP client override",
+    extraOptions,
+    QWP_NODE_CLIENT_SECTIONS,
+  );
   const parsed = parseConfigurationString(configurationString);
   const value = (key: string): string | undefined =>
     parsed.values.get(key)?.[0];
   const endpoints = parseEndpoints(parsed);
+  // Validated for both entry points; only the pooled client acts on it.
+  const configuredLazyConnect =
+    optionalCaseInsensitiveBoolean(value("lazy_connect"), "lazy_connect") ??
+    false;
   const lazyConnect =
-    optionalBoolean(value("lazy_connect"), "lazy_connect") ?? false;
-  const initialConnectMode = resolveInitialConnectMode(
-    parsed.values,
-    lazyConnect,
+    scope === "client" && (extraOptions.lazyConnect ?? configuredLazyConnect);
+  // Parsed this early so an invalid mode is the error a caller sees first.
+  const explicitInitialConnectMode = optionalInitialConnectMode(
+    value("initial_connect_retry"),
   );
 
   validateAuthentication(parsed.values);
@@ -225,14 +295,14 @@ export function resolveQwpNodeClientConfig(
   const authorization = createAuthorization(parsed.values);
   if (
     authorization !== undefined &&
-    extraOptions.webSocket?.authorization !== undefined
+    extraOptions.cluster?.authorization !== undefined
   ) {
     throw new Error(
-      "a custom QWP 'qwp.webSocket.authorization' header cannot be combined with 'username'/'password' or 'token'; supply only one",
+      "a custom QWP authorization cannot be combined with 'username'/'password' or 'token'; supply only one",
     );
   }
   const configuredAgent = createTlsAgent(parsed);
-  const callerAgent = extraOptions.webSocket?.agent;
+  const callerAgent = extraOptions.cluster?.agent;
   if (callerAgent && configuredAgent) {
     // configuredAgent is built only when tls_verify/tls_roots were set, and a
     // caller agent is the WebSocket upgrade's sole TLS channel. Preferring the
@@ -242,45 +312,61 @@ export function resolveQwpNodeClientConfig(
       "a custom QWP WebSocket agent cannot be combined with tls_verify, tls_roots, or tls_roots_password; configure TLS on the agent itself",
     );
   }
+  if (configuredAgent) {
+    // The same combination on one side: its agent replaces the cluster's on
+    // that side alone, so the string's verification would silently apply to
+    // the other side only.
+    for (const side of ["ingress", "egress"] as const) {
+      if (!extraOptions[side]?.agent) continue;
+      throw new Error(
+        `a custom QWP WebSocket agent cannot be combined with tls_verify, tls_roots, or tls_roots_password; ${side}.agent would replace them for ${side} alone, so configure TLS on the agent itself`,
+      );
+    }
+  }
   const agent =
     validateQwpWebSocketAgent(callerAgent, parsed.schema === "wss") ??
     configuredAgent;
 
-  // requestDurableAck is ingress-only and the ingress block below sets it
-  // explicitly. Leaving it in the shared block spread it into `egress` too,
-  // so a typed `webSocket: { requestDurableAck: true }` override made every
-  // pooled query session fail its /read/v1 capability check.
-  const sharedWebSocket = { ...definedOnly(extraOptions.webSocket) };
-  delete sharedWebSocket.requestDurableAck;
-  const common = {
-    ...sharedWebSocket,
+  const cluster: QwpNodeWebSocketOptions = {
+    ...definedOnly(extraOptions.cluster),
+    url: endpoints[0],
+    failoverUrls: endpoints.slice(1),
     connectTimeoutMs:
-      extraOptions.webSocket?.connectTimeoutMs ??
+      extraOptions.cluster?.connectTimeoutMs ??
       optionalPositiveInteger(value("connect_timeout"), "connect_timeout"),
     authTimeoutMs:
-      extraOptions.webSocket?.authTimeoutMs ??
+      extraOptions.cluster?.authTimeoutMs ??
       optionalPositiveInteger(value("auth_timeout_ms"), "auth_timeout_ms"),
-    clientId: extraOptions.webSocket?.clientId ?? value("client_id"),
-    authorization: extraOptions.webSocket?.authorization ?? authorization,
+    clientId: extraOptions.cluster?.clientId ?? value("client_id"),
+    authorization: extraOptions.cluster?.authorization ?? authorization,
     agent,
   };
 
   const ingressReconnect = parseIngressReconnect(parsed.values);
   const egressReconnect = parseEgressReconnect(parsed.values);
+  const initialConnectMode = resolveInitialConnectMode(
+    explicitInitialConnectMode,
+    lazyConnect,
+    extraOptions,
+    ingressReconnect,
+  );
+  // The store is merged with the string's sf_* keys rather than replacing
+  // them, so it is kept out of the typed ingress values spread below.
+  const { storeAndForward: typedStoreAndForward, ...ingressOverrides } =
+    extraOptions.ingress ?? {};
   const configuredStoreAndForward = parseStoreAndForward(
     parsed.values,
-    extraOptions.storeAndForward?.directory,
-    initialConnectMode,
+    typedStoreAndForward?.directory,
   );
-  const storeAndForward = extraOptions.storeAndForward
+  const storeAndForward = typedStoreAndForward
     ? {
         ...configuredStoreAndForward,
-        ...definedOnly(extraOptions.storeAndForward),
+        ...definedOnly(typedStoreAndForward),
       }
     : configuredStoreAndForward;
   validateStoreAndForwardDependencies(parsed.values, storeAndForward);
 
-  const sender: QwpSenderOptions = {
+  const buffering: QwpSenderOptions = {
     autoFlush: optionalBoolean(value("auto_flush"), "auto_flush"),
     autoFlushRows: optionalInteger(
       value("auto_flush_rows"),
@@ -307,20 +393,11 @@ export function resolveQwpNodeClientConfig(
     maxNameLength:
       optionalInteger(value("max_name_len"), "max_name_len", 16) ?? 127,
     transactional: optionalBoolean(value("transaction"), "transaction"),
-    ...definedOnly(extraOptions.sender),
   };
 
-  const ingressSession: QwpIngressSessionOptions = {
+  const delivery: QwpIngressSessionOptions = {
     reconnect: ingressReconnect,
-    // One policy, two spellings: the session field is the internal one the
-    // Node adapter feeds from the store. Reading the connect string's value
-    // here instead of the store's effective value manufactured a disagreement
-    // out of a typed override -- `qwp.webSocket.storeAndForward.
-    // initialConnectMode` is documented to win over the string, yet it was
-    // rejected as conflicting with the default the string had just supplied.
-    initialConnectMode: storeAndForward
-      ? storeAndForward.initialConnectMode
-      : initialConnectMode,
+    initialConnectMode,
     memoryReplayMaxBytes: storeAndForward
       ? undefined
       : optionalSize(value("sf_max_total_bytes"), "sf_max_total_bytes", 1),
@@ -350,7 +427,6 @@ export function resolveQwpNodeClientConfig(
       "durable_ack_keepalive_interval_millis",
       0,
     ),
-    ...definedOnly(extraOptions.ingressSession),
   };
   const egressSession: QwpEgressSessionOptions = {
     reconnect: egressReconnect,
@@ -368,7 +444,12 @@ export function resolveQwpNodeClientConfig(
       value("query_close_timeout_ms"),
       "query_close_timeout_ms",
     ),
-    ...definedOnly(extraOptions.egressSession),
+    // Zero disables the timeout, as in the Java client.
+    queryTimeoutMs: optionalInteger(
+      value("query_timeout_ms"),
+      "query_timeout_ms",
+      0,
+    ),
   };
 
   const pool: QwpClientPoolOptions = {
@@ -414,41 +495,24 @@ export function resolveQwpNodeClientConfig(
     "replica",
   ] as const) as QwpTarget | undefined;
   const zone = value("zone");
-  const configuredRequestDurableAck =
-    extraOptions.webSocket?.requestDurableAck ??
-    optionalBoolean(value("request_durable_ack"), "request_durable_ack");
-  if (
-    configuredRequestDurableAck === false &&
-    ingressSession.durableAckKeepaliveMs !== undefined
-  ) {
-    throw new RangeError(
-      "durableAckKeepaliveMs cannot be combined with requestDurableAck=false",
-    );
-  }
-  const ingress: QwpNodeIngressOptions = {
-    ...common,
-    url: withPath(endpoints[0], "/write/v4"),
-    failoverUrls: endpoints
-      .slice(1)
-      .map((endpoint) => withPath(endpoint, "/write/v4")),
-    // `target` and `zone` are one cluster-routing pair, and QWP.md documents
-    // them under "Reconnect and failover" and promises the ingress endpoint
-    // ranking uses zone affinity. Reaching only the egress factory left both
-    // silently inert for writes.
-    target,
-    zone,
-    requestDurableAck:
-      configuredRequestDurableAck ??
-      (ingressSession.durableAckKeepaliveMs === undefined ? undefined : true),
+  const ingress: NonNullable<QwpNodeClientOptions["ingress"]> = {
+    // The keepalive does not request durable ACKs: it is carried as set and
+    // ignored without them, as in the Java and Rust clients.
+    requestDurableAck: optionalBoolean(
+      value("request_durable_ack"),
+      "request_durable_ack",
+    ),
     storeAndForward,
-    senderId: validateSenderId(value("sender_id") ?? "default"),
+    senderId: validateSenderId(value("sender_id") ?? QWP_DEFAULT_SENDER_ID),
+    ...buffering,
+    ...delivery,
+    ...definedOnly(ingressOverrides),
   };
-  const egress: QwpNodeEgressOptions = {
-    ...common,
-    url: withPath(endpoints[0], "/read/v1"),
-    failoverUrls: endpoints
-      .slice(1)
-      .map((endpoint) => withPath(endpoint, "/read/v1")),
+  const egress: NonNullable<QwpNodeClientOptions["egress"]> = {
+    // Routing is egress-only. Writes can only land on the primary, which the
+    // ingress sweep reaches through each replica's 421 whatever these say;
+    // copied onto ingress as a role filter, target=replica refused the primary
+    // and left a pooled client's senders nowhere to connect.
     target,
     zone,
     compression: optionalEnum(value("compression"), "compression", [
@@ -463,18 +527,11 @@ export function resolveQwpNodeClientConfig(
       1,
       MAX_BATCH_ROWS,
     ),
+    ...egressSession,
     ...definedOnly(extraOptions.egress),
   };
 
-  return {
-    ingress,
-    egress,
-    sender,
-    ingressSession,
-    egressSession,
-    pool,
-    lazyConnect,
-  };
+  return { cluster, ingress, egress, pool, lazyConnect };
 }
 
 function parseConfigurationString(configurationString: string): ParsedConfig {
@@ -664,12 +721,6 @@ function validateAddressPort(address: string, port: string): void {
   }
 }
 
-function withPath(endpoint: URL, path: string): URL {
-  const result = new URL(endpoint);
-  result.pathname = path;
-  return result;
-}
-
 function validateAuthentication(
   values: ReadonlyMap<string, readonly string[]>,
 ): void {
@@ -765,25 +816,22 @@ export function readPemTlsRoots(
 
 function parseIngressReconnect(
   values: ReadonlyMap<string, readonly string[]>,
-): QwpReconnectOptions | undefined {
-  const reconnect: QwpReconnectOptions = {
-    initialBackoffMs: optionalPositiveInteger(
+): QwpIngressReconnectOptions | undefined {
+  const reconnect: QwpIngressReconnectOptions = {
+    reconnectInitialBackoffMs: optionalPositiveInteger(
       values.get("reconnect_initial_backoff_millis")?.[0],
       "reconnect_initial_backoff_millis",
     ),
-    maxBackoffMs: optionalPositiveInteger(
+    reconnectMaxBackoffMs: optionalPositiveInteger(
       values.get("reconnect_max_backoff_millis")?.[0],
       "reconnect_max_backoff_millis",
     ),
-    // Zero is the documented "no reconnect deadline" state on the typed side --
-    // QwpReconnectOptions.maxDurationMs spells it out, both reconnecting
-    // connections gate their deadline on `maxDurationMs > 0`, and the egress
-    // failover_max_duration_ms key already accepts it. Requiring a positive
-    // value here left that supported state reachable only by dropping the
-    // portable connection-string spelling QWP.md presents as equivalent.
-    // The backoff keys above stay positive-only on purpose: a zero backoff is
-    // a hot retry loop, not a documented mode.
-    maxDurationMs: optionalInteger(
+    // Zero is accepted, as the Rust and Python clients accept it, and means
+    // the same: a synchronous startup makes one attempt and does not retry
+    // (QwpIngressReconnectOptions.reconnectMaxDurationMs). Java rejects it.
+    // The backoff keys above stay positive-only on purpose, as in all three:
+    // a zero backoff is a hot retry loop, not a documented mode.
+    reconnectMaxDurationMs: optionalInteger(
       values.get("reconnect_max_duration_millis")?.[0],
       "reconnect_max_duration_millis",
       0,
@@ -806,36 +854,32 @@ function parseIngressReconnect(
 
 function parseEgressReconnect(
   values: ReadonlyMap<string, readonly string[]>,
-): QwpReconnectOptions | false | undefined {
+): QwpEgressReconnectOptions | false | undefined {
   const failover = optionalBoolean(values.get("failover")?.[0], "failover");
-  const reconnect: QwpReconnectOptions = {
-    maxAttempts: optionalInteger(
+  const reconnect: QwpEgressReconnectOptions = {
+    failoverMaxAttempts: optionalInteger(
       values.get("failover_max_attempts")?.[0],
       "failover_max_attempts",
       1,
     ),
-    initialBackoffMs: optionalInteger(
+    failoverBackoffInitialMs: optionalInteger(
       values.get("failover_backoff_initial_ms")?.[0],
       "failover_backoff_initial_ms",
       0,
     ),
-    maxBackoffMs: optionalInteger(
+    failoverBackoffMaxMs: optionalInteger(
       values.get("failover_backoff_max_ms")?.[0],
       "failover_backoff_max_ms",
       0,
     ),
-    maxDurationMs: optionalInteger(
+    failoverMaxDurationMs: optionalInteger(
       values.get("failover_max_duration_ms")?.[0],
       "failover_max_duration_ms",
       0,
       Number.MAX_SAFE_INTEGER,
     ),
   };
-  validateReconnectBounds(
-    reconnect,
-    "QWP egress failover",
-    QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
-  );
+  validateEgressReconnectBounds(reconnect);
   if (failover === false) return false;
   // The Java facade defaults egress failover to on for cluster strings.
   return failover === true || hasDefinedValue(reconnect)
@@ -846,7 +890,6 @@ function parseEgressReconnect(
 function parseStoreAndForward(
   values: ReadonlyMap<string, readonly string[]>,
   fallbackDirectory?: string,
-  initialConnectMode?: "off" | "sync" | "async",
 ): QwpNodeStoreAndForwardOptions | undefined {
   const directory = values.get("sf_dir")?.[0] ?? fallbackDirectory;
   if (!directory) return undefined;
@@ -862,26 +905,25 @@ function parseStoreAndForward(
         values.get("sf_max_total_bytes")?.[0],
         "sf_max_total_bytes",
         1,
-      ) ?? DEFAULT_SF_MAX_TOTAL_BYTES,
+      ) ?? QWP_SF_DEFAULTS.maxBytes,
     maxSegmentBytes:
       optionalSize(
         values.get("sf_max_segment_bytes")?.[0],
         "sf_max_segment_bytes",
         1,
-      ) ?? DEFAULT_SF_MAX_SEGMENT_BYTES,
-    durability: durability ?? "memory",
+      ) ?? QWP_SF_DEFAULTS.maxSegmentBytes,
+    durability: durability ?? QWP_SF_DEFAULTS.durability,
     checkpointIntervalMs: optionalInteger(
       values.get("sf_sync_interval_millis")?.[0],
       "sf_sync_interval_millis",
       0,
     ),
-    backpressurePolicy: "wait",
+    backpressurePolicy: QWP_SF_DEFAULTS.backpressurePolicy,
     appendDeadlineMs:
       optionalPositiveInteger(
         values.get("sf_append_deadline_millis")?.[0],
         "sf_append_deadline_millis",
-      ) ?? DEFAULT_SF_APPEND_DEADLINE_MS,
-    initialConnectMode,
+      ) ?? QWP_SF_DEFAULTS.appendDeadlineMs,
     catchUpCapGapMinEscalationWindowMs: optionalInteger(
       values.get("catch_up_cap_gap_min_escalation_window_millis")?.[0],
       "catch_up_cap_gap_min_escalation_window_millis",
@@ -932,9 +974,9 @@ function validateStoreAndForwardDependencies(
     typeof storeAndForward?.directory === "string" &&
     storeAndForward.directory.trim()
   ) {
-    const maxBytes = storeAndForward.maxBytes ?? DEFAULT_SF_MAX_TOTAL_BYTES;
+    const maxBytes = storeAndForward.maxBytes ?? QWP_SF_DEFAULTS.maxBytes;
     const maxSegmentBytes =
-      storeAndForward.maxSegmentBytes ?? DEFAULT_SF_MAX_SEGMENT_BYTES;
+      storeAndForward.maxSegmentBytes ?? QWP_SF_DEFAULTS.maxSegmentBytes;
     if (
       !Number.isSafeInteger(maxSegmentBytes) ||
       maxSegmentBytes < 1 ||
@@ -956,16 +998,8 @@ function validateStoreAndForwardDependencies(
       );
     }
   }
-  validateReconnectBounds(
-    parseIngressReconnect(values),
-    "QWP ingress reconnect",
-    QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS,
-  );
-  validateReconnectBounds(
-    parseEgressReconnect(values),
-    "QWP egress failover",
-    QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS,
-  );
+  validateIngressReconnectBounds(parseIngressReconnect(values));
+  validateEgressReconnectBounds(parseEgressReconnect(values));
 }
 
 /**
@@ -989,20 +1023,177 @@ function definedOnly<T extends object>(overrides: T | undefined): Partial<T> {
   return defined as Partial<T>;
 }
 
+/**
+ * The startup policy a connect string and its typed overrides resolve to.
+ *
+ * A typed mode wins, as every typed value does. Then an explicit `initial_connect_retry`, then the pooled client's
+ * `lazy_connect`, and only then the reconnect policy. That last step reads the
+ * policy the session will really run: a typed `reconnect` replaces the
+ * string's whole object, so promoting startup to `sync` from the string's
+ * keys alone missed a budget tuned through the typed option, and applied one
+ * the typed option had discarded.
+ */
 function resolveInitialConnectMode(
-  values: ReadonlyMap<string, readonly string[]>,
+  explicit: QwpInitialConnectMode | undefined,
   lazyConnect: boolean,
-): "off" | "sync" | "async" {
-  const explicit = optionalInitialConnectMode(
-    values.get("initial_connect_retry")?.[0],
-  );
+  extraOptions: QwpNodeClientConfigOptions,
+  configuredReconnect: QwpIngressReconnectOptions | undefined,
+): QwpInitialConnectMode {
+  const typed = extraOptions.ingress?.initialConnectMode;
+  if (typed !== undefined) return typed;
   if (explicit !== undefined) return explicit;
-  if (lazyConnect) return "async";
-  return values.has("reconnect_initial_backoff_millis") ||
-    values.has("reconnect_max_backoff_millis") ||
-    values.has("reconnect_max_duration_millis")
-    ? "sync"
-    : "off";
+  if (lazyConnect) return QWP_INITIAL_CONNECT_MODE.ASYNC;
+  const typedReconnect = extraOptions.ingress?.reconnect;
+  return selectsQwpSyncInitialConnect(
+    typedReconnect === undefined ? configuredReconnect : typedReconnect,
+  )
+    ? QWP_INITIAL_CONNECT_MODE.SYNC
+    : QWP_INITIAL_CONNECT_MODE.OFF;
+}
+
+/**
+ * @internal Resolves a ws/wss connect string into a standalone `Sender`'s
+ * complete ingress options.
+ *
+ * The whole shared vocabulary is validated, as for the pooled client, but
+ * `lazy_connect` is not applied: like the Java, Rust and Python standalone
+ * senders, a Sender accepts the pool-level flag and ignores it, and
+ * warnUnsupportedQwpSenderKeys() says so.
+ */
+export function resolveQwpNodeSenderConfig(
+  configurationString: string,
+  extraOptions: QwpNodeClientConfigOptions = {},
+): QwpNodeIngressOptions {
+  return resolveQwpNodeClientSides(
+    normalizeQwpNodeClientOptions(
+      resolveQwpNodeClientConfig(configurationString, extraOptions, "sender"),
+    ),
+  ).ingress;
+}
+
+/**
+ * @internal Validates resolved or typed client options and applies the
+ * `lazyConnect` contract. The pooled client runs every option set through it;
+ * a standalone Sender's never has `lazyConnect` set.
+ */
+export function normalizeQwpNodeClientOptions(
+  options: QwpNodeClientOptions,
+): QwpNodeClientOptions {
+  assertKnownQwpOptionSections("QWP client", options, QWP_NODE_CLIENT_SECTIONS);
+  // The cluster's settings reach ingress as well, so routing has no place
+  // there either.
+  for (const section of ["cluster", "ingress"] as const) {
+    assertNoQwpIngressRouting(
+      options[section],
+      `${section}.`,
+      "set it under egress instead",
+    );
+  }
+  validateQwpIngressReconnectBackoffs(options.ingress?.reconnect);
+  validateQwpEgressReconnectBackoffs(options.egress?.reconnect);
+  const initialConnectMode = options.ingress?.initialConnectMode;
+  validateQwpInitialConnectMode(
+    initialConnectMode,
+    "ingress.initialConnectMode",
+  );
+  if (!options.lazyConnect) return options;
+  if (
+    initialConnectMode !== undefined &&
+    initialConnectMode !== QWP_INITIAL_CONNECT_MODE.ASYNC
+  ) {
+    throw new RangeError(
+      `conflicting configuration: lazyConnect requires initialConnectMode='async', got '${initialConnectMode}'`,
+    );
+  }
+  if ((options.pool?.queryPoolMin ?? 0) > 0) {
+    throw new RangeError(
+      `conflicting configuration: lazyConnect requires queryPoolMin=0, got ${options.pool?.queryPoolMin}`,
+    );
+  }
+  // A background startup needs reconnection: it is the reconnect loop that
+  // connects, and its replay queue that holds rows until it does.
+  if (options.ingress?.reconnect === false) {
+    throw new RangeError(
+      "conflicting configuration: lazyConnect requires ingress reconnect",
+    );
+  }
+  return {
+    ...options,
+    // ASYNC alone starts the session in the background, with or without a
+    // store-and-forward journal; see QwpIngressSession.connect().
+    ingress: {
+      ...options.ingress,
+      initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
+    },
+    pool: { ...options.pool, queryPoolMin: 0 },
+  };
+}
+
+/** The sections of the pooled client's options and of its overrides. */
+const QWP_NODE_CLIENT_SECTIONS = [
+  "cluster",
+  "ingress",
+  "egress",
+  "pool",
+  "lazyConnect",
+] as const;
+
+/** Connection settings a pooled client's cluster owns. */
+const QWP_NODE_CLUSTER_OWNED_OPTIONS = [
+  "url",
+  "failoverUrls",
+  "authorization",
+] as const;
+
+/**
+ * @internal Derives each side's complete options from a pooled client's
+ * cluster form: the shared connection settings, the side's own options over
+ * them, and the side's route on every cluster endpoint.
+ */
+export function resolveQwpNodeClientSides(options: QwpNodeClientOptions): {
+  ingress: QwpNodeIngressOptions;
+  egress: QwpNodeEgressOptions;
+} {
+  // The type requires it; this names it for a JavaScript caller.
+  if (!options.cluster) {
+    throw new TypeError(
+      "QWP client configuration requires cluster; ingress and egress hold side-specific options only",
+    );
+  }
+  for (const [side, sideOptions] of [
+    ["ingress", options.ingress],
+    ["egress", options.egress],
+  ] as const) {
+    for (const name of QWP_NODE_CLUSTER_OWNED_OPTIONS) {
+      if ((sideOptions as Record<string, unknown>)?.[name] !== undefined) {
+        throw new TypeError(
+          `conflicting client configuration: ${side}.${name} must be configured once under cluster.${name}`,
+        );
+      }
+    }
+  }
+  const { url, failoverUrls, ...shared } = options.cluster;
+  const routed = (endpoint: string | URL, route: QwpClusterRoute): URL =>
+    qwpClusterEndpoint(endpoint, route, "QWP cluster URL");
+  const ingress: QwpNodeIngressOptions = {
+    ...shared,
+    ...definedOnly(options.ingress),
+    url: routed(url, "write/v4"),
+    failoverUrls: failoverUrls?.map((endpoint) => routed(endpoint, "write/v4")),
+  };
+  const egress: QwpNodeEgressOptions = {
+    ...shared,
+    ...definedOnly(options.egress),
+    url: routed(url, "read/v1"),
+    failoverUrls: failoverUrls?.map((endpoint) => routed(endpoint, "read/v1")),
+  };
+  // Both sweeps carry one connection configuration across every endpoint, so a
+  // mixed scheme sends this client's credentials and rows over whichever
+  // socket a sweep reaches. Checked here as well as in the failover factory so
+  // a typed configuration is reported before the client exists.
+  assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
+  assertUniformQwpEndpointScheme(egress.url, egress.failoverUrls);
+  return { ingress, egress };
 }
 
 function validateSenderId(value: string): string {
@@ -1046,15 +1237,35 @@ function parseCompressionLevel(
   return level;
 }
 
-function validateReconnectBounds(
-  reconnect: QwpReconnectOptions | false | undefined,
-  name: string,
-  defaults: Pick<QwpReconnectOptions, "initialBackoffMs" | "maxBackoffMs">,
+function validateIngressReconnectBounds(
+  reconnect: QwpIngressReconnectOptions | undefined,
 ): void {
   if (!reconnect) return;
-  const initialBackoffMs =
-    reconnect.initialBackoffMs ?? defaults.initialBackoffMs!;
-  const maxBackoffMs = reconnect.maxBackoffMs ?? defaults.maxBackoffMs!;
+  const defaults = QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS;
+  validateBackoffOrder(
+    "QWP ingress reconnect",
+    reconnect.reconnectInitialBackoffMs ?? defaults.reconnectInitialBackoffMs,
+    reconnect.reconnectMaxBackoffMs ?? defaults.reconnectMaxBackoffMs,
+  );
+}
+
+function validateEgressReconnectBounds(
+  reconnect: QwpEgressReconnectOptions | false | undefined,
+): void {
+  if (!reconnect) return;
+  const defaults = QWP_DEFAULT_EGRESS_RECONNECT_OPTIONS;
+  validateBackoffOrder(
+    "QWP egress failover",
+    reconnect.failoverBackoffInitialMs ?? defaults.failoverBackoffInitialMs,
+    reconnect.failoverBackoffMaxMs ?? defaults.failoverBackoffMaxMs,
+  );
+}
+
+function validateBackoffOrder(
+  name: string,
+  initialBackoffMs: number,
+  maxBackoffMs: number,
+): void {
   if (maxBackoffMs < initialBackoffMs) {
     throw new RangeError(
       `${name} maximum backoff must be greater than or equal to its initial backoff`,
@@ -1117,23 +1328,51 @@ function validatePoolBounds(
   }
 }
 
+/**
+ * Case-insensitive, with the boolean aliases, as the Java and Rust parsers
+ * read this key, so a connect string written for either of them is accepted.
+ */
 function optionalInitialConnectMode(
   value: string | undefined,
-): "off" | "sync" | "async" | undefined {
+): QwpInitialConnectMode | undefined {
   if (value === undefined) return undefined;
-  switch (value) {
+  switch (value.toLowerCase()) {
     case "off":
     case "false":
-      return "off";
+      return QWP_INITIAL_CONNECT_MODE.OFF;
     case "on":
     case "true":
     case "sync":
-      return "sync";
+      return QWP_INITIAL_CONNECT_MODE.SYNC;
     case "async":
-      return "async";
+      return QWP_INITIAL_CONNECT_MODE.ASYNC;
     default:
       throw new Error(
-        `Invalid initial_connect_retry: '${value}', accepted values: 'off', 'sync', 'async'`,
+        `Invalid initial_connect_retry: '${value}', accepted values: 'on', 'off', 'true', 'false', 'sync', 'async'`,
+      );
+  }
+}
+
+/**
+ * An on/off flag that also takes true/false, in any case. `lazy_connect` reads
+ * this way in the Rust and Python clients, and its documented spelling in the
+ * Java, Rust and Python clients alike is `lazy_connect=true`.
+ */
+function optionalCaseInsensitiveBoolean(
+  value: string | undefined,
+  key: string,
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  switch (value.toLowerCase()) {
+    case "on":
+    case "true":
+      return true;
+    case "off":
+    case "false":
+      return false;
+    default:
+      throw new Error(
+        `Invalid ${key}: '${value}', accepted values: 'on', 'off', 'true', 'false'`,
       );
   }
 }

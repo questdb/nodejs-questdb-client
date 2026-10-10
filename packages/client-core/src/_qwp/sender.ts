@@ -4,8 +4,6 @@ import {
   QWP_MAX_ARRAY_DIMENSIONS,
   QWP_MAX_COLUMNS_PER_TABLE,
   QwpColumnType,
-  QwpIngressEncodeOptions,
-  QwpIngressResponse,
   QwpTableBuffer,
   flattenQwpArray,
   utf8Length,
@@ -13,8 +11,6 @@ import {
 } from "./_core";
 import {
   QwpBatchTooLargeError,
-  QwpIngressAckTimeoutError,
-  type QwpIngressSendResult,
   type QwpIngressMetrics,
 } from "./ingress-session";
 import {
@@ -25,7 +21,12 @@ import {
 import {
   exceedsQwpTimerCeiling,
   QWP_MAX_TIMER_DELAY_MS,
+  validateQwpAckWaitTimeout,
 } from "./_internal/timer-bounds";
+import type {
+  QwpSenderSession,
+  QwpSenderSessionFactory,
+} from "./_internal/sender-session";
 import { isInt8Array, isUint8Array } from "./_core/typed-array-brand";
 import { log as defaultLog } from "../logging";
 import {
@@ -47,13 +48,10 @@ export type QwpSenderLogger = (
   message: string | Error,
 ) => void;
 
-export interface QwpSenderEncodeOptions
-  extends Pick<QwpIngressEncodeOptions, "gorilla"> {
-  /** Connection-scoped deltas are the default; use `full` to opt out. */
-  symbolDictionary?: "delta" | "full";
-}
-
-/** Options for the browser-safe, fluent QWP sender. */
+/**
+ * Row buffering and flushing options of the browser-safe, fluent QWP sender.
+ * Each runtime's ingress options, and the Node UDP options, include them.
+ */
 export interface QwpSenderOptions {
   autoFlush?: boolean;
   autoFlushRows?: number;
@@ -71,37 +69,32 @@ export interface QwpSenderOptions {
   maxNameLength?: number;
   /**
    * Keep auto-flushed rows in an open server-side transaction. An explicit
-   * flush()/commit() closes the transaction. QWP transactions are atomic per
-   * table, rather than across every table in a multi-table flush.
+   * flush() closes the transaction. QWP transactions are atomic per table,
+   * rather than across every table in a multi-table flush.
    */
   transactional?: boolean;
   /**
-   * Wait for the server's protocol ACK before flush()/commit() resolves.
-   * Defaults to false, matching the Java QWP sender's local-publication
-   * boundary. Set this to true for an acknowledgement barrier, or use
-   * flushAndGetSequence() followed by waitForAcknowledged().
-   */
-  awaitServerAck?: boolean;
-  /**
-   * Wait for durable upload after every successful ingress ACK. When true,
-   * this implies awaitServerAck unless awaitServerAck is explicitly false.
-   */
-  awaitDurableAck?: boolean;
-  /**
-   * Durable-upload deadline applied after each ingress ACK. Capped at
+   * Maximum time close() spends publishing queued rows and waiting for the
+   * server ACK watermark. Zero or a negative value skips the ACK wait, but
+   * RAM-backed frames still have up to 5 seconds to reach the socket before
+   * close() reports a timeout; if the session can no longer send them at
+   * all, close() rejects with its failure. Defaults to 5 seconds. Capped at
    * 2,147,483,647ms (the host timer ceiling); a larger value throws a
    * `RangeError`.
    */
-  durableAckTimeoutMs?: number;
-  /**
-   * Maximum time close() spends publishing queued rows and waiting for the
-   * server ACK watermark. Zero or a negative value skips the drain. Defaults
-   * to 5 seconds. Capped at 2,147,483,647ms (the host timer ceiling); a larger
-   * value throws a `RangeError`.
-   */
   closeFlushTimeoutMs?: number;
-  /** QWP frame encoding options supported by the high-level sender. */
-  encode?: QwpSenderEncodeOptions;
+  /**
+   * Gorilla-compresses TIMESTAMP and TIMESTAMP_NANOS columns; a column whose
+   * deltas the encoding cannot represent is sent raw. Defaults to true. UDP
+   * senders always disable it.
+   */
+  gorilla?: boolean;
+  /**
+   * Connection-scoped symbol dictionary deltas are the default; `full` opts
+   * out, so every frame carries its own dictionaries. UDP senders always use
+   * `full`.
+   */
+  symbolDictionary?: "delta" | "full";
   log?: QwpSenderLogger;
 }
 
@@ -109,83 +102,22 @@ export interface QwpSenderOptions {
 export class QwpSenderCloseTimeoutError extends Error {
   readonly timeoutMs: number;
   readonly targetSequence: bigint;
-  readonly acknowledgedSequence: bigint;
+  readonly ackedSequence: bigint;
 
   constructor(
     timeoutMs: number,
     targetSequence: bigint,
-    acknowledgedSequence: bigint,
+    ackedSequence: bigint,
   ) {
     super(
-      `QWP sender close timed out after ${timeoutMs}ms [targetSequence=${targetSequence}, acknowledgedSequence=${acknowledgedSequence}]; pending data may be lost`,
+      `QWP sender close timed out after ${timeoutMs}ms [targetSequence=${targetSequence}, ackedSequence=${ackedSequence}]; pending data may be lost`,
     );
     this.name = "QwpSenderCloseTimeoutError";
     this.timeoutMs = timeoutMs;
     this.targetSequence = targetSequence;
-    this.acknowledgedSequence = acknowledgedSequence;
+    this.ackedSequence = ackedSequence;
   }
 }
-
-/**
- * The subset of QwpIngressSession used by QwpSender.
- *
- * Only `sendTables`, `waitForDurable`, and `close` are required. The optional
- * members are capabilities the sender uses when present: the `*WithPublication`
- * and `publish*` pairs separate the local publication boundary from the server
- * ACK, `sendTablesDelta`/`publishTablesDelta` carry incremental symbol
- * dictionaries, and `waitForAcknowledged` exposes the ACK watermark. A session
- * that implements only the required members is supported and falls back to
- * `sendTables`.
- */
-export interface QwpSenderSession {
-  readonly metrics?: QwpIngressMetrics;
-  readonly maxBatchSizeBytes?: number;
-  readonly publishedFrameSequence?: bigint;
-  readonly acknowledgedFrameSequence?: bigint;
-  sendTables(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<QwpIngressResponse>;
-  sendTablesDelta?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<QwpIngressResponse>;
-  sendTablesWithPublication?(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): QwpIngressSendResult;
-  sendTablesDeltaWithPublication?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): QwpIngressSendResult;
-  publishTables?(
-    tables: readonly QwpTableBuffer[],
-    options?: QwpIngressEncodeOptions,
-  ): Promise<void>;
-  publishTablesDelta?(
-    tables: readonly QwpTableBuffer[],
-    options?: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit">,
-  ): Promise<void>;
-  waitForAcknowledged?(
-    targetSequence: bigint,
-    timeoutMs?: number,
-  ): Promise<void>;
-  waitForDurable(
-    response: QwpIngressResponse,
-    timeoutMs?: number,
-  ): Promise<void>;
-  close(code?: number, reason?: string): Promise<void>;
-}
-
-/**
- * Opens the sender's session. The signal is aborted by close(), so a connect
- * still negotiating can be torn down instead of outliving the sender by up to
- * its connect/auth deadline. Factories that ignore the parameter remain
- * assignable, matching QwpConnectionFactory.
- */
-export type QwpSenderSessionFactory = (
-  signal?: AbortSignal,
-) => Promise<QwpSenderSession>;
 
 /** Transport-specific row constraints supplied by a QWP runtime adapter. */
 interface QwpSenderTransportConstraints {
@@ -1144,6 +1076,7 @@ function encodeQwpWriterValue(
 }
 
 const QWP_TABLE_WRITER_CONSTRUCTOR = Symbol("QWP table writer constructor");
+const QWP_SENDER_CONSTRUCTOR = Symbol("QWP sender constructor");
 
 /** Returned by at()/atNow() for a row that started no flush. */
 const SETTLED: Promise<void> = Promise.resolve();
@@ -1152,7 +1085,13 @@ function ignoreResult(): void {}
 
 /** A reusable table-bound writer compiled from a QWP schema. */
 export class QwpTableWriter<Schema extends QwpWriterSchema> {
-  /** @internal Construct table writers with QwpSender.writer(). */
+  /**
+   * Construct table writers with QwpSender.writer(); this constructor takes a
+   * token only the sender holds.
+   *
+   * @internal
+   * @hidden
+   */
   constructor(
     token: typeof QWP_TABLE_WRITER_CONSTRUCTOR,
     readonly tableName: string,
@@ -1237,7 +1176,6 @@ export class QwpSender {
   private closed = false;
   private hasDeferredMessages = false;
   private deferredRowCount = 0;
-  private readonly deferredAcks: Promise<QwpIngressResponse>[] = [];
   private totalRowsStaged = 0;
   private totalRowsPublished = 0;
   private totalFlushes = 0;
@@ -1250,7 +1188,6 @@ export class QwpSender {
   private readonly autoFlushBytes: number;
   private readonly autoFlushIntervalMs: number;
   private readonly transactional: boolean;
-  private readonly awaitServerAck: boolean;
   private readonly closeFlushTimeoutMs: number;
   private readonly maxNameLength: number;
   private readonly log: QwpSenderLogger;
@@ -1258,19 +1195,31 @@ export class QwpSender {
 
   private readonly connectAbort = new AbortController();
 
+  /**
+   * Obtain senders from the runtime factories, such as connectQwpNodeSender()
+   * or connectQwpBrowserSender(), or from a pooled client's borrowSender();
+   * this constructor takes a token only the internal factory holds.
+   *
+   * @internal
+   * @hidden
+   */
   constructor(
+    token: typeof QWP_SENDER_CONSTRUCTOR,
     private readonly sessionFactory: QwpSenderSessionFactory,
     private readonly options: QwpSenderOptions = {},
     constraints: QwpSenderTransportConstraints = {},
   ) {
+    if (token !== QWP_SENDER_CONSTRUCTOR) {
+      throw new TypeError(
+        "QWP senders must be created by a runtime factory such as connectQwpNodeSender() or connectQwpBrowserSender(), or by a QWP client",
+      );
+    }
     this.autoFlush = options.autoFlush ?? true;
     this.autoFlushRows = options.autoFlushRows ?? DEFAULT_AUTO_FLUSH_ROWS;
     this.autoFlushBytes = options.autoFlushBytes ?? DEFAULT_AUTO_FLUSH_BYTES;
     this.autoFlushIntervalMs =
       options.autoFlushIntervalMs ?? DEFAULT_AUTO_FLUSH_INTERVAL_MS;
     this.transactional = options.transactional ?? false;
-    this.awaitServerAck =
-      options.awaitServerAck ?? options.awaitDurableAck === true;
     this.closeFlushTimeoutMs =
       options.closeFlushTimeoutMs ?? DEFAULT_CLOSE_FLUSH_TIMEOUT_MS;
     this.maxNameLength = options.maxNameLength ?? DEFAULT_MAX_NAME_LENGTH;
@@ -1289,21 +1238,6 @@ export class QwpSender {
     if (!Number.isSafeInteger(this.maxNameLength) || this.maxNameLength < 16) {
       throw new RangeError(
         "maxNameLength must be a safe integer of at least 16",
-      );
-    }
-    if (
-      options.durableAckTimeoutMs !== undefined &&
-      (!Number.isFinite(options.durableAckTimeoutMs) ||
-        options.durableAckTimeoutMs <= 0 ||
-        exceedsQwpTimerCeiling(options.durableAckTimeoutMs))
-    ) {
-      throw new RangeError(
-        `durableAckTimeoutMs must be a positive number no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
-      );
-    }
-    if (!this.awaitServerAck && options.awaitDurableAck) {
-      throw new RangeError(
-        "awaitDurableAck requires awaitServerAck to be enabled",
       );
     }
     this.log = containedLogger(options.log);
@@ -2011,8 +1945,10 @@ export class QwpSender {
   }
 
   /**
-   * Publishes completed rows to the local ingress/replay boundary. This does
-   * not wait for a server ACK unless awaitServerAck or awaitDurableAck is set.
+   * Publishes completed rows to the local ingress/replay boundary without
+   * waiting for a server ACK. Use flushAndWait() to also wait for the ACK.
+   * A transactional sender commits here: rows previously sent by auto-flush
+   * and any pending rows close in one group-closing frame.
    */
   // `async` so a closed or closing sender rejects rather than throwing out of
   // a method the signature says returns a Promise: a caller written as
@@ -2025,16 +1961,52 @@ export class QwpSender {
 
   /**
    * Publishes pending rows without waiting for their server ACK and returns
-   * the highest frame sequence produced by this call, or -1n when empty.
-   * Pass the result to waitForAcknowledged() when an explicit delivery
-   * barrier is needed.
+   * the highest frame sequence published by this call, or -1n when it
+   * published nothing. Pass the result to waitForAck() to wait for that frame;
+   * flushAndWait() waits for everything published so far.
    */
   async flushAndGetSequence(): Promise<bigint> {
     return this.enqueueSequenceFlush(false);
   }
 
+  /**
+   * Flushes pending rows, then waits until the server has acknowledged every
+   * frame this sender has published, including the frames a store-and-forward
+   * journal recovered from an earlier process once the sender has connected.
+   * Resolves true once they are acknowledged and false when the ACK watermark
+   * makes no progress for `timeoutMs` (the session's ackTimeoutMs, 15 seconds
+   * by default); the timeout restarts whenever the watermark advances. As in
+   * the Java client's drain(), a `timeoutMs` of zero or less flushes and then
+   * checks without waiting. After false the frames remain queued and are
+   * still delivered, so do not publish them again. Rejects when the server
+   * rejects a frame or the session can no longer deliver. With durable ACK
+   * requested, the wait covers durable upload. A transactional sender commits
+   * its open transaction first. Over UDP, which has no server
+   * acknowledgements, this resolves true once the datagrams are sent.
+   */
+  async flushAndWait(timeoutMs?: number): Promise<boolean> {
+    this.throwIfUnavailable();
+    validateQwpAckWaitTimeout(timeoutMs);
+    await this.flush();
+    const session = this.activeSession;
+    if (!session) return true;
+    // Commit boundaries, not the published watermark: the latter can end in a
+    // recovered transaction tail that is retired instead of acknowledged. The
+    // frames a journal recovered count as published, as Java's drain() counts
+    // them, up to the last commit among them; without that, a restarted
+    // sender with nothing new to flush reported an unacknowledged backlog as
+    // acknowledged.
+    const recovered = session.recoveredCommitFrameSequence ?? -1n;
+    return session.waitForAck(
+      recovered > this.lastCommitBoundarySequence
+        ? recovered
+        : this.lastCommitBoundarySequence,
+      timeoutMs,
+    );
+  }
+
   /** Highest cumulative ACK watermark, or -1n before acknowledgement. */
-  get acknowledgedSequence(): bigint {
+  get ackedSequence(): bigint {
     return this.activeSession
       ? sessionAcknowledgedSequence(this.activeSession)
       : -1n;
@@ -2047,65 +2019,50 @@ export class QwpSender {
       : -1n;
   }
 
-  /** Independently waits until the cumulative ACK watermark covers a frame. */
-  async waitForAcknowledged(
+  /**
+   * Waits until the cumulative ACK watermark covers a frame sequence, such as
+   * one returned by flushAndGetSequence(). Resolves true once it does, and
+   * false when the watermark makes no progress for `timeoutMs` (the session's
+   * ackTimeoutMs by default); the timeout restarts whenever the watermark
+   * advances, and after false the frames remain queued for delivery. As in
+   * the Java client's awaitAckedFsn(), a `timeoutMs` of zero or less checks
+   * without waiting. Rejects when the server rejects a covered frame or the
+   * session can no longer deliver.
+   */
+  async waitForAck(
     targetSequence: bigint,
     timeoutMs?: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.throwIfUnavailable();
     if (typeof targetSequence !== "bigint") {
       throw new TypeError("QWP ACK target sequence must be a bigint");
     }
-    if (
-      timeoutMs !== undefined &&
-      (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    ) {
-      throw new RangeError(
-        "QWP ACK watermark timeout must be positive and finite",
-      );
-    }
+    validateQwpAckWaitTimeout(timeoutMs);
     const session =
       targetSequence < 0n && !this.activeSession
         ? undefined
         : await this.getSession();
-    if (!session) return;
-    if (!session.waitForAcknowledged) {
-      throw new Error(
-        "this QWP ingress session does not expose an ACK watermark",
-      );
-    }
-    await session.waitForAcknowledged(targetSequence, timeoutMs);
-  }
-
-  /**
-   * Commits rows previously sent by transactional auto-flush. This is an
-   * ergonomic alias for flush(); pending local rows are included in the same
-   * group-closing frame.
-   */
-  async commit(): Promise<boolean> {
-    return this.flush();
+    if (!session) return true;
+    return session.waitForAck(targetSequence, timeoutMs);
   }
 
   private enqueueFlush(deferCommit: boolean): Promise<boolean> {
-    return this.enqueueFlushResult(deferCommit, false).then(
+    return this.enqueueFlushResult(deferCommit).then(
       (result) => result.flushed,
     );
   }
 
   private enqueueSequenceFlush(deferCommit: boolean): Promise<bigint> {
-    return this.enqueueFlushResult(deferCommit, true).then(
+    return this.enqueueFlushResult(deferCommit).then(
       (result) => result.sequence,
     );
   }
 
   private enqueueFlushResult(
     deferCommit: boolean,
-    publicationOnly: boolean,
   ): Promise<QwpSenderFlushResult> {
     this.throwIfUnavailable();
-    const flushing = this.flushTail.then(() =>
-      this.flushNow(deferCommit, publicationOnly),
-    );
+    const flushing = this.flushTail.then(() => this.flushNow(deferCommit));
     void flushing.catch(() => {
       this.totalFlushFailures++;
     });
@@ -2139,6 +2096,36 @@ export class QwpSender {
     this.reset();
   }
 
+  /**
+   * Closes the sender on behalf of the pooled QWP client, best effort. A
+   * failure -- typically a close drain that timed out with frames still
+   * unacknowledged -- is logged as a warning instead of rejecting, as the
+   * Java, Rust and Python pools do, so neither pool shutdown nor the lease
+   * whose return triggered the close fails because of it.
+   *
+   * @internal
+   */
+  async closeForPool(): Promise<void> {
+    try {
+      await this.close();
+    } catch (error) {
+      const ingress = this.activeSession?.metrics;
+      const journalled =
+        ingress?.replayPublishedFrameSequence !== undefined &&
+        ingress.memoryReplayMaxBytes === undefined;
+      this.log(
+        "warn",
+        `Closing a pooled QWP sender failed: ${
+          error instanceof Error ? error.message : String(error)
+        }${
+          journalled
+            ? ". Its unacknowledged frames remain in the store-and-forward journal, which replays them"
+            : ""
+        }`,
+      );
+    }
+  }
+
   private async closeNow(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
@@ -2152,17 +2139,13 @@ export class QwpSender {
       this.closeFlushTimeoutMs > 0
         ? Date.now() + this.closeFlushTimeoutMs
         : undefined;
-    const publishDeadline =
-      Date.now() +
-      (this.closeFlushTimeoutMs > 0
-        ? this.closeFlushTimeoutMs
-        : DEFAULT_CLOSE_FLUSH_TIMEOUT_MS);
+    const publishDeadline = Date.now() + this.closePublishTimeoutMs;
     let terminalError: unknown;
 
     try {
       // Serialize behind public flushes so symbol dictionaries, transaction
-      // boundaries, and staging ownership cannot race. close() itself uses a
-      // publication-only flush and applies one bounded ACK watermark wait.
+      // boundaries, and staging ownership cannot race. close() flushes, then
+      // applies one bounded ACK watermark wait.
       const closeFlush = this.flushTail.then(async () => {
         if (
           this.pendingRowCount === 0 &&
@@ -2171,7 +2154,7 @@ export class QwpSender {
           return;
         }
         try {
-          await this.flushNow(this.transactional, true);
+          await this.flushNow(this.transactional);
         } catch (error) {
           this.totalFlushFailures++;
           throw error;
@@ -2180,6 +2163,15 @@ export class QwpSender {
       await this.withCloseDeadline(closeFlush, publishDeadline);
 
       const session = this.activeSession;
+      // Fast close skips the server ACK, not the physical send. RAM replay
+      // publishes before its background drainer transmits; closing the session
+      // now would erase accepted frames without ever putting them on the wire.
+      if (drainDeadline === undefined && session?.waitForPendingSends) {
+        await this.withCloseDeadline(
+          session.waitForPendingSends(),
+          publishDeadline,
+        );
+      }
       const target = this.lastCommitBoundarySequence;
       if (
         drainDeadline !== undefined &&
@@ -2187,32 +2179,15 @@ export class QwpSender {
         target >= 0n &&
         sessionAcknowledgedSequence(session) < target
       ) {
-        if (!session.waitForAcknowledged) {
-          // waitForAcknowledged is optional on QwpSenderSession, so a session
-          // implementing only the required members exposes no watermark to
-          // drain: its sendTables() promise is the acknowledgement, and the
-          // close flush above already consumed it. Refusing to close such a
-          // session broke the interface this class publishes instead of
-          // protecting anything.
-          this.log(
-            "debug",
-            "QWP ingress session exposes no ACK watermark; skipping the close drain",
-          );
-        } else {
-          const remaining = drainDeadline - Date.now();
-          if (remaining <= 0) throw this.closeTimeoutError();
-          try {
-            await this.withCloseDeadline(
-              session.waitForAcknowledged(target, remaining),
-              drainDeadline,
-            );
-          } catch (error) {
-            if (error instanceof QwpIngressAckTimeoutError) {
-              throw this.closeTimeoutError();
-            }
-            throw error;
-          }
-        }
+        const remaining = drainDeadline - Date.now();
+        if (remaining <= 0) throw this.closeTimeoutError();
+        // The absolute close deadline bounds this wait even though the
+        // watermark wait itself restarts its timeout on progress.
+        const acknowledged = await this.withCloseDeadline(
+          session.waitForAck(target, remaining),
+          drainDeadline,
+        );
+        if (!acknowledged) throw this.closeTimeoutError();
       }
     } catch (error) {
       terminalError = error;
@@ -2290,10 +2265,21 @@ export class QwpSender {
     if (closeError !== undefined) throw closeError;
   }
 
+  /**
+   * The bound close() actually applies. A fast close still bounds publication
+   * by the default, and its timeout error must report that wait, not the
+   * configured zero.
+   */
+  private get closePublishTimeoutMs(): number {
+    return this.closeFlushTimeoutMs > 0
+      ? this.closeFlushTimeoutMs
+      : DEFAULT_CLOSE_FLUSH_TIMEOUT_MS;
+  }
+
   private closeTimeoutError(): QwpSenderCloseTimeoutError {
     const session = this.activeSession;
     return new QwpSenderCloseTimeoutError(
-      this.closeFlushTimeoutMs,
+      this.closePublishTimeoutMs,
       this.lastCommitBoundarySequence,
       session ? sessionAcknowledgedSequence(session) : -1n,
     );
@@ -2896,17 +2882,13 @@ export class QwpSender {
     return undefined;
   }
 
-  private async flushNow(
-    deferCommit: boolean,
-    publicationOnly: boolean,
-  ): Promise<QwpSenderFlushResult> {
+  private async flushNow(deferCommit: boolean): Promise<QwpSenderFlushResult> {
     if (
       this.pendingRowCount === 0 &&
       (deferCommit || !this.hasDeferredMessages)
     ) {
-      if (this.activeSession?.waitForAcknowledged) {
-        await this.activeSession.waitForAcknowledged(-1n);
-      }
+      // Surfaces a latched session failure even when there is nothing to send.
+      if (this.activeSession) await this.activeSession.waitForAck(-1n);
       return { flushed: false, sequence: -1n };
     }
     const session = await this.getSession();
@@ -2922,115 +2904,29 @@ export class QwpSender {
       this.buildTable(table.name, rows),
     );
     const closesDeferredTransaction = this.hasDeferredMessages;
-    // sendTables encodes synchronously. Do not compact staging if encoding
-    // throws, but transfer ownership once the frame has entered the session.
-    const encode = this.options.encode;
-    const useDelta =
-      (encode?.symbolDictionary ?? "delta") === "delta" &&
-      session.sendTablesDelta;
-    const beforeSequence = sessionPublishedSequence(session);
-    let response: Promise<QwpIngressResponse> | undefined;
-    let publication: Promise<void> | undefined;
-    let publishedSequence = -1n;
-    const waitForServerAck = this.awaitServerAck && !publicationOnly;
-    // planIngressFrames runs synchronously here, so an unfittable row throws
-    // before anything reaches the transport and staging is retained: the
-    // caller keeps the batch and can retry it. close() is where an over-cap
-    // batch is finally discarded.
-    if (waitForServerAck) {
-      const trackedSender = useDelta
-        ? session.sendTablesDeltaWithPublication
-        : session.sendTablesWithPublication;
-      if (trackedSender) {
-        const sending = trackedSender.call(session, wireTables, {
-          gorilla: encode?.gorilla,
-          deferCommit,
-        });
-        response = sending.acknowledgement;
-        // Observe ACK rejection while the local-publication boundary is being
-        // awaited; it is consumed normally below after ownership transfers.
-        void response.catch(() => undefined);
-        publication = sending.publication.then(() => {
-          publishedSequence = sending.sequence;
-        });
-      } else {
-        if (deferCommit) {
-          throw new Error(
-            "transactional QWP flushing requires a session publication boundary",
-          );
-        }
-        response = useDelta
-          ? session.sendTablesDelta!(wireTables, {
-              gorilla: encode?.gorilla,
-              deferCommit,
-            })
-          : session.sendTables(wireTables, {
-              gorilla: encode?.gorilla,
-              deferCommit,
-            });
-        // A required-only session exposes no earlier ownership boundary. Its
-        // ACK is therefore also the publication boundary: retain staging until
-        // it fulfills so an asynchronous rejection remains retryable.
-        publication = response.then(() => {
-          publishedSequence = advancedSequence(
-            beforeSequence,
-            sessionPublishedSequence(session),
-          );
-        });
-      }
-    } else {
-      const publisher = useDelta
+    const publishDelta =
+      (this.options.symbolDictionary ?? "delta") === "delta"
         ? session.publishTablesDelta
-        : session.publishTables;
-      if (publisher) {
-        publication = publisher
-          .call(session, wireTables, {
-            gorilla: encode?.gorilla,
-            deferCommit,
-          })
-          .then(() => {
-            publishedSequence = advancedSequence(
-              beforeSequence,
-              sessionPublishedSequence(session),
-            );
-          });
-      } else {
-        // Only sendTables is required by QwpSenderSession. Its ACK is the only
-        // proof that another component owns the rows, so it must also serve as
-        // the publication boundary; retiring staging immediately made an
-        // asynchronous rejection unretryable. A deferred transaction cannot
-        // use this fallback because the server intentionally withholds its ACK
-        // until a later commit, so that mode needs an explicit publisher.
-        if (deferCommit) {
-          throw new Error(
-            "transactional QWP flushing requires a session publication boundary",
-          );
-        }
-        const send = useDelta ? session.sendTablesDelta! : session.sendTables;
-        response = send.call(session, wireTables, {
-          gorilla: encode?.gorilla,
-          deferCommit,
-        });
-        void response.catch(() => undefined);
-        publication = response.then(() => {
-          publishedSequence = advancedSequence(
-            beforeSequence,
-            sessionPublishedSequence(session),
-          );
-        });
-      }
-    }
-    publishedSequence = advancedSequence(
-      beforeSequence,
-      sessionPublishedSequence(session),
+        : undefined;
+    const beforeSequence = sessionPublishedSequence(session);
+    // Frame planning runs synchronously inside the publisher, so an unfittable
+    // row fails before anything reaches the transport and staging is
+    // retained: the caller keeps the batch and can retry it. close() is where
+    // an over-cap batch is finally discarded.
+    const publication = (publishDelta ?? session.publishTables).call(
+      session,
+      wireTables,
+      { gorilla: this.options.gorilla, deferCommit },
     );
     this.totalFlushes++;
     // Transfer row ownership only after every logical frame is accepted by
     // the transport. For Node store-and-forward this is the durable journal
-    // boundary, independently of whether this flush also waits for an ACK.
-    if (publication) {
-      await publication;
-    }
+    // boundary.
+    await publication;
+    const publishedSequence = advancedSequence(
+      beforeSequence,
+      sessionPublishedSequence(session),
+    );
     // These snapshot rows are exactly the ones whose frames entered the ingress
     // session, so they count as published even when a concurrent reset() has
     // since bumped the staging generation. releaseStagedRows() retires them from
@@ -3048,54 +2944,23 @@ export class QwpSender {
       "debug",
       `${deferCommit ? "Auto-flushing" : "Flushing"} ${publishedRows} QWP row(s)${deferCommit ? " with commit deferred" : ""}`,
     );
-    if (!deferCommit && publishedSequence >= 0n) {
-      this.lastCommitBoundarySequence = publishedSequence;
-    }
 
     if (deferCommit) {
       this.hasDeferredMessages = true;
       this.deferredRowCount += publishedRows;
-      if (response) {
-        this.deferredAcks.push(response);
-        // The server intentionally withholds this ACK until a later commit.
-        // Observe rejection now so abandoning an open transaction during close
-        // never creates an unhandled rejection; an ACK-waiting flush/commit
-        // still awaits it.
-        void response.catch(() => undefined);
-      }
       return { flushed: true, sequence: publishedSequence };
     }
 
-    const deferredAcks = this.deferredAcks.splice(0);
     this.hasDeferredMessages = false;
     this.deferredRowCount = 0;
-    const ack = response ? await response : undefined;
-    if (response) {
-      const observedSequence = advancedSequence(
-        beforeSequence,
-        sessionPublishedSequence(session),
-      );
-      publishedSequence =
-        observedSequence >= 0n
-          ? observedSequence
-          : typeof ack?.sequence === "bigint"
-            ? ack.sequence
-            : -1n;
-    }
     if (publishedSequence >= 0n) {
       this.lastCommitBoundarySequence = publishedSequence;
-    }
-    if (!publicationOnly && deferredAcks.length > 0) {
-      await Promise.all(deferredAcks);
     }
     if (
       this.transactional &&
       (closesDeferredTransaction || publishedRows > 0)
     ) {
       this.totalTransactionsCommitted++;
-    }
-    if (this.options.awaitDurableAck && ack) {
-      await session.waitForDurable(ack, this.options.durableAckTimeoutMs);
     }
     return { flushed: true, sequence: publishedSequence };
   }
@@ -3186,23 +3051,33 @@ export class QwpSender {
 }
 
 function sessionPublishedSequence(session: QwpSenderSession): bigint {
-  return (
-    session.publishedFrameSequence ??
-    session.metrics?.replayPublishedFrameSequence ??
-    session.metrics?.publishedSequence ??
-    -1n
-  );
+  return session.publishedFrameSequence;
 }
 
 function sessionAcknowledgedSequence(session: QwpSenderSession): bigint {
-  return (
-    session.acknowledgedFrameSequence ??
-    session.metrics?.replayAcknowledgedFrameSequence ??
-    session.metrics?.acknowledgedSequence ??
-    -1n
-  );
+  return session.acknowledgedFrameSequence;
 }
 
 function advancedSequence(before: bigint, after: bigint): bigint {
   return after > before ? after : -1n;
+}
+
+/**
+ * Creates a sender that publishes through the sessions a factory opens.
+ *
+ * @internal The runtime adapters' sender factories call it, and tests use it
+ * with fake sessions. Neither package root exports it: applications obtain
+ * senders from those factories or a pooled client.
+ */
+export function createQwpSender(
+  sessionFactory: QwpSenderSessionFactory,
+  options: QwpSenderOptions = {},
+  constraints: QwpSenderTransportConstraints = {},
+): QwpSender {
+  return new QwpSender(
+    QWP_SENDER_CONSTRUCTOR,
+    sessionFactory,
+    options,
+    constraints,
+  );
 }

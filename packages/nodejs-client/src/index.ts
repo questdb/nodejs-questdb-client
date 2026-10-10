@@ -21,4 +21,55 @@ export { HttpTransport } from "./transport/http/stdlib";
 export { UndiciTransport } from "./transport/http/undici";
 export type { Logger } from "./logging";
 export { bigintToTwosComplementBytes } from "./utils";
-export * from "./qwp";
+// QWP: the shared protocol barrel plus the Node.js runtime adapter. The adapter
+// is re-exported by name rather than with `export *` because qwp.ts also
+// exports internal helpers: the ingress-session factory behind its senders and
+// a raw WebSocket connector for tests.
+export * from "../../client-core/src/qwp";
+export {
+  QWP_ORPHAN_DRAIN_EVENT_KIND,
+  QWP_ORPHAN_FAILED_SENTINEL,
+  QWP_SF_BACKPRESSURE_POLICY,
+  QWP_SF_DURABILITY,
+  QwpReplayStoreAppendTimeoutError,
+  QwpReplayStoreBatchTooLargeError,
+  QwpReplayStoreCheckpointError,
+  QwpReplayStoreCorruptionError,
+  QwpReplayStoreError,
+  QwpReplayStoreFullError,
+  QwpReplayStoreLockLostError,
+  QwpReplayStoreLockUnprovableError,
+  QwpReplayStoreLockedError,
+  QwpReplayStoreQuarantinedError,
+  QwpReplayStoreSegmentTooLargeError,
+  QwpUdpDatagramTooLargeError,
+  QwpVersionMismatchError,
+  connectQwpNodeClient,
+  connectQwpNodeEgress,
+  connectQwpNodeSender,
+  connectQwpNodeUdpSender,
+  createQwpNodeClient,
+  createQwpNodeSender,
+  createQwpNodeUdpSender,
+  parseQwpNodeClientConfig,
+  retryQwpNodeOrphanSlot,
+} from "./qwp";
+export type {
+  QwpNodeClientConfigOptions,
+  QwpNodeClientOptions,
+  QwpNodeEgressOptions,
+  QwpNodeIngressOptions,
+  QwpNodeOrphanDrainEvent,
+  QwpNodeOrphanDrainEventKind,
+  QwpNodeOrphanDrainerMetrics,
+  QwpNodeReplayDataLossReport,
+  QwpNodeReplayRecoveryEvent,
+  QwpNodeStoreAndForwardOptions,
+  QwpNodeUdpOptions,
+  QwpNodeUdpSocketLike,
+  QwpNodeUpgradeRejection,
+  QwpNodeWebSocketOptions,
+  QwpSfBackpressurePolicy,
+  QwpSfDurability,
+  QwpWebSocketLike,
+} from "./qwp";

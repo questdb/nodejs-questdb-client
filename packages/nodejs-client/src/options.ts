@@ -7,20 +7,20 @@ import * as https from "https";
 import { log, Logger } from "./logging";
 import { fetchJson, isBoolean, isInteger } from "./utils";
 import { DEFAULT_REQUEST_TIMEOUT } from "./transport/http/base";
-import * as qwpNode from "./qwp";
-// Imported directly rather than through ./qwp: this is a Sender-side guard, and
-// ./qwp is re-exported wholesale by the package root.
-import { warnUnsupportedQwpSenderKeys } from "./qwp-node/client-config";
+// Imported directly rather than through ./qwp: these are Sender-side helpers,
+// and ./qwp is re-exported wholesale by the package root.
+import {
+  resolveQwpNodeSenderConfig,
+  warnUnsupportedQwpSenderKeys,
+} from "./qwp-node/client-config";
 // Imported directly for the same reason: a Sender-side guard on routing the
 // QWP schema never saw, kept out of the package root's re-export.
 import { assertUniformQwpEndpointScheme } from "../../client-core/src/_qwp/_internal/failover";
-import type {
-  QwpNodeClientOptions,
-  QwpNodeIngressOptions,
-  QwpNodeUdpOptions,
-  QwpIngressSessionOptions,
-  QwpSenderOptions,
-} from "./qwp";
+import {
+  assertKnownQwpOptionSections,
+  assertNoQwpIngressRouting,
+} from "../../client-core/src/_qwp/_internal/option-sections";
+import type { QwpNodeIngressOptions, QwpNodeUdpOptions } from "./qwp";
 
 /**
  * @ignore
@@ -29,11 +29,11 @@ import type {
  */
 const qwpConnectStrings = new WeakMap<SenderOptions, string>();
 
-/** @ignore Configuration resolved from a ws/wss connect string. */
-const qwpConfigs = new WeakMap<SenderOptions, QwpNodeClientOptions>();
+/** @ignore Ingress options resolved from a ws/wss connect string. */
+const qwpConfigs = new WeakMap<SenderOptions, QwpNodeIngressOptions>();
 
-/** @ignore Returns the QWP configuration these options resolved to. */
-function qwpConfig(options: SenderOptions): QwpNodeClientOptions | undefined {
+/** @ignore Returns the QWP ingress options these options resolved to. */
+function qwpConfig(options: SenderOptions): QwpNodeIngressOptions | undefined {
   return qwpConfigs.get(options);
 }
 
@@ -95,59 +95,51 @@ export function selectQwpSchemeAgent(
 function resolveQwpConfig(
   options: SenderOptions,
   configString: string,
-): QwpNodeClientOptions {
-  const configuredWebSocket = options.qwp?.webSocket;
+): QwpNodeIngressOptions {
+  // qwp.webSocket is a Sender's whole typed ingress section. The agent and the
+  // authorization are cluster settings the resolver checks against the
+  // string's own TLS and credential keys, and failoverUrls replaces the
+  // endpoints `addr` resolved to, so those three are routed apart.
   const {
-    storeAndForward,
+    agent: configuredAgent,
+    authorization,
     failoverUrls,
-    target,
-    zone,
-    senderId,
-    ...webSocketOverrides
-  } = configuredWebSocket ?? {};
-  const logger = options.log ?? options.qwp?.sender?.log ?? log;
+    ...ingressOverrides
+  } = options.qwp?.webSocket ?? {};
+  const logger = options.log ?? options.qwp?.webSocket?.log ?? log;
   // A Sender is ingress-only, so the egress and pool sections this string may
   // configure have nothing to act on. One connect string is meant to serve both
   // entry points, so this is not an error -- but it was applied to nothing
   // without a word, and every other unusable key in this vocabulary says so.
   warnUnsupportedQwpSenderKeys(configString, logger);
   const agent =
-    webSocketOverrides.agent ??
+    configuredAgent ??
     selectQwpSchemeAgent(options.agent, options.protocol === WSS, logger);
-  const resolved = qwpNode.parseQwpNodeClientConfig(configString, {
-    webSocket: { ...webSocketOverrides, agent },
-    storeAndForward,
-    // The top-level logger wins, then the QWP-specific one, then the default
-    // console logger -- never undefined. resolveQwpNodeClientConfig() spreads
-    // this object last, so an explicit `log: undefined` overwrote a configured
-    // logger, and with no logger anywhere the QWP sender falls back to a no-op
-    // sink: a ws::/wss:: connect string then silenced every warning and error
-    // the other transports emit.
-    sender: {
-      ...options.qwp?.sender,
+  // The Sender scope validates the whole shared vocabulary but leaves the
+  // pool-level lazy_connect flag unapplied, as the other QuestDB clients'
+  // standalone senders do; the warning above names it.
+  const resolved = resolveQwpNodeSenderConfig(configString, {
+    cluster: { agent, authorization },
+    ingress: {
+      ...ingressOverrides,
+      // The top-level logger wins, then the QWP-specific one, then the
+      // default console logger -- never undefined. The resolver spreads this
+      // section last, so an explicit `log: undefined` overwrote a configured
+      // logger, and with no logger anywhere the QWP sender falls back to a
+      // no-op sink: a ws::/wss:: connect string then silenced every warning
+      // and error the other transports emit.
       log: logger,
     },
-    ingressSession: options.qwp?.session,
   });
-
-  // The primary URL remains derived from `addr`, which the typed options do
-  // not expose. Fields available in both forms are applied only after the
-  // complete connect string has been parsed and validated, so typed ingress
-  // routing and producer identity cannot be overwritten by URL defaults.
-  const ingress = {
-    ...resolved.ingress,
-    ...(failoverUrls === undefined ? {} : { failoverUrls }),
-    ...(target === undefined ? {} : { target }),
-    ...(zone === undefined ? {} : { zone }),
-    ...(senderId === undefined ? {} : { senderId }),
-  };
+  const ingress =
+    failoverUrls === undefined ? resolved : { ...resolved, failoverUrls };
   // These endpoints arrive after the QWP schema has finished, so they are the
   // one routing input the connect string never validated. A `ws` entry under a
   // `wss` string used to send this sender's credentials over a cleartext
   // socket; the failover factory enforces the same rule, but reporting it here
   // names the option while the sender is still being built.
   assertUniformQwpEndpointScheme(ingress.url, ingress.failoverUrls);
-  return { ...resolved, ingress };
+  return ingress;
 }
 
 const HTTP_PORT = 9000;
@@ -175,24 +167,19 @@ const LINE_PROTO_SUPPORT_VERSION = "line.proto.support.versions";
 
 type QwpExtraOptions = {
   /**
-   * WS/WSS ingress overrides. Values are applied after the connect string has
-   * been fully parsed and validated; typed values win when both forms set the
-   * same option.
+   * WS/WSS sender options: connection, buffering and delivery. Values are
+   * applied after the connect string has been fully parsed and validated, and
+   * win when both forms set the same option -- `initialConnectMode` over
+   * `initial_connect_retry`, for example. A `log` here is used when no
+   * top-level logger is supplied.
    */
   webSocket?: Omit<QwpNodeIngressOptions, "url">;
-  /** WS/WSS ingress ACK, durable-ACK, and reconnect options. */
-  session?: QwpIngressSessionOptions;
   /**
-   * High-level buffering and auto-flush options for WS, WSS, and UDP. A `log`
-   * here is used when no top-level logger is supplied; the top-level one wins
-   * when both are set.
-   */
-  sender?: QwpSenderOptions;
-  /**
-   * UDP-only socket overrides. Like every other section here, these are applied
-   * after the connect string is parsed and win over the equivalent connect
-   * string key -- `maxDatagramSize` over `max_datagram_size`, `multicastTtl`
-   * over `multicast_ttl`.
+   * UDP sender options: socket and buffering. Like the WS/WSS section, these
+   * are applied after the connect string is parsed and win over the
+   * equivalent connect string key -- `maxDatagramSize` over
+   * `max_datagram_size`, `multicastTtl` over `multicast_ttl`. A `log` here is
+   * used when no top-level logger is supplied.
    */
   udp?: Omit<QwpNodeUdpOptions, "host" | "port">;
 };
@@ -571,6 +558,7 @@ export function validateQwpExtraOptions(
   options: QwpExtraOptions | undefined,
 ): void {
   if (!options) return;
+  assertKnownQwpOptionSections("qwp", options, ["webSocket", "udp"]);
   const webSocket = protocol === WS || protocol === WSS;
   const udp = protocol === UDP;
 
@@ -579,31 +567,29 @@ export function validateQwpExtraOptions(
       "'qwp.webSocket' option is supported only for the ws/wss transports",
     );
   }
-  if (options.session !== undefined && !webSocket) {
-    throw new Error(
-      "'qwp.session' option is supported only for the ws/wss transports",
-    );
-  }
-  if (options.sender !== undefined && !webSocket && !udp) {
-    throw new Error(
-      "'qwp.sender' option is supported only for the ws/wss and udp transports",
-    );
-  }
   if (options.udp !== undefined && !udp) {
     throw new Error("'qwp.udp' option is supported only for the udp transport");
   }
+  // A Sender is ingress-only, and writes can only land on the primary.
+  assertNoQwpIngressRouting(
+    options.webSocket,
+    "qwp.webSocket.",
+    "a Sender has no query side for it to route",
+  );
   // Same check the top-level logger gets, for the same reason. A QWP sender
   // contains every log call in a try/catch -- the sink is the thing that
   // failed, so there is nowhere to report its failure to -- which means a
   // non-function here is not merely ignored: it throws on every call and is
   // swallowed, so the sender falls silent instead of falling back. The row-loss
   // and open-transaction warnings at close() are exactly what goes missing.
-  if (
-    options.sender?.log !== null &&
-    options.sender?.log !== undefined &&
-    typeof options.sender.log !== "function"
-  ) {
-    throw new Error("Invalid logging function");
+  for (const section of [options.webSocket, options.udp]) {
+    if (
+      section?.log !== null &&
+      section?.log !== undefined &&
+      typeof section.log !== "function"
+    ) {
+      throw new Error("Invalid logging function");
+    }
   }
 }
 
