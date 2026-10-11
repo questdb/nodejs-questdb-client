@@ -734,19 +734,49 @@ describe("QWP unified Node client configuration", () => {
       ).ingress?.initialConnectMode,
     ).toBe("off");
 
-    // Promotion reads the reconnect policy the session will run, and a typed
-    // `reconnect` replaces the string's whole object.
+    // Promotion reads the reconnect policy the session will run: the string's
+    // keys with a typed `reconnect` merged over them field by field.
     expect(
       parseQwpNodeClientConfig("ws::addr=localhost;", {
         ingress: { reconnect: { reconnectMaxDurationMs: 30_000 } },
       }).ingress?.initialConnectMode,
     ).toBe("sync");
     expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;", {
+        ingress: { reconnect: { onEvent: () => undefined } },
+      }).ingress?.initialConnectMode,
+    ).toBe("off");
+    // An observer keeps the budget the string tuned, and the sync startup
+    // that budget selects.
+    const onEvent = (): void => undefined;
+    const observed = parseQwpNodeClientConfig(
+      "ws::addr=localhost;reconnect_max_duration_millis=30000;max_frame_rejections=8;",
+      { ingress: { reconnect: { onEvent } } },
+    );
+    expect(observed.ingress?.initialConnectMode).toBe("sync");
+    expect(observed.ingress?.reconnect).toEqual({
+      reconnectMaxDurationMs: 30_000,
+      maxFrameRejections: 8,
+      onEvent,
+    });
+    // A typed field wins over the key that sets it.
+    expect(
       parseQwpNodeClientConfig(
         "ws::addr=localhost;reconnect_max_duration_millis=30000;",
-        { ingress: { reconnect: { onEvent: () => undefined } } },
-      ).ingress?.initialConnectMode,
-    ).toBe("off");
+        {
+          ingress: {
+            reconnect: { reconnectMaxDurationMs: 1_000, onEvent: undefined },
+          },
+        },
+      ).ingress?.reconnect,
+    ).toEqual({ reconnectMaxDurationMs: 1_000 });
+    // `false` still disables reconnecting.
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;reconnect_max_duration_millis=30000;",
+        { ingress: { reconnect: false } },
+      ).ingress,
+    ).toMatchObject({ reconnect: false, initialConnectMode: "off" });
 
     // Typed values are validated up front, and lazyConnect needs reconnect.
     expect(() =>
@@ -1209,6 +1239,21 @@ describe("QWP unified Node client configuration", () => {
     expect(resolved?.clientId).toBe("probe");
   });
 
+  it("merges a Sender's typed reconnect over the string's keys", async () => {
+    const onEvent = (): void => undefined;
+    const resolved = qwpConfig(
+      await SenderOptions.fromConfig(
+        "ws::addr=localhost:9000;reconnect_max_duration_millis=60000;",
+        { qwp: { webSocket: { reconnect: { onEvent } } } },
+      ),
+    );
+    expect(resolved?.reconnect).toEqual({
+      reconnectMaxDurationMs: 60_000,
+      onEvent,
+    });
+    expect(resolved?.initialConnectMode).toBe("sync");
+  });
+
   it("validates cluster authorities and supports bracketed IPv6", () => {
     const options = parseQwpNodeClientConfig(
       "ws::addr=[::1],[2001:db8::2]:9443;sender_pool_min=0;query_pool_min=0;",
@@ -1262,6 +1307,32 @@ describe("QWP unified Node client configuration", () => {
         message: expect.not.stringContaining(secret),
       }),
     );
+  });
+
+  it("merges a typed egress reconnect over the string's failover keys", () => {
+    const onEvent = (): void => undefined;
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;failover_max_attempts=3;failover_backoff_max_ms=200;",
+        { egress: { reconnect: { failoverBackoffMaxMs: 400, onEvent } } },
+      ).egress?.reconnect,
+    ).toEqual({
+      failoverMaxAttempts: 3,
+      failoverBackoffMaxMs: 400,
+      onEvent,
+    });
+    // `false` on either side disables failover, and a typed object enables a
+    // policy the string disabled.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;failover_max_attempts=3;", {
+        egress: { reconnect: false },
+      }).egress?.reconnect,
+    ).toBe(false);
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost;failover=off;", {
+        egress: { reconnect: { onEvent } },
+      }).egress?.reconnect,
+    ).toEqual({ onEvent });
   });
 
   it("bounds typed reconnect backoffs across config and client paths", async () => {

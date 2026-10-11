@@ -83,7 +83,11 @@ The complete connect string is parsed and validated before typed overrides are
 applied. When both forms set the same option, the typed value wins. In
 particular, `Sender.fromConfig()` applies `qwp.webSocket.failoverUrls` and
 `senderId` after URL parsing. The primary ingress URL continues to come from
-`addr`, because the typed object intentionally omits `url`.
+`addr`, because the typed object intentionally omits `url`. The typed
+`storeAndForward` and `reconnect` objects are merged field by field with the
+keys they correspond to, so a typed `reconnect: { onEvent }` keeps the
+`reconnect_*` or `failover_*` budgets the string sets, while `reconnect: false`
+still disables reconnecting.
 
 Typed `ExtraOptions.qwp` sections are transport-specific, and a mismatched or
 unknown section is rejected rather than ignored: `webSocket` applies only to
@@ -1084,6 +1088,8 @@ kind `authentication` carrying the thrown error as `cause`, without trying the
 remaining endpoints; reconnects retry it with backoff unless the error carries
 `retryable: false`. A returned credential that could never be sent, such as a
 bearer token with a space or a non-ASCII character, fails without a retry.
+`reconnect.onEvent` reports either failure as `endpoint-attempt-failed`, not
+`auth-failed`, because no server refused a credential.
 
 `auth` cannot be combined with `sessionBootstrap`. The credential is
 base64url-encoded, not encrypted, so use `wss:`. QuestDB accepts it only from a

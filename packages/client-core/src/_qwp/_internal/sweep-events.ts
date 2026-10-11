@@ -2,6 +2,7 @@ import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
   QwpReconnectEvent,
+  QwpReconnectEventKind,
   QwpReconnectExhaustedError,
   QwpUpgradeError,
 } from "../transport";
@@ -9,6 +10,7 @@ import type {
   QwpBinaryConnection,
   QwpEndpointFailureObserver,
 } from "./binary-connection";
+import { isQwpCredentialUnavailable } from "./upgrade-verdict";
 
 /** Reports the failures of one connection sweep on the reconnect events. */
 export interface SweepFailureReporter {
@@ -25,8 +27,13 @@ export interface SweepFailureReporter {
 /**
  * Raises the events the Java, Rust, Go and Python clients raise for a sweep:
  * one per endpoint as it fails, then a single `all-endpoints-unreachable` once
- * none accepted the connection. An authentication rejection stops the sweep,
- * so it is reported as `auth-failed` instead of either.
+ * none accepted the connection.
+ *
+ * A credential failure stops the sweep, because the credential is the same for
+ * every endpoint, so neither event follows it. A server rejecting the
+ * credentials is reported as `auth-failed`. A credential the client could not
+ * produce -- a browser `auth` provider that threw or returned an invalid one --
+ * is reported as `endpoint-attempt-failed` instead: no server refused it.
  */
 export function createSweepFailureReporter(
   emit: (event: Omit<QwpReconnectEvent, "timestampMs">) => void,
@@ -35,17 +42,14 @@ export function createSweepFailureReporter(
   isClosing: () => boolean,
 ): SweepFailureReporter {
   let lastEndpoint: string | URL | undefined;
-  let authenticationReported = false;
+  let credentialFailureReported = false;
   return {
     onEndpointFailure: (endpoint, error) => {
       lastEndpoint = endpoint;
       if (isClosing()) return;
-      const authentication = isAuthenticationFailure(error);
-      if (authentication) authenticationReported = true;
+      if (isCredentialFailure(error)) credentialFailureReported = true;
       emit({
-        kind: authentication
-          ? QWP_RECONNECT_EVENT_KIND.AUTH_FAILED
-          : QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        kind: endpointFailureKind(error),
         attempt,
         endpoint,
         previousEndpoint,
@@ -68,12 +72,12 @@ export function createSweepFailureReporter(
         });
         return;
       }
-      if (isAuthenticationFailure(error)) {
+      if (isCredentialFailure(error)) {
         // A factory that walks endpoints has already reported it as it failed;
         // one that does not walk them reports nothing per endpoint.
-        if (!authenticationReported) {
+        if (!credentialFailureReported) {
           emit({
-            kind: QWP_RECONNECT_EVENT_KIND.AUTH_FAILED,
+            kind: endpointFailureKind(error),
             attempt,
             endpoint: error.url ?? lastEndpoint,
             previousEndpoint,
@@ -93,9 +97,16 @@ export function createSweepFailureReporter(
   };
 }
 
-function isAuthenticationFailure(error: unknown): error is QwpUpgradeError {
+/** A credential failure: the server refused it, or none could be produced. */
+function isCredentialFailure(error: unknown): error is QwpUpgradeError {
   return (
     error instanceof QwpUpgradeError &&
     error.kind === QWP_UPGRADE_ERROR_KIND.AUTHENTICATION
   );
+}
+
+function endpointFailureKind(error: unknown): QwpReconnectEventKind {
+  return isCredentialFailure(error) && !isQwpCredentialUnavailable(error)
+    ? QWP_RECONNECT_EVENT_KIND.AUTH_FAILED
+    : QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED;
 }

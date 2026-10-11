@@ -342,18 +342,30 @@ export function resolveQwpNodeClientConfig(
     agent,
   };
 
-  const ingressReconnect = parseIngressReconnect(parsed.values);
-  const egressReconnect = parseEgressReconnect(parsed.values);
+  // The store and the reconnect policies are merged with the string's keys
+  // rather than replacing them, so they are kept out of the typed values
+  // spread below.
+  const {
+    storeAndForward: typedStoreAndForward,
+    reconnect: typedIngressReconnect,
+    ...ingressOverrides
+  } = extraOptions.ingress ?? {};
+  const { reconnect: typedEgressReconnect, ...egressOverrides } =
+    extraOptions.egress ?? {};
+  const ingressReconnect = mergeReconnect(
+    parseIngressReconnect(parsed.values),
+    typedIngressReconnect,
+  );
+  const egressReconnect = mergeReconnect(
+    parseEgressReconnect(parsed.values),
+    typedEgressReconnect,
+  );
   const initialConnectMode = resolveInitialConnectMode(
     explicitInitialConnectMode,
     lazyConnect,
     extraOptions,
     ingressReconnect,
   );
-  // The store is merged with the string's sf_* keys rather than replacing
-  // them, so it is kept out of the typed ingress values spread below.
-  const { storeAndForward: typedStoreAndForward, ...ingressOverrides } =
-    extraOptions.ingress ?? {};
   const configuredStoreAndForward = parseStoreAndForward(
     parsed.values,
     typedStoreAndForward?.directory,
@@ -528,7 +540,7 @@ export function resolveQwpNodeClientConfig(
       MAX_BATCH_ROWS,
     ),
     ...egressSession,
-    ...definedOnly(extraOptions.egress),
+    ...definedOnly(egressOverrides),
   };
 
   return { cluster, ingress, egress, pool, lazyConnect };
@@ -1024,29 +1036,45 @@ function definedOnly<T extends object>(overrides: T | undefined): Partial<T> {
 }
 
 /**
+ * Merges a typed `reconnect` override with the policy the connect string's
+ * keys describe.
+ *
+ * A typed object is merged field by field, as `storeAndForward` is, because
+ * each field is its own option: a typed value wins over the key that sets
+ * the same field, and leaves the other keys standing. It used to replace the
+ * string's whole object, so adding only an `onEvent` observer discarded every
+ * `reconnect_*` budget the string tuned -- and with them the `sync` startup
+ * those keys select. `false` on either side disables reconnecting, and a
+ * typed object re-enables a policy the string disabled.
+ */
+function mergeReconnect<T extends object>(
+  configured: T | false | undefined,
+  typed: T | false | undefined,
+): T | false | undefined {
+  if (typed === undefined) return configured;
+  if (typed === false || !configured) return typed;
+  return { ...configured, ...definedOnly(typed) };
+}
+
+/**
  * The startup policy a connect string and its typed overrides resolve to.
  *
- * A typed mode wins, as every typed value does. Then an explicit `initial_connect_retry`, then the pooled client's
- * `lazy_connect`, and only then the reconnect policy. That last step reads the
- * policy the session will really run: a typed `reconnect` replaces the
- * string's whole object, so promoting startup to `sync` from the string's
- * keys alone missed a budget tuned through the typed option, and applied one
- * the typed option had discarded.
+ * A typed mode wins, as every typed value does. Then an explicit
+ * `initial_connect_retry`, then the pooled client's `lazy_connect`, and only
+ * then the reconnect policy: the merged one the session will really run, so a
+ * budget tuned through either spelling also governs startup.
  */
 function resolveInitialConnectMode(
   explicit: QwpInitialConnectMode | undefined,
   lazyConnect: boolean,
   extraOptions: QwpNodeClientConfigOptions,
-  configuredReconnect: QwpIngressReconnectOptions | undefined,
+  reconnect: QwpIngressReconnectOptions | false | undefined,
 ): QwpInitialConnectMode {
   const typed = extraOptions.ingress?.initialConnectMode;
   if (typed !== undefined) return typed;
   if (explicit !== undefined) return explicit;
   if (lazyConnect) return QWP_INITIAL_CONNECT_MODE.ASYNC;
-  const typedReconnect = extraOptions.ingress?.reconnect;
-  return selectsQwpSyncInitialConnect(
-    typedReconnect === undefined ? configuredReconnect : typedReconnect,
-  )
+  return selectsQwpSyncInitialConnect(reconnect)
     ? QWP_INITIAL_CONNECT_MODE.SYNC
     : QWP_INITIAL_CONNECT_MODE.OFF;
 }

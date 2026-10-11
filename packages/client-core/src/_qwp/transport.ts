@@ -215,7 +215,10 @@ export const QWP_RECONNECT_EVENT_KIND = {
   /**
    * One endpoint failed: it could not be opened, or it opened and then failed
    * before the session could use it, as when it refuses the replayed frames.
-   * Fired as each endpoint fails, before the sweep moves on.
+   * Fired as each endpoint fails, before the sweep moves on. A browser `auth`
+   * provider that cannot produce a credential fails the attempt this way too,
+   * and like `auth-failed` it ends the sweep, so no
+   * `all-endpoints-unreachable` follows.
    */
   ENDPOINT_ATTEMPT_FAILED: "endpoint-attempt-failed",
   /**

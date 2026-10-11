@@ -10,7 +10,9 @@ const QWP_ROUTE_SUFFIX = /\/(?:write\/v4|read\/v1)\/?$/;
  *
  * A cluster URL may be an origin, a reverse-proxy base path, or an existing
  * `/write/v4` or `/read/v1` endpoint, and its query parameters are preserved.
- * A relative URL resolves against `base`, which only a browser page has.
+ * It must be an absolute `ws:` or `wss:` URL. A browser passes its page URL
+ * as `base` only so that a relative URL is rejected naming the http(s) URL it
+ * resolved to, rather than as an invalid URL.
  */
 export function qwpClusterEndpoint(
   endpoint: string | URL,

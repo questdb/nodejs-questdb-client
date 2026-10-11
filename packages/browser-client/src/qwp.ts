@@ -18,7 +18,10 @@ import {
   createQwpFailoverConnectionFactory,
 } from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
-import { qwpFinalUpgradeVerdict } from "../../client-core/src/_qwp/_internal/upgrade-verdict";
+import {
+  qwpCredentialUnavailable,
+  qwpFinalUpgradeVerdict,
+} from "../../client-core/src/_qwp/_internal/upgrade-verdict";
 import {
   assertKnownQwpOptionSections,
   assertNoQwpIngressRouting,
@@ -119,7 +122,8 @@ export interface QwpBrowserAuthContext {
  * A provider that throws fails the attempt with a {@link QwpUpgradeError} of
  * kind `authentication` whose `cause` is the thrown value, without trying the
  * remaining endpoints. Reconnects retry it with backoff unless the thrown value
- * carries `retryable: false`.
+ * carries `retryable: false`. `reconnect.onEvent` reports the failed attempt as
+ * `endpoint-attempt-failed`, not `auth-failed`: no server refused anything.
  */
 export type QwpBrowserAuthProvider = (
   context: QwpBrowserAuthContext,
@@ -400,28 +404,34 @@ async function resolveBrowserCredentialProtocol(
     const retryable =
       (error as { retryable?: unknown } | null | undefined)?.retryable !==
       false;
-    const failure = new QwpUpgradeError("QWP browser auth provider failed", {
-      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
-      retryable,
-      tryNextEndpoint: false,
-      url: endpoint,
-      cause: error,
-    });
+    // No server saw a credential, so connection events report the attempt as
+    // failed rather than as auth-failed; see qwpCredentialUnavailable().
+    const failure = qwpCredentialUnavailable(
+      new QwpUpgradeError("QWP browser auth provider failed", {
+        kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+        retryable,
+        tryNextEndpoint: false,
+        url: endpoint,
+        cause: error,
+      }),
+    );
     throw retryable ? failure : qwpFinalUpgradeVerdict(failure);
   }
   try {
     return browserCredentialProtocol(authentication);
   } catch (error) {
     throw qwpFinalUpgradeVerdict(
-      new QwpUpgradeError(
-        `QWP browser auth provider returned an invalid credential: ${(error as Error).message}`,
-        {
-          kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
-          retryable: false,
-          tryNextEndpoint: false,
-          url: endpoint,
-          cause: error,
-        },
+      qwpCredentialUnavailable(
+        new QwpUpgradeError(
+          `QWP browser auth provider returned an invalid credential: ${(error as Error).message}`,
+          {
+            kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+            retryable: false,
+            tryNextEndpoint: false,
+            url: endpoint,
+            cause: error,
+          },
+        ),
       ),
     );
   }

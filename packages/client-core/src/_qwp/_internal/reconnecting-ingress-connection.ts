@@ -222,6 +222,13 @@ interface ReplayFrame extends Omit<QwpIngressReplayReference, "frameSequence"> {
   transmitted: boolean;
   durableTargets?: Map<string, bigint>;
   dictionaryCatchup?: boolean;
+  /** A table-less durable-ACK poll; it carries no rows. */
+  durableAckPoll?: boolean;
+  /**
+   * A newer poll superseded this one, so it left the replay queue while its
+   * OK may still be due; see discardSupersededDurableAckPolls().
+   */
+  discarded?: boolean;
   /**
    * The frame carries QWP_FLAG_DEFER_COMMIT, so QuestDB deliberately withholds
    * its cumulative ACK until the transaction commits. Read from the frame
@@ -348,7 +355,9 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     // progress it asks for is what trims a queue full of frames awaiting
     // durability. Making it wait for that trimming could never succeed, so it
     // is admitted above the target like a transaction-closing frame. The
-    // session keeps at most one poll that has not reached the socket.
+    // session keeps at most one poll that has not reached the socket, and the
+    // connection discards each poll a newer one supersedes; see
+    // discardSupersededDurableAckPolls().
     const durableAckPoll = isDurableAckPoll(record.payload);
     if (requiredBytes > this.maxBytes && !durableAckPoll) {
       throw new QwpMemoryReplayFrameTooLargeError(
@@ -471,6 +480,18 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
 
   async discardThrough(frameSequence: bigint): Promise<void> {
     this.removeThrough(frameSequence);
+  }
+
+  /**
+   * Drops one record that a newer one superseded, wherever it sits in the
+   * queue; see discardSupersededDurableAckPolls().
+   */
+  discard(frameSequence: bigint): void {
+    const payload = this.records.get(frameSequence);
+    if (!payload) return;
+    this.usedBytes -= payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+    this.records.delete(frameSequence);
+    this.releaseCapacityWaiters();
   }
 
   private removeThrough(frameSequence: bigint): void {
@@ -1118,6 +1139,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       ackDelivered: false,
       transmitted: false,
       deferCommit: defersCommit(payload),
+      durableAckPoll: isDurableAckPoll(payload),
     };
     const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
@@ -1144,6 +1166,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       frame.frameSequence = frameSequence;
       this.trackFrame(frame);
       this.publishedFrameSequence = frame.frameSequence;
+      if (frame.durableAckPoll) this.discardSupersededDurableAckPolls(frame);
       if (
         this.backgroundStoreAndForward ||
         this.store instanceof QwpMemoryReplayStore
@@ -2012,12 +2035,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // durableTargets accumulated one map per frame with nothing to drain it.
       try {
         if (this.handshake.durableAckEnabled && this.durableAckTracked) {
-          frame.durableTargets = new Map(
+          const targets = new Map(
             response.tables.map((table) => [
               table.name,
               table.sequenceTransaction,
             ]),
           );
+          if (frame.discarded) this.keepDiscardedPollTargets(frame, targets);
+          else frame.durableTargets = targets;
           await this.trimDurablePrefix();
         } else {
           await this.acknowledgeThrough(frame.frameSequence);
@@ -2391,6 +2416,83 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (sequence > frameSequence) break;
       this.frames.delete(sequence);
       this.pendingReplayBytes -= frame.payloadLength;
+    }
+  }
+
+  /**
+   * Drops from the in-memory replay queue the durable-ACK polls that `newest`
+   * supersedes.
+   *
+   * A poll carries no rows, so replaying one achieves nothing, yet each used to
+   * stay queued until the durable prefix reached it. While an acknowledged
+   * commit waited for its durable upload -- during an object-store outage, say
+   * -- every keepalive tick therefore added a frame nothing could trim: about
+   * 18,000 an hour at the default 200ms, each OK taking time proportional to
+   * the backlog, and a reconnect resent them all.
+   *
+   * Only polls already handed to the socket go; the newest poll stays, so the
+   * published sequence remains one an ACK can still cover. A poll whose OK
+   * named table transactions -- QuestDB coalesced it with an earlier frame's --
+   * hands them to the newest frame still queued before it. Frames between the
+   * two are discarded polls, so retiring that frame once the targets are
+   * durable retires exactly what retiring the poll would have. Only a session
+   * tracking durable ACKs polls, and only there does a poll wait for the
+   * durable prefix. A persistent journal keeps its polls: only browsers poll,
+   * and they have no journal.
+   */
+  private discardSupersededDurableAckPolls(newest: ReplayFrame): void {
+    if (
+      !this.durableAckTracked ||
+      !(this.store instanceof QwpMemoryReplayStore)
+    ) {
+      return;
+    }
+    let retained: ReplayFrame | undefined;
+    for (const frame of this.frames.values()) {
+      if (frame === newest) break;
+      if (!frame.durableAckPoll || !frame.transmitted) {
+        retained = frame;
+        continue;
+      }
+      if (frame.durableTargets !== undefined && frame.durableTargets.size > 0) {
+        if (!retained) {
+          retained = frame;
+          continue;
+        }
+        retained.durableTargets = mergeDurableTargets(
+          retained.durableTargets,
+          frame.durableTargets,
+        );
+      }
+      frame.discarded = true;
+      this.frames.delete(frame.frameSequence);
+      this.pendingReplayBytes -= frame.payloadLength;
+      this.store.discard(frame.frameSequence);
+    }
+  }
+
+  /**
+   * Keeps the table transactions an OK names for a poll that has already been
+   * discarded. They belong to frames the OK covers, so the newest frame still
+   * queued before the poll takes them, as when a poll is discarded after its
+   * OK. With none queued, every frame the OK covers has already been retired,
+   * which in durable mode happens only once it is durable.
+   */
+  private keepDiscardedPollTargets(
+    poll: ReplayFrame,
+    targets: ReadonlyMap<string, bigint>,
+  ): void {
+    if (targets.size === 0) return;
+    let retained: ReplayFrame | undefined;
+    for (const frame of this.frames.values()) {
+      if (frame.frameSequence > poll.frameSequence) break;
+      retained = frame;
+    }
+    if (retained) {
+      retained.durableTargets = mergeDurableTargets(
+        retained.durableTargets,
+        targets,
+      );
     }
   }
 
@@ -3216,4 +3318,17 @@ function areTargetsCovered(
     if (watermark === undefined || watermark < target) return false;
   }
   return true;
+}
+
+/** The union of two durable target sets, keeping each table's higher target. */
+function mergeDurableTargets(
+  into: ReadonlyMap<string, bigint> | undefined,
+  from: ReadonlyMap<string, bigint>,
+): Map<string, bigint> {
+  const merged = new Map(into);
+  for (const [table, target] of from) {
+    const current = merged.get(table);
+    if (current === undefined || target > current) merged.set(table, target);
+  }
+  return merged;
 }

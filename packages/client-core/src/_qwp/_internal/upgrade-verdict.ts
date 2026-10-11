@@ -29,3 +29,23 @@ export function hasQwpFinalUpgradeVerdict(error: unknown): boolean {
   }
   return error instanceof QwpUpgradeError && finalVerdicts.has(error);
 }
+
+const unavailableCredentials = new WeakSet<QwpUpgradeError>();
+
+/**
+ * Marks an authentication failure as the client's own: the credential
+ * provider could not produce a credential, so no server rejected anything.
+ * Connection events report it as an attempt that failed, not as
+ * `auth-failed`, which means the server refused the credentials.
+ */
+export function qwpCredentialUnavailable<E extends QwpUpgradeError>(
+  error: E,
+): E {
+  unavailableCredentials.add(error);
+  return error;
+}
+
+/** Whether `error` is a credential the provider could not produce. */
+export function isQwpCredentialUnavailable(error: unknown): boolean {
+  return error instanceof QwpUpgradeError && unavailableCredentials.has(error);
+}

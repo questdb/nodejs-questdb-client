@@ -289,6 +289,23 @@ class FakeConnection implements QwpBinaryConnection {
   }
 }
 
+/**
+ * A connection that can PING, as Node's can. A ping delivers the durable
+ * progress staged in `uploaded`, since QuestDB reports durable progress only
+ * in reply to inbound traffic.
+ */
+class DurablePollConnection extends FakeConnection {
+  pings = 0;
+  uploaded?: [string, bigint][];
+
+  ping(): Promise<void> {
+    this.pings++;
+    if (this.uploaded) this.receive(durableResponse(this.uploaded));
+    this.uploaded = undefined;
+    return Promise.resolve();
+  }
+}
+
 class TrackingReplayStore implements QwpIngressReplayStore {
   readonly records = new Map<bigint, Uint8Array>();
   closeCount = 0;
@@ -1891,6 +1908,134 @@ describe("QWP ingress reconnect and replay", () => {
       expect(terminalErrors).toEqual([]);
     } finally {
       releaseReconnect(replacement);
+      vi.useRealTimers();
+      await session?.close();
+    }
+  });
+
+  it("keeps one durable-ACK poll queued while a commit's durable upload stalls", async () => {
+    // QuestDB acknowledges every poll, but no poll can be trimmed before the
+    // commit ahead of it is durable, so each keepalive tick used to add a
+    // replay frame for as long as the upload stalled.
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    try {
+      const connection = new FakeConnection("primary", {
+        qwpVersion: 1,
+        durableAckEnabled: true,
+      });
+      session = await QwpIngressSession.connect(async () => connection, {
+        durableAckKeepaliveMs: 100,
+      });
+      const poll = encodeQwpDurableAckPollFrame();
+      await session.publishFrame(Uint8Array.of(1));
+      await vi.advanceTimersByTimeAsync(0);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      for (let tick = 0; tick < 50; tick++) {
+        await vi.advanceTimersByTimeAsync(100);
+        connection.receive(
+          ingressResponse(QWP_STATUS.OK, BigInt(connection.sent.length - 1)),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      expect(connection.sent).toHaveLength(51);
+      expect(connection.sent.slice(1)).toEqual(Array(50).fill(poll));
+      expect(session.metrics.pendingReplayFrames).toBe(2);
+      expect(session.metrics.memoryReplayUsedBytes).toBe(
+        1 + poll.byteLength + 2 * 64,
+      );
+      expect(session.acknowledgedFrameSequence).toBe(-1n);
+
+      connection.receive(durableResponse([["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.metrics.pendingReplayFrames).toBe(0);
+      expect(session.metrics.memoryReplayUsedBytes).toBe(0);
+      expect(session.acknowledgedFrameSequence).toBe(50n);
+    } finally {
+      vi.useRealTimers();
+      await session?.close();
+    }
+  });
+
+  it("keeps one durable-ACK poll queued while a transaction is open", async () => {
+    // QuestDB withholds a poll's OK while deferred rows are uncommitted, and
+    // only the commit's OK covers the polls sent meanwhile.
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    try {
+      const connection = new FakeConnection("primary", {
+        qwpVersion: 1,
+        durableAckEnabled: true,
+      });
+      session = await QwpIngressSession.connect(async () => connection, {
+        durableAckKeepaliveMs: 100,
+      });
+      await session.publishFrame(Uint8Array.of(1));
+      await vi.advanceTimersByTimeAsync(0);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["a", 1n]]));
+      await session.publishFrame(
+        encodeQwpFrame(Uint8Array.of(2), QWP_FLAG_DEFER_COMMIT, 0),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(connection.sent).toHaveLength(12);
+      expect(session.metrics.pendingReplayFrames).toBe(3);
+
+      await session.publishFrame(Uint8Array.of(3));
+      await vi.advanceTimersByTimeAsync(0);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 12n, [["b", 1n]]));
+      connection.receive(
+        durableResponse([
+          ["a", 1n],
+          ["b", 1n],
+        ]),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.metrics.pendingReplayFrames).toBe(0);
+      expect(session.acknowledgedFrameSequence).toBe(12n);
+    } finally {
+      vi.useRealTimers();
+      await session?.close();
+    }
+  });
+
+  it("keeps the durable targets an OK names for a discarded poll", async () => {
+    // A frame QuestDB acknowledged only through a later poll's OK has no
+    // targets of its own. When that poll has already been discarded, its
+    // targets have to reach the frame they belong to, or the next table-less
+    // OK lets the durable watermark pass rows that are not durable.
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    try {
+      const connection = new FakeConnection("primary", {
+        qwpVersion: 1,
+        durableAckEnabled: true,
+      });
+      session = await QwpIngressSession.connect(async () => connection, {
+        durableAckKeepaliveMs: 100,
+      });
+      await session.publishFrame(Uint8Array.of(1));
+      await vi.advanceTimersByTimeAsync(0);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["a", 1n]]));
+      await session.publishFrame(Uint8Array.of(2));
+      await vi.advanceTimersByTimeAsync(200);
+      // Frame 1 and the first poll are unacknowledged, and the second poll
+      // has replaced the first in the queue.
+      expect(connection.sent).toHaveLength(4);
+      expect(session.metrics.pendingReplayFrames).toBe(3);
+
+      connection.receive(ingressResponse(QWP_STATUS.OK, 2n, [["b", 5n]]));
+      connection.receive(ingressResponse(QWP_STATUS.OK, 3n));
+      connection.receive(durableResponse([["a", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.acknowledgedFrameSequence).toBe(0n);
+
+      connection.receive(durableResponse([["b", 5n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.acknowledgedFrameSequence).toBe(3n);
+      expect(session.metrics.pendingReplayFrames).toBe(0);
+    } finally {
       vi.useRealTimers();
       await session?.close();
     }
@@ -6318,17 +6463,6 @@ describe("QWP ingress reconnect and replay", () => {
     // the OK of a recovered frame is not forwarded to the session, which has
     // no publication to resolve with it. The poll has to run on the
     // transport's account, or a wait covering that frame never ends.
-    class DurablePollConnection extends FakeConnection {
-      pings = 0;
-      uploaded?: [string, bigint][];
-
-      ping(): Promise<void> {
-        this.pings++;
-        if (this.uploaded) this.receive(durableResponse(this.uploaded));
-        this.uploaded = undefined;
-        return Promise.resolve();
-      }
-    }
     const store = new TrackingReplayStore();
     store.records.set(0n, Uint8Array.of(5));
     const connection = new DurablePollConnection("primary", {
@@ -6370,6 +6504,43 @@ describe("QWP ingress reconnect and replay", () => {
       await expect(waiting).resolves.toBe(true);
       expect(connection.pings).toBeGreaterThan(pings);
       expect(sender.ackedSequence).toBe(1n);
+      expect(store.records.size).toBe(0);
+    } finally {
+      await sender.close();
+    }
+  });
+
+  it("polls for the durable ACK of recovered frames when nothing new is published", async () => {
+    // The test above publishes a frame of its own, whose forwarded OK starts
+    // the poll anyway. Here only the recovered frame's OK arrives, and it is
+    // not forwarded, so the transport has to wake the session to poll.
+    const store = new TrackingReplayStore();
+    store.records.set(0n, Uint8Array.of(5));
+    const connection = new DurablePollConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: {},
+      replayStore: store,
+      durableAckKeepaliveMs: 5,
+    });
+    const sender = createQwpSender(async () => session, {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
+    try {
+      await sender.connect();
+      await vi.waitFor(() =>
+        expect(connection.sent).toEqual([Uint8Array.of(5)]),
+      );
+      connection.uploaded = [["A", 1n]];
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["A", 1n]]));
+
+      await expect(sender.flushAndWait(1_000)).resolves.toBe(true);
+      expect(connection.pings).toBeGreaterThan(0);
+      expect(connection.sent).toHaveLength(1);
+      expect(sender.ackedSequence).toBe(0n);
       expect(store.records.size).toBe(0);
     } finally {
       await sender.close();

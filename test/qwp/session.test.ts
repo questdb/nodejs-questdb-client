@@ -39,6 +39,7 @@ import {
   QwpByteReader,
   QwpByteWriter,
   type QwpConnectionCloseInfo,
+  type QwpReconnectEvent,
   decodeQwpFrame,
   decodeQwpIngressSymbolDictionaryDelta,
   encodeQwpDurableAckPollFrame,
@@ -2854,6 +2855,7 @@ describe("QWP browser credential authentication", () => {
     let providerCalls = 0;
     const sockets: FakeWebSocket[] = [];
     const authorizations: string[] = [];
+    const events: QwpReconnectEvent[] = [];
     const session = await connectQwpBrowserIngress({
       url: "wss://questdb.example/write/v4",
       auth: async () => {
@@ -2866,7 +2868,11 @@ describe("QWP browser credential authentication", () => {
         sockets.push(socket);
         return asQwpSocket(socket);
       },
-      reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+      reconnect: {
+        reconnectInitialBackoffMs: 0,
+        reconnectMaxBackoffMs: 0,
+        onEvent: (event) => events.push(event),
+      },
     });
 
     const pending = publishAndWait(session, Uint8Array.of(1));
@@ -2879,6 +2885,20 @@ describe("QWP browser credential authentication", () => {
     await vi.waitFor(() => expect(sockets[1].sent).toEqual(sockets[0].sent));
     sockets[1].message(ingressResponse(QWP_STATUS.OK, 0n));
     await expect(pending).resolves.toBe(0n);
+    // No server refused the credential, so the failed attempt is not
+    // reported as auth-failed.
+    await vi.waitFor(() =>
+      expect(events.map((event) => event.kind)).toEqual([
+        QWP_RECONNECT_EVENT_KIND.CONNECTED,
+        QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
+        QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        QWP_RECONNECT_EVENT_KIND.RECONNECTED,
+      ]),
+    );
+    expect(events[2].cause).toMatchObject({
+      message: "QWP browser auth provider failed",
+      kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+    });
     await session.close();
   });
 

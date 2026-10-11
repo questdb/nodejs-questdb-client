@@ -284,7 +284,9 @@ The `signal` aborts when the connection attempt is abandoned, and time spent in
 the function counts against `connectTimeoutMs`. If the function throws, the
 attempt fails with a `QwpUpgradeError` of kind `authentication` whose `cause` is
 the thrown error; reconnects retry it with backoff unless that error carries
-`retryable: false`.
+`retryable: false`. `reconnect.onEvent` reports such an attempt as
+`endpoint-attempt-failed`, not `auth-failed`, because no server refused the
+credential.
 
 - Use `wss:`. The credential travels in the upgrade request's
   `Sec-WebSocket-Protocol` header, base64url-encoded but not encrypted.
