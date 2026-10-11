@@ -18,6 +18,7 @@ import {
   createQwpFailoverConnectionFactory,
 } from "../../client-core/src/_qwp/_internal/failover";
 import { createQwpEgressFailoverConnectionFactory } from "../../client-core/src/_qwp/_internal/egress-routing";
+import { qwpFinalUpgradeVerdict } from "../../client-core/src/_qwp/_internal/upgrade-verdict";
 import {
   assertKnownQwpOptionSections,
   assertNoQwpIngressRouting,
@@ -394,29 +395,34 @@ async function resolveBrowserCredentialProtocol(
     // The credential does not depend on the endpoint, so the next one would
     // fail the same way: stop the sweep and leave the retry to reconnect
     // backoff. A provider that knows retrying cannot help says so the way the
-    // rest of the client does, with `retryable: false`.
-    throw new QwpUpgradeError("QWP browser auth provider failed", {
+    // rest of the client does, with `retryable: false`, and that verdict
+    // holds for a sender that has already connected, too.
+    const retryable =
+      (error as { retryable?: unknown } | null | undefined)?.retryable !==
+      false;
+    const failure = new QwpUpgradeError("QWP browser auth provider failed", {
       kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
-      retryable:
-        (error as { retryable?: unknown } | null | undefined)?.retryable !==
-        false,
+      retryable,
       tryNextEndpoint: false,
       url: endpoint,
       cause: error,
     });
+    throw retryable ? failure : qwpFinalUpgradeVerdict(failure);
   }
   try {
     return browserCredentialProtocol(authentication);
   } catch (error) {
-    throw new QwpUpgradeError(
-      `QWP browser auth provider returned an invalid credential: ${(error as Error).message}`,
-      {
-        kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
-        retryable: false,
-        tryNextEndpoint: false,
-        url: endpoint,
-        cause: error,
-      },
+    throw qwpFinalUpgradeVerdict(
+      new QwpUpgradeError(
+        `QWP browser auth provider returned an invalid credential: ${(error as Error).message}`,
+        {
+          kind: QWP_UPGRADE_ERROR_KIND.AUTHENTICATION,
+          retryable: false,
+          tryNextEndpoint: false,
+          url: endpoint,
+          cause: error,
+        },
+      ),
     );
   }
 }
@@ -430,14 +436,16 @@ async function resolveBrowserCredentialProtocol(
  * only repeat the exposure.
  */
 function credentialEchoError(endpoint: string | URL): QwpUpgradeError {
-  return new QwpUpgradeError(
-    "QWP server selected the browser credential as its WebSocket subprotocol, echoing the credential in its upgrade response; this is a server defect",
-    {
-      kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
-      retryable: false,
-      tryNextEndpoint: false,
-      url: endpoint,
-    },
+  return qwpFinalUpgradeVerdict(
+    new QwpUpgradeError(
+      "QWP server selected the browser credential as its WebSocket subprotocol, echoing the credential in its upgrade response; this is a server defect",
+      {
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+        retryable: false,
+        tryNextEndpoint: false,
+        url: endpoint,
+      },
+    ),
   );
 }
 

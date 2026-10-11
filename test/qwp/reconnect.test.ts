@@ -6313,6 +6313,69 @@ describe("QWP ingress reconnect and replay", () => {
     }
   });
 
+  it("polls for the durable ACK of a frame the journal recovered", async () => {
+    // QuestDB reports durable progress only in reply to inbound traffic, and
+    // the OK of a recovered frame is not forwarded to the session, which has
+    // no publication to resolve with it. The poll has to run on the
+    // transport's account, or a wait covering that frame never ends.
+    class DurablePollConnection extends FakeConnection {
+      pings = 0;
+      uploaded?: [string, bigint][];
+
+      ping(): Promise<void> {
+        this.pings++;
+        if (this.uploaded) this.receive(durableResponse(this.uploaded));
+        this.uploaded = undefined;
+        return Promise.resolve();
+      }
+    }
+    const store = new TrackingReplayStore();
+    store.records.set(0n, Uint8Array.of(5));
+    const connection = new DurablePollConnection("primary", {
+      qwpVersion: 1,
+      durableAckEnabled: true,
+    });
+    const session = await QwpIngressSession.connect(async () => connection, {
+      reconnect: {},
+      replayStore: store,
+      durableAckKeepaliveMs: 5,
+    });
+    const sender = createQwpSender(async () => session, {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
+    try {
+      await sender.connect();
+      await vi.waitFor(() =>
+        expect(connection.sent).toEqual([Uint8Array.of(5)]),
+      );
+      // The recovered frame wrote table A, whose upload is still running.
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["A", 1n]]));
+      await sender.table("B").longColumn("v", 1n).atNow();
+      const waiting = sender.flushAndWait(2_000);
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+      connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["B", 1n]]));
+      await vi.waitFor(() =>
+        expect(session.metrics.pendingDurableTables).toBe(1),
+      );
+      // This sender's own frame becomes durable first, leaving the session
+      // with nothing of its own to poll for.
+      connection.uploaded = [["B", 1n]];
+      await vi.waitFor(() => expect(session.metrics.totalDurableAcks).toBe(1));
+      expect(session.metrics.pendingDurableTables).toBe(0);
+      expect(sender.ackedSequence).toBe(-1n);
+
+      const pings = connection.pings;
+      connection.uploaded = [["A", 1n]];
+      await expect(waiting).resolves.toBe(true);
+      expect(connection.pings).toBeGreaterThan(pings);
+      expect(sender.ackedSequence).toBe(1n);
+      expect(store.records.size).toBe(0);
+    } finally {
+      await sender.close();
+    }
+  });
+
   it("recovers a Node journal before new frames and removes it after ACK", async () => {
     const directory = await createTemporaryDirectory();
     const seed = new QwpNodeFileReplayStore({ directory });

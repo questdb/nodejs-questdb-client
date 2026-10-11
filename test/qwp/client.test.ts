@@ -1377,6 +1377,72 @@ describe("QWP pooled client", () => {
     await client.close();
   });
 
+  it("rejects a query that has not started when its lease is returned", async () => {
+    const connections: FakeConnection[] = [];
+    let queryCreations = 0;
+    const client = new QwpClient(
+      {
+        createSender: async () => {
+          throw new Error("sender factory should not run");
+        },
+        createQuerySession: async (slot) => {
+          queryCreations++;
+          return createQuerySession(slot, connections);
+        },
+      },
+      {
+        senderPoolMin: 0,
+        senderPoolMax: 1,
+        queryPoolMin: 0,
+        queryPoolMax: 1,
+        acquireTimeoutMs: 500,
+      },
+    );
+    const sentKinds = (): number[] =>
+      connections[0].sent.map((payload) => payload[0]);
+    const lease = await client.borrowQuery();
+    const abandoned = await lease.query("select * from long_running()");
+    connections[0].receive(emptyResultBatch(abandoned.requestId));
+    for await (const _batch of abandoned) break;
+    // The next query waits for the abandoned one to drain. Started after the
+    // lease returned, it would run under the next borrower.
+    const waiting = lease.query("select 2").then(
+      () => "started",
+      (error: unknown) => error,
+    );
+    const releasing = lease.close();
+    connections[0].receive(queryError(abandoned.requestId));
+    await releasing;
+    await expect(waiting).resolves.toMatchObject({
+      name: "QwpClientClosedError",
+      message: "QWP query lease is closed",
+    } satisfies Partial<QwpClientClosedError>);
+    expect(sentKinds()).toEqual([
+      QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+      QWP_EGRESS_MESSAGE.CANCEL,
+    ]);
+
+    // A query() returned in the same turn as close() has not started either.
+    const next = await client.borrowQuery();
+    const sameTurn = next.query("select 3");
+    const nextReleasing = next.close();
+    await expect(sameTurn).rejects.toBeInstanceOf(QwpClientClosedError);
+    await nextReleasing;
+
+    const reused = await client.borrowQuery();
+    const query = await reused.query("select 4");
+    connections[0].receive(resultEnd(query.requestId));
+    await expect(query.completion).resolves.toMatchObject({ totalRows: 0n });
+    expect(queryCreations).toBe(1);
+    expect(sentKinds()).toEqual([
+      QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+      QWP_EGRESS_MESSAGE.CANCEL,
+      QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+    ]);
+    await reused.close();
+    await client.close();
+  });
+
   it("keeps lease-return teardown bounded while a terminal waits on a view", async () => {
     const connections: FakeConnection[] = [];
     let queryCreations = 0;

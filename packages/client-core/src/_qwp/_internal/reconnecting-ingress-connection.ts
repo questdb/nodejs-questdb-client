@@ -54,6 +54,7 @@ import {
 } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
 import { createSweepFailureReporter } from "./sweep-events";
+import { hasQwpFinalUpgradeVerdict } from "./upgrade-verdict";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 import {
   createQwpDataLossSenderError,
@@ -1186,6 +1187,20 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   /**
+   * @internal Whether a frame the server has acknowledged still waits for its
+   * durable ACK. The owning session tracks only the targets of the OKs it is
+   * handed, and an OK covering only recovered frames is not handed to it.
+   */
+  get hasPendingDurableTargets(): boolean {
+    for (const frame of this.frames.values()) {
+      if (frame.durableTargets) return true;
+      // Only an acknowledged frame carries targets.
+      if (frame.frameSequence >= this.highestOkFrameSequence) return false;
+    }
+    return false;
+  }
+
+  /**
    * @internal Waits until every frame published to the in-memory replay queue
    * has been handed to the socket -- not for its ACK. A persistent journal
    * keeps unsent frames, so this resolves at once for one.
@@ -1645,6 +1660,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private isRetryableReconnectError(error: unknown): boolean {
+    // Ahead of the store-and-forward rules below: those retry a server's
+    // rejection, and this is the client's own -- see upgrade-verdict.ts.
+    if (hasQwpFinalUpgradeVerdict(error)) return false;
     if (this.backgroundStoreAndForward && !this.orphanStoreAndForward) {
       // Once this sender has connected even once, every endpoint policy
       // failure is retried indefinitely, so a credential can rotate or a
@@ -1809,7 +1827,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         }
         const advanced = this.publishAcknowledgedFrameSequence();
         if (translated) this.messagesQueue.push(translated);
-        else if (advanced) this.notifyUnforwardedAcknowledgement();
+        else if (advanced || this.hasPendingDurableTargets) {
+          // An unforwarded OK can also leave durable targets the session
+          // has to poll for; see hasPendingDurableTargets.
+          this.notifyUnforwardedAcknowledgement();
+        }
         if (this.terminalError) return;
       }
       if (

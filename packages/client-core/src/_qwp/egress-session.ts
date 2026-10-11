@@ -957,6 +957,17 @@ function endedByTimeout(
 }
 
 /**
+ * A query() that has not become the active query yet. Returning a pooled lease
+ * abandons it: started afterwards, it would run under the next borrower.
+ */
+interface QwpPendingQueryStart {
+  /** Rejects with the abandonment, for waitToStart() to race. */
+  readonly abandoned: Promise<never>;
+  error?: Error;
+  abandon(error: Error): void;
+}
+
+/**
  * The steps a reconnecting connection runs on its session to replay the active
  * query onto a new connection. They are the session's private methods, so its
  * constructor fills these in for the function that opened the connection.
@@ -982,6 +993,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly bufferPoolSize: number;
   private readonly cancelDrainTimeoutMs: number;
   private readonly idleWaiters = new Set<() => void>();
+  private readonly pendingStarts = new Set<QwpPendingQueryStart>();
   private active?: QwpEgressQuery;
   private activeRequest?: QwpReplayableQueryRequest;
   private nextRequestId = 0n;
@@ -1206,7 +1218,16 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     ) {
       throw new TypeError("onFailoverReset must be a function");
     }
-    await this.waitToStart(timeoutMs, deadline);
+    const start = this.beginQueryStart();
+    try {
+      await this.waitToStart(timeoutMs, deadline, start.abandoned);
+      // A return that ran after the wait settled, but before this resumed.
+      if (start.error) throw start.error;
+    } finally {
+      // Synchronous from here until the query is active, so no lease return
+      // can slip in between.
+      this.pendingStarts.delete(start);
+    }
     this.throwIfUnavailable();
     if (this.active) {
       throw new Error("a QWP query is already active on this connection");
@@ -1294,6 +1315,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private async waitToStart(
     timeoutMs: number,
     deadline: number | undefined,
+    abandoned: Promise<never>,
   ): Promise<void> {
     if (this.currentServerInfo !== undefined && !this.active?.isDone()) {
       return;
@@ -1304,8 +1326,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         await this.waitUntilIdle();
       }
     })();
-    if (deadline === undefined) return startable;
     void startable.catch(() => undefined);
+    if (deadline === undefined) {
+      await Promise.race([startable, abandoned]);
+      return;
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(
@@ -1317,10 +1342,27 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       );
     });
     try {
-      await Promise.race([startable, expired]);
+      await Promise.race([startable, expired, abandoned]);
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private beginQueryStart(): QwpPendingQueryStart {
+    let reject!: (error: Error) => void;
+    const abandoned = new Promise<never>((_resolve, rejectStart) => {
+      reject = rejectStart;
+    });
+    void abandoned.catch(() => undefined);
+    const start: QwpPendingQueryStart = {
+      abandoned,
+      abandon: (error) => {
+        start.error ??= error;
+        reject(error);
+      },
+    };
+    this.pendingStarts.add(start);
+    return start;
   }
 
   cancel(requestId: bigint): Promise<void> {
@@ -1460,9 +1502,17 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    * Cancels and drains an active operation before a pooled lease is returned.
    * False means the physical session is no longer safe to reuse.
    *
+   * A query() of the lease that has not started yet -- still waiting for
+   * SERVER_INFO, or for an abandoned query to drain -- rejects with
+   * `abandonStart()` instead. Left waiting, it started as soon as the drain
+   * below finished, on a session the pool was handing to its next borrower,
+   * whose own query() then failed because one was already active.
+   *
    * @internal
    */
-  async prepareForPoolRelease(): Promise<boolean> {
+  async prepareForPoolRelease(abandonStart: () => Error): Promise<boolean> {
+    for (const start of this.pendingStarts) start.abandon(abandonStart());
+    this.pendingStarts.clear();
     if (this.failure || this.closing) return false;
     const active = this.active;
     if (!active) return true;

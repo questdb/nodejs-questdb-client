@@ -605,7 +605,9 @@ export class QwpQueryLease {
     this.released = true;
     let reusable = false;
     try {
-      reusable = await this.session.prepareForPoolRelease();
+      reusable = await this.session.prepareForPoolRelease(
+        () => new QwpClientClosedError("QWP query lease is closed"),
+      );
     } finally {
       await this.releaseSession(reusable);
     }

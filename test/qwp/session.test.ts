@@ -29,6 +29,7 @@ import {
   QWP_INGRESS_PROGRESS_KIND,
   QWP_MAX_ROWS_PER_TABLE,
   QWP_MAX_TABLES_PER_FRAME,
+  QWP_RECONNECT_EVENT_KIND,
   QWP_STATUS,
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
@@ -3112,6 +3113,78 @@ describe("QWP browser credential authentication", () => {
       // The exposure is not repeated on the rest of the cluster.
       expect(attempted).toEqual(["node-a.example"]);
       expect(sockets[0].closeCalls).toHaveLength(1);
+    }
+  });
+
+  it("ends an async sender on its own auth verdict after it has connected", async () => {
+    // "async" retries every server rejection once connected, so a credential
+    // can rotate on the server. These verdicts are the client's, and nothing
+    // a retry does can change them.
+    for (const verdict of [
+      "provider-not-retryable",
+      "invalid-credential",
+      "credential-echo",
+    ] as const) {
+      let broken = false;
+      let providerCalls = 0;
+      const sockets: FakeWebSocket[] = [];
+      const connected: string[] = [];
+      const errors: { terminal: boolean; error: unknown }[] = [];
+      const sender = createQwpBrowserSender({
+        url: "wss://questdb.example/write/v4",
+        initialConnectMode: "async",
+        autoFlush: false,
+        auth: async () => {
+          providerCalls++;
+          if (broken && verdict === "provider-not-retryable") {
+            throw Object.assign(new Error("signed out"), { retryable: false });
+          }
+          if (broken && verdict === "invalid-credential") {
+            return { type: "bearer", token: "not a token" };
+          }
+          return { type: "bearer", token: "token" };
+        },
+        webSocketFactory: (url, protocols) => {
+          const socket = questDbBrowserSocket(url, protocols);
+          if (broken && verdict === "credential-echo") {
+            socket.protocol = offeredProtocols(protocols).find((protocol) =>
+              protocol.startsWith(CREDENTIAL_PREFIX),
+            )!;
+          }
+          sockets.push(socket);
+          return asQwpSocket(socket);
+        },
+        reconnect: {
+          reconnectInitialBackoffMs: 1,
+          reconnectMaxBackoffMs: 1,
+          onEvent: (event) => connected.push(event.kind),
+        },
+        onError: (event) => errors.push(event),
+      });
+      try {
+        await sender.connect();
+        await vi.waitFor(() =>
+          expect(connected).toContain(QWP_RECONNECT_EVENT_KIND.CONNECTED),
+        );
+        broken = true;
+        sockets[0].close(1006, "dropped");
+
+        await vi.waitFor(() => expect(errors).toHaveLength(1));
+        expect(errors[0].terminal).toBe(true);
+        expect(errors[0].error).toMatchObject({
+          name: "QwpUpgradeError",
+          retryable: false,
+          tryNextEndpoint: false,
+        } satisfies Partial<QwpUpgradeError>);
+        // One attempt, never repeated: the provider is not asked again, and
+        // an echoing server is not sent the credential again.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(providerCalls).toBe(2);
+        expect(sockets).toHaveLength(verdict === "credential-echo" ? 2 : 1);
+        expect(errors).toHaveLength(1);
+      } finally {
+        await sender.close().catch(() => undefined);
+      }
     }
   });
 });

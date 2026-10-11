@@ -724,11 +724,13 @@ export class QwpIngressSession {
     this.deltaSymbolsPublished = this.symbolDictionary.size > 0;
     if (connection instanceof QwpReconnectingIngressConnection) {
       // Recovered frames advance the transport watermark without forwarding
-      // their OK to this session, so the response loop cannot wake waiters.
+      // their OK to this session, so the response loop cannot wake waiters,
+      // or start the durable-ACK poll their durability depends on.
       connection.setAcknowledgedFrameSequenceListener(() => {
         if (this.acknowledgedSequenceWaiters.size > 0) {
           this.resolveAcknowledgedSequenceWaiters();
         }
+        this.scheduleDurablePoll();
       });
     }
     this.receiveLoop = this.consumeMessages();
@@ -1563,10 +1565,10 @@ export class QwpIngressSession {
 
     const frameAdvanced = this.advanceDurableFrameWatermark();
     this.resolveAcknowledgedSequenceWaiters();
-    if (this.pendingDurableTargets.size === 0) {
-      this.clearDurablePoll();
-    } else {
+    if (this.durableProgressPending) {
       this.scheduleDurablePoll();
+    } else {
+      this.clearDurablePoll();
     }
     this.pruneCompletedDurableWatermarks();
     return advanced || frameAdvanced;
@@ -1676,25 +1678,41 @@ export class QwpIngressSession {
     return true;
   }
 
+  /**
+   * Whether an acknowledged frame still waits for its durable ACK: one whose
+   * targets this session tracks, or one only the transport knows about. The
+   * server sends durable progress only in reply to inbound traffic, so either
+   * one needs the poll. A frame recovered from a store-and-forward journal is
+   * the second kind -- its OK is not forwarded here, as no caller of this
+   * session published it -- and without the poll a `flushAndWait()` covering
+   * it waited for rows that had already become durable until new rows were
+   * published.
+   */
+  private get durableProgressPending(): boolean {
+    return (
+      this.pendingDurableTargets.size > 0 ||
+      (this.connection instanceof QwpReconnectingIngressConnection &&
+        this.connection.hasPendingDurableTargets)
+    );
+  }
+
   private scheduleDurablePoll(): void {
     const interval = this.options.durableAckKeepaliveMs;
     // Zero is tracked but never polled, so it is excluded here and nowhere
     // else.
     if (
       interval === 0 ||
+      this.closing ||
+      this.failure ||
+      this.durablePollTimer ||
       !this.durableAckTracked ||
-      this.pendingDurableTargets.size === 0 ||
-      this.durablePollTimer
+      !this.durableProgressPending
     ) {
       return;
     }
     this.durablePollTimer = setTimeout(() => {
       this.durablePollTimer = undefined;
-      if (
-        this.closing ||
-        this.failure ||
-        this.pendingDurableTargets.size === 0
-      ) {
+      if (this.closing || this.failure || !this.durableProgressPending) {
         return;
       }
       const poll = this.connection.ping
