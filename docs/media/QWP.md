@@ -259,7 +259,7 @@ Rust and Python pools apply it, and their standalone senders ignore it too.
 | `idle_timeout_ms`         | integer ms                   | `60000`   | Idle time before a pooled entry is reaped.                                                                                     |
 | `max_lifetime_ms`         | integer ms                   | `1800000` | Absolute lifetime of a pooled entry.                                                                                           |
 | `housekeeper_interval_ms` | integer ms                   | `5000`    | How often the pool reaps aged entries.                                                                                         |
-| `lazy_connect`            | `on`, `off`, `true`, `false` | off       | Start without blocking on a first connection: ingress uses `initial_connect_retry=async` and `query_pool_min` defaults to `0`. |
+| `lazy_connect`            | `on`, `off`, `true`, `false` | off       | Start without blocking on a first connection. Sets `initial_connect_retry=async` and `query_pool_min=0`; rejects other values. |
 
 ### Reserved
 
@@ -394,7 +394,11 @@ or `reconnectMaxBackoffMs` (or the matching `reconnect_*` key) promotes the init
 connection to `"sync"`, so that budget also governs startup, as in the Java client.
 After a foreground persistent sender, or one started with `"async"`, has connected
 successfully at least once, every one of these failures is retried indefinitely so
-credential rotation and rolling capability changes cannot strand its queued rows. `reconnectMaxDurationMs` bounds only
+credential rotation and rolling capability changes cannot strand its queued rows.
+The browser client's own verdicts are the exception, and end the sender whenever they
+occur: an auth provider error that carries `retryable: false`, a returned credential
+that could never be sent, and a server that echoes the credential (see
+[Third-party browser applications](#third-party-browser-applications)). `reconnectMaxDurationMs` bounds only
 `"sync"` startup; no setting bounds a reconnect after the first connection.
 
 The connect-string key
