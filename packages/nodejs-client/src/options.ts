@@ -20,6 +20,7 @@ import {
   assertKnownQwpOptionSections,
   assertNoQwpIngressRouting,
 } from "../../client-core/src/_qwp/_internal/option-sections";
+import { validateQwpInitialConnectMode } from "../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import type { QwpNodeIngressOptions, QwpNodeUdpOptions } from "./qwp";
 
 /**
@@ -575,6 +576,20 @@ export function validateQwpExtraOptions(
     options.webSocket,
     "qwp.webSocket.",
     "a Sender has no query side for it to route",
+  );
+  // The shared resolver checks both of these too, but in the pooled client's
+  // terms: it reported a url as an `ingress.url` that belongs under
+  // `cluster.url`, options a Sender does not have. Checked here, the message
+  // names what the caller wrote. A programmatic Sender replaced the url
+  // without a word.
+  if ((options.webSocket as { url?: unknown } | undefined)?.url !== undefined) {
+    throw new TypeError(
+      "qwp.webSocket.url is not a Sender option: the connect string's addr, or host and port, set the endpoint; list further endpoints in qwp.webSocket.failoverUrls",
+    );
+  }
+  validateQwpInitialConnectMode(
+    options.webSocket?.initialConnectMode,
+    "qwp.webSocket.initialConnectMode",
   );
   // Same check the top-level logger gets, for the same reason. A QWP sender
   // contains every log call in a try/catch -- the sink is the thing that

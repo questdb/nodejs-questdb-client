@@ -2818,6 +2818,58 @@ describe("QWP ingress reconnect and replay", () => {
     await session.close();
   });
 
+  it("wakes an ACK waiter on a recovered frame when retiring the recovered tail fails", async () => {
+    // The OK covers recovered frames only, so it has no publication to
+    // deliver. The store retired the frame before the tail discard failed, so
+    // nothing is replayed and no later response would wake a waiter parked on
+    // it: the failure path itself has to, or the waiter stalled to its timeout.
+    class DiscardFaultStore extends TrackingReplayStore {
+      discardCalls = 0;
+
+      async discardThrough(): Promise<void> {
+        this.discardCalls++;
+        throw new QwpReplayStoreError("could not persist QWP discard: EIO");
+      }
+    }
+
+    const committed = encodeQwpIngressFrame([symbolTable("ETH-USD")]);
+    const replayStore = new DiscardFaultStore();
+    replayStore.records.set(5n, committed);
+    replayStore.records.set(
+      6n,
+      encodeQwpIngressFrame([symbolTable("BTC-USD")], { deferCommit: true }),
+    );
+    const connections: FakeConnection[] = [];
+    const session = await QwpIngressSession.connect(
+      async () => {
+        const next = new FakeConnection(`endpoint-${connections.length}`);
+        connections.push(next);
+        return next;
+      },
+      {
+        replayStore,
+        ackTimeoutMs: 5_000,
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+        },
+      },
+    );
+
+    expect(connections[0].sent).toEqual([committed]);
+    // Its timeout outlasts the test's, so a missed wake-up fails the test
+    // rather than resolving late.
+    const parked = session.waitForAck(5n, 60_000);
+    connections[0].receive(ingressResponse(QWP_STATUS.OK, 0n));
+
+    await expect(parked).resolves.toBe(true);
+    await vi.waitFor(() => expect(connections.length).toBe(2));
+    expect(replayStore.discardCalls).toBe(1);
+    expect(session.acknowledgedFrameSequence).toBe(5n);
+    expect(connections[1].sent).toEqual([]);
+    await session.close();
+  });
+
   it("publishes a durable trim's watermark when retiring the recovered tail fails", async () => {
     // The durable counterpart: a DURABLE_ACK trims the journal, then retiring
     // the recovered uncommitted tail fails. Nothing is left to replay, so no

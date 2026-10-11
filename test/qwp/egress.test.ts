@@ -2577,6 +2577,35 @@ describe("QwpEgressSession", () => {
     }
   });
 
+  it("reports the timeout for a result whose batch arrives after it", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      // The server streamed the whole result before it read the CANCEL. The
+      // batch is dropped unread, so the end of the stream reports the timeout,
+      // not a row count that disagrees with the rows the consumer received.
+      connection.receive(firstResultBatch(query.requestId));
+      connection.receive(resultEnd(query.requestId));
+
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      expect(connection.closeCalls).toEqual([]);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("withholds result views decoded ahead of the timeout", async () => {
     vi.useFakeTimers();
     try {

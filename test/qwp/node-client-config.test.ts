@@ -828,6 +828,25 @@ describe("QWP unified Node client configuration", () => {
     ).not.toThrow();
   });
 
+  it("accepts a zero backoff for egress failover only, as QWP.md documents", () => {
+    // A connected ingress session retries without limit, so a zero reconnect
+    // backoff would be a hot loop. failover_max_attempts bounds an egress
+    // episode, and the Java and Rust clients accept a zero failover backoff.
+    for (const key of [
+      "reconnect_initial_backoff_millis",
+      "reconnect_max_backoff_millis",
+    ]) {
+      expect(() =>
+        parseQwpNodeClientConfig(`ws::addr=localhost;${key}=0;`),
+      ).toThrow(`${key} must be an integer between 1 and`);
+    }
+    expect(
+      parseQwpNodeClientConfig(
+        "ws::addr=localhost;failover_backoff_initial_ms=0;failover_backoff_max_ms=0;",
+      ).egress?.reconnect,
+    ).toMatchObject({ failoverBackoffInitialMs: 0, failoverBackoffMaxMs: 0 });
+  });
+
   it("parses the default query timeout, where zero means none", () => {
     // The key Java's QuestDB facade reads. Rejected as unknown, a connect
     // string written for it failed here before any query ran.

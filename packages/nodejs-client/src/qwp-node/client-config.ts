@@ -163,8 +163,8 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
  * and the connection pools, and a `Sender` builds neither.
  *
  * `Sender.fromConfig("ws::...")` parses and validates the whole shared QWP
- * vocabulary and then consumes three of the seven resolved sections, so every
- * one of these used to be accepted and silently dropped. The parser rejects an
+ * vocabulary and then keeps only the resolved ingress options, so every one of
+ * these used to be accepted and silently dropped. The parser rejects an
  * unknown key, so accepting a known one that does nothing is the outlier --
  * the same reasoning validateUdpUnsupportedOptions() already applies on the
  * ILP side.

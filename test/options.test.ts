@@ -1144,6 +1144,52 @@ describe("Configuration string parser suite", function () {
     ).toThrow("qwp.webSocket.zone is not an ingress option");
   });
 
+  it("names the Sender's own option when it rejects a typed QWP setting", async function () {
+    // The typed section passes through the pooled client's resolver, which
+    // named ingress and cluster sections that a Sender does not have.
+    const webSocket = {
+      url: "ws://elsewhere:9000/write/v4",
+      autoFlushRows: 10,
+    };
+    await expect(
+      SenderOptions.fromConfig("ws::addr=localhost:9000;", {
+        qwp: { webSocket },
+      }),
+    ).rejects.toThrow(
+      "qwp.webSocket.url is not a Sender option: the connect string's addr, or host and port, set the endpoint",
+    );
+    // A programmatic Sender replaced the url without a word.
+    expect(
+      () =>
+        new Sender({
+          protocol: "ws",
+          host: "localhost",
+          port: 9000,
+          qwp: { webSocket },
+        }),
+    ).toThrow("qwp.webSocket.url is not a Sender option");
+
+    const invalidMode = { initialConnectMode: "later" };
+    await expect(
+      SenderOptions.fromConfig("ws::addr=localhost:9000;", {
+        qwp: { webSocket: invalidMode },
+      } as never),
+    ).rejects.toThrow(
+      "qwp.webSocket.initialConnectMode must be 'off', 'sync', or 'async'",
+    );
+    expect(
+      () =>
+        new Sender({
+          protocol: "ws",
+          host: "localhost",
+          port: 9000,
+          qwp: { webSocket: invalidMode },
+        } as never),
+    ).toThrow(
+      "qwp.webSocket.initialConnectMode must be 'off', 'sync', or 'async'",
+    );
+  });
+
   it("leaves QWP-only keys to the QWP schema", async function () {
     // close_flush_timeout_millis, initial_connect_retry and
     // catch_up_cap_gap_min_escalation_window_millis are QWP vocabulary. This
