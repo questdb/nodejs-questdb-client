@@ -124,7 +124,9 @@ sender or query session keeps working with each refreshed token:</p>
 the function counts against <code>connectTimeoutMs</code>. If the function throws, the
 attempt fails with a <code>QwpUpgradeError</code> of kind <code>authentication</code> whose <code>cause</code> is
 the thrown error; reconnects retry it with backoff unless that error carries
-<code>retryable: false</code>.</p>
+<code>retryable: false</code>. <code>reconnect.onEvent</code> reports such an attempt as
+<code>endpoint-attempt-failed</code>, not <code>auth-failed</code>, because no server refused the
+credential.</p>
 <ul>
 <li>Use <code>wss:</code>. The credential travels in the upgrade request's
 <code>Sec-WebSocket-Protocol</code> header, base64url-encoded but not encrypted.</li>
