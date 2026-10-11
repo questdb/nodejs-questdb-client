@@ -134,8 +134,8 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 | `initial_connect_retry`            | `off`, `sync`, `async`      | `off`    | Ingress startup policy while no server is reachable, with or without `sf_dir`.          |
 | `failover`                         | `on`, `off`                 | on       | Enables endpoint failover for egress.                                                   |
 | `failover_max_attempts`            | integer ≥ 1                 | `8`      | Failover attempts before giving up.                                                     |
-| `failover_backoff_initial_ms`      | integer ms                  | `50`     | First failover delay.                                                                   |
-| `failover_backoff_max_ms`          | integer ms                  | `1000`   | Ceiling for one failover delay.                                                         |
+| `failover_backoff_initial_ms`      | integer ms ≥ 0              | `50`     | First failover delay. `0` retries at once.                                              |
+| `failover_backoff_max_ms`          | integer ms ≥ 0              | `1000`   | Ceiling for one failover delay.                                                         |
 | `failover_max_duration_ms`         | integer ms                  | `30000`  | Budget for a failover episode.                                                          |
 | `target`                           | `any`, `primary`, `replica` | `any`    | Server role a query session accepts. Ingress ignores it.                                |
 | `zone`                             | string                      | —        | Preferred topology zone when ranking query endpoints. Ingress ignores it.               |
@@ -158,8 +158,11 @@ each failover episode by `failover_max_attempts` and `failover_max_duration_ms`.
 zero `reconnect_max_duration_millis` allows a synchronous startup one attempt and no
 retries, as in the Rust and Python clients (Java rejects it); a zero
 `failover_max_duration_ms` disables the egress deadline, as in the Java and Rust
-clients. The backoff keys require a positive value, because a zero delay is a hot
-retry loop rather than a documented mode.
+clients. The `reconnect_*` backoff keys require a positive value: a connected
+ingress session retries without limit, so a zero delay would be a hot retry loop
+rather than a documented mode. The `failover_*` backoff keys accept zero, as in the
+Java and Rust clients, and then retry the next sweep at once; `failover_max_attempts`
+still bounds the episode.
 
 `initial_connect_retry` decides what the first ingress connection does while no
 server is reachable, for the memory replay queue and `sf_dir` alike. `off` makes one
@@ -1307,12 +1310,15 @@ application worker.
 `onSenderError` is the Java-parity rejection stream. Its immutable payload includes
 `category`, applied policy, raw server status/message, wire message sequence, inclusive
 stable `[fromFsn, toFsn]` correlation range, optional single-table attribution, and
-`quarantinedPath` for abandoned persistent data. The legacy `onError` callback remains
-available for timeouts and general session failures; classified NACK events also expose
-the same payload as `event.senderError`. When `onSenderError` is omitted, QWP logs
-retriable rejections at `warn` and terminal rejections or abandoned data at `error`.
-General asynchronous session failures are likewise logged when `onError` is omitted,
-so a background store-and-forward failure is never silent by default. Reconnect and
+`quarantinedPath` for abandoned persistent data. The legacy `onError` callback reports
+server rejections and terminal session failures; classified NACK events also expose
+the same payload as `event.senderError`. A timeout is reported only to the caller it
+ends: a `waitForAck()` or `flushAndWait()` that times out returns `false`, and a
+`close()` whose drain times out rejects, without either reaching `onError`. When
+`onSenderError` is omitted, QWP logs retriable rejections at `warn` and terminal
+rejections or abandoned data at `error`. General asynchronous session failures are
+likewise logged when `onError` is omitted, so a background store-and-forward failure
+is never silent by default. Reconnect and
 orphan-drain fallbacks use the same bounded asynchronous error inbox; direct session
 fallback logging adds no callback or close-time dependency. Both paths work in browsers
 and Node.js.
@@ -1803,12 +1809,13 @@ standalone sender and egress functions directly.
 
 `createQwpNodeClient()` and `createQwpBrowserClient()` build the pooled facade
 without contacting the server, leaving the first connect to `connect()` or to the
-first borrow. The connecting forms `connectQwpNodeClient()` and
-`connectQwpBrowserClient()` prewarm each configured
-pool minimum. A prewarm that
+first borrow. `connect()` prewarms each configured pool minimum. A prewarm that
 fails rejects but does not close the client: connections it did establish stay
 pooled, and calling `connect()` again makes a fresh attempt, so a transient
-outage at start-up can be retried rather than requiring a new client. Pools grow to
+outage at start-up can be retried rather than requiring a new client. The
+connecting forms `connectQwpNodeClient()` and `connectQwpBrowserClient()` create a
+client and prewarm it the same way, but a failed prewarm never hands that client
+back, so they close it before rejecting; retry by calling them again. Pools grow to
 their maximum under concurrent borrows and apply one FIFO acquisition deadline;
 exhaustion raises `QwpPoolAcquireTimeoutError`. Query handles are single-flight,
 but separate borrowed handles run concurrently. Returning a handle with an active
