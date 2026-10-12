@@ -61,6 +61,7 @@ type QueryRequestEncoder = (
   requestId: bigint,
 ) => Uint8Array | Promise<Uint8Array>;
 type ConnectionLostHandler = () => void;
+type ConnectionRestoredHandler = () => void;
 
 interface PendingTerminalVerdict {
   readonly requestId: bigint;
@@ -131,6 +132,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     private readonly encodeQueryRequest: QueryRequestEncoder,
     private readonly onFailoverReset?: FailoverResetHandler,
     private readonly onConnectionLost?: ConnectionLostHandler,
+    private readonly onConnectionRestored?: ConnectionRestoredHandler,
     private readonly retryInitialConnection = true,
     connectionListenerInboxCapacity = 64,
   ) {
@@ -171,6 +173,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     encodeQueryRequest: QueryRequestEncoder,
     onFailoverReset?: FailoverResetHandler,
     onConnectionLost?: ConnectionLostHandler,
+    onConnectionRestored?: ConnectionRestoredHandler,
     retryInitialConnection = true,
     signal?: AbortSignal,
     connectionListenerInboxCapacity?: number,
@@ -183,6 +186,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       encodeQueryRequest,
       onFailoverReset,
       onConnectionLost,
+      onConnectionRestored,
       retryInitialConnection,
       connectionListenerInboxCapacity,
     );
@@ -577,10 +581,11 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
           if (candidate) await candidate.close().catch(() => undefined);
           if (this.closing) return;
           // A candidate that failed after SERVER_INFO -- typically when the
-          // replay could not be sent -- may already have run the session's
-          // reset, which marks the connection present again. The outage goes
-          // on, so the session hears of it again: otherwise an expired query
-          // waited out its grace period and was replayed on the next endpoint.
+          // replay could not be sent -- may already have taken over from the
+          // session's point of view, which marks the connection present
+          // again. The outage goes on, so the session hears of it again:
+          // otherwise an expired query waited out its grace period and was
+          // replayed on the next endpoint.
           if (reconnecting && candidate) {
             try {
               this.onConnectionLost?.();
@@ -768,6 +773,7 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       this.throwIfUnavailable();
       if (accepted) {
         await this.onConnectionReset(serverInfo);
+        this.onConnectionRestored?.();
         return;
       }
     }
@@ -777,18 +783,31 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       if (skipQueueBarrier) this.messagesQueue.clear();
       else await this.messagesQueue.barrier();
       await this.onConnectionReset(serverInfo);
+      this.onConnectionRestored?.();
       return;
     }
-    // An active operation will be replayed from its request. Drop raw stale
-    // messages before resetting the decoded queue; waiting for a barrier here
-    // can deadlock when that queue is deliberately at its client-side bound.
-    this.messagesQueue.clear();
-    await this.onConnectionReset(serverInfo);
     const requestId = replayRequestId(this.outboundReplay);
     if (requestId === undefined) {
       throw new ReplayStateError(
         "QWP egress replay is missing its QUERY_REQUEST",
       );
+    }
+    // Until the replay leaves, the session still settles a query that no
+    // longer needs a server -- its timeout expired, its consumer retired --
+    // by withdrawing it from the replay, and the steps below wait on a
+    // result-view callback and on the application's onFailoverReset. A
+    // withdrawn query is not replayed: the server would run it again only to
+    // be cancelled.
+    const withdrawn = (): boolean =>
+      replayRequestId(this.outboundReplay) !== requestId;
+    // An active operation will be replayed from its request. Drop raw stale
+    // messages before resetting the decoded queue; waiting for a barrier here
+    // can deadlock when that queue is deliberately at its client-side bound.
+    this.messagesQueue.clear();
+    await this.onConnectionReset(serverInfo);
+    if (withdrawn()) {
+      this.onConnectionRestored?.();
+      return;
     }
     if (this.onFailoverReset) {
       try {
@@ -807,8 +826,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     }
     const request = await this.encodeReplayRequest(serverInfo, requestId);
     validateEncodedRequest(request, requestId);
-    const preparedRequest = request.slice();
-    this.outboundReplay[0] = preparedRequest;
+    // Checked and committed in one step: from here on the request is on its
+    // way, and a query ending now is cancelled on the replacement instead.
+    const replaying = !withdrawn();
+    if (replaying) this.outboundReplay[0] = request.slice();
+    this.onConnectionRestored?.();
+    if (!replaying) return;
     for (const payload of this.outboundReplay) await connection.send(payload);
   }
 

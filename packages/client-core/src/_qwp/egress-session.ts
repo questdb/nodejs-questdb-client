@@ -117,7 +117,9 @@ export interface QwpEgressQueryOptions {
   /**
    * Notification before this query is replayed after failover. Use it to clear
    * results already consumed from the old connection. Overrides the session's
-   * onFailoverReset for this query; the callback is awaited before replay.
+   * onFailoverReset for this query; the callback is awaited before replay. The
+   * query's timeout keeps running meanwhile, and a query whose timeout expires
+   * first is not replayed.
    */
   onFailoverReset?: (
     event: QwpEgressFailoverResetEvent,
@@ -980,6 +982,7 @@ interface QwpEgressReplayHooks {
   ) => Uint8Array;
   notifyFailoverReset?: (event: QwpEgressFailoverResetEvent) => Promise<void>;
   onConnectionLost?: () => void;
+  onConnectionRestored?: () => void;
 }
 
 export class QwpEgressSession implements QwpEgressQueryControl {
@@ -1097,6 +1100,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       replayHooks.notifyFailoverReset = (event) =>
         this.notifyFailoverReset(event, options.onFailoverReset);
       replayHooks.onConnectionLost = () => this.handleConnectionLost();
+      replayHooks.onConnectionRestored = () => this.completeConnectionReset();
     }
   }
 
@@ -1769,13 +1773,17 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     }
   }
 
+  /**
+   * Resets connection-scoped state for the replacement connection. The
+   * connection still counts as lost: the active query's replay has not been
+   * sent, and while this waits for a result-view callback -- and the
+   * transport then for onFailoverReset -- a query that ends is withdrawn
+   * from the replay rather than replayed and cancelled.
+   */
   private async prepareConnectionReset(
     serverInfo: QwpServerInfoMessage,
   ): Promise<void> {
     this.currentServerInfo = serverInfo;
-    // From here on the replacement connection carries the active query, if
-    // any, so a query ending now drains on it rather than being dropped.
-    this.connectionLost = false;
     const query = this.active;
     if (query && this.activeDetached) {
       // It ended with the old connection and is not replayed. Its last view
@@ -1784,10 +1792,26 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       this.clearActive(query);
     } else if (query) {
       await query.resetForReplay();
-      this.boundReplayedQuery(query);
+      // Its timeout may have expired while the callback ran.
+      if (this.activeDetached) this.clearActive(query);
     }
     this.decoder.applyCacheReset(QWP_RESET_MASK_DICTIONARY);
     this.decoder.resetQuerySchema();
+  }
+
+  /**
+   * The replacement connection takes over: the active query's replay, if it
+   * has one, is sent next. A query ending from now on drains on the
+   * replacement rather than being dropped.
+   */
+  private completeConnectionReset(): void {
+    this.connectionLost = false;
+    const query = this.active;
+    if (!query) return;
+    // Withdrawn from the replay after the reset above had run. Its views
+    // drained then, and nothing has been received since.
+    if (this.activeDetached) this.clearActive(query);
+    else this.boundReplayedQuery(query);
   }
 
   /**
@@ -2119,6 +2143,7 @@ export async function connectQwpEgressSession(
           await replayHooks.notifyFailoverReset(event);
         },
         () => replayHooks.onConnectionLost?.(),
+        () => replayHooks.onConnectionRestored?.(),
         options.reconnect !== undefined,
         signal,
         validated.connectionListenerInboxCapacity,

@@ -1233,21 +1233,22 @@ endpoint list unless the proxy routes writers to a primary.
 On Node.js a `401` or `403` on the upgrade is classified as an authentication
 failure, and it is the one endpoint verdict that is terminal for the entire endpoint
 set rather than for the endpoint that returned it. It short-circuits the sweep: the
-endpoints ranked after it are never tried, and the reconnect loop rethrows it without
-retrying, so no reconnect setting extends it. A
-credential is cluster-wide, so a node rejecting it reports a configuration error that
-walking on to a peer would only mask; the Java client applies the same rule. Every
-other rejected status keeps the sweep walking, including `404`, which one node can
-return mid-deploy while its peers are healthy, and a sweep mixing such attempts stays
-retryable if any one of them was.
+endpoints ranked after it are never tried, and unless one of the exemptions below
+applies, the reconnect loop rethrows it without retrying, so no reconnect setting
+extends it. A credential is cluster-wide, so a node rejecting it reports a
+configuration error that walking on to a peer would only mask; the Java client applies
+the same rule. Every other rejected status keeps the sweep walking, including `404`,
+which one node can return mid-deploy while its peers are healthy, and a sweep mixing
+such attempts stays retryable if any one of them was.
 
 Note how this composes with health ranking. A non-orderly close demotes the endpoint
 it happened on, so a peer that answers `401` can rank ahead of the endpoint that just
 dropped; that sweep then ends without the dropped endpoint being retried at all, and
 the sender stays terminal even after it recovers. Two cases are exempt. A Node
-foreground store-and-forward sender retries these failures indefinitely once it has
+foreground persistent sender, or one started with `"async"` (as every pooled sender
+is under `lazy_connect=on`), retries these failures indefinitely once it has
 connected at least once, so a credential can rotate under a running producer without
-losing journaled rows; before that first connection it still retries the statuses
+losing its queued rows; before that first connection it still retries the statuses
 that keep the sweep walking, and only a cluster-wide verdict such as `401` is
 terminal. A browser cannot distinguish them at all, because its upgrade
 error carries no status; browser authentication failures surface from the REST
@@ -1507,10 +1508,11 @@ released with `QwpEgressQueryTimeoutError` and the connection drains the query f
 to one more period; a server still silent then fails the session with
 `QwpEgressQueryCancelTimeoutError`. A query issued meanwhile waits for the drain
 instead of failing, and the wait counts against its own timeout. If the connection is
-lost after the timeout has expired, the timeout is reported at once and the query is
-not replayed; a request whose timeout expires while a reconnect holds it is never
-sent. The timeout is enforced by the client, and QuestDB acts on `CANCEL` between
-result batches, so a query still computing its first batch runs until it produces one.
+lost after the timeout has expired, or the timeout expires before the query's replay
+has been sent, the timeout is reported at once and the query is not replayed; a
+request whose timeout expires while a reconnect holds it is never sent. The timeout
+is enforced by the client, and QuestDB acts on `CANCEL` between result batches, so a
+query still computing its first batch runs until it produces one.
 
 Breaking out of `for await` early also discards buffered batches, restores their
 flow-control credit, sends `CANCEL`, and rejects `completion` with
@@ -1592,11 +1594,12 @@ lost, and a consumer may already have observed a prefix of SELECT rows. Queued b
 unconsumed batches are discarded automatically. Configure `onFailoverReset` on the
 query when the application must clear an accumulated prefix before batches restart
 at sequence zero. It runs before every replay, whether the reconnect reached another
-endpoint (a `failed-over` event) or the same one (`reconnected`). The query-scoped
-callback is especially important with pooled leases: request IDs are local to each
-session and cannot distinguish concurrent leases in one shared callback. An
-`onFailoverReset` on the egress options remains the fallback for queries without
-their own callback. Both are optional notifications, not an opt-in. Set
+endpoint (a `failed-over` event) or the same one (`reconnected`). The query's timeout
+keeps running while the callback does; if it expires first, the query is not
+replayed. The query-scoped callback is especially important with pooled leases:
+request IDs are local to each session and cannot distinguish concurrent leases in one
+shared callback. An `onFailoverReset` on the egress options remains the fallback for
+queries without their own callback. Both are optional notifications, not an opt-in. Set
 `reconnect: false` to use one fixed connection and surface failures without
 replay. Supplying a `reconnect` object tunes the failover bounds and also retains
 the earlier opt-in behavior of retrying initial connection establishment.
