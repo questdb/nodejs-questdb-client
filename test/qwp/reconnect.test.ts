@@ -42,6 +42,7 @@ import {
   QWP_SENDER_ERROR_CATEGORY,
   QWP_SENDER_ERROR_POLICY,
   QWP_UPGRADE_ERROR_KIND,
+  QwpBatchTooLargeError,
   QwpByteWriter,
   QwpConnectionCloseInfo,
   QwpDurableAckUnavailableError,
@@ -2456,6 +2457,73 @@ describe("QWP ingress reconnect and replay", () => {
       message: "unauthorized",
     });
     expect(first.sent).toHaveLength(0);
+  });
+
+  it("sends earlier RAM frames when a fast close discards an over-cap batch", async () => {
+    // close() discards a batch the cap can never accept, but the frames that
+    // earlier flushes published are not part of it. They were still waiting
+    // for the drainer, and closing the session without the send drain dropped
+    // them while close() reported only the discarded batch.
+    const connection = new FakeConnection("primary");
+    // As with ws, a send completes on a later I/O turn, so the frames flushed
+    // just before close() are still queued when it runs.
+    connection.onSend = () =>
+      new Promise<void>((resolve) => setImmediate(resolve));
+    const session = await QwpIngressSession.connect(async () => connection, {
+      maxBatchSizeBytes: 200,
+    });
+    const sender = createQwpSender(async () => session, {
+      autoFlush: false,
+      closeFlushTimeoutMs: 0,
+    });
+    for (let value = 1n; value <= 3n; value++) {
+      await sender.table("events").longColumn("value", value).atNow();
+      await expect(sender.flush()).resolves.toBe(true);
+    }
+    await sender.table("events").stringColumn("v", "x".repeat(500)).atNow();
+
+    await expect(sender.close()).rejects.toBeInstanceOf(QwpBatchTooLargeError);
+    expect(connection.sent).toHaveLength(3);
+    expect(sender.metrics.pendingRows).toBe(0);
+  });
+
+  it("waits for earlier frames' ACK when close() discards an over-cap batch", async () => {
+    const first = new FakeConnection("primary");
+    const replacement = new FakeConnection("secondary");
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => (factoryCalls++ === 0 ? first : reconnecting),
+      {
+        reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+        maxBatchSizeBytes: 200,
+      },
+    );
+    const sender = createQwpSender(async () => session, { autoFlush: false });
+    try {
+      first.drop();
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+      // Published to memory while no connection exists.
+      await sender.table("events").longColumn("value", 1n).atNow();
+      await expect(sender.flush()).resolves.toBe(true);
+      await sender.table("events").stringColumn("v", "x".repeat(500)).atNow();
+
+      const outcome = sender.close().then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      releaseReconnect(replacement);
+      await vi.waitFor(() => expect(replacement.sent).toHaveLength(1));
+      replacement.receive(ingressResponse(QWP_STATUS.OK, 0n));
+      expect(await outcome).toBeInstanceOf(QwpBatchTooLargeError);
+      expect(sender.ackedSequence).toBe(0n);
+    } finally {
+      releaseReconnect(replacement);
+      await sender.close().catch(() => undefined);
+    }
   });
 
   it("keeps default RAM replay alive past the five-minute reconnect budget", async () => {

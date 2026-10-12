@@ -2145,7 +2145,7 @@ export class QwpSender {
     try {
       // Serialize behind public flushes so symbol dictionaries, transaction
       // boundaries, and staging ownership cannot race. close() flushes, then
-      // applies one bounded ACK watermark wait.
+      // drains what has been published.
       const closeFlush = this.flushTail.then(async () => {
         if (
           this.pendingRowCount === 0 &&
@@ -2161,34 +2161,6 @@ export class QwpSender {
         }
       });
       await this.withCloseDeadline(closeFlush, publishDeadline);
-
-      const session = this.activeSession;
-      // Fast close skips the server ACK, not the physical send. RAM replay
-      // publishes before its background drainer transmits; closing the session
-      // now would erase accepted frames without ever putting them on the wire.
-      if (drainDeadline === undefined && session?.waitForPendingSends) {
-        await this.withCloseDeadline(
-          session.waitForPendingSends(),
-          publishDeadline,
-        );
-      }
-      const target = this.lastCommitBoundarySequence;
-      if (
-        drainDeadline !== undefined &&
-        session &&
-        target >= 0n &&
-        sessionAcknowledgedSequence(session) < target
-      ) {
-        const remaining = drainDeadline - Date.now();
-        if (remaining <= 0) throw this.closeTimeoutError();
-        // The absolute close deadline bounds this wait even though the
-        // watermark wait itself restarts its timeout on progress.
-        const acknowledged = await this.withCloseDeadline(
-          session.waitForAck(target, remaining),
-          drainDeadline,
-        );
-        if (!acknowledged) throw this.closeTimeoutError();
-      }
     } catch (error) {
       terminalError = error;
       if (error instanceof QwpBatchTooLargeError) {
@@ -2203,6 +2175,28 @@ export class QwpSender {
           "error",
           `Discarded ${abandoned} QWP row(s) on close: ${error.message}`,
         );
+      }
+    }
+
+    // The drain covers the frames earlier flushes published, so it runs even
+    // when the final flush failed: that failure concerns the rows still staged.
+    // Without a journal those frames may still wait for the background
+    // drainer, and closing the session discards them. Skipping the drain here
+    // made a close() that discarded an over-cap batch drop the rows flushed
+    // just before it as well, while reporting only the batch. An expired close
+    // deadline leaves no time to wait, and its timeout already reports the
+    // pending data.
+    if (!(terminalError instanceof QwpSenderCloseTimeoutError)) {
+      try {
+        await this.drainPublishedFrames(drainDeadline, publishDeadline);
+      } catch (error) {
+        if (terminalError === undefined) {
+          terminalError = error;
+        } else if (error !== terminalError) {
+          // close() rejects with the first failure. This one concerns rows
+          // the caller had already flushed, so it is logged rather than lost.
+          this.log("error", error instanceof Error ? error : String(error));
+        }
       }
     }
 
@@ -2263,6 +2257,44 @@ export class QwpSender {
       throw terminalError;
     }
     if (closeError !== undefined) throw closeError;
+  }
+
+  /**
+   * Waits, within the close deadlines, for the frames this sender has
+   * published: in a fast close until they reach the socket, otherwise until
+   * the ACK watermark covers the last commit boundary.
+   */
+  private async drainPublishedFrames(
+    drainDeadline: number | undefined,
+    publishDeadline: number,
+  ): Promise<void> {
+    const session = this.activeSession;
+    // Fast close skips the server ACK, not the physical send. RAM replay
+    // publishes before its background drainer transmits; closing the session
+    // now would erase accepted frames without ever putting them on the wire.
+    if (drainDeadline === undefined && session?.waitForPendingSends) {
+      await this.withCloseDeadline(
+        session.waitForPendingSends(),
+        publishDeadline,
+      );
+    }
+    const target = this.lastCommitBoundarySequence;
+    if (
+      drainDeadline !== undefined &&
+      session &&
+      target >= 0n &&
+      sessionAcknowledgedSequence(session) < target
+    ) {
+      const remaining = drainDeadline - Date.now();
+      if (remaining <= 0) throw this.closeTimeoutError();
+      // The absolute close deadline bounds this wait even though the
+      // watermark wait itself restarts its timeout on progress.
+      const acknowledged = await this.withCloseDeadline(
+        session.waitForAck(target, remaining),
+        drainDeadline,
+      );
+      if (!acknowledged) throw this.closeTimeoutError();
+    }
   }
 
   /**
