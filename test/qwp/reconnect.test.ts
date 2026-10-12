@@ -102,7 +102,10 @@ import type {
   QwpIngressReplayStore,
 } from "../../packages/client-core/src/_qwp/_internal/replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
-import { QwpReconnectingIngressConnection } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
+import {
+  QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES,
+  QwpReconnectingIngressConnection,
+} from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { validateQwpWebSocketTimeouts } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
 import {
   isIgnorableQwpDirectorySyncError,
@@ -1769,8 +1772,9 @@ describe("QWP ingress reconnect and replay", () => {
 
   it("bounds memory replay and resumes publication after ACK trimming", async () => {
     const connection = new FakeConnection("primary");
+    const twoFrames = 2 * (1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES);
     const session = await QwpIngressSession.connect(async () => connection, {
-      memoryReplayMaxBytes: 130,
+      memoryReplayMaxBytes: twoFrames,
       memoryReplayAppendDeadlineMs: 1_000,
     });
 
@@ -1780,8 +1784,8 @@ describe("QWP ingress reconnect and replay", () => {
 
     await vi.waitFor(() =>
       expect(session.metrics).toMatchObject({
-        memoryReplayMaxBytes: 130,
-        memoryReplayUsedBytes: 130,
+        memoryReplayMaxBytes: twoFrames,
+        memoryReplayUsedBytes: twoFrames,
         waitingMemoryReplayAppends: 1,
         totalMemoryReplayBackpressureStalls: 1,
         totalMemoryReplayAppendTimeouts: 0,
@@ -1797,7 +1801,7 @@ describe("QWP ingress reconnect and replay", () => {
       Uint8Array.of(3),
     ]);
     expect(session.metrics).toMatchObject({
-      memoryReplayUsedBytes: 130,
+      memoryReplayUsedBytes: twoFrames,
       waitingMemoryReplayAppends: 0,
       totalMemoryReplayBackpressureStalls: 1,
       totalMemoryReplayAppendTimeouts: 0,
@@ -1815,7 +1819,10 @@ describe("QWP ingress reconnect and replay", () => {
     let calls = 0;
     const session = await QwpIngressSession.connect(
       async () => (calls++ === 0 ? first : reconnecting),
-      { memoryReplayMaxBytes: 65, memoryReplayAppendDeadlineMs: 50 },
+      {
+        memoryReplayMaxBytes: 1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES,
+        memoryReplayAppendDeadlineMs: 50,
+      },
     );
     try {
       first.drop();
@@ -1830,6 +1837,50 @@ describe("QWP ingress reconnect and replay", () => {
       expect(session.metrics.pendingReplayFrames).toBe(1);
     } finally {
       releaseReconnect(replacement);
+      await session.close();
+    }
+  });
+
+  it("charges each offline RAM frame for the memory it keeps beside its payload", async () => {
+    // Publication completes while the sender is disconnected, so the cap is
+    // the only bound on an outage's backlog. A queued frame keeps about 800
+    // bytes of heap on Node beside its payload, and charging it only 64 let
+    // one-row flushes fill about 1 GiB of heap before the default 128 MiB cap
+    // engaged; a process with a 512 MB heap ran out of memory first.
+    expect(QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES).toBeGreaterThanOrEqual(
+      1024,
+    );
+    const frameBytes = 1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+    const first = new FakeConnection("primary");
+    let releaseReconnect!: (connection: QwpBinaryConnection) => void;
+    const reconnecting = new Promise<QwpBinaryConnection>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    let calls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => (calls++ === 0 ? first : reconnecting),
+      {
+        memoryReplayMaxBytes: 4 * frameBytes,
+        memoryReplayAppendDeadlineMs: 50,
+      },
+    );
+    try {
+      first.drop();
+      await vi.waitFor(() => expect(calls).toBe(2));
+      for (const value of [1, 2, 3, 4]) {
+        await session.publishFrame(Uint8Array.of(value));
+      }
+      expect(session.metrics).toMatchObject({
+        pendingReplayFrames: 4,
+        pendingReplayBytes: 4,
+        memoryReplayUsedBytes: 4 * frameBytes,
+      });
+      await expect(
+        session.publishFrame(Uint8Array.of(5)),
+      ).rejects.toBeInstanceOf(QwpMemoryReplayAppendTimeoutError);
+      expect(session.metrics.pendingReplayFrames).toBe(4);
+    } finally {
+      releaseReconnect(new FakeConnection("secondary"));
       await session.close();
     }
   });
@@ -1856,7 +1907,8 @@ describe("QWP ingress reconnect and replay", () => {
         async () => (calls++ === 0 ? first : reconnecting),
         {
           durableAckKeepaliveMs: 100,
-          memoryReplayMaxBytes: 195,
+          memoryReplayMaxBytes:
+            3 * (1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES),
           memoryReplayAppendDeadlineMs: 50,
           onError: (event) => {
             if (event.terminal) terminalErrors.push(event.error);
@@ -1945,7 +1997,7 @@ describe("QWP ingress reconnect and replay", () => {
       expect(connection.sent.slice(1)).toEqual(Array(50).fill(poll));
       expect(session.metrics.pendingReplayFrames).toBe(2);
       expect(session.metrics.memoryReplayUsedBytes).toBe(
-        1 + poll.byteLength + 2 * 64,
+        1 + poll.byteLength + 2 * QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES,
       );
       expect(session.acknowledgedFrameSequence).toBe(-1n);
 
@@ -2093,8 +2145,10 @@ describe("QWP ingress reconnect and replay", () => {
     // With a strict per-append cap, the tiny group-closing frame then waited
     // for an ACK that could only be produced after that same frame was sent.
     const connection = new FakeConnection("primary");
+    // Room for the deferred frame alone, not for the frame that closes it.
+    const capacity = 46 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
     const session = await QwpIngressSession.connect(async () => connection, {
-      memoryReplayMaxBytes: 110,
+      memoryReplayMaxBytes: capacity,
       memoryReplayAppendDeadlineMs: 50,
     });
     const sender = createQwpSender(async () => session, {
@@ -2108,14 +2162,14 @@ describe("QWP ingress reconnect and replay", () => {
     expect(connection.sent[0][5] & QWP_FLAG_DEFER_COMMIT).toBe(
       QWP_FLAG_DEFER_COMMIT,
     );
-    expect(session.metrics.memoryReplayUsedBytes).toBeLessThanOrEqual(110);
+    expect(session.metrics.memoryReplayUsedBytes).toBeLessThanOrEqual(capacity);
 
     // flush() resolves once memory replay admits the closing frame, even
     // though only that frame's ACK can trim the deferred prefix.
     await expect(sender.flush()).resolves.toBe(true);
     await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
     expect(connection.sent[1][5] & QWP_FLAG_DEFER_COMMIT).toBe(0);
-    expect(session.metrics.memoryReplayUsedBytes).toBeGreaterThan(110);
+    expect(session.metrics.memoryReplayUsedBytes).toBeGreaterThan(capacity);
     const waiting = sender.flushAndWait();
     connection.receive(ingressResponse(QWP_STATUS.OK, 1n, [["events", 1n]]));
 
@@ -2129,17 +2183,18 @@ describe("QWP ingress reconnect and replay", () => {
 
   it("bounds memory replay waits with typed capacity errors", async () => {
     const connection = new FakeConnection("primary");
+    const oneFrame = 1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
     const session = await QwpIngressSession.connect(async () => connection, {
-      memoryReplayMaxBytes: 65,
+      memoryReplayMaxBytes: oneFrame,
       memoryReplayAppendDeadlineMs: 50,
     });
 
     await session.publishFrame(Uint8Array.of(1));
     await expect(session.publishFrame(Uint8Array.of(2))).rejects.toMatchObject({
       name: "QwpMemoryReplayAppendTimeoutError",
-      maxBytes: 65,
-      usedBytes: 65,
-      requiredBytes: 65,
+      maxBytes: oneFrame,
+      usedBytes: oneFrame,
+      requiredBytes: oneFrame,
       timeoutMs: 50,
     } satisfies Partial<QwpMemoryReplayAppendTimeoutError>);
     expect(session.metrics).toMatchObject({
@@ -2152,7 +2207,7 @@ describe("QWP ingress reconnect and replay", () => {
 
     await expect(
       QwpIngressSession.connect(async () => new FakeConnection("other"), {
-        memoryReplayMaxBytes: 64,
+        memoryReplayMaxBytes: QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES,
       }).then((tooSmall) =>
         tooSmall.publishFrame(Uint8Array.of(1)).finally(() => tooSmall.close()),
       ),
@@ -2163,7 +2218,7 @@ describe("QWP ingress reconnect and replay", () => {
   it("interrupts a memory replay capacity wait on close", async () => {
     const connection = new FakeConnection("primary");
     const session = await QwpIngressSession.connect(async () => connection, {
-      memoryReplayMaxBytes: 65,
+      memoryReplayMaxBytes: 1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES,
       memoryReplayAppendDeadlineMs: 60_000,
     });
 
@@ -4747,7 +4802,8 @@ describe("QWP ingress reconnect and replay", () => {
     const session = await QwpIngressSession.connect(async () => connection, {
       backgroundStoreAndForward: true,
       reconnect: {},
-      memoryReplayMaxBytes: 200,
+      // Room for any one frame of the batch, not for all three.
+      memoryReplayMaxBytes: 136 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES,
       maxBatchSizeBytes: 128,
     });
     const table = new QwpTableBuffer("t");

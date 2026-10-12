@@ -136,10 +136,21 @@ const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
 const MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS = 16;
 const DEFAULT_MEMORY_REPLAY_MAX_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS = 30_000;
-// Charge a conservative fixed amount so even empty/very small opaque frames
-// cannot grow the replay Map without bound. Payload arrays are not copied by
-// the store, so the configured budget primarily tracks live frame storage.
-const MEMORY_REPLAY_RECORD_OVERHEAD_BYTES = 64;
+/**
+ * @internal What the memory replay queue charges each frame on top of its
+ * payload, so that its byte cap bounds the memory a backlog of small frames
+ * takes as well as a backlog of large ones.
+ *
+ * It stands for what a queued frame keeps in memory besides its payload
+ * bytes: the payload's array objects, the replay record, the connection's
+ * bookkeeping for the frame and, until the background drainer has sent it,
+ * its step in the drain. On Node that is about 800 bytes for a frame not yet
+ * sent and about 450 for one awaiting its ACK. The queue used to charge 64,
+ * so an outage let one-row flushes fill about 1 GiB of heap before the
+ * default 128 MiB cap applied any backpressure, and a process with a 512 MB
+ * heap ran out of memory first.
+ */
+export const QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES = 1024;
 
 /**
  * How long one connectLoop() keeps trying.
@@ -349,7 +360,7 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
       );
     }
     const requiredBytes =
-      record.payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+      record.payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
     const deferCommit = defersCommit(record.payload);
     // A durable-ACK poll is a fixed-size control frame, and the durable
     // progress it asks for is what trims a queue full of frames awaiting
@@ -416,7 +427,7 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     let requiredBytes = 0;
     for (const payload of payloads) {
       const recordBytes =
-        payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+        payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
       if (recordBytes > this.maxBytes) {
         throw new QwpMemoryReplayFrameTooLargeError(
           this.maxBytes,
@@ -489,7 +500,8 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
   discard(frameSequence: bigint): void {
     const payload = this.records.get(frameSequence);
     if (!payload) return;
-    this.usedBytes -= payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+    this.usedBytes -=
+      payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
     this.records.delete(frameSequence);
     this.releaseCapacityWaiters();
   }
@@ -499,7 +511,7 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
       if (sequence > frameSequence) break;
       const payload = this.records.get(sequence)!;
       this.usedBytes -=
-        payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+        payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
       this.records.delete(sequence);
     }
     this.releaseCapacityWaiters();

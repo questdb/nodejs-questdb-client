@@ -222,14 +222,17 @@ export interface QwpIngressSessionOptions {
    */
   reconnect?: QwpIngressReconnectOptions | false;
   /**
-   * Target cap for the built-in memory-only replay queue, including estimated
-   * per-frame bookkeeping. Defaults to 128 MiB. A transaction-closing logical
-   * batch may temporarily exceed this target by up to one target-sized batch,
-   * because the server cannot ACK its deferred prefix before receiving that
-   * batch. A browser durable-ACK poll is admitted above it too, since only
-   * the durable progress it asks for can trim frames awaiting durability.
-   * This applies in browsers and non-persistent Node sessions; a Node
-   * store-and-forward journal is bounded by its own `maxBytes` instead.
+   * Target cap for the built-in memory-only replay queue. Each queued frame
+   * counts its payload plus 1 KiB for the bookkeeping it keeps in memory, so
+   * the cap bounds the memory a backlog of small frames takes as well; the
+   * default holds about 127,000 one-row frames. Defaults to 128 MiB. A
+   * transaction-closing logical batch may temporarily exceed this target by up
+   * to one target-sized batch, because the server cannot ACK its deferred
+   * prefix before receiving that batch. A browser durable-ACK poll is
+   * admitted above it too, since only the durable progress it asks for can
+   * trim frames awaiting durability. This applies in browsers and
+   * non-persistent Node sessions; a Node store-and-forward journal is bounded
+   * by its own `maxBytes` instead.
    */
   memoryReplayMaxBytes?: number;
   /**
