@@ -2042,6 +2042,52 @@ describe("QWP ingress reconnect and replay", () => {
     }
   });
 
+  it("keeps the durable targets a poll's OK names before a newer poll supersedes it", async () => {
+    // The sibling of the test above: here the OK reaches the poll before the
+    // next keepalive tick discards it, so the poll already holds the targets
+    // and has to hand them to the frame its OK covered. Dropping them would let
+    // the next table-less OK carry the durable watermark past rows that are not
+    // durable.
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    try {
+      const connection = new FakeConnection("primary", {
+        qwpVersion: 1,
+        durableAckEnabled: true,
+      });
+      session = await QwpIngressSession.connect(async () => connection, {
+        durableAckKeepaliveMs: 100,
+      });
+      await session.publishFrame(Uint8Array.of(1));
+      await vi.advanceTimersByTimeAsync(0);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 0n, [["a", 1n]]));
+      await session.publishFrame(Uint8Array.of(2));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(connection.sent).toHaveLength(3);
+      // QuestDB folds frame 1's commit into the first poll's OK.
+      connection.receive(ingressResponse(QWP_STATUS.OK, 2n, [["b", 5n]]));
+      await vi.advanceTimersByTimeAsync(100);
+      // The second poll has replaced the first: frame 0, frame 1 and the
+      // second poll remain queued.
+      expect(connection.sent).toHaveLength(4);
+      expect(session.metrics.pendingReplayFrames).toBe(3);
+
+      connection.receive(ingressResponse(QWP_STATUS.OK, 3n));
+      connection.receive(durableResponse([["a", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.acknowledgedFrameSequence).toBe(0n);
+      expect(session.metrics.pendingReplayFrames).toBe(2);
+
+      connection.receive(durableResponse([["b", 5n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.acknowledgedFrameSequence).toBe(3n);
+      expect(session.metrics.pendingReplayFrames).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      await session?.close();
+    }
+  });
+
   it("admits a transaction commit when its deferred prefix fills memory replay", async () => {
     // QuestDB intentionally sends no ACK for the auto-flushed deferred frame.
     // With a strict per-append cap, the tiny group-closing frame then waited
