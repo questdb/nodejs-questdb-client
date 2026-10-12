@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 import {
   decodeQwpEgressMessage,
@@ -361,6 +365,280 @@ function deltaDictionaryFloodBatch(count: number): Uint8Array {
     payload.toUint8Array(),
     QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_ZSTD,
     1,
+  );
+}
+
+// RFC 8878 3.1.1.3.2.1.1: the extra bits each literals length code and match
+// length code reads. Each code's baseline is the previous code's plus the span
+// of the previous code's extra bits.
+const ZSTD_LITERALS_LENGTH_BITS: readonly number[] = [
+  ...new Array<number>(16).fill(0),
+  ...[1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+];
+const ZSTD_MATCH_LENGTH_BITS: readonly number[] = [
+  ...new Array<number>(32).fill(0),
+  ...[1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+];
+
+function zstdBaselines(bits: readonly number[], first: number): number[] {
+  let baseline = first;
+  return bits.map((count) => {
+    const current = baseline;
+    baseline += 1 << count;
+    return current;
+  });
+}
+
+/** One Zstd sequence: literals, then a match. */
+interface ZstdSequence {
+  readonly literals:
+    | { raw: number[] }
+    | { rle: [byte: number, length: number] };
+  /** 1-3 select a repeat offset; anything larger is the distance plus 3. */
+  readonly offsetValue: number;
+  readonly matchLength: number;
+}
+
+/**
+ * A Zstd frame whose sequences use every literals length code (0-35) and every
+ * match length code (0-52), each with alternating extra bits set, and whose
+ * first three copy from the initial repeat offsets 1, 4 and 8. Each sequence
+ * is a compressed block of its own with all three code tables in RLE mode, so
+ * its bit stream holds nothing but those extra bits. The content comes from
+ * executing the sequences here, independently of any decoder.
+ */
+function zstdLengthCodeSweep(): { frame: Uint8Array; content: Uint8Array } {
+  const literalsBaselines = zstdBaselines(ZSTD_LITERALS_LENGTH_BITS, 0);
+  const matchBaselines = zstdBaselines(ZSTD_MATCH_LENGTH_BITS, 3);
+  const extraBits = (count: number) => 0x5555 & ((1 << count) - 1);
+  const sequences: ZstdSequence[] = [
+    // Nine distinct literals each, so a copy from 1, 4 or 8 bytes back -- or
+    // from any other distance -- reads different bytes.
+    ...[0xa0, 0xb0, 0xc0].map(
+      (first, index): ZstdSequence => ({
+        literals: { raw: Array.from({ length: 9 }, (_, byte) => first + byte) },
+        offsetValue: index + 1,
+        matchLength: 3,
+      }),
+    ),
+    ...ZSTD_MATCH_LENGTH_BITS.map((matchBits, matchCode): ZstdSequence => {
+      const literalsCode = matchCode % ZSTD_LITERALS_LENGTH_BITS.length;
+      const literalsBits = ZSTD_LITERALS_LENGTH_BITS[literalsCode];
+      return {
+        literals: {
+          rle: [
+            matchCode + 1,
+            literalsBaselines[literalsCode] + extraBits(literalsBits),
+          ],
+        },
+        offsetValue: 4 + (matchCode % 30),
+        matchLength: matchBaselines[matchCode] + extraBits(matchBits),
+      };
+    }),
+  ];
+
+  const content: number[] = [];
+  const repeatOffsets = [1, 4, 8];
+  const blocks: number[] = [];
+  sequences.forEach(({ literals, offsetValue, matchLength }, index) => {
+    const literalBytes =
+      "raw" in literals
+        ? literals.raw
+        : new Array<number>(literals.rle[1]).fill(literals.rle[0]);
+    for (const byte of literalBytes) content.push(byte);
+    // After literals, offset values 1-3 take that repeat offset and move it to
+    // the front (RFC 8878 3.1.1.5). Every sequence here that uses one has
+    // literals; without them the values would mean something else.
+    const distance =
+      offsetValue > 3
+        ? offsetValue - 3
+        : repeatOffsets.splice(offsetValue - 1, 1)[0];
+    repeatOffsets.unshift(distance);
+    repeatOffsets.length = 3;
+    for (let byte = 0; byte < matchLength; byte++) {
+      content.push(content[content.length - distance]);
+    }
+
+    const literalsLength = literalBytes.length;
+    const literalsCode = literalsBaselines.findLastIndex(
+      (baseline) => baseline <= literalsLength,
+    );
+    const matchCode = matchBaselines.findLastIndex(
+      (baseline) => baseline <= matchLength,
+    );
+    const offsetCode = 31 - Math.clz32(offsetValue);
+    const block = [
+      // Literals section: Raw (0) or RLE (1), Size_Format 3 (a 20-bit size).
+      ("raw" in literals ? 0 : 1) | (3 << 2) | ((literalsLength & 0xf) << 4),
+      (literalsLength >>> 4) & 0xff,
+      literalsLength >>> 12,
+      ...("raw" in literals ? literals.raw : [literals.rle[0]]),
+      // Sequences section: one sequence, RLE mode for the literals length,
+      // offset and match length codes, then each one's only symbol.
+      1,
+      0b01010100,
+      literalsCode,
+      offsetCode,
+      matchCode,
+    ];
+    // Its bit stream is read backwards from the closing 1 bit: the offset's
+    // extra bits, the match length's, then the literals length's.
+    const bits: number[] = [];
+    const put = (value: number, count: number) => {
+      for (let bit = 0; bit < count; bit++) bits.push((value >>> bit) & 1);
+    };
+    put(
+      literalsLength - literalsBaselines[literalsCode],
+      ZSTD_LITERALS_LENGTH_BITS[literalsCode],
+    );
+    put(
+      matchLength - matchBaselines[matchCode],
+      ZSTD_MATCH_LENGTH_BITS[matchCode],
+    );
+    put(offsetValue - (1 << offsetCode), offsetCode);
+    bits.push(1);
+    for (let bit = 0; bit < bits.length; bit += 8) {
+      block.push(
+        bits
+          .slice(bit, bit + 8)
+          .reduce((byte, value, shift) => byte | (value << shift), 0),
+      );
+    }
+    // Block header: Last_Block, Block_Type 2 (compressed), Block_Size.
+    const header =
+      (index === sequences.length - 1 ? 1 : 0) | (2 << 1) | (block.length << 3);
+    blocks.push(header & 0xff, (header >>> 8) & 0xff, header >>> 16, ...block);
+  });
+
+  const size = content.length;
+  return {
+    frame: Uint8Array.from([
+      ...[0x28, 0xb5, 0x2f, 0xfd], // magic
+      0xa0, // single segment, 4-byte content size
+      ...[size & 0xff, (size >>> 8) & 0xff, (size >>> 16) & 0xff, size >>> 24],
+      ...blocks,
+    ]),
+    content: Uint8Array.from(content),
+  };
+}
+
+interface IntegerArray {
+  [index: number]: number;
+  readonly length: number;
+  readonly buffer: ArrayBufferLike;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+}
+
+interface IntegerArrayConstructor {
+  readonly BYTES_PER_ELEMENT: number;
+  new (length: number): IntegerArray;
+  new (
+    buffer: ArrayBufferLike,
+    byteOffset?: number,
+    length?: number,
+  ): IntegerArray;
+}
+
+/**
+ * Stands in for a multi-byte integer typed array, storing every element with
+ * its bytes reversed: the layout a host of the opposite byte order uses.
+ * Indexing reads and writes the same values as before, so only code that views
+ * the same memory at another width can tell -- the code that breaks on such a
+ * host.
+ */
+function withReversedBytes(Native: IntegerArrayConstructor) {
+  const width = Native.BYTES_PER_ELEMENT;
+  const scratch = new Native(1);
+  const scratchBytes = new Uint8Array(scratch.buffer);
+  const elementIndex = (key: string | symbol) =>
+    typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key) ? Number(key) : -1;
+  return function (
+    source: number | ArrayLike<number> | ArrayBufferLike,
+    byteOffset?: number,
+    length?: number,
+  ) {
+    const values =
+      typeof source === "object" && !(source instanceof ArrayBuffer)
+        ? (source as ArrayLike<number>)
+        : undefined;
+    const array =
+      typeof source === "number"
+        ? new Native(source)
+        : values
+          ? new Native(values.length)
+          : new Native(source as ArrayBufferLike, byteOffset, length);
+    const bytes = new Uint8Array(
+      array.buffer,
+      array.byteOffset,
+      array.byteLength,
+    );
+    const read = (index: number) => {
+      for (let byte = 0; byte < width; byte++) {
+        scratchBytes[byte] = bytes[(index + 1) * width - 1 - byte];
+      }
+      return scratch[0];
+    };
+    const write = (index: number, value: number) => {
+      scratch[0] = value;
+      for (let byte = 0; byte < width; byte++) {
+        bytes[(index + 1) * width - 1 - byte] = scratchBytes[byte];
+      }
+    };
+    if (values) {
+      for (let index = 0; index < values.length; index++) {
+        write(index, values[index]);
+      }
+    }
+    return new Proxy(array, {
+      get: (target, key) => {
+        const index = elementIndex(key);
+        if (index < 0) return Reflect.get(target, key);
+        return index < target.length ? read(index) : undefined;
+      },
+      set: (target, key, value: number) => {
+        const index = elementIndex(key);
+        if (index < 0) return Reflect.set(target, key, value);
+        if (index < target.length) write(index, value);
+        return true;
+      },
+    });
+  };
+}
+
+/**
+ * The installed fzstd, with patches/fzstd@0.1.1.patch applied: the copy both
+ * client packages inline through client-core.
+ */
+const FZSTD_PACKAGE = dirname(
+  dirname(
+    createRequire(
+      new URL("../../packages/client-core/package.json", import.meta.url),
+    ).resolve("fzstd"),
+  ),
+);
+
+/**
+ * Evaluates one of fzstd's builds with its multi-byte typed arrays in the
+ * byte order this host does not use.
+ */
+function fzstdWithReversedByteOrder(
+  build: string,
+): (frame: Uint8Array, output: Uint8Array) => Uint8Array {
+  const source = readFileSync(join(FZSTD_PACKAGE, build), "utf8")
+    // The ESM build's exports, as plain declarations.
+    .replace(/^export \{[^}]*\};$/m, "")
+    .replace(/^export /gm, "");
+  return runInNewContext(
+    `(function (exports) {\n${source}\nreturn decompress;\n})({})`,
+    {
+      ArrayBuffer,
+      Uint8Array,
+      Int16Array: withReversedBytes(Int16Array),
+      Uint16Array: withReversedBytes(Uint16Array),
+      Int32Array: withReversedBytes(Int32Array),
+      Uint32Array: withReversedBytes(Uint32Array),
+    },
   );
 }
 
@@ -1465,6 +1743,49 @@ describe("QWP result batch decoder", () => {
       /exceeds declared content size/i,
     );
   });
+});
+
+describe("Zstd decoding on hosts of either byte order", () => {
+  // fzstd laid out the extra-bit counts of its literals length and match
+  // length codes as bytes of an Int32Array, and seeded the repeat offsets
+  // 1, 4 and 8 as bytes read back through one, so all three took on the
+  // host's byte order. On a big-endian host such as s390x, frames that used
+  // them misdecoded: the declared-size check caught some, and the rest decoded
+  // to the wrong bytes without an error. patches/fzstd@0.1.1.patch spells the
+  // tables out as bytes and sets the offsets through the Int32Array instead.
+  // Running fzstd with its multi-byte typed arrays reversed is how the other
+  // byte order looks, from either kind of host. The sweep decodes to 380 KB,
+  // which toEqual would walk element by element, hence Buffer.compare.
+  const sweep = zstdLengthCodeSweep();
+
+  it("decodes every length code and initial repeat offset", () => {
+    // In this host's own byte order, through the production entry point: the
+    // reversed runs below compare against a frame known to decode correctly.
+    expect(
+      Buffer.compare(decompressQwpZstdFrame(sweep.frame), sweep.content),
+    ).toBe(0);
+  });
+
+  it.each(["esm/index.mjs", "lib/index.js"])(
+    "decodes identically in the opposite byte order (fzstd %s)",
+    (build) => {
+      const decompress = fzstdWithReversedByteOrder(build);
+      const output = new Uint8Array(sweep.content.length);
+      expect(
+        Buffer.compare(decompress(sweep.frame, output), sweep.content),
+      ).toBe(0);
+      // Frames from libzstd, which also use the Huffman and FSE tables that the
+      // sweep's RLE-only blocks leave out.
+      for (const frame of [
+        COMPRESSED_INT_RESULT_BODY,
+        COMPRESSED_LARGE_DELTA_RESULT_BODY,
+      ]) {
+        const expected = decompressQwpZstdFrame(frame);
+        const decoded = decompress(frame, new Uint8Array(expected.length));
+        expect(Buffer.compare(decoded, expected)).toBe(0);
+      }
+    },
+  );
 });
 
 describe("QwpEgressSession", () => {
