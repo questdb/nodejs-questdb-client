@@ -933,16 +933,6 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 }
 
-/**
- * Browser-safe QWP egress session.
- *
- * The server currently executes one query at a time per connection, so this
- * session deliberately rejects a query issued while another is still running.
- * A query whose caller has already been released -- abandoned, or past its
- * timeout -- may still be draining on the connection; a new query waits for
- * that rather than failing. A completed query's materialized batches may
- * still be consumed while the next query runs.
- */
 const QWP_EGRESS_SESSION_CONSTRUCTOR = Symbol("QWP egress session constructor");
 
 const QUERY_TIMED_OUT = Symbol("QWP query timed out");
@@ -985,6 +975,16 @@ interface QwpEgressReplayHooks {
   onConnectionRestored?: () => void;
 }
 
+/**
+ * Browser-safe QWP egress session.
+ *
+ * The server currently executes one query at a time per connection, so this
+ * session deliberately rejects a query issued while another is still running.
+ * A query whose caller has already been released -- abandoned, or past its
+ * timeout -- may still be draining on the connection; a new query waits for
+ * that rather than failing. A completed query's materialized batches may
+ * still be consumed while the next query runs.
+ */
 export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly decoder = new QwpResultBatchDecoder();
   private readonly receiveLoop: Promise<void>;
@@ -1425,6 +1425,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    * cancelled, but the outcome waits for the server's terminal response, up to
    * one grace period: a statement that completed has taken effect, and
    * reporting it as timed out would invite a retry that applies it twice.
+   *
+   * @internal The query's own timer calls it; applications cancel or abandon
+   * a query instead.
+   * @hidden
    */
   expire(requestId: bigint): void {
     const query = this.active;
@@ -1452,6 +1456,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    * An expired query has not ended within the grace period. Its caller is
    * released with the timeout, while the connection drains the query for up
    * to one more period before the session gives up on it.
+   *
+   * @internal The query's own timer calls it once the grace period ends.
+   * Called on a query that has not timed out, it would end that query with a
+   * timeout all the same.
+   * @hidden
    */
   expireGrace(requestId: bigint): void {
     const query = this.active;
