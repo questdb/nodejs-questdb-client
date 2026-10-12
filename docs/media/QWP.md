@@ -1175,11 +1175,13 @@ is rejected immediately with `QwpMemoryReplayFrameTooLargeError`, and a split lo
 batch that can never fit is rejected before its first frame with
 `QwpMemoryReplayBatchTooLargeError`. Set
 `memoryReplayMaxBytes` and `memoryReplayAppendDeadlineMs` on the ingress options to
-tune these bounds. The accounting includes a fixed per-frame allowance so many
-small frames cannot bypass the byte cap. A browser durable-ACK poll is admitted
-above the cap, because only the durable progress it asks for can trim frames that
-await durability; while frames still wait for the socket, as during an outage, no
-further poll is queued behind them.
+tune these bounds. Each frame counts its payload plus a fixed 1 KiB allowance for
+the bookkeeping a queued frame keeps in memory, so the cap bounds the memory a
+backlog of small frames takes as well: the default 128 MiB holds about 127,000
+one-row frames. A browser durable-ACK poll is admitted above the cap, because only
+the durable progress it asks for can trim frames that await durability; while
+frames still wait for the socket, as during an outage, no further poll is queued
+behind them.
 
 In-memory publication completes once the frame enters the bounded replay queue;
 a serialized background drainer transmits it and replays unacknowledged frames
