@@ -9233,6 +9233,57 @@ describe("QWP egress reconnect and replay", () => {
         vi.useRealTimers();
       }
     });
+
+    it("releases an iterator returning credit when the timeout expires during the outage", async () => {
+      // With flow control on, next() first returns the credit of the batch it
+      // consumed. Without a connection that CREDIT waits for the replacement,
+      // and next() used to wait with it: until the reconnect settled, up to
+      // failoverMaxDurationMs after completion had reported the timeout.
+      vi.useFakeTimers();
+      try {
+        const { session, primary, replacement, releaseReplacement, resets } =
+          await sessionWithHeldReplacement();
+        const query = await session.query("select * from x", {
+          timeoutMs: 25,
+          initialCredit: 1 << 20,
+        });
+        const completion = query.completion.catch((error: unknown) => error);
+        const iterator = query[Symbol.asyncIterator]();
+        primary.receive(emptyResultBatch(query.requestId));
+        await expect(iterator.next()).resolves.toMatchObject({ done: false });
+
+        primary.drop();
+        await vi.advanceTimersByTimeAsync(0);
+        let advanced: unknown = "pending";
+        void iterator.next().then(
+          (result) => (advanced = result),
+          (error: unknown) => (advanced = error),
+        );
+        await vi.advanceTimersByTimeAsync(25);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryTimeoutError",
+          requestId: query.requestId,
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Released with the timeout at the deadline, while the replacement
+        // connection is still being held back.
+        expect(advanced).toMatchObject({
+          name: "QwpEgressQueryTimeoutError",
+          requestId: query.requestId,
+        });
+
+        releaseReplacement();
+        const next = await session.query("select 2");
+        expect(resets).toEqual([]);
+        replacement.receive(resultEnd(next.requestId));
+        await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
 

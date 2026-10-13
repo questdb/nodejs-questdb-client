@@ -443,6 +443,8 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   // The deadline, then the grace period after it. One at a time.
   private timeoutTimer?: ReturnType<typeof setTimeout>;
   readonly completion: Promise<QwpQueryCompletion>;
+  /** Settles, without rejecting, once the query reaches its outcome. */
+  private readonly ended: Promise<void>;
 
   constructor(
     readonly requestId: bigint,
@@ -460,8 +462,12 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
       reject = rej;
     });
     // Consumers commonly use only `for await`; keep the parallel completion
-    // rejection from becoming an unhandled promise while preserving awaitability.
-    void this.completion.catch(() => undefined);
+    // rejection from becoming an unhandled promise while preserving
+    // awaitability. The same handlers settle `ended`.
+    this.ended = this.completion.then(
+      () => undefined,
+      () => undefined,
+    );
     this.resolveCompletion = resolve;
     this.rejectCompletion = reject;
     this.availableViewSlots = viewHandler
@@ -924,7 +930,15 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     this.deliveredCreditBytes = 0;
     if (!this.autoCredit || this.terminal || creditBytes === 0) return;
     try {
-      await this.control.grantCredit(this.requestId, creditBytes, false);
+      // Raced against the query's end. Without a connection the CREDIT waits
+      // for the replacement, and a query that ends meanwhile -- its timeout
+      // expired during the outage, say -- no longer needs it. Awaited alone,
+      // the grant kept this iterator waiting until the reconnect settled, up
+      // to failoverMaxDurationMs after completion had reported the outcome.
+      await Promise.race([
+        this.control.grantCredit(this.requestId, creditBytes, false),
+        this.ended,
+      ]);
     } catch (error) {
       // Transport failures fail the query through the session send tail. If a
       // terminal response won the race, no replenishment is needed anymore.
