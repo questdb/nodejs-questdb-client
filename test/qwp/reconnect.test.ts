@@ -1226,6 +1226,69 @@ describe("QWP connection events", () => {
     ]);
   });
 
+  it("reports a verdict that stops the sweep as that endpoint's failure alone", async () => {
+    // A verdict that tells the sweep not to try the next endpoint -- here the
+    // one a server echoing the browser credential earns -- leaves the other
+    // endpoints untried, so none of them is unreachable.
+    const verdict = (url?: string) =>
+      new QwpUpgradeError("echoed the credential", {
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+        retryable: false,
+        tryNextEndpoint: false,
+        url,
+      });
+    const reconnect = (events: QwpReconnectEvent[]) => ({
+      reconnectInitialBackoffMs: 0,
+      reconnectMaxBackoffMs: 0,
+      onEvent: (event: QwpReconnectEvent) => events.push(event),
+    });
+
+    const walked: QwpReconnectEvent[] = [];
+    const attempts: string[] = [];
+    const rejection = verdict();
+    await expect(
+      QwpIngressSession.connect(
+        createQwpFailoverConnectionFactory(
+          "primary",
+          ["secondary"],
+          async (endpoint) => {
+            attempts.push(String(endpoint));
+            throw rejection;
+          },
+        ),
+        { reconnect: reconnect(walked) },
+      ),
+    ).rejects.toBe(rejection);
+    expect(attempts).toEqual(["primary"]);
+    expect(summary(walked)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: "primary",
+      },
+    ]);
+    expect(walked[0].cause).toBe(rejection);
+
+    // A factory that does not walk endpoints reports the endpoint once, here.
+    const direct: QwpReconnectEvent[] = [];
+    const directRejection = verdict("ws://primary:9000/write/v4");
+    await expect(
+      QwpIngressSession.connect(
+        async () => {
+          throw directRejection;
+        },
+        { reconnect: reconnect(direct) },
+      ),
+    ).rejects.toBe(directRejection);
+    expect(summary(direct)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: "ws://primary:9000/write/v4",
+      },
+    ]);
+  });
+
   it("reports an endpoint that fails after opening without failing the sweep", async () => {
     // The success events wait until the unacknowledged frames are replayed, so
     // an endpoint that opens and then fails that replay has failed its
@@ -1391,6 +1454,44 @@ describe("QWP connection events", () => {
       },
     ]);
     await session.close();
+  });
+
+  it("reports an egress verdict that stops the sweep as that endpoint's failure alone", async () => {
+    const events: QwpReconnectEvent[] = [];
+    const attempts: string[] = [];
+    const rejection = new QwpUpgradeError("echoed the credential", {
+      kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+      retryable: false,
+      tryNextEndpoint: false,
+    });
+
+    await expect(
+      connectQwpEgressSession(
+        createQwpFailoverConnectionFactory(
+          "primary",
+          ["secondary"],
+          async (endpoint) => {
+            attempts.push(String(endpoint));
+            throw rejection;
+          },
+        ),
+        {
+          reconnect: {
+            failoverBackoffInitialMs: 0,
+            failoverBackoffMaxMs: 0,
+            onEvent: (event) => events.push(event),
+          },
+        },
+      ),
+    ).rejects.toBe(rejection);
+    expect(attempts).toEqual(["primary"]);
+    expect(summary(events)).toEqual([
+      {
+        kind: QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+        attempt: 1,
+        endpoint: "primary",
+      },
+    ]);
   });
 
   it("reports an egress authentication rejection as auth-failed alone", async () => {

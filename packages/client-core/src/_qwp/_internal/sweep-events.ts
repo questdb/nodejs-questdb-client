@@ -33,7 +33,10 @@ export interface SweepFailureReporter {
  * every endpoint, so neither event follows it. A server rejecting the
  * credentials is reported as `auth-failed`. A credential the client could not
  * produce -- a browser `auth` provider that threw or returned an invalid one --
- * is reported as `endpoint-attempt-failed` instead: no server refused it.
+ * is reported as `endpoint-attempt-failed` instead: no server refused it. Any
+ * other verdict that stops the sweep at the endpoint that returned it, such as
+ * a server echoing the browser credential, is that endpoint's failure alone:
+ * the endpoints after it were never tried, so none of them is unreachable.
  */
 export function createSweepFailureReporter(
   emit: (event: Omit<QwpReconnectEvent, "timestampMs">) => void,
@@ -42,12 +45,13 @@ export function createSweepFailureReporter(
   isClosing: () => boolean,
 ): SweepFailureReporter {
   let lastEndpoint: string | URL | undefined;
-  let credentialFailureReported = false;
+  // The failure that stopped the sweep, once reported for its endpoint.
+  let reportedStop: unknown;
   return {
     onEndpointFailure: (endpoint, error) => {
       lastEndpoint = endpoint;
       if (isClosing()) return;
-      if (isCredentialFailure(error)) credentialFailureReported = true;
+      if (stopsSweep(error)) reportedStop = error;
       emit({
         kind: endpointFailureKind(error),
         attempt,
@@ -72,10 +76,10 @@ export function createSweepFailureReporter(
         });
         return;
       }
-      if (isCredentialFailure(error)) {
+      if (stopsSweep(error)) {
         // A factory that walks endpoints has already reported it as it failed;
         // one that does not walk them reports nothing per endpoint.
-        if (!credentialFailureReported) {
+        if (reportedStop !== error) {
           emit({
             kind: endpointFailureKind(error),
             attempt,
@@ -95,6 +99,18 @@ export function createSweepFailureReporter(
       });
     },
   };
+}
+
+/**
+ * A failure that ends the sweep at the endpoint that returned it: a credential
+ * failure, which every endpoint would repeat, or an upgrade verdict that tells
+ * the sweep not to try the next endpoint.
+ */
+function stopsSweep(error: unknown): error is QwpUpgradeError {
+  return (
+    isCredentialFailure(error) ||
+    (error instanceof QwpUpgradeError && error.tryNextEndpoint === false)
+  );
 }
 
 /** A credential failure: the server refused it, or none could be produced. */

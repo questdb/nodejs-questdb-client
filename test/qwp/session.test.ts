@@ -3136,6 +3136,53 @@ describe("QWP browser credential authentication", () => {
     }
   });
 
+  it("reports a credential echo as its endpoint's failure, not an unreachable cluster", async () => {
+    // The echo ends the sweep at the endpoint that sent it, so the next
+    // endpoint is never tried and is not reported unreachable either.
+    for (const path of ["write/v4", "read/v1"]) {
+      const attempted: string[] = [];
+      const events: string[] = [];
+      const onEvent = (event: QwpReconnectEvent) =>
+        events.push(`${event.kind} ${new URL(String(event.endpoint)).host}`);
+      const options = {
+        url: `wss://node-a.example/${path}`,
+        failoverUrls: [`wss://node-b.example/${path}`],
+        auth: { type: "bearer", token: "echoed-secret" } as const,
+        webSocketFactory: (
+          url: string | URL,
+          protocols?: string | string[],
+        ): QwpWebSocketLike => {
+          attempted.push(new URL(url).hostname);
+          const socket = new FakeWebSocket();
+          socket.protocol = offeredProtocols(protocols).find((protocol) =>
+            protocol.startsWith(CREDENTIAL_PREFIX),
+          )!;
+          queueMicrotask(() => socket.open());
+          return asQwpSocket(socket);
+        },
+      };
+      const connecting =
+        path === "write/v4"
+          ? connectQwpBrowserIngress({
+              ...options,
+              reconnect: { reconnectMaxDurationMs: 1_000, onEvent },
+            })
+          : connectQwpBrowserEgress({ ...options, reconnect: { onEvent } });
+
+      await expect(connecting).rejects.toMatchObject({
+        name: "QwpUpgradeError",
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+      });
+      await vi.waitFor(() => expect(events).toHaveLength(1));
+      // Leaves a sweep-level event time to arrive, had one been raised.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(attempted).toEqual(["node-a.example"]);
+      expect(events).toEqual([
+        `${QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED} node-a.example`,
+      ]);
+    }
+  });
+
   it("ends an async sender on its own auth verdict after it has connected", async () => {
     // "async" retries every server rejection once connected, so a credential
     // can rotate on the server. These verdicts are the client's, and nothing
