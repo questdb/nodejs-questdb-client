@@ -2067,6 +2067,176 @@ describe("QWP ingress reconnect and replay", () => {
     }
   });
 
+  it("sends a durable-ACK poll ahead of a publication waiting for replay capacity", async () => {
+    // The three acknowledged frames await durable upload and fill the queue,
+    // so the fourth publication waits for room only durable progress can
+    // make. It holds the publication queue meanwhile, and QuestDB reports
+    // durable progress only in reply to inbound traffic: a poll published
+    // behind it reached the server only after the publication had waited out
+    // its append deadline and failed.
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    try {
+      const connection = new FakeConnection("primary", {
+        qwpVersion: 1,
+        durableAckEnabled: true,
+      });
+      const terminalErrors: Error[] = [];
+      session = await QwpIngressSession.connect(async () => connection, {
+        durableAckKeepaliveMs: 100,
+        memoryReplayMaxBytes: 3 * (1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES),
+        memoryReplayAppendDeadlineMs: 1_000,
+        onError: (event) => {
+          if (event.terminal) terminalErrors.push(event.error);
+        },
+      });
+      const poll = encodeQwpDurableAckPollFrame();
+      for (const value of [1, 2, 3]) {
+        await session.publishFrame(Uint8Array.of(value));
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 2n, [["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+
+      let published = false;
+      const fourth = session.publishFrame(Uint8Array.of(4)).then(() => {
+        published = true;
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      // The poll left at the first keepalive tick, outside the replay queue,
+      // which the waiting frame still finds full.
+      expect(connection.sent).toEqual([
+        Uint8Array.of(1),
+        Uint8Array.of(2),
+        Uint8Array.of(3),
+        poll,
+      ]);
+      expect(session.metrics.pendingReplayFrames).toBe(3);
+      expect(published).toBe(false);
+
+      // QuestDB answers the poll, and its durable progress makes the room.
+      connection.receive(ingressResponse(QWP_STATUS.OK, 3n));
+      connection.receive(durableResponse([["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      await fourth;
+      expect(session.acknowledgedFrameSequence).toBe(2n);
+      expect(connection.sent).toHaveLength(5);
+      expect(connection.sent[4]).toEqual(Uint8Array.of(4));
+
+      // The poll took a wire sequence but no frame sequence: the fourth frame
+      // is wire sequence 4 and frame sequence 3.
+      connection.receive(ingressResponse(QWP_STATUS.OK, 4n, [["events", 2n]]));
+      connection.receive(durableResponse([["events", 2n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.acknowledgedFrameSequence).toBe(3n);
+      expect(session.metrics.pendingReplayFrames).toBe(0);
+      expect(terminalErrors).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      await session?.close();
+    }
+  });
+
+  it("blames no frame when QuestDB rejects a poll sent ahead of the queue", async () => {
+    // One strike would end the session with these limits, so recycling the
+    // connection and replaying the frames shows the rejection earned none.
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    try {
+      const durable = { qwpVersion: 1, durableAckEnabled: true };
+      const first = new FakeConnection("primary", durable);
+      const second = new FakeConnection("primary", durable);
+      const connections = [first, second];
+      const terminalErrors: Error[] = [];
+      session = await QwpIngressSession.connect(
+        async () => connections.shift()!,
+        {
+          reconnect: {
+            reconnectInitialBackoffMs: 0,
+            reconnectMaxBackoffMs: 0,
+            maxFrameRejections: 1,
+            poisonMinEscalationWindowMs: 0,
+          },
+          durableAckKeepaliveMs: 100,
+          memoryReplayMaxBytes:
+            3 * (1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES),
+          memoryReplayAppendDeadlineMs: 1_000,
+          onError: (event) => {
+            if (event.terminal) terminalErrors.push(event.error);
+          },
+        },
+      );
+      const poll = encodeQwpDurableAckPollFrame();
+      for (const value of [1, 2, 3]) {
+        await session.publishFrame(Uint8Array.of(value));
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      first.receive(ingressResponse(QWP_STATUS.OK, 2n, [["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      const fourth = session.publishFrame(Uint8Array.of(4));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(first.sent.at(-1)).toEqual(poll);
+
+      first.receive(ingressResponse(QWP_STATUS.WRITE_ERROR, 3n));
+      await vi.advanceTimersByTimeAsync(0);
+      // The queued frames are replayed on the replacement; the poll is not.
+      expect(second.sent).toEqual([
+        Uint8Array.of(1),
+        Uint8Array.of(2),
+        Uint8Array.of(3),
+      ]);
+      second.receive(ingressResponse(QWP_STATUS.OK, 2n, [["events", 1n]]));
+      second.receive(durableResponse([["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(fourth).resolves.toBeUndefined();
+      expect(second.sent.at(-1)).toEqual(Uint8Array.of(4));
+      expect(terminalErrors).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      await session?.close();
+    }
+  });
+
+  it("ends the session when QuestDB refuses a poll sent ahead of the queue", async () => {
+    vi.useFakeTimers();
+    let session: QwpIngressSession | undefined;
+    try {
+      const connection = new FakeConnection("primary", {
+        qwpVersion: 1,
+        durableAckEnabled: true,
+      });
+      const terminalErrors: Error[] = [];
+      session = await QwpIngressSession.connect(async () => connection, {
+        durableAckKeepaliveMs: 100,
+        memoryReplayMaxBytes: 3 * (1 + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES),
+        memoryReplayAppendDeadlineMs: 1_000,
+        onError: (event) => {
+          if (event.terminal) terminalErrors.push(event.error);
+        },
+      });
+      for (const value of [1, 2, 3]) {
+        await session.publishFrame(Uint8Array.of(value));
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      connection.receive(ingressResponse(QWP_STATUS.OK, 2n, [["events", 1n]]));
+      await vi.advanceTimersByTimeAsync(0);
+      const fourth = session.publishFrame(Uint8Array.of(4));
+      void fourth.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(100);
+
+      connection.receive(ingressResponse(QWP_STATUS.PARSE_ERROR, 3n));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() => expect(terminalErrors).toHaveLength(1));
+      // The rejection names the poll, not the last frame published before it.
+      expect(terminalErrors[0]).toBeInstanceOf(QwpProtocolError);
+      expect(terminalErrors[0].message).toContain("durable-ACK poll");
+      await expect(fourth).rejects.toBeDefined();
+    } finally {
+      vi.useRealTimers();
+      await session?.close().catch(() => undefined);
+    }
+  });
+
   it("keeps one durable-ACK poll queued while a commit's durable upload stalls", async () => {
     // QuestDB acknowledges every poll, but no poll can be trimmed before the
     // commit ahead of it is durable, so each keepalive tick used to add a

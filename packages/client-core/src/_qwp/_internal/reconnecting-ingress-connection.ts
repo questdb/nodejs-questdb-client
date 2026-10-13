@@ -241,6 +241,14 @@ interface ReplayFrame extends Omit<QwpIngressReplayReference, "frameSequence"> {
    */
   discarded?: boolean;
   /**
+   * A poll sent straight to the socket, ahead of a publication waiting for
+   * replay-queue capacity; see sendDurableAckPoll(). It never entered the
+   * replay queue and has no frame sequence of its own: `frameSequence` is the
+   * last frame published before it, the frame its cumulative OK covers. It is
+   * always also `discarded`, which is how its OK is handled.
+   */
+  wireOnlyPoll?: boolean;
+  /**
    * The frame carries QWP_FLAG_DEFER_COMMIT, so QuestDB deliberately withholds
    * its cumulative ACK until the transaction commits. Read from the frame
    * header rather than passed in, so it survives a journal round-trip and is
@@ -334,6 +342,11 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     readonly maxBytes = DEFAULT_MEMORY_REPLAY_MAX_BYTES,
     private readonly appendDeadlineMs = DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS,
   ) {}
+
+  /** Whether an append, or a batch preflight, is waiting for capacity. */
+  get hasWaitingAppends(): boolean {
+    return this.capacityWaiters.size > 0;
+  }
 
   get metrics() {
     return {
@@ -1236,6 +1249,77 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   /**
+   * @internal Whether a publication is waiting for the in-memory replay queue
+   * to make room for it. It holds the publication queue meanwhile, so nothing
+   * published after it reaches the socket until it gets that room or its
+   * append deadline expires.
+   */
+  get publicationAwaitsCapacity(): boolean {
+    return (
+      this.store instanceof QwpMemoryReplayStore && this.store.hasWaitingAppends
+    );
+  }
+
+  /**
+   * @internal Sends a durable-ACK poll straight to the socket, ahead of a
+   * publication waiting for replay-queue capacity.
+   *
+   * When the queue is full of frames awaiting their durable upload, only
+   * durable progress can free the room that publication waits for, and
+   * QuestDB reports durable progress only in reply to inbound traffic. A poll
+   * published through the queue waited behind the publication, so it reached
+   * the server only after the publication had waited out its append deadline
+   * and failed, against a server that had durable progress to report.
+   *
+   * Like Node's WebSocket PING, this poll stays out of the replay queue. It
+   * takes no frame or client sequence -- the waiting publication has already
+   * claimed the next frame sequence -- and is not replayed after a reconnect;
+   * the next keepalive tick polls again. It does take a wire sequence, so the
+   * wire log records it, as a discarded poll whose OK covers the frames
+   * published before it.
+   */
+  async sendDurableAckPoll(payload: Uint8Array): Promise<void> {
+    let connection: QwpBinaryConnection;
+    try {
+      connection = await this.requireConnection();
+    } catch (error) {
+      // A closing connection has nothing left to poll for.
+      if (this.closing) return;
+      throw error;
+    }
+    // Re-checked after the wait: a reconnect can have replaced the connection,
+    // and frames still waiting for the drain reach the server first and draw
+    // the durable progress themselves.
+    if (
+      this.closing ||
+      this.connection !== connection ||
+      this.unsentFrames > 0
+    ) {
+      return;
+    }
+    const poll: ReplayFrame = {
+      frameSequence: this.publishedFrameSequence,
+      payloadLength: payload.byteLength,
+      ackDelivered: true,
+      transmitted: true,
+      deferCommit: false,
+      durableAckPoll: true,
+      discarded: true,
+      wireOnlyPoll: true,
+    };
+    this.wireFrames.push(poll);
+    try {
+      await this.sendPhysical(connection, payload, false);
+    } catch (error) {
+      try {
+        await this.requestReconnect(error, connection);
+      } catch (reconnectError) {
+        if (!this.closing) throw reconnectError;
+      }
+    }
+  }
+
+  /**
    * @internal Waits until every frame published to the in-memory replay queue
    * has been handed to the socket -- not for its ACK. A persistent journal
    * keeps unsent frames, so this resolves at once for one.
@@ -2098,9 +2182,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
 
     this.totalServerNacks++;
-    const pending = frame.dictionaryCatchup
-      ? this.pendingFsnRange()
-      : undefined;
+    // Neither a dictionary catch-up frame nor a poll sent ahead of the queue
+    // is a replay record, so neither is the frame to blame: the rejection
+    // concerns the frames still pending, and earns none of them a strike.
+    const controlFrame =
+      frame.dictionaryCatchup === true || frame.wireOnlyPoll === true;
+    const pending = controlFrame ? this.pendingFsnRange() : undefined;
     this.emitSenderError(
       createQwpSenderError(response, {
         messageSequence: response.sequence,
@@ -2111,7 +2198,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     if (isRetriableIngressStatus(response.status)) {
       const exempt =
-        frame.dictionaryCatchup ||
+        controlFrame ||
         response.status === QWP_STATUS.NOT_WRITABLE ||
         // A DICTIONARY_GAP is the server asking for symbol catch-up, not a
         // verdict on this frame. The catch-up it triggers has not been sent
@@ -2123,7 +2210,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (exempt) {
         this.resetPoisonEpisode();
         throw new RetriableIngressNackError(
-          frame.frameSequence,
+          frame.wireOnlyPoll ? -1n : frame.frameSequence,
           response.status,
           this.nextExemptRecycleDelay(),
           response.errorMessage,
@@ -2158,9 +2245,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       );
     }
 
-    if (frame.dictionaryCatchup) {
+    if (controlFrame) {
       const error = new QwpProtocolError(
-        `QuestDB rejected QWP symbol dictionary catch-up [status=0x${response.status.toString(16)}]${
+        `QuestDB rejected ${
+          frame.dictionaryCatchup
+            ? "QWP symbol dictionary catch-up"
+            : "a QWP durable-ACK poll"
+        } [status=0x${response.status.toString(16)}]${
           response.errorMessage ? `: ${response.errorMessage}` : ""
         }`,
       );
@@ -2341,6 +2432,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return this.wireFrames.find(
       (frame) =>
         !frame.dictionaryCatchup &&
+        !frame.wireOnlyPoll &&
         !frame.deferCommit &&
         frame.frameSequence > progress,
     );

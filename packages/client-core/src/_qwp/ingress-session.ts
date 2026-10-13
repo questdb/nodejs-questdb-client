@@ -1270,13 +1270,20 @@ export class QwpIngressSession {
    * every poll would wait, each one a replay-queue entry that the reconnect
    * then sends as a stale burst; the poll or frame already queued reaches the
    * server first anyway, and the next keepalive tick tries again.
+   *
+   * A publication waiting for replay-queue capacity holds the publication
+   * queue, and when the queue is full of frames awaiting their durable upload
+   * only the durable progress a poll asks for can make that room. Published
+   * behind it, the poll left only once the publication had waited out its
+   * append deadline and failed, so the connection sends it ahead instead.
    */
   private publishBrowserDurableAckPoll(): Promise<void> {
-    if (
-      this.connection instanceof QwpReconnectingIngressConnection &&
-      this.connection.hasUnsentFrames
-    ) {
-      return Promise.resolve();
+    const connection = this.connection;
+    if (connection instanceof QwpReconnectingIngressConnection) {
+      if (connection.hasUnsentFrames) return Promise.resolve();
+      if (connection.publicationAwaitsCapacity) {
+        return connection.sendDurableAckPoll(encodeQwpDurableAckPollFrame());
+      }
     }
     return this.publishFrame(encodeQwpDurableAckPollFrame());
   }
