@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 import {
   decodeQwpEgressMessage,
@@ -18,7 +22,6 @@ import {
   QWP_QUERY_FLAG_RESET_DICTIONARY,
   QWP_RESET_MASK_DICTIONARY,
   QWP_STATUS,
-  QwpBinaryConnection,
   QwpByteReader,
   QwpByteWriter,
   QwpColumnType,
@@ -36,6 +39,12 @@ import {
   readQwpVarint,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports these.
+import {
+  connectQwpEgressSession,
+  createQwpEgressSession,
+} from "../../packages/client-core/src/_qwp/egress-session";
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
 import { decompressQwpZstdFrame } from "../../packages/client-core/src/_qwp/_core/zstd";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 
@@ -189,6 +198,14 @@ function resultEnd(
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
   writeQwpVarint(payload, finalSequence);
   writeQwpVarint(payload, totalRows);
+  return encodeQwpFrame(payload.toUint8Array());
+}
+
+function execDone(requestId: bigint, rowsAffected = 1n): Uint8Array {
+  const payload = new QwpByteWriter();
+  payload.writeUint8(QWP_EGRESS_MESSAGE.EXEC_DONE).writeBigUint64(requestId);
+  payload.writeUint8(2); // operation type
+  writeQwpVarint(payload, rowsAffected);
   return encodeQwpFrame(payload.toUint8Array());
 }
 
@@ -349,6 +366,280 @@ function deltaDictionaryFloodBatch(count: number): Uint8Array {
     payload.toUint8Array(),
     QWP_FLAG_DELTA_SYMBOL_DICTIONARY | QWP_FLAG_ZSTD,
     1,
+  );
+}
+
+// RFC 8878 3.1.1.3.2.1.1: the extra bits each literals length code and match
+// length code reads. Each code's baseline is the previous code's plus the span
+// of the previous code's extra bits.
+const ZSTD_LITERALS_LENGTH_BITS: readonly number[] = [
+  ...new Array<number>(16).fill(0),
+  ...[1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+];
+const ZSTD_MATCH_LENGTH_BITS: readonly number[] = [
+  ...new Array<number>(32).fill(0),
+  ...[1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+];
+
+function zstdBaselines(bits: readonly number[], first: number): number[] {
+  let baseline = first;
+  return bits.map((count) => {
+    const current = baseline;
+    baseline += 1 << count;
+    return current;
+  });
+}
+
+/** One Zstd sequence: literals, then a match. */
+interface ZstdSequence {
+  readonly literals:
+    | { raw: number[] }
+    | { rle: [byte: number, length: number] };
+  /** 1-3 select a repeat offset; anything larger is the distance plus 3. */
+  readonly offsetValue: number;
+  readonly matchLength: number;
+}
+
+/**
+ * A Zstd frame whose sequences use every literals length code (0-35) and every
+ * match length code (0-52), each with alternating extra bits set, and whose
+ * first three copy from the initial repeat offsets 1, 4 and 8. Each sequence
+ * is a compressed block of its own with all three code tables in RLE mode, so
+ * its bit stream holds nothing but those extra bits. The content comes from
+ * executing the sequences here, independently of any decoder.
+ */
+function zstdLengthCodeSweep(): { frame: Uint8Array; content: Uint8Array } {
+  const literalsBaselines = zstdBaselines(ZSTD_LITERALS_LENGTH_BITS, 0);
+  const matchBaselines = zstdBaselines(ZSTD_MATCH_LENGTH_BITS, 3);
+  const extraBits = (count: number) => 0x5555 & ((1 << count) - 1);
+  const sequences: ZstdSequence[] = [
+    // Nine distinct literals each, so a copy from 1, 4 or 8 bytes back -- or
+    // from any other distance -- reads different bytes.
+    ...[0xa0, 0xb0, 0xc0].map(
+      (first, index): ZstdSequence => ({
+        literals: { raw: Array.from({ length: 9 }, (_, byte) => first + byte) },
+        offsetValue: index + 1,
+        matchLength: 3,
+      }),
+    ),
+    ...ZSTD_MATCH_LENGTH_BITS.map((matchBits, matchCode): ZstdSequence => {
+      const literalsCode = matchCode % ZSTD_LITERALS_LENGTH_BITS.length;
+      const literalsBits = ZSTD_LITERALS_LENGTH_BITS[literalsCode];
+      return {
+        literals: {
+          rle: [
+            matchCode + 1,
+            literalsBaselines[literalsCode] + extraBits(literalsBits),
+          ],
+        },
+        offsetValue: 4 + (matchCode % 30),
+        matchLength: matchBaselines[matchCode] + extraBits(matchBits),
+      };
+    }),
+  ];
+
+  const content: number[] = [];
+  const repeatOffsets = [1, 4, 8];
+  const blocks: number[] = [];
+  sequences.forEach(({ literals, offsetValue, matchLength }, index) => {
+    const literalBytes =
+      "raw" in literals
+        ? literals.raw
+        : new Array<number>(literals.rle[1]).fill(literals.rle[0]);
+    for (const byte of literalBytes) content.push(byte);
+    // After literals, offset values 1-3 take that repeat offset and move it to
+    // the front (RFC 8878 3.1.1.5). Every sequence here that uses one has
+    // literals; without them the values would mean something else.
+    const distance =
+      offsetValue > 3
+        ? offsetValue - 3
+        : repeatOffsets.splice(offsetValue - 1, 1)[0];
+    repeatOffsets.unshift(distance);
+    repeatOffsets.length = 3;
+    for (let byte = 0; byte < matchLength; byte++) {
+      content.push(content[content.length - distance]);
+    }
+
+    const literalsLength = literalBytes.length;
+    const literalsCode = literalsBaselines.findLastIndex(
+      (baseline) => baseline <= literalsLength,
+    );
+    const matchCode = matchBaselines.findLastIndex(
+      (baseline) => baseline <= matchLength,
+    );
+    const offsetCode = 31 - Math.clz32(offsetValue);
+    const block = [
+      // Literals section: Raw (0) or RLE (1), Size_Format 3 (a 20-bit size).
+      ("raw" in literals ? 0 : 1) | (3 << 2) | ((literalsLength & 0xf) << 4),
+      (literalsLength >>> 4) & 0xff,
+      literalsLength >>> 12,
+      ...("raw" in literals ? literals.raw : [literals.rle[0]]),
+      // Sequences section: one sequence, RLE mode for the literals length,
+      // offset and match length codes, then each one's only symbol.
+      1,
+      0b01010100,
+      literalsCode,
+      offsetCode,
+      matchCode,
+    ];
+    // Its bit stream is read backwards from the closing 1 bit: the offset's
+    // extra bits, the match length's, then the literals length's.
+    const bits: number[] = [];
+    const put = (value: number, count: number) => {
+      for (let bit = 0; bit < count; bit++) bits.push((value >>> bit) & 1);
+    };
+    put(
+      literalsLength - literalsBaselines[literalsCode],
+      ZSTD_LITERALS_LENGTH_BITS[literalsCode],
+    );
+    put(
+      matchLength - matchBaselines[matchCode],
+      ZSTD_MATCH_LENGTH_BITS[matchCode],
+    );
+    put(offsetValue - (1 << offsetCode), offsetCode);
+    bits.push(1);
+    for (let bit = 0; bit < bits.length; bit += 8) {
+      block.push(
+        bits
+          .slice(bit, bit + 8)
+          .reduce((byte, value, shift) => byte | (value << shift), 0),
+      );
+    }
+    // Block header: Last_Block, Block_Type 2 (compressed), Block_Size.
+    const header =
+      (index === sequences.length - 1 ? 1 : 0) | (2 << 1) | (block.length << 3);
+    blocks.push(header & 0xff, (header >>> 8) & 0xff, header >>> 16, ...block);
+  });
+
+  const size = content.length;
+  return {
+    frame: Uint8Array.from([
+      ...[0x28, 0xb5, 0x2f, 0xfd], // magic
+      0xa0, // single segment, 4-byte content size
+      ...[size & 0xff, (size >>> 8) & 0xff, (size >>> 16) & 0xff, size >>> 24],
+      ...blocks,
+    ]),
+    content: Uint8Array.from(content),
+  };
+}
+
+interface IntegerArray {
+  [index: number]: number;
+  readonly length: number;
+  readonly buffer: ArrayBufferLike;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+}
+
+interface IntegerArrayConstructor {
+  readonly BYTES_PER_ELEMENT: number;
+  new (length: number): IntegerArray;
+  new (
+    buffer: ArrayBufferLike,
+    byteOffset?: number,
+    length?: number,
+  ): IntegerArray;
+}
+
+/**
+ * Stands in for a multi-byte integer typed array, storing every element with
+ * its bytes reversed: the layout a host of the opposite byte order uses.
+ * Indexing reads and writes the same values as before, so only code that views
+ * the same memory at another width can tell -- the code that breaks on such a
+ * host.
+ */
+function withReversedBytes(Native: IntegerArrayConstructor) {
+  const width = Native.BYTES_PER_ELEMENT;
+  const scratch = new Native(1);
+  const scratchBytes = new Uint8Array(scratch.buffer);
+  const elementIndex = (key: string | symbol) =>
+    typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key) ? Number(key) : -1;
+  return function (
+    source: number | ArrayLike<number> | ArrayBufferLike,
+    byteOffset?: number,
+    length?: number,
+  ) {
+    const values =
+      typeof source === "object" && !(source instanceof ArrayBuffer)
+        ? (source as ArrayLike<number>)
+        : undefined;
+    const array =
+      typeof source === "number"
+        ? new Native(source)
+        : values
+          ? new Native(values.length)
+          : new Native(source as ArrayBufferLike, byteOffset, length);
+    const bytes = new Uint8Array(
+      array.buffer,
+      array.byteOffset,
+      array.byteLength,
+    );
+    const read = (index: number) => {
+      for (let byte = 0; byte < width; byte++) {
+        scratchBytes[byte] = bytes[(index + 1) * width - 1 - byte];
+      }
+      return scratch[0];
+    };
+    const write = (index: number, value: number) => {
+      scratch[0] = value;
+      for (let byte = 0; byte < width; byte++) {
+        bytes[(index + 1) * width - 1 - byte] = scratchBytes[byte];
+      }
+    };
+    if (values) {
+      for (let index = 0; index < values.length; index++) {
+        write(index, values[index]);
+      }
+    }
+    return new Proxy(array, {
+      get: (target, key) => {
+        const index = elementIndex(key);
+        if (index < 0) return Reflect.get(target, key);
+        return index < target.length ? read(index) : undefined;
+      },
+      set: (target, key, value: number) => {
+        const index = elementIndex(key);
+        if (index < 0) return Reflect.set(target, key, value);
+        if (index < target.length) write(index, value);
+        return true;
+      },
+    });
+  };
+}
+
+/**
+ * The installed fzstd, with patches/fzstd@0.1.1.patch applied: the copy both
+ * client packages inline through client-core.
+ */
+const FZSTD_PACKAGE = dirname(
+  dirname(
+    createRequire(
+      new URL("../../packages/client-core/package.json", import.meta.url),
+    ).resolve("fzstd"),
+  ),
+);
+
+/**
+ * Evaluates one of fzstd's builds with its multi-byte typed arrays in the
+ * byte order this host does not use.
+ */
+function fzstdWithReversedByteOrder(
+  build: string,
+): (frame: Uint8Array, output: Uint8Array) => Uint8Array {
+  const source = readFileSync(join(FZSTD_PACKAGE, build), "utf8")
+    // The ESM build's exports, as plain declarations.
+    .replace(/^export \{[^}]*\};$/m, "")
+    .replace(/^export /gm, "");
+  return runInNewContext(
+    `(function (exports) {\n${source}\nreturn decompress;\n})({})`,
+    {
+      ArrayBuffer,
+      Uint8Array,
+      Int16Array: withReversedBytes(Int16Array),
+      Uint16Array: withReversedBytes(Uint16Array),
+      Int32Array: withReversedBytes(Int32Array),
+      Uint32Array: withReversedBytes(Uint32Array),
+    },
   );
 }
 
@@ -1416,6 +1707,27 @@ describe("QWP result batch decoder", () => {
     expect(second.row(0).getBoolean(0)).toBe(true);
   });
 
+  it("resets query state when the only decoded view occupies slot 1", () => {
+    const decoder = new QwpResultBatchDecoder();
+    const message = decodeQwpEgressMessage(scalarResultBatch());
+    if (message.kind !== "result-batch") throw new Error("unexpected message");
+
+    const batch = decoder.decodeView(message, 1);
+    expect(batch.valid).toBe(true);
+    expect(batch.columnCount).toBeGreaterThan(0);
+    decoder.resetQuerySchema();
+    expect(batch.valid).toBe(false);
+
+    const nextMessage = decodeQwpEgressMessage(emptyResultBatch(1n, 0));
+    if (nextMessage.kind !== "result-batch") {
+      throw new Error("unexpected message");
+    }
+    const next = decoder.decodeView(nextMessage, 1);
+    expect(next).toBe(batch);
+    expect(next.batchSequence).toBe(0n);
+    expect(next.columnCount).toBe(0);
+  });
+
   it("rejects a continuation batch before a schema-bearing batch", () => {
     const bytes = firstResultBatch();
     // RESULT_BATCH sequence is the byte immediately after kind + request ID.
@@ -1872,11 +2184,54 @@ describe("QWP result batch decoder", () => {
   });
 });
 
+describe("Zstd decoding on hosts of either byte order", () => {
+  // fzstd laid out the extra-bit counts of its literals length and match
+  // length codes as bytes of an Int32Array, and seeded the repeat offsets
+  // 1, 4 and 8 as bytes read back through one, so all three took on the
+  // host's byte order. On a big-endian host such as s390x, frames that used
+  // them misdecoded: the declared-size check caught some, and the rest decoded
+  // to the wrong bytes without an error. patches/fzstd@0.1.1.patch spells the
+  // tables out as bytes and sets the offsets through the Int32Array instead.
+  // Running fzstd with its multi-byte typed arrays reversed is how the other
+  // byte order looks, from either kind of host. The sweep decodes to 380 KB,
+  // which toEqual would walk element by element, hence Buffer.compare.
+  const sweep = zstdLengthCodeSweep();
+
+  it("decodes every length code and initial repeat offset", () => {
+    // In this host's own byte order, through the production entry point: the
+    // reversed runs below compare against a frame known to decode correctly.
+    expect(
+      Buffer.compare(decompressQwpZstdFrame(sweep.frame), sweep.content),
+    ).toBe(0);
+  });
+
+  it.each(["esm/index.mjs", "lib/index.js"])(
+    "decodes identically in the opposite byte order (fzstd %s)",
+    (build) => {
+      const decompress = fzstdWithReversedByteOrder(build);
+      const output = new Uint8Array(sweep.content.length);
+      expect(
+        Buffer.compare(decompress(sweep.frame, output), sweep.content),
+      ).toBe(0);
+      // Frames from libzstd, which also use the Huffman and FSE tables that the
+      // sweep's RLE-only blocks leave out.
+      for (const frame of [
+        COMPRESSED_INT_RESULT_BODY,
+        COMPRESSED_LARGE_DELTA_RESULT_BODY,
+      ]) {
+        const expected = decompressQwpZstdFrame(frame);
+        const decoded = decompress(frame, new Uint8Array(expected.length));
+        expect(Buffer.compare(decoded, expected)).toBe(0);
+      }
+    },
+  );
+});
+
 describe("QwpEgressSession", () => {
   it("validates SERVER_INFO timeouts before invoking its factory", async () => {
     let factoryCalls = 0;
     await expect(
-      QwpEgressSession.connect(
+      connectQwpEgressSession(
         async () => {
           factoryCalls++;
           return new FakeConnection();
@@ -1887,7 +2242,7 @@ describe("QwpEgressSession", () => {
     expect(factoryCalls).toBe(0);
 
     await expect(
-      QwpEgressSession.connect(
+      connectQwpEgressSession(
         async () => {
           factoryCalls++;
           return new FakeConnection();
@@ -1898,7 +2253,7 @@ describe("QwpEgressSession", () => {
     expect(factoryCalls).toBe(0);
 
     await expect(
-      QwpEgressSession.connect(
+      connectQwpEgressSession(
         async () => {
           factoryCalls++;
           return new FakeConnection();
@@ -1909,7 +2264,7 @@ describe("QwpEgressSession", () => {
     expect(factoryCalls).toBe(0);
 
     await expect(
-      QwpEgressSession.connect(
+      connectQwpEgressSession(
         async () => {
           factoryCalls++;
           return new FakeConnection();
@@ -1920,7 +2275,7 @@ describe("QwpEgressSession", () => {
     expect(factoryCalls).toBe(0);
 
     await expect(
-      QwpEgressSession.connect(
+      connectQwpEgressSession(
         async () => {
           factoryCalls++;
           return new FakeConnection();
@@ -1931,7 +2286,7 @@ describe("QwpEgressSession", () => {
     expect(factoryCalls).toBe(0);
 
     await expect(
-      QwpEgressSession.connect(
+      connectQwpEgressSession(
         async () => {
           factoryCalls++;
           return new FakeConnection();
@@ -1948,7 +2303,7 @@ describe("QwpEgressSession", () => {
     const timerCeiling = 0x7fffffff;
     const overTimerCeiling = timerCeiling + 1;
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection, {});
+    const session = createQwpEgressSession(connection, {});
     connection.receive(serverInfo());
     await session.ready;
 
@@ -1974,7 +2329,7 @@ describe("QwpEgressSession", () => {
     // The session has to hand its own request down to the decoder; otherwise
     // the bound exists only as a header on the wire.
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection, { maxBatchRows: 1024 });
+    const session = createQwpEgressSession(connection, { maxBatchRows: 1024 });
     connection.receive(serverInfo());
     await session.ready;
 
@@ -1994,7 +2349,7 @@ describe("QwpEgressSession", () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection, {
+      const session = createQwpEgressSession(connection, {
         serverInfoTimeoutMs: 25,
       });
       const ready = session.ready.catch((error: unknown) => error);
@@ -2019,7 +2374,7 @@ describe("QwpEgressSession", () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection);
+      const session = createQwpEgressSession(connection);
       const ready = session.ready.catch((error: unknown) => error);
 
       expect(QWP_DEFAULT_EGRESS_SERVER_INFO_TIMEOUT_MS).toBe(5_000);
@@ -2039,7 +2394,7 @@ describe("QwpEgressSession", () => {
 
   it("close interrupts an egress request whose send has not settled", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     await session.ready;
     let rejectSend!: (error: Error) => void;
@@ -2059,7 +2414,7 @@ describe("QwpEgressSession", () => {
 
   it("waits for SERVER_INFO and streams a typed query result", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     await expect(session.ready).resolves.toMatchObject({
       kind: "server-info",
@@ -2091,7 +2446,7 @@ describe("QwpEgressSession", () => {
       resetDictionary: boolean,
     ): Promise<Uint8Array> => {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection);
+      const session = createQwpEgressSession(connection);
       connection.receive(serverInfo(capabilities));
       const query = await session.query("select 1", { resetDictionary });
       connection.receive(resultEnd(query.requestId, 0n, 0n));
@@ -2121,7 +2476,7 @@ describe("QwpEgressSession", () => {
 
   it("automatically replenishes credit after the consumer advances", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select * from x", {
       initialCredit: 64,
@@ -2151,7 +2506,7 @@ describe("QwpEgressSession", () => {
 
   it("serializes concurrent iterator advances before replenishing credit", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select * from x", {
       initialCredit: 64,
@@ -2195,7 +2550,7 @@ describe("QwpEgressSession", () => {
 
   it("bounds reusable views to an awaited callback and then replenishes credit", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
 
     let enterHandler!: () => void;
@@ -2246,7 +2601,7 @@ describe("QwpEgressSession", () => {
   it("decodes reusable views ahead through a bounded slot pool", async () => {
     const decodeView = vi.spyOn(QwpResultBatchDecoder.prototype, "decodeView");
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection, {
+    const session = createQwpEgressSession(connection, {
       initialCredit: 0,
       bufferPoolSize: 2,
     });
@@ -2298,7 +2653,7 @@ describe("QwpEgressSession", () => {
 
   it("cancels and drains when a result-view callback fails", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const handlerError = new Error("consumer failed");
     let delivered: QwpResultBatchView | undefined;
@@ -2328,7 +2683,7 @@ describe("QwpEgressSession", () => {
 
   it("keeps a query error ordered after an active result-view callback", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
 
     let releaseHandler!: () => void;
@@ -2378,7 +2733,7 @@ describe("QwpEgressSession", () => {
     // the documented ceiling on draining a closing query session, so it bounds
     // these too; the handler is abandoned rather than awaited.
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection, {
+    const session = createQwpEgressSession(connection, {
       cancelDrainTimeoutMs: 100,
     });
     connection.receive(serverInfo());
@@ -2415,7 +2770,7 @@ describe("QwpEgressSession", () => {
     // undefined. The reset must drain in-flight views first, as its
     // client-initiated sibling does.
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
 
     let enterHandler!: () => void;
@@ -2456,7 +2811,7 @@ describe("QwpEgressSession", () => {
 
   it("defaults to Java-compatible unbounded credit and allows a bounded override", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select * from x");
     const request = new QwpByteReader(connection.sent[0]);
@@ -2482,7 +2837,7 @@ describe("QwpEgressSession", () => {
     await session.close();
 
     const boundedConnection = new FakeConnection();
-    const bounded = new QwpEgressSession(boundedConnection, {
+    const bounded = createQwpEgressSession(boundedConnection, {
       initialCredit: 64,
     });
     boundedConnection.receive(serverInfo());
@@ -2500,7 +2855,7 @@ describe("QwpEgressSession", () => {
 
   it("bounds decoded materialized batches when wire credit is unbounded", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection, {
+    const session = createQwpEgressSession(connection, {
       initialCredit: 0,
       bufferPoolSize: 2,
     });
@@ -2534,7 +2889,7 @@ describe("QwpEgressSession", () => {
 
   it("interrupts a materialized-buffer wait during close", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection, {
+    const session = createQwpEgressSession(connection, {
       initialCredit: 0,
       bufferPoolSize: 1,
     });
@@ -2551,7 +2906,7 @@ describe("QwpEgressSession", () => {
 
   it("uses compressed RESULT_BATCH wire bytes for automatic credit", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select 42", { initialCredit: 1 });
     const resultFrame = compressedIntResultBatch(query.requestId);
@@ -2574,7 +2929,7 @@ describe("QwpEgressSession", () => {
 
   it("allows automatic credit replenishment to be disabled", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select * from x", {
       initialCredit: 64,
@@ -2598,7 +2953,7 @@ describe("QwpEgressSession", () => {
 
   it("cancels and retires a query when result iteration is abandoned", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select * from x", {
       initialCredit: 64,
@@ -2626,15 +2981,17 @@ describe("QwpEgressSession", () => {
     expect(credit.readBigUint64()).toBe(query.requestId);
     expect(readQwpVarint(credit)).toBe(BigInt(resultFrame.byteLength));
 
-    await expect(session.query("select 2")).rejects.toThrow(
-      "a QWP query is already active",
-    );
+    // The abandoned query still drains on the connection. The next query waits
+    // for that instead of failing, as the loop above has already returned.
+    const querying = session.query("select 2");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(connection.sent).toHaveLength(3);
     connection.receive(
       queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
     );
-    await Promise.resolve();
-    await Promise.resolve();
-    const nextQuery = await session.query("select 2");
+    const nextQuery = await querying;
+    expect(connection.sent).toHaveLength(4);
     connection.receive(resultEnd(nextQuery.requestId, 0n, 0n));
     await nextQuery.completion;
     await session.close();
@@ -2651,7 +3008,7 @@ describe("QwpEgressSession", () => {
     // asked for. Breaking out of the documented `for await` loop is enough to
     // reach it.
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
 
     const query = await session.query("select * from x", {
@@ -2692,7 +3049,7 @@ describe("QwpEgressSession", () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection);
+      const session = createQwpEgressSession(connection);
       connection.receive(serverInfo());
       const query = await session.query("select * from slow_table");
 
@@ -2730,11 +3087,11 @@ describe("QwpEgressSession", () => {
     }
   });
 
-  it("times out a query, sends CANCEL, and drains the terminal response", async () => {
+  it("cancels a query at its timeout and reports it once the server ends it", async () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection, {
+      const session = createQwpEgressSession(connection, {
         queryTimeoutMs: 25,
       });
       connection.receive(serverInfo());
@@ -2744,12 +3101,47 @@ describe("QwpEgressSession", () => {
           initialCredit: 64,
         },
       );
+      let settled = false;
       const next = query[Symbol.asyncIterator]()
         .next()
-        .catch((error: unknown) => error);
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
 
       await vi.advanceTimersByTimeAsync(25);
 
+      // CANCEL goes out at the deadline, but the outcome waits for the server.
+      expect(connection.sent).toHaveLength(2);
+      const cancel = new QwpByteReader(connection.sent[1]);
+      expect(cancel.readUint8()).toBe(QWP_EGRESS_MESSAGE.CANCEL);
+      expect(cancel.readBigUint64()).toBe(query.requestId);
+      expect(cancel.remaining).toBe(0);
+      expect(settled).toBe(false);
+      expect(query.isDone()).toBe(false);
+      // Still running on the connection, so another query is refused.
+      await expect(session.query("select 2")).rejects.toThrow(
+        "a QWP query is already active",
+      );
+
+      // A batch past the deadline is withheld, and its credit goes back.
+      const lateBatch = firstResultBatch(query.requestId);
+      connection.receive(lateBatch);
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(3));
+      const drainCredit = new QwpByteReader(connection.sent[2]);
+      expect(drainCredit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+      expect(drainCredit.readBigUint64()).toBe(query.requestId);
+      expect(readQwpVarint(drainCredit)).toBe(BigInt(lateBatch.byteLength));
+      expect(settled).toBe(false);
+
+      // The server honours the CANCEL, which the caller sees as the timeout.
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
       await expect(next).resolves.toMatchObject({
         name: "QwpEgressQueryTimeoutError",
         requestId: query.requestId,
@@ -2758,31 +3150,6 @@ describe("QwpEgressSession", () => {
       await expect(query.completion).rejects.toBeInstanceOf(
         QwpEgressQueryTimeoutError,
       );
-      expect(connection.sent).toHaveLength(2);
-      const cancel = new QwpByteReader(connection.sent[1]);
-      expect(cancel.readUint8()).toBe(QWP_EGRESS_MESSAGE.CANCEL);
-      expect(cancel.readBigUint64()).toBe(query.requestId);
-      expect(cancel.remaining).toBe(0);
-
-      await expect(session.query("select 2")).rejects.toThrow(
-        "a QWP query is already active",
-      );
-      const lateBatch = firstResultBatch(query.requestId);
-      connection.receive(lateBatch);
-      await vi.waitFor(() => expect(connection.sent).toHaveLength(3));
-      const drainCredit = new QwpByteReader(connection.sent[2]);
-      expect(drainCredit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
-      expect(drainCredit.readBigUint64()).toBe(query.requestId);
-      expect(readQwpVarint(drainCredit)).toBe(BigInt(lateBatch.byteLength));
-      connection.receive(
-        queryError(
-          query.requestId,
-          "cancelled by client",
-          QWP_STATUS.CANCELLED,
-        ),
-      );
-      await Promise.resolve();
-      await Promise.resolve();
 
       const nextQuery = await session.query("select 2", { timeoutMs: 0 });
       connection.receive(resultEnd(nextQuery.requestId, 0n, 0n));
@@ -2794,31 +3161,53 @@ describe("QwpEgressSession", () => {
     }
   });
 
-  it("fails and closes a session when cancellation never terminates", async () => {
+  it("releases a timed-out caller after the grace period and gives up after another", async () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection, {
+      const session = createQwpEgressSession(connection, {
         queryTimeoutMs: 25,
         cancelDrainTimeoutMs: 50,
       });
       connection.receive(serverInfo());
       const query = await session.query("select * from long_sequence(1000000)");
+      const completion = query.completion.catch((error: unknown) => error);
 
       await vi.advanceTimersByTimeAsync(25);
-      await expect(query.completion).rejects.toBeInstanceOf(
-        QwpEgressQueryTimeoutError,
-      );
-      await vi.advanceTimersByTimeAsync(50);
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      await vi.advanceTimersByTimeAsync(49);
+      expect(query.isDone()).toBe(false);
 
+      // No answer within the grace period: the caller gets the timeout.
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(completion).resolves.toMatchObject({
+        name: "QwpEgressQueryTimeoutError",
+        requestId: query.requestId,
+        timeoutMs: 25,
+      } satisfies Partial<QwpEgressQueryTimeoutError>);
+
+      // The connection drains for one more period, and a new query waits for
+      // it rather than failing.
+      const next = session
+        .query("select 2", { timeoutMs: 0 })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(49);
+      expect(connection.closeCalls).toEqual([]);
+      expect(connection.sent).toHaveLength(2);
+
+      await vi.advanceTimersByTimeAsync(1);
       expect(connection.closeCalls).toEqual([
         { code: 1011, reason: "QWP cancellation drain timed out" },
       ]);
-      await expect(session.query("select 2")).rejects.toMatchObject({
+      await expect(next).resolves.toMatchObject({
         name: "QwpEgressQueryCancelTimeoutError",
         requestId: query.requestId,
         timeoutMs: 50,
       } satisfies Partial<QwpEgressQueryCancelTimeoutError>);
+      expect(connection.sent).toHaveLength(2);
       expect(vi.getTimerCount()).toBe(0);
       await session.close();
     } finally {
@@ -2830,7 +3219,7 @@ describe("QwpEgressSession", () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection);
+      const session = createQwpEgressSession(connection);
       connection.receive(serverInfo());
       const query = await session.query("select 1", { timeoutMs: 25 });
       connection.receive(resultEnd(query.requestId, 0n, 0n));
@@ -2845,9 +3234,346 @@ describe("QwpEgressSession", () => {
     }
   });
 
+  it("reports a statement that completes past its timeout as done", async () => {
+    // EXEC_DONE means the statement has taken effect. Reporting it as timed
+    // out would invite a retry that applies it twice.
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("insert into t select * from src", {
+        timeoutMs: 25,
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(connection.sent[1][0]).toBe(QWP_EGRESS_MESSAGE.CANCEL);
+      connection.receive(execDone(query.requestId, 42n));
+
+      await expect(query.completion).resolves.toMatchObject({
+        kind: "exec-done",
+        rowsAffected: 42n,
+      });
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("completes a result that ends past its timeout with nothing withheld", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      const iterator = query[Symbol.asyncIterator]();
+      connection.receive(firstResultBatch(query.requestId));
+      await expect(iterator.next()).resolves.toMatchObject({ done: false });
+
+      await vi.advanceTimersByTimeAsync(25);
+      // Every batch reached the consumer before the deadline, so the end of
+      // the stream completes the result.
+      connection.receive(resultEnd(query.requestId));
+      await expect(iterator.next()).resolves.toEqual({
+        value: undefined,
+        done: true,
+      });
+      await expect(query.completion).resolves.toMatchObject({
+        kind: "result-end",
+        totalRows: 3n,
+      });
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports the timeout for a result that lost a batch to it", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", {
+        timeoutMs: 25,
+        initialCredit: 4096,
+      });
+      // Decoded and queued, but not consumed before the deadline.
+      const queued = firstResultBatch(query.requestId);
+      connection.receive(queued);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(connection.sent).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(15);
+      // The deadline drops the queued batch and returns its credit.
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+        QWP_EGRESS_MESSAGE.CREDIT,
+      ]);
+      const credit = new QwpByteReader(connection.sent[2]);
+      credit.readUint8();
+      expect(credit.readBigUint64()).toBe(query.requestId);
+      expect(readQwpVarint(credit)).toBe(BigInt(queued.byteLength));
+
+      // The server finished just past the deadline, but the consumer is
+      // missing rows, so the outcome is the timeout.
+      connection.receive(resultEnd(query.requestId));
+      const consumed: unknown[] = [];
+      await expect(
+        (async () => {
+          for await (const batch of query) consumed.push(batch);
+        })(),
+      ).rejects.toBeInstanceOf(QwpEgressQueryTimeoutError);
+      expect(consumed).toEqual([]);
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports the timeout for a result whose batch arrives after it", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      // The server streamed the whole result before it read the CANCEL. The
+      // batch is dropped unread, so the end of the stream reports the timeout,
+      // not a row count that disagrees with the rows the consumer received.
+      connection.receive(firstResultBatch(query.requestId));
+      connection.receive(resultEnd(query.requestId));
+
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      expect(connection.closeCalls).toEqual([]);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("withholds result views decoded ahead of the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      let releaseHandler!: () => void;
+      const handlerReleased = new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      const seen: bigint[] = [];
+      const query = await session.queryViews(
+        "select * from x",
+        async (batch) => {
+          seen.push(batch.batchSequence);
+          await handlerReleased;
+        },
+        { timeoutMs: 25, initialCredit: 4096 },
+      );
+      const first = emptyResultBatch(query.requestId, 0);
+      const second = emptyResultBatch(query.requestId, 1);
+      connection.receive(first);
+      connection.receive(second);
+      await vi.advanceTimersByTimeAsync(10);
+      // The first view is in the callback; the second is decoded ahead.
+      expect(seen).toEqual([0n]);
+
+      await vi.advanceTimersByTimeAsync(15);
+      releaseHandler();
+      await vi.advanceTimersByTimeAsync(0);
+      // The callback that was running completes; the view queued behind it
+      // never reaches the callback, and its credit is returned all the same.
+      expect(seen).toEqual([0n]);
+      const credits = connection.sent
+        .filter((payload) => payload[0] === QWP_EGRESS_MESSAGE.CREDIT)
+        .map((payload) => {
+          const reader = new QwpByteReader(payload);
+          reader.readUint8();
+          reader.readBigUint64();
+          return readQwpVarint(reader);
+        });
+      expect(credits).toEqual([
+        BigInt(first.byteLength),
+        BigInt(second.byteLength),
+      ]);
+
+      connection.receive(resultEnd(query.requestId, 0n, 1n));
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports an application cancel that precedes the timeout as a cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      await query.cancel();
+
+      await vi.advanceTimersByTimeAsync(25);
+      // The deadline sends no second CANCEL.
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+      } satisfies Partial<QwpEgressQueryError>);
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends one CANCEL however a timed-out query is ended", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      const iterator = query[Symbol.asyncIterator]();
+
+      await vi.advanceTimersByTimeAsync(25);
+      // A late cancel, and breaking out of iteration, both find it cancelled.
+      await query.cancel();
+      await iterator.return!();
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryAbandonedError,
+      );
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts a query's timeout when query() is called", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      const querying = session.query("select 1", { timeoutMs: 30 });
+      // SERVER_INFO is late, and the wait for it is part of the budget.
+      await vi.advanceTimersByTimeAsync(20);
+      connection.receive(serverInfo());
+      const query = await querying;
+      expect(connection.sent).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(9);
+      expect(connection.sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressQueryTimeoutError,
+      );
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts waiting for a draining query against the next query's timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const abandoned = await session.query("select * from x");
+      connection.receive(firstResultBatch(abandoned.requestId));
+      for await (const _batch of abandoned) break;
+      expect(connection.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+
+      const waiting = session
+        .query("select 2", { timeoutMs: 30 })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(29);
+      expect(connection.sent).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      // The whole budget went on waiting, so nothing was sent for it.
+      await expect(waiting).resolves.toMatchObject({
+        name: "QwpEgressQueryTimeoutError",
+        timeoutMs: 30,
+      } satisfies Partial<QwpEgressQueryTimeoutError>);
+      expect(connection.sent).toHaveLength(2);
+
+      connection.receive(
+        queryError(
+          abandoned.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const next = await session.query("select 3", { timeoutMs: 30 });
+      expect(connection.sent).toHaveLength(3);
+      connection.receive(resultEnd(next.requestId, 0n, 0n));
+      await next.completion;
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("streams a Zstd-compressed result through the high-level session", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select 42");
 
@@ -2870,7 +3596,7 @@ describe("QwpEgressSession", () => {
     // rejected every non-empty result as a protocol violation and closed the
     // connection with 1002.
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select * from x");
     connection.receive(firstResultBatch(query.requestId));
@@ -2893,7 +3619,7 @@ describe("QwpEgressSession", () => {
 
   it("accepts a multi-batch RESULT_END ending at the last batch sequence", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("select * from x");
     connection.receive(emptyResultBatch(query.requestId, 0));
@@ -2919,7 +3645,7 @@ describe("QwpEgressSession", () => {
     "rejects RESULT_END with $2",
     async (finalSequence, totalRows, _label) => {
       const connection = new FakeConnection();
-      const session = new QwpEgressSession(connection);
+      const session = createQwpEgressSession(connection);
       connection.receive(serverInfo());
       const query = await session.query("select * from x");
       connection.receive(firstResultBatch(query.requestId));
@@ -2941,7 +3667,7 @@ describe("QwpEgressSession", () => {
 
   it("surfaces QUERY_ERROR to iteration and completion", async () => {
     const connection = new FakeConnection();
-    const session = new QwpEgressSession(connection);
+    const session = createQwpEgressSession(connection);
     connection.receive(serverInfo());
     const query = await session.query("broken sql");
     connection.receive(queryError(query.requestId, "bad syntax"));

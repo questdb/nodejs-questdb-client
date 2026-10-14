@@ -13,11 +13,11 @@ import {
   QWP_UPGRADE_ERROR_KIND,
   type QwpReconnectEvent,
   QwpConnectionCloseInfo,
-  QwpIngressTransportMetrics,
   QwpReplayRejectedError,
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../../../client-core/src/_qwp/transport";
+import type { QwpIngressTransportMetrics } from "../../../client-core/src/_qwp/_internal/binary-connection";
 import {
   isQwpNodeReplayQuarantineSlotName,
   QwpReplayStoreCorruptionError,
@@ -106,7 +106,11 @@ export interface QwpNodeOrphanDrainerMetrics {
   readonly closed: boolean;
 }
 
-/** Minimal session surface used by the Node orphan drainer. */
+/**
+ * Minimal session surface used by the Node orphan drainer.
+ *
+ * @internal Part of the internal QwpNodeOrphanDrainer's construction contract.
+ */
 export interface QwpNodeOrphanDrainSession {
   readonly closed: Promise<QwpConnectionCloseInfo>;
   readonly metrics: Pick<
@@ -120,6 +124,7 @@ export interface QwpNodeOrphanDrainSession {
   close(code?: number, reason?: string): Promise<void>;
 }
 
+/** @internal Construction options of the internal QwpNodeOrphanDrainer. */
 export interface QwpNodeOrphanDrainerOptions {
   /** Directory whose child directories are independent replay slots. */
   rootDirectory: string;
@@ -162,6 +167,8 @@ export interface QwpNodeOrphanDrainerOptions {
  * The scan is deliberately read-only and does not inspect lock ownership.
  * Adoption obtains the replay store's exclusive lock, closing the race with a
  * live foreground producer or another drainer.
+ *
+ * @internal The drainer's discovery step, internal along with the drainer.
  */
 export async function scanQwpNodeOrphanSlots(
   rootDirectory: string,
@@ -263,6 +270,12 @@ async function isAssignedSegmentOrInvalid(path: string): Promise<boolean> {
 /**
  * Bounded Node-only scanner and background drainer for replay slots left by
  * terminated producer processes. Each adopted slot uses its own connection.
+ *
+ * @internal As in the other QuestDB clients, orphan recovery is configured
+ * through the store-and-forward options -- `drainOrphans`,
+ * `maxBackgroundDrainers` and `orphanScanIntervalMs` -- and observed through
+ * `onOrphanDrainEvent`, so the package root exports neither this class, its
+ * options and session types, nor scanQwpNodeOrphanSlots().
  */
 export class QwpNodeOrphanDrainer {
   private readonly rootDirectory: string;

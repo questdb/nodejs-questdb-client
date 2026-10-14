@@ -1,4 +1,7 @@
-import type { QwpReconnectOptions } from "../transport";
+import type {
+  QwpEgressReconnectOptions,
+  QwpIngressReconnectOptions,
+} from "../transport";
 import { QWP_MAX_TIMER_DELAY_MS } from "./timer-bounds";
 
 /**
@@ -8,14 +11,33 @@ import { QWP_MAX_TIMER_DELAY_MS } from "./timer-bounds";
  */
 export const QWP_MAX_RECONNECT_BACKOFF_MS = QWP_MAX_TIMER_DELAY_MS;
 
-export function validateQwpReconnectBackoffs(
-  reconnect: QwpReconnectOptions | false | undefined,
+/** Validates the backoff ceilings of an ingress `reconnect` option. */
+export function validateQwpIngressReconnectBackoffs(
+  reconnect: QwpIngressReconnectOptions | false | undefined,
 ): void {
   if (!reconnect) return;
-  for (const [name, value] of [
-    ["initialBackoffMs", reconnect.initialBackoffMs],
-    ["maxBackoffMs", reconnect.maxBackoffMs],
-  ] as const) {
+  validateReconnectBackoffs([
+    ["reconnectInitialBackoffMs", reconnect.reconnectInitialBackoffMs],
+    ["reconnectMaxBackoffMs", reconnect.reconnectMaxBackoffMs],
+  ]);
+}
+
+/** Validates the backoff ceilings of an egress `reconnect` option. */
+export function validateQwpEgressReconnectBackoffs(
+  reconnect: QwpEgressReconnectOptions | false | undefined,
+): void {
+  if (!reconnect) return;
+  validateReconnectBackoffs([
+    ["failoverBackoffInitialMs", reconnect.failoverBackoffInitialMs],
+    ["failoverBackoffMaxMs", reconnect.failoverBackoffMaxMs],
+  ]);
+}
+
+/** Ingress and egress spell their backoff options differently. */
+function validateReconnectBackoffs(
+  backoffs: readonly (readonly [name: string, value: number | undefined])[],
+): void {
+  for (const [name, value] of backoffs) {
     if (value === undefined) continue;
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError(

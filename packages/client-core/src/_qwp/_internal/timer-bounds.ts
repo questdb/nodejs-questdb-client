@@ -18,3 +18,19 @@ export const QWP_MAX_TIMER_DELAY_MS = 0x7fffffff;
 export function exceedsQwpTimerCeiling(value: number): boolean {
   return value > QWP_MAX_TIMER_DELAY_MS;
 }
+
+/**
+ * Validates the timeout of an ACK wait (waitForAck, flushAndWait):
+ * any finite value up to the host timer ceiling. Zero or less is valid and
+ * means a check that does not wait, as in the Java client.
+ */
+export function validateQwpAckWaitTimeout(timeoutMs: number | undefined): void {
+  if (
+    timeoutMs !== undefined &&
+    (!Number.isFinite(timeoutMs) || exceedsQwpTimerCeiling(timeoutMs))
+  ) {
+    throw new RangeError(
+      `QWP ACK timeout must be finite and no greater than ${QWP_MAX_TIMER_DELAY_MS}`,
+    );
+  }
+}

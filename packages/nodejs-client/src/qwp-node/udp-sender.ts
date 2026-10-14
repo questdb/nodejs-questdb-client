@@ -2,11 +2,11 @@ import { createSocket, type Socket } from "node:dgram";
 import {
   encodeQwpIngressFrame,
   type QwpIngressEncodeOptions,
-  type QwpIngressResponse,
   type QwpTableBuffer,
 } from "../../../client-core/src/_qwp/_core";
-import type { QwpSenderSession } from "../../../client-core/src/_qwp/sender";
+import type { QwpSenderSession } from "../../../client-core/src/_qwp/_internal/sender-session";
 import { safelyInvoke } from "../../../client-core/src/_qwp/_internal/safe-callback";
+import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 
 const DEFAULT_QWP_UDP_PORT = 9007;
 const DEFAULT_MAX_DATAGRAM_SIZE = 1_400;
@@ -37,7 +37,21 @@ export interface QwpNodeUdpSocketLike {
   setMulticastInterface(multicastInterface: string): void;
 }
 
-export interface QwpNodeUdpOptions {
+/**
+ * Everything a Node QWP-over-UDP sender takes: the datagram socket and row
+ * buffering. Every datagram is self-contained and none is ever part of a
+ * transaction, so the sender's transactional and encoding options are absent.
+ */
+export interface QwpNodeUdpOptions
+  extends Omit<
+    QwpSenderOptions,
+    "transactional" | "gorilla" | "symbolDictionary"
+  > {
+  /**
+   * Soft threshold for estimated buffered column bytes; zero disables the
+   * byte trigger. Defaults to maxDatagramSize.
+   */
+  autoFlushBytes?: number;
   /** Destination hostname or IPv4 address. */
   host: string;
   /** Destination port. Defaults to the Java QWP UDP port, 9007. */
@@ -54,6 +68,7 @@ export interface QwpNodeUdpOptions {
   socketFactory?: () => QwpNodeUdpSocketLike;
 }
 
+/** @internal Datagram counters of the internal QwpNodeUdpSession. */
 export interface QwpNodeUdpMetrics {
   readonly publishedDatagramSequence: bigint;
   readonly totalDatagramsSent: number;
@@ -83,6 +98,10 @@ export class QwpUdpDatagramTooLargeError extends Error {
  * Each datagram is self-contained: it carries one table, an inline schema and
  * local symbol dictionaries. There are no ACKs, retries, transactions,
  * authentication, compression, or store-and-forward semantics.
+ *
+ * @internal The transport session behind createQwpNodeUdpSender(). As in the
+ * Java client, applications publish UDP rows through a sender, so the package
+ * root exports neither this class nor a factory that returns one.
  */
 export class QwpNodeUdpSession implements QwpSenderSession {
   readonly maxBatchSizeBytes: number;
@@ -97,7 +116,7 @@ export class QwpNodeUdpSession implements QwpSenderSession {
   /**
    * Completion callbacks for datagrams handed to the socket but not yet
    * reported. `dgram.Socket.close()` discards the callbacks of sends still
-   * queued in the handle, so without this a `sendTables()` racing a `close()`
+   * queued in the handle, so without this a `publishTables()` racing a `close()`
    * returned a promise that never settled -- and `sendDatagrams()` awaits each
    * datagram in turn, so one dropped callback stranded the whole call.
    */
@@ -158,14 +177,14 @@ export class QwpNodeUdpSession implements QwpSenderSession {
   // Not `async`: validation and encoding must run synchronously, before the
   // returned promise exists. The high-level sender transfers row ownership as
   // soon as a flush reaches the transport, so a batch that cannot be encoded
-  // has to fail the flush before that transfer -- the same contract
-  // planIngressFrames gives the WebSocket path by throwing out of
-  // sendTablesWithPublication. Only the sends themselves are deferred, and a
-  // failed send is fire-and-forget by design.
-  sendTables(
+  // has to fail the flush before that transfer -- the same contract the
+  // WebSocket session's publishTables() gives by planning every frame before
+  // it publishes any. Only the sends themselves are deferred, and a failed
+  // send is fire-and-forget by design.
+  publishTables(
     tables: readonly QwpTableBuffer[],
     options: QwpIngressEncodeOptions = {},
-  ): Promise<QwpIngressResponse> {
+  ): Promise<void> {
     this.assertOpen();
     if (options.deferCommit) {
       throw new Error(
@@ -194,21 +213,15 @@ export class QwpNodeUdpSession implements QwpSenderSession {
     return this.sendDatagrams(datagrams);
   }
 
-  publishTables(
-    tables: readonly QwpTableBuffer[],
-    options: QwpIngressEncodeOptions = {},
-  ): Promise<void> {
-    return this.sendTables(tables, options).then(() => undefined);
-  }
-
-  private async sendDatagrams(
-    datagrams: readonly Uint8Array[],
-  ): Promise<QwpIngressResponse> {
+  private async sendDatagrams(datagrams: readonly Uint8Array[]): Promise<void> {
     for (const datagram of datagrams) await this.send(datagram);
-    return { status: 0, sequence: this.sequence, tables: [] };
   }
 
-  waitForAcknowledged(targetSequence: bigint): Promise<void> {
+  /**
+   * UDP has no server acknowledgements, so a datagram counts as acknowledged
+   * once it is sent: this resolves true for any published sequence.
+   */
+  waitForAck(targetSequence: bigint): Promise<boolean> {
     this.assertOpen();
     if (targetSequence > this.sequence) {
       return Promise.reject(
@@ -217,13 +230,7 @@ export class QwpNodeUdpSession implements QwpSenderSession {
         ),
       );
     }
-    return Promise.resolve();
-  }
-
-  waitForDurable(): Promise<void> {
-    return Promise.reject(
-      new Error("QWP UDP does not provide server or durable acknowledgements"),
-    );
+    return Promise.resolve(true);
   }
 
   close(): Promise<void> {
@@ -290,7 +297,7 @@ export class QwpNodeUdpSession implements QwpSenderSession {
           // both publishedFrameSequence and acknowledgedFrameSequence, so
           // counting a datagram the kernel refused reported rows that never
           // left the host as delivered: flushAndGetSequence() returned a
-          // sequence covering them and waitForAcknowledged() resolved on it.
+          // sequence covering them and waitForAck() resolved on it.
           this.reportError(
             describeSendFailure(
               error,

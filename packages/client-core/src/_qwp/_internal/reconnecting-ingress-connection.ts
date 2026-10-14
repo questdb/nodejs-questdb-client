@@ -16,23 +16,17 @@ import {
   QWP_INITIAL_CONNECT_MODE,
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
-  QwpBinaryConnection,
   QwpConnectionCloseInfo,
-  QwpConnectionFactory,
   QwpDurableAckUnavailableError,
   QwpFailoverError,
   QwpHandshakeMetadata,
-  QwpIngressReplayRecord,
-  QwpIngressReplayReference,
-  QwpIngressReplayStore,
-  QwpIngressTransportMetrics,
+  QwpIngressReconnectOptions,
   QwpInitialConnectMode,
   QwpMemoryReplayAppendTimeoutError,
   QwpMemoryReplayBatchTooLargeError,
   QwpMemoryReplayFrameTooLargeError,
   QwpReconnectEvent,
   QwpReconnectExhaustedError,
-  QwpReconnectOptions,
   QwpReplayDictionaryError,
   QwpReplayDictionaryPersistenceError,
   QwpReplayRejectedError,
@@ -40,15 +34,27 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../transport";
+import type {
+  QwpBinaryConnection,
+  QwpConnectionFactory,
+  QwpIngressTransportMetrics,
+} from "./binary-connection";
 import { defersCommit, isDurableAckPoll } from "./frame-flags";
+import type {
+  QwpIngressReplayRecord,
+  QwpIngressReplayReference,
+  QwpIngressReplayStore,
+} from "./replay-store";
 import { redactQwpEndpointFields } from "./redact-endpoint";
 import { QwpAsyncQueue } from "./async-queue";
 import { monotonicNowMs } from "./monotonic-clock";
 import {
   jitterReconnectDelayMs,
-  validateQwpReconnectBackoffs,
+  validateQwpIngressReconnectBackoffs,
 } from "./reconnect-backoff";
 import { awaitReconnectDeadline } from "./reconnect-deadline";
+import { createSweepFailureReporter } from "./sweep-events";
+import { hasQwpFinalUpgradeVerdict } from "./upgrade-verdict";
 import { QwpNotificationDispatcher } from "./notification-dispatcher";
 import {
   createQwpDataLossSenderError,
@@ -67,23 +73,62 @@ import {
  * constructor below reads every field from the merged result, so the two layers
  * cannot disagree. They used to: the session default object was replaced
  * wholesale by any partial `reconnect`, and the constructor's own per-field
- * fallbacks then supplied maxAttempts 3 and maxDurationMs 30s instead of the
- * unlimited/5-minute policy the session promises. Setting one documented key --
- * `reconnect_max_duration_millis`, say, which QWP.md presents as the ws/wss
- * replacement for ILP's `retry_timeout` -- therefore capped a running sender at
- * three reconnect attempts and latched it terminal during a transient outage.
+ * fallbacks then supplied a 30-second budget instead of the 5-minute
+ * synchronous-startup policy the session promises.
+ *
+ * No field bounds a session that has connected: as in the Java, Rust and
+ * Python clients, its reconnects retry until close() or a terminal error.
  */
 export const QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS: Readonly<
-  Required<Omit<QwpReconnectOptions, "onEvent">>
+  Required<Omit<QwpIngressReconnectOptions, "onEvent">>
 > = {
-  /** Zero is unlimited: a running producer must outlast any outage. */
-  maxAttempts: 0,
-  initialBackoffMs: 100,
-  maxBackoffMs: 5_000,
-  maxDurationMs: 300_000,
+  reconnectInitialBackoffMs: 100,
+  reconnectMaxBackoffMs: 5_000,
+  /** Bounds a synchronous initial connect only. */
+  reconnectMaxDurationMs: 300_000,
   maxFrameRejections: 4,
-  poisonMinEscalationWindowMs: 300_000,
+  poisonMinEscalationWindowMs: 5_000,
 };
+
+/**
+ * Whether a reconnect policy makes the first connect synchronous and retrying
+ * when no initial connect mode is given. Only the three settings that tune
+ * retrying do: a policy that only observes events through onEvent, or only
+ * sets the poison-frame limits, leaves the first connect a single attempt.
+ *
+ * This follows the Java client, which applies the rule to pooled senders as
+ * well. The Rust and Python clients apply it to a standalone sender only;
+ * their connection pools honour only an explicit mode.
+ */
+export function selectsQwpSyncInitialConnect(
+  reconnect: QwpIngressReconnectOptions | false | null | undefined,
+): boolean {
+  return (
+    !!reconnect &&
+    (reconnect.reconnectMaxDurationMs !== undefined ||
+      reconnect.reconnectInitialBackoffMs !== undefined ||
+      reconnect.reconnectMaxBackoffMs !== undefined)
+  );
+}
+
+/**
+ * Rejects a startup mode outside QWP_INITIAL_CONNECT_MODE. Without this an
+ * unknown value fell through every comparison against the three modes and ran
+ * as a synchronous startup. `option` names the spelling the caller used.
+ */
+export function validateQwpInitialConnectMode(
+  value: unknown,
+  option = "initialConnectMode",
+): void {
+  if (
+    value !== undefined &&
+    value !== QWP_INITIAL_CONNECT_MODE.OFF &&
+    value !== QWP_INITIAL_CONNECT_MODE.SYNC &&
+    value !== QWP_INITIAL_CONNECT_MODE.ASYNC
+  ) {
+    throw new RangeError(`${option} must be 'off', 'sync', or 'async'`);
+  }
+}
 
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
@@ -91,12 +136,34 @@ const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
 const MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS = 16;
 const DEFAULT_MEMORY_REPLAY_MAX_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS = 30_000;
-// Charge a conservative fixed amount so even empty/very small opaque frames
-// cannot grow the replay Map without bound. Payload arrays are not copied by
-// the store, so the configured budget primarily tracks live frame storage.
-const MEMORY_REPLAY_RECORD_OVERHEAD_BYTES = 64;
+/**
+ * @internal What the memory replay queue charges each frame on top of its
+ * payload, so that its byte cap bounds the memory a backlog of small frames
+ * takes as well as a backlog of large ones.
+ *
+ * It stands for what a queued frame keeps in memory besides its payload
+ * bytes: the payload's array objects, the replay record, the connection's
+ * bookkeeping for the frame and, until the background drainer has sent it,
+ * its step in the drain. On Node that is about 800 bytes for a frame not yet
+ * sent and about 450 for one awaiting its ACK. The queue used to charge 64,
+ * so an outage let one-row flushes fill about 1 GiB of heap before the
+ * default 128 MiB cap applied any backpressure, and a process with a 512 MB
+ * heap ran out of memory first.
+ */
+export const QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES = 1024;
 
-type ConnectAttemptPolicy = "single" | "configured" | "unbounded";
+/**
+ * How long one connectLoop() keeps trying.
+ *
+ * - `single`: one sweep of the endpoints -- an initial connect in
+ *   QWP_INITIAL_CONNECT_MODE.OFF.
+ * - `deadline`: retries until reconnectMaxDurationMs elapses -- a synchronous
+ *   initial connect. A zero budget makes one sweep, like `single`.
+ * - `unbounded`: retries until close() or a terminal error -- an initial
+ *   connect that runs in the background, and every reconnect after a
+ *   connection was established.
+ */
+type ConnectAttemptPolicy = "single" | "deadline" | "unbounded";
 
 export class QwpCatchUpCapGapError extends RangeError {
   constructor(
@@ -166,6 +233,21 @@ interface ReplayFrame extends Omit<QwpIngressReplayReference, "frameSequence"> {
   transmitted: boolean;
   durableTargets?: Map<string, bigint>;
   dictionaryCatchup?: boolean;
+  /** A table-less durable-ACK poll; it carries no rows. */
+  durableAckPoll?: boolean;
+  /**
+   * A newer poll superseded this one, so it left the replay queue while its
+   * OK may still be due; see discardSupersededDurableAckPolls().
+   */
+  discarded?: boolean;
+  /**
+   * A poll sent straight to the socket, ahead of a publication waiting for
+   * replay-queue capacity; see sendDurableAckPoll(). It never entered the
+   * replay queue and has no frame sequence of its own: `frameSequence` is the
+   * last frame published before it, the frame its cumulative OK covers. It is
+   * always also `discarded`, which is how its OK is handled.
+   */
+  wireOnlyPoll?: boolean;
   /**
    * The frame carries QWP_FLAG_DEFER_COMMIT, so QuestDB deliberately withholds
    * its cumulative ACK until the transaction commits. Read from the frame
@@ -261,6 +343,11 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     private readonly appendDeadlineMs = DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS,
   ) {}
 
+  /** Whether an append, or a batch preflight, is waiting for capacity. */
+  get hasWaitingAppends(): boolean {
+    return this.capacityWaiters.size > 0;
+  }
+
   get metrics() {
     return {
       maxBytes: this.maxBytes,
@@ -286,9 +373,17 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
       );
     }
     const requiredBytes =
-      record.payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+      record.payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
     const deferCommit = defersCommit(record.payload);
-    if (requiredBytes > this.maxBytes) {
+    // A durable-ACK poll is a fixed-size control frame, and the durable
+    // progress it asks for is what trims a queue full of frames awaiting
+    // durability. Making it wait for that trimming could never succeed, so it
+    // is admitted above the target like a transaction-closing frame. The
+    // session keeps at most one poll that has not reached the socket, and the
+    // connection discards each poll a newer one supersedes; see
+    // discardSupersededDurableAckPolls().
+    const durableAckPoll = isDurableAckPoll(record.payload);
+    if (requiredBytes > this.maxBytes && !durableAckPoll) {
       throw new QwpMemoryReplayFrameTooLargeError(
         this.maxBytes,
         record.payload.byteLength,
@@ -298,13 +393,14 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     const preparedCloseFrame = this.matchesPreparedTransactionClose(
       record.payload,
     );
-    const changesTransaction = !isDurableAckPoll(record.payload);
+    const changesTransaction = !durableAckPoll;
     const closesOpenTransaction =
       this.transactionOpen && changesTransaction && !deferCommit;
     if (
       this.usedBytes + requiredBytes > this.maxBytes &&
       !preparedCloseFrame &&
-      !closesOpenTransaction
+      !closesOpenTransaction &&
+      !durableAckPoll
     ) {
       this.totalBackpressureStalls++;
       // Elapsed time, so a clock step cannot expire an append that has been
@@ -344,7 +440,7 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     let requiredBytes = 0;
     for (const payload of payloads) {
       const recordBytes =
-        payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+        payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
       if (recordBytes > this.maxBytes) {
         throw new QwpMemoryReplayFrameTooLargeError(
           this.maxBytes,
@@ -410,12 +506,25 @@ class QwpMemoryReplayStore implements QwpIngressReplayStore {
     this.removeThrough(frameSequence);
   }
 
+  /**
+   * Drops one record that a newer one superseded, wherever it sits in the
+   * queue; see discardSupersededDurableAckPolls().
+   */
+  discard(frameSequence: bigint): void {
+    const payload = this.records.get(frameSequence);
+    if (!payload) return;
+    this.usedBytes -=
+      payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+    this.records.delete(frameSequence);
+    this.releaseCapacityWaiters();
+  }
+
   private removeThrough(frameSequence: bigint): void {
     for (const sequence of this.records.keys()) {
       if (sequence > frameSequence) break;
       const payload = this.records.get(sequence)!;
       this.usedBytes -=
-        payload.byteLength + MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
+        payload.byteLength + QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES;
       this.records.delete(sequence);
     }
     this.releaseCapacityWaiters();
@@ -523,10 +632,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly symbolDictionary: string[];
   private readonly store: QwpIngressReplayStore;
   private readonly lazyReplayStore?: LazyReplayStore;
-  private readonly maxAttempts: number;
   private readonly initialBackoffMs: number;
   private readonly maxBackoffMs: number;
-  private readonly maxDurationMs: number;
+  private readonly reconnectMaxDurationMs: number;
   private readonly maxFrameRejections: number;
   private readonly poisonMinEscalationWindowMs: number;
   private readonly catchUpCapGapMinEscalationWindowMs: number;
@@ -549,7 +657,30 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private nextFrameSequence = 0n;
   private nextClientSequence = 0n;
   private publishedFrameSequence = -1n;
+  /** See getRecoveredCommitFrameSequence(). Fixed once recovery has run. */
+  private readonly recoveredCommitFrameSequence: bigint;
+  /** Highest frame sequence the replay store has acknowledged. */
+  private storeAcknowledgedFrameSequence = -1n;
+  /**
+   * The ACK watermark the owning session sees. It catches up with the store's
+   * only once the response carrying the acknowledgement is queued for the
+   * session, or, when no response will carry it, just before the session is
+   * told directly. Publishing it as soon as the store had acknowledged let a
+   * waiter -- or close() -- finish while the response was still in flight
+   * here; close() then ended the message stream, and the response was lost
+   * together with its onResponse and ACKNOWLEDGED notifications.
+   */
   private acknowledgedFrameSequence = -1n;
+  private acknowledgedFrameSequenceListener?: () => void;
+  /** abandonedFrameRanges entries the session has already been woken for. */
+  private notifiedAbandonedRanges = 0;
+  /**
+   * Frames published to the replay queue whose drain has not yet handed them
+   * to the socket. With the in-memory store these are lost if the connection
+   * closes, so a fast QwpSender.close() waits for them; see
+   * waitForPendingSends().
+   */
+  private unsentFrames = 0;
   private highestOkFrameSequence = -1n;
   private poisonFrameSequence?: bigint;
   private poisonFirstStrikeMs = 0;
@@ -595,7 +726,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
   private constructor(
     private readonly factory: QwpConnectionFactory,
-    private readonly reconnectOptions: QwpReconnectOptions,
+    private readonly reconnectOptions: QwpIngressReconnectOptions,
     store: QwpIngressReplayStore,
     records: readonly LoadedReplayRecord[],
     symbolDictionary: readonly string[],
@@ -624,21 +755,22 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.recoveredDiscardTail = recoveredDiscardTail;
     this.localMaxBatchSizeBytes = localMaxBatchSizeBytes;
     const defaults = QWP_DEFAULT_INGRESS_RECONNECT_OPTIONS;
-    this.maxAttempts = reconnectOptions.maxAttempts ?? defaults.maxAttempts;
     this.initialBackoffMs =
-      reconnectOptions.initialBackoffMs ?? defaults.initialBackoffMs;
-    this.maxBackoffMs = reconnectOptions.maxBackoffMs ?? defaults.maxBackoffMs;
-    this.maxDurationMs =
-      reconnectOptions.maxDurationMs ?? defaults.maxDurationMs;
+      reconnectOptions.reconnectInitialBackoffMs ??
+      defaults.reconnectInitialBackoffMs;
+    this.maxBackoffMs =
+      reconnectOptions.reconnectMaxBackoffMs ?? defaults.reconnectMaxBackoffMs;
+    this.reconnectMaxDurationMs =
+      reconnectOptions.reconnectMaxDurationMs ??
+      defaults.reconnectMaxDurationMs;
     this.maxFrameRejections =
       reconnectOptions.maxFrameRejections ?? defaults.maxFrameRejections;
-    // WRITE_ERROR and INTERNAL_ERROR are RETRIABLE by policy, but the only
+    // WRITE_ERROR and INTERNAL_ERROR are RETRIABLE by policy, so the only
     // thing separating "this frame is poison" from "the server cannot write
-    // right now" is how long the rejection persists. Five seconds did not
-    // separate them at all: a concurrent DDL, a checkpoint or a briefly full
-    // server volume outlives it easily, and with the reconnect backoff capped
-    // at maxBackoffMs four strikes accumulate well inside that window -- so a
-    // transient server-side fault permanently killed a running producer.
+    // right now" is how long the rejection persists. The 5-second default
+    // matches the Java, Rust and Python clients; a server whose transient
+    // faults -- a concurrent DDL, a checkpoint, a briefly full volume --
+    // outlast it needs a longer window.
     this.poisonMinEscalationWindowMs =
       reconnectOptions.poisonMinEscalationWindowMs ??
       defaults.poisonMinEscalationWindowMs;
@@ -657,10 +789,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       errorInboxCapacity,
     );
     validateReconnectPolicy(
-      this.maxAttempts,
       this.initialBackoffMs,
       this.maxBackoffMs,
-      this.maxDurationMs,
+      this.reconnectMaxDurationMs,
       this.maxFrameRejections,
       this.poisonMinEscalationWindowMs,
       this.catchUpCapGapMinEscalationWindowMs,
@@ -700,14 +831,20 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
     if (records.length > 0) {
       this.acknowledgedFrameSequence = records[0].frameSequence - 1n;
+      this.storeAcknowledgedFrameSequence = this.acknowledgedFrameSequence;
     }
     this.nextFrameSequence = previous + 1n;
     this.publishedFrameSequence = previous;
+    // A recovered tail after the last commit is retired rather than
+    // acknowledged, so the commit before it is the last frame an ACK covers.
+    this.recoveredCommitFrameSequence = recoveredDiscardTail
+      ? (recoveredDiscardTail.predecessorSequence ?? -1n)
+      : previous;
   }
 
   static async connect(
     factory: QwpConnectionFactory,
-    reconnectOptions: QwpReconnectOptions,
+    reconnectOptions: QwpIngressReconnectOptions,
     replayStore?: QwpIngressReplayStore,
     localMaxBatchSizeBytes?: number,
     memoryReplayMaxBytes = DEFAULT_MEMORY_REPLAY_MAX_BYTES,
@@ -879,7 +1016,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         false,
         initialConnectMode === QWP_INITIAL_CONNECT_MODE.OFF
           ? "single"
-          : "configured",
+          : "deadline",
         initialConnection,
       );
     } catch (error) {
@@ -929,6 +1066,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return this.publishedFrameSequence;
   }
 
+  /**
+   * The last frame recovered from the replay store that a server ACK will
+   * cover, or -1n. Recovered frames count as published, but a deferred tail
+   * that recovery retires is never acknowledged.
+   */
+  getRecoveredCommitFrameSequence(): bigint {
+    return this.recoveredCommitFrameSequence;
+  }
+
   getIngressMetrics(): QwpIngressTransportMetrics {
     const pendingReplayBytes = this.pendingReplayBytes;
     const memoryMetrics =
@@ -965,6 +1111,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       deliveredErrorNotifications: this.errorDispatcher?.metrics.delivered ?? 0,
       droppedErrorNotifications: this.errorDispatcher?.metrics.dropped ?? 0,
     });
+  }
+
+  /** @internal Notifies the owning session even when a replayed OK is hidden. */
+  setAcknowledgedFrameSequenceListener(listener: () => void): void {
+    this.acknowledgedFrameSequenceListener = listener;
   }
 
   getIngressFrameSequence(clientSequence: bigint): bigint | undefined {
@@ -1013,6 +1164,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       ackDelivered: false,
       transmitted: false,
       deferCommit: defersCommit(payload),
+      durableAckPoll: isDurableAckPoll(payload),
     };
     const publishing = this.sendTail.then(async () => {
       this.throwIfUnavailable();
@@ -1039,8 +1191,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       frame.frameSequence = frameSequence;
       this.trackFrame(frame);
       this.publishedFrameSequence = frame.frameSequence;
-      if (this.backgroundStoreAndForward) {
+      if (frame.durableAckPoll) this.discardSupersededDurableAckPolls(frame);
+      if (
+        this.backgroundStoreAndForward ||
+        this.store instanceof QwpMemoryReplayStore
+      ) {
         if (this.lazyReplayStore) frame.payload = undefined;
+        // Local publication is the completion boundary for RAM replay too.
+        // The serialized drain continues independently during reconnects.
         this.enqueueDrain(frame);
         return;
       }
@@ -1056,13 +1214,137 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private enqueueDrain(frame: ReplayFrame): void {
+    this.unsentFrames++;
     const draining = this.drainTail.then(async () => {
       if (this.closing) return;
       await this.transmit(frame);
+      this.unsentFrames--;
     });
     this.drainTail = draining.catch((error: unknown) => {
       if (!this.closing) this.failTerminal(error);
     });
+  }
+
+  /**
+   * @internal Whether a frame published to the replay queue is still waiting
+   * for its background drain to hand it to the socket: during an outage, or
+   * while a backlog drains.
+   */
+  get hasUnsentFrames(): boolean {
+    return this.unsentFrames > 0;
+  }
+
+  /**
+   * @internal Whether a frame the server has acknowledged still waits for its
+   * durable ACK. The owning session tracks only the targets of the OKs it is
+   * handed, and an OK covering only recovered frames is not handed to it.
+   */
+  get hasPendingDurableTargets(): boolean {
+    for (const frame of this.frames.values()) {
+      if (frame.durableTargets) return true;
+      // Only an acknowledged frame carries targets.
+      if (frame.frameSequence >= this.highestOkFrameSequence) return false;
+    }
+    return false;
+  }
+
+  /**
+   * @internal Whether a publication is waiting for the in-memory replay queue
+   * to make room for it. It holds the publication queue meanwhile, so nothing
+   * published after it reaches the socket until it gets that room or its
+   * append deadline expires.
+   */
+  get publicationAwaitsCapacity(): boolean {
+    return (
+      this.store instanceof QwpMemoryReplayStore && this.store.hasWaitingAppends
+    );
+  }
+
+  /**
+   * @internal Sends a durable-ACK poll straight to the socket, ahead of a
+   * publication waiting for replay-queue capacity.
+   *
+   * When the queue is full of frames awaiting their durable upload, only
+   * durable progress can free the room that publication waits for, and
+   * QuestDB reports durable progress only in reply to inbound traffic. A poll
+   * published through the queue waited behind the publication, so it reached
+   * the server only after the publication had waited out its append deadline
+   * and failed, against a server that had durable progress to report.
+   *
+   * Like Node's WebSocket PING, this poll stays out of the replay queue. It
+   * takes no frame or client sequence -- the waiting publication has already
+   * claimed the next frame sequence -- and is not replayed after a reconnect;
+   * the next keepalive tick polls again. It does take a wire sequence, so the
+   * wire log records it, as a discarded poll whose OK covers the frames
+   * published before it.
+   */
+  async sendDurableAckPoll(payload: Uint8Array): Promise<void> {
+    let connection: QwpBinaryConnection;
+    try {
+      connection = await this.requireConnection();
+    } catch (error) {
+      // A closing connection has nothing left to poll for.
+      if (this.closing) return;
+      throw error;
+    }
+    // Re-checked after the wait: a reconnect can have replaced the connection,
+    // and frames still waiting for the drain reach the server first and draw
+    // the durable progress themselves.
+    if (
+      this.closing ||
+      this.connection !== connection ||
+      this.unsentFrames > 0
+    ) {
+      return;
+    }
+    const poll: ReplayFrame = {
+      frameSequence: this.publishedFrameSequence,
+      payloadLength: payload.byteLength,
+      ackDelivered: true,
+      transmitted: true,
+      deferCommit: false,
+      durableAckPoll: true,
+      discarded: true,
+      wireOnlyPoll: true,
+    };
+    this.wireFrames.push(poll);
+    try {
+      await this.sendPhysical(connection, payload, false);
+    } catch (error) {
+      try {
+        await this.requestReconnect(error, connection);
+      } catch (reconnectError) {
+        if (!this.closing) throw reconnectError;
+      }
+    }
+  }
+
+  /**
+   * @internal Waits until every frame published to the in-memory replay queue
+   * has been handed to the socket -- not for its ACK. A persistent journal
+   * keeps unsent frames, so this resolves at once for one.
+   *
+   * Rejects with the transport's failure only when frames remain that it can
+   * no longer send. A failure with nothing left to send was already reported
+   * where it happened; rethrowing it here made a fast close() reject after
+   * every frame had been sent and acknowledged.
+   */
+  async waitForPendingSends(): Promise<void> {
+    if (!(this.store instanceof QwpMemoryReplayStore)) return;
+    // A publication racing this call extends drainTail, so wait for the tail
+    // that is current once the previous one settles. Comparing identities
+    // stops the loop should the counter and the tail ever disagree.
+    let awaited: Promise<void> | undefined;
+    while (
+      this.unsentFrames > 0 &&
+      !this.terminalError &&
+      !this.closing &&
+      awaited !== this.drainTail
+    ) {
+      awaited = this.drainTail;
+      await awaited;
+    }
+    if (this.unsentFrames > 0) this.throwIfUnavailable();
   }
 
   private startBackgroundConnect(): void {
@@ -1129,17 +1411,21 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private async connectLoop(
     initialCause: unknown,
     reconnecting: boolean,
-    attemptPolicy: ConnectAttemptPolicy = this.backgroundStoreAndForward
-      ? "unbounded"
-      : "configured",
+    attemptPolicy: ConnectAttemptPolicy,
     initialConnection?: Promise<QwpBinaryConnection>,
   ): Promise<void> {
     // Monotonic for the same reason recordPoisonStrike() is: a clock step
-    // must not exhaust a reconnect budget that has not actually elapsed.
+    // must not exhaust a startup budget that has not actually elapsed.
     const outageStarted = monotonicNowMs();
+    // A zero startup budget allows one sweep and no retries, as in the Rust and
+    // Python clients. It sets no deadline: one that had already passed would
+    // cut that sweep short before it could connect even to a healthy server.
+    const singleSweep =
+      attemptPolicy === "single" ||
+      (attemptPolicy === "deadline" && this.reconnectMaxDurationMs === 0);
     const reconnectDeadlineMs =
-      attemptPolicy === "configured" && this.maxDurationMs > 0
-        ? outageStarted + this.maxDurationMs
+      attemptPolicy === "deadline" && this.reconnectMaxDurationMs > 0
+        ? outageStarted + this.reconnectMaxDurationMs
         : undefined;
     const previousEndpoint = this.lastEndpoint;
     let attempt = 0;
@@ -1151,7 +1437,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     const endpointCapRejections = new Set<string>();
     if (reconnecting) {
       this.emitEvent({
-        kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
+        kind: QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
         attempt: 0,
         previousEndpoint,
         cause: initialCause,
@@ -1181,8 +1467,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           // loop's only macrotask, and a factory that rejects without an I/O
           // turn -- a caller-supplied webSocketFactory, or a browser WebSocket
           // constructor that throws SecurityError on mixed content -- otherwise
-          // left the loop spinning in microtasks with initialBackoffMs 0, which
-          // starves timers, I/O and close() for as long as connecting fails.
+          // left the loop spinning in microtasks with reconnectInitialBackoffMs
+          // 0, which starves timers, I/O and close() for as long as connecting
+          // fails.
           // A zero delay still means "retry immediately"; it just yields first.
           await this.waitForBackoffWithinDeadline(
             backoffMs > 0 ? jitterReconnectDelayMs(backoffMs) : 0,
@@ -1196,6 +1483,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         this.throwIfUnavailable();
         attempt++;
         if (reconnecting) this.totalReconnectAttempts++;
+        const sweep = createSweepFailureReporter(
+          (event) => this.emitEvent(event),
+          attempt,
+          previousEndpoint,
+          () => this.closing,
+        );
         let candidate: QwpBinaryConnection | undefined;
         try {
           if (attempt === 1 && initialConnection) {
@@ -1211,7 +1504,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             this.connectAbort = abort;
             try {
               candidate = await awaitReconnectDeadline(
-                this.factory(abort.signal),
+                this.factory(abort.signal, sweep.onEndpointFailure),
                 reconnectDeadlineMs,
                 attempt,
                 () => abort.abort(),
@@ -1282,13 +1575,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             this.connectingCandidate = undefined;
           }
           if (candidate) await candidate.close().catch(() => undefined);
-          this.emitEvent({
-            kind: QWP_RECONNECT_EVENT_KIND.ATTEMPT_FAILED,
-            attempt,
-            endpoint: candidate?.endpoint,
-            previousEndpoint,
-            cause: error,
-          });
+          sweep.sweepFailed(error, candidate);
           if (error instanceof QwpReconnectExhaustedError) throw error;
           const capGapError =
             error instanceof QwpCatchUpCapGapError
@@ -1307,8 +1594,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             // here abandons producer data over a rejection that replay can
             // satisfy -- the one thing this client's error policy says must not
             // go terminal. Falling through hands it to the normal retry loop,
-            // which now deprioritizes the endpoint in replayInto() and stays
-            // bounded by the configured attempt and duration budgets.
+            // which now deprioritizes the endpoint in replayInto() and retries
+            // within this loop's attempt policy.
             !this.canAnotherEndpointAcceptCatchUp(capGapError.error.frameLength)
           ) {
             throw capGapError.error;
@@ -1356,26 +1643,23 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           // sweep, so a cluster that refuses the frame everywhere terminates on
           // the first endpoint that repeats, with the cap error as its cause.
           let sweepsAnotherEndpointForCap = false;
-          if (
-            attemptPolicy === "single" &&
-            error instanceof QwpEndpointReplayCapError
-          ) {
+          if (singleSweep && error instanceof QwpEndpointReplayCapError) {
             const capRejectedEndpoint = String(candidate?.endpoint);
             sweepsAnotherEndpointForCap =
               !endpointCapRejections.has(capRejectedEndpoint);
             endpointCapRejections.add(capRejectedEndpoint);
           }
-          const attemptsExhausted =
-            (attemptPolicy === "single" && !sweepsAnotherEndpointForCap) ||
-            (attemptPolicy === "configured" &&
-              this.maxAttempts > 0 &&
-              attempt >= this.maxAttempts);
-          const durationExhausted =
-            attemptPolicy === "configured" &&
-            this.maxDurationMs > 0 &&
-            monotonicNowMs() - outageStarted >= this.maxDurationMs;
-          if (attemptsExhausted || durationExhausted) {
+          if (singleSweep && !sweepsAnotherEndpointForCap) {
+            // A spent budget reports exhaustion, with this failure as its
+            // cause; QWP_INITIAL_CONNECT_MODE.OFF reports the failure itself.
             if (attemptPolicy === "single") throw error;
+            throw new QwpReconnectExhaustedError(attempt, lastError);
+          }
+          if (
+            attemptPolicy === "deadline" &&
+            this.reconnectMaxDurationMs > 0 &&
+            monotonicNowMs() - outageStarted >= this.reconnectMaxDurationMs
+          ) {
             throw new QwpReconnectExhaustedError(attempt, lastError);
           }
         }
@@ -1388,9 +1672,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // carries lastError, so an expired duration budget reported "QWP
       // reconnect deadline elapsed" and nothing else: a bad certificate, a
       // wrong port and a DNS failure were indistinguishable.
-      // Ingress defaults to unlimited attempts, so the duration budget is
-      // the only exhaustion most senders reach and the attempts branch that
-      // does carry lastError never runs.
+      // Ingress has no attempt budget, so the startup deadline is the only
+      // exhaustion it reaches.
       if (
         error instanceof QwpReconnectExhaustedError &&
         lastError !== undefined &&
@@ -1496,6 +1779,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   }
 
   private isRetryableReconnectError(error: unknown): boolean {
+    // Ahead of the store-and-forward rules below: those retry a server's
+    // rejection, and this is the client's own -- see upgrade-verdict.ts.
+    if (hasQwpFinalUpgradeVerdict(error)) return false;
     if (this.backgroundStoreAndForward && !this.orphanStoreAndForward) {
       // Once this sender has connected even once, every endpoint policy
       // failure is retried indefinitely, so a credential can rotate or a
@@ -1658,7 +1944,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
             .catch(() => undefined);
           return;
         }
+        const advanced = this.publishAcknowledgedFrameSequence();
         if (translated) this.messagesQueue.push(translated);
+        else if (advanced || this.hasPendingDurableTargets) {
+          // An unforwarded OK can also leave durable targets the session
+          // has to poll for; see hasPendingDurableTargets.
+          this.notifyUnforwardedAcknowledgement();
+        }
         if (this.terminalError) return;
       }
       if (
@@ -1733,7 +2025,19 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           this.durableWatermarks.set(table.name, table.sequenceTransaction);
         }
       }
-      await this.trimDurablePrefix();
+      try {
+        await this.trimDurablePrefix();
+      } catch (error) {
+        // As on the OK path: the store may have acknowledged and trimmed
+        // frames before a later step (recovered tail retirement) failed.
+        // Those frames are not replayed, so no later response would publish
+        // their watermark; publish it now or waitForAck() and the close drain
+        // report durable data as pending.
+        if (this.publishAcknowledgedFrameSequence()) {
+          this.notifyUnforwardedAcknowledgement();
+        }
+        throw error;
+      }
       return payload;
     }
     if (response.sequence === null) {
@@ -1809,8 +2113,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // ackDelivered is set only once the ACK is persisted. If persisting
       // fails, pump() reconnects and replays every frame still in the
       // journal; marking them delivered up front made the replacement
-      // connection's OK look like a duplicate and dropped it, leaving the
-      // caller's awaitServerAck()/awaitDurableAck() to time out.
+      // connection's OK look like a duplicate and dropped it, so the session
+      // never observed that acknowledgement.
       const markDelivered = (): void => {
         for (const candidate of covered) candidate.ackDelivered = true;
       };
@@ -1827,12 +2131,14 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // durableTargets accumulated one map per frame with nothing to drain it.
       try {
         if (this.handshake.durableAckEnabled && this.durableAckTracked) {
-          frame.durableTargets = new Map(
+          const targets = new Map(
             response.tables.map((table) => [
               table.name,
               table.sequenceTransaction,
             ]),
           );
+          if (frame.discarded) this.keepDiscardedPollTargets(frame, targets);
+          else frame.durableTargets = targets;
           await this.trimDurablePrefix();
         } else {
           await this.acknowledgeThrough(frame.frameSequence);
@@ -1841,6 +2147,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
         // A step after the store accepted the ACK can still fail. The frame
         // is then already retired and will not be replayed, so no
         // replacement OK will arrive for it: deliver this one now.
+        const advanced = this.publishAcknowledgedFrameSequence();
         if (
           !this.frames.has(frame.frameSequence) &&
           hasUndelivered() &&
@@ -1850,6 +2157,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           this.messagesQueue.push(
             rewriteResponseSequence(payload, clientTarget.clientSequence),
           );
+        } else if (advanced) {
+          this.notifyUnforwardedAcknowledgement();
         }
         throw error;
       }
@@ -1873,9 +2182,12 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
 
     this.totalServerNacks++;
-    const pending = frame.dictionaryCatchup
-      ? this.pendingFsnRange()
-      : undefined;
+    // Neither a dictionary catch-up frame nor a poll sent ahead of the queue
+    // is a replay record, so neither is the frame to blame: the rejection
+    // concerns the frames still pending, and earns none of them a strike.
+    const controlFrame =
+      frame.dictionaryCatchup === true || frame.wireOnlyPoll === true;
+    const pending = controlFrame ? this.pendingFsnRange() : undefined;
     this.emitSenderError(
       createQwpSenderError(response, {
         messageSequence: response.sequence,
@@ -1886,7 +2198,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
     if (isRetriableIngressStatus(response.status)) {
       const exempt =
-        frame.dictionaryCatchup ||
+        controlFrame ||
         response.status === QWP_STATUS.NOT_WRITABLE ||
         // A DICTIONARY_GAP is the server asking for symbol catch-up, not a
         // verdict on this frame. The catch-up it triggers has not been sent
@@ -1898,7 +2210,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (exempt) {
         this.resetPoisonEpisode();
         throw new RetriableIngressNackError(
-          frame.frameSequence,
+          frame.wireOnlyPoll ? -1n : frame.frameSequence,
           response.status,
           this.nextExemptRecycleDelay(),
           response.errorMessage,
@@ -1933,9 +2245,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       );
     }
 
-    if (frame.dictionaryCatchup) {
+    if (controlFrame) {
       const error = new QwpProtocolError(
-        `QuestDB rejected QWP symbol dictionary catch-up [status=0x${response.status.toString(16)}]${
+        `QuestDB rejected ${
+          frame.dictionaryCatchup
+            ? "QWP symbol dictionary catch-up"
+            : "a QWP durable-ACK poll"
+        } [status=0x${response.status.toString(16)}]${
           response.errorMessage ? `: ${response.errorMessage}` : ""
         }`,
       );
@@ -2029,8 +2345,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     // Elapsed time, not a point in time: the dwell this window measures is how
     // long a frame has stayed suspect while the client could reach a server,
     // so a wall-clock correction -- an NTP step, a VM or container resume --
-    // must not satisfy it. It used to, collapsing the five-minute guard to
-    // zero and turning a transient rejection burst into a terminal sender or a
+    // must not satisfy it. It used to, collapsing the window to zero and
+    // turning a transient rejection burst into a terminal sender or a
     // quarantined orphan slot. The two sibling episode policies in this file
     // already measure their windows this way.
     const now = monotonicNowMs();
@@ -2110,12 +2426,13 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
    */
   private currentPoisonHead(): ReplayFrame | undefined {
     const progress =
-      this.highestOkFrameSequence > this.acknowledgedFrameSequence
+      this.highestOkFrameSequence > this.storeAcknowledgedFrameSequence
         ? this.highestOkFrameSequence
-        : this.acknowledgedFrameSequence;
+        : this.storeAcknowledgedFrameSequence;
     return this.wireFrames.find(
       (frame) =>
         !frame.dictionaryCatchup &&
+        !frame.wireOnlyPoll &&
         !frame.deferCommit &&
         frame.frameSequence > progress,
     );
@@ -2123,9 +2440,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
 
   private nextExemptRecycleDelay(): number {
     const progress =
-      this.highestOkFrameSequence > this.acknowledgedFrameSequence
+      this.highestOkFrameSequence > this.storeAcknowledgedFrameSequence
         ? this.highestOkFrameSequence
-        : this.acknowledgedFrameSequence;
+        : this.storeAcknowledgedFrameSequence;
     if (progress > this.progressAtLastExemptRecycle) {
       this.zeroProgressRecycles = 0;
     }
@@ -2149,9 +2466,47 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   ): Promise<void> {
     await this.store.acknowledgeThrough(frameSequence);
     this.removeFramesThrough(frameSequence);
-    if (frameSequence > this.acknowledgedFrameSequence) {
-      this.acknowledgedFrameSequence = frameSequence;
+    if (frameSequence > this.storeAcknowledgedFrameSequence) {
+      this.storeAcknowledgedFrameSequence = frameSequence;
     }
+  }
+
+  /**
+   * Publishes the store's ACK watermark to the session. Called only once the
+   * response that carries the acknowledgement is about to be queued for the
+   * session, or is known not to be forwarded at all, and after any recovered
+   * tail retirement it triggered has recorded its abandoned range.
+   */
+  private publishAcknowledgedFrameSequence(): boolean {
+    let changed = false;
+    if (this.storeAcknowledgedFrameSequence > this.acknowledgedFrameSequence) {
+      this.acknowledgedFrameSequence = this.storeAcknowledgedFrameSequence;
+      changed = true;
+    }
+    // A retired tail does not move the watermark, but waiters on its frames
+    // still have to wake up to be rejected as abandoned.
+    if (this.abandonedFrameRanges.length !== this.notifiedAbandonedRanges) {
+      this.notifiedAbandonedRanges = this.abandonedFrameRanges.length;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * Wakes the session's ACK waiters for progress no forwarded response will
+   * report: an OK that covers only recovered frames, or one already delivered
+   * through a replacement connection. The session wakes waiters itself for
+   * every response it is handed, once it has processed it. The barrier keeps
+   * that order here too: the responses already queued are processed before
+   * this wake-up.
+   */
+  private notifyUnforwardedAcknowledgement(): void {
+    void this.messagesQueue.barrier().then(
+      () => this.acknowledgedFrameSequenceListener?.(),
+      // The queue failed because the transport did; the session's waiters
+      // are rejected through that failure instead.
+      () => undefined,
+    );
   }
 
   /** Inserts a frame and charges its bytes to the pending-backlog counter. */
@@ -2165,6 +2520,83 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       if (sequence > frameSequence) break;
       this.frames.delete(sequence);
       this.pendingReplayBytes -= frame.payloadLength;
+    }
+  }
+
+  /**
+   * Drops from the in-memory replay queue the durable-ACK polls that `newest`
+   * supersedes.
+   *
+   * A poll carries no rows, so replaying one achieves nothing, yet each used to
+   * stay queued until the durable prefix reached it. While an acknowledged
+   * commit waited for its durable upload -- during an object-store outage, say
+   * -- every keepalive tick therefore added a frame nothing could trim: about
+   * 18,000 an hour at the default 200ms, each OK taking time proportional to
+   * the backlog, and a reconnect resent them all.
+   *
+   * Only polls already handed to the socket go; the newest poll stays, so the
+   * published sequence remains one an ACK can still cover. A poll whose OK
+   * named table transactions -- QuestDB coalesced it with an earlier frame's --
+   * hands them to the newest frame still queued before it. Frames between the
+   * two are discarded polls, so retiring that frame once the targets are
+   * durable retires exactly what retiring the poll would have. Only a session
+   * tracking durable ACKs polls, and only there does a poll wait for the
+   * durable prefix. A persistent journal keeps its polls: only browsers poll,
+   * and they have no journal.
+   */
+  private discardSupersededDurableAckPolls(newest: ReplayFrame): void {
+    if (
+      !this.durableAckTracked ||
+      !(this.store instanceof QwpMemoryReplayStore)
+    ) {
+      return;
+    }
+    let retained: ReplayFrame | undefined;
+    for (const frame of this.frames.values()) {
+      if (frame === newest) break;
+      if (!frame.durableAckPoll || !frame.transmitted) {
+        retained = frame;
+        continue;
+      }
+      if (frame.durableTargets !== undefined && frame.durableTargets.size > 0) {
+        if (!retained) {
+          retained = frame;
+          continue;
+        }
+        retained.durableTargets = mergeDurableTargets(
+          retained.durableTargets,
+          frame.durableTargets,
+        );
+      }
+      frame.discarded = true;
+      this.frames.delete(frame.frameSequence);
+      this.pendingReplayBytes -= frame.payloadLength;
+      this.store.discard(frame.frameSequence);
+    }
+  }
+
+  /**
+   * Keeps the table transactions an OK names for a poll that has already been
+   * discarded. They belong to frames the OK covers, so the newest frame still
+   * queued before the poll takes them, as when a poll is discarded after its
+   * OK. With none queued, every frame the OK covers has already been retired,
+   * which in durable mode happens only once it is durable.
+   */
+  private keepDiscardedPollTargets(
+    poll: ReplayFrame,
+    targets: ReadonlyMap<string, bigint>,
+  ): void {
+    if (targets.size === 0) return;
+    let retained: ReplayFrame | undefined;
+    for (const frame of this.frames.values()) {
+      if (frame.frameSequence > poll.frameSequence) break;
+      retained = frame;
+    }
+    if (retained) {
+      retained.durableTargets = mergeDurableTargets(
+        retained.durableTargets,
+        targets,
+      );
     }
   }
 
@@ -2310,6 +2742,15 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       // connectLoop retries its failures, so route this one the same way.
       // Deterministic corruption still escapes and stays terminal.
       if (!isRetryableReconnectError(error)) throw error;
+      // The same currency check as the success path below. A reconnect that
+      // completed during the read has already replayed every transmitted frame
+      // and skipped this one, so marking it transmitted here would leave it
+      // with no sender at all: requestReconnect() ignores the dead connection,
+      // and the replacement's next cumulative ACK would delete its journal
+      // record. Retry the read against the current connection instead.
+      if (this.connection !== connection || this.generation !== generation) {
+        return false;
+      }
       // Nothing reached the wire, so the frame is deliberately kept off the
       // wire log; marking it transmitted is what puts it in replayInto()'s
       // resend set, exactly as the batch-cap branch above does.
@@ -2430,11 +2871,11 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
     this.connection = undefined;
     void failedConnection.close().catch(() => undefined);
-    const reconnecting = this.connectLoop(
-      cause,
-      true,
-      this.backgroundStoreAndForward ? "unbounded" : "configured",
-    );
+    // Unbounded, as in the Java, Rust and Python clients: once a session has
+    // connected, no configured limit ends it. reconnectMaxDurationMs bounds a
+    // synchronous initial connect only; an outage after that is retried until
+    // close() or a terminal error.
+    const reconnecting = this.connectLoop(cause, true, "unbounded");
     this.reconnectTask = reconnecting;
     try {
       await reconnecting;
@@ -2814,22 +3255,19 @@ function minimumDefined(
 }
 
 function validateReconnectPolicy(
-  maxAttempts: number,
   initialBackoffMs: number,
   maxBackoffMs: number,
-  maxDurationMs: number,
+  reconnectMaxDurationMs: number,
   maxFrameRejections: number,
   poisonMinEscalationWindowMs: number,
   catchUpCapGapMinEscalationWindowMs: number,
 ): void {
-  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 0) {
-    throw new RangeError(
-      "reconnect maxAttempts must be a non-negative safe integer",
-    );
-  }
-  validateQwpReconnectBackoffs({ initialBackoffMs, maxBackoffMs });
+  validateQwpIngressReconnectBackoffs({
+    reconnectInitialBackoffMs: initialBackoffMs,
+    reconnectMaxBackoffMs: maxBackoffMs,
+  });
   for (const [name, value] of [
-    ["maxDurationMs", maxDurationMs],
+    ["reconnectMaxDurationMs", reconnectMaxDurationMs],
     ["poisonMinEscalationWindowMs", poisonMinEscalationWindowMs],
     ["catchUpCapGapMinEscalationWindowMs", catchUpCapGapMinEscalationWindowMs],
   ] as const) {
@@ -2841,7 +3279,7 @@ function validateReconnectPolicy(
   }
   if (maxBackoffMs < initialBackoffMs) {
     throw new RangeError(
-      "reconnect maxBackoffMs must be greater than or equal to initialBackoffMs",
+      "reconnect reconnectMaxBackoffMs must be greater than or equal to reconnectInitialBackoffMs",
     );
   }
   if (!Number.isSafeInteger(maxFrameRejections) || maxFrameRejections < 1) {
@@ -2984,4 +3422,17 @@ function areTargetsCovered(
     if (watermark === undefined || watermark < target) return false;
   }
   return true;
+}
+
+/** The union of two durable target sets, keeping each table's higher target. */
+function mergeDurableTargets(
+  into: ReadonlyMap<string, bigint> | undefined,
+  from: ReadonlyMap<string, bigint>,
+): Map<string, bigint> {
+  const merged = new Map(into);
+  for (const [table, target] of from) {
+    const current = merged.get(table);
+    if (current === undefined || target > current) merged.set(table, target);
+  }
+  return merged;
 }

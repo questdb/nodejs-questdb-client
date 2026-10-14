@@ -267,7 +267,7 @@ describe("QwpNotificationDispatcher", () => {
  */
 describe("orphan-drained reconnect observers", () => {
   const event = {
-    kind: QWP_RECONNECT_EVENT_KIND.RECONNECTING,
+    kind: QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
     attempt: 1,
     timestampMs: 0,
   } as const;

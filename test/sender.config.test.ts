@@ -477,8 +477,8 @@ describe("Sender auth config checks suite", function () {
  * The QWP-shaped members on the root `Sender` all have an ILP fallback, and
  * every existing test drives them through a `ws::` sender, so the fallback was
  * reachable by every HTTP/TCP user and asserted by nothing. Mutating each
- * branch -- dropping the `flush()`, resolving `waitForAcknowledged()`, moving
- * the sentinels off `-1n`, removing the `writer()` guard -- left the whole CI
+ * branch -- dropping the `flush()`, resolving `waitForAck()`, moving the
+ * sentinels off `-1n`, removing the `writer()` guard -- left the whole CI
  * matrix green, including `test:dist` and all three `typecheck:dist` configs.
  */
 describe("Sender QWP members on ILP transports", function () {
@@ -513,10 +513,30 @@ describe("Sender QWP members on ILP transports", function () {
     await sender.close();
   });
 
+  it("flushes and resolves true from flushAndWait(), validating its timeout first", async function () {
+    const sent: Buffer[] = [];
+    const sender = await ilpSender(sent);
+    await sender.table("t").intColumn("i", 1).atNow();
+
+    await expect(sender.flushAndWait(Number.NaN)).rejects.toThrow(
+      "QWP ACK timeout must be finite and no greater than 2147483647",
+    );
+    expect(sent).toHaveLength(0);
+    // ILP exposes no ACK watermark, so the flush is the whole wait.
+    await expect(sender.flushAndWait()).resolves.toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].toString()).toBe("t i=1i\n");
+    // A zero timeout still flushes, as in the Java client's drain().
+    await sender.table("t").intColumn("i", 2).atNow();
+    await expect(sender.flushAndWait(0)).resolves.toBe(true);
+    expect(sent).toHaveLength(2);
+    await sender.close();
+  });
+
   it("reports no published or acknowledged sequence", async function () {
     const sender = await ilpSender([]);
     expect(sender.publishedSequence).toBe(-1n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
     await sender.close();
   });
 
@@ -524,16 +544,17 @@ describe("Sender QWP members on ILP transports", function () {
     const sender = await ilpSender([]);
     await expect(
       // @ts-expect-error - Testing an invalid argument type
-      sender.waitForAcknowledged(0),
+      sender.waitForAck(0),
     ).rejects.toThrow("QWP ACK target sequence must be a bigint");
-    await expect(sender.waitForAcknowledged(1n, 0)).rejects.toThrow(
-      "QWP ACK watermark timeout must be positive and finite",
+    await expect(sender.waitForAck(1n, Number.NaN)).rejects.toThrow(
+      "QWP ACK timeout must be finite and no greater than 2147483647",
     );
-    // A negative target is already satisfied, so it resolves on every
+    // A negative target is already satisfied, so it resolves true on every
     // transport -- this is what lets transport-agnostic code pass the -1n
     // sentinel straight back.
-    await expect(sender.waitForAcknowledged(-1n)).resolves.toBeUndefined();
-    await expect(sender.waitForAcknowledged(1n)).rejects.toThrow(
+    await expect(sender.waitForAck(-1n)).resolves.toBe(true);
+    await expect(sender.waitForAck(-1n, 0)).resolves.toBe(true);
+    await expect(sender.waitForAck(1n)).rejects.toThrow(
       "ACK sequence watermarks are available only with the QWP WebSocket transport",
     );
     await sender.close();

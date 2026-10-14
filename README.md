@@ -235,29 +235,41 @@ UDP datagrams are self-contained and split at row boundaries. UDP has no
 authentication, acknowledgements, transactions, retry, or store-and-forward and is
 not available in browsers. See the QWP guide for the lower-level Node UDP API.
 
-QWP `flush()` resolves at the local publication boundary by default in both
-Node.js and browsers, matching the Java QWP sender. Set
-`qwp.sender.awaitServerAck: true` to wait for QuestDB's protocol ACK instead,
-or `awaitDurableAck: true` to wait through durable upload. When Node QWP is
-configured with `qwp.webSocket.storeAndForward`, the publication boundary is
-the local durable journal, so the sender can accept flushes while QuestDB is
-offline and a background drainer reconnects and sends them in order.
+QWP `flush()` resolves at the local publication boundary in both Node.js and
+browsers, matching the Java QWP sender. Without a journal, that boundary is the
+bounded in-memory replay queue: a background drainer sends frames in order, even
+while the sender keeps accepting flushes during an outage. Call `flushAndWait()`
+to also wait until QuestDB has acknowledged everything the sender published; it
+resolves `false` when the acknowledgements make no progress for its timeout, and
+the rows then stay queued for delivery. With `requestDurableAck: true` that wait
+lasts through durable upload. When Node QWP is configured with
+`qwp.webSocket.storeAndForward`, the publication boundary is the local
+store-and-forward journal; only that mode survives a process restart. Its
+default `memory` durability relies on the OS page cache, which makes no
+power-loss promise; set `durability: "append"` (`sf_durability=append`) to make
+each append durable.
 Set `initialConnectMode` to `"off"` (the default), `"sync"`, or `"async"` to
-choose fail-fast, bounded blocking, or background startup. Supplying reconnect
-budget settings without an explicit mode promotes initial startup to `"sync"`,
-matching the Java client. The configuration-string
-equivalent is `initial_connect_retry`, used together with the store-and-forward
-options in `extraOptions.qwp`.
+choose fail-fast, bounded blocking, or background startup, with or without a
+journal. It is an ingress option (`qwp.webSocket` for `Sender.fromConfig()`),
+beside `storeAndForward` rather than inside it. Setting
+`reconnectMaxDurationMs`, `reconnectInitialBackoffMs` or `reconnectMaxBackoffMs`
+without an explicit mode promotes initial startup to `"sync"`, as in the Java
+client; the Rust and Python clients do so only for a standalone sender. The
+configuration-string equivalent is `initial_connect_retry`. The pooled client's
+`lazy_connect` selects `"async"` as well, but like the other QuestDB clients'
+standalone senders, a `Sender` ignores that key and logs a warning.
 Persistent frames are coalesced into fixed-size 4 MiB `.sfa` segments by default,
 using the shared Java/Rust/Python SFA envelope, manifest, ACK watermark, and symbol
 dictionary formats. The active segment and a pre-sized temporary hot spare keep open
 handles. A shared worker provisions spares, checkpoints files, and trims acknowledged
 segments. Recovery keeps only frame offsets in memory and reads payloads from disk as
 they are sent, so a large persisted backlog is not duplicated on the JavaScript heap.
-Set `drainOrphans: true` when sibling journal directories share a dedicated parent:
-the Node client scans and drains slots left by failed producer processes with bounded
-concurrency. Pooled QWP clients recover idle in-range and out-of-range `sender-N`
-slots automatically without raising `senderPoolMin`, including leftovers after
+Each journal is a slot below the configured directory, `<directory>/<senderId>` with
+`senderId` defaulting to `default`, as with `sf_dir` and `sender_id`. Set
+`drainOrphans: true` when producers share a dedicated directory: the Node client scans
+it and drains slots left by failed producer processes with bounded concurrency.
+Pooled QWP clients recover idle in-range and out-of-range `<senderId>-N` slots
+automatically without raising `senderPoolMin`, including leftovers after
 `senderPoolMax` is reduced. Terminally bad slots are marked `.failed` for inspection
 and can be re-enabled with
 `retryQwpNodeOrphanSlot()`. This persistent mode is Node-only; browser senders
@@ -266,7 +278,7 @@ use the in-memory replay boundary.
 Browser applications use the browser entry point, which has no Node.js
 dependencies. Cookies are supplied by the browser during a same-origin
 WebSocket upgrade. Browser and non-persistent Node ingress reconnect by default and
-retain unacknowledged frames in memory; set `reconnect: false` in the session options
+retain unacknowledged frames in memory; set `reconnect: false` in the sender options
 for a fixed connection. Only Node store-and-forward survives process failure.
 
 ```typescript
@@ -274,7 +286,7 @@ import { connectQwpBrowserSender } from "@questdb/browser-client";
 
 const url = new URL("/write/v4", location.href);
 url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+const sender = await connectQwpBrowserSender({ url, autoFlush: false });
 await sender.table("events").longColumn("value", 42n).atNow();
 await sender.flush();
 await sender.close();
@@ -282,21 +294,19 @@ await sender.close();
 
 For batches larger than the automatic flush threshold, transactional mode
 keeps each auto-flushed frame in an open server-side transaction. An explicit
-`flush()` (or its `commit()` alias) publishes the group-closing frame. Set
-`awaitServerAck: true`, or wait on the sequence returned by
+`flush()` publishes the group-closing frame. Call
+`flushAndWait()` instead, or wait on the sequence returned by
 `flushAndGetSequence()`, when the call must also observe the cumulative ACK.
 QuestDB guarantees this atomicity per table; a flush that contains multiple
 tables is not one cross-table transaction.
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  { url },
-  {
-    autoFlushRows: 10_000,
-    autoFlushBytes: 4 * 1024 * 1024,
-    transactional: true,
-  },
-);
+const sender = await connectQwpBrowserSender({
+  url,
+  autoFlushRows: 10_000,
+  autoFlushBytes: 4 * 1024 * 1024,
+  transactional: true,
+});
 
 for (const event of events) {
   await sender
@@ -305,21 +315,23 @@ for (const event of events) {
     .longColumn("value", event.value)
     .at(event.timestamp, "ms");
 }
-await sender.commit();
+await sender.flush();
 await sender.close();
 ```
 
 QWP `close()` publishes completed rows and waits up to 5 seconds for their
 committed-frame ACK watermark. Configure `closeFlushTimeoutMs` (or
-`close_flush_timeout_millis` in a `ws::` string); `0` publishes without waiting.
+`close_flush_timeout_millis` in a `ws::` string); `0` skips the ACK wait but
+still waits up to 5 seconds for RAM-backed frames to reach the socket, rejecting
+rather than silently dropping them if that deadline expires.
 An unfinished row is not completed implicitly.
 
 The server intentionally withholds ACKs for deferred frames until commit. The
 sender pipelines transactional auto-flushes without waiting for those ACKs,
-then publishes the group-closing frame at `flush()`/`commit()`. With
-`awaitServerAck` or `awaitDurableAck`, that call also waits for all covered
-ACKs; durable waiting starts only after the transaction commits. Closing
-without an explicit commit abandons the open transaction and logs a warning;
+then publishes the group-closing frame at `flush()`.
+`flushAndWait()` publishes the same frame and then waits for all covered ACKs;
+durable waiting starts only after the transaction commits. Closing
+without an explicit `flush()` abandons the open transaction and logs a warning;
 QuestDB rolls it back when the WebSocket disconnects.
 
 Ingress sessions expose browser-safe progress/error callbacks and immutable
@@ -332,29 +344,27 @@ import {
   createQwpBrowserSender,
 } from "@questdb/browser-client";
 
-const sender = createQwpBrowserSender(
-  { url },
-  { autoFlush: false },
-  {
-    reconnect: {
-      onEvent: (event) => console.info("QWP connection", event),
-    },
-    onProgress: (event) => {
-      if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
-        console.info("accepted through", event.sequence);
-      }
-    },
-    onError: (event) => console.error("QWP ingress", event.error),
-    onSenderError: (error) =>
-      console.error(
-        "QWP rejection",
-        error.category,
-        error.appliedPolicy,
-        error.fromFsn,
-        error.toFsn,
-      ),
+const sender = createQwpBrowserSender({
+  url,
+  autoFlush: false,
+  reconnect: {
+    onEvent: (event) => console.info("QWP connection", event),
   },
-);
+  onProgress: (event) => {
+    if (event.kind === QWP_INGRESS_PROGRESS_KIND.ACKNOWLEDGED) {
+      console.info("accepted through", event.sequence);
+    }
+  },
+  onError: (event) => console.error("QWP ingress", event.error),
+  onSenderError: (error) =>
+    console.error(
+      "QWP rejection",
+      error.category,
+      error.appliedPolicy,
+      error.fromFsn,
+      error.toFsn,
+    ),
+});
 
 await sender.connect();
 const snapshot = sender.metrics;
@@ -397,26 +407,24 @@ await bootstrapQwpBrowserSession({
   serviceAccount: "market_data_writer",
 });
 
-const sender = await connectQwpBrowserSender({ url }, { autoFlush: false });
+const sender = await connectQwpBrowserSender({ url, autoFlush: false });
 ```
 
 The bootstrap can also be attached to the connection options. It then runs
 before each initial, reconnect, or failover WebSocket attempt:
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  {
-    url,
-    sessionBootstrap: {
-      authentication: {
-        type: "basic",
-        username: "admin",
-        password: "quest",
-      },
+const sender = await connectQwpBrowserSender({
+  url,
+  sessionBootstrap: {
+    authentication: {
+      type: "basic",
+      username: "admin",
+      password: "quest",
     },
   },
-  { autoFlush: false },
-);
+  autoFlush: false,
+});
 ```
 
 The REST request uses `credentials: "include"`. The default bootstrap URL is
@@ -436,16 +444,14 @@ reconnect, and failover attempt. `auth` cannot be combined with
 `sessionBootstrap`:
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  {
-    url: "wss://questdb.example.com:9000/write/v4",
-    auth: async ({ signal }) => ({
-      type: "bearer",
-      token: await identityProvider.getAccessToken({ signal }),
-    }),
-  },
-  { autoFlush: false },
-);
+const sender = await connectQwpBrowserSender({
+  url: "wss://questdb.example.com:9000/write/v4",
+  auth: async ({ signal }) => ({
+    type: "bearer",
+    token: await identityProvider.getAccessToken({ signal }),
+  }),
+  autoFlush: false,
+});
 ```
 
 Browsers can request durable ingress acknowledgements without custom HTTP
@@ -454,25 +460,31 @@ server selected it before sending data. Browser keepalives use side-effect-free,
 table-less QWP poll frames because the WebSocket API does not expose
 protocol-level PING frames. A poll completes once published: durable progress
 arrives independently, and an open deferred transaction may intentionally
-prevent the server from sending a cumulative OK for that poll. Supplying
-`durableAckKeepaliveMs` requires durable negotiation (`requestDurableAck: true`,
-either explicit or implied by `awaitDurableAck`); manual polls and durable waits
-reject locally when the capability was not negotiated.
+prevent the server from sending a cumulative OK for that poll.
+`durableAckKeepaliveMs` takes effect only with `requestDurableAck: true` and is
+otherwise ignored, as in the Java and Rust clients. A server that does not select
+the durable-ACK subprotocol fails the connection with
+`QwpDurableAckUnavailableError`. Once it is negotiated, `flushAndWait()` waits for
+durable upload:
 
 ```typescript
-const sender = await connectQwpBrowserSender(
-  { url, requestDurableAck: true },
-  { autoFlush: false, awaitDurableAck: true },
-);
+const sender = await connectQwpBrowserSender({
+  url,
+  requestDurableAck: true,
+  autoFlush: false,
+});
+await sender.table("events").longColumn("value", 42n).atNow();
+const durable = await sender.flushAndWait();
 ```
 
 Browser durable ACKs are an in-memory delivery confirmation only. Persistent
 store-and-forward remains available exclusively through the Node.js entry
 point. In-memory ingress replay targets a 128 MiB cap and waits at most 30 seconds
 for ACK-driven trimming by default. A commit-bearing logical batch may temporarily
-raise usage to at most twice that target so a retained deferred prefix cannot deadlock;
+raise usage to at most twice that target so a retained deferred prefix cannot deadlock,
+and a durable-ACK poll is admitted above it for the same reason;
 tune `memoryReplayMaxBytes` and
-`memoryReplayAppendDeadlineMs` in the ingress session options when needed.
+`memoryReplayAppendDeadlineMs` in the sender options when needed.
 
 ### Zstd-compressed QWP egress
 
@@ -482,16 +494,12 @@ WebSocket upgrade. Raw batches remain the default for compatibility.
 ```typescript
 import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
-const session = await connectQwpNodeEgress(
-  {
-    url: "ws://127.0.0.1:9000/read/v1",
-    compression: "zstd",
-    compressionLevel: 3,
-  },
-  {
-    queryTimeoutMs: 30_000,
-  },
-);
+const session = await connectQwpNodeEgress({
+  url: "ws://127.0.0.1:9000/read/v1",
+  compression: "zstd",
+  compressionLevel: 3,
+  queryTimeoutMs: 30_000,
+});
 try {
   const query = await session.query("select * from trades", {
     initialCredit: 1024 * 1024,
@@ -537,14 +545,19 @@ reusable buffer pool. Views are invalid when their callback returns; copy a byte
 view with `.slice()` or call `batch.materialize()` inside the callback to retain
 data. Tune the default four-slot pool with the session's `bufferPoolSize`.
 
-`queryTimeoutMs` sets the session's default query deadline; a per-query
-`timeoutMs` overrides it, and zero disables the deadline. When a deadline
-expires, the client rejects iteration and `query.completion` with
-`QwpEgressQueryTimeoutError`, sends QWP `CANCEL`, and waits for the terminal
-server response before accepting another query on that connection. Breaking out
-of `for await` early cancels the query too. `cancelDrainTimeoutMs` bounds that
-wait (5 seconds by default); an unresponsive cancellation closes the connection
-with `QwpEgressQueryCancelTimeoutError` instead of wedging the session.
+`queryTimeoutMs` (connect-string key `query_timeout_ms`) sets the session's
+default query timeout; a per-query `timeoutMs` overrides it, and zero disables
+it. The timeout runs from the `query()` call and covers the whole query. When it
+expires, no further batch is delivered and the client sends QWP `CANCEL`; the
+outcome then follows the server's terminal response. A statement that completed
+anyway, or a result that ended with nothing withheld, succeeds; otherwise
+iteration and `query.completion` reject with `QwpEgressQueryTimeoutError`. If the
+server does not end the query within `cancelDrainTimeoutMs` (5 seconds by
+default), the caller gets `QwpEgressQueryTimeoutError` anyway while the
+connection keeps draining the query for up to one more period; an unresponsive
+server then closes the connection with `QwpEgressQueryCancelTimeoutError`
+instead of wedging the session. A new query waits for that drain rather than
+failing. Breaking out of `for await` early cancels the query too.
 To bound only the caller's wait without cancelling, use
 `await query.awaitCompletion(timeoutMs)`. It returns `false` on timeout and leaves
 the query active, matching Java `Completion.await(timeout, unit)`. The SERVER_INFO

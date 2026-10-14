@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
-  QwpNodeFileReplayStore,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
 } from "../../packages/nodejs-client/src";
@@ -14,15 +13,21 @@ import {
   QWP_COLUMN_TYPE,
   QWP_FLAG_DEFER_COMMIT,
   QWP_STATUS,
-  QwpBinaryConnection,
   QwpByteWriter,
   QwpConnectionCloseInfo,
   QwpHandshakeMetadata,
-  QwpIngressSession,
   QwpSender,
   QwpTableBuffer,
 } from "../../packages/client-core/src/qwp";
+// Internal: neither package root exports the sender factory.
+import { createQwpSender } from "../../packages/client-core/src/_qwp/sender";
+// Internal: neither package root exports these.
+import type { QwpBinaryConnection } from "../../packages/client-core/src/_qwp/_internal/binary-connection";
+import { QwpIngressSession } from "../../packages/client-core/src/_qwp/ingress-session";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
+import { waitForPublished } from "./publish-and-wait";
 
 const SEGMENT_HEADER_SIZE = 24;
 const FRAME_HEADER_SIZE = 8;
@@ -130,17 +135,17 @@ function okResponse(
 }
 
 function transactionalSender(session: QwpIngressSession): QwpSender {
-  return new QwpSender(async () => session, {
+  return createQwpSender(async () => session, {
     autoFlushRows: 1,
     autoFlushIntervalMs: 0,
     transactional: true,
-    awaitServerAck: true,
   });
 }
 
+/** Commits a one-row transaction and waits for the server to ACK it. */
 async function publishOneRowTransaction(sender: QwpSender): Promise<boolean> {
   await sender.table("events").longColumn("value", 42n).atNow();
-  return sender.commit();
+  return sender.flushAndWait();
 }
 
 /**
@@ -191,7 +196,7 @@ describe("QWP file replay store transaction liveness", () => {
     const connection = new DeferredAckConnection();
     const session = await QwpIngressSession.connect(async () => connection, {
       ackTimeoutMs: 5_000,
-      reconnect: { maxAttempts: 1 },
+      reconnect: {},
     });
     const sender = transactionalSender(session);
     try {
@@ -221,7 +226,7 @@ describe("QWP file replay store transaction liveness", () => {
     const connection = new DeferredAckConnection();
     const session = await QwpIngressSession.connect(async () => connection, {
       ackTimeoutMs: 5_000,
-      reconnect: { maxAttempts: 1 },
+      reconnect: {},
       replayStore: store,
     });
     const sender = transactionalSender(session);
@@ -240,7 +245,7 @@ describe("QWP file replay store transaction liveness", () => {
         totalBytes: SEGMENT_HEADER_SIZE + FRAME_HEADER_SIZE + maxSegmentBytes,
       });
 
-      const committing = sender.commit();
+      const committing = sender.flush();
       await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
       expect(connection.sent[1][5] & QWP_FLAG_DEFER_COMMIT).toBe(0);
       await expect(committing).resolves.toBe(true);
@@ -262,7 +267,7 @@ describe("QWP file replay store transaction liveness", () => {
       async () => measureConnection,
       {
         ackTimeoutMs: 5_000,
-        reconnect: { maxAttempts: 1 },
+        reconnect: {},
       },
     );
     const measureSender = transactionalSender(measureSession);
@@ -271,7 +276,7 @@ describe("QWP file replay store transaction liveness", () => {
         .table("events")
         .symbol("kind", "retained-symbol")
         .atNow();
-      await measureSender.commit();
+      await measureSender.flush();
       await measureSender
         .table("events")
         .stringColumn("payload", "x".repeat(256))
@@ -280,7 +285,7 @@ describe("QWP file replay store transaction liveness", () => {
         .table("events")
         .stringColumn("payload", "x".repeat(256))
         .atNow();
-      await measureSender.commit();
+      await measureSender.flush();
     } finally {
       await measureSender.close();
     }
@@ -323,14 +328,14 @@ describe("QWP file replay store transaction liveness", () => {
     const connection = new DeferredAckConnection();
     const session = await QwpIngressSession.connect(async () => connection, {
       ackTimeoutMs: 5_000,
-      reconnect: { maxAttempts: 1 },
+      reconnect: {},
       replayStore: store,
     });
     const sender = transactionalSender(session);
 
     try {
       await sender.table("events").symbol("kind", "retained-symbol").atNow();
-      await sender.commit();
+      await sender.flush();
       await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
       await expect(store.loadSymbolDictionary()).resolves.toContain(
         "retained-symbol",
@@ -344,7 +349,8 @@ describe("QWP file replay store transaction liveness", () => {
         .table("events")
         .stringColumn("payload", "x".repeat(256))
         .atNow();
-      await expect(sender.commit()).resolves.toBe(true);
+      // Commits and waits for the ACK, so every frame has reached the wire.
+      await expect(sender.flushAndWait()).resolves.toBe(true);
 
       expect(
         connection.sent.map(
@@ -684,7 +690,7 @@ describe("QWP file replay store transaction liveness", () => {
     const connection = new SilentConnection();
     const session = await QwpIngressSession.connect(async () => connection, {
       ackTimeoutMs: 5_000,
-      reconnect: { maxAttempts: 1 },
+      reconnect: {},
       replayStore: store,
       backgroundStoreAndForward: true,
       maxBatchSizeBytes: 128,
@@ -693,14 +699,9 @@ describe("QWP file replay store transaction liveness", () => {
     try {
       // Open a transaction the journal must keep until its commit arrives.
       await session.publishFrame(transactionFrame(60, true));
-      const sending = session.sendTablesWithPublication([splittableTable(3)]);
-      const acknowledged = sending.acknowledgement.catch(
-        (error: unknown) => error,
-      );
-      await expect(sending.publication).rejects.toBeInstanceOf(
-        QwpReplayStoreBatchTooLargeError,
-      );
-      await acknowledged;
+      await expect(
+        session.publishTables([splittableTable(3)]),
+      ).rejects.toBeInstanceOf(QwpReplayStoreBatchTooLargeError);
       // The rejection came from the split-batch preflight, not from a
       // per-frame append that only this shape of flush can reach.
       expect((preflights.mock.calls[0]?.[0] ?? []).length).toBeGreaterThan(1);
@@ -736,7 +737,7 @@ describe("QWP file replay store transaction liveness", () => {
     const connection = new DeferredAckConnection();
     const session = await QwpIngressSession.connect(async () => connection, {
       ackTimeoutMs: 5_000,
-      reconnect: { maxAttempts: 1 },
+      reconnect: {},
       replayStore: store,
       maxBatchSizeBytes: 128,
     });
@@ -751,15 +752,15 @@ describe("QWP file replay store transaction liveness", () => {
         totalBytes: 2 * segmentFileSize,
       });
 
-      const sending = session.sendTablesWithPublication([splittableTable(2)]);
-      await expect(sending.publication).resolves.toBeUndefined();
+      await expect(
+        session.publishTables([splittableTable(2)]),
+      ).resolves.toBeUndefined();
       expect(preflights.mock.calls[0][0].length).toBe(2);
       expect(connection.sent).toHaveLength(4);
       expect(store.metrics.totalBytes).toBeLessThanOrEqual(4 * segmentFileSize);
 
-      await expect(sending.acknowledgement).resolves.toMatchObject({
-        sequence: sending.sequence,
-      });
+      // Two deferred frames, then the two frames of the split commit.
+      await expect(waitForPublished(session)).resolves.toBe(3n);
       await vi.waitFor(() => expect(store.metrics.pendingRecords).toBe(0));
       expect(store.metrics.totalAppendTimeouts).toBe(0);
     } finally {
@@ -783,7 +784,7 @@ describe("QWP file replay store transaction liveness", () => {
     const connection = new DeferredAckConnection();
     const session = await QwpIngressSession.connect(async () => connection, {
       ackTimeoutMs: 5_000,
-      reconnect: { maxAttempts: 1 },
+      reconnect: {},
       replayStore: store,
       // Withhold every ACK, so nothing trims and only capacity decides.
       backgroundStoreAndForward: true,

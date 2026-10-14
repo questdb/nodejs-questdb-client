@@ -9,7 +9,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 
 const FIXTURE_DIRECTORY = join(process.cwd(), "test/qwp/fixtures/sfa");
 
