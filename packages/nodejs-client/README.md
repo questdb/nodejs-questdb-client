@@ -231,14 +231,12 @@ query at a time.
 ```typescript
 import { connectQwpNodeEgress } from "@questdb/nodejs-client";
 
-const session = await connectQwpNodeEgress(
-  {
-    url: "wss://questdb.example:9000/read/v1",
-    authorization: `Bearer ${process.env.QUESTDB_TOKEN}`,
-    compression: "zstd",
-  },
-  { queryTimeoutMs: 30_000 },
-);
+const session = await connectQwpNodeEgress({
+  url: "wss://questdb.example:9000/read/v1",
+  authorization: `Bearer ${process.env.QUESTDB_TOKEN}`,
+  compression: "zstd",
+  queryTimeoutMs: 30_000,
+});
 
 try {
   const query = await session.query(
@@ -284,8 +282,9 @@ const sender = await Sender.fromConfig(
 await sender.connect();
 ```
 
-Give every active producer its own journal directory. Durability,
-backpressure, capacity, orphan recovery, and shutdown behavior are covered in
+Give every active producer its own journal: its own `sf_dir`, or its own
+`sender_id` below a shared one. Durability, backpressure, capacity, orphan
+recovery, and shutdown behavior are covered in
 the [store-and-forward section of the QWP guide](https://github.com/questdb/nodejs-questdb-client/blob/main/QWP.md#store-and-forward-node-only).
 
 ## Error handling and shutdown

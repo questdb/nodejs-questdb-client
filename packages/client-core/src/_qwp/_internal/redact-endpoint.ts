@@ -20,17 +20,36 @@ export function redactQwpEndpoint(endpoint: string | URL): string {
     // A malformed absolute URL can still contain live userinfo (for example
     // `wss://user:password@`). URL parsing cannot safely distinguish that from
     // harmless text, so redact the whole authority-shaped value rather than
-    // returning the credential verbatim. Relative browser endpoints contain
-    // no `://` authority and remain useful in diagnostics.
+    // returning the credential verbatim.
     const scheme = /^([a-z][a-z\d+.-]*):\/\//i.exec(text)?.[1];
     return scheme && text.includes("@")
       ? `${scheme}://<redacted>@<invalid-url>`
-      : text;
+      : redactLeadingUserinfo(text);
   }
-  if (!url.username && !url.password) return text;
-  url.username = "";
-  url.password = "";
-  return url.href;
+  if (url.username || url.password) {
+    url.username = "";
+    url.password = "";
+    return url.href;
+  }
+  // An endpoint written without its `ws://` still parses, but with no
+  // authority: `admin:quest@db:9000` reads as scheme `admin` and an opaque
+  // path that carries the password, so URL parsing finds no userinfo to strip.
+  return url.host === "" ? redactLeadingUserinfo(text) : text;
+}
+
+/**
+ * Redacts what reads as userinfo at the front of an endpoint that has no
+ * parsed authority: `user:pass@host` or `//user:pass@host`, up to the last
+ * `@`, as an authority's userinfo would be delimited. Relative browser
+ * endpoints, which start with a single `/`, carry none and remain useful in
+ * diagnostics.
+ */
+function redactLeadingUserinfo(text: string): string {
+  const protocolRelative = text.startsWith("//");
+  if (text.startsWith("/") && !protocolRelative) return text;
+  const at = text.lastIndexOf("@");
+  if (at < 0) return text;
+  return `${protocolRelative ? "//" : ""}<redacted>@${text.slice(at + 1)}`;
 }
 
 /**

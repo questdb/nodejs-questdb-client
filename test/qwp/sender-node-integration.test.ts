@@ -11,9 +11,10 @@ import {
   QWP_MAGIC,
   QWP_STATUS,
   QwpByteWriter,
-  QwpNodeFileReplayStore,
   decodeQwpIngressSymbolDictionaryDelta,
 } from "../../packages/nodejs-client/src";
+// Internal: the package root does not export the store-and-forward journal.
+import { QwpNodeFileReplayStore } from "../../packages/nodejs-client/src/qwp-node/file-replay-store";
 
 function okResponse(sequence: bigint, table: string): Uint8Array {
   const encodedTable = new TextEncoder().encode(table);
@@ -50,27 +51,44 @@ describe("Sender QWP integration", () => {
         if (level === "warn") target.push(String(message));
       }) as never;
 
+    // target and zone are among them: they route query sessions, and writes
+    // can only land on the primary, which a Sender reaches whatever they say.
     const sender = await Sender.fromConfig(
       "ws::addr=localhost:9000;compression=zstd;query_pool_min=4;" +
-        "target=primary;auto_flush_rows=5000;",
+        "target=primary;zone=eu;auto_flush_rows=5000;",
       { log: collect(warnings) },
     );
     await sender.close();
     expect(warnings).toEqual([
-      "Sender ignores QWP configuration keys: compression, query_pool_min; " +
-        "they configure QWP egress and the connection pools, which only " +
-        "connectQwpNodeClient() builds",
+      "Sender ignores QWP configuration keys: compression, query_pool_min, " +
+        "target, zone; they configure QWP egress and the connection pools, " +
+        "which only connectQwpNodeClient() builds",
     ]);
 
     // Ingress-side keys on their own stay silent.
     const quiet: string[] = [];
     const second = await Sender.fromConfig(
-      "ws::addr=localhost:9000;target=primary;zone=eu;" +
-        "lazy_connect=on;auto_flush_rows=5000;",
+      "ws::addr=localhost:9000;sender_id=producer_1;" +
+        "initial_connect_retry=async;auto_flush_rows=5000;",
       { log: collect(quiet) },
     );
     await second.close();
     expect(quiet).toEqual([]);
+
+    // lazy_connect is a pooled-client flag in every QuestDB client, so a
+    // Sender ignores it like the other pool keys and names the key it wants.
+    const lazy: string[] = [];
+    const lazySender = await Sender.fromConfig(
+      "ws::addr=localhost:9000;lazy_connect=true;auto_flush_rows=5000;",
+      { log: collect(lazy) },
+    );
+    await lazySender.close();
+    expect(lazy).toEqual([
+      "Sender ignores QWP configuration key: lazy_connect; " +
+        "they configure QWP egress and the connection pools, which only " +
+        "connectQwpNodeClient() builds; set initial_connect_retry=async " +
+        "for a Sender that must start without a server",
+    ]);
 
     // The failover keys are not among them. They used to ride in the list
     // above on the premise that ingress honours them, but QWP.md scopes them
@@ -139,6 +157,44 @@ describe("Sender QWP integration", () => {
     }
   });
 
+  it("ignores lazy_connect, as the other clients' standalone senders do", async () => {
+    const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve, reject) => {
+      reservation.once("listening", resolve);
+      reservation.once("error", reject);
+    });
+    const port = (reservation.address() as AddressInfo).port;
+    await new Promise<void>((resolve, reject) =>
+      reservation.close((error) => (error ? reject(error) : resolve())),
+    );
+    const silent = () => undefined;
+    // A Sender that applied lazy_connect started in the background, so this
+    // connect() resolved against a port nothing listens on. Java, Rust and
+    // Python standalone senders start fail-fast with the same string.
+    const sender = await Sender.fromConfig(
+      `ws::addr=127.0.0.1:${port};lazy_connect=on;`,
+      { log: silent, qwp: { webSocket: { connectTimeoutMs: 1_000 } } },
+    );
+    try {
+      await expect(sender.connect()).rejects.toThrow();
+    } finally {
+      await sender.close().catch(() => undefined);
+    }
+
+    // Nor does a Sender enforce the pooled client's lazy_connect contract:
+    // it reads neither key the contract would reject.
+    for (const conflict of [
+      "query_pool_min=1;",
+      "initial_connect_retry=sync;",
+    ]) {
+      const tolerant = await Sender.fromConfig(
+        `ws::addr=127.0.0.1:${port};lazy_connect=on;${conflict}`,
+        { log: silent },
+      );
+      await tolerant.close();
+    }
+  });
+
   it("applies fail-fast persistent startup from the configuration string", async () => {
     const reservation = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await new Promise<void>((resolve, reject) => {
@@ -156,13 +212,12 @@ describe("Sender QWP integration", () => {
         qwp: {
           webSocket: {
             connectTimeoutMs: 100,
-          },
-          session: {
+            // A startup budget: initial_connect_retry=off still fails on the
+            // first attempt.
             reconnect: {
-              maxAttempts: 0,
-              maxDurationMs: 0,
-              initialBackoffMs: 0,
-              maxBackoffMs: 0,
+              reconnectMaxDurationMs: 60_000,
+              reconnectInitialBackoffMs: 0,
+              reconnectMaxBackoffMs: 0,
             },
           },
         },
@@ -213,12 +268,12 @@ describe("Sender QWP integration", () => {
       .atNow();
     await expect(sender.flushAndGetSequence()).resolves.toBe(0n);
     expect(sender.publishedSequence).toBe(0n);
-    expect(sender.acknowledgedSequence).toBe(-1n);
+    expect(sender.ackedSequence).toBe(-1n);
     await vi.waitFor(() => expect(acknowledge).toBeTypeOf("function"));
-    const acknowledged = sender.waitForAcknowledged(0n, 1_000);
+    const acknowledged = sender.waitForAck(0n, 1_000);
     acknowledge!();
-    await expect(acknowledged).resolves.toBeUndefined();
-    expect(sender.acknowledgedSequence).toBe(0n);
+    await expect(acknowledged).resolves.toBe(true);
+    expect(sender.ackedSequence).toBe(0n);
     await sender.close();
 
     expect(authorization).toBe("Bearer secret");
@@ -240,6 +295,56 @@ describe("Sender QWP integration", () => {
     ).toBe(QWP_MAGIC);
   });
 
+  it("waits for the server ACK in flushAndWait() and reports a timeout as false", async () => {
+    const frames: Uint8Array[] = [];
+    let acknowledge: (() => void) | undefined;
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("headers", (headers) => {
+      headers.push("X-QWP-Version: 1");
+    });
+    server.on("connection", (socket) => {
+      socket.on("message", (payload) => {
+        frames.push(new Uint8Array(payload as Buffer));
+        const sequence = BigInt(frames.length - 1);
+        acknowledge = () => socket.send(okResponse(sequence, "trades"));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("listening", resolve);
+      server!.once("error", reject);
+    });
+    const { port } = server.address() as AddressInfo;
+
+    const sender = await Sender.fromConfig(
+      `ws::addr=127.0.0.1:${port};auto_flush=off`,
+    );
+    try {
+      await sender.table("trades").symbol("symbol", "ETH-USD").atNow();
+      let settled = false;
+      const waiting = sender.flushAndWait(5_000).finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(acknowledge).toBeTypeOf("function"));
+      expect(settled).toBe(false);
+      acknowledge!();
+      await expect(waiting).resolves.toBe(true);
+      expect(sender.ackedSequence).toBe(0n);
+
+      // Unacknowledged, the wait runs out and reports false. The frame stays
+      // queued, so the next wait needs no second copy of it.
+      acknowledge = undefined;
+      await sender.table("trades").symbol("symbol", "BTC-USD").atNow();
+      await expect(sender.flushAndWait(50)).resolves.toBe(false);
+      await vi.waitFor(() => expect(acknowledge).toBeTypeOf("function"));
+      const retried = sender.flushAndWait(5_000);
+      acknowledge!();
+      await expect(retried).resolves.toBe(true);
+      expect(frames).toHaveLength(2);
+    } finally {
+      await sender.close();
+    }
+  });
+
   it("uses the unified cluster vocabulary and fails over between addr entries", async () => {
     let authorization: string | undefined;
     let clientId: string | undefined;
@@ -248,6 +353,10 @@ describe("Sender QWP integration", () => {
     server.on("headers", (headers) => {
       headers.push("X-QWP-Version: 1");
       headers.push("X-QWP-Max-Batch-Size: 1048576");
+      // QuestDB advertises the role on every write upgrade it completes. Read
+      // as an ingress role filter, the target=replica below once refused this
+      // primary, and the Sender never connected.
+      headers.push("X-QuestDB-Role: PRIMARY");
     });
     server.on("connection", (_socket, request) => {
       authorization = request.headers.authorization;
@@ -448,7 +557,7 @@ describe("Sender QWP integration", () => {
     await expect(sender.close()).resolves.toBeUndefined();
     expect(frames).toHaveLength(1);
     expect(ackSent).toBe(true);
-    expect(sender.acknowledgedSequence).toBe(0n);
+    expect(sender.ackedSequence).toBe(0n);
   });
 
   it("releases the store-and-forward slot before close() returns", async () => {
@@ -533,7 +642,7 @@ describe("Sender QWP integration", () => {
       name: "QwpSenderCloseTimeoutError",
       timeoutMs: 25,
       targetSequence: 0n,
-      acknowledgedSequence: -1n,
+      ackedSequence: -1n,
     });
     expect(frames).toHaveLength(1);
   });

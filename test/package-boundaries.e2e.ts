@@ -360,24 +360,27 @@ describe("public npm package boundaries", () => {
       // input mode -- `--input-type=module --eval`, or the same flag with the
       // script piped on stdin -- used to make the worker throw `require is not
       // defined in ES module scope` before installing its message listener,
-      // and every QwpNodeFileReplayStore.load() in the process then failed to
-      // provision its first hot spare.
+      // and every journal load in the process then failed to provision its
+      // first hot spare. The journal is internal, so a sender opens it: an
+      // async startup loads it, hot spare included, before connect() resolves,
+      // and leaves connecting to the endpoint nothing listens on to the
+      // background.
       const script = [
         'import { mkdtemp, rm } from "node:fs/promises";',
         'import { tmpdir } from "node:os";',
         'import path from "node:path";',
-        'const { QwpNodeFileReplayStore } = await import("@questdb/nodejs-client");',
+        'const { createQwpNodeSender } = await import("@questdb/nodejs-client");',
         'const directory = await mkdtemp(path.join(tmpdir(), "questdb-sf-esm-"));',
-        "const store = new QwpNodeFileReplayStore({",
-        "  directory,",
-        "  maxSegmentBytes: 64,",
-        "  maxBytes: 4096,",
+        "const sender = createQwpNodeSender({",
+        '  url: "ws://127.0.0.1:1/write/v4",',
+        '  initialConnectMode: "async",',
+        "  storeAndForward: { directory, maxSegmentBytes: 64, maxBytes: 4096 },",
         "});",
         "try {",
-        "  await store.load();",
+        "  await sender.connect();",
         '  console.log("loaded");',
         "} finally {",
-        "  await store.close();",
+        "  await sender.close();",
         "  await rm(directory, { recursive: true, force: true });",
         "}",
       ].join("\n");

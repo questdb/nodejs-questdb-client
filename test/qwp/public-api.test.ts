@@ -71,14 +71,11 @@ const sharedRuntimeContract = [
   "QwpEgressQueryCancelTimeoutError",
   "QwpEgressQueryError",
   "QwpEgressQueryTimeoutError",
-  "QwpEgressReplayRequiredError",
   "QwpEgressSession",
   "QwpEgressSessionClosedError",
   "QwpFailoverError",
   "QwpIngressAckAbandonedError",
-  "QwpIngressAckTimeoutError",
   "QwpIngressNackError",
-  "QwpIngressSession",
   "QwpIngressSessionClosedError",
   "QwpMemoryReplayAppendTimeoutError",
   "QwpMemoryReplayBatchTooLargeError",
@@ -180,11 +177,8 @@ const browserRuntimeContract = [
   "bootstrapQwpBrowserSession",
   "connectQwpBrowserClient",
   "connectQwpBrowserEgress",
-  "connectQwpBrowserIngress",
   "connectQwpBrowserSender",
-  "connectQwpBrowserWebSocket",
   "createQwpBrowserClient",
-  "createQwpBrowserConnectionFactory",
   "createQwpBrowserSender",
 ] as const;
 
@@ -194,9 +188,6 @@ const nodeRuntimeContract = [
   "QWP_ORPHAN_FAILED_SENTINEL",
   "QWP_SF_BACKPRESSURE_POLICY",
   "QWP_SF_DURABILITY",
-  "QwpNodeFileReplayStore",
-  "QwpNodeOrphanDrainer",
-  "QwpNodeUdpSession",
   "QwpReplayStoreAppendTimeoutError",
   "QwpReplayStoreBatchTooLargeError",
   "QwpReplayStoreCheckpointError",
@@ -212,18 +203,13 @@ const nodeRuntimeContract = [
   "QwpVersionMismatchError",
   "connectQwpNodeClient",
   "connectQwpNodeEgress",
-  "connectQwpNodeIngress",
   "connectQwpNodeSender",
-  "connectQwpNodeUdp",
   "connectQwpNodeUdpSender",
-  "connectQwpNodeWebSocket",
   "createQwpNodeClient",
-  "createQwpNodeConnectionFactory",
   "createQwpNodeSender",
   "createQwpNodeUdpSender",
   "parseQwpNodeClientConfig",
   "retryQwpNodeOrphanSlot",
-  "scanQwpNodeOrphanSlots",
 ] as const;
 
 /**
@@ -295,6 +281,109 @@ describe("QWP public API contract", () => {
       nodeRuntimeContract,
       ilpRuntimeContract,
     );
+  });
+
+  it("keeps the ingress session layer internal", () => {
+    // As in the Java, Rust and Python clients, applications publish through a
+    // sender. The session below it and the factories that return one are
+    // internal, so re-exposing them has to remove this test rather than merely
+    // extend the contract above.
+    for (const api of [shared, browser, node]) {
+      for (const name of [
+        "QwpIngressSession",
+        "connectQwpBrowserIngress",
+        "connectQwpNodeIngress",
+      ]) {
+        expect(api, `${name} must stay internal`).not.toHaveProperty(name);
+      }
+    }
+  });
+
+  it("keeps the orphan drainer and the UDP session internal", () => {
+    // As in the other QuestDB clients, orphan recovery is configured through
+    // the store-and-forward options and observed through onOrphanDrainEvent,
+    // and UDP rows are published through a sender. The drainer, its slot
+    // scanner, and the UDP session with the factory that returned one are
+    // internal, so re-exposing them has to remove this test rather than merely
+    // extend the contract above.
+    for (const name of [
+      "QwpNodeOrphanDrainer",
+      "QwpNodeUdpSession",
+      "connectQwpNodeUdp",
+      "scanQwpNodeOrphanSlots",
+    ]) {
+      expect(node, `${name} must stay internal`).not.toHaveProperty(name);
+    }
+  });
+
+  it("keeps the store-and-forward journal internal", () => {
+    // Store-and-forward is configured rather than constructed: storeAndForward
+    // builds the journal, and no option takes another replay store. Its
+    // policies, errors and data-loss reports stay public; re-exposing the
+    // journal has to remove this test rather than merely extend the contract
+    // above.
+    expect(
+      node,
+      "QwpNodeFileReplayStore must stay internal",
+    ).not.toHaveProperty("QwpNodeFileReplayStore");
+  });
+
+  it("keeps sender construction internal", () => {
+    // Senders come from the runtime factories, the Node Sender and the pooled
+    // clients. The factory below them is internal, and the constructor takes a
+    // token only it holds, so a sender cannot be built over a session factory
+    // from outside.
+    for (const api of [shared, browser, node]) {
+      expect(api, "createQwpSender must stay internal").not.toHaveProperty(
+        "createQwpSender",
+      );
+      const construct = api.QwpSender as unknown as new (
+        ...args: unknown[]
+      ) => unknown;
+      expect(() => new construct(async () => undefined)).toThrow(
+        /must be created by a runtime factory/,
+      );
+    }
+  });
+
+  it("keeps query-session construction internal", () => {
+    // A query session is the query API, so the class stays public, but it is
+    // opened by connectQwp*Egress() and the pooled clients. The factories below
+    // them are internal, the class has no static connect(), and its
+    // constructor takes a token only the runtime adapters hold.
+    for (const api of [shared, browser, node]) {
+      for (const name of [
+        "connectQwpEgressSession",
+        "createQwpEgressSession",
+      ]) {
+        expect(api, `${name} must stay internal`).not.toHaveProperty(name);
+      }
+      expect(api.QwpEgressSession).not.toHaveProperty("connect");
+      const construct = api.QwpEgressSession as unknown as new (
+        ...args: unknown[]
+      ) => unknown;
+      expect(() => new construct({})).toThrow(
+        /must be created by connectQwpNodeEgress\(\)/,
+      );
+    }
+  });
+
+  it("keeps the raw connection helpers internal", () => {
+    // Applications connect through a sender, a query session or the pooled
+    // client, each of which opens its own connections. The raw WebSocket
+    // connectors and endpoint walkers below them are internal, so re-exposing
+    // them has to remove this test rather than merely extend the contract
+    // above.
+    for (const api of [shared, browser, node]) {
+      for (const name of [
+        "connectQwpBrowserWebSocket",
+        "connectQwpNodeWebSocket",
+        "createQwpBrowserConnectionFactory",
+        "createQwpNodeConnectionFactory",
+      ]) {
+        expect(api, `${name} must stay internal`).not.toHaveProperty(name);
+      }
+    }
   });
 
   it("rejects out-of-int64 Gorilla timestamps through every public root", () => {

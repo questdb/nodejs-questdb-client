@@ -18,6 +18,10 @@ import { afterEach, describe, expect, it } from "vitest";
  * and no `.lock.pid` left by an earlier producer, so the state a contender
  * actually meets in production is structurally unreachable there.
  *
+ * The journal is internal, so each child drives it through a public sender
+ * whose endpoint never answers: every flushed row stays journalled, one frame
+ * per row.
+ *
  * Requires a build. Run with `pnpm test:dist`.
  */
 
@@ -168,9 +172,7 @@ describe("QWP store-and-forward across processes", () => {
     const directory = await slot();
     const holder = await track(directory);
     expect((await holder.send("open")).ok).toBe(true);
-    expect((await holder.send("append", { sequence: 0, marker: "A" })).ok).toBe(
-      true,
-    );
+    expect((await holder.send("append", { marker: "A" })).ok).toBe(true);
 
     // Long enough for several heartbeats: a live holder must never age out.
     await new Promise((resolve) => setTimeout(resolve, BEAT_SETTLE_MS));
@@ -188,10 +190,8 @@ describe("QWP store-and-forward across processes", () => {
     const directory = await slot();
     const crashing = await track(directory);
     expect((await crashing.send("open")).ok).toBe(true);
-    for (let sequence = 0; sequence < 5; sequence++) {
-      expect(
-        (await crashing.send("append", { sequence, marker: "A" })).ok,
-      ).toBe(true);
+    for (let row = 0; row < 5; row++) {
+      expect((await crashing.send("append", { marker: "A" })).ok).toBe(true);
     }
     await crashing.kill();
 
@@ -207,10 +207,8 @@ describe("QWP store-and-forward across processes", () => {
     const directory = await slot();
     const stalled = await track(directory);
     expect((await stalled.send("open")).ok).toBe(true);
-    for (let sequence = 0; sequence < 5; sequence++) {
-      expect((await stalled.send("append", { sequence, marker: "A" })).ok).toBe(
-        true,
-      );
+    for (let row = 0; row < 5; row++) {
+      expect((await stalled.send("append", { marker: "A" })).ok).toBe(true);
     }
 
     await simulateLapsedHeartbeat(directory);

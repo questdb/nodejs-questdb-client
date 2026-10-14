@@ -46,7 +46,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     const options = qwpNode.parseQwpNodeClientConfig(
       "wss::addr=localhost;tls_verify=on;",
     );
-    expect(agentTlsOptions(options.ingress.agent).rejectUnauthorized).toBe(
+    expect(agentTlsOptions(options.cluster.agent).rejectUnauthorized).toBe(
       true,
     );
   });
@@ -55,7 +55,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     const options = qwpNode.parseQwpNodeClientConfig(
       `wss::addr=localhost;tls_roots=${CA_PATH};`,
     );
-    const tls = agentTlsOptions(options.ingress.agent);
+    const tls = agentTlsOptions(options.cluster.agent);
     expect(tls.rejectUnauthorized).toBe(true);
     expect(tls.ca).toEqual(readFileSync(CA_PATH));
     expect(tls.pfx).toBeUndefined();
@@ -89,7 +89,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
           {
             hostname: "127.0.0.1",
             port,
-            agent: options.ingress.agent as https.Agent,
+            agent: options.cluster.agent as https.Agent,
           },
           (response) => {
             response.resume();
@@ -126,7 +126,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     const options = qwpNode.parseQwpNodeClientConfig(
       "wss::addr=localhost;tls_verify=unsafe_off;",
     );
-    expect(agentTlsOptions(options.ingress.agent).rejectUnauthorized).toBe(
+    expect(agentTlsOptions(options.cluster.agent).rejectUnauthorized).toBe(
       false,
     );
   });
@@ -135,7 +135,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     // No explicit agent means the WebSocket upgrade uses node's default, which
     // verifies -- not an agent that silently turns verification off.
     const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;");
-    expect(options.ingress.agent).toBeUndefined();
+    expect(options.cluster.agent).toBeUndefined();
   });
 
   it("rejects a caller agent combined with tls_verify", () => {
@@ -143,7 +143,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     // dropped the verification tls_verify asked for. Reject, don't drop.
     expect(() =>
       qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;tls_verify=on;", {
-        webSocket: { agent: new https.Agent() },
+        cluster: { agent: new https.Agent() },
       }),
     ).toThrow(/custom QWP WebSocket agent cannot be combined/);
   });
@@ -152,9 +152,36 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     expect(() =>
       qwpNode.parseQwpNodeClientConfig(
         `wss::addr=localhost;tls_roots=${CA_PATH};`,
-        { webSocket: { agent: new https.Agent() } },
+        { cluster: { agent: new https.Agent() } },
       ),
     ).toThrow(/custom QWP WebSocket agent cannot be combined/);
+  });
+
+  it("rejects one side's caller agent combined with the string's TLS keys", () => {
+    // A side's agent replaces the cluster's for that side alone, so accepting
+    // it applied the string's verification to the other side only: tls_roots
+    // was dropped for one side, or tls_verify=on lost to an agent that skips
+    // verification and then sent that side's credentials anyway.
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig(
+        `wss::addr=localhost;tls_roots=${CA_PATH};`,
+        { ingress: { agent: new https.Agent() } },
+      ),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined.*ingress\.agent/);
+    expect(() =>
+      qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;tls_verify=on;", {
+        egress: { agent: new https.Agent({ rejectUnauthorized: false }) },
+      }),
+    ).toThrow(/custom QWP WebSocket agent cannot be combined.*egress\.agent/);
+  });
+
+  it("keeps one side's caller agent when no TLS keys are set", () => {
+    const agent = new https.Agent();
+    const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;", {
+      egress: { agent },
+    });
+    expect(options.egress?.agent).toBe(agent);
+    expect(options.cluster.agent).toBeUndefined();
   });
 
   it("keeps a caller agent when no TLS keys are set", () => {
@@ -162,9 +189,9 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     // it passes through unchanged rather than being rejected.
     const agent = new https.Agent();
     const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;", {
-      webSocket: { agent },
+      cluster: { agent },
     });
-    expect(options.ingress.agent).toBe(agent);
+    expect(options.cluster.agent).toBe(agent);
   });
 
   it("promotes a top-level https agent onto the wss connect string", async () => {
@@ -172,7 +199,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
     const options = await SenderOptions.fromConfig("wss::addr=localhost;", {
       agent,
     });
-    expect(qwpConfig(options)?.ingress.agent).toBe(agent);
+    expect(qwpConfig(options)?.agent).toBe(agent);
   });
 
   it("promotes a tunnelling agent onto wss, like qwp.webSocket.agent does", async () => {
@@ -191,7 +218,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
       agent,
       log: logger,
     });
-    expect(qwpConfig(options)?.ingress.agent).toBe(agent);
+    expect(qwpConfig(options)?.agent).toBe(agent);
     expect(logger).not.toHaveBeenCalledWith(
       "warn",
       expect.stringMatching(/Ignoring/),
@@ -209,7 +236,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
       agent,
       log: logger,
     });
-    expect(qwpConfig(options)?.ingress.agent).toBe(agent);
+    expect(qwpConfig(options)?.agent).toBe(agent);
   });
 
   it("still refuses an https agent on a cleartext ws connect string", async () => {
@@ -218,7 +245,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
       agent: new https.Agent(),
       log: logger,
     });
-    expect(qwpConfig(options)?.ingress.agent).toBeUndefined();
+    expect(qwpConfig(options)?.agent).toBeUndefined();
     expect(logger).toHaveBeenCalledWith(
       "warn",
       expect.stringMatching(
@@ -235,7 +262,7 @@ describe("QWP wss:: connect-string verifies the server certificate", () => {
         agent,
         log: logger,
       });
-      expect(qwpConfig(options)?.ingress.agent).toBeUndefined();
+      expect(qwpConfig(options)?.agent).toBeUndefined();
       expect(logger).toHaveBeenCalledWith(
         "warn",
         expect.stringMatching(
@@ -532,7 +559,7 @@ describe("QWP programmatic wss sender applies TLS and authorization", () => {
       expect(
         () =>
           qwpNode.parseQwpNodeClientConfig(configuration, {
-            webSocket: extraOptions.qwp.webSocket,
+            cluster: extraOptions.qwp.webSocket,
           }),
         configuration,
       ).toThrow(/cannot be combined with 'username'\/'password' or 'token'/);
@@ -558,15 +585,15 @@ describe("QWP wss accepts a tunnelling upgrade agent", () => {
     expect(agent).not.toBeInstanceOf(https.Agent);
 
     const options = qwpNode.parseQwpNodeClientConfig("wss::addr=localhost;", {
-      webSocket: { agent },
+      cluster: { agent },
     });
-    expect(options.ingress.agent).toBe(agent);
+    expect(options.cluster.agent).toBe(agent);
   });
 
   it("still rejects an https.Agent on a cleartext ws endpoint", () => {
     expect(() =>
       qwpNode.parseQwpNodeClientConfig("ws::addr=localhost;", {
-        webSocket: { agent: new https.Agent() },
+        cluster: { agent: new https.Agent() },
       }),
     ).toThrow(/must be a plain Node\.js http\.Agent/);
   });
@@ -690,9 +717,7 @@ describe("QWP failover endpoints share the preferred scheme", () => {
         `${schema}::addr=primary.example:9000;`,
         { qwp: { webSocket: { failoverUrls: [failover] } } },
       );
-      expect(qwpConfig(options)?.ingress.failoverUrls?.map(String)).toEqual([
-        failover,
-      ]);
+      expect(qwpConfig(options)?.failoverUrls?.map(String)).toEqual([failover]);
     }
   });
 });
@@ -714,7 +739,7 @@ describe("QWP reports a permanent upgrade-argument fault immediately", () => {
       port: 1,
       token: "header.payload.signature\n",
       log: () => undefined,
-      qwp: { session: { reconnect: { maxDurationMs: 30_000 } } },
+      qwp: { webSocket: { reconnect: { reconnectMaxDurationMs: 30_000 } } },
     } as never);
     const started = Date.now();
     await expect(sender.connect()).rejects.toThrow(/Authorization/);
@@ -730,7 +755,7 @@ describe("QWP reports a permanent upgrade-argument fault immediately", () => {
       host: "127.0.0.1",
       port: 1,
       log: () => undefined,
-      qwp: { session: { reconnect: { maxDurationMs: 600 } } },
+      qwp: { webSocket: { reconnect: { reconnectMaxDurationMs: 600 } } },
     } as never);
     const started = Date.now();
     await expect(sender.connect()).rejects.toThrow(/reconnect/i);

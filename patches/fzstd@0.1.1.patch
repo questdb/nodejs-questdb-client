@@ -1,5 +1,5 @@
 diff --git a/esm/index.mjs b/esm/index.mjs
-index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f36604fa43 100644
+index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..8d2f60970f30c6c87e2e5941bb574b695556fa20 100644
 --- a/esm/index.mjs
 +++ b/esm/index.mjs
 @@ -63,6 +63,12 @@ var err = function (ind, msg, nt) {
@@ -15,15 +15,59 @@ index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f3
  var rb = function (d, b, n) {
      var i = 0, o = 0;
      for (; i < n; ++i)
-@@ -111,6 +117,7 @@ var rzfh = function (dat, w) {
+@@ -101,7 +107,10 @@ var rzfh = function (dat, w) {
+         if (ws > 2145386496)
+             err(1);
+         var buf = new u8((w == 1 ? (fss || ws) : w ? 0 : ws) + 12);
+-        buf[0] = 1, buf[4] = 4, buf[8] = 8;
++        // initial repeat offsets (RFC 8878 3.1.1.5), written through the i32
++        // view: written as bytes they read back in the host's byte order
++        var ro = new i32(buf.buffer, 0, 3);
++        ro[0] = 1, ro[1] = 4, ro[2] = 8;
+         return {
+             b: bt + fsb,
+             y: 0,
+@@ -109,8 +118,9 @@ var rzfh = function (dat, w) {
+             d: di,
+             w: (w && w != 1) ? w : buf.subarray(12),
              e: ws,
-             o: new i32(buf.buffer, 0, 3),
+-            o: new i32(buf.buffer, 0, 3),
++            o: ro,
              u: fss,
 +            v: fsb > 0,
              c: cc,
              m: Math.min(131072, ws)
          };
-@@ -403,6 +410,8 @@ var rzb = function (dat, st, out) {
+@@ -350,16 +360,20 @@ var b2bl = function (b, s) {
+     }
+     return bl;
+ };
+-// literal length bits
+-var llb = /*#__PURE__ */ new u8(( /*#__PURE__ */new i32([
+-    0, 0, 0, 0, 16843009, 50528770, 134678020, 202050057, 269422093
+-])).buffer, 0, 36);
++// literal length bits (RFC 8878 3.1.1.3.2.1.1), spelled out byte by byte:
++// packed into an i32 array they took on the host's byte order
++var llb = /*#__PURE__ */ new u8([
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
++]);
+ // literal length baseline
+ var llbl = /*#__PURE__ */ b2bl(llb, 0);
+-// match length bits
+-var mlb = /*#__PURE__ */ new u8(( /*#__PURE__ */new i32([
+-    0, 0, 0, 0, 0, 0, 0, 0, 16843009, 50528770, 117769220, 185207048, 252579084, 16
+-])).buffer, 0, 53);
++// match length bits (RFC 8878 3.1.1.3.2.1.1), byte by byte for the same reason
++var mlb = /*#__PURE__ */ new u8([
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
++]);
+ // match length baseline
+ var mlbl = /*#__PURE__ */ b2bl(mlb, 3);
+ // decode huffman stream
+@@ -403,6 +417,8 @@ var rzb = function (dat, st, out) {
              return;
          st.b = bt + 1;
          if (out) {
@@ -32,7 +76,7 @@ index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f3
              fill(out, dat[bt], st.y, st.y += sz);
              return out;
          }
-@@ -413,6 +422,8 @@ var rzb = function (dat, st, out) {
+@@ -413,6 +429,8 @@ var rzb = function (dat, st, out) {
      if (btype == 0) {
          st.b = ebt;
          if (out) {
@@ -41,7 +85,7 @@ index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f3
              out.set(dat.subarray(bt, ebt), st.y);
              st.y += sz;
              return out;
-@@ -569,13 +580,18 @@ var rzb = function (dat, st, out) {
+@@ -569,13 +587,18 @@ var rzb = function (dat, st, out) {
              }
              else
                  oubt = buf.length;
@@ -61,7 +105,7 @@ index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f3
              if (spl) {
                  for (var i = 0; i < lss; ++i) {
                      buf[i] = buf[spl + i];
-@@ -640,6 +656,8 @@ export function decompress(dat, buf) {
+@@ -640,6 +663,8 @@ export function decompress(dat, buf) {
                      st.w.set(blk, st.w.length - blk.length);
                  }
              }
@@ -70,7 +114,7 @@ index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f3
              bt = st.b + (st.c * 4);
          }
          else
-@@ -733,11 +751,16 @@ var Decompress = /*#__PURE__*/ (function () {
+@@ -733,11 +758,16 @@ var Decompress = /*#__PURE__*/ (function () {
                      return;
                  }
                  else {
@@ -88,7 +132,7 @@ index 5d3c01b4130fdc4cdba432b9643bbd2a1ee04226..43bf0026c7f5e1b838b3c5e6d07608f3
                      this.s = this.s.c * 4;
                      this.push(rest, final);
 diff --git a/lib/index.js b/lib/index.js
-index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..bfe263ae62c8b2eb2fd0bf6ea22f1f2915e33e52 100644
+index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..d1ad2a384bb950c5be9917bdeef5601015bdb144 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -64,6 +64,12 @@ var err = function (ind, msg, nt) {
@@ -104,15 +148,59 @@ index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..bfe263ae62c8b2eb2fd0bf6ea22f1f29
  var rb = function (d, b, n) {
      var i = 0, o = 0;
      for (; i < n; ++i)
-@@ -112,6 +118,7 @@ var rzfh = function (dat, w) {
+@@ -102,7 +108,10 @@ var rzfh = function (dat, w) {
+         if (ws > 2145386496)
+             err(1);
+         var buf = new u8((w == 1 ? (fss || ws) : w ? 0 : ws) + 12);
+-        buf[0] = 1, buf[4] = 4, buf[8] = 8;
++        // initial repeat offsets (RFC 8878 3.1.1.5), written through the i32
++        // view: written as bytes they read back in the host's byte order
++        var ro = new i32(buf.buffer, 0, 3);
++        ro[0] = 1, ro[1] = 4, ro[2] = 8;
+         return {
+             b: bt + fsb,
+             y: 0,
+@@ -110,8 +119,9 @@ var rzfh = function (dat, w) {
+             d: di,
+             w: (w && w != 1) ? w : buf.subarray(12),
              e: ws,
-             o: new i32(buf.buffer, 0, 3),
+-            o: new i32(buf.buffer, 0, 3),
++            o: ro,
              u: fss,
 +            v: fsb > 0,
              c: cc,
              m: Math.min(131072, ws)
          };
-@@ -404,6 +411,8 @@ var rzb = function (dat, st, out) {
+@@ -351,16 +361,20 @@ var b2bl = function (b, s) {
+     }
+     return bl;
+ };
+-// literal length bits
+-var llb = /*#__PURE__ */ new u8(( /*#__PURE__ */new i32([
+-    0, 0, 0, 0, 16843009, 50528770, 134678020, 202050057, 269422093
+-])).buffer, 0, 36);
++// literal length bits (RFC 8878 3.1.1.3.2.1.1), spelled out byte by byte:
++// packed into an i32 array they took on the host's byte order
++var llb = /*#__PURE__ */ new u8([
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
++]);
+ // literal length baseline
+ var llbl = /*#__PURE__ */ b2bl(llb, 0);
+-// match length bits
+-var mlb = /*#__PURE__ */ new u8(( /*#__PURE__ */new i32([
+-    0, 0, 0, 0, 0, 0, 0, 0, 16843009, 50528770, 117769220, 185207048, 252579084, 16
+-])).buffer, 0, 53);
++// match length bits (RFC 8878 3.1.1.3.2.1.1), byte by byte for the same reason
++var mlb = /*#__PURE__ */ new u8([
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
++]);
+ // match length baseline
+ var mlbl = /*#__PURE__ */ b2bl(mlb, 3);
+ // decode huffman stream
+@@ -404,6 +418,8 @@ var rzb = function (dat, st, out) {
              return;
          st.b = bt + 1;
          if (out) {
@@ -121,7 +209,7 @@ index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..bfe263ae62c8b2eb2fd0bf6ea22f1f29
              fill(out, dat[bt], st.y, st.y += sz);
              return out;
          }
-@@ -414,6 +423,8 @@ var rzb = function (dat, st, out) {
+@@ -414,6 +430,8 @@ var rzb = function (dat, st, out) {
      if (btype == 0) {
          st.b = ebt;
          if (out) {
@@ -130,7 +218,7 @@ index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..bfe263ae62c8b2eb2fd0bf6ea22f1f29
              out.set(dat.subarray(bt, ebt), st.y);
              st.y += sz;
              return out;
-@@ -570,13 +581,18 @@ var rzb = function (dat, st, out) {
+@@ -570,13 +588,18 @@ var rzb = function (dat, st, out) {
              }
              else
                  oubt = buf.length;
@@ -150,7 +238,7 @@ index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..bfe263ae62c8b2eb2fd0bf6ea22f1f29
              if (spl) {
                  for (var i = 0; i < lss; ++i) {
                      buf[i] = buf[spl + i];
-@@ -641,6 +657,8 @@ function decompress(dat, buf) {
+@@ -641,6 +664,8 @@ function decompress(dat, buf) {
                      st.w.set(blk, st.w.length - blk.length);
                  }
              }
@@ -159,7 +247,7 @@ index fc3a45d5dbf22d7512203c714019b0a8eb130ee6..bfe263ae62c8b2eb2fd0bf6ea22f1f29
              bt = st.b + (st.c * 4);
          }
          else
-@@ -735,11 +753,16 @@ var Decompress = /*#__PURE__*/ (function () {
+@@ -735,11 +760,16 @@ var Decompress = /*#__PURE__*/ (function () {
                      return;
                  }
                  else {

@@ -8,36 +8,63 @@
 //
 // It imports the built package rather than `src/`, because that is what a
 // deployed producer runs, and because a forked child has no TypeScript loader.
+// The journal itself is internal, so the child drives it the way a producer
+// does: through a sender whose endpoint never answers, which keeps every
+// flushed row journalled.
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [, , distDir, directory] = process.argv;
-const { QwpNodeFileReplayStore } = await import(
+const { createQwpNodeSender } = await import(
   pathToFileURL(`${distDir}/es/index.mjs`).href
 );
 
-const payload = (marker) => new Uint8Array(64).fill(marker.charCodeAt(0));
 const named = (error) => ({
   name: error?.name ?? "Error",
   message: String(error?.message ?? error).slice(0, 200),
   causeName: error?.cause?.name,
 });
 
-let store;
+let sender;
 const handlers = {
   async open() {
-    store = new QwpNodeFileReplayStore({ directory, durability: "append" });
-    const records = await store.loadReferences();
-    return { recovered: records.length };
-  },
-  async append({ sequence, marker }) {
-    await store.append({
-      frameSequence: BigInt(sequence),
-      payload: payload(marker),
+    const opening = createQwpNodeSender({
+      // Nothing listens on port 1. An async startup still opens the journal --
+      // taking its lock and recovering its frames -- before connect()
+      // resolves, and leaves connecting to the background.
+      url: "ws://127.0.0.1:1/write/v4",
+      initialConnectMode: "async",
+      // The slot is `directory` itself: its parent is the slot root, and its
+      // name the sender ID.
+      storeAndForward: {
+        directory: path.dirname(directory),
+        durability: "append",
+      },
+      senderId: path.basename(directory),
+      autoFlush: false,
+      // Nothing will ever acknowledge the journal, so close without waiting.
+      closeFlushTimeoutMs: 0,
     });
+    try {
+      await opening.connect();
+    } catch (error) {
+      await opening.close().catch(() => undefined);
+      throw error;
+    }
+    sender = opening;
+    return { recovered: sender.metrics.ingress.pendingReplayFrames };
+  },
+  async append({ marker }) {
+    // One row per flush, and no symbols, so each append journals one frame.
+    await sender
+      .table("sfa_multiprocess")
+      .stringColumn("marker", marker)
+      .atNow();
+    await sender.flush();
     return {};
   },
   async close() {
-    await store.close();
+    await sender.close();
     return {};
   },
 };

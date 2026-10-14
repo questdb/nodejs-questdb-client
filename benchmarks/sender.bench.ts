@@ -1,16 +1,15 @@
 import { beforeAll, bench, describe } from "vitest";
 import {
   encodeQwpIngressFrame,
-  QWP_STATUS,
   QwpSymbolDictionary,
   type QwpIngressEncodeOptions,
-  type QwpIngressResponse,
   type QwpTableBuffer,
 } from "../packages/client-core/src/_qwp/_core";
 import {
+  createQwpSender,
   QwpSender,
-  type QwpSenderSession,
 } from "../packages/client-core/src/_qwp/sender";
+import type { QwpSenderSession } from "../packages/client-core/src/_qwp/_internal/sender-session";
 import { BENCHMARK_WORKLOADS, type BenchmarkRow } from "./workloads";
 
 const ROWS = 10_000;
@@ -33,22 +32,6 @@ class EncodingSession implements QwpSenderSession {
     return this.publishedSequence;
   }
 
-  async sendTables(
-    tables: readonly QwpTableBuffer[],
-    options: QwpIngressEncodeOptions = {},
-  ): Promise<QwpIngressResponse> {
-    this.encode(tables, options);
-    return this.response();
-  }
-
-  async sendTablesDelta(
-    tables: readonly QwpTableBuffer[],
-    options: Pick<QwpIngressEncodeOptions, "gorilla" | "deferCommit"> = {},
-  ): Promise<QwpIngressResponse> {
-    this.encodeDelta(tables, options);
-    return this.response();
-  }
-
   async publishTables(
     tables: readonly QwpTableBuffer[],
     options: QwpIngressEncodeOptions = {},
@@ -63,7 +46,10 @@ class EncodingSession implements QwpSenderSession {
     this.encodeDelta(tables, options);
   }
 
-  async waitForDurable(): Promise<void> {}
+  /** Every frame counts as acknowledged once it is encoded. */
+  async waitForAck(): Promise<boolean> {
+    return true;
+  }
 
   async close(): Promise<void> {}
 
@@ -86,14 +72,6 @@ class EncodingSession implements QwpSenderSession {
     }).byteLength;
     this.confirmedMaxSymbolId = this.dictionary.size - 1;
     this.publishedSequence++;
-  }
-
-  private response(): QwpIngressResponse {
-    return {
-      status: QWP_STATUS.OK,
-      sequence: this.publishedSequence,
-      tables: [],
-    };
   }
 }
 
@@ -119,10 +97,10 @@ function senderFor(
   session: EncodingSession,
   symbolDictionary: "delta" | "full",
 ): QwpSender {
-  return new QwpSender(async () => session, {
+  return createQwpSender(async () => session, {
     autoFlush: false,
     closeFlushTimeoutMs: 0,
-    encode: { symbolDictionary },
+    symbolDictionary,
   });
 }
 
