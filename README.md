@@ -669,6 +669,30 @@ async function run() {
 run().catch(console.error);
 ```
 
+You can also pass a complete private EC P-256 JWK through `extraOptions.jwk`,
+without mutating `SenderOptions`:
+
+```typescript
+import { readFileSync } from "node:fs";
+import { Sender } from "@questdb/nodejs-client";
+
+// The file must contain kid, d, x, y, kty: "EC", and crv: "P-256".
+const jwk: Record<string, string> = JSON.parse(
+  readFileSync("path/to/private-jwk.json", "utf8"),
+);
+const sender = await Sender.fromConfig("tcps::addr=questdb.example:9009", {
+  jwk,
+});
+await sender.connect();
+// Write and flush rows, then close the sender.
+await sender.close();
+```
+
+The same option is supported by `Sender.fromEnv({ jwk })` and the
+`SenderOptions` constructor and factories. It takes precedence over
+`username`/`token` in the configuration string and is rejected for transports
+other than TCP/TCPS.
+
 ### Array usage example
 
 ```typescript

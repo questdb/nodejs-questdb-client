@@ -140,6 +140,31 @@ import { Sender } from "@questdb/nodejs-client";
 const sender = await Sender.fromEnv();
 ```
 
+TCP/TCPS authentication uses `username` and a base64url-encoded P-256 private
+key in `token`; the client derives its public coordinates automatically. If
+you already have a complete private JWK, pass it through `extraOptions.jwk`:
+
+```typescript
+import { readFileSync } from "node:fs";
+import { Sender } from "@questdb/nodejs-client";
+
+// The file must contain kid, d, x, y, kty: "EC", and crv: "P-256".
+const jwk: Record<string, string> = JSON.parse(
+  readFileSync("path/to/private-jwk.json", "utf8"),
+);
+const sender = await Sender.fromConfig("tcps::addr=questdb.example:9009", {
+  jwk,
+});
+await sender.connect();
+// Write and flush rows, then close the sender.
+await sender.close();
+```
+
+The same option is supported by `Sender.fromEnv({ jwk })` and the
+`SenderOptions` constructor and factories. It takes precedence over
+`username`/`token` in the configuration string and is rejected for transports
+other than TCP/TCPS.
+
 ## QWP ingestion
 
 Changing the configuration prefix to `ws::` or `wss::` selects QWP while

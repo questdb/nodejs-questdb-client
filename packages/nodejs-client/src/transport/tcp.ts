@@ -241,7 +241,7 @@ class TcpTransport implements SenderTransport {
         format: "jwk",
       });
       const signature = crypto.sign(
-        "RSA-SHA256",
+        "SHA256",
         challenge.subarray(0, challenge.length - 1),
         keyObject,
       );

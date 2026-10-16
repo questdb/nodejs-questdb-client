@@ -1,5 +1,5 @@
 // @ts-check
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Agent } from "undici";
 
 import { Sender } from "../packages/nodejs-client/src/sender";
@@ -50,6 +50,35 @@ describe("Configuration string parser suite", function () {
     expect(options.protocol).toBe("tcp");
     expect(options.addr).toBe("host");
   });
+
+  it.each(["tcp", "tcps"])(
+    "preserves a JWK supplied through extra options for %s factories",
+    async (protocol) => {
+      const jwk = { kid: "user1" };
+      const config = `${protocol}::addr=host`;
+      expect(new SenderOptions(config, { jwk }).jwk).toBe(jwk);
+      expect((await SenderOptions.fromConfig(config, { jwk })).jwk).toBe(jwk);
+
+      vi.stubEnv("QDB_CLIENT_CONF", config);
+      try {
+        expect((await SenderOptions.fromEnv({ jwk })).jwk).toBe(jwk);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each(["http", "https", "ws", "wss", "udp"])(
+    "rejects a JWK in extra options for the %s transport",
+    async (protocol) => {
+      const config = `${protocol}::addr=host${protocol.startsWith("http") ? ";protocol_version=1" : ""}`;
+      await expect(
+        SenderOptions.fromConfig(config, { jwk: { kid: "user1" } }),
+      ).rejects.toThrow(
+        "'jwk' option is supported only for the tcp/tcps transports",
+      );
+    },
+  );
 
   it("accepts only lowercase protocols", async function () {
     let options = await SenderOptions.fromConfig("tcp::addr=host;");

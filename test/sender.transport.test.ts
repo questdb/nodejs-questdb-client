@@ -1,5 +1,5 @@
 // @ts-check
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { readFileSync } from "fs";
 import { Agent } from "undici";
 import http from "http";
@@ -452,6 +452,79 @@ describe("Sender TCP suite", function () {
     await sender.close();
     await proxy.stop();
   });
+
+  it.each([
+    ["tcp", "fromConfig"],
+    ["tcps", "fromConfig"],
+    ["tcp", "fromEnv"],
+    ["tcps", "fromEnv"],
+  ] as const)(
+    "authenticates over %s using a full JWK passed to %s",
+    async (protocol, factory) => {
+      const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", {
+        namedCurve: "prime256v1",
+      });
+      const { d, x, y } = privateKey.export({ format: "jwk" });
+      const jwk = {
+        kid: "generated-user",
+        kty: "EC",
+        crv: "P-256",
+        d: d!,
+        x: x!,
+        y: y!,
+      };
+      // Also cover full-JWK precedence over connect-string credentials,
+      // matching the existing `new Sender({ jwk, username, token })` path.
+      const credentials =
+        factory === "fromEnv"
+          ? ";username=ignored-user;token=ignored-token"
+          : "";
+      const config = `${protocol}::addr=${PROXY_HOST}:${PROXY_PORT}${credentials};tls_ca=test/certs/ca/ca.crt`;
+      const proxy = await createProxy(
+        true,
+        protocol === "tcps" ? proxyOptions : undefined,
+      );
+      const sign = vi.spyOn(crypto, "sign");
+      let sender: Sender | undefined;
+      try {
+        if (factory === "fromEnv") vi.stubEnv("QDB_CLIENT_CONF", config);
+        sender =
+          factory === "fromConfig"
+            ? await Sender.fromConfig(config, { jwk })
+            : await Sender.fromEnv({ jwk });
+        await expect(sender.connect()).resolves.toBe(true);
+        await expect
+          .poll(() => proxy.getDataSentToRemote().join("").split("\n"))
+          .toHaveLength(3);
+        const [kid, signature] = proxy
+          .getDataSentToRemote()
+          .join("")
+          .split("\n");
+        expect(kid).toBe(jwk.kid);
+        // MockProxy sends 511 ASCII 'a' bytes followed by a newline. Only
+        // the challenge, not the trailing newline, is covered by the signature.
+        const challenge = Buffer.from("a".repeat(511));
+        expect(sign).toHaveBeenCalledExactlyOnceWith(
+          "SHA256",
+          challenge,
+          expect.any(crypto.KeyObject),
+        );
+        expect(
+          crypto.verify(
+            "SHA256",
+            challenge,
+            publicKey,
+            Buffer.from(signature, "base64"),
+          ),
+        ).toBe(true);
+      } finally {
+        sign.mockRestore();
+        vi.unstubAllEnvs();
+        await sender?.close();
+        await proxy.stop();
+      }
+    },
+  );
 
   it("can connect unauthenticated", async function () {
     const proxy = await createProxy();
