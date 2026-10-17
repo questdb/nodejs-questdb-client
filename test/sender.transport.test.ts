@@ -1,5 +1,5 @@
 // @ts-check
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { readFileSync } from "fs";
 import { Agent } from "undici";
 import http from "http";
@@ -451,6 +451,137 @@ describe("Sender TCP suite", function () {
     await assertSentData(proxy, true, "user2\n");
     await sender.close();
     await proxy.stop();
+  });
+
+  it.each([
+    ["tcp", "fromConfig"],
+    ["tcps", "fromConfig"],
+    ["tcp", "fromEnv"],
+    ["tcps", "fromEnv"],
+  ] as const)(
+    "authenticates over %s using a full JWK passed to %s",
+    async (protocol, factory) => {
+      const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", {
+        namedCurve: "prime256v1",
+      });
+      const { d, x, y } = privateKey.export({ format: "jwk" });
+      const jwk = {
+        kid: "generated-user",
+        kty: "EC",
+        crv: "P-256",
+        d: d!,
+        x: x!,
+        y: y!,
+      };
+      // Also cover full-JWK precedence over connect-string credentials,
+      // matching the existing `new Sender({ jwk, username, token })` path.
+      const credentials =
+        factory === "fromEnv"
+          ? ";username=ignored-user;token=ignored-token"
+          : "";
+      const config = `${protocol}::addr=${PROXY_HOST}:${PROXY_PORT}${credentials};tls_ca=test/certs/ca/ca.crt`;
+      const proxy = await createProxy(
+        true,
+        protocol === "tcps" ? proxyOptions : undefined,
+      );
+      const sign = vi.spyOn(crypto, "sign");
+      let sender: Sender | undefined;
+      try {
+        if (factory === "fromEnv") vi.stubEnv("QDB_CLIENT_CONF", config);
+        sender =
+          factory === "fromConfig"
+            ? await Sender.fromConfig(config, { jwk })
+            : await Sender.fromEnv({ jwk });
+        await expect(sender.connect()).resolves.toBe(true);
+        await expect
+          .poll(() => proxy.getDataSentToRemote().join("").split("\n"))
+          .toHaveLength(3);
+        const [kid, signature] = proxy
+          .getDataSentToRemote()
+          .join("")
+          .split("\n");
+        expect(kid).toBe(jwk.kid);
+        // MockProxy sends 511 ASCII 'a' bytes followed by a newline. Only
+        // the challenge, not the trailing newline, is covered by the signature.
+        const challenge = Buffer.from("a".repeat(511));
+        expect(sign).toHaveBeenCalledExactlyOnceWith(
+          "SHA256",
+          challenge,
+          expect.any(crypto.KeyObject),
+        );
+        expect(
+          crypto.verify(
+            "SHA256",
+            challenge,
+            publicKey,
+            Buffer.from(signature, "base64"),
+          ),
+        ).toBe(true);
+      } finally {
+        sign.mockRestore();
+        vi.unstubAllEnvs();
+        await sender?.close();
+        await proxy.stop();
+      }
+    },
+  );
+
+  describe("rejects an unusable full JWK when the sender is created", () => {
+    // A bad key used to surface only when the server's challenge arrived,
+    // inside a socket listener, where the error escaped connect() and
+    // crashed the process.
+    const { privateKey } = crypto.generateKeyPairSync("ec", {
+      namedCurve: "prime256v1",
+    });
+    const { d, x, y } = privateKey.export({ format: "jwk" });
+    const jwk = { kid: "user1", kty: "EC", crv: "P-256", d, x, y };
+    const p384 = crypto
+      .generateKeyPairSync("ec", { namedCurve: "secp384r1" })
+      .privateKey.export({ format: "jwk" });
+
+    it.each<[string, unknown, RegExp]>([
+      ["its JSON text", JSON.stringify(jwk), /expected a JWK object/],
+      ["an array", [jwk], /expected a JWK object/],
+      ["a key without 'kid'", { ...jwk, kid: undefined }, /'kid' property/],
+      [
+        "a key without 'kty' and 'crv'",
+        { kid: "user1", d, x, y },
+        /'kty' set to 'EC' and 'crv' set to 'P-256'/,
+      ],
+      [
+        "a P-384 key",
+        { kid: "user1", ...p384 },
+        /'kty' set to 'EC' and 'crv' set to 'P-256'/,
+      ],
+      ["a key without 'x'", { ...jwk, x: undefined }, /'d', 'x' and 'y'/],
+      [
+        "a point that is not on the curve",
+        { ...jwk, x: "AAAA", y: "BBBB" },
+        /must form a P-256 key pair/,
+      ],
+    ])("rejects %s passed to fromConfig", async (_, value, error) => {
+      const result = await Sender.fromConfig(
+        `tcp::addr=${PROXY_HOST}:${PROXY_PORT}`,
+        { jwk: value as Record<string, string> },
+      ).catch((err: Error) => err);
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toMatch(error);
+      // The key carries the private scalar, so no message may quote it.
+      expect((result as Error).message).not.toContain(d);
+    });
+
+    it("rejects one passed through the options object", () => {
+      expect(
+        () =>
+          new Sender({
+            protocol: "tcp",
+            protocol_version: "1",
+            host: PROXY_HOST,
+            port: PROXY_PORT,
+            jwk: { kid: "user1", d: d!, x: x!, y: y! },
+          }),
+      ).toThrow(/'kty' set to 'EC' and 'crv' set to 'P-256'/);
+    });
   });
 
   it("can connect unauthenticated", async function () {

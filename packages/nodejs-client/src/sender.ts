@@ -101,7 +101,8 @@ const DEFAULT_AUTO_FLUSH_INTERVAL = 1000; // 1 sec
  * </p>
  * <p>
  * Extra options can be provided to the Sender in the <i>extraOptions</i> configuration object. <br>
- * A custom logging function and a custom HTTP(S) agent can be passed to the Sender in this object. <br>
+ * A custom logging function, a custom HTTP(S) agent, and a complete TCP/TCPS authentication JWK can be passed to the Sender in this object. <br>
+ * The <i>jwk</i> option takes precedence over <i>username</i>/<i>token</i> in the configuration string and is rejected for other transports. <br>
  * The logger implementation provides the option to direct log messages to the same place where the host application's
  * log is saved. The default logger writes to the console. <br>
  * The custom HTTP(S) agent option becomes handy if there is a need to modify the default options set for the
@@ -187,7 +188,9 @@ class Sender {
    * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
-   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>. <br>
+   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, with the 'kid', 'd', 'x' and 'y' properties, 'kty' set to 'EC' and 'crv' set to 'P-256'.
+   * It takes precedence over 'username'/'token' in the configuration string and is rejected for other transports.
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
    */
@@ -207,7 +210,9 @@ class Sender {
    * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
-   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>. <br>
+   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, with the 'kid', 'd', 'x' and 'y' properties, 'kty' set to 'EC' and 'crv' set to 'P-256'.
+   * It takes precedence over 'username'/'token' in the configuration string and is rejected for other transports.
    *
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
