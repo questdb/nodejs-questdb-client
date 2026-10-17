@@ -324,7 +324,60 @@ function constructJwk(options: SenderOptions): Record<string, string> {
       crv: "P-256",
     };
   } else {
+    if (options.jwk) {
+      validateJwk(options.jwk);
+    }
     return options.jwk;
+  }
+}
+
+/**
+ * @ignore
+ * Validates a JWK supplied through the 'jwk' option.
+ * The key is first used when the server's challenge arrives, inside a socket
+ * listener, where an error escapes connect() as an unhandled rejection and
+ * takes the process down. Checking it here fails the Sender's creation instead.
+ * The messages never quote the key, which carries the private scalar.
+ * @param {unknown} jwk - JWK supplied through the 'jwk' option
+ * @throws Error if the JWK is not a complete EC P-256 private key
+ */
+function validateJwk(jwk: unknown): void {
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk)) {
+    throw new Error(
+      `Invalid 'jwk' config option, expected a JWK object with the 'kid', 'kty', 'crv', 'd', 'x' and 'y' properties`,
+    );
+  }
+  const { kid, kty, crv, d, x, y } = jwk as Record<string, unknown>;
+  if (typeof kid !== "string" || !kid) {
+    throw new Error(
+      `Missing key id, please, specify the 'kid' property of the 'jwk' config option as a non-empty string`,
+    );
+  }
+  if (kty !== "EC" || crv !== "P-256") {
+    throw new Error(
+      `Unsupported key type, the 'jwk' config option must be an EC P-256 key, with 'kty' set to 'EC' and 'crv' set to 'P-256'`,
+    );
+  }
+  if (
+    typeof d !== "string" ||
+    !d ||
+    typeof x !== "string" ||
+    !x ||
+    typeof y !== "string" ||
+    !y
+  ) {
+    throw new Error(
+      `Missing key material, please, specify the 'd', 'x' and 'y' properties of the 'jwk' config option as base64url-encoded strings`,
+    );
+  }
+  try {
+    crypto.createPrivateKey({ key: jwk as crypto.JsonWebKey, format: "jwk" });
+  } catch (err) {
+    // Every property is a string by now, so Node's message names the problem
+    // without quoting a value.
+    throw new Error(
+      `Invalid private key, the 'd', 'x' and 'y' properties of the 'jwk' config option must form a P-256 key pair: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 

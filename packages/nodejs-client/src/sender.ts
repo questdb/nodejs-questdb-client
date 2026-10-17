@@ -189,7 +189,7 @@ class Sender {
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
    * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>. <br>
-   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, including 'kid', 'd', 'x' and 'y'.
+   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, with the 'kid', 'd', 'x' and 'y' properties, 'kty' set to 'EC' and 'crv' set to 'P-256'.
    * It takes precedence over 'username'/'token' in the configuration string and is rejected for other transports.
    *
    * @return {Sender} A Sender object initialized from the provided configuration string.
@@ -211,7 +211,7 @@ class Sender {
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
    * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>. <br>
-   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, including 'kid', 'd', 'x' and 'y'.
+   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, with the 'kid', 'd', 'x' and 'y' properties, 'kty' set to 'EC' and 'crv' set to 'P-256'.
    * It takes precedence over 'username'/'token' in the configuration string and is rejected for other transports.
    *
    * @return {Sender} A Sender object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.

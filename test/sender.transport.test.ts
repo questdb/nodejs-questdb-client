@@ -526,6 +526,64 @@ describe("Sender TCP suite", function () {
     },
   );
 
+  describe("rejects an unusable full JWK when the sender is created", () => {
+    // A bad key used to surface only when the server's challenge arrived,
+    // inside a socket listener, where the error escaped connect() and
+    // crashed the process.
+    const { privateKey } = crypto.generateKeyPairSync("ec", {
+      namedCurve: "prime256v1",
+    });
+    const { d, x, y } = privateKey.export({ format: "jwk" });
+    const jwk = { kid: "user1", kty: "EC", crv: "P-256", d, x, y };
+    const p384 = crypto
+      .generateKeyPairSync("ec", { namedCurve: "secp384r1" })
+      .privateKey.export({ format: "jwk" });
+
+    it.each<[string, unknown, RegExp]>([
+      ["its JSON text", JSON.stringify(jwk), /expected a JWK object/],
+      ["an array", [jwk], /expected a JWK object/],
+      ["a key without 'kid'", { ...jwk, kid: undefined }, /'kid' property/],
+      [
+        "a key without 'kty' and 'crv'",
+        { kid: "user1", d, x, y },
+        /'kty' set to 'EC' and 'crv' set to 'P-256'/,
+      ],
+      [
+        "a P-384 key",
+        { kid: "user1", ...p384 },
+        /'kty' set to 'EC' and 'crv' set to 'P-256'/,
+      ],
+      ["a key without 'x'", { ...jwk, x: undefined }, /'d', 'x' and 'y'/],
+      [
+        "a point that is not on the curve",
+        { ...jwk, x: "AAAA", y: "BBBB" },
+        /must form a P-256 key pair/,
+      ],
+    ])("rejects %s passed to fromConfig", async (_, value, error) => {
+      const result = await Sender.fromConfig(
+        `tcp::addr=${PROXY_HOST}:${PROXY_PORT}`,
+        { jwk: value as Record<string, string> },
+      ).catch((err: Error) => err);
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toMatch(error);
+      // The key carries the private scalar, so no message may quote it.
+      expect((result as Error).message).not.toContain(d);
+    });
+
+    it("rejects one passed through the options object", () => {
+      expect(
+        () =>
+          new Sender({
+            protocol: "tcp",
+            protocol_version: "1",
+            host: PROXY_HOST,
+            port: PROXY_PORT,
+            jwk: { kid: "user1", d: d!, x: x!, y: y! },
+          }),
+      ).toThrow(/'kty' set to 'EC' and 'crv' set to 'P-256'/);
+    });
+  });
+
   it("can connect unauthenticated", async function () {
     const proxy = await createProxy();
     // @ts-expect-error - Invalid options

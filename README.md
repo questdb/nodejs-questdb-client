@@ -669,8 +669,7 @@ async function run() {
 run().catch(console.error);
 ```
 
-You can also pass a complete private EC P-256 JWK through `extraOptions.jwk`,
-without mutating `SenderOptions`:
+You can also pass a complete private EC P-256 JWK through `extraOptions.jwk`:
 
 ```typescript
 import { readFileSync } from "node:fs";
@@ -691,7 +690,8 @@ await sender.close();
 The same option is supported by `Sender.fromEnv({ jwk })` and the
 `SenderOptions` constructor and factories. It takes precedence over
 `username`/`token` in the configuration string and is rejected for transports
-other than TCP/TCPS.
+other than TCP/TCPS. A key that is incomplete or not a P-256 key pair is
+rejected when the sender is created.
 
 ### Array usage example
 

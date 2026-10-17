@@ -163,7 +163,8 @@ await sender.close();
 The same option is supported by `Sender.fromEnv({ jwk })` and the
 `SenderOptions` constructor and factories. It takes precedence over
 `username`/`token` in the configuration string and is rejected for transports
-other than TCP/TCPS.
+other than TCP/TCPS. A key that is incomplete or not a P-256 key pair is
+rejected when the sender is created.
 
 ## QWP ingestion
 
