@@ -538,6 +538,12 @@ describe("Sender TCP suite", function () {
     const p384 = crypto
       .generateKeyPairSync("ec", { namedCurve: "secp384r1" })
       .privateKey.export({ format: "jwk" });
+    const other = crypto
+      .generateKeyPairSync("ec", { namedCurve: "prime256v1" })
+      .privateKey.export({ format: "jwk" });
+    // A common encoding mistake. It decodes to a scalar past the curve order,
+    // which Node up to v24 imports and then fails to sign with.
+    const dHex = Buffer.from(d!, "base64url").toString("hex");
 
     it.each<[string, unknown, RegExp]>([
       ["its JSON text", JSON.stringify(jwk), /expected a JWK object/],
@@ -559,6 +565,17 @@ describe("Sender TCP suite", function () {
         { ...jwk, x: "AAAA", y: "BBBB" },
         /must form a P-256 key pair/,
       ],
+      // Node up to v24 accepts both of these keys when it imports them.
+      [
+        "a key whose 'x' and 'y' belong to another key",
+        { ...jwk, x: other.x, y: other.y },
+        /must form a P-256 key pair/,
+      ],
+      [
+        "a key whose 'd' is hex-encoded",
+        { ...jwk, d: dHex },
+        /must form a P-256 key pair/,
+      ],
     ])("rejects %s passed to fromConfig", async (_, value, error) => {
       const result = await Sender.fromConfig(
         `tcp::addr=${PROXY_HOST}:${PROXY_PORT}`,
@@ -567,7 +584,24 @@ describe("Sender TCP suite", function () {
       expect(result).toBeInstanceOf(Error);
       expect((result as Error).message).toMatch(error);
       // The key carries the private scalar, so no message may quote it.
-      expect((result as Error).message).not.toContain(d);
+      for (const secret of [d, dHex]) {
+        expect((result as Error).message).not.toContain(secret);
+      }
+    });
+
+    it("accepts coordinates encoded with a leading zero byte", async () => {
+      // Node decodes JWK members as integers, so the pair check compares
+      // values rather than encodings.
+      const padded = (value: string) =>
+        Buffer.concat([
+          Buffer.alloc(1),
+          Buffer.from(value, "base64url"),
+        ]).toString("base64url");
+      const sender = await Sender.fromConfig(
+        `tcp::addr=${PROXY_HOST}:${PROXY_PORT}`,
+        { jwk: { ...jwk, x: padded(x!), y: padded(y!) } },
+      );
+      await sender.close();
     });
 
     it("rejects one passed through the options object", () => {
@@ -582,6 +616,33 @@ describe("Sender TCP suite", function () {
           }),
       ).toThrow(/'kty' set to 'EC' and 'crv' set to 'P-256'/);
     });
+  });
+
+  it("rejects connect() when the server's challenge cannot be signed", async () => {
+    // Signing runs inside a socket listener, where an error used to escape
+    // connect() as an unhandled rejection and end the process.
+    const proxy = await createProxy(true);
+    const sign = vi.spyOn(crypto, "sign").mockImplementation(() => {
+      throw new Error("signing failed");
+    });
+    const sender = new Sender({
+      protocol: "tcp",
+      protocol_version: "1",
+      port: PROXY_PORT,
+      host: PROXY_HOST,
+      auth: AUTH,
+    });
+    try {
+      await expect(sender.connect()).rejects.toThrow("signing failed");
+      const transport = (
+        sender as unknown as { transport: { socket: { destroyed: boolean } } }
+      ).transport;
+      expect(transport.socket.destroyed).toBe(true);
+    } finally {
+      sign.mockRestore();
+      await sender.close();
+      await proxy.stop();
+    }
   });
 
   it("can connect unauthenticated", async function () {
