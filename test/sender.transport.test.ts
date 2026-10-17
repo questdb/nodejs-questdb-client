@@ -544,6 +544,7 @@ describe("Sender TCP suite", function () {
     // A common encoding mistake. It decodes to a scalar past the curve order,
     // which Node up to v24 imports and then fails to sign with.
     const dHex = Buffer.from(d!, "base64url").toString("hex");
+    const dBig = BigInt(`0x${dHex}`);
 
     it.each<[string, unknown, RegExp]>([
       ["its JSON text", JSON.stringify(jwk), /expected a JWK object/],
@@ -559,7 +560,12 @@ describe("Sender TCP suite", function () {
         { kid: "user1", ...p384 },
         /'kty' set to 'EC' and 'crv' set to 'P-256'/,
       ],
-      ["a key without 'x'", { ...jwk, x: undefined }, /'d', 'x' and 'y'/],
+      ["a key without 'x'", { ...jwk, x: undefined }, /Missing key material/],
+      [
+        "a key whose 'd' is not a string",
+        { ...jwk, d: dBig },
+        /Missing key material/,
+      ],
       [
         "a point that is not on the curve",
         { ...jwk, x: "AAAA", y: "BBBB" },
@@ -584,7 +590,7 @@ describe("Sender TCP suite", function () {
       expect(result).toBeInstanceOf(Error);
       expect((result as Error).message).toMatch(error);
       // The key carries the private scalar, so no message may quote it.
-      for (const secret of [d, dHex]) {
+      for (const secret of [d, dHex, String(dBig)]) {
         expect((result as Error).message).not.toContain(secret);
       }
     });
