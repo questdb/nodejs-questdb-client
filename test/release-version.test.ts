@@ -14,11 +14,22 @@ const BROWSER = "@questdb/browser-client";
 
 // FAKE_NPM_PUBLISHED lists, comma-separated, the packages that have published
 // PUBLISHED; every one of them reports FAKE_NPM_GIT_HEAD as its gitHead.
+// FAKE_NPM_ABSENT lists packages npm does not have at all, which `npm view`
+// reports as E404. FAKE_NPM_NO_LATEST lists packages whose `latest` dist-tag
+// names no version, for which real npm prints no versions at all.
 const fakeNpm = `#!/usr/bin/env node
 const [, , command, specifier, field] = process.argv;
 if (command !== "view") process.exit(2);
 const published = (process.env.FAKE_NPM_PUBLISHED ?? "").split(",");
-if (field === "versions") {
+const absent = (process.env.FAKE_NPM_ABSENT ?? "").split(",");
+const noLatest = (process.env.FAKE_NPM_NO_LATEST ?? "").split(",");
+if (absent.includes(specifier)) {
+  console.error("npm error code E404");
+  console.error("npm error 404 Not Found - GET https://registry.npmjs.org/" + specifier);
+  process.exit(1);
+} else if (field === "versions" && noLatest.includes(specifier)) {
+  process.exit(0);
+} else if (field === "versions") {
   console.log(published.includes(specifier) ? '["${PUBLISHED}"]' : '[]');
 } else if (
   field === "gitHead" &&
@@ -84,7 +95,12 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
   const run = (
     gitHead: string,
     packages?: string,
-    { cwd = root, published = [NODEJS] } = {},
+    {
+      cwd = root,
+      published = [NODEJS],
+      absent = [] as string[],
+      noLatest = [] as string[],
+    } = {},
   ) =>
     spawnSync(process.execPath, [script], {
       cwd,
@@ -95,6 +111,8 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
         GITHUB_SHA: "release-commit",
         FAKE_NPM_GIT_HEAD: gitHead,
         FAKE_NPM_PUBLISHED: published.join(","),
+        FAKE_NPM_ABSENT: absent.join(","),
+        FAKE_NPM_NO_LATEST: noLatest.join(","),
         RELEASE_PACKAGES: packages ?? "",
       },
     });
@@ -179,6 +197,37 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
       expect(narrowed.stderr, packages).not.toContain("not on npm yet");
       expect(narrowed.stderr, packages).not.toContain("dispatch with");
     }
+  });
+
+  it("refuses a selected package npm does not have", () => {
+    // The publish steps can only use trusted publishing, which npm sets up
+    // only for an existing package, so a dispatch cannot create one.
+    const missing = { published: [], absent: [BROWSER] };
+    for (const packages of ["both", "browser"]) {
+      const result = run("release-commit", packages, missing);
+      expect(result.status, packages).toBe(1);
+      expect(result.stderr, packages).toContain(
+        `${BROWSER} is not on npm, and this workflow cannot create it`,
+      );
+      expect(result.stderr, packages).toContain("npm authentication");
+    }
+
+    // A dispatch that leaves the missing package out is unaffected.
+    const nodeOnly = run("release-commit", "nodejs", missing);
+    expect(nodeOnly.status).toBe(0);
+    expect(nodeOnly.stdout).toContain("release check passed (packages=nodejs)");
+  });
+
+  it("releases a package whose latest dist-tag names no version", () => {
+    // A package created by staged publishing may hold only a placeholder
+    // that `latest` does not name, and then npm prints no versions.
+    const result = run("release-commit", "both", {
+      published: [],
+      noLatest: [BROWSER],
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("resuming");
+    expect(result.stdout).toContain("release check passed (packages=both)");
   });
 
   it("rejects an unknown package selection", () => {

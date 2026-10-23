@@ -186,37 +186,55 @@ rediscover.
 
 ### npm authentication
 
-The publish steps authenticate with npm
+The publish steps authenticate with npm only through
 [trusted publishing](https://docs.npmjs.com/trusted-publishers): npm trades the
 job's GitHub OIDC token for a short-lived publish token, so the repository
-stores no long-lived npm token, and every version carries a provenance
-statement. Each package needs a trusted publisher on npmjs.com (package
-Settings, Trusted publishing, GitHub Actions) with organization `questdb`,
-repository `nodejs-questdb-client`, workflow filename `publish.yml` and no
-environment. Its allowed actions must include `npm publish`; npm defaults a new
+stores no npm token, and every version carries a provenance statement. Each
+package needs a trusted publisher on npmjs.com (package Settings, Trusted
+publishing, GitHub Actions) with organization `questdb`, repository
+`nodejs-questdb-client`, workflow filename `publish.yml` and no environment.
+Its allowed actions must include `npm publish`; npm defaults a new
 configuration to `npm stage publish` only. npm also expires a configuration
 that has not published within 48 hours of its creation, so add it shortly
 before the dispatch that first uses it, and recreate it if it lapsed.
-`ENEEDAUTH` from a publish step means npm got no token over OIDC and had no
-token to fall back to. Usually no trusted publisher matches this workflow, but
-a failed OIDC request to GitHub or npm ends the same way, so check the
-configuration and re-dispatch. `404 Not Found - PUT` means npm rejected a
-token.
+`ENEEDAUTH` from a publish step means npm got no token over OIDC. Usually no
+trusted publisher matches this workflow, but a failed OIDC request to GitHub
+or npm ends the same way, so check the configuration and re-dispatch.
+`404 Not Found - PUT` means npm rejected a token.
 
-npm attaches a trusted publisher only to a package that already exists, so a
-new package's first version needs a token. Create a granular access token with
-read and write access to the `@questdb` scope, **Bypass 2FA** enabled and a
-short expiry, store it as the `NPM_BOOTSTRAP_TOKEN` repository secret, and
-dispatch. npm still tries trusted publishing first, but while the secret is
-set it falls back to the token whenever that fails, for every package in the
-dispatch: a package whose trusted publisher does not match this workflow or
-has expired also publishes with the token, and the run still passes. So check
-each version the dispatch published: one published over OIDC shows a
-`trustedPublisher` entry in `npm view <package>@<version> _npmUser`, and one
-without it used the token. Then delete the secret and revoke the token.
-Shortly before the next release, add a trusted publisher for the new package
-and for any other package that published with the token, deleting its broken
-or expired one first.
+npm attaches a trusted publisher only to a package that already exists, and
+the workflow has no token to create one with, so the release check refuses a
+dispatch that selects a package npm does not have. Create a new package by
+hand first, with [staged publishing](https://docs.npmjs.com/staged-publishing):
+`npm stage publish` creates a package from a maintainer's logged-in session,
+with no token and no 2FA prompt. It needs npm 11.15 or later, Node 22.14 or
+later, and an npm account with 2FA enabled that may publish to `@questdb`.
+
+1. Stage a throwaway version from an empty directory, here for
+   `@questdb/browser-client`:
+
+   ```bash
+   cd "$(mktemp -d)"
+   echo '{"name":"@questdb/browser-client","version":"0.0.1-bootstrap.0"}' > package.json
+   npx -y npm@11.21.1 login
+   npx -y npm@11.21.1 stage publish --access public --tag bootstrap
+   ```
+
+   npm creates the package with a public placeholder version, `0.0.0-stage`,
+   which stays in its version list. The staged version itself is not public
+   unless a maintainer approves it. Do not stage the release version instead:
+   while a version is staged, npm refuses to publish that version.
+
+2. Add the package's trusted publisher as described above.
+
+3. Reject the staged version with
+   `npx -y npm@11.21.1 stage reject <stage-id>`, which prompts for 2FA.
+   `stage publish` printed the stage ID, and
+   `npx -y npm@11.21.1 stage list @questdb/browser-client` shows it again.
+   Then check that `npm view @questdb/browser-client@0.0.0-stage version`
+   still prints the placeholder, so the package still exists.
+
+4. Dispatch within 48 hours of adding the trusted publisher.
 
 ## Making Changes
 

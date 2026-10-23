@@ -19,6 +19,11 @@
 // exactly right. A different or missing gitHead is an older unrelated artifact
 // that must never authorize publishing new code under the same version.
 //
+// A selected package npm does not have at all is refused too. The publish
+// steps authenticate only through trusted publishing, and npm attaches a
+// trusted publisher only to a package that already exists, so its publish step
+// would fail, possibly after the other package had published.
+//
 // RELEASE_PACKAGES (the publish workflow's `packages` input) narrows the
 // dispatch to one package: `nodejs`, `browser`, or `both` (the default). The
 // manifests must still carry the same version, so the repository never drifts
@@ -57,22 +62,28 @@ function manifest(packageDirectory) {
   );
 }
 
-/** Versions already on npm, or [] for a package that has never been published. */
+/** Versions already on npm, or undefined for a package npm does not have. */
 function publishedVersions(name) {
+  let output;
   try {
-    return JSON.parse(
-      execFileSync(
-        process.platform === "win32" ? "npm.cmd" : "npm",
-        ["view", name, "versions", "--json"],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-      ),
-    );
+    output = execFileSync(
+      process.platform === "win32" ? "npm.cmd" : "npm",
+      ["view", name, "versions", "--json"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
   } catch (error) {
     const stderr = error?.stderr?.toString() ?? "";
-    // A package nobody has published yet is the expected state for a new one.
-    if (stderr.includes("E404") || stderr.includes("404 Not Found")) return [];
+    if (stderr.includes("E404") || stderr.includes("404 Not Found")) {
+      return undefined;
+    }
     throw new Error(`npm view ${name} versions failed:\n${stderr.trim()}`);
   }
+  // npm prints nothing when the package's `latest` dist-tag names no version,
+  // which a package created by staged publishing may start out with. Every
+  // publish here tags `latest`, so this workflow has published no version of it.
+  if (!output) return [];
+  const versions = JSON.parse(output);
+  return Array.isArray(versions) ? versions : [versions];
 }
 
 function publishedGitHead(name, version) {
@@ -105,15 +116,21 @@ const releases = manifests.filter((release) => selection.includes(release.key));
 const label = ({ name, version }) => `${name}@${version}`;
 
 function isOnRegistry({ name, version }) {
-  const onRegistry = publishedVersions(name);
-  const list = Array.isArray(onRegistry) ? onRegistry : [onRegistry];
-  return list.includes(version);
+  return (publishedVersions(name) ?? []).includes(version);
 }
 
 const published = [];
 const pending = [];
 for (const release of releases) {
-  (isOnRegistry(release) ? published : pending).push(release);
+  const onRegistry = publishedVersions(release.name);
+  if (onRegistry === undefined) {
+    problems.push(
+      `${release.name} is not on npm, and this workflow cannot create it: it publishes ` +
+        `only through trusted publishing, which npm sets up only for an existing ` +
+        `package. Create the package first (see "npm authentication" in CONTRIBUTING.md).`,
+    );
+  }
+  (onRegistry?.includes(release.version) ? published : pending).push(release);
 }
 
 if (pending.length === 0) {
