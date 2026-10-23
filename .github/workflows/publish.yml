@@ -14,12 +14,23 @@ on:
           - browser
         default: both
 
+# One release dispatch at a time: a dispatch made while another is running
+# waits for it, so its version check sees what the earlier one published.
+# Otherwise two overlapping dispatches from different commits could both pass
+# the check and split one version across the two commits. GitHub keeps only
+# the newest waiting dispatch and cancels older waiting ones; a running
+# publish is never cancelled.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 jobs:
   test:
     name: Publish
     runs-on: ubuntu-latest
     # id-token lets npm trusted publishing trade this job's GitHub OIDC token
-    # for a short-lived publish token, so the repository stores no npm token.
+    # for a short-lived publish token, so the repository stores no long-lived
+    # npm token.
     permissions:
       contents: read
       id-token: write
@@ -104,8 +115,9 @@ jobs:
           echo "//registry.npmjs.org/:_authToken=\${NODE_AUTH_TOKEN?}" > "$RUNNER_TEMP/.npmrc"
           echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/.npmrc" >> "$GITHUB_ENV"
 
-      # A version npm already has can only be the published half of a partial
-      # release that the version check cleared to resume, so it is skipped.
+      # Dispatches run one at a time (see concurrency), so a version npm already
+      # has here is the published half of a partial release that the version
+      # check cleared to resume. It is skipped.
       - name: Publish @questdb/nodejs-client
         if: inputs.packages == 'both' || inputs.packages == 'nodejs'
         working-directory: packages/nodejs-client

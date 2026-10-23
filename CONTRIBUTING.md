@@ -142,6 +142,11 @@ that means re-dispatching a package already on npm is refused even while the
 other package is still missing; the error names the missing package and the
 `packages` value that publishes it.
 
+Dispatches run one at a time. A dispatch made while another is running waits
+for it to finish, so its version check sees everything the earlier one
+published; GitHub keeps only the newest waiting dispatch and cancels any older
+one still waiting.
+
 If a dispatch fails between the two publish steps, leaving one package on npm
 and the other not, **re-dispatch the same commit**. That is the supported
 repair: the gate verifies that the published package's npm `gitHead` is the
@@ -184,11 +189,11 @@ rediscover.
 The publish steps authenticate with npm
 [trusted publishing](https://docs.npmjs.com/trusted-publishers): npm trades the
 job's GitHub OIDC token for a short-lived publish token, so the repository
-stores no npm token, and every version carries a provenance statement. Each
-package needs a trusted publisher on npmjs.com (package Settings, Trusted
-publishing, GitHub Actions) with organization `questdb`, repository
-`nodejs-questdb-client`, workflow filename `publish.yml` and no environment.
-Its allowed actions must include `npm publish`; npm defaults a new
+stores no long-lived npm token, and every version carries a provenance
+statement. Each package needs a trusted publisher on npmjs.com (package
+Settings, Trusted publishing, GitHub Actions) with organization `questdb`,
+repository `nodejs-questdb-client`, workflow filename `publish.yml` and no
+environment. Its allowed actions must include `npm publish`; npm defaults a new
 configuration to `npm stage publish` only. npm also expires a configuration
 that has not published within 48 hours of its creation, so add it shortly
 before the dispatch that first uses it, and recreate it if it lapsed.
