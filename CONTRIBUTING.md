@@ -140,7 +140,8 @@ published, because each publish step skips a version npm already has and
 such a dispatch would publish nothing at all. For a single-package dispatch
 that means re-dispatching a package already on npm is refused even while the
 other package is still missing; the error names the missing package and the
-`packages` value that publishes it.
+`packages` value that publishes it, and says to create that package first
+when npm does not have it at all (see "npm authentication" below).
 
 Dispatches run one at a time. A dispatch made while another is running waits
 for it to finish, so its version check sees everything the earlier one

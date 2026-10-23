@@ -164,6 +164,7 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
       `${BROWSER}@${PUBLISHED} is not on npm yet`,
     );
     expect(nodeOnly.stderr).toContain("packages=browser");
+    expect(nodeOnly.stderr).not.toContain(`create ${BROWSER} first`);
 
     const browserOnly = run("release-commit", "browser", {
       published: [BROWSER],
@@ -216,6 +217,18 @@ describe.skipIf(process.platform === "win32")("release version gate", () => {
     const nodeOnly = run("release-commit", "nodejs", missing);
     expect(nodeOnly.status).toBe(0);
     expect(nodeOnly.stdout).toContain("release check passed (packages=nodejs)");
+
+    // Once that dispatch has published, repeating it is refused, and the
+    // follow-up it suggests has to create the missing package first.
+    const repeated = run("release-commit", "nodejs", {
+      published: [NODEJS],
+      absent: [BROWSER],
+    });
+    expect(repeated.status).toBe(1);
+    expect(repeated.stderr).toContain(
+      `create ${BROWSER} first (see "npm authentication" in CONTRIBUTING.md), ` +
+        "then dispatch with packages=browser",
+    );
   });
 
   it("releases a package whose latest dist-tag names no version", () => {

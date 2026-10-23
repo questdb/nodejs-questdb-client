@@ -115,10 +115,6 @@ if (versions.size > 1) {
 const releases = manifests.filter((release) => selection.includes(release.key));
 const label = ({ name, version }) => `${name}@${version}`;
 
-function isOnRegistry({ name, version }) {
-  return (publishedVersions(name) ?? []).includes(version);
-}
-
 const published = [];
 const pending = [];
 for (const release of releases) {
@@ -142,17 +138,30 @@ if (pending.length === 0) {
   } else {
     // A narrowed dispatch of an already-published package is most likely the
     // follow-up of a single-package release with the wrong package selected.
-    // Point at the unselected package still missing from npm, if any.
-    const missing = manifests.filter(
-      (release) => !selection.includes(release.key) && !isOnRegistry(release),
+    // Point at the unselected package still missing from npm, if any. A
+    // package npm does not have at all must be created first, because the
+    // loop above refuses a dispatch that selects it.
+    const missing = manifests
+      .filter((release) => !selection.includes(release.key))
+      .map((release) => ({
+        ...release,
+        onRegistry: publishedVersions(release.name),
+      }))
+      .filter((release) => !release.onRegistry?.includes(release.version));
+    const uncreated = missing.filter(
+      (release) => release.onRegistry === undefined,
     );
     problems.push(
       `the selected package has already published this version (${published.map(label).join(", ")}), ` +
         `so this dispatch would publish nothing. ` +
         (missing.length > 0
-          ? `${missing.map(label).join(", ")} is not on npm yet; dispatch with ` +
-            `packages=${missing.map((release) => release.key).join(",")} to publish it ` +
-            `under this version, or bump the version first.`
+          ? `${missing.map(label).join(", ")} is not on npm yet; ` +
+            (uncreated.length > 0
+              ? `create ${uncreated.map((release) => release.name).join(", ")} first ` +
+                `(see "npm authentication" in CONTRIBUTING.md), then `
+              : "") +
+            `dispatch with packages=${missing.map((release) => release.key).join(",")} ` +
+            `to publish it under this version, or bump the version first.`
           : `Bump the version first.`),
     );
   }
