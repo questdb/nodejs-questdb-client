@@ -18,6 +18,11 @@ jobs:
   test:
     name: Publish
     runs-on: ubuntu-latest
+    # id-token lets npm trusted publishing trade this job's GitHub OIDC token
+    # for a short-lived publish token, so the repository stores no npm token.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -72,8 +77,8 @@ jobs:
       - name: Check for build artifacts
         run: node scripts/check-build-artifacts.mjs
 
-      # The selected packages are published from one commit, and npm-publish
-      # silently skips a version that already exists. Fail here instead of
+      # The selected packages are published from one commit, and each publish
+      # step skips a version npm already has. Fail here instead of
       # half-releasing or publishing nothing.
       # Every gate above still covers both packages: they share client-core, so
       # a broken browser build is a broken build even on a Node-only release.
@@ -82,20 +87,49 @@ jobs:
           RELEASE_PACKAGES: ${{ inputs.packages }}
         run: node scripts/check-release-versions.mjs
 
+      # Trusted publishing needs npm >= 11.5.1 and Node 22 bundles npm 10, so
+      # upgrade it only here, after every gate has run on the stock toolchain.
+      - name: Install npm for trusted publishing
+        run: npm install --global npm@11.21.1
+
+      # npm publishes through trusted publishing (OIDC) and falls back to this
+      # token whenever that fails: for a new package, which cannot have a
+      # trusted publisher until it exists, but also for an existing package
+      # whose trusted publisher does not match this workflow or has expired.
+      # The token is the NPM_BOOTSTRAP_TOKEN secret, unset except to create a
+      # new package (see "npm authentication" in CONTRIBUTING.md); `?` turns an
+      # unset variable into no token rather than a literal one.
+      - name: Configure npm authentication
+        run: |
+          echo "//registry.npmjs.org/:_authToken=\${NODE_AUTH_TOKEN?}" > "$RUNNER_TEMP/.npmrc"
+          echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/.npmrc" >> "$GITHUB_ENV"
+
+      # A version npm already has can only be the published half of a partial
+      # release that the version check cleared to resume, so it is skipped.
       - name: Publish @questdb/nodejs-client
         if: inputs.packages == 'both' || inputs.packages == 'nodejs'
-        uses: JS-DevTools/npm-publish@v3
-        with:
-          token: ${{ secrets.CI_TOKEN }}
-          access: public
-          strategy: all
-          package: packages/nodejs-client/package.json
+        working-directory: packages/nodejs-client
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        run: |
+          name=$(node -p 'require("./package.json").name')
+          version=$(node -p 'require("./package.json").version')
+          if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+            echo "$name@$version is already on npm; skipping it."
+          else
+            npm publish --access public --provenance --ignore-scripts
+          fi
 
       - name: Publish @questdb/browser-client
         if: inputs.packages == 'both' || inputs.packages == 'browser'
-        uses: JS-DevTools/npm-publish@v3
-        with:
-          token: ${{ secrets.CI_TOKEN }}
-          access: public
-          strategy: all
-          package: packages/browser-client/package.json
+        working-directory: packages/browser-client
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        run: |
+          name=$(node -p 'require("./package.json").name')
+          version=$(node -p 'require("./package.json").version')
+          if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+            echo "$name@$version is already on npm; skipping it."
+          else
+            npm publish --access public --provenance --ignore-scripts
+          fi

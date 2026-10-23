@@ -136,7 +136,7 @@ default, see below) from one commit, so bump `packages/nodejs-client/package.jso
 `packages/browser-client/package.json` to the same new version before
 dispatching it. `node scripts/check-release-versions.mjs` runs first and
 refuses a dispatch whose version **every** selected package has already
-published, because the publish action skips an existing version silently and
+published, because each publish step skips a version npm already has and
 such a dispatch would publish nothing at all. For a single-package dispatch
 that means re-dispatching a package already on npm is refused even while the
 other package is still missing; the error names the missing package and the
@@ -146,7 +146,7 @@ If a dispatch fails between the two publish steps, leaving one package on npm
 and the other not, **re-dispatch the same commit**. That is the supported
 repair: the gate verifies that the published package's npm `gitHead` is the
 commit being dispatched, reports `resuming a partial release`, and passes. The
-published package no-ops inside the publish action, and the missing one lands.
+published package's step skips it, and the missing one lands.
 A package with the same version but a different or missing `gitHead` is an older
 unrelated artifact, not a partial release; the gate rejects it and the version
 must be bumped, unless that package was deliberately released on its own (see
@@ -178,6 +178,40 @@ is breaking and needs a major bump, even when the new behaviour is a fix. The
 signal comes from the commits, so mark a breaking change where Conventional
 Commits puts it (see below) rather than leaving it for the release to
 rediscover.
+
+### npm authentication
+
+The publish steps authenticate with npm
+[trusted publishing](https://docs.npmjs.com/trusted-publishers): npm trades the
+job's GitHub OIDC token for a short-lived publish token, so the repository
+stores no npm token, and every version carries a provenance statement. Each
+package needs a trusted publisher on npmjs.com (package Settings, Trusted
+publishing, GitHub Actions) with organization `questdb`, repository
+`nodejs-questdb-client`, workflow filename `publish.yml` and no environment.
+Its allowed actions must include `npm publish`; npm defaults a new
+configuration to `npm stage publish` only. npm also expires a configuration
+that has not published within 48 hours of its creation, so add it shortly
+before the dispatch that first uses it, and recreate it if it lapsed.
+`ENEEDAUTH` from a publish step means npm got no token over OIDC and had no
+token to fall back to. Usually no trusted publisher matches this workflow, but
+a failed OIDC request to GitHub or npm ends the same way, so check the
+configuration and re-dispatch. `404 Not Found - PUT` means npm rejected a
+token.
+
+npm attaches a trusted publisher only to a package that already exists, so a
+new package's first version needs a token. Create a granular access token with
+read and write access to the `@questdb` scope, **Bypass 2FA** enabled and a
+short expiry, store it as the `NPM_BOOTSTRAP_TOKEN` repository secret, and
+dispatch. npm still tries trusted publishing first, but while the secret is
+set it falls back to the token whenever that fails, for every package in the
+dispatch: a package whose trusted publisher does not match this workflow or
+has expired also publishes with the token, and the run still passes. So check
+each version the dispatch published: one published over OIDC shows a
+`trustedPublisher` entry in `npm view <package>@<version> _npmUser`, and one
+without it used the token. Then delete the secret and revoke the token.
+Shortly before the next release, add a trusted publisher for the new package
+and for any other package that published with the token, deleting its broken
+or expired one first.
 
 ## Making Changes
 

@@ -1,9 +1,9 @@
 // Guards a lockstep-versioned release of one or both packages.
 //
-// JS-DevTools/npm-publish skips a version that is already on npm, which was
-// harmless while this repo published one package: a forgotten bump made the
-// whole workflow a no-op. With two packages a version that only one of them
-// has already published publishes the other and still reports success, leaving
+// The publish steps skip a version that is already on npm, which was harmless
+// while this repo published one package: a forgotten bump made the whole
+// workflow a no-op. With two packages a version that only one of them has
+// already published publishes the other and still reports success, leaving
 // the two halves of one release on different versions. This turns that into a
 // failure before either publish step runs.
 //
@@ -15,7 +15,7 @@
 // Then it is either the wreckage of a dispatch whose first publish step
 // succeeded and whose second failed, or a package deliberately released on its
 // own from this commit (see RELEASE_PACKAGES below). Either way the publish
-// action's skip-if-present behaviour makes publishing the rest from this commit
+// steps' skip-if-present behaviour makes publishing the rest from this commit
 // exactly right. A different or missing gitHead is an older unrelated artifact
 // that must never authorize publishing new code under the same version.
 //
