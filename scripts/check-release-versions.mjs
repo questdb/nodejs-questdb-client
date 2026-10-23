@@ -1,9 +1,9 @@
 // Guards a lockstep-versioned release of one or both packages.
 //
-// JS-DevTools/npm-publish skips a version that is already on npm, which was
-// harmless while this repo published one package: a forgotten bump made the
-// whole workflow a no-op. With two packages a version that only one of them
-// has already published publishes the other and still reports success, leaving
+// The publish steps skip a version that is already on npm, which was harmless
+// while this repo published one package: a forgotten bump made the whole
+// workflow a no-op. With two packages a version that only one of them has
+// already published publishes the other and still reports success, leaving
 // the two halves of one release on different versions. This turns that into a
 // failure before either publish step runs.
 //
@@ -15,9 +15,14 @@
 // Then it is either the wreckage of a dispatch whose first publish step
 // succeeded and whose second failed, or a package deliberately released on its
 // own from this commit (see RELEASE_PACKAGES below). Either way the publish
-// action's skip-if-present behaviour makes publishing the rest from this commit
+// steps' skip-if-present behaviour makes publishing the rest from this commit
 // exactly right. A different or missing gitHead is an older unrelated artifact
 // that must never authorize publishing new code under the same version.
+//
+// A selected package npm does not have at all is refused too. The publish
+// steps authenticate only through trusted publishing, and npm attaches a
+// trusted publisher only to a package that already exists, so its publish step
+// would fail, possibly after the other package had published.
 //
 // RELEASE_PACKAGES (the publish workflow's `packages` input) narrows the
 // dispatch to one package: `nodejs`, `browser`, or `both` (the default). The
@@ -57,22 +62,28 @@ function manifest(packageDirectory) {
   );
 }
 
-/** Versions already on npm, or [] for a package that has never been published. */
+/** Versions already on npm, or undefined for a package npm does not have. */
 function publishedVersions(name) {
+  let output;
   try {
-    return JSON.parse(
-      execFileSync(
-        process.platform === "win32" ? "npm.cmd" : "npm",
-        ["view", name, "versions", "--json"],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-      ),
-    );
+    output = execFileSync(
+      process.platform === "win32" ? "npm.cmd" : "npm",
+      ["view", name, "versions", "--json"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
   } catch (error) {
     const stderr = error?.stderr?.toString() ?? "";
-    // A package nobody has published yet is the expected state for a new one.
-    if (stderr.includes("E404") || stderr.includes("404 Not Found")) return [];
+    if (stderr.includes("E404") || stderr.includes("404 Not Found")) {
+      return undefined;
+    }
     throw new Error(`npm view ${name} versions failed:\n${stderr.trim()}`);
   }
+  // npm prints nothing when the package's `latest` dist-tag names no version,
+  // which a package created by staged publishing may start out with. Every
+  // publish here tags `latest`, so this workflow has published no version of it.
+  if (!output) return [];
+  const versions = JSON.parse(output);
+  return Array.isArray(versions) ? versions : [versions];
 }
 
 function publishedGitHead(name, version) {
@@ -104,16 +115,18 @@ if (versions.size > 1) {
 const releases = manifests.filter((release) => selection.includes(release.key));
 const label = ({ name, version }) => `${name}@${version}`;
 
-function isOnRegistry({ name, version }) {
-  const onRegistry = publishedVersions(name);
-  const list = Array.isArray(onRegistry) ? onRegistry : [onRegistry];
-  return list.includes(version);
-}
-
 const published = [];
 const pending = [];
 for (const release of releases) {
-  (isOnRegistry(release) ? published : pending).push(release);
+  const onRegistry = publishedVersions(release.name);
+  if (onRegistry === undefined) {
+    problems.push(
+      `${release.name} is not on npm, and this workflow cannot create it: it publishes ` +
+        `only through trusted publishing, which npm sets up only for an existing ` +
+        `package. Create the package first (see "npm authentication" in CONTRIBUTING.md).`,
+    );
+  }
+  (onRegistry?.includes(release.version) ? published : pending).push(release);
 }
 
 if (pending.length === 0) {
@@ -125,17 +138,30 @@ if (pending.length === 0) {
   } else {
     // A narrowed dispatch of an already-published package is most likely the
     // follow-up of a single-package release with the wrong package selected.
-    // Point at the unselected package still missing from npm, if any.
-    const missing = manifests.filter(
-      (release) => !selection.includes(release.key) && !isOnRegistry(release),
+    // Point at the unselected package still missing from npm, if any. A
+    // package npm does not have at all must be created first, because the
+    // loop above refuses a dispatch that selects it.
+    const missing = manifests
+      .filter((release) => !selection.includes(release.key))
+      .map((release) => ({
+        ...release,
+        onRegistry: publishedVersions(release.name),
+      }))
+      .filter((release) => !release.onRegistry?.includes(release.version));
+    const uncreated = missing.filter(
+      (release) => release.onRegistry === undefined,
     );
     problems.push(
       `the selected package has already published this version (${published.map(label).join(", ")}), ` +
         `so this dispatch would publish nothing. ` +
         (missing.length > 0
-          ? `${missing.map(label).join(", ")} is not on npm yet; dispatch with ` +
-            `packages=${missing.map((release) => release.key).join(",")} to publish it ` +
-            `under this version, or bump the version first.`
+          ? `${missing.map(label).join(", ")} is not on npm yet; ` +
+            (uncreated.length > 0
+              ? `create ${uncreated.map((release) => release.name).join(", ")} first ` +
+                `(see "npm authentication" in CONTRIBUTING.md), then `
+              : "") +
+            `dispatch with packages=${missing.map((release) => release.key).join(",")} ` +
+            `to publish it under this version, or bump the version first.`
           : `Bump the version first.`),
     );
   }

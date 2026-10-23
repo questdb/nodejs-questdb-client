@@ -136,17 +136,23 @@ default, see below) from one commit, so bump `packages/nodejs-client/package.jso
 `packages/browser-client/package.json` to the same new version before
 dispatching it. `node scripts/check-release-versions.mjs` runs first and
 refuses a dispatch whose version **every** selected package has already
-published, because the publish action skips an existing version silently and
+published, because each publish step skips a version npm already has and
 such a dispatch would publish nothing at all. For a single-package dispatch
 that means re-dispatching a package already on npm is refused even while the
 other package is still missing; the error names the missing package and the
-`packages` value that publishes it.
+`packages` value that publishes it, and says to create that package first
+when npm does not have it at all (see "npm authentication" below).
+
+Dispatches run one at a time. A dispatch made while another is running waits
+for it to finish, so its version check sees everything the earlier one
+published; GitHub keeps only the newest waiting dispatch and cancels any older
+one still waiting.
 
 If a dispatch fails between the two publish steps, leaving one package on npm
 and the other not, **re-dispatch the same commit**. That is the supported
 repair: the gate verifies that the published package's npm `gitHead` is the
 commit being dispatched, reports `resuming a partial release`, and passes. The
-published package no-ops inside the publish action, and the missing one lands.
+published package's step skips it, and the missing one lands.
 A package with the same version but a different or missing `gitHead` is an older
 unrelated artifact, not a partial release; the gate rejects it and the version
 must be bumped, unless that package was deliberately released on its own (see
@@ -178,6 +184,58 @@ is breaking and needs a major bump, even when the new behaviour is a fix. The
 signal comes from the commits, so mark a breaking change where Conventional
 Commits puts it (see below) rather than leaving it for the release to
 rediscover.
+
+### npm authentication
+
+The publish steps authenticate with npm only through
+[trusted publishing](https://docs.npmjs.com/trusted-publishers): npm trades the
+job's GitHub OIDC token for a short-lived publish token, so the repository
+stores no npm token, and every version carries a provenance statement. Each
+package needs a trusted publisher on npmjs.com (package Settings, Trusted
+publishing, GitHub Actions) with organization `questdb`, repository
+`nodejs-questdb-client`, workflow filename `publish.yml` and no environment.
+Its allowed actions must include `npm publish`; npm defaults a new
+configuration to `npm stage publish` only. npm also expires a configuration
+that has not published within 48 hours of its creation, so add it shortly
+before the dispatch that first uses it, and recreate it if it lapsed.
+`ENEEDAUTH` from a publish step means npm got no token over OIDC. Usually no
+trusted publisher matches this workflow, but a failed OIDC request to GitHub
+or npm ends the same way, so check the configuration and re-dispatch.
+`404 Not Found - PUT` means npm rejected a token.
+
+npm attaches a trusted publisher only to a package that already exists, and
+the workflow has no token to create one with, so the release check refuses a
+dispatch that selects a package npm does not have. Create a new package by
+hand first, with [staged publishing](https://docs.npmjs.com/staged-publishing):
+`npm stage publish` creates a package from a maintainer's logged-in session,
+with no token and no 2FA prompt. It needs npm 11.15 or later, Node 22.14 or
+later, and an npm account with 2FA enabled that may publish to `@questdb`.
+
+1. Stage a throwaway version from an empty directory, here for
+   `@questdb/browser-client`:
+
+   ```bash
+   cd "$(mktemp -d)"
+   echo '{"name":"@questdb/browser-client","version":"0.0.1-bootstrap.0"}' > package.json
+   npx -y npm@11.21.1 login
+   npx -y npm@11.21.1 stage publish --access public --tag bootstrap
+   ```
+
+   npm creates the package with a public placeholder version, `0.0.0-stage`,
+   which stays in its version list. The staged version itself is not public
+   unless a maintainer approves it. Do not stage the release version instead:
+   while a version is staged, npm refuses to publish that version.
+
+2. Add the package's trusted publisher as described above.
+
+3. Reject the staged version with
+   `npx -y npm@11.21.1 stage reject <stage-id>`, which prompts for 2FA.
+   `stage publish` printed the stage ID, and
+   `npx -y npm@11.21.1 stage list @questdb/browser-client` shows it again.
+   Then check that `npm view @questdb/browser-client@0.0.0-stage version`
+   still prints the placeholder, so the package still exists.
+
+4. Dispatch within 48 hours of adding the trusted publisher.
 
 ## Making Changes
 
