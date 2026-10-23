@@ -107,27 +107,12 @@ jobs:
 
       # Dispatches run one at a time (see concurrency), so a version npm already
       # has here is the published half of a partial release that the version
-      # check cleared to resume. It is skipped.
+      # check cleared to resume, and the script skips it. Both steps run the
+      # same script, which test/release-version.test.ts covers.
       - name: Publish @questdb/nodejs-client
         if: inputs.packages == 'both' || inputs.packages == 'nodejs'
-        working-directory: packages/nodejs-client
-        run: |
-          name=$(node -p 'require("./package.json").name')
-          version=$(node -p 'require("./package.json").version')
-          if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
-            echo "$name@$version is already on npm; skipping it."
-          else
-            npm publish --access public --provenance --ignore-scripts
-          fi
+        run: node scripts/publish-package.mjs packages/nodejs-client
 
       - name: Publish @questdb/browser-client
         if: inputs.packages == 'both' || inputs.packages == 'browser'
-        working-directory: packages/browser-client
-        run: |
-          name=$(node -p 'require("./package.json").name')
-          version=$(node -p 'require("./package.json").version')
-          if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
-            echo "$name@$version is already on npm; skipping it."
-          else
-            npm publish --access public --provenance --ignore-scripts
-          fi
+        run: node scripts/publish-package.mjs packages/browser-client
