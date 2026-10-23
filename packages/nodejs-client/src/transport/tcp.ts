@@ -13,6 +13,21 @@ import { isBoolean } from "../utils";
 // Default number of rows that trigger auto-flush for TCP transport.
 const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 
+// Returns the uncompressed SEC1 public point of a base64url-encoded P-256
+// private key: an 0x04 tag followed by the 32-byte X and Y. ECDH rejects a
+// scalar outside the curve's range.
+function p256PublicPoint(privateKey: string): Buffer {
+  const ecdh = crypto.createECDH("prime256v1");
+  ecdh.setPrivateKey(Buffer.from(privateKey, "base64url"));
+  return ecdh.getPublicKey();
+}
+
+// JWK members are big-endian unsigned integers, and Node decodes them by
+// value, so an encoding with a leading zero byte names the same key.
+function toUnsigned(bytes: Buffer): bigint {
+  return bytes.length ? BigInt(`0x${bytes.toString("hex")}`) : 0n;
+}
+
 // A JWK is not a valid EC key without its public point, but QuestDB's TCP auth
 // config carries only the private scalar. Deriving the point keeps the pair
 // mathematically consistent; a fixed placeholder used to stand in here, which
@@ -21,15 +36,12 @@ const DEFAULT_TCP_AUTO_FLUSH_ROWS = 600;
 function derivePublicKey(privateKey: string): { x: string; y: string } {
   let point: Buffer;
   try {
-    const ecdh = crypto.createECDH("prime256v1");
-    ecdh.setPrivateKey(Buffer.from(privateKey, "base64url"));
-    point = ecdh.getPublicKey();
+    point = p256PublicPoint(privateKey);
   } catch (err) {
     throw new Error(
       `Invalid private key, the 'token' property of the 'auth' config option must be a base64url-encoded P-256 private key: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  // Uncompressed SEC1 point: an 0x04 tag followed by the 32-byte X and Y.
   return {
     x: point.subarray(1, 33).toString("base64url"),
     y: point.subarray(33, 65).toString("base64url"),
@@ -132,7 +144,19 @@ class TcpTransport implements SenderTransport {
         .on("data", async (raw) => {
           data = !data ? raw : Buffer.concat([data, raw]);
           if (!authenticated) {
-            authenticated = await this.authenticate(data);
+            try {
+              authenticated = await this.authenticate(data);
+            } catch (err) {
+              // Nothing handles this listener's promise, so an error left to
+              // escape it would end the process as an unhandled rejection.
+              this.log(
+                "error",
+                `Failed to authenticate: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              this.socket?.destroy();
+              reject(err);
+              return;
+            }
             if (authenticated) {
               resolve(true);
             }
@@ -241,7 +265,7 @@ class TcpTransport implements SenderTransport {
         format: "jwk",
       });
       const signature = crypto.sign(
-        "RSA-SHA256",
+        "SHA256",
         challenge.subarray(0, challenge.length - 1),
         keyObject,
       );
@@ -324,7 +348,72 @@ function constructJwk(options: SenderOptions): Record<string, string> {
       crv: "P-256",
     };
   } else {
+    if (options.jwk) {
+      validateJwk(options.jwk);
+    }
     return options.jwk;
+  }
+}
+
+/**
+ * @ignore
+ * Validates a JWK supplied through the 'jwk' option.
+ * The key is first used when the server's challenge arrives, so checking it
+ * here reports a bad key when the Sender is created rather than when it
+ * connects. The messages never quote the key, which carries the private scalar.
+ * @param {unknown} jwk - JWK supplied through the 'jwk' option
+ * @throws Error if the JWK is not a complete EC P-256 private key
+ */
+function validateJwk(jwk: unknown): void {
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk)) {
+    throw new Error(
+      `Invalid 'jwk' config option, expected a JWK object with the 'kid', 'kty', 'crv', 'd', 'x' and 'y' properties`,
+    );
+  }
+  const { kid, kty, crv, d, x, y } = jwk as Record<string, unknown>;
+  if (typeof kid !== "string" || !kid) {
+    throw new Error(
+      `Missing key id, please, specify the 'kid' property of the 'jwk' config option as a non-empty string`,
+    );
+  }
+  if (kty !== "EC" || crv !== "P-256") {
+    throw new Error(
+      `Unsupported key type, the 'jwk' config option must be an EC P-256 key, with 'kty' set to 'EC' and 'crv' set to 'P-256'`,
+    );
+  }
+  if (
+    typeof d !== "string" ||
+    !d ||
+    typeof x !== "string" ||
+    !x ||
+    typeof y !== "string" ||
+    !y
+  ) {
+    throw new Error(
+      `Missing key material, please, specify the 'd', 'x' and 'y' properties of the 'jwk' config option as base64url-encoded strings`,
+    );
+  }
+  try {
+    // Up to v24, Node imports a JWK without checking that x and y belong to d,
+    // and accepts a d outside the curve's range that crypto.sign() rejects only
+    // at the server's challenge. Deriving the point applies one rule on every
+    // Node version.
+    const point = p256PublicPoint(d);
+    if (
+      toUnsigned(Buffer.from(x, "base64url")) !==
+        toUnsigned(point.subarray(1, 33)) ||
+      toUnsigned(Buffer.from(y, "base64url")) !==
+        toUnsigned(point.subarray(33, 65))
+    ) {
+      throw new Error("the public point does not belong to the private key");
+    }
+    crypto.createPrivateKey({ key: jwk as crypto.JsonWebKey, format: "jwk" });
+  } catch (err) {
+    // Every property is a string by now, so Node's message names the problem
+    // without quoting a value.
+    throw new Error(
+      `Invalid private key, the 'd', 'x' and 'y' properties of the 'jwk' config option must form a P-256 key pair: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 

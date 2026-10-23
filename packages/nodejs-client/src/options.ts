@@ -196,6 +196,14 @@ type ExtraOptions = {
    * `ERR_INVALID_PROTOCOL` when the upgrade is attempted.
    */
   agent?: Agent | http.Agent | https.Agent;
+  /**
+   * Complete EC P-256 private JWK for TCP/TCPS authentication, with the
+   * `kid`, `d`, `x` and `y` properties, `kty` set to `"EC"` and `crv` set to
+   * `"P-256"`. A key that is incomplete or not a P-256 key pair is rejected
+   * when the Sender is created. Takes precedence over `username`/`token` in
+   * the configuration string. Rejected for other transports.
+   */
+  jwk?: Record<string, string>;
   qwp?: QwpExtraOptions;
 };
 
@@ -397,7 +405,9 @@ class SenderOptions {
    * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
-   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>. <br>
+   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, with the 'kid', 'd', 'x' and 'y' properties, 'kty' set to 'EC' and 'crv' set to 'P-256'.
+   * It takes precedence over 'username'/'token' in the configuration string and is rejected for other transports.
    */
   constructor(configurationString: string, extraOptions?: ExtraOptions) {
     parseConfigurationString(this, configurationString);
@@ -418,6 +428,16 @@ class SenderOptions {
         throw new Error("Invalid HTTP agent");
       }
       this.agent = extraOptions.agent;
+      if (
+        extraOptions.jwk !== undefined &&
+        this.protocol !== TCP &&
+        this.protocol !== TCPS
+      ) {
+        throw new Error(
+          "'jwk' option is supported only for the tcp/tcps transports",
+        );
+      }
+      this.jwk = extraOptions.jwk;
       validateQwpExtraOptions(this.protocol, extraOptions.qwp);
       this.qwp = extraOptions.qwp;
     }
@@ -522,7 +542,9 @@ class SenderOptions {
    * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
-   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>. <br>
+   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, with the 'kid', 'd', 'x' and 'y' properties, 'kty' set to 'EC' and 'crv' set to 'P-256'.
+   * It takes precedence over 'username'/'token' in the configuration string and is rejected for other transports.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the provided configuration string.
    */
@@ -542,7 +564,9 @@ class SenderOptions {
    * - 'log' is a logging function used by the {@link Sender}.
    * Prototype: <i>(level: 'error'|'warn'|'info'|'debug', message: string) => void</i>. <br>
    * - 'agent' is a custom http/https agent used by the {@link Sender} when http/https transport is used.
-   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>.
+   * Depends on which transport implementation and protocol used, one of the followings expected: <i>undici.Agent</i>, <i>http.Agent</i> or <i>https.Agent</i>. <br>
+   * - 'jwk' is a complete EC P-256 private JWK for TCP/TCPS authentication, with the 'kid', 'd', 'x' and 'y' properties, 'kty' set to 'EC' and 'crv' set to 'P-256'.
+   * It takes precedence over 'username'/'token' in the configuration string and is rejected for other transports.
    *
    * @return {SenderOptions} A Sender configuration object initialized from the <b>QDB_CLIENT_CONF</b> environment variable.
    */
