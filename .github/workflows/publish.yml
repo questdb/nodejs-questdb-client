@@ -14,10 +14,25 @@ on:
           - browser
         default: both
 
+# One release dispatch at a time: a dispatch made while another is running
+# waits for it, so its version check sees what the earlier one published.
+# Otherwise two overlapping dispatches from different commits could both pass
+# the check and split one version across the two commits. GitHub keeps only
+# the newest waiting dispatch and cancels older waiting ones; a running
+# publish is never cancelled.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 jobs:
   test:
     name: Publish
     runs-on: ubuntu-latest
+    # id-token lets npm trusted publishing trade this job's GitHub OIDC token
+    # for a short-lived publish token, so the repository stores no npm token.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -72,8 +87,8 @@ jobs:
       - name: Check for build artifacts
         run: node scripts/check-build-artifacts.mjs
 
-      # The selected packages are published from one commit, and npm-publish
-      # silently skips a version that already exists. Fail here instead of
+      # The selected packages are published from one commit, and each publish
+      # step skips a version npm already has. Fail here instead of
       # half-releasing or publishing nothing.
       # Every gate above still covers both packages: they share client-core, so
       # a broken browser build is a broken build even on a Node-only release.
@@ -82,20 +97,22 @@ jobs:
           RELEASE_PACKAGES: ${{ inputs.packages }}
         run: node scripts/check-release-versions.mjs
 
+      # Trusted publishing needs npm >= 11.5.1 and Node 22 bundles npm 10, so
+      # upgrade it only here, after every gate has run on the stock toolchain.
+      # It is the only way the publish steps authenticate: the job configures
+      # no npm token, so a package with no matching trusted publisher fails
+      # with ENEEDAUTH (see "npm authentication" in CONTRIBUTING.md).
+      - name: Install npm for trusted publishing
+        run: npm install --global npm@11.21.1
+
+      # Dispatches run one at a time (see concurrency), so a version npm already
+      # has here is the published half of a partial release that the version
+      # check cleared to resume, and the script skips it. Both steps run the
+      # same script, which test/release-version.test.ts covers.
       - name: Publish @questdb/nodejs-client
         if: inputs.packages == 'both' || inputs.packages == 'nodejs'
-        uses: JS-DevTools/npm-publish@v3
-        with:
-          token: ${{ secrets.CI_TOKEN }}
-          access: public
-          strategy: all
-          package: packages/nodejs-client/package.json
+        run: node scripts/publish-package.mjs packages/nodejs-client
 
       - name: Publish @questdb/browser-client
         if: inputs.packages == 'both' || inputs.packages == 'browser'
-        uses: JS-DevTools/npm-publish@v3
-        with:
-          token: ${{ secrets.CI_TOKEN }}
-          access: public
-          strategy: all
-          package: packages/browser-client/package.json
+        run: node scripts/publish-package.mjs packages/browser-client
