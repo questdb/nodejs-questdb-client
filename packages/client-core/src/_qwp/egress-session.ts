@@ -2071,7 +2071,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         ? Math.max(discardedCredit, 1)
         : discardedCredit;
     if (creditBytes === 0) return cancelling;
-    return cancelling.then(() => this.sendCredit(query, creditBytes));
+    return cancelling.then(() => {
+      // Keep CANCEL before CREDIT, but release a callback awaiting cancel():
+      // credit recovery may reconnect and wait for that same callback to drain.
+      // The session send tail still owns failures from this queued credit.
+      void this.sendCredit(query, creditBytes).catch(() => undefined);
+    });
   }
 
   private sendCredit(

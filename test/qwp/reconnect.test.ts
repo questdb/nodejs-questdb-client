@@ -70,6 +70,7 @@ import {
   encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
   encodeQwpQueryRequest,
+  encodeQwpCredit,
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
@@ -9148,6 +9149,144 @@ describe("QWP egress reconnect and replay", () => {
         });
         await session.close();
       } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([false, true])(
+      "releases a cancelling view callback when its CREDIT send starts reconnect (autoCredit: %s)",
+      async (autoCredit) => {
+        vi.useFakeTimers();
+        let session: Awaited<ReturnType<typeof connectQwpEgressSession>>;
+        try {
+          const connected = await sessionWithHeldReplacement({
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+              failoverMaxDurationMs: 500,
+            },
+          });
+          session = connected.session;
+          const { primary, replacement, releaseReplacement, resets } =
+            connected;
+          releaseReplacement();
+          primary.onSend = async (payload) => {
+            if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT) {
+              throw new Error("cancellation credit send failed");
+            }
+          };
+          const seen: bigint[] = [];
+          let cancelReturned = false;
+          const query = await session.queryViews(
+            "select * from x",
+            async (batch, control) => {
+              seen.push(batch.batchSequence);
+              await control.cancel();
+              cancelReturned = true;
+            },
+            { initialCredit: 4096, autoCredit },
+          );
+          primary.receive(emptyResultBatch(query.requestId));
+          await vi.advanceTimersByTimeAsync(0);
+
+          // CANCEL succeeds, but its wake-up CREDIT starts reconnect. Awaiting
+          // that send inside cancel() held the callback open while the replay
+          // reset waited for the same callback, until reconnect exhausted.
+          expect(kinds(primary)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+            QWP_EGRESS_MESSAGE.CANCEL,
+            QWP_EGRESS_MESSAGE.CREDIT,
+          ]);
+          expect(cancelReturned).toBe(true);
+          expect(resets).toEqual([query.requestId]);
+          expect(kinds(replacement).slice(0, 2)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+            QWP_EGRESS_MESSAGE.CANCEL,
+          ]);
+          expect(requestIdOf(replacement.sent[0])).toBe(query.requestId);
+          expect(query.isDone()).toBe(false);
+
+          // Replay preserves cancellation: late batches are credited without
+          // invoking the callback, even when automatic credit is disabled.
+          const lateBatch = emptyResultBatch(query.requestId);
+          replacement.receive(lateBatch);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(replacement.sent.at(-1)).toEqual(
+            encodeQwpCredit(query.requestId, lateBatch.byteLength),
+          );
+          replacement.receive(cancelled(query.requestId));
+          await expect(query.completion).rejects.toMatchObject({
+            name: "QwpEgressQueryError",
+            status: QWP_STATUS.CANCELLED,
+          });
+          expect(seen).toEqual([0n]);
+
+          const next = await session.query("select 2");
+          expect(requestIdOf(replacement.sent.at(-1)!)).toBe(next.requestId);
+          replacement.receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+        } finally {
+          const closing = session?.close();
+          await vi.advanceTimersByTimeAsync(1_000);
+          await closing;
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it("reports exhausted recovery after a cancellation CREDIT send fails", async () => {
+      vi.useFakeTimers();
+      let session: Awaited<ReturnType<typeof connectQwpEgressSession>>;
+      try {
+        const connected = await sessionWithHeldReplacement({
+          cancelDrainTimeoutMs: 50,
+          reconnect: {
+            failoverMaxAttempts: 1,
+            failoverBackoffInitialMs: 0,
+            failoverBackoffMaxMs: 0,
+            failoverMaxDurationMs: 500,
+          },
+        });
+        session = connected.session;
+        const { primary, replacement, releaseReplacement } = connected;
+        releaseReplacement();
+        primary.onSend = async (payload) => {
+          if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT) {
+            throw new Error("cancellation credit send failed");
+          }
+        };
+        const replayFailure = new Error("replay send failed");
+        replacement.onSend = async () => {
+          throw replayFailure;
+        };
+        let cancelReturned = false;
+        const query = await session.queryViews(
+          "select * from x",
+          async (_batch, control) => {
+            await control.cancel();
+            cancelReturned = true;
+          },
+          { initialCredit: 4096 },
+        );
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Releasing cancel() must not swallow the send failure: exhaustion
+        // still belongs to the query and session, not the view callback.
+        expect(cancelReturned).toBe(true);
+        const failure = await completion;
+        expect(failure).toBeInstanceOf(QwpReconnectExhaustedError);
+        expect(failure).toMatchObject({ cause: replayFailure });
+        await expect(session.query("select 2")).rejects.toBe(failure);
+      } finally {
+        const closing = session?.close();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await closing;
         vi.useRealTimers();
       }
     });
