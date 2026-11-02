@@ -888,8 +888,17 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
    */
   async replaceConnection(cause: Error, reason: string): Promise<void> {
     this.throwIfUnavailable();
+    // The session restarts its drain bound once a reconnect has restored it,
+    // but the reconnect installs its connection only after sending the replay.
+    // A bound that expires in between replaces the connection that reconnect
+    // installs. Returning at once left the settled query holding the session
+    // with no bound at all, until the server ended the replayed query.
+    if (!this.connection && this.reconnectTask) {
+      await this.reconnectTask.catch(() => undefined);
+      this.throwIfUnavailable();
+    }
     const connection = this.connection;
-    // A reconnect is already replacing it.
+    // No reconnect succeeded, and the session hears of whatever failed it.
     if (!connection) return;
     try {
       // Messages still queued from the old connection belong to the settled

@@ -9301,6 +9301,83 @@ describe("QWP egress reconnect and replay", () => {
       }
     });
 
+    it("replaces the connection a reconnect installs when the drain bound expires during its replay", async () => {
+      // The bound restarts once a reconnect has restored the session, but the
+      // reconnect installs its connection only after the replayed request has
+      // been sent. A bound that expired in between found no connection to
+      // replace: the cancelled query then held the session with no bound at
+      // all, and a query without a timeout of its own waited until the server
+      // ended the replayed one.
+      vi.useFakeTimers();
+      try {
+        const primary = new FakeConnection("primary");
+        const replacement = new FakeConnection("secondary");
+        const third = new FakeConnection("tertiary");
+        const connections = [primary, replacement, third];
+        let opened = 0;
+        const session = await connectQwpEgressSession(
+          async () => {
+            const connection = connections[opened++];
+            queueMicrotask(() =>
+              connection.receive(serverInfo(connection.endpoint)),
+            );
+            return connection;
+          },
+          {
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+            },
+          },
+        );
+        const query = await session.query("select * from x");
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+        // The replacement takes longer than the bound to accept the replay.
+        let releaseReplay!: () => void;
+        const replayHeld = new Promise<void>((resolve) => {
+          releaseReplay = resolve;
+        });
+        replacement.onSend = (payload) =>
+          payload[0] === QWP_EGRESS_MESSAGE.QUERY_REQUEST
+            ? replayHeld
+            : Promise.resolve();
+        primary.drop();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+
+        await vi.advanceTimersByTimeAsync(50);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+          requestId: query.requestId,
+          timeoutMs: 50,
+        });
+        releaseReplay();
+        await vi.advanceTimersByTimeAsync(0);
+        // The connection the reconnect installed is replaced in turn, and the
+        // cancelled query is not replayed onto the next one.
+        expect(opened).toBe(3);
+        await expect(replacement.closed).resolves.toMatchObject({
+          code: 1000,
+          reason: "QWP cancellation drain timed out",
+        });
+
+        const next = await session.query("select 2");
+        expect(kinds(third)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(third.sent[0])).toBe(next.requestId);
+        third.receive(resultEnd(next.requestId));
+        await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("lets a terminal that arrived before the connection was lost decide an expired query", async () => {
       vi.useFakeTimers();
       try {
