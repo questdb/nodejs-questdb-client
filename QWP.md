@@ -1303,7 +1303,11 @@ those clients, this one fires the success events only after the unacknowledged
 frames are replayed, so an endpoint that fails the replay is reported as
 `endpoint-attempt-failed`. `durable-ack-unavailable`,
 `durable-ack-persistent-failure` and `primary-unavailable` report store-and-forward
-conditions on the same stream. Egress sessions report the same connection events.
+conditions on the same stream. Egress sessions report the same connection events,
+including when the client replaces a connection whose cancellation drain expired:
+`disconnected` then carries `QwpEgressQueryCancelTimeoutError` as its cause, followed
+by `reconnected` or `failed-over` on success. This is not a transport outage: the
+endpoint is not deprioritized and the retired query is not replayed.
 
 Callbacks are placed on bounded asynchronous inboxes and never invoked inside ACK,
 reconnect, or orphan-recovery protocol stacks, on ingress and egress alike; the
@@ -1549,11 +1553,14 @@ its connection is closed, which is what ends the query on the server. A query en
 with `query.cancel()` then fails with `QwpEgressQueryCancelTimeoutError`; one already
 released by its timeout or by breaking out of `for await` keeps the error it was
 released with. A reconnecting session, the default, opens a new connection for the
-next query instead of failing; a session opened with `reconnect: false` has no other
-connection and fails with `QwpEgressQueryCancelTimeoutError`. Set a positive
-`initialCredit` on queries that may be cancelled mid-stream. A reconnect does not
-count against the bound: without a connection there is nothing to drain, and a query
-whose consumer has retired is dropped rather than replayed.
+next query instead of failing. This client-initiated replacement emits `disconnected`
+with `QwpEgressQueryCancelTimeoutError` as its cause, followed by `reconnected` or
+`failed-over` on success. It does not deprioritize the endpoint or replay the retired
+query. A session opened with `reconnect: false` has no other connection and fails with
+`QwpEgressQueryCancelTimeoutError`. Set a positive `initialCredit` on queries that may
+be cancelled mid-stream. A reconnect does not count against the bound: without a
+connection there is nothing to drain, and a query whose consumer has retired is
+dropped rather than replayed.
 
 Node.js and browsers can request Zstd with `compression: "zstd"` or `"auto"` and a
 level from 1 through 22. Raw remains the compatibility default. Node uses
@@ -1598,10 +1605,11 @@ transport.
 
 Egress failover is enabled by default in Node.js and browsers. A transport failure or
 invalid protocol response closes and deprioritizes that endpoint, reconnects, resets
-connection-scoped decoding state, and re-executes the active query. The default policy
-uses eight connection sweeps, full-jitter backoff starting at 50 ms and capped at one
-second, and a 30-second outage deadline. `QUERY_ERROR` remains a query result and does
-not trigger failover.
+connection-scoped decoding state, and re-executes the active query. Cancellation-drain
+expiry also triggers a reconnect, but without deprioritizing the endpoint or replaying
+the retired query. The default policy uses eight connection sweeps, full-jitter backoff
+starting at 50 ms and capped at one second, and a 30-second outage deadline.
+`QUERY_ERROR` remains a query result and does not trigger failover.
 
 `session.ready` resolves once with the initial `SERVER_INFO`. Read
 `session.serverInfo` for the immutable snapshot from the currently bound endpoint:

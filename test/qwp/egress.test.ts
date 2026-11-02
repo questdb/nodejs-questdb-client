@@ -797,9 +797,9 @@ function creditsSent(connection: FakeConnection): bigint[] {
 }
 
 /**
- * Answers CANCEL the way QuestDB does on a flow-controlled stream: the server
- * reads it only once the stream has run out of credit and parked, and replies
- * when the next CREDIT resumes the stream -- not before.
+ * Models the terminal reply of a flow-controlled stream already parked on
+ * exhausted credit: after CANCEL, the next CREDIT resumes it and triggers the
+ * reply. Callers arrange the exhausted window; this helper does not track it.
  */
 function answerCancelOnCredit(connection: FakeConnection): void {
   const cancelled = new Set<bigint>();
@@ -3625,6 +3625,56 @@ describe("QwpEgressSession", () => {
     await session.close();
   });
 
+  it("reports cancellation when only queued rows are withheld before RESULT_END", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", {
+        initialCredit: 4096,
+      });
+      const iterator = query[Symbol.asyncIterator]();
+      const held = symbolDeltaBatch(query.requestId, 0, 0, ["alpha"], 0);
+      const queued = symbolDeltaBatch(query.requestId, 1, 1, ["beta"], 1);
+      connection.receive(held);
+      connection.receive(queued);
+      const first = await iterator.next();
+      expect(first.done).toBe(false);
+      expect(first.value.columns[0].values).toEqual(["alpha"]);
+      // Decode the second row into the queue before cancelling. No batch
+      // arrives after cancel(), so only dropping this queued row can mark
+      // the result as incomplete.
+      await vi.advanceTimersByTimeAsync(0);
+      await query.cancel();
+      expect(creditsSent(connection)).toEqual([
+        BigInt(held.byteLength + queued.byteLength),
+      ]);
+      expect(query.isDone()).toBe(false);
+
+      const next = iterator.next();
+      connection.receive(resultEnd(query.requestId, 2n, 1n));
+      await expect(next).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+        requestId: query.requestId,
+      } satisfies Partial<QwpEgressQueryError>);
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+        requestId: query.requestId,
+      } satisfies Partial<QwpEgressQueryError>);
+
+      const following = await session.query("select 2");
+      connection.receive(resultEnd(following.requestId, 0n, 0n));
+      await following.completion;
+      expect(connection.closeCalls).toEqual([]);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resumes a stream parked on exhausted credit when the application cancels", async () => {
     // QuestDB acts on CANCEL only when CREDIT resumes a parked stream. With
     // manual credit the consumer may hold nothing to give back, and a CANCEL
@@ -3636,15 +3686,18 @@ describe("QwpEgressSession", () => {
       cancelDrainTimeoutMs: 1_000,
     });
     connection.receive(serverInfo());
+    const initialCredit = emptyResultBatch(0n, 0).byteLength;
     const query = await session.query("select * from x", {
-      initialCredit: 64,
+      initialCredit,
       autoCredit: false,
     });
     const iterator = query[Symbol.asyncIterator]();
-    connection.receive(emptyResultBatch(query.requestId, 0));
+    const first = emptyResultBatch(query.requestId, 0);
+    expect(first.byteLength).toBe(initialCredit);
+    connection.receive(first);
     await expect(iterator.next()).resolves.toMatchObject({ done: false });
-    // The window is spent; the server waits for credit the consumer never
-    // grants, and the consumer has moved past the batch it held.
+    // The batch exactly exhausts the window. The server waits for credit
+    // the consumer never grants, after it moves past the batch it held.
     const next = iterator.next().catch((error: unknown) => error);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -3663,10 +3716,11 @@ describe("QwpEgressSession", () => {
     // A consumer that stops iterating instead gets the same answer: the
     // credit it held goes back with the CANCEL.
     const stopped = await session.query("select * from y", {
-      initialCredit: 64,
+      initialCredit,
     });
     const stoppedIterator = stopped[Symbol.asyncIterator]();
     const batch = emptyResultBatch(stopped.requestId, 0);
+    expect(batch.byteLength).toBe(initialCredit);
     connection.receive(batch);
     await expect(stoppedIterator.next()).resolves.toMatchObject({
       done: false,

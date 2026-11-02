@@ -9378,6 +9378,101 @@ describe("QWP egress reconnect and replay", () => {
       }
     });
 
+    it.each([false, true])(
+      "keeps the clean connection when a retired query's replay fails (next query waiting: %s)",
+      async (nextQueryWaiting) => {
+        vi.useFakeTimers();
+        try {
+          const primary = new FakeConnection("primary");
+          const replacement = new FakeConnection("secondary");
+          const third = new FakeConnection("tertiary");
+          const fourth = new FakeConnection("quaternary");
+          const connections = [primary, replacement, third, fourth];
+          const closeThird = vi.spyOn(third, "close");
+          const resets: bigint[] = [];
+          const events: QwpReconnectEvent[] = [];
+          let opened = 0;
+          const session = await connectQwpEgressSession(
+            async () => {
+              const connection = connections[opened++];
+              queueMicrotask(() =>
+                connection.receive(serverInfo(connection.endpoint)),
+              );
+              return connection;
+            },
+            {
+              cancelDrainTimeoutMs: 50,
+              reconnect: {
+                failoverMaxAttempts: 3,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
+                onEvent: (event) => void events.push(event),
+              },
+              onFailoverReset: (event) => void resets.push(event.requestId),
+            },
+          );
+          const query = await session.query("select * from x");
+          const completion = query.completion.catch((error: unknown) => error);
+          await query.cancel();
+
+          let rejectReplay!: (error: Error) => void;
+          const replayHeld = new Promise<void>((_resolve, reject) => {
+            rejectReplay = reject;
+          });
+          replacement.onSend = (payload) =>
+            payload[0] === QWP_EGRESS_MESSAGE.QUERY_REQUEST
+              ? replayHeld
+              : Promise.resolve();
+          primary.drop();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(kinds(replacement)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          ]);
+
+          // The drain expires while the reconnect is still sending the
+          // replay. Its replacement request waits for that reconnect.
+          await vi.advanceTimersByTimeAsync(50);
+          await expect(completion).resolves.toMatchObject({
+            name: "QwpEgressQueryCancelTimeoutError",
+            requestId: query.requestId,
+            timeoutMs: 50,
+          });
+          const waiting = nextQueryWaiting
+            ? session.query("select 2")
+            : undefined;
+
+          // This attempt fails, so the next one drops the retired query
+          // instead of replaying it. The waiting replacement must not close
+          // that clean connection, whether idle or carrying a new query.
+          rejectReplay(new QwpSendClosedError());
+          await vi.advanceTimersByTimeAsync(10);
+          expect(opened).toBe(3);
+          expect(closeThird).not.toHaveBeenCalled();
+          expect(resets).toEqual([query.requestId]);
+          expect(kinds(fourth)).toEqual([]);
+          expect(events.map((event) => event.kind)).toEqual([
+            QWP_RECONNECT_EVENT_KIND.CONNECTED,
+            QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
+            QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+            QWP_RECONNECT_EVENT_KIND.FAILED_OVER,
+          ]);
+          if (!nextQueryWaiting) expect(kinds(third)).toEqual([]);
+
+          const next = await (waiting ?? session.query("select 2"));
+          expect(kinds(third)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+          expect(requestIdOf(third.sent[0])).toBe(next.requestId);
+          third.receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+          expect(closeThird).not.toHaveBeenCalled();
+          await session.close();
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("lets a terminal that arrived before the connection was lost decide an expired query", async () => {
       vi.useFakeTimers();
       try {

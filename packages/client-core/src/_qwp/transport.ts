@@ -204,8 +204,12 @@ export const QWP_RECONNECT_EVENT_KIND = {
   /** The session's first successful connection. */
   CONNECTED: "connected",
   /**
-   * The active connection was lost. Fired once per outage, before the first
-   * reconnect attempt.
+   * The active connection was lost or intentionally replaced. Fired once
+   * before the first reconnect attempt. For an egress cancellation-drain
+   * expiry, `cause` is a `QwpEgressQueryCancelTimeoutError`: the client closes
+   * the connection without deprioritizing the endpoint or replaying the
+   * retired query. A successful replacement then fires `reconnected` or
+   * `failed-over`, just as recovery from an outage does.
    */
   DISCONNECTED: "disconnected",
   /** A reconnect succeeded against the endpoint that was active before. */

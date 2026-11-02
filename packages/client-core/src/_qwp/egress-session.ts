@@ -84,8 +84,13 @@ export interface QwpEgressSessionOptions {
    * `reconnect: false` fails with {@link QwpEgressQueryCancelTimeoutError}. A
    * query ended with `cancel()` fails with that error as well; one already
    * released by its timeout or by leaving iteration keeps the error it was
-   * released with. Defaults to 5 seconds. Capped at 2,147,483,647ms (the host
-   * timer ceiling); a larger value throws a `RangeError`.
+   * released with. This client-initiated replacement emits `disconnected`
+   * with {@link QwpEgressQueryCancelTimeoutError} as its cause, then
+   * `reconnected` or `failed-over` on success. It does not deprioritize the
+   * endpoint or replay the retired query.
+   *
+   * Defaults to 5 seconds. Capped at 2,147,483,647ms (the host timer ceiling);
+   * a larger value throws a `RangeError`.
    */
   cancelDrainTimeoutMs?: number;
   /**
@@ -2138,7 +2143,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     // running it again. A no-op for a consumer that has already retired.
     query.retire(error);
     void connection
-      .replaceConnection(error, "QWP cancellation drain timed out")
+      .replaceConnection(
+        error,
+        "QWP cancellation drain timed out",
+        query.requestId,
+      )
       .catch((replaceError: unknown) => this.fail(replaceError));
     return true;
   }

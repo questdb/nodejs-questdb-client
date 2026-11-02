@@ -886,7 +886,11 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
    *
    * @internal
    */
-  async replaceConnection(cause: Error, reason: string): Promise<void> {
+  async replaceConnection(
+    cause: Error,
+    reason: string,
+    requestId: bigint,
+  ): Promise<void> {
     this.throwIfUnavailable();
     // The session restarts its drain bound once a reconnect has restored it,
     // but the reconnect installs its connection only after sending the replay.
@@ -896,6 +900,10 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     if (!this.connection && this.reconnectTask) {
       await this.reconnectTask.catch(() => undefined);
       this.throwIfUnavailable();
+      // A failed replay may have dropped the retired query before a later
+      // attempt connected. Do not replace that clean connection, which may
+      // already carry another query, on behalf of the old drain.
+      if (replayRequestId(this.outboundReplay) !== requestId) return;
     }
     const connection = this.connection;
     // No reconnect succeeded, and the session hears of whatever failed it.
