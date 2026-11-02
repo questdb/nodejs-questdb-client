@@ -79,11 +79,13 @@ export interface QwpEgressSessionOptions {
    * Maximum wait for a terminal response after CANCEL, and the grace period of
    * a query timeout: how long an expired query may take to end before its
    * caller is released, and how long its connection may then take to drain
-   * it. A query that has not ended by then fails with
-   * {@link QwpEgressQueryCancelTimeoutError}, and its connection is closed: a
+   * it. A connection that has not drained the query by then is closed: a
    * reconnecting session continues on a new one, while a session opened with
-   * `reconnect: false` fails. Defaults to 5 seconds. Capped at 2,147,483,647ms
-   * (the host timer ceiling); a larger value throws a `RangeError`.
+   * `reconnect: false` fails with {@link QwpEgressQueryCancelTimeoutError}. A
+   * query ended with `cancel()` fails with that error as well; one already
+   * released by its timeout or by leaving iteration keeps the error it was
+   * released with. Defaults to 5 seconds. Capped at 2,147,483,647ms (the host
+   * timer ceiling); a larger value throws a `RangeError`.
    */
   cancelDrainTimeoutMs?: number;
   /**
