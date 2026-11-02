@@ -3504,6 +3504,37 @@ describe("QwpEgressSession", () => {
     }
   });
 
+  it("reports a cancelled result that ends after its timeout as a cancellation", async () => {
+    // Without flow control QuestDB reads the CANCEL only once it has sent the
+    // whole result, so a cancelled stream normally ends with RESULT_END. The
+    // timeout expiring before that does not turn the application's
+    // cancellation into a timeout.
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      const completion = query.completion.catch((error: unknown) => error);
+      await query.cancel();
+      // Sent before the server read the CANCEL, so it is withheld.
+      connection.receive(emptyResultBatch(query.requestId, 0));
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(query.isDone()).toBe(false);
+      connection.receive(resultEnd(query.requestId, 0n, 0n));
+      await expect(completion).resolves.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+        requestId: query.requestId,
+      } satisfies Partial<QwpEgressQueryError>);
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("sends one CANCEL however a timed-out query is ended", async () => {
     vi.useFakeTimers();
     try {
@@ -3728,53 +3759,71 @@ describe("QwpEgressSession", () => {
   });
 
   it("delivers no view decoded ahead of an application cancel", async () => {
-    const connection = new FakeConnection();
-    const session = createQwpEgressSession(connection);
-    connection.receive(serverInfo());
-    const seen: bigint[] = [];
-    const query = await session.queryViews(
-      "select * from x",
-      async (batch, control) => {
-        seen.push(batch.batchSequence);
-        await control.cancel();
-      },
-      { initialCredit: 4096 },
-    );
-    const first = emptyResultBatch(query.requestId, 0);
-    const second = emptyResultBatch(query.requestId, 1);
-    connection.receive(first);
-    connection.receive(second);
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      let releaseHandler!: () => void;
+      const handlerReleased = new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      const seen: bigint[] = [];
+      const query = await session.queryViews(
+        "select * from x",
+        async (batch, control) => {
+          seen.push(batch.batchSequence);
+          await handlerReleased;
+          await control.cancel();
+        },
+        { initialCredit: 4096 },
+      );
+      const first = emptyResultBatch(query.requestId, 0);
+      const second = emptyResultBatch(query.requestId, 1);
+      connection.receive(first);
+      connection.receive(second);
+      await vi.advanceTimersByTimeAsync(0);
+      // The first view is in the callback; the second is decoded ahead and
+      // queued behind it. A callback that cancelled at once instead left the
+      // second batch to be dropped before it was decoded.
+      expect(seen).toEqual([0n]);
 
-    // Every credit follows the CANCEL: a single byte, as the cancel itself
-    // dropped nothing, then the cancelling callback's own view and the one
-    // behind it, in whichever order they were released.
-    const bySize = (left: bigint, right: bigint): number =>
-      Number(left - right);
-    await vi.waitFor(() => expect(creditsSent(connection)).toHaveLength(3));
-    expect(sentKinds(connection).slice(0, 2)).toEqual([
-      QWP_EGRESS_MESSAGE.QUERY_REQUEST,
-      QWP_EGRESS_MESSAGE.CANCEL,
-    ]);
-    expect(creditsSent(connection).sort(bySize)).toEqual(
-      [1n, BigInt(first.byteLength), BigInt(second.byteLength)].sort(bySize),
-    );
-    // The view decoded behind the cancelling callback never reached it.
-    expect(seen).toEqual([0n]);
-    expect(
-      sentKinds(connection).filter(
-        (kind) => kind === QWP_EGRESS_MESSAGE.CANCEL,
-      ),
-    ).toHaveLength(1);
+      releaseHandler();
+      await vi.advanceTimersByTimeAsync(0);
+      // The view decoded ahead never reaches the callback. Every credit
+      // follows the CANCEL: a single byte, as the cancel itself dropped
+      // nothing, then the cancelling callback's own view, then the one
+      // behind it.
+      expect(seen).toEqual([0n]);
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+        QWP_EGRESS_MESSAGE.CREDIT,
+        QWP_EGRESS_MESSAGE.CREDIT,
+        QWP_EGRESS_MESSAGE.CREDIT,
+      ]);
+      expect(creditsSent(connection)).toEqual([
+        1n,
+        BigInt(first.byteLength),
+        BigInt(second.byteLength),
+      ]);
 
-    connection.receive(
-      queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
-    );
-    await expect(query.completion).rejects.toMatchObject({
-      name: "QwpEgressQueryError",
-      status: QWP_STATUS.CANCELLED,
-    } satisfies Partial<QwpEgressQueryError>);
-    expect(seen).toEqual([0n]);
-    await session.close();
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+      } satisfies Partial<QwpEgressQueryError>);
+      expect(seen).toEqual([0n]);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails a session without reconnect when a cancelled query cannot drain", async () => {
