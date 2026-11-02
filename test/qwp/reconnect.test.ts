@@ -9152,6 +9152,155 @@ describe("QWP egress reconnect and replay", () => {
       }
     });
 
+    it("replaces a connection that cannot drain a cancelled query instead of failing the session", async () => {
+      // Without flow control QuestDB does not read the connection while it
+      // streams a result, so a CANCEL reaches it only after the last batch,
+      // and a long result cannot drain within the bound. Failing the session
+      // then refused every later query, although closing the connection is
+      // what ends the query on the server.
+      vi.useFakeTimers();
+      try {
+        const events: QwpReconnectEvent[] = [];
+        const { session, primary, replacement, releaseReplacement, resets } =
+          await sessionWithHeldReplacement({
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+              onEvent: (event) => void events.push(event),
+            },
+          });
+        releaseReplacement();
+        const query = await session.query("select * from x");
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+        expect(kinds(primary)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          QWP_EGRESS_MESSAGE.CANCEL,
+        ]);
+        // The server streams on and never answers.
+        primary.receive(emptyResultBatch(query.requestId, 1));
+        await vi.advanceTimersByTimeAsync(49);
+        expect(query.isDone()).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+          requestId: query.requestId,
+          timeoutMs: 50,
+        });
+        // A normal closure: the endpoint keeps its standing.
+        await expect(primary.closed).resolves.toMatchObject({
+          code: 1000,
+          reason: "QWP cancellation drain timed out",
+        });
+
+        const next = await session.query("select 2");
+        // The cancelled query is not run again on the replacement.
+        expect(resets).toEqual([]);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(next.requestId);
+        replacement.receive(resultEnd(next.requestId));
+        await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+
+        // The observer hears of it as of any other outage, and of its cause.
+        await vi.advanceTimersByTimeAsync(10);
+        expect(events.map((event) => event.kind)).toEqual([
+          QWP_RECONNECT_EVENT_KIND.CONNECTED,
+          QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
+          // The fake replacement carries another endpoint name.
+          QWP_RECONNECT_EVENT_KIND.FAILED_OVER,
+        ]);
+        expect(events[1].cause).toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps reading a replaced connection until it closes", async () => {
+      // A server streaming a result does not read its socket, so it answers no
+      // closing handshake, and the old connection keeps receiving until its
+      // close times out. Left unread, all of that piled up in its queue.
+      class LingeringConnection extends FakeConnection {
+        read = 0;
+
+        constructor(endpoint: string) {
+          super(endpoint);
+          const source = this.messages;
+          (this as { messages: AsyncIterable<Uint8Array> }).messages = {
+            [Symbol.asyncIterator]: () => {
+              const iterator = source[Symbol.asyncIterator]();
+              return {
+                next: async () => {
+                  const next = await iterator.next();
+                  if (!next.done) this.read++;
+                  return next;
+                },
+              };
+            },
+          };
+        }
+
+        // The closing handshake stays pending, as the server never reads it.
+        override close(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+      vi.useFakeTimers();
+      try {
+        const primary = new LingeringConnection("primary");
+        const replacement = new FakeConnection("secondary");
+        let opened = 0;
+        const session = await connectQwpEgressSession(
+          async () => {
+            const connection = opened++ === 0 ? primary : replacement;
+            queueMicrotask(() =>
+              connection.receive(serverInfo(connection.endpoint)),
+            );
+            return connection;
+          },
+          {
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+            },
+          },
+        );
+        const query = await session.query("select * from x");
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+        await vi.advanceTimersByTimeAsync(50);
+        await expect(query.completion).rejects.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        expect(opened).toBe(2);
+
+        const read = primary.read;
+        for (let sequence = 1; sequence <= 100; sequence++) {
+          primary.receive(emptyResultBatch(query.requestId, sequence));
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(primary.read).toBe(read + 100);
+
+        primary.drop();
+        const next = await session.query("select 2");
+        replacement.receive(resultEnd(next.requestId));
+        await next.completion;
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("lets a terminal that arrived before the connection was lost decide an expired query", async () => {
       vi.useFakeTimers();
       try {

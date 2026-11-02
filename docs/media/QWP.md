@@ -1507,19 +1507,26 @@ before the timeout is still reported as a cancellation.
 The grace period is `cancelDrainTimeoutMs` (the `query_close_timeout_ms` key, 5
 seconds by default). If the server has not ended the query within it, the caller is
 released with `QwpEgressQueryTimeoutError` and the connection drains the query for up
-to one more period; a server still silent then fails the session with
-`QwpEgressQueryCancelTimeoutError`. A query issued meanwhile waits for the drain
-instead of failing, and the wait counts against its own timeout. If the connection is
-lost after the timeout has expired, or the timeout expires before the query's replay
-has been sent, the timeout is reported at once and the query is not replayed; a
-request whose timeout expires while a reconnect holds it is never sent. The timeout
-is enforced by the client, and QuestDB acts on `CANCEL` between result batches, so a
+to one more period; a server still busy then has its connection closed, as described
+below for cancellation draining. A query issued meanwhile waits for the drain instead
+of failing, and the wait counts against its own timeout. If the connection is lost
+after the timeout has expired, or the timeout expires before the query's replay has
+been sent, the timeout is reported at once and the query is not replayed; a request
+whose timeout expires while a reconnect holds it is never sent. The timeout is
+enforced by the client, and QuestDB acts on `CANCEL` only between result batches, so a
 query still computing its first batch runs until it produces one.
 
 Breaking out of `for await` early also discards buffered batches, restores their
 flow-control credit, sends `CANCEL`, and rejects `completion` with
 `QwpEgressQueryAbandonedError`; the next query waits for that drain too. Call
-`query.cancel()` for explicit cancellation. A query sends at most one `CANCEL`.
+`query.cancel()` for explicit cancellation, including from a `queryViews()` callback.
+It stops delivery the way the timeout does: no further batch reaches the consumer,
+batches already queued are dropped, and `CANCEL` is followed by the flow-control
+credit they held. The outcome is the server's terminal response. A cancellation
+rejects iteration and `completion` with `QwpEgressQueryError` whose `status` is
+`QWP_STATUS.CANCELLED`, and so does a result that ended after rows were withheld; a
+statement that completed anyway, or a result that ended with nothing withheld,
+succeeds. A query sends at most one `CANCEL`.
 
 `await query.awaitCompletion(timeoutMs)` bounds only the caller's wait and returns
 `false` without cancelling when the timeout expires, matching Java
@@ -1529,10 +1536,20 @@ The initial and reconnect `SERVER_INFO` timeout defaults to five seconds, matchi
 Java, and remains configurable through `serverInfoTimeoutMs`.
 
 Cancellation draining is bounded by `cancelDrainTimeoutMs` (5 seconds by default).
-Late batches are decoded and credited while the terminal response is pending. If the
-server does not terminate the query within the bound, the client fails with
-`QwpEgressQueryCancelTimeoutError` and closes the unusable connection instead of
-leaving the session permanently occupied. A reconnect does not count against the
+Late batches are decoded and credited while the terminal response is pending, whether
+or not the consumer still iterates. QuestDB reads `CANCEL` only once a
+flow-controlled stream has used up its credit, and acts on it when the next `CREDIT`
+resumes the stream, so the client follows every `CANCEL` on such a query with credit:
+a single byte when nothing else is owed. With a positive `initialCredit`, a cancelled
+stream therefore ends within a round trip. Without flow control
+(`initialCredit: 0`, the default) QuestDB does not read the connection while it
+streams a result: it sends the rest of the result before it sees the `CANCEL`, and
+the client discards it. If the server does not terminate the query within the bound,
+the query fails with `QwpEgressQueryCancelTimeoutError` and its connection is closed,
+which is what ends the query on the server. A reconnecting session, the default, then
+opens a new connection for the next query instead of failing; a session opened with
+`reconnect: false` has no other connection and fails. Set a positive `initialCredit`
+on queries that may be cancelled mid-stream. A reconnect does not count against the
 bound: without a connection there is nothing to drain, and a query whose consumer has
 retired is dropped rather than replayed.
 

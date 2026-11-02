@@ -647,7 +647,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       while (true) {
         const next = await iterator.next();
         if (next.done) break;
-        if (this.closing || this.connection !== connection) return;
+        // A replaced or closing connection keeps being read, and its messages
+        // dropped, until it closes. A server streaming a result does not read
+        // its socket, so it answers no closing handshake and sends on until
+        // the close times out; left unread, all of it piled up in the old
+        // connection's queue.
+        if (this.closing || this.connection !== connection) continue;
         const message = decodeQwpEgressMessage(next.value);
         if (message.kind === "server-info") {
           throw new QwpProtocolError("received duplicate QWP SERVER_INFO");
@@ -870,6 +875,31 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.outboundReplay = [];
     this.pendingTerminal = undefined;
     pending.resolve(true);
+  }
+
+  /**
+   * Replaces a connection whose server has not ended a cancelled query within
+   * the session's drain bound. The session has settled that query and drops
+   * it from the replay when this reports the connection lost, so nothing is
+   * replayed; the endpoint keeps its standing, since a server streaming a
+   * result it has not finished is not unhealthy.
+   *
+   * @internal
+   */
+  async replaceConnection(cause: Error, reason: string): Promise<void> {
+    this.throwIfUnavailable();
+    const connection = this.connection;
+    // A reconnect is already replacing it.
+    if (!connection) return;
+    try {
+      // Messages still queued from the old connection belong to the settled
+      // query alone, and waiting for the session to work through them would
+      // only delay the replacement.
+      await this.requestReconnect(cause, connection, 1000, reason, true);
+    } catch (error) {
+      this.failTerminal(error);
+      throw error;
+    }
   }
 
   /** @internal Replaces a connection whose server response was invalid. */
