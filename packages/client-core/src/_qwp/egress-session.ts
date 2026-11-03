@@ -87,7 +87,11 @@ export interface QwpEgressSessionOptions {
    * released with. This client-initiated replacement emits `disconnected`
    * with {@link QwpEgressQueryCancelTimeoutError} as its cause, then
    * `reconnected` or `failed-over` on success. It does not deprioritize the
-   * endpoint or replay the retired query.
+   * endpoint or replay the retired query. A `queryViews()` callback of that
+   * query still running holds the replacement for up to one more period,
+   * since the connection's decoding state cannot be reset under it; if it
+   * has not returned by then, the session fails with
+   * {@link QwpEgressQueryCancelTimeoutError} as well.
    *
    * Defaults to 5 seconds. Capped at 2,147,483,647ms (the host timer ceiling);
    * a larger value throws a `RangeError`.
@@ -462,6 +466,8 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private withheldBatch = false;
   private cancelledByApplication = false;
   private cancelClaimed = false;
+  // Set while the result-view callback runs; callbacks run one at a time.
+  private viewCallbackActive = false;
   // The deadline, then the grace period after it. One at a time.
   private timeoutTimer?: ReturnType<typeof setTimeout>;
   readonly completion: Promise<QwpQueryCompletion>;
@@ -781,12 +787,14 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
         return;
       }
       let handlerError: Error | undefined;
+      this.viewCallbackActive = true;
       try {
         await this.viewHandler!(batch, this.viewControl!);
       } catch (error) {
         handlerError =
           error instanceof Error ? error : new Error(String(error));
       } finally {
+        this.viewCallbackActive = false;
         batch.release();
         this.releaseViewSlot(slot);
       }
@@ -820,6 +828,16 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   /** @internal */
   get usesViews(): boolean {
     return this.viewHandler !== undefined;
+  }
+
+  /** @internal Whether a result-view callback is running now. */
+  get viewCallbackRunning(): boolean {
+    return this.viewCallbackActive;
+  }
+
+  /** @internal Whether the server's terminal response has been received. */
+  get terminalReceived(): boolean {
+    return this.wireComplete;
   }
 
   /** @internal */
@@ -2137,15 +2155,20 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         this.cancelDrainTimeoutMs,
       );
       if (this.replaceUndrainedConnection(query, error)) return;
-      this.fail(error);
-      try {
-        void this.connection
-          .close(1011, "QWP cancellation drain timed out")
-          .catch(() => undefined);
-      } catch {
-        // The typed cancellation failure remains the session's terminal error.
-      }
+      this.failUndrained(error);
     }, this.cancelDrainTimeoutMs);
+  }
+
+  /** Fails the session over a query its connection could not drain. */
+  private failUndrained(error: QwpEgressQueryCancelTimeoutError): void {
+    this.fail(error);
+    try {
+      void this.connection
+        .close(1011, "QWP cancellation drain timed out")
+        .catch(() => undefined);
+    } catch {
+      // The typed cancellation failure remains the session's terminal error.
+    }
   }
 
   /**
@@ -2179,6 +2202,69 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     // replacement reports then drops the query from the replay rather than
     // running it again. A no-op for a consumer that has already retired.
     query.retire(error);
+    if (query.viewCallbackRunning) {
+      this.replaceAfterViewCallback(connection, query, error);
+    } else {
+      this.startReplacement(connection, query, error);
+    }
+    return true;
+  }
+
+  /**
+   * Replaces the connection once the query's running result-view callback
+   * returns, allowing it one more drain period.
+   *
+   * The reset before a replacement drains that callback first, because the
+   * views it reads alias the connection's symbol dictionary. Replacing at once
+   * left the reset -- and every later query -- waiting on the callback for up
+   * to failoverMaxDurationMs, with no bound at all when that is zero, where a
+   * session without reconnect fails at the drain bound. A callback still
+   * running after one more period fails the session the same way. If the
+   * server ends the query while the callback runs, the connection has drained
+   * and stays in use.
+   */
+  private replaceAfterViewCallback(
+    connection: QwpReconnectingEgressConnection,
+    query: QwpEgressQuery,
+    error: QwpEgressQueryCancelTimeoutError,
+  ): void {
+    const requestId = query.requestId;
+    // Held in the drain slot, so a close, a failure, a lost connection or the
+    // query's terminal response clears it as it would the drain itself.
+    this.clearCancelDrain();
+    this.cancelDrainRequestId = requestId;
+    const timer = setTimeout(() => {
+      if (this.cancelDrainTimer !== timer) return;
+      this.cancelDrainTimer = undefined;
+      this.cancelDrainRequestId = undefined;
+      if (this.active === query) this.failUndrained(error);
+    }, this.cancelDrainTimeoutMs);
+    this.cancelDrainTimer = timer;
+    void query.waitForViewDrain().then(
+      () => {
+        // Cleared or expired meanwhile: whatever did so settles the query.
+        if (this.cancelDrainTimer !== timer) return;
+        this.clearCancelDrain(requestId);
+        if (
+          this.active !== query ||
+          query.terminalReceived ||
+          this.closing ||
+          this.failure ||
+          this.connectionLost
+        ) {
+          return;
+        }
+        this.startReplacement(connection, query, error);
+      },
+      () => undefined,
+    );
+  }
+
+  private startReplacement(
+    connection: QwpReconnectingEgressConnection,
+    query: QwpEgressQuery,
+    error: QwpEgressQueryCancelTimeoutError,
+  ): void {
     void connection
       .replaceConnection(
         error,
@@ -2186,7 +2272,6 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         query.requestId,
       )
       .catch((replaceError: unknown) => this.fail(replaceError));
-    return true;
   }
 
   private clearCancelDrain(requestId?: bigint): void {

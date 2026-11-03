@@ -9624,6 +9624,149 @@ describe("QWP egress reconnect and replay", () => {
       },
     );
 
+    /**
+     * Cancels a result-view query whose callback is still running when the
+     * drain bound expires, on a session whose reconnect has no deadline of
+     * its own, so only the drain bound can end a wait for that callback.
+     */
+    async function cancelPastDrainInViewCallback(serverEndsQuery: boolean) {
+      const connected = await sessionWithHeldReplacement({
+        cancelDrainTimeoutMs: 50,
+        reconnect: {
+          failoverMaxAttempts: 1,
+          failoverBackoffInitialMs: 0,
+          failoverBackoffMaxMs: 0,
+          failoverMaxDurationMs: 0,
+        },
+      });
+      connected.releaseReplacement();
+      let releaseCallback!: () => void;
+      const callbackHeld = new Promise<void>((resolve) => {
+        releaseCallback = resolve;
+      });
+      const view = await connected.session.queryViews(
+        "select * from x",
+        () => callbackHeld,
+        { initialCredit: 4096 },
+      );
+      const completion = view.completion.catch((error: unknown) => error);
+      connected.primary.receive(emptyResultBatch(view.requestId));
+      await vi.advanceTimersByTimeAsync(0);
+      await view.cancel();
+      // Received, but the terminal waits for the callback like any batch.
+      if (serverEndsQuery) connected.primary.receive(cancelled(view.requestId));
+      let primaryClosed: QwpConnectionCloseInfo | undefined;
+      void connected.primary.closed.then((info) => {
+        primaryClosed = info;
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      // The bound releases the caller although the callback still runs.
+      await expect(completion).resolves.toMatchObject({
+        name: "QwpEgressQueryCancelTimeoutError",
+        requestId: view.requestId,
+      });
+      return {
+        ...connected,
+        releaseCallback,
+        primaryClosed: () => primaryClosed,
+      };
+    }
+
+    it("fails the session when a result-view callback outlasts the drain by another period", async () => {
+      // The reset before a replacement drains the callback first, because its
+      // views read the connection's symbol dictionary. Replacing at once left
+      // that reset, and every later query, waiting on the callback -- with no
+      // bound at all here -- where a session without reconnect fails at the
+      // drain bound. The callback gets one more period.
+      vi.useFakeTimers();
+      try {
+        const { session, replacement, releaseCallback, primaryClosed } =
+          await cancelPastDrainInViewCallback(false);
+        let outcome: unknown = "pending";
+        void session.query("select 2").then(
+          () => (outcome = "started"),
+          (error: unknown) => (outcome = error),
+        );
+        await vi.advanceTimersByTimeAsync(49);
+        expect(outcome).toBe("pending");
+        expect(primaryClosed()).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(outcome).toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        expect(primaryClosed()).toMatchObject({
+          code: 1011,
+          reason: "QWP cancellation drain timed out",
+        });
+        expect(replacement.sent).toEqual([]);
+        releaseCallback();
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("replaces the connection once a result-view callback returns within another period", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session, replacement, resets, releaseCallback, primaryClosed } =
+          await cancelPastDrainInViewCallback(false);
+        const next = session.query("select 2");
+        await vi.advanceTimersByTimeAsync(25);
+        // The connection is replaced only after the callback returns.
+        expect(primaryClosed()).toBeUndefined();
+
+        releaseCallback();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(primaryClosed()).toMatchObject({
+          code: 1000,
+          reason: "QWP cancellation drain timed out",
+        });
+        const started = await next;
+        expect(resets).toEqual([]);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(started.requestId);
+        replacement.receive(resultEnd(started.requestId));
+        await expect(started.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the connection when the server ends the query while a result-view callback holds it", async () => {
+      // The server answered within the bound; only the callback held up the
+      // terminal. Once it returns, the connection has drained.
+      vi.useFakeTimers();
+      try {
+        const {
+          session,
+          primary,
+          replacement,
+          releaseCallback,
+          primaryClosed,
+        } = await cancelPastDrainInViewCallback(true);
+        const next = session.query("select 2");
+        releaseCallback();
+        await vi.advanceTimersByTimeAsync(0);
+        const started = await next;
+        expect(primaryClosed()).toBeUndefined();
+        expect(replacement.sent).toEqual([]);
+        expect(requestIdOf(primary.sent.at(-1)!)).toBe(started.requestId);
+        primary.receive(resultEnd(started.requestId));
+        await expect(started.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps reading a replaced connection until it closes", async () => {
       // A server streaming a result does not read its socket, so it answers no
       // closing handshake, and the old connection keeps receiving until its

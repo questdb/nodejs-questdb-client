@@ -1560,11 +1560,16 @@ released with. A reconnecting session, the default, opens a new connection for t
 next query instead of failing. This client-initiated replacement emits `disconnected`
 with `QwpEgressQueryCancelTimeoutError` as its cause, followed by `reconnected` or
 `failed-over` on success. It does not deprioritize the endpoint or replay the retired
-query. A session opened with `reconnect: false` has no other connection and fails with
-`QwpEgressQueryCancelTimeoutError`. Set a positive `initialCredit` on queries that may
-be cancelled mid-stream, small enough for a window to arrive well within the bound. A
-reconnect does not count against the bound: without a connection there is nothing to
-drain, and a query whose consumer has retired is dropped rather than replayed.
+query. If a `queryViews()` callback of the query is still running, the client first
+waits up to one more `cancelDrainTimeoutMs` for it to return, since the connection's
+decoding state cannot be reset under it. A callback still running then fails the
+session with `QwpEgressQueryCancelTimeoutError`; if the server ends the query
+meanwhile, the session keeps its connection. A session opened with `reconnect: false`
+has no other connection and fails with `QwpEgressQueryCancelTimeoutError`. Set a
+positive `initialCredit` on queries that may be cancelled mid-stream, small enough for
+a window to arrive well within the bound. A reconnect does not count against the
+bound: without a connection there is nothing to drain, and a query whose consumer has
+retired is dropped rather than replayed.
 
 Node.js and browsers can request Zstd with `compression: "zstd"` or `"auto"` and a
 level from 1 through 22. Raw remains the compatibility default. Node uses
