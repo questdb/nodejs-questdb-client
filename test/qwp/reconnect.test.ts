@@ -9194,9 +9194,11 @@ describe("QWP egress reconnect and replay", () => {
           primary.receive(emptyResultBatch(query.requestId));
           await vi.advanceTimersByTimeAsync(0);
 
-          // CANCEL succeeds, but its wake-up CREDIT starts reconnect. Awaiting
-          // that send inside cancel() held the callback open while the replay
-          // reset waited for the same callback, until reconnect exhausted.
+          // CANCEL succeeds, but its wake-up CREDIT starts reconnect, and the
+          // replay reset cannot run until this callback returns. cancel()
+          // settles once its CANCEL is sent; were it to wait for the CREDIT,
+          // the connection loss would still release it, so the early-exit test
+          // below is the one that pins the CREDIT being queued, not awaited.
           expect(kinds(primary)).toEqual([
             QWP_EGRESS_MESSAGE.QUERY_REQUEST,
             QWP_EGRESS_MESSAGE.CANCEL,
@@ -9501,6 +9503,60 @@ describe("QWP egress reconnect and replay", () => {
         expect(events[1].cause).toMatchObject({
           name: "QwpEgressQueryCancelTimeoutError",
         });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("fails the session when no replacement for an undrained connection can be opened", async () => {
+      // The replacement is an ordinary reconnect, and one that cannot reach a
+      // server fails the session with the exhausted reconnect. If that failure
+      // were dropped, the retired query would keep the session busy, and every
+      // later query would wait out its own timeout, or until close() if it had
+      // none.
+      vi.useFakeTimers();
+      try {
+        const primary = new FakeConnection("primary");
+        const refused = new Error("replacement refused");
+        let opened = 0;
+        const session = await connectQwpEgressSession(
+          async () => {
+            if (opened++ > 0) throw refused;
+            queueMicrotask(() => primary.receive(serverInfo(primary.endpoint)));
+            return primary;
+          },
+          {
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+            },
+          },
+        );
+        const query = await session.query("select * from x");
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+
+        // The server never ends the query, and the replacement is refused.
+        await vi.advanceTimersByTimeAsync(50);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+          requestId: query.requestId,
+        });
+        expect(opened).toBe(2);
+
+        // A later query is refused at once, not when its own timeout expires.
+        let outcome: unknown = "pending";
+        void session.query("select 2", { timeoutMs: 1_000 }).then(
+          () => (outcome = "started"),
+          (error: unknown) => (outcome = error),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        expect(outcome).toBeInstanceOf(QwpReconnectExhaustedError);
+        expect(outcome).toMatchObject({ cause: refused });
         await session.close();
       } finally {
         vi.useRealTimers();
