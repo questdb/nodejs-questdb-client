@@ -1544,8 +1544,9 @@ Late batches are decoded and credited while the terminal response is pending, wh
 or not the consumer still iterates. QuestDB reads `CANCEL` only once a
 flow-controlled stream has used up its credit, and acts on it when the next `CREDIT`
 resumes the stream, so the client follows every `CANCEL` on such a query with credit:
-a single byte when nothing else is owed. With a positive `initialCredit`, a cancelled
-stream therefore ends within a round trip. Without flow control
+a single byte when nothing else is owed. A cancelled stream therefore still delivers
+the credit the server already holds, up to one `initialCredit` window, which the
+client discards, and ends a round trip after that. Without flow control
 (`initialCredit: 0`, the default) QuestDB does not read the connection while it
 streams a result: it sends the rest of the result before it sees the `CANCEL`, and
 the client discards it. If the server does not terminate the query within the bound,
@@ -1558,9 +1559,9 @@ with `QwpEgressQueryCancelTimeoutError` as its cause, followed by `reconnected` 
 `failed-over` on success. It does not deprioritize the endpoint or replay the retired
 query. A session opened with `reconnect: false` has no other connection and fails with
 `QwpEgressQueryCancelTimeoutError`. Set a positive `initialCredit` on queries that may
-be cancelled mid-stream. A reconnect does not count against the bound: without a
-connection there is nothing to drain, and a query whose consumer has retired is
-dropped rather than replayed.
+be cancelled mid-stream, small enough for a window to arrive well within the bound. A
+reconnect does not count against the bound: without a connection there is nothing to
+drain, and a query whose consumer has retired is dropped rather than replayed.
 
 Node.js and browsers can request Zstd with `compression: "zstd"` or `"auto"` and a
 level from 1 through 22. Raw remains the compatibility default. Node uses

@@ -324,8 +324,9 @@ A new query waits for that drain rather than failing. Breaking out of
 <code>for await</code> early cancels the query too, as does <code>query.cancel()</code>, which stops
 delivery at once; the query's outcome then follows the server's answer. QuestDB
 acts on a <code>CANCEL</code> mid-stream only when flow control has paused the stream, so
-give queries that may be cancelled a positive <code>initialCredit</code>; without it the
-server sends the rest of the result first.
+give queries that may be cancelled a small positive <code>initialCredit</code>: the server
+still sends the credit it holds, and without any it sends the rest of the result
+first.
 To bound only the caller's wait without cancelling, use
 <code>await query.awaitCompletion(timeoutMs)</code>. It returns <code>false</code> on timeout and leaves
 the query active, matching Java <code>Completion.await(timeout, unit)</code>. The SERVER_INFO
