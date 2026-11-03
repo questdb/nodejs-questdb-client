@@ -548,7 +548,9 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
    * with a {@link QwpEgressQueryError} whose status is `QWP_STATUS.CANCELLED`,
    * a statement that completed anyway succeeds, and so does a result that
    * ended with nothing withheld. The returned promise settles once `CANCEL`
-   * has been sent, and a query sends at most one.
+   * has been sent, or once a reconnect has taken it over: it then follows the
+   * replayed request, and a later failure reaches the query and the session.
+   * A query sends at most one `CANCEL`.
    */
   cancel(): Promise<void> {
     return this.control.cancel(this.requestId);
@@ -1086,6 +1088,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly bufferPoolSize: number;
   private readonly cancelDrainTimeoutMs: number;
   private readonly idleWaiters = new Set<() => void>();
+  /** Callers of cancel() released once a reconnect owns their CANCEL. */
+  private readonly connectionLossWaiters = new Set<() => void>();
   private readonly pendingStarts = new Set<QwpPendingQueryStart>();
   private active?: QwpEgressQuery;
   private activeRequest?: QwpReplayableQueryRequest;
@@ -1476,7 +1480,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     // Without a connection the CANCEL follows the replayed request, and its
     // drain bound starts with the replacement connection.
     if (!this.connectionLost) this.armCancelDrain(requestId);
-    return this.sendCancel(query, discardedCredit);
+    return this.releasedByReconnect(this.sendCancel(query, discardedCredit));
   }
 
   abandon(requestId: bigint): Promise<void> {
@@ -1928,6 +1932,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    */
   private handleConnectionLost(): void {
     this.connectionLost = true;
+    for (const release of this.connectionLossWaiters) release();
+    this.connectionLossWaiters.clear();
     this.clearCancelDrain();
     this.settleLostQuery();
   }
@@ -2076,6 +2082,32 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       // credit recovery may reconnect and wait for that same callback to drain.
       // The session send tail still owns failures from this queued credit.
       void this.sendCredit(query, creditBytes).catch(() => undefined);
+    });
+  }
+
+  /**
+   * Settles with `sending`, or as soon as the reconnecting transport has lost
+   * its connection: the reconnect then owns the frame, which travels with the
+   * replayed request or follows it, and is dropped with a query that is not
+   * replayed.
+   *
+   * A result-view callback may be the caller, and the reset before a replay
+   * drains that very callback first. Waiting for the frame itself left the two
+   * waiting on each other until the reconnect budget ran out and failed the
+   * session, although the replacement was ready. The session send tail still
+   * owns a failure that arrives after the caller has been released.
+   */
+  private releasedByReconnect(sending: Promise<void>): Promise<void> {
+    if (!(this.connection instanceof QwpReconnectingEgressConnection)) {
+      return sending;
+    }
+    void sending.catch(() => undefined);
+    if (this.connectionLost) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      this.connectionLossWaiters.add(resolve);
+      void sending
+        .then(resolve, reject)
+        .finally(() => this.connectionLossWaiters.delete(resolve));
     });
   }
 

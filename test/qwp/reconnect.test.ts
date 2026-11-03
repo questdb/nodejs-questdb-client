@@ -8959,9 +8959,12 @@ describe("QWP egress reconnect and replay", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(resets).toEqual([query.requestId]);
 
-        const cancelling = query.cancel();
+        // The reconnect owns the CANCEL, so cancel() returns while the reset
+        // that holds up the replay is still running.
+        await query.cancel();
+        expect(kinds(replacement)).toEqual([]);
         releaseReset();
-        await cancelling;
+        await vi.advanceTimersByTimeAsync(0);
         // The CANCEL follows the replayed request.
         expect(kinds(replacement)).toEqual([
           QWP_EGRESS_MESSAGE.QUERY_REQUEST,
@@ -9290,6 +9293,94 @@ describe("QWP egress reconnect and replay", () => {
         vi.useRealTimers();
       }
     });
+
+    it.each(["its CANCEL send fails", "a reconnect is waiting for it"])(
+      "releases a view callback awaiting cancel() when %s",
+      async (trigger) => {
+        vi.useFakeTimers();
+        let session: Awaited<ReturnType<typeof connectQwpEgressSession>>;
+        try {
+          const connected = await sessionWithHeldReplacement({
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+              failoverMaxDurationMs: 500,
+            },
+          });
+          session = connected.session;
+          const { primary, replacement, releaseReplacement, resets } =
+            connected;
+          releaseReplacement();
+          const cancelSendFails = trigger === "its CANCEL send fails";
+          if (cancelSendFails) {
+            primary.onSend = async (payload) => {
+              if (payload[0] === QWP_EGRESS_MESSAGE.CANCEL) {
+                throw new Error("cancel send failed");
+              }
+            };
+          }
+          let releaseCallback!: () => void;
+          const callbackHeld = new Promise<void>((resolve) => {
+            releaseCallback = resolve;
+          });
+          let cancelReturned = false;
+          const query = await session.queryViews(
+            "select * from x",
+            async (_batch, control) => {
+              if (!cancelSendFails) await callbackHeld;
+              await control.cancel();
+              cancelReturned = true;
+            },
+            // Manual credit keeps the callback's own batch from adding a
+            // CREDIT of its own behind the cancellation's.
+            { initialCredit: 4096, autoCredit: false },
+          );
+          primary.receive(emptyResultBatch(query.requestId));
+          await vi.advanceTimersByTimeAsync(0);
+          if (!cancelSendFails) {
+            // The replacement is up, and its reset waits for the callback.
+            primary.drop();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(replacement.sent).toEqual([]);
+            releaseCallback();
+            await vi.advanceTimersByTimeAsync(0);
+          }
+
+          // The reconnect owns the CANCEL, so the callback returns and the
+          // reset it held up replays the query, with the CANCEL and its CREDIT
+          // behind it. Waiting inside cancel() for that frame to be sent left
+          // the two waiting on each other until the reconnect budget ran out
+          // and failed the session.
+          expect(cancelReturned).toBe(true);
+          expect(resets).toEqual([query.requestId]);
+          expect(kinds(replacement)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+            QWP_EGRESS_MESSAGE.CANCEL,
+            QWP_EGRESS_MESSAGE.CREDIT,
+          ]);
+          expect(requestIdOf(replacement.sent[0])).toBe(query.requestId);
+          replacement.receive(cancelled(query.requestId));
+          await expect(query.completion).rejects.toMatchObject({
+            name: "QwpEgressQueryError",
+            status: QWP_STATUS.CANCELLED,
+          });
+
+          const next = await session.query("select 2");
+          expect(requestIdOf(replacement.sent.at(-1)!)).toBe(next.requestId);
+          replacement.receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+        } finally {
+          const closing = session?.close();
+          await vi.advanceTimersByTimeAsync(1_000);
+          await closing;
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it("replaces a connection that cannot drain a cancelled query instead of failing the session", async () => {
       // Without flow control QuestDB does not read the connection while it

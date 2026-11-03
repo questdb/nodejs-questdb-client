@@ -1530,7 +1530,10 @@ credit they held. The outcome is the server's terminal response. A cancellation
 rejects iteration and `completion` with `QwpEgressQueryError` whose `status` is
 `QWP_STATUS.CANCELLED`, and so does a result that ended after rows were withheld; a
 statement that completed anyway, or a result that ended with nothing withheld,
-succeeds. A query sends at most one `CANCEL`.
+succeeds. A query sends at most one `CANCEL`. `cancel()` settles once its `CANCEL`
+has been sent, or once a reconnect has taken it over: the frame then follows the
+replayed request, so a callback that awaits `cancel()` does not hold up the
+reconnect that has to drain it first.
 
 `await query.awaitCompletion(timeoutMs)` bounds only the caller's wait and returns
 `false` without cancelling when the timeout expires, matching Java
