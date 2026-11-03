@@ -9275,11 +9275,19 @@ describe("QWP egress reconnect and replay", () => {
             await control.cancel();
             cancelReturned = true;
           },
-          { initialCredit: 4096 },
+          // Manual credit, so the CREDIT that follows the CANCEL is the only
+          // one sent: the callback's own batch would otherwise add a CREDIT
+          // that fails the same way.
+          { initialCredit: 4096, autoCredit: false },
         );
         const completion = query.completion.catch((error: unknown) => error);
         primary.receive(emptyResultBatch(query.requestId));
         await vi.advanceTimersByTimeAsync(0);
+        expect(kinds(primary)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          QWP_EGRESS_MESSAGE.CANCEL,
+          QWP_EGRESS_MESSAGE.CREDIT,
+        ]);
 
         // Releasing cancel() must not swallow the send failure: exhaustion
         // still belongs to the query and session, not the view callback.
