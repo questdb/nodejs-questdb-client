@@ -647,7 +647,12 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
       while (true) {
         const next = await iterator.next();
         if (next.done) break;
-        if (this.closing || this.connection !== connection) return;
+        // A replaced or closing connection keeps being read, and its messages
+        // dropped, until it closes. A server streaming a result does not read
+        // its socket, so it answers no closing handshake and sends on until
+        // the close times out; left unread, all of it piled up in the old
+        // connection's queue.
+        if (this.closing || this.connection !== connection) continue;
         const message = decodeQwpEgressMessage(next.value);
         if (message.kind === "server-info") {
           throw new QwpProtocolError("received duplicate QWP SERVER_INFO");
@@ -870,6 +875,48 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.outboundReplay = [];
     this.pendingTerminal = undefined;
     pending.resolve(true);
+  }
+
+  /**
+   * Replaces a connection whose server has not ended a cancelled query within
+   * the session's drain bound. The session has settled that query and drops
+   * it from the replay when this reports the connection lost, so nothing is
+   * replayed; the endpoint keeps its standing, since a server streaming a
+   * result it has not finished is not unhealthy.
+   *
+   * @internal
+   */
+  async replaceConnection(
+    cause: Error,
+    reason: string,
+    requestId: bigint,
+  ): Promise<void> {
+    this.throwIfUnavailable();
+    // The session restarts its drain bound once a reconnect has restored it,
+    // but the reconnect installs its connection only after sending the replay.
+    // A bound that expires in between replaces the connection that reconnect
+    // installs. Returning at once left the settled query holding the session
+    // with no bound at all, until the server ended the replayed query.
+    if (!this.connection && this.reconnectTask) {
+      await this.reconnectTask.catch(() => undefined);
+      this.throwIfUnavailable();
+      // A failed replay may have dropped the retired query before a later
+      // attempt connected. Do not replace that clean connection, which may
+      // already carry another query, on behalf of the old drain.
+      if (replayRequestId(this.outboundReplay) !== requestId) return;
+    }
+    const connection = this.connection;
+    // No reconnect succeeded, and the session hears of whatever failed it.
+    if (!connection) return;
+    try {
+      // Messages still queued from the old connection belong to the settled
+      // query alone, and waiting for the session to work through them would
+      // only delay the replacement.
+      await this.requestReconnect(cause, connection, 1000, reason, true);
+    } catch (error) {
+      this.failTerminal(error);
+      throw error;
+    }
   }
 
   /** @internal Replaces a connection whose server response was invalid. */

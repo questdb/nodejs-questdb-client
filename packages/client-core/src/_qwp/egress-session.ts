@@ -79,8 +79,22 @@ export interface QwpEgressSessionOptions {
    * Maximum wait for a terminal response after CANCEL, and the grace period of
    * a query timeout: how long an expired query may take to end before its
    * caller is released, and how long its connection may then take to drain
-   * it. Defaults to 5 seconds. Capped at 2,147,483,647ms (the host timer
-   * ceiling); a larger value throws a `RangeError`.
+   * it. A connection that has not drained the query by then is closed: a
+   * reconnecting session continues on a new one, while a session opened with
+   * `reconnect: false` fails with {@link QwpEgressQueryCancelTimeoutError}. A
+   * query ended with `cancel()` fails with that error as well; one already
+   * released by its timeout or by leaving iteration keeps the error it was
+   * released with. This client-initiated replacement emits `disconnected`
+   * with {@link QwpEgressQueryCancelTimeoutError} as its cause, then
+   * `reconnected` or `failed-over` on success. It does not deprioritize the
+   * endpoint or replay the retired query. A `queryViews()` callback of that
+   * query still running holds the replacement for up to one more period,
+   * since the connection's decoding state cannot be reset under it; if it
+   * has not returned by then, the session fails with
+   * {@link QwpEgressQueryCancelTimeoutError} as well.
+   *
+   * Defaults to 5 seconds. Capped at 2,147,483,647ms (the host timer ceiling);
+   * a larger value throws a `RangeError`.
    */
   cancelDrainTimeoutMs?: number;
   /**
@@ -325,8 +339,14 @@ export class QwpEgressQueryAbandonedError extends Error {
 }
 
 /**
- * The server did not terminate a cancelled query within the drain deadline,
- * so the session gave up on the connection.
+ * A cancelled query did not end within `cancelDrainTimeoutMs`. A query ended
+ * with `cancel()` fails with this error; one released by its timeout or by
+ * leaving iteration keeps the error it was released with. A reconnecting
+ * session then replaces its connection, reporting this error as the `cause`
+ * of its `disconnected` event, and runs the next query on the new one. The
+ * session itself fails with this error if it was opened with
+ * `reconnect: false`, or if a `queryViews()` callback of the query is still
+ * running one more `cancelDrainTimeoutMs` later.
  */
 export class QwpEgressQueryCancelTimeoutError extends Error {
   constructor(
@@ -389,6 +409,11 @@ export interface QwpEgressViewQuery {
   readonly completion: Promise<QwpQueryCompletion>;
   /** Waits without cancelling; false means only this wait timed out. */
   awaitCompletion(timeoutMs: number): Promise<boolean>;
+  /**
+   * Cancels the query: no further batch reaches the callback, and the outcome
+   * follows the server's terminal response, as for
+   * {@link QwpEgressQuery.cancel}.
+   */
   cancel(): Promise<void>;
   grantCredit(additionalBytes: number | bigint): Promise<void>;
   isDone(): boolean;
@@ -431,15 +456,22 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   private decodedRowCount = 0n;
   private wireComplete = false;
   private terminal = false;
-  // Set when the timeout expires. From then on no result batch reaches the
-  // consumer, while the outcome still waits for the server's terminal response:
-  // a statement that completed has taken effect and is reported as done.
+  // Set when the timeout expires or the application cancels. From then on no
+  // result batch reaches the consumer, and batches still arriving are dropped
+  // and credited however the consumer behaves, so the terminal response the
+  // outcome waits for is never stuck behind a full slot pool. A statement that
+  // completed has taken effect all the same and is reported as done.
+  private withholding = false;
+  // Set when the timeout expires: the outcome is then reported as a timeout
+  // unless the application cancelled first.
   private deadlineReached = false;
-  // A batch was kept from the consumer after the timeout expired, so a
+  // A batch was kept from the consumer once results were withheld, so a
   // RESULT_END that follows no longer closes a complete result.
   private withheldBatch = false;
   private cancelledByApplication = false;
   private cancelClaimed = false;
+  // Set while the result-view callback runs; callbacks run one at a time.
+  private viewCallbackActive = false;
   // The deadline, then the grace period after it. One at a time.
   private timeoutTimer?: ReturnType<typeof setTimeout>;
   readonly completion: Promise<QwpQueryCompletion>;
@@ -518,6 +550,25 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     };
   }
 
+  /**
+   * Cancels the query. No further batch is delivered: batches already queued
+   * are dropped, and the server is sent `CANCEL` together with the
+   * flow-control credit those batches held. The outcome follows the server's
+   * terminal response: a cancellation rejects iteration and `completion`
+   * with a {@link QwpEgressQueryError} whose status is `QWP_STATUS.CANCELLED`,
+   * a statement that completed anyway succeeds, and so does a result that
+   * ended with nothing withheld.
+   *
+   * If the server does not end the query within `cancelDrainTimeoutMs`,
+   * iteration and `completion` reject with
+   * {@link QwpEgressQueryCancelTimeoutError}. A reconnecting session replaces
+   * the connection; a session opened with `reconnect: false` fails instead.
+   *
+   * The returned promise settles once `CANCEL` has been sent, or once a
+   * reconnect has taken it over: it then follows the replayed request, and a
+   * later failure reaches the query and the session. A query sends at most
+   * one `CANCEL`.
+   */
   cancel(): Promise<void> {
     return this.control.cancel(this.requestId);
   }
@@ -593,9 +644,17 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     return this.cancelledByApplication;
   }
 
-  /** @internal Records an application cancel, which outranks the timeout. */
-  markCancelledByUser(): void {
-    this.cancelledByApplication = true;
+  /**
+   * @internal Whether results are withheld from the consumer: the timeout
+   * expired or the application cancelled.
+   */
+  get withholdingResults(): boolean {
+    return this.withholding;
+  }
+
+  /** @internal Whether the server streams this query under credit. */
+  get flowControlled(): boolean {
+    return this.creditEnabled;
   }
 
   /**
@@ -614,13 +673,43 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 
   /**
+   * @internal The error reporting an application cancel for a result whose
+   * stream ended after rows had been withheld: the server finished before it
+   * acted on the CANCEL, but the consumer did not receive the whole result.
+   */
+  cancelledError(): QwpEgressQueryError {
+    return new QwpEgressQueryError(
+      this.requestId,
+      QWP_STATUS.CANCELLED,
+      `QWP query was cancelled before its result completed [requestId=${this.requestId}]`,
+    );
+  }
+
+  /**
    * @internal Called when the timeout expires. No further batch reaches the
    * consumer: queued ones are dropped. Returns the flow-control credit they
    * held, which the server needs back to stream on toward its terminal.
    */
-  withholdResults(): number {
-    if (this.terminal || this.deadlineReached) return 0;
+  expireDeadline(): number {
+    if (this.terminal) return 0;
     this.deadlineReached = true;
+    return this.withholdResults();
+  }
+
+  /**
+   * @internal Called when the application cancels, which outranks a timeout
+   * expiring later. Results are withheld exactly as they are at the timeout,
+   * and the credit returned is what the dropped batches held.
+   */
+  cancelByUser(): number {
+    if (this.terminal) return 0;
+    this.cancelledByApplication = true;
+    return this.withholdResults();
+  }
+
+  private withholdResults(): number {
+    if (this.withholding) return 0;
+    this.withholding = true;
     // Also wakes a receive loop parked on a full slot pool, which then drops
     // the batch it holds instead of queueing it.
     return this.discardBufferedResults();
@@ -631,13 +720,13 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     const generation = this.bufferGeneration;
     while (
       !this.terminal &&
-      !this.deadlineReached &&
+      !this.withholding &&
       generation === this.bufferGeneration &&
       this.bufferedBatchCount >= this.bufferPoolSize
     ) {
       await new Promise<void>((resolve) => this.bufferWaiters.add(resolve));
     }
-    if (this.terminal || this.deadlineReached) return "retired";
+    if (this.terminal || this.withholding) return "retired";
     if (generation !== this.bufferGeneration) return "reset";
     this.bufferedBatchCount++;
     return "reserved";
@@ -645,7 +734,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
 
   /** @internal Publishes a batch after reserveMaterializedBatch(). */
   pushReserved(batch: QwpResultBatch, creditBytes: number): void {
-    if (this.terminal || this.deadlineReached) {
+    if (this.terminal || this.withholding) {
       if (!this.terminal) this.withheldBatch = true;
       this.releaseBufferedBatches(1);
       return;
@@ -664,13 +753,13 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     const generation = this.bufferGeneration;
     while (
       !this.terminal &&
-      !this.deadlineReached &&
+      !this.withholding &&
       generation === this.bufferGeneration &&
       this.availableViewSlots.length === 0
     ) {
       await new Promise<void>((resolve) => this.bufferWaiters.add(resolve));
     }
-    if (this.terminal || this.deadlineReached) return { status: "retired" };
+    if (this.terminal || this.withholding) return { status: "retired" };
     if (generation !== this.bufferGeneration) return { status: "reset" };
     return { status: "reserved", slot: this.availableViewSlots.shift()! };
   }
@@ -681,7 +770,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     creditBytes: number,
     slot: number,
   ): void {
-    if (this.terminal || this.deadlineReached) {
+    if (this.terminal || this.withholding) {
       if (!this.terminal) this.withheldBatch = true;
       batch.release();
       this.releaseViewSlot(slot);
@@ -695,10 +784,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
         this.releaseViewSlot(slot);
         return;
       }
-      if (this.deadlineReached) {
-        // Decoded ahead before the timeout expired, so it is dropped unread.
-        // Its credit still goes back: the server streams on toward the
-        // terminal response the outcome waits for.
+      if (this.withholding) {
+        // Decoded ahead before the timeout expired or the application
+        // cancelled, so it is dropped unread. Its credit still goes back: the
+        // server streams on toward the terminal response the outcome waits
+        // for.
         this.withheldBatch = true;
         batch.release();
         this.releaseViewSlot(slot);
@@ -708,12 +798,14 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
         return;
       }
       let handlerError: Error | undefined;
+      this.viewCallbackActive = true;
       try {
         await this.viewHandler!(batch, this.viewControl!);
       } catch (error) {
         handlerError =
           error instanceof Error ? error : new Error(String(error));
       } finally {
+        this.viewCallbackActive = false;
         batch.release();
         this.releaseViewSlot(slot);
       }
@@ -749,6 +841,16 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     return this.viewHandler !== undefined;
   }
 
+  /** @internal Whether a result-view callback is running now. */
+  get viewCallbackRunning(): boolean {
+    return this.viewCallbackActive;
+  }
+
+  /** @internal Whether the server's terminal response has been received. */
+  get terminalReceived(): boolean {
+    return this.wireComplete;
+  }
+
   /** @internal */
   async finish(completion: QwpQueryCompletion): Promise<void> {
     this.wireComplete = true;
@@ -756,10 +858,15 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     if (this.terminal) return;
     if (completion.kind === "result-end") {
       if (this.withheldBatch) {
-        // Rows were kept from the consumer once the timeout expired, so what
-        // it received is not the whole result. A statement's EXEC_DONE has no
-        // rows to withhold and is reported as done: it has taken effect.
-        this.fail(this.timeoutError());
+        // Rows were kept from the consumer once the timeout expired or the
+        // application cancelled, so what it received is not the whole result.
+        // A statement's EXEC_DONE has no rows to withhold and is reported as
+        // done: it has taken effect.
+        this.fail(
+          this.cancelledByApplication
+            ? this.cancelledError()
+            : this.timeoutError(),
+        );
         return;
       }
       if (
@@ -825,10 +932,10 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
 
   /**
    * @internal Records a batch dropped unread because the consumer has retired
-   * or the timeout has expired, and returns the credit to restore for it.
+   * or results are withheld, and returns the credit to restore for it.
    */
   dropLateBatch(creditBytes: number): number {
-    if (this.deadlineReached && !this.terminal) this.withheldBatch = true;
+    if (this.withholding && !this.terminal) this.withheldBatch = true;
     return this.creditEnabled ? creditBytes : 0;
   }
 
@@ -900,7 +1007,7 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
     let creditBytes = this.deliveredCreditBytes;
     this.deliveredCreditBytes = 0;
     const dropped = this.batches.clear();
-    if (dropped.length > 0 && this.deadlineReached) this.withheldBatch = true;
+    if (dropped.length > 0 && this.withholding) this.withheldBatch = true;
     this.releaseBufferedBatches(dropped.length);
     for (const queued of dropped) {
       creditBytes += queued.creditBytes;
@@ -1010,6 +1117,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private readonly bufferPoolSize: number;
   private readonly cancelDrainTimeoutMs: number;
   private readonly idleWaiters = new Set<() => void>();
+  /** Callers of cancel() released once a reconnect owns their CANCEL. */
+  private readonly connectionLossWaiters = new Set<() => void>();
   private readonly pendingStarts = new Set<QwpPendingQueryStart>();
   private active?: QwpEgressQuery;
   private activeRequest?: QwpReplayableQueryRequest;
@@ -1021,6 +1130,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private closePromise?: Promise<void>;
   private cancelDrainRequestId?: bigint;
   private cancelDrainTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Bounds a result-view callback that holds up a drain replacement. Kept out
+   * of the drain slot, which a lost connection clears: the reconnect that
+   * follows drains the same callback before it resets the session.
+   */
+  private viewHoldTimer?: ReturnType<typeof setTimeout>;
   /**
    * Set while a reconnecting transport is without a connection. A query that
    * no longer needs a server -- its timeout expired, its consumer is gone --
@@ -1385,14 +1500,22 @@ export class QwpEgressSession implements QwpEgressQueryControl {
 
   cancel(requestId: bigint): Promise<void> {
     const query = this.requireActive(requestId);
-    // Past its timeout, or with its consumer gone, the query is already being
-    // cancelled, and the server would ignore a second CANCEL.
-    if (query.isDone() || query.pastDeadline) return Promise.resolve();
-    query.markCancelledByUser();
+    // Past its timeout, with its consumer gone, or cancelled already, the
+    // query is already being cancelled, and the server would ignore a second
+    // CANCEL.
+    if (query.isDone() || query.pastDeadline || query.cancelledByUser) {
+      return Promise.resolve();
+    }
+    // No further batch reaches the consumer, exactly as at a timeout. The
+    // cancel used to leave delivery running, so the terminal response queued
+    // behind every batch still in flight: a consumer that stopped iterating
+    // parked the receive loop on a full slot pool short of it, until the
+    // CANCEL drain gave up on the connection.
+    const discardedCredit = query.cancelByUser();
     // Without a connection the CANCEL follows the replayed request, and its
     // drain bound starts with the replacement connection.
     if (!this.connectionLost) this.armCancelDrain(requestId);
-    return this.sendCancel(query, 0);
+    return this.releasedByReconnect(this.sendCancel(query, discardedCredit));
   }
 
   abandon(requestId: bigint): Promise<void> {
@@ -1447,7 +1570,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   expire(requestId: bigint): void {
     const query = this.active;
     if (!query || query.requestId !== requestId || query.isDone()) return;
-    const discardedCredit = query.withholdResults();
+    const discardedCredit = query.expireDeadline();
     try {
       if (this.connectionLost) {
         // Nothing can answer on a connection that is gone.
@@ -1661,7 +1784,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
               break;
             case "result-batch": {
               const query = this.requireActive(message.requestId);
-              if (query.retired || query.pastDeadline) {
+              if (query.retired || query.withholdingResults) {
                 this.discardBatch(query, message, payload);
               } else if (query.usesViews) {
                 const reservation = await query.reserveViewBatch();
@@ -1844,6 +1967,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    */
   private handleConnectionLost(): void {
     this.connectionLost = true;
+    for (const release of this.connectionLossWaiters) release();
+    this.connectionLossWaiters.clear();
     this.clearCancelDrain();
     this.settleLostQuery();
   }
@@ -1962,17 +2087,67 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     return this.sendCancel(query, discardedCredit);
   }
 
-  /** Sends the request's one CANCEL, then credit for batches it dropped. */
+  /**
+   * Sends the request's one CANCEL, then credit for the batches it dropped --
+   * on a flow-controlled query never less than one byte.
+   *
+   * QuestDB reads a CANCEL only once a flow-controlled stream has run out of
+   * credit and parked, and it acts on it when the next CREDIT resumes that
+   * stream. A CANCEL sent alone therefore waited for the consumer to hand
+   * credit back, which a consumer that had stopped iterating never did, and
+   * the drain bound then gave up on the connection. A resumed stream checks
+   * for the cancellation before it sends anything, so one byte is enough.
+   */
   private sendCancel(
     query: QwpEgressQuery,
     discardedCredit: number,
   ): Promise<void> {
     const requestId = query.requestId;
-    const cancelling = query.claimCancel()
+    const claimed = query.claimCancel();
+    const cancelling = claimed
       ? this.sendWhileActive(requestId, encodeQwpCancel(requestId))
       : Promise.resolve();
-    if (discardedCredit === 0) return cancelling;
-    return cancelling.then(() => this.sendCredit(query, discardedCredit));
+    const creditBytes =
+      claimed && query.flowControlled
+        ? Math.max(discardedCredit, 1)
+        : discardedCredit;
+    if (creditBytes === 0) return cancelling;
+    return cancelling.then(() => {
+      // A close or failure while CANCEL was being sent already settled the
+      // query. Do not let CREDIT's synchronous availability check reject a
+      // successful CANCEL send.
+      if (this.failure || this.closing) return;
+      // Keep CANCEL before CREDIT, but release a callback awaiting cancel():
+      // credit recovery may reconnect and wait for that same callback to drain.
+      // The session send tail still owns failures from this queued credit.
+      void this.sendCredit(query, creditBytes).catch(() => undefined);
+    });
+  }
+
+  /**
+   * Settles with `sending`, or as soon as the reconnecting transport has lost
+   * its connection: the reconnect then owns the frame, which travels with the
+   * replayed request or follows it, and is dropped with a query that is not
+   * replayed.
+   *
+   * A result-view callback may be the caller, and the reset before a replay
+   * drains that very callback first. Waiting for the frame itself left the two
+   * waiting on each other until the reconnect budget ran out and failed the
+   * session, although the replacement was ready. The session send tail still
+   * owns a failure that arrives after the caller has been released.
+   */
+  private releasedByReconnect(sending: Promise<void>): Promise<void> {
+    if (!(this.connection instanceof QwpReconnectingEgressConnection)) {
+      return sending;
+    }
+    void sending.catch(() => undefined);
+    if (this.connectionLost) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      this.connectionLossWaiters.add(resolve);
+      void sending
+        .then(resolve, reject)
+        .finally(() => this.connectionLossWaiters.delete(resolve));
+    });
   }
 
   private sendCredit(
@@ -1994,20 +2169,140 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     this.cancelDrainTimer = setTimeout(() => {
       this.cancelDrainTimer = undefined;
       this.cancelDrainRequestId = undefined;
-      if (!this.active || this.active.requestId !== requestId) return;
+      const query = this.active;
+      if (!query || query.requestId !== requestId) return;
       const error = new QwpEgressQueryCancelTimeoutError(
         requestId,
         this.cancelDrainTimeoutMs,
       );
-      this.fail(error);
-      try {
-        void this.connection
-          .close(1011, "QWP cancellation drain timed out")
-          .catch(() => undefined);
-      } catch {
-        // The typed cancellation failure remains the session's terminal error.
-      }
+      if (this.replaceUndrainedConnection(query, error)) return;
+      this.failUndrained(error);
     }, this.cancelDrainTimeoutMs);
+  }
+
+  /** Fails the session over a query its connection could not drain. */
+  private failUndrained(error: QwpEgressQueryCancelTimeoutError): void {
+    this.fail(error);
+    try {
+      void this.connection
+        .close(1011, "QWP cancellation drain timed out")
+        .catch(() => undefined);
+    } catch {
+      // The typed cancellation failure remains the session's terminal error.
+    }
+  }
+
+  /**
+   * Gives up on a connection that has not drained a cancelled query within
+   * the bound, but not on the session: a reconnecting transport opens a
+   * replacement and the next query runs there.
+   *
+   * This is the ordinary outcome, not a fault, for a query streamed without
+   * flow control. QuestDB does not read the connection while it streams such
+   * a result, so a CANCEL reaches it only after the last batch has been sent,
+   * and a long result cannot drain within the bound. Failing the session
+   * then refused every later query, although closing the connection is what
+   * ends the query on the server, and the replacement is as healthy as any.
+   * A session without a reconnecting transport still fails: it has no other
+   * connection.
+   */
+  private replaceUndrainedConnection(
+    query: QwpEgressQuery,
+    error: QwpEgressQueryCancelTimeoutError,
+  ): boolean {
+    const connection = this.connection;
+    if (
+      !(connection instanceof QwpReconnectingEgressConnection) ||
+      this.closing ||
+      this.failure ||
+      this.connectionLost
+    ) {
+      return false;
+    }
+    // Settled first, with the error its caller sees: the connection loss the
+    // replacement reports then drops the query from the replay rather than
+    // running it again. A no-op for a consumer that has already retired.
+    query.retire(error);
+    if (query.viewCallbackRunning) {
+      this.replaceAfterViewCallback(connection, query, error);
+    } else {
+      this.startReplacement(connection, query, error);
+    }
+    return true;
+  }
+
+  /**
+   * Replaces the connection once the query's running result-view callback
+   * returns, allowing it one more drain period.
+   *
+   * The reset before a replacement drains that callback first, because the
+   * views it reads alias the connection's symbol dictionary. Replacing at once
+   * left the reset -- and every later query -- waiting on the callback for up
+   * to failoverMaxDurationMs, with no bound at all when that is zero, where a
+   * session without reconnect fails at the drain bound. A callback still
+   * running after one more period fails the session the same way, even if the
+   * connection was lost meanwhile: the reconnect that follows drains the same
+   * callback before it resets the session, so it would wait just as long. If
+   * the server ends the query while the callback runs, the connection has
+   * drained and stays in use.
+   */
+  private replaceAfterViewCallback(
+    connection: QwpReconnectingEgressConnection,
+    query: QwpEgressQuery,
+    error: QwpEgressQueryCancelTimeoutError,
+  ): void {
+    // Not held in the drain slot, which a lost connection clears. Clearing
+    // this bound with it left the reconnect's reset, and every later query,
+    // waiting on the callback for up to failoverMaxDurationMs, or with no
+    // bound at all when that is zero. The query leaving the session -- its
+    // terminal response, a close or a failure -- clears it instead.
+    this.clearViewHold();
+    const timer = setTimeout(() => {
+      if (this.viewHoldTimer !== timer) return;
+      this.viewHoldTimer = undefined;
+      if (this.active === query) this.failUndrained(error);
+    }, this.cancelDrainTimeoutMs);
+    this.viewHoldTimer = timer;
+    void query.waitForViewDrain().then(
+      () => {
+        // Expired or cleared meanwhile: whatever did so settles the query.
+        if (this.viewHoldTimer !== timer) return;
+        this.clearViewHold();
+        // Nothing to replace once the query has left the session, the server
+        // has ended it, or the session is closing or has failed. A reconnect
+        // under way resets the session itself now that the callback returned.
+        if (
+          this.active !== query ||
+          query.terminalReceived ||
+          this.closing ||
+          this.failure ||
+          this.connectionLost
+        ) {
+          return;
+        }
+        this.startReplacement(connection, query, error);
+      },
+      () => undefined,
+    );
+  }
+
+  private clearViewHold(): void {
+    if (this.viewHoldTimer) clearTimeout(this.viewHoldTimer);
+    this.viewHoldTimer = undefined;
+  }
+
+  private startReplacement(
+    connection: QwpReconnectingEgressConnection,
+    query: QwpEgressQuery,
+    error: QwpEgressQueryCancelTimeoutError,
+  ): void {
+    void connection
+      .replaceConnection(
+        error,
+        "QWP cancellation drain timed out",
+        query.requestId,
+      )
+      .catch((replaceError: unknown) => this.fail(replaceError));
   }
 
   private clearCancelDrain(requestId?: bigint): void {
@@ -2095,6 +2390,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private clearActive(expected?: QwpEgressQuery): void {
     if (expected && this.active !== expected) return;
     if (!this.active) return;
+    // Only the active query is ever held, so its bound leaves with it.
+    this.clearViewHold();
     this.active = undefined;
     this.activeRequest = undefined;
     this.activeDetached = false;

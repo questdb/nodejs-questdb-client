@@ -51,13 +51,19 @@ async function manifest(directory: string): Promise<PackageManifest> {
 }
 
 function packedFiles(directory: string): Set<string> {
-  const [pack] = JSON.parse(
-    execFileSync(
-      process.platform === "win32" ? "npm.cmd" : "npm",
-      ["pack", "--dry-run", "--json"],
-      { cwd: directory, encoding: "utf8" },
+  // npm <=11 returns an array; npm >=12 returns an object keyed by package name.
+  const [pack] = Object.values(
+    JSON.parse(
+      execFileSync(
+        process.platform === "win32" ? "npm.cmd" : "npm",
+        ["pack", "--dry-run", "--json"],
+        { cwd: directory, encoding: "utf8" },
+      ),
     ),
-  ) as [{ files: PackedFile[] }];
+  ) as { files: PackedFile[] }[];
+  if (!Array.isArray(pack?.files)) {
+    throw new Error(`${directory}: npm pack returned no file manifest`);
+  }
   return new Set(pack.files.map((file) => file.path));
 }
 
