@@ -557,10 +557,17 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
    * terminal response: a cancellation rejects iteration and `completion`
    * with a {@link QwpEgressQueryError} whose status is `QWP_STATUS.CANCELLED`,
    * a statement that completed anyway succeeds, and so does a result that
-   * ended with nothing withheld. The returned promise settles once `CANCEL`
-   * has been sent, or once a reconnect has taken it over: it then follows the
-   * replayed request, and a later failure reaches the query and the session.
-   * A query sends at most one `CANCEL`.
+   * ended with nothing withheld.
+   *
+   * If the server does not end the query within `cancelDrainTimeoutMs`,
+   * iteration and `completion` reject with
+   * {@link QwpEgressQueryCancelTimeoutError}. A reconnecting session replaces
+   * the connection; a session opened with `reconnect: false` fails instead.
+   *
+   * The returned promise settles once `CANCEL` has been sent, or once a
+   * reconnect has taken it over: it then follows the replayed request, and a
+   * later failure reaches the query and the session. A query sends at most
+   * one `CANCEL`.
    */
   cancel(): Promise<void> {
     return this.control.cancel(this.requestId);
@@ -2106,6 +2113,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         : discardedCredit;
     if (creditBytes === 0) return cancelling;
     return cancelling.then(() => {
+      // A close or failure while CANCEL was being sent already settled the
+      // query. Do not let CREDIT's synchronous availability check reject a
+      // successful CANCEL send.
+      if (this.failure || this.closing) return;
       // Keep CANCEL before CREDIT, but release a callback awaiting cancel():
       // credit recovery may reconnect and wait for that same callback to drain.
       // The session send tail still owns failures from this queued credit.

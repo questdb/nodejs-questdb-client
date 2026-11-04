@@ -31,6 +31,7 @@ import {
   QwpEgressQueryError,
   QwpEgressQueryTimeoutError,
   QwpEgressSession,
+  QwpEgressSessionClosedError,
   QwpProtocolError,
   QwpResultBatchDecoder,
   QwpTableBuffer,
@@ -3623,6 +3624,111 @@ describe("QwpEgressSession", () => {
     await following.completion;
     expect(connection.closeCalls).toEqual([]);
     await session.close();
+  });
+
+  it.each([false, undefined] as const)(
+    "resolves cancel when close races its follow-up CREDIT (reconnect: %s)",
+    async (reconnect) => {
+      const connection = new FakeConnection();
+      connection.receive(serverInfo());
+      const session = await connectQwpEgressSession(async () => connection, {
+        reconnect,
+      });
+      let finishCancel!: () => void;
+      try {
+        const query = await session.query("select * from x", {
+          initialCredit: 4096,
+        });
+        connection.onSend = (payload) => {
+          if (payload[0] !== QWP_EGRESS_MESSAGE.CANCEL)
+            return Promise.resolve();
+          return new Promise<void>((resolve) => {
+            finishCancel = resolve;
+          });
+        };
+        const cancelling = query.cancel();
+        await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+
+        // The Node ws write callback and an application's nextTick close can
+        // run in the same turn, before the CANCEL continuation queues CREDIT.
+        finishCancel();
+        const closing = session.close();
+        await expect(cancelling).resolves.toBeUndefined();
+        await closing;
+        await expect(query.completion).rejects.toBeInstanceOf(
+          QwpEgressSessionClosedError,
+        );
+        expect(sentKinds(connection)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          QWP_EGRESS_MESSAGE.CANCEL,
+        ]);
+      } finally {
+        finishCancel?.();
+        await session.close();
+      }
+    },
+  );
+
+  it("resolves cancel when the session fails before its follow-up CREDIT", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    let finishCancel!: () => void;
+    try {
+      const query = await session.query("select * from x", {
+        initialCredit: 4096,
+      });
+      connection.onSend = (payload) => {
+        if (payload[0] !== QWP_EGRESS_MESSAGE.CANCEL) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          finishCancel = resolve;
+        });
+      };
+      const cancelling = query.cancel();
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+
+      // A protocol failure settles the query while the CANCEL write is still
+      // pending. Its successful send must not inherit the later CREDIT error.
+      connection.receive(serverInfo());
+      await expect(query.completion).rejects.toThrow(
+        "received duplicate QWP SERVER_INFO",
+      );
+      finishCancel();
+      await expect(cancelling).resolves.toBeUndefined();
+      await expect(session.query("select 2")).rejects.toThrow(
+        "received duplicate QWP SERVER_INFO",
+      );
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+    } finally {
+      finishCancel?.();
+      await session.close();
+    }
+  });
+
+  it("still rejects cancel when the CANCEL send itself fails", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    try {
+      const query = await session.query("select * from x", {
+        initialCredit: 4096,
+      });
+      const failure = new Error("CANCEL send failed");
+      connection.onSend = async () => {
+        throw failure;
+      };
+      await expect(query.cancel()).rejects.toBe(failure);
+      await expect(query.completion).rejects.toBe(failure);
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+    } finally {
+      await session.close();
+    }
   });
 
   it("reports cancellation when only queued rows are withheld before RESULT_END", async () => {
