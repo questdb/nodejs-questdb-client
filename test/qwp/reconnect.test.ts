@@ -9716,6 +9716,69 @@ describe("QWP egress reconnect and replay", () => {
       }
     });
 
+    it("fails the session when a result-view callback outlasts another period in which the connection is lost", async () => {
+      // A lost connection clears the drain, and the reconnect that follows
+      // drains the same callback before it resets the session. The callback's
+      // extra period was cleared along with the drain, which left that reset,
+      // and every later query, waiting on the callback -- with no bound at all
+      // here, and for failoverMaxDurationMs otherwise.
+      vi.useFakeTimers();
+      try {
+        const { session, primary, replacement, releaseCallback } =
+          await cancelPastDrainInViewCallback(false);
+        let outcome: unknown = "pending";
+        void session.query("select 2").then(
+          () => (outcome = "started"),
+          (error: unknown) => (outcome = error),
+        );
+        await vi.advanceTimersByTimeAsync(10);
+        primary.drop();
+        await vi.advanceTimersByTimeAsync(39);
+        expect(outcome).toBe("pending");
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(outcome).toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        expect(replacement.sent).toEqual([]);
+        releaseCallback();
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("reconnects once a result-view callback returns within another period in which the connection is lost", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session, primary, replacement, resets, releaseCallback } =
+          await cancelPastDrainInViewCallback(false);
+        const next = session.query("select 2");
+        await vi.advanceTimersByTimeAsync(10);
+        primary.drop();
+        await vi.advanceTimersByTimeAsync(15);
+        // The reconnect's reset waits for the callback.
+        expect(replacement.sent).toEqual([]);
+
+        releaseCallback();
+        await vi.advanceTimersByTimeAsync(0);
+        const started = await next;
+        // The retired query is dropped rather than replayed, and the bound it
+        // was held under ends with it: the session outlives that deadline.
+        expect(resets).toEqual([]);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(started.requestId);
+        await vi.advanceTimersByTimeAsync(50);
+        replacement.receive(resultEnd(started.requestId));
+        await expect(started.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("replaces the connection once a result-view callback returns within another period", async () => {
       vi.useFakeTimers();
       try {

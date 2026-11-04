@@ -1124,6 +1124,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private cancelDrainRequestId?: bigint;
   private cancelDrainTimer?: ReturnType<typeof setTimeout>;
   /**
+   * Bounds a result-view callback that holds up a drain replacement. Kept out
+   * of the drain slot, which a lost connection clears: the reconnect that
+   * follows drains the same callback before it resets the session.
+   */
+  private viewHoldTimer?: ReturnType<typeof setTimeout>;
+  /**
    * Set while a reconnecting transport is without a connection. A query that
    * no longer needs a server -- its timeout expired, its consumer is gone --
    * then ends at once instead of waiting out a drain bound, and is not replayed.
@@ -2223,32 +2229,37 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    * left the reset -- and every later query -- waiting on the callback for up
    * to failoverMaxDurationMs, with no bound at all when that is zero, where a
    * session without reconnect fails at the drain bound. A callback still
-   * running after one more period fails the session the same way. If the
-   * server ends the query while the callback runs, the connection has drained
-   * and stays in use.
+   * running after one more period fails the session the same way, even if the
+   * connection was lost meanwhile: the reconnect that follows drains the same
+   * callback before it resets the session, so it would wait just as long. If
+   * the server ends the query while the callback runs, the connection has
+   * drained and stays in use.
    */
   private replaceAfterViewCallback(
     connection: QwpReconnectingEgressConnection,
     query: QwpEgressQuery,
     error: QwpEgressQueryCancelTimeoutError,
   ): void {
-    const requestId = query.requestId;
-    // Held in the drain slot, so a close, a failure, a lost connection or the
-    // query's terminal response clears it as it would the drain itself.
-    this.clearCancelDrain();
-    this.cancelDrainRequestId = requestId;
+    // Not held in the drain slot, which a lost connection clears. Clearing
+    // this bound with it left the reconnect's reset, and every later query,
+    // waiting on the callback for up to failoverMaxDurationMs, or with no
+    // bound at all when that is zero. The query leaving the session -- its
+    // terminal response, a close or a failure -- clears it instead.
+    this.clearViewHold();
     const timer = setTimeout(() => {
-      if (this.cancelDrainTimer !== timer) return;
-      this.cancelDrainTimer = undefined;
-      this.cancelDrainRequestId = undefined;
+      if (this.viewHoldTimer !== timer) return;
+      this.viewHoldTimer = undefined;
       if (this.active === query) this.failUndrained(error);
     }, this.cancelDrainTimeoutMs);
-    this.cancelDrainTimer = timer;
+    this.viewHoldTimer = timer;
     void query.waitForViewDrain().then(
       () => {
-        // Cleared or expired meanwhile: whatever did so settles the query.
-        if (this.cancelDrainTimer !== timer) return;
-        this.clearCancelDrain(requestId);
+        // Expired or cleared meanwhile: whatever did so settles the query.
+        if (this.viewHoldTimer !== timer) return;
+        this.clearViewHold();
+        // Nothing to replace once the query has left the session, the server
+        // has ended it, or the session is closing or has failed. A reconnect
+        // under way resets the session itself now that the callback returned.
         if (
           this.active !== query ||
           query.terminalReceived ||
@@ -2262,6 +2273,11 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       },
       () => undefined,
     );
+  }
+
+  private clearViewHold(): void {
+    if (this.viewHoldTimer) clearTimeout(this.viewHoldTimer);
+    this.viewHoldTimer = undefined;
   }
 
   private startReplacement(
@@ -2363,6 +2379,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   private clearActive(expected?: QwpEgressQuery): void {
     if (expected && this.active !== expected) return;
     if (!this.active) return;
+    // Only the active query is ever held, so its bound leaves with it.
+    this.clearViewHold();
     this.active = undefined;
     this.activeRequest = undefined;
     this.activeDetached = false;
