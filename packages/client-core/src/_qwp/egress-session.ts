@@ -339,10 +339,14 @@ export class QwpEgressQueryAbandonedError extends Error {
 }
 
 /**
- * The server did not terminate a cancelled query within the drain deadline,
- * so the session gave up on the connection. A reconnecting session opens a
- * new one for the next query; a session opened with `reconnect: false` fails
- * with this error.
+ * A cancelled query did not end within `cancelDrainTimeoutMs`. A query ended
+ * with `cancel()` fails with this error; one released by its timeout or by
+ * leaving iteration keeps the error it was released with. A reconnecting
+ * session then replaces its connection, reporting this error as the `cause`
+ * of its `disconnected` event, and runs the next query on the new one. The
+ * session itself fails with this error if it was opened with
+ * `reconnect: false`, or if a `queryViews()` callback of the query is still
+ * running one more `cancelDrainTimeoutMs` later.
  */
 export class QwpEgressQueryCancelTimeoutError extends Error {
   constructor(
