@@ -3778,14 +3778,22 @@ describe("QwpEgressSession", () => {
         ]);
 
         // The session's own control calls treat a request that has left it
-        // the same way: nothing is left to cancel, abandon or credit, and the
+        // the same way, whether the session is idle or has started the next
+        // query: nothing is left to cancel, abandon, credit or reject, and the
         // query running now is not touched either.
+        const lateCalls = [
+          () => session.cancel(query.requestId),
+          () => session.grantCredit(query.requestId, 1),
+          () => session.abandon(query.requestId),
+          () => session.rejectView(query.requestId, new Error("late")),
+        ];
+        for (const call of lateCalls) {
+          await expect(call()).resolves.toBeUndefined();
+        }
         const next = await session.query("select 2");
-        await expect(session.cancel(query.requestId)).resolves.toBeUndefined();
-        await expect(
-          session.grantCredit(query.requestId, 1),
-        ).resolves.toBeUndefined();
-        await expect(session.abandon(query.requestId)).resolves.toBeUndefined();
+        for (const call of lateCalls) {
+          await expect(call()).resolves.toBeUndefined();
+        }
         expect(next.isDone()).toBe(false);
 
         // An invalid grant is still reported, as a rejection.
@@ -3827,12 +3835,20 @@ describe("QwpEgressSession", () => {
 
     // The handle queryViews() returned, and the control a callback kept past
     // its own return, as a timer or an abort listener would.
-    for (const control of [query, kept]) {
+    const controls = [query, kept];
+    for (const control of controls) {
       await expect(control.cancel()).resolves.toBeUndefined();
       await expect(control.grantCredit(1)).resolves.toBeUndefined();
     }
     expect(connection.sent).toHaveLength(sent);
+
+    // Neither asks the session, so they settle the same way once it has
+    // closed.
     await session.close();
+    for (const control of controls) {
+      await expect(control.cancel()).resolves.toBeUndefined();
+      await expect(control.grantCredit(1)).resolves.toBeUndefined();
+    }
   });
 
   it("sends no credit for a query whose consumer has already retired", async () => {
@@ -3903,6 +3919,7 @@ describe("QwpEgressSession", () => {
         () => session.cancel(query.requestId),
         () => session.grantCredit(query.requestId, 1),
         () => session.abandon(query.requestId),
+        () => session.rejectView(query.requestId, new Error("late")),
       ]) {
         let settled: Promise<void> | undefined;
         expect(() => {
@@ -3912,6 +3929,44 @@ describe("QwpEgressSession", () => {
       }
     }
     await failed.session.close();
+  });
+
+  it("rejects an invalid grantCredit() on a running query without sending it", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+      autoCredit: false,
+    });
+    const sent = connection.sent.length;
+
+    // The amount is checked first, whatever the query's state, so a running
+    // query reports a bad one exactly as an ended query does: as a RangeError
+    // rejection, never a synchronous throw. A numeric string is refused as
+    // well, not coerced into a CREDIT frame.
+    for (const amount of [
+      -1,
+      1.5,
+      Number.NaN,
+      2 ** 53,
+      2n ** 64n,
+      "64",
+      undefined,
+    ]) {
+      let granted: Promise<void> | undefined;
+      expect(() => {
+        granted = query.grantCredit(amount as never);
+      }).not.toThrow();
+      await expect(granted).rejects.toBeInstanceOf(RangeError);
+    }
+    expect(connection.sent).toHaveLength(sent);
+
+    // The query keeps running, and a valid grant still goes out.
+    expect(query.isDone()).toBe(false);
+    await query.grantCredit(64);
+    expect(creditsSent(connection)).toEqual([64n]);
+    await session.close();
   });
 
   it("reports cancellation when only queued rows are withheld before RESULT_END", async () => {
