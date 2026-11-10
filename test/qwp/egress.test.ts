@@ -40,6 +40,7 @@ import {
   readQwpVarint,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
+import type { QwpEgressViewCallbackControl } from "../../packages/client-core/src/qwp";
 // Internal: neither package root exports these.
 import {
   connectQwpEgressSession,
@@ -3729,6 +3730,187 @@ describe("QwpEgressSession", () => {
     } finally {
       await session.close();
     }
+  });
+
+  it.each([false, undefined] as const)(
+    "settles cancel() and grantCredit() on a query that has ended (reconnect: %s)",
+    async (reconnect) => {
+      const connection = new FakeConnection();
+      connection.receive(serverInfo());
+      const session = await connectQwpEgressSession(async () => connection, {
+        reconnect,
+      });
+      try {
+        const query = await session.query("select * from x");
+        connection.receive(firstResultBatch(query.requestId));
+        connection.receive(resultEnd(query.requestId));
+        for await (const _batch of query) {
+          // Consume the whole result.
+        }
+        await query.completion;
+        expect(query.isDone()).toBe(true);
+        const sent = connection.sent.length;
+
+        // The session has handled RESULT_END, so the query has left it. Both
+        // calls used to throw QwpProtocolError synchronously here, before any
+        // promise existed, so a .catch() on their result never ran.
+        await expect(query.cancel()).resolves.toBeUndefined();
+        await expect(query.grantCredit(1)).resolves.toBeUndefined();
+
+        // An abort that arrives after completion is the usual way to get
+        // here. A listener that throws surfaces as an uncaught exception,
+        // which ends a Node process.
+        const controller = new AbortController();
+        const thrown: unknown[] = [];
+        const settling: Promise<void>[] = [];
+        controller.signal.addEventListener("abort", () => {
+          try {
+            settling.push(query.cancel(), query.grantCredit(1));
+          } catch (error) {
+            thrown.push(error);
+          }
+        });
+        controller.abort();
+        expect(thrown).toEqual([]);
+        await expect(Promise.all(settling)).resolves.toEqual([
+          undefined,
+          undefined,
+        ]);
+
+        // The session's own control calls treat a request that has left it
+        // the same way: nothing is left to cancel, abandon or credit.
+        await expect(session.cancel(query.requestId)).resolves.toBeUndefined();
+        await expect(
+          session.grantCredit(query.requestId, 1),
+        ).resolves.toBeUndefined();
+        await expect(session.abandon(query.requestId)).resolves.toBeUndefined();
+        expect(connection.sent).toHaveLength(sent);
+
+        // An invalid grant is still reported, as a rejection.
+        await expect(query.grantCredit(-1)).rejects.toBeInstanceOf(RangeError);
+        await expect(
+          session.grantCredit(query.requestId, -1),
+        ).rejects.toBeInstanceOf(RangeError);
+
+        // Nothing was queued behind the session's send tail either: the next
+        // query's request is the only frame that follows.
+        const next = await session.query("select 2");
+        connection.receive(resultEnd(next.requestId, 0n, 0n));
+        await next.completion;
+        expect(sentKinds(connection).slice(sent)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        ]);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  it("settles the queryViews() handles' cancel() and grantCredit() once the query has ended", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    let kept: QwpEgressViewCallbackControl | undefined;
+    const query = await session.queryViews(
+      "select * from x",
+      (_batch, control) => {
+        kept = control;
+      },
+    );
+    connection.receive(firstResultBatch(query.requestId));
+    connection.receive(resultEnd(query.requestId));
+    await query.completion;
+    expect(query.isDone()).toBe(true);
+    expect(kept).toBeDefined();
+    const sent = connection.sent.length;
+
+    // The handle queryViews() returned, and the control a callback kept past
+    // its own return, as a timer or an abort listener would.
+    for (const control of [query, kept]) {
+      await expect(control.cancel()).resolves.toBeUndefined();
+      await expect(control.grantCredit(1)).resolves.toBeUndefined();
+    }
+    expect(connection.sent).toHaveLength(sent);
+    await session.close();
+  });
+
+  it("sends no credit for a query whose consumer has already retired", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+      autoCredit: false,
+    });
+    connection.receive(firstResultBatch(query.requestId));
+    for await (const _batch of query) break;
+    // Leaving the loop retired the query: CANCEL, then the credit it held.
+    await vi.waitFor(() =>
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+        QWP_EGRESS_MESSAGE.CREDIT,
+      ]),
+    );
+    expect(query.isDone()).toBe(true);
+
+    // It is still draining, and the session credits whatever arrives
+    // meanwhile on its own. The application owes it nothing more.
+    await expect(query.grantCredit(64)).resolves.toBeUndefined();
+    await expect(query.cancel()).resolves.toBeUndefined();
+    expect(connection.sent).toHaveLength(3);
+
+    connection.receive(
+      queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
+    );
+    await expect(query.completion).rejects.toBeInstanceOf(
+      QwpEgressQueryAbandonedError,
+    );
+    const following = await session.query("select 2");
+    connection.receive(resultEnd(following.requestId, 0n, 0n));
+    await following.completion;
+    expect(connection.sent).toHaveLength(4);
+    await session.close();
+  });
+
+  it("settles a query's control calls once its session has closed or failed", async () => {
+    const open = async () => {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x");
+      return { connection, session, query };
+    };
+    const closed = await open();
+    await closed.session.close();
+    const failed = await open();
+    // A second SERVER_INFO is a protocol fault, which fails the session.
+    failed.connection.receive(serverInfo());
+
+    for (const [{ session, query }, reason] of [
+      [closed, QwpEgressSessionClosedError],
+      [failed, QwpProtocolError],
+    ] as const) {
+      await expect(query.completion).rejects.toBeInstanceOf(reason);
+      // The query ended with its session and reports that through its
+      // completion. Nothing is left to cancel or credit.
+      await expect(query.cancel()).resolves.toBeUndefined();
+      await expect(query.grantCredit(1)).resolves.toBeUndefined();
+      // The session's own control calls report its state, but through the
+      // promise they return, never by throwing past a .catch() on it.
+      for (const call of [
+        () => session.cancel(query.requestId),
+        () => session.grantCredit(query.requestId, 1),
+        () => session.abandon(query.requestId),
+      ]) {
+        let settled: Promise<void> | undefined;
+        expect(() => {
+          settled = call();
+        }).not.toThrow();
+        await expect(settled).rejects.toBeInstanceOf(reason);
+      }
+    }
+    await failed.session.close();
   });
 
   it("reports cancellation when only queued rows are withheld before RESULT_END", async () => {
