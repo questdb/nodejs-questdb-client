@@ -1803,7 +1803,10 @@ describe("Sender message builder test suite (anything not covered in client inte
     await sender.close();
   });
 
-  it("throws exception if tries to extend the size of the buffer above max buffer size", async function () {
+  it("grows the buffer to max buffer size when the growth step would overshoot it", async function () {
+    // The buffer grows by whole multiples of its current size, so from 48 the
+    // next step is 96, past the 64 byte cap. Nothing here ever needs more than
+    // the cap, so the buffer is grown to it rather than the write refused.
     const sender = await Sender.fromConfig(
       "tcp::addr=host;init_buf_size=8;max_buf_size=64;",
     );
@@ -1820,17 +1823,34 @@ describe("Sender message builder test suite (anything not covered in client inte
     expect(bufferPosition(sender)).toBe("tableName intField=123i\n".length);
     expect(bufferContent(sender)).toBe("tableName intField=123i\n");
 
-    try {
-      await sender
+    await sender
+      .table("table2")
+      .intColumn("intField", 125)
+      .stringColumn("strField", "test")
+      .atNow();
+    expect(bufferSize(sender)).toBe(64);
+    expect(bufferPosition(sender)).toBe(61);
+    expect(bufferContent(sender)).toBe(
+      "tableName intField=123i\n" + 'table2 intField=125i,strField="test"\n',
+    );
+    await sender.close();
+  });
+
+  it("throws exception if the data does not fit in max buffer size", async function () {
+    const sender = await Sender.fromConfig(
+      "tcp::addr=host;init_buf_size=8;max_buf_size=48;",
+    );
+    await sender.table("tableName").intColumn("intField", 123).atNow();
+    expect(bufferPosition(sender)).toBe("tableName intField=123i\n".length);
+
+    // Both rows together need more than the 48 byte cap, so this must throw.
+    await expect(async () =>
+      sender
         .table("table2")
         .intColumn("intField", 125)
         .stringColumn("strField", "test")
-        .atNow();
-    } catch (err: Error | any) {
-      expect(err.message).toBe(
-        "Max buffer size is 64 bytes, requested buffer size: 96",
-      );
-    }
+        .atNow(),
+    ).rejects.toThrow("Max buffer size is 48 bytes");
     await sender.close();
   });
 

@@ -540,11 +540,17 @@ abstract class SenderBufferBase implements SenderBuffer {
     for (const str of data) {
       length += Buffer.byteLength(str, "utf8");
     }
-    if (this.position + length > this.bufferSize) {
+    const required = this.position + length;
+    if (required > this.bufferSize) {
       let newSize = this.bufferSize;
       do {
         newSize += this.bufferSize;
-      } while (this.position + length > newSize);
+      } while (required > newSize);
+      if (newSize > this.maxBufferSize && required <= this.maxBufferSize) {
+        // The step overshot the cap but the data fits inside it, so grow to
+        // the cap instead of refusing a write that is within budget.
+        newSize = this.maxBufferSize;
+      }
       this.resize(newSize);
     }
   }
