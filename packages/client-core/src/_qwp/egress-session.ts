@@ -239,7 +239,7 @@ function validateEgressSessionOptions(
   }
   return {
     serverInfoTimeoutMs,
-    initialCredit: validateInitialCredit(
+    initialCredit: validateCredit(
       options.initialCredit ?? QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
       "initialCredit",
     ),
@@ -277,10 +277,7 @@ function validateBufferPoolSize(value: number): number {
   return value;
 }
 
-function validateInitialCredit(
-  value: number | bigint,
-  name: string,
-): number | bigint {
+function validateCredit(value: number | bigint, name: string): number | bigint {
   if (typeof value === "number") {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new RangeError(`${name} must be a non-negative safe integer`);
@@ -371,6 +368,12 @@ export class QwpEgressSessionClosedError extends Error {
   }
 }
 
+/**
+ * What a query asks of its session. The operations returning a promise never
+ * throw: every failure, including a session that has failed or closed, rejects
+ * that promise. On a session still open, one naming a request that has left it
+ * resolves without doing anything, since nothing is left to act on.
+ */
 interface QwpEgressQueryControl {
   cancel(requestId: bigint): Promise<void>;
   abandon(requestId: bigint): Promise<void>;
@@ -412,9 +415,15 @@ export interface QwpEgressViewQuery {
   /**
    * Cancels the query: no further batch reaches the callback, and the outcome
    * follows the server's terminal response, as for
-   * {@link QwpEgressQuery.cancel}.
+   * {@link QwpEgressQuery.cancel}. Once the query has ended, it resolves
+   * without sending anything.
    */
   cancel(): Promise<void>;
+  /**
+   * Grants the server more send-ahead credit for this query, as
+   * {@link QwpEgressQuery.grantCredit} does. A query that has ended is owed
+   * none: the grant resolves without sending anything.
+   */
   grantCredit(additionalBytes: number | bigint): Promise<void>;
   isDone(): boolean;
 }
@@ -568,12 +577,43 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
    * reconnect has taken it over: it then follows the replayed request, and a
    * later failure reaches the query and the session. A query sends at most
    * one `CANCEL`.
+   *
+   * A query that has already ended, as `isDone()` reports, has nothing left
+   * to cancel: the returned promise resolves and nothing is sent, even if the
+   * session has since closed or failed. A timer or an `AbortSignal` listener
+   * that fires after the query completes may therefore still call it. This
+   * method never throws: every failure rejects the returned promise.
    */
   cancel(): Promise<void> {
+    // An ended query has nothing left to cancel, so its session is not asked:
+    // one that has failed or closed since rejects every call. Asked once it
+    // had handled the terminal response, the session used to throw
+    // QwpProtocolError synchronously, past any .catch() on this promise.
+    if (this.terminal) return Promise.resolve();
     return this.control.cancel(this.requestId);
   }
 
+  /**
+   * Grants the server `additionalBytes` more send-ahead credit for this
+   * query. Use it to replenish credit by hand on a query run with
+   * `autoCredit: false`.
+   *
+   * A query that has already ended is owed no credit: the returned promise
+   * resolves and nothing is sent, even if the session has since closed or
+   * failed. `additionalBytes` must be a non-negative safe integer or a
+   * `bigint` that fits in uint64, whatever the query's state; any other value
+   * rejects with a `RangeError`. This method never throws: every failure
+   * rejects the returned promise.
+   */
   grantCredit(additionalBytes: number | bigint): Promise<void> {
+    try {
+      validateCredit(additionalBytes, "additionalBytes");
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    // An ended query takes no further batches, so it is owed no credit, and
+    // its session is not asked, for the same reasons as in cancel().
+    if (this.terminal) return Promise.resolve();
     // Replayable, and accepted as soon as a reconnect owns it. Both arguments
     // matter: the grant is recorded in the replayable request before its frame
     // is sent, so without the replay-supersession handling the replacement
@@ -994,13 +1034,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 
   private returnCredit(creditBytes: number): void {
-    try {
-      void this.control
-        .grantCredit(this.requestId, creditBytes, false)
-        .catch(() => undefined);
-    } catch {
-      // The query is no longer active on the session; nothing is owed.
-    }
+    // The session send tail owns failures, and a query no longer active on
+    // the session is owed nothing: the grant then resolves without a frame.
+    void this.control
+      .grantCredit(this.requestId, creditBytes, false)
+      .catch(() => undefined);
   }
 
   private discardBufferedResults(): number {
@@ -1335,7 +1373,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     // The timeout runs from this call: waiting for SERVER_INFO, for a previous
     // query to drain and for the request to leave all count against it.
     const deadline = timeoutMs > 0 ? monotonicNowMs() + timeoutMs : undefined;
-    const initialCredit = validateInitialCredit(
+    const initialCredit = validateCredit(
       options.initialCredit ?? this.defaultInitialCredit,
       "initialCredit",
     );
@@ -1499,31 +1537,45 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   }
 
   cancel(requestId: bigint): Promise<void> {
-    const query = this.requireActive(requestId);
-    // Past its timeout, with its consumer gone, or cancelled already, the
-    // query is already being cancelled, and the server would ignore a second
-    // CANCEL.
-    if (query.isDone() || query.pastDeadline || query.cancelledByUser) {
-      return Promise.resolve();
+    try {
+      const query = this.controlledQuery(requestId);
+      // A query that has left the session has ended. Past its timeout, with
+      // its consumer gone, or cancelled already, the query is already being
+      // cancelled, and the server would ignore a second CANCEL.
+      if (
+        !query ||
+        query.isDone() ||
+        query.pastDeadline ||
+        query.cancelledByUser
+      ) {
+        return Promise.resolve();
+      }
+      // No further batch reaches the consumer, exactly as at a timeout. The
+      // cancel used to leave delivery running, so the terminal response queued
+      // behind every batch still in flight: a consumer that stopped iterating
+      // parked the receive loop on a full slot pool short of it, until the
+      // CANCEL drain gave up on the connection.
+      const discardedCredit = query.cancelByUser();
+      // Without a connection the CANCEL follows the replayed request, and its
+      // drain bound starts with the replacement connection.
+      if (!this.connectionLost) this.armCancelDrain(requestId);
+      return this.releasedByReconnect(this.sendCancel(query, discardedCredit));
+    } catch (error) {
+      return Promise.reject(error);
     }
-    // No further batch reaches the consumer, exactly as at a timeout. The
-    // cancel used to leave delivery running, so the terminal response queued
-    // behind every batch still in flight: a consumer that stopped iterating
-    // parked the receive loop on a full slot pool short of it, until the
-    // CANCEL drain gave up on the connection.
-    const discardedCredit = query.cancelByUser();
-    // Without a connection the CANCEL follows the replayed request, and its
-    // drain bound starts with the replacement connection.
-    if (!this.connectionLost) this.armCancelDrain(requestId);
-    return this.releasedByReconnect(this.sendCancel(query, discardedCredit));
   }
 
   abandon(requestId: bigint): Promise<void> {
-    const query = this.requireActive(requestId);
-    const discardedCredit = query.retire(
-      new QwpEgressQueryAbandonedError(requestId),
-    );
-    return this.drainRetired(query, discardedCredit);
+    try {
+      const query = this.controlledQuery(requestId);
+      if (!query) return Promise.resolve();
+      const discardedCredit = query.retire(
+        new QwpEgressQueryAbandonedError(requestId),
+      );
+      return this.drainRetired(query, discardedCredit);
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   grantCredit(
@@ -1532,29 +1584,35 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     replayOnReconnect = true,
     acceptWhenReconnectStarts = false,
   ): Promise<void> {
-    this.requireActive(requestId);
-    const payload = encodeQwpCredit(requestId, additionalBytes);
-    if (!replayOnReconnect) {
-      return this.sendWhileActive(requestId, payload);
+    try {
+      const payload = encodeQwpCredit(requestId, additionalBytes);
+      // A query that has left the session is owed no credit.
+      if (!this.controlledQuery(requestId)) return Promise.resolve();
+      if (!replayOnReconnect) {
+        return this.sendWhileActive(requestId, payload);
+      }
+      const additional = BigInt(additionalBytes);
+      return this.sendWhileActive(
+        requestId,
+        payload,
+        () => {
+          const request = this.activeRequest;
+          if (!request || request.requestId !== requestId) return;
+          this.manualCreditEpoch++;
+          const total = BigInt(request.initialCredit) + additional;
+          // QUERY_REQUEST carries one uint64 initial-credit field. Saturating
+          // is lossless for any representable result stream and avoids
+          // dropping all successfully granted manual credit merely because
+          // several grants were used before a failover. Apply before the
+          // physical CREDIT send: that send itself may be what starts the
+          // replay.
+          request.initialCredit = total > MAX_UINT64 ? MAX_UINT64 : total;
+        },
+        acceptWhenReconnectStarts,
+      );
+    } catch (error) {
+      return Promise.reject(error);
     }
-    const additional = BigInt(additionalBytes);
-    return this.sendWhileActive(
-      requestId,
-      payload,
-      () => {
-        const request = this.activeRequest;
-        if (!request || request.requestId !== requestId) return;
-        this.manualCreditEpoch++;
-        const total = BigInt(request.initialCredit) + additional;
-        // QUERY_REQUEST carries one uint64 initial-credit field. Saturating is
-        // lossless for any representable result stream and avoids dropping all
-        // successfully granted manual credit merely because several grants
-        // were used before a failover. Apply before the physical CREDIT send:
-        // that send itself may be what starts the replay.
-        request.initialCredit = total > MAX_UINT64 ? MAX_UINT64 : total;
-      },
-      acceptWhenReconnectStarts,
-    );
   }
 
   /**
@@ -1611,7 +1669,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   }
 
   async rejectView(requestId: bigint, error: Error): Promise<void> {
-    const query = this.requireActive(requestId);
+    const query = this.controlledQuery(requestId);
+    if (!query) return;
     const discardedCredit = query.retire(error);
     await this.drainRetired(query, discardedCredit);
   }
@@ -1886,6 +1945,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     }
   }
 
+  /** The active query a server message names; any other is a protocol fault. */
   private requireActive(requestId: bigint): QwpEgressQuery {
     this.throwIfUnavailable();
     if (!this.active || this.active.requestId !== requestId) {
@@ -1894,6 +1954,22 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       );
     }
     return this.active;
+  }
+
+  /**
+   * The active query an application's control call names, or undefined once
+   * that query has left the session. Throws if the session has failed or is
+   * closing; the control calls turn that into a rejection.
+   *
+   * Unlike a server message, an application names an ended request simply by
+   * acting late -- a timer or an `AbortSignal` listener that fires after the
+   * terminal response -- and nothing is left to act on then. requireActive()
+   * reported that as a protocol fault, thrown before any promise existed.
+   */
+  private controlledQuery(requestId: bigint): QwpEgressQuery | undefined {
+    this.throwIfUnavailable();
+    const query = this.active;
+    return query?.requestId === requestId ? query : undefined;
   }
 
   /**
