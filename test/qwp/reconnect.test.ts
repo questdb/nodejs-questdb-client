@@ -70,6 +70,7 @@ import {
   encodeQwpDurableAckPollFrame,
   encodeQwpIngressFrame,
   encodeQwpQueryRequest,
+  encodeQwpCredit,
   decodeQwpIngressSymbolDictionaryDelta,
   writeQwpVarint,
 } from "../../packages/client-core/src/qwp";
@@ -8958,9 +8959,12 @@ describe("QWP egress reconnect and replay", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(resets).toEqual([query.requestId]);
 
-        const cancelling = query.cancel();
+        // The reconnect owns the CANCEL, so cancel() returns while the reset
+        // that holds up the replay is still running.
+        await query.cancel();
+        expect(kinds(replacement)).toEqual([]);
         releaseReset();
-        await cancelling;
+        await vi.advanceTimersByTimeAsync(0);
         // The CANCEL follows the replayed request.
         expect(kinds(replacement)).toEqual([
           QWP_EGRESS_MESSAGE.QUERY_REQUEST,
@@ -9151,6 +9155,937 @@ describe("QWP egress reconnect and replay", () => {
         vi.useRealTimers();
       }
     });
+
+    it.each([false, true])(
+      "releases a cancelling view callback when its CREDIT send starts reconnect (autoCredit: %s)",
+      async (autoCredit) => {
+        vi.useFakeTimers();
+        let session: Awaited<ReturnType<typeof connectQwpEgressSession>>;
+        try {
+          const connected = await sessionWithHeldReplacement({
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+              failoverMaxDurationMs: 500,
+            },
+          });
+          session = connected.session;
+          const { primary, replacement, releaseReplacement, resets } =
+            connected;
+          releaseReplacement();
+          primary.onSend = async (payload) => {
+            if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT) {
+              throw new Error("cancellation credit send failed");
+            }
+          };
+          const seen: bigint[] = [];
+          let cancelReturned = false;
+          const query = await session.queryViews(
+            "select * from x",
+            async (batch, control) => {
+              seen.push(batch.batchSequence);
+              await control.cancel();
+              cancelReturned = true;
+            },
+            { initialCredit: 4096, autoCredit },
+          );
+          primary.receive(emptyResultBatch(query.requestId));
+          await vi.advanceTimersByTimeAsync(0);
+
+          // CANCEL succeeds, but its wake-up CREDIT starts reconnect, and the
+          // replay reset cannot run until this callback returns. cancel()
+          // settles once its CANCEL is sent; were it to wait for the CREDIT,
+          // the connection loss would still release it, so the early-exit test
+          // below is the one that pins the CREDIT being queued, not awaited.
+          expect(kinds(primary)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+            QWP_EGRESS_MESSAGE.CANCEL,
+            QWP_EGRESS_MESSAGE.CREDIT,
+          ]);
+          expect(cancelReturned).toBe(true);
+          expect(resets).toEqual([query.requestId]);
+          expect(kinds(replacement).slice(0, 2)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+            QWP_EGRESS_MESSAGE.CANCEL,
+          ]);
+          expect(requestIdOf(replacement.sent[0])).toBe(query.requestId);
+          expect(query.isDone()).toBe(false);
+
+          // Replay preserves cancellation: late batches are credited without
+          // invoking the callback, even when automatic credit is disabled.
+          const lateBatch = emptyResultBatch(query.requestId);
+          replacement.receive(lateBatch);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(replacement.sent.at(-1)).toEqual(
+            encodeQwpCredit(query.requestId, lateBatch.byteLength),
+          );
+          replacement.receive(cancelled(query.requestId));
+          await expect(query.completion).rejects.toMatchObject({
+            name: "QwpEgressQueryError",
+            status: QWP_STATUS.CANCELLED,
+          });
+          expect(seen).toEqual([0n]);
+
+          const next = await session.query("select 2");
+          expect(requestIdOf(replacement.sent.at(-1)!)).toBe(next.requestId);
+          replacement.receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+        } finally {
+          const closing = session?.close();
+          await vi.advanceTimersByTimeAsync(1_000);
+          await closing;
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it("reports exhausted recovery after a cancellation CREDIT send fails", async () => {
+      vi.useFakeTimers();
+      let session: Awaited<ReturnType<typeof connectQwpEgressSession>>;
+      try {
+        const connected = await sessionWithHeldReplacement({
+          cancelDrainTimeoutMs: 50,
+          reconnect: {
+            failoverMaxAttempts: 1,
+            failoverBackoffInitialMs: 0,
+            failoverBackoffMaxMs: 0,
+            failoverMaxDurationMs: 500,
+          },
+        });
+        session = connected.session;
+        const { primary, replacement, releaseReplacement } = connected;
+        releaseReplacement();
+        primary.onSend = async (payload) => {
+          if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT) {
+            throw new Error("cancellation credit send failed");
+          }
+        };
+        const replayFailure = new Error("replay send failed");
+        replacement.onSend = async () => {
+          throw replayFailure;
+        };
+        let cancelReturned = false;
+        const query = await session.queryViews(
+          "select * from x",
+          async (_batch, control) => {
+            await control.cancel();
+            cancelReturned = true;
+          },
+          // Manual credit, so the CREDIT that follows the CANCEL is the only
+          // one sent: the callback's own batch would otherwise add a CREDIT
+          // that fails the same way.
+          { initialCredit: 4096, autoCredit: false },
+        );
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(kinds(primary)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          QWP_EGRESS_MESSAGE.CANCEL,
+          QWP_EGRESS_MESSAGE.CREDIT,
+        ]);
+
+        // Releasing cancel() must not swallow the send failure: exhaustion
+        // still belongs to the query and session, not the view callback.
+        expect(cancelReturned).toBe(true);
+        const failure = await completion;
+        expect(failure).toBeInstanceOf(QwpReconnectExhaustedError);
+        expect(failure).toMatchObject({ cause: replayFailure });
+        await expect(session.query("select 2")).rejects.toBe(failure);
+      } finally {
+        const closing = session?.close();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await closing;
+        vi.useRealTimers();
+      }
+    });
+
+    it("releases an early exit when its cancellation CREDIT send starts reconnect", async () => {
+      // Leaving iteration early awaits abandon(), which settles once the CANCEL
+      // has been sent. The CREDIT behind it is queued, not awaited: a send that
+      // fails hands it to a reconnect, and awaiting that held the loop's break
+      // until the reconnect finished, up to failoverMaxDurationMs. Connection
+      // loss releases cancel() but not abandon(), so only the queued CREDIT
+      // keeps the break prompt.
+      vi.useFakeTimers();
+      try {
+        const { session, primary, replacement, releaseReplacement } =
+          await sessionWithHeldReplacement({ cancelDrainTimeoutMs: 50 });
+        primary.onSend = async (payload) => {
+          if (payload[0] === QWP_EGRESS_MESSAGE.CREDIT) {
+            throw new Error("cancellation credit send failed");
+          }
+        };
+        const query = await session.query("select * from x", {
+          initialCredit: 4096,
+          autoCredit: false,
+        });
+        void query.completion.catch(() => undefined);
+        primary.receive(emptyResultBatch(query.requestId));
+        const iterator = query[Symbol.asyncIterator]();
+        await iterator.next();
+        let returned = false;
+        void iterator.return!().then(() => {
+          returned = true;
+        });
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The CREDIT failed, and the reconnect it started is still held.
+        expect(kinds(primary)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          QWP_EGRESS_MESSAGE.CANCEL,
+          QWP_EGRESS_MESSAGE.CREDIT,
+        ]);
+        expect(kinds(replacement)).toEqual([]);
+        expect(returned).toBe(true);
+
+        releaseReplacement();
+        const next = await session.query("select 2");
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(next.requestId);
+        replacement.receive(resultEnd(next.requestId));
+        await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["its CANCEL send fails", "a reconnect is waiting for it"])(
+      "releases a view callback awaiting cancel() when %s",
+      async (trigger) => {
+        vi.useFakeTimers();
+        let session: Awaited<ReturnType<typeof connectQwpEgressSession>>;
+        try {
+          const connected = await sessionWithHeldReplacement({
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+              failoverMaxDurationMs: 500,
+            },
+          });
+          session = connected.session;
+          const { primary, replacement, releaseReplacement, resets } =
+            connected;
+          releaseReplacement();
+          const cancelSendFails = trigger === "its CANCEL send fails";
+          if (cancelSendFails) {
+            primary.onSend = async (payload) => {
+              if (payload[0] === QWP_EGRESS_MESSAGE.CANCEL) {
+                throw new Error("cancel send failed");
+              }
+            };
+          }
+          let releaseCallback!: () => void;
+          const callbackHeld = new Promise<void>((resolve) => {
+            releaseCallback = resolve;
+          });
+          let cancelReturned = false;
+          const query = await session.queryViews(
+            "select * from x",
+            async (_batch, control) => {
+              if (!cancelSendFails) await callbackHeld;
+              await control.cancel();
+              cancelReturned = true;
+            },
+            // Manual credit keeps the callback's own batch from adding a
+            // CREDIT of its own behind the cancellation's.
+            { initialCredit: 4096, autoCredit: false },
+          );
+          primary.receive(emptyResultBatch(query.requestId));
+          await vi.advanceTimersByTimeAsync(0);
+          if (!cancelSendFails) {
+            // The replacement is up, and its reset waits for the callback.
+            primary.drop();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(replacement.sent).toEqual([]);
+            releaseCallback();
+            await vi.advanceTimersByTimeAsync(0);
+          }
+
+          // The reconnect owns the CANCEL, so the callback returns and the
+          // reset it held up replays the query, with the CANCEL and its CREDIT
+          // behind it. Waiting inside cancel() for that frame to be sent left
+          // the two waiting on each other until the reconnect budget ran out
+          // and failed the session.
+          expect(cancelReturned).toBe(true);
+          expect(resets).toEqual([query.requestId]);
+          expect(kinds(replacement)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+            QWP_EGRESS_MESSAGE.CANCEL,
+            QWP_EGRESS_MESSAGE.CREDIT,
+          ]);
+          expect(requestIdOf(replacement.sent[0])).toBe(query.requestId);
+          replacement.receive(cancelled(query.requestId));
+          await expect(query.completion).rejects.toMatchObject({
+            name: "QwpEgressQueryError",
+            status: QWP_STATUS.CANCELLED,
+          });
+
+          const next = await session.query("select 2");
+          expect(requestIdOf(replacement.sent.at(-1)!)).toBe(next.requestId);
+          replacement.receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+        } finally {
+          const closing = session?.close();
+          await vi.advanceTimersByTimeAsync(1_000);
+          await closing;
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it("replaces a connection that cannot drain a cancelled query instead of failing the session", async () => {
+      // Without flow control QuestDB does not read the connection while it
+      // streams a result, so a CANCEL reaches it only after the last batch,
+      // and a long result cannot drain within the bound. Failing the session
+      // then refused every later query, although closing the connection is
+      // what ends the query on the server.
+      vi.useFakeTimers();
+      try {
+        const events: QwpReconnectEvent[] = [];
+        const { session, primary, replacement, releaseReplacement, resets } =
+          await sessionWithHeldReplacement({
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+              onEvent: (event) => void events.push(event),
+            },
+          });
+        releaseReplacement();
+        const query = await session.query("select * from x");
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+        expect(kinds(primary)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          QWP_EGRESS_MESSAGE.CANCEL,
+        ]);
+        // The server streams on and never answers.
+        primary.receive(emptyResultBatch(query.requestId, 1));
+        await vi.advanceTimersByTimeAsync(49);
+        expect(query.isDone()).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+          requestId: query.requestId,
+          timeoutMs: 50,
+        });
+        // A normal closure: the endpoint keeps its standing.
+        await expect(primary.closed).resolves.toMatchObject({
+          code: 1000,
+          reason: "QWP cancellation drain timed out",
+        });
+
+        const next = await session.query("select 2");
+        // The cancelled query is not run again on the replacement.
+        expect(resets).toEqual([]);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(next.requestId);
+        replacement.receive(resultEnd(next.requestId));
+        await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+
+        // The observer hears of it as of any other outage, and of its cause.
+        await vi.advanceTimersByTimeAsync(10);
+        expect(events.map((event) => event.kind)).toEqual([
+          QWP_RECONNECT_EVENT_KIND.CONNECTED,
+          QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
+          // The fake replacement carries another endpoint name.
+          QWP_RECONNECT_EVENT_KIND.FAILED_OVER,
+        ]);
+        expect(events[1].cause).toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("fails the session when no replacement for an undrained connection can be opened", async () => {
+      // The replacement is an ordinary reconnect, and one that cannot reach a
+      // server fails the session with the exhausted reconnect. If that failure
+      // were dropped, the retired query would keep the session busy, and every
+      // later query would wait out its own timeout, or until close() if it had
+      // none.
+      vi.useFakeTimers();
+      try {
+        const primary = new FakeConnection("primary");
+        const refused = new Error("replacement refused");
+        let opened = 0;
+        const session = await connectQwpEgressSession(
+          async () => {
+            if (opened++ > 0) throw refused;
+            queueMicrotask(() => primary.receive(serverInfo(primary.endpoint)));
+            return primary;
+          },
+          {
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+            },
+          },
+        );
+        const query = await session.query("select * from x");
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+
+        // The server never ends the query, and the replacement is refused.
+        await vi.advanceTimersByTimeAsync(50);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+          requestId: query.requestId,
+        });
+        expect(opened).toBe(2);
+
+        // A later query is refused at once, not when its own timeout expires.
+        let outcome: unknown = "pending";
+        void session.query("select 2", { timeoutMs: 1_000 }).then(
+          () => (outcome = "started"),
+          (error: unknown) => (outcome = error),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        expect(outcome).toBeInstanceOf(QwpReconnectExhaustedError);
+        expect(outcome).toMatchObject({ cause: refused });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["timed-out", "abandoned"])(
+      "replaces the connection when the %s query cannot drain",
+      async (ending) => {
+        // The bound also covers a query whose caller has already been
+        // released, by its timeout or by leaving iteration. Without flow
+        // control a timed-out long result normally ends there: QuestDB reads
+        // the CANCEL only once it has sent the rest of the result. The query
+        // keeps the error it was released with, and the session continues on
+        // a new connection, as it does after cancel().
+        vi.useFakeTimers();
+        try {
+          const { session, primary, replacement, releaseReplacement, resets } =
+            await sessionWithHeldReplacement({ cancelDrainTimeoutMs: 50 });
+          releaseReplacement();
+          const query = await session.query(
+            "select * from x",
+            ending === "timed-out" ? { timeoutMs: 25 } : {},
+          );
+          const completion = query.completion.catch((error: unknown) => error);
+          if (ending === "timed-out") {
+            // The timeout, then its grace period, release the caller.
+            await vi.advanceTimersByTimeAsync(75);
+          } else {
+            primary.receive(emptyResultBatch(query.requestId));
+            for await (const _batch of query) break;
+          }
+          await expect(completion).resolves.toMatchObject({
+            name:
+              ending === "timed-out"
+                ? "QwpEgressQueryTimeoutError"
+                : "QwpEgressQueryAbandonedError",
+            requestId: query.requestId,
+          });
+          expect(kinds(primary)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+            QWP_EGRESS_MESSAGE.CANCEL,
+          ]);
+
+          // The server never ends the query.
+          await vi.advanceTimersByTimeAsync(50);
+          await expect(primary.closed).resolves.toMatchObject({
+            code: 1000,
+            reason: "QWP cancellation drain timed out",
+          });
+          const next = await session.query("select 2");
+          expect(resets).toEqual([]);
+          expect(kinds(replacement)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          ]);
+          expect(requestIdOf(replacement.sent[0])).toBe(next.requestId);
+          replacement.receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+          await session.close();
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    /**
+     * Cancels a result-view query whose callback is still running when the
+     * drain bound expires, on a session whose reconnect has no deadline of
+     * its own, so only the drain bound can end a wait for that callback.
+     */
+    async function cancelPastDrainInViewCallback(serverEndsQuery: boolean) {
+      const connected = await sessionWithHeldReplacement({
+        cancelDrainTimeoutMs: 50,
+        reconnect: {
+          failoverMaxAttempts: 1,
+          failoverBackoffInitialMs: 0,
+          failoverBackoffMaxMs: 0,
+          failoverMaxDurationMs: 0,
+        },
+      });
+      connected.releaseReplacement();
+      let releaseCallback!: () => void;
+      const callbackHeld = new Promise<void>((resolve) => {
+        releaseCallback = resolve;
+      });
+      const view = await connected.session.queryViews(
+        "select * from x",
+        () => callbackHeld,
+        { initialCredit: 4096 },
+      );
+      const completion = view.completion.catch((error: unknown) => error);
+      connected.primary.receive(emptyResultBatch(view.requestId));
+      await vi.advanceTimersByTimeAsync(0);
+      await view.cancel();
+      // Received, but the terminal waits for the callback like any batch.
+      if (serverEndsQuery) connected.primary.receive(cancelled(view.requestId));
+      let primaryClosed: QwpConnectionCloseInfo | undefined;
+      void connected.primary.closed.then((info) => {
+        primaryClosed = info;
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      // The bound releases the caller although the callback still runs.
+      await expect(completion).resolves.toMatchObject({
+        name: "QwpEgressQueryCancelTimeoutError",
+        requestId: view.requestId,
+      });
+      return {
+        ...connected,
+        releaseCallback,
+        primaryClosed: () => primaryClosed,
+      };
+    }
+
+    it("fails the session when a result-view callback outlasts the drain by another period", async () => {
+      // The reset before a replacement drains the callback first, because its
+      // views read the connection's symbol dictionary. Replacing at once left
+      // that reset, and every later query, waiting on the callback -- with no
+      // bound at all here -- where a session without reconnect fails at the
+      // drain bound. The callback gets one more period.
+      vi.useFakeTimers();
+      try {
+        const { session, replacement, releaseCallback, primaryClosed } =
+          await cancelPastDrainInViewCallback(false);
+        let outcome: unknown = "pending";
+        void session.query("select 2").then(
+          () => (outcome = "started"),
+          (error: unknown) => (outcome = error),
+        );
+        await vi.advanceTimersByTimeAsync(49);
+        expect(outcome).toBe("pending");
+        expect(primaryClosed()).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(outcome).toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        expect(primaryClosed()).toMatchObject({
+          code: 1011,
+          reason: "QWP cancellation drain timed out",
+        });
+        expect(replacement.sent).toEqual([]);
+        releaseCallback();
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("fails the session when a result-view callback outlasts another period in which the connection is lost", async () => {
+      // A lost connection clears the drain, and the reconnect that follows
+      // drains the same callback before it resets the session. The callback's
+      // extra period was cleared along with the drain, which left that reset,
+      // and every later query, waiting on the callback -- with no bound at all
+      // here, and for failoverMaxDurationMs otherwise.
+      vi.useFakeTimers();
+      try {
+        const { session, primary, replacement, releaseCallback } =
+          await cancelPastDrainInViewCallback(false);
+        let outcome: unknown = "pending";
+        void session.query("select 2").then(
+          () => (outcome = "started"),
+          (error: unknown) => (outcome = error),
+        );
+        await vi.advanceTimersByTimeAsync(10);
+        primary.drop();
+        await vi.advanceTimersByTimeAsync(39);
+        expect(outcome).toBe("pending");
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(outcome).toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        expect(replacement.sent).toEqual([]);
+        releaseCallback();
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("reconnects once a result-view callback returns within another period in which the connection is lost", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session, primary, replacement, resets, releaseCallback } =
+          await cancelPastDrainInViewCallback(false);
+        const next = session.query("select 2");
+        await vi.advanceTimersByTimeAsync(10);
+        primary.drop();
+        await vi.advanceTimersByTimeAsync(15);
+        // The reconnect's reset waits for the callback.
+        expect(replacement.sent).toEqual([]);
+
+        releaseCallback();
+        await vi.advanceTimersByTimeAsync(0);
+        const started = await next;
+        // The retired query is dropped rather than replayed, and the bound it
+        // was held under ends with it: the session outlives that deadline.
+        expect(resets).toEqual([]);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(started.requestId);
+        await vi.advanceTimersByTimeAsync(50);
+        replacement.receive(resultEnd(started.requestId));
+        await expect(started.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("replaces the connection once a result-view callback returns within another period", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session, replacement, resets, releaseCallback, primaryClosed } =
+          await cancelPastDrainInViewCallback(false);
+        const next = session.query("select 2");
+        await vi.advanceTimersByTimeAsync(25);
+        // The connection is replaced only after the callback returns.
+        expect(primaryClosed()).toBeUndefined();
+
+        releaseCallback();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(primaryClosed()).toMatchObject({
+          code: 1000,
+          reason: "QWP cancellation drain timed out",
+        });
+        const started = await next;
+        expect(resets).toEqual([]);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(replacement.sent[0])).toBe(started.requestId);
+        replacement.receive(resultEnd(started.requestId));
+        await expect(started.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the connection when the server ends the query while a result-view callback holds it", async () => {
+      // The server answered within the bound; only the callback held up the
+      // terminal. Once it returns, the connection has drained.
+      vi.useFakeTimers();
+      try {
+        const {
+          session,
+          primary,
+          replacement,
+          releaseCallback,
+          primaryClosed,
+        } = await cancelPastDrainInViewCallback(true);
+        const next = session.query("select 2");
+        releaseCallback();
+        await vi.advanceTimersByTimeAsync(0);
+        const started = await next;
+        expect(primaryClosed()).toBeUndefined();
+        expect(replacement.sent).toEqual([]);
+        expect(requestIdOf(primary.sent.at(-1)!)).toBe(started.requestId);
+        primary.receive(resultEnd(started.requestId));
+        await expect(started.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps reading a replaced connection until it closes", async () => {
+      // A server streaming a result does not read its socket, so it answers no
+      // closing handshake, and the old connection keeps receiving until its
+      // close times out. Left unread, all of that piled up in its queue.
+      class LingeringConnection extends FakeConnection {
+        read = 0;
+
+        constructor(endpoint: string) {
+          super(endpoint);
+          const source = this.messages;
+          (this as { messages: AsyncIterable<Uint8Array> }).messages = {
+            [Symbol.asyncIterator]: () => {
+              const iterator = source[Symbol.asyncIterator]();
+              return {
+                next: async () => {
+                  const next = await iterator.next();
+                  if (!next.done) this.read++;
+                  return next;
+                },
+              };
+            },
+          };
+        }
+
+        // The closing handshake stays pending, as the server never reads it.
+        override close(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+      vi.useFakeTimers();
+      try {
+        const primary = new LingeringConnection("primary");
+        const replacement = new FakeConnection("secondary");
+        let opened = 0;
+        const session = await connectQwpEgressSession(
+          async () => {
+            const connection = opened++ === 0 ? primary : replacement;
+            queueMicrotask(() =>
+              connection.receive(serverInfo(connection.endpoint)),
+            );
+            return connection;
+          },
+          {
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+            },
+          },
+        );
+        const query = await session.query("select * from x");
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+        await vi.advanceTimersByTimeAsync(50);
+        await expect(query.completion).rejects.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+        });
+        expect(opened).toBe(2);
+
+        const read = primary.read;
+        for (let sequence = 1; sequence <= 100; sequence++) {
+          primary.receive(emptyResultBatch(query.requestId, sequence));
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(primary.read).toBe(read + 100);
+
+        primary.drop();
+        const next = await session.query("select 2");
+        replacement.receive(resultEnd(next.requestId));
+        await next.completion;
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("replaces the connection a reconnect installs when the drain bound expires during its replay", async () => {
+      // The bound restarts once a reconnect has restored the session, but the
+      // reconnect installs its connection only after the replayed request has
+      // been sent. A bound that expired in between found no connection to
+      // replace: the cancelled query then held the session with no bound at
+      // all, and a query without a timeout of its own waited until the server
+      // ended the replayed one.
+      vi.useFakeTimers();
+      try {
+        const primary = new FakeConnection("primary");
+        const replacement = new FakeConnection("secondary");
+        const third = new FakeConnection("tertiary");
+        const connections = [primary, replacement, third];
+        let opened = 0;
+        const session = await connectQwpEgressSession(
+          async () => {
+            const connection = connections[opened++];
+            queueMicrotask(() =>
+              connection.receive(serverInfo(connection.endpoint)),
+            );
+            return connection;
+          },
+          {
+            cancelDrainTimeoutMs: 50,
+            reconnect: {
+              failoverMaxAttempts: 1,
+              failoverBackoffInitialMs: 0,
+              failoverBackoffMaxMs: 0,
+            },
+          },
+        );
+        const query = await session.query("select * from x");
+        const completion = query.completion.catch((error: unknown) => error);
+        primary.receive(emptyResultBatch(query.requestId));
+        await query.cancel();
+        // The replacement takes longer than the bound to accept the replay.
+        let releaseReplay!: () => void;
+        const replayHeld = new Promise<void>((resolve) => {
+          releaseReplay = resolve;
+        });
+        replacement.onSend = (payload) =>
+          payload[0] === QWP_EGRESS_MESSAGE.QUERY_REQUEST
+            ? replayHeld
+            : Promise.resolve();
+        primary.drop();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(kinds(replacement)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+
+        await vi.advanceTimersByTimeAsync(50);
+        await expect(completion).resolves.toMatchObject({
+          name: "QwpEgressQueryCancelTimeoutError",
+          requestId: query.requestId,
+          timeoutMs: 50,
+        });
+        releaseReplay();
+        await vi.advanceTimersByTimeAsync(0);
+        // The connection the reconnect installed is replaced in turn, and the
+        // cancelled query is not replayed onto the next one.
+        expect(opened).toBe(3);
+        await expect(replacement.closed).resolves.toMatchObject({
+          code: 1000,
+          reason: "QWP cancellation drain timed out",
+        });
+
+        const next = await session.query("select 2");
+        expect(kinds(third)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+        expect(requestIdOf(third.sent[0])).toBe(next.requestId);
+        third.receive(resultEnd(next.requestId));
+        await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        await session.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([false, true])(
+      "keeps the clean connection when a retired query's replay fails (next query waiting: %s)",
+      async (nextQueryWaiting) => {
+        vi.useFakeTimers();
+        try {
+          const primary = new FakeConnection("primary");
+          const replacement = new FakeConnection("secondary");
+          const third = new FakeConnection("tertiary");
+          const fourth = new FakeConnection("quaternary");
+          const connections = [primary, replacement, third, fourth];
+          const closeThird = vi.spyOn(third, "close");
+          const resets: bigint[] = [];
+          const events: QwpReconnectEvent[] = [];
+          let opened = 0;
+          const session = await connectQwpEgressSession(
+            async () => {
+              const connection = connections[opened++];
+              queueMicrotask(() =>
+                connection.receive(serverInfo(connection.endpoint)),
+              );
+              return connection;
+            },
+            {
+              cancelDrainTimeoutMs: 50,
+              reconnect: {
+                failoverMaxAttempts: 3,
+                failoverBackoffInitialMs: 0,
+                failoverBackoffMaxMs: 0,
+                onEvent: (event) => void events.push(event),
+              },
+              onFailoverReset: (event) => void resets.push(event.requestId),
+            },
+          );
+          const query = await session.query("select * from x");
+          const completion = query.completion.catch((error: unknown) => error);
+          await query.cancel();
+
+          let rejectReplay!: (error: Error) => void;
+          const replayHeld = new Promise<void>((_resolve, reject) => {
+            rejectReplay = reject;
+          });
+          replacement.onSend = (payload) =>
+            payload[0] === QWP_EGRESS_MESSAGE.QUERY_REQUEST
+              ? replayHeld
+              : Promise.resolve();
+          primary.drop();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(kinds(replacement)).toEqual([
+            QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          ]);
+
+          // The drain expires while the reconnect is still sending the
+          // replay. Its replacement request waits for that reconnect.
+          await vi.advanceTimersByTimeAsync(50);
+          await expect(completion).resolves.toMatchObject({
+            name: "QwpEgressQueryCancelTimeoutError",
+            requestId: query.requestId,
+            timeoutMs: 50,
+          });
+          const waiting = nextQueryWaiting
+            ? session.query("select 2")
+            : undefined;
+
+          // This attempt fails, so the next one drops the retired query
+          // instead of replaying it. The waiting replacement must not close
+          // that clean connection, whether idle or carrying a new query.
+          rejectReplay(new QwpSendClosedError());
+          await vi.advanceTimersByTimeAsync(10);
+          expect(opened).toBe(3);
+          expect(closeThird).not.toHaveBeenCalled();
+          expect(resets).toEqual([query.requestId]);
+          expect(kinds(fourth)).toEqual([]);
+          expect(events.map((event) => event.kind)).toEqual([
+            QWP_RECONNECT_EVENT_KIND.CONNECTED,
+            QWP_RECONNECT_EVENT_KIND.DISCONNECTED,
+            QWP_RECONNECT_EVENT_KIND.ENDPOINT_ATTEMPT_FAILED,
+            QWP_RECONNECT_EVENT_KIND.FAILED_OVER,
+          ]);
+          if (!nextQueryWaiting) expect(kinds(third)).toEqual([]);
+
+          const next = await (waiting ?? session.query("select 2"));
+          expect(kinds(third)).toEqual([QWP_EGRESS_MESSAGE.QUERY_REQUEST]);
+          expect(requestIdOf(third.sent[0])).toBe(next.requestId);
+          third.receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+          expect(closeThird).not.toHaveBeenCalled();
+          await session.close();
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it("lets a terminal that arrived before the connection was lost decide an expired query", async () => {
       vi.useFakeTimers();

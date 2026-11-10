@@ -46,15 +46,18 @@ function checkPackage(packageDirectory) {
 
   let pack;
   try {
-    [pack] = JSON.parse(
-      execFileSync(
-        process.platform === "win32" ? "npm.cmd" : "npm",
-        ["pack", "--dry-run", "--json"],
-        {
-          cwd: packageDirectory,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        },
+    // npm <=11 returns an array; npm >=12 returns an object keyed by package name.
+    [pack] = Object.values(
+      JSON.parse(
+        execFileSync(
+          process.platform === "win32" ? "npm.cmd" : "npm",
+          ["pack", "--dry-run", "--json"],
+          {
+            cwd: packageDirectory,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        ),
       ),
     );
   } catch (error) {
