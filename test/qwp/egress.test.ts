@@ -3778,13 +3778,15 @@ describe("QwpEgressSession", () => {
         ]);
 
         // The session's own control calls treat a request that has left it
-        // the same way: nothing is left to cancel, abandon or credit.
+        // the same way: nothing is left to cancel, abandon or credit, and the
+        // query running now is not touched either.
+        const next = await session.query("select 2");
         await expect(session.cancel(query.requestId)).resolves.toBeUndefined();
         await expect(
           session.grantCredit(query.requestId, 1),
         ).resolves.toBeUndefined();
         await expect(session.abandon(query.requestId)).resolves.toBeUndefined();
-        expect(connection.sent).toHaveLength(sent);
+        expect(next.isDone()).toBe(false);
 
         // An invalid grant is still reported, as a rejection.
         await expect(query.grantCredit(-1)).rejects.toBeInstanceOf(RangeError);
@@ -3794,7 +3796,6 @@ describe("QwpEgressSession", () => {
 
         // Nothing was queued behind the session's send tail either: the next
         // query's request is the only frame that follows.
-        const next = await session.query("select 2");
         connection.receive(resultEnd(next.requestId, 0n, 0n));
         await next.completion;
         expect(sentKinds(connection).slice(sent)).toEqual([
