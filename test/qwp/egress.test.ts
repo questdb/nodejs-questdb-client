@@ -31,6 +31,7 @@ import {
   QwpEgressQueryError,
   QwpEgressQueryTimeoutError,
   QwpEgressSession,
+  QwpEgressSessionClosedError,
   QwpProtocolError,
   QwpResultBatchDecoder,
   QwpTableBuffer,
@@ -779,6 +780,45 @@ class FakeConnection implements QwpBinaryConnection {
   receive(payload: Uint8Array): void {
     this.incoming.push(payload);
   }
+}
+
+const sentKinds = (connection: FakeConnection): number[] =>
+  connection.sent.map((payload) => payload[0]);
+
+/** The byte count each CREDIT frame the connection sent grants, in order. */
+function creditsSent(connection: FakeConnection): bigint[] {
+  return connection.sent
+    .filter((payload) => payload[0] === QWP_EGRESS_MESSAGE.CREDIT)
+    .map((payload) => {
+      const reader = new QwpByteReader(payload);
+      reader.readUint8();
+      reader.readBigUint64();
+      return readQwpVarint(reader);
+    });
+}
+
+/**
+ * Models the terminal reply of a flow-controlled stream already parked on
+ * exhausted credit: after CANCEL, the next CREDIT resumes it and triggers the
+ * reply. Callers arrange the exhausted window; this helper does not track it.
+ */
+function answerCancelOnCredit(connection: FakeConnection): void {
+  const cancelled = new Set<bigint>();
+  connection.onSend = async (payload) => {
+    const reader = new QwpByteReader(payload);
+    const kind = reader.readUint8();
+    const requestId = reader.readBigUint64();
+    if (kind === QWP_EGRESS_MESSAGE.CANCEL) {
+      cancelled.add(requestId);
+    } else if (
+      kind === QWP_EGRESS_MESSAGE.CREDIT &&
+      cancelled.delete(requestId)
+    ) {
+      connection.receive(
+        queryError(requestId, "cancelled by client", QWP_STATUS.CANCELLED),
+      );
+    }
+  };
 }
 
 /** Deterministic xorshift32 values in [0, 1). */
@@ -3112,11 +3152,18 @@ describe("QwpEgressSession", () => {
       await vi.advanceTimersByTimeAsync(25);
 
       // CANCEL goes out at the deadline, but the outcome waits for the server.
-      expect(connection.sent).toHaveLength(2);
+      expect(connection.sent).toHaveLength(3);
       const cancel = new QwpByteReader(connection.sent[1]);
       expect(cancel.readUint8()).toBe(QWP_EGRESS_MESSAGE.CANCEL);
       expect(cancel.readBigUint64()).toBe(query.requestId);
       expect(cancel.remaining).toBe(0);
+      // Nothing was buffered, so the credit following the CANCEL is a single
+      // byte: enough to resume a stream parked on exhausted credit, which is
+      // when QuestDB acts on a CANCEL.
+      const wake = new QwpByteReader(connection.sent[2]);
+      expect(wake.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
+      expect(wake.readBigUint64()).toBe(query.requestId);
+      expect(readQwpVarint(wake)).toBe(1n);
       expect(settled).toBe(false);
       expect(query.isDone()).toBe(false);
       // Still running on the connection, so another query is refused.
@@ -3127,8 +3174,8 @@ describe("QwpEgressSession", () => {
       // A batch past the deadline is withheld, and its credit goes back.
       const lateBatch = firstResultBatch(query.requestId);
       connection.receive(lateBatch);
-      await vi.waitFor(() => expect(connection.sent).toHaveLength(3));
-      const drainCredit = new QwpByteReader(connection.sent[2]);
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(4));
+      const drainCredit = new QwpByteReader(connection.sent[3]);
       expect(drainCredit.readUint8()).toBe(QWP_EGRESS_MESSAGE.CREDIT);
       expect(drainCredit.readBigUint64()).toBe(query.requestId);
       expect(readQwpVarint(drainCredit)).toBe(BigInt(lateBatch.byteLength));
@@ -3398,6 +3445,8 @@ describe("QwpEgressSession", () => {
       await vi.advanceTimersByTimeAsync(0);
       // The callback that was running completes; the view queued behind it
       // never reaches the callback, and its credit is returned all the same.
+      // The single byte ahead of both followed the CANCEL at the deadline,
+      // while both views were still held.
       expect(seen).toEqual([0n]);
       const credits = connection.sent
         .filter((payload) => payload[0] === QWP_EGRESS_MESSAGE.CREDIT)
@@ -3408,6 +3457,7 @@ describe("QwpEgressSession", () => {
           return readQwpVarint(reader);
         });
       expect(credits).toEqual([
+        1n,
         BigInt(first.byteLength),
         BigInt(second.byteLength),
       ]);
@@ -3455,6 +3505,37 @@ describe("QwpEgressSession", () => {
     }
   });
 
+  it("reports a cancelled result that ends after its timeout as a cancellation", async () => {
+    // Without flow control QuestDB reads the CANCEL only once it has sent the
+    // whole result, so a cancelled stream normally ends with RESULT_END. The
+    // timeout expiring before that does not turn the application's
+    // cancellation into a timeout.
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", { timeoutMs: 25 });
+      const completion = query.completion.catch((error: unknown) => error);
+      await query.cancel();
+      // Sent before the server read the CANCEL, so it is withheld.
+      connection.receive(emptyResultBatch(query.requestId, 0));
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(query.isDone()).toBe(false);
+      connection.receive(resultEnd(query.requestId, 0n, 0n));
+      await expect(completion).resolves.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+        requestId: query.requestId,
+      } satisfies Partial<QwpEgressQueryError>);
+      expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("sends one CANCEL however a timed-out query is ended", async () => {
     vi.useFakeTimers();
     try {
@@ -3484,6 +3565,452 @@ describe("QwpEgressSession", () => {
       );
       await vi.advanceTimersByTimeAsync(0);
       expect(vi.getTimerCount()).toBe(0);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("withholds later batches once the application cancels and credits them behind the CANCEL", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 4096,
+    });
+    const iterator = query[Symbol.asyncIterator]();
+    const held = emptyResultBatch(query.requestId, 0);
+    const queued = emptyResultBatch(query.requestId, 1);
+    connection.receive(held);
+    connection.receive(queued);
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    // Let the receive loop decode the second batch into the queue.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await query.cancel();
+    // The queued batch is dropped, and the credit of both -- the one the
+    // consumer holds and the one it will never see -- follows the CANCEL.
+    expect(sentKinds(connection)).toEqual([
+      QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+      QWP_EGRESS_MESSAGE.CANCEL,
+      QWP_EGRESS_MESSAGE.CREDIT,
+    ]);
+    expect(creditsSent(connection)).toEqual([
+      BigInt(held.byteLength + queued.byteLength),
+    ]);
+
+    // A batch the server sent before it read the CANCEL is dropped and
+    // credited as well, and a second cancel sends nothing.
+    const late = emptyResultBatch(query.requestId, 2);
+    connection.receive(late);
+    await vi.waitFor(() => expect(connection.sent).toHaveLength(4));
+    expect(creditsSent(connection)[1]).toBe(BigInt(late.byteLength));
+    await query.cancel();
+    expect(connection.sent).toHaveLength(4);
+
+    const next = iterator.next();
+    connection.receive(
+      queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
+    );
+    await expect(next).rejects.toMatchObject({
+      name: "QwpEgressQueryError",
+      status: QWP_STATUS.CANCELLED,
+      requestId: query.requestId,
+    } satisfies Partial<QwpEgressQueryError>);
+    await expect(query.completion).rejects.toBeInstanceOf(QwpEgressQueryError);
+
+    const following = await session.query("select 2");
+    connection.receive(resultEnd(following.requestId, 0n, 0n));
+    await following.completion;
+    expect(connection.closeCalls).toEqual([]);
+    await session.close();
+  });
+
+  it.each([false, undefined] as const)(
+    "resolves cancel when close races its follow-up CREDIT (reconnect: %s)",
+    async (reconnect) => {
+      const connection = new FakeConnection();
+      connection.receive(serverInfo());
+      const session = await connectQwpEgressSession(async () => connection, {
+        reconnect,
+      });
+      let finishCancel!: () => void;
+      try {
+        const query = await session.query("select * from x", {
+          initialCredit: 4096,
+        });
+        connection.onSend = (payload) => {
+          if (payload[0] !== QWP_EGRESS_MESSAGE.CANCEL)
+            return Promise.resolve();
+          return new Promise<void>((resolve) => {
+            finishCancel = resolve;
+          });
+        };
+        const cancelling = query.cancel();
+        await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+
+        // The Node ws write callback and an application's nextTick close can
+        // run in the same turn, before the CANCEL continuation queues CREDIT.
+        finishCancel();
+        const closing = session.close();
+        await expect(cancelling).resolves.toBeUndefined();
+        await closing;
+        await expect(query.completion).rejects.toBeInstanceOf(
+          QwpEgressSessionClosedError,
+        );
+        expect(sentKinds(connection)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+          QWP_EGRESS_MESSAGE.CANCEL,
+        ]);
+      } finally {
+        finishCancel?.();
+        await session.close();
+      }
+    },
+  );
+
+  it("resolves cancel when the session fails before its follow-up CREDIT", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    let finishCancel!: () => void;
+    try {
+      const query = await session.query("select * from x", {
+        initialCredit: 4096,
+      });
+      connection.onSend = (payload) => {
+        if (payload[0] !== QWP_EGRESS_MESSAGE.CANCEL) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          finishCancel = resolve;
+        });
+      };
+      const cancelling = query.cancel();
+      await vi.waitFor(() => expect(connection.sent).toHaveLength(2));
+
+      // A protocol failure settles the query while the CANCEL write is still
+      // pending. Its successful send must not inherit the later CREDIT error.
+      connection.receive(serverInfo());
+      await expect(query.completion).rejects.toThrow(
+        "received duplicate QWP SERVER_INFO",
+      );
+      finishCancel();
+      await expect(cancelling).resolves.toBeUndefined();
+      await expect(session.query("select 2")).rejects.toThrow(
+        "received duplicate QWP SERVER_INFO",
+      );
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+    } finally {
+      finishCancel?.();
+      await session.close();
+    }
+  });
+
+  it("still rejects cancel when the CANCEL send itself fails", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    try {
+      const query = await session.query("select * from x", {
+        initialCredit: 4096,
+      });
+      const failure = new Error("CANCEL send failed");
+      connection.onSend = async () => {
+        throw failure;
+      };
+      await expect(query.cancel()).rejects.toBe(failure);
+      await expect(query.completion).rejects.toBe(failure);
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("reports cancellation when only queued rows are withheld before RESULT_END", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x", {
+        initialCredit: 4096,
+      });
+      const iterator = query[Symbol.asyncIterator]();
+      const held = symbolDeltaBatch(query.requestId, 0, 0, ["alpha"], 0);
+      const queued = symbolDeltaBatch(query.requestId, 1, 1, ["beta"], 1);
+      connection.receive(held);
+      connection.receive(queued);
+      const first = await iterator.next();
+      expect(first.done).toBe(false);
+      expect(first.value.columns[0].values).toEqual(["alpha"]);
+      // Decode the second row into the queue before cancelling. No batch
+      // arrives after cancel(), so only dropping this queued row can mark
+      // the result as incomplete.
+      await vi.advanceTimersByTimeAsync(0);
+      await query.cancel();
+      expect(creditsSent(connection)).toEqual([
+        BigInt(held.byteLength + queued.byteLength),
+      ]);
+      expect(query.isDone()).toBe(false);
+
+      const next = iterator.next();
+      connection.receive(resultEnd(query.requestId, 2n, 1n));
+      await expect(next).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+        requestId: query.requestId,
+      } satisfies Partial<QwpEgressQueryError>);
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+        requestId: query.requestId,
+      } satisfies Partial<QwpEgressQueryError>);
+
+      const following = await session.query("select 2");
+      connection.receive(resultEnd(following.requestId, 0n, 0n));
+      await following.completion;
+      expect(connection.closeCalls).toEqual([]);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes a stream parked on exhausted credit when the application cancels", async () => {
+    // QuestDB acts on CANCEL only when CREDIT resumes a parked stream. With
+    // manual credit the consumer may hold nothing to give back, and a CANCEL
+    // sent alone then left the server parked until the drain bound failed
+    // the session -- which refused every later query.
+    const connection = new FakeConnection();
+    answerCancelOnCredit(connection);
+    const session = createQwpEgressSession(connection, {
+      cancelDrainTimeoutMs: 1_000,
+    });
+    connection.receive(serverInfo());
+    const initialCredit = emptyResultBatch(0n, 0).byteLength;
+    const query = await session.query("select * from x", {
+      initialCredit,
+      autoCredit: false,
+    });
+    const iterator = query[Symbol.asyncIterator]();
+    const first = emptyResultBatch(query.requestId, 0);
+    expect(first.byteLength).toBe(initialCredit);
+    connection.receive(first);
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    // The batch exactly exhausts the window. The server waits for credit
+    // the consumer never grants, after it moves past the batch it held.
+    const next = iterator.next().catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await query.cancel();
+    expect(sentKinds(connection)).toEqual([
+      QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+      QWP_EGRESS_MESSAGE.CANCEL,
+      QWP_EGRESS_MESSAGE.CREDIT,
+    ]);
+    expect(creditsSent(connection)).toEqual([1n]);
+    await expect(next).resolves.toMatchObject({
+      name: "QwpEgressQueryError",
+      status: QWP_STATUS.CANCELLED,
+    } satisfies Partial<QwpEgressQueryError>);
+
+    // A consumer that stops iterating instead gets the same answer: the
+    // credit it held goes back with the CANCEL.
+    const stopped = await session.query("select * from y", {
+      initialCredit,
+    });
+    const stoppedIterator = stopped[Symbol.asyncIterator]();
+    const batch = emptyResultBatch(stopped.requestId, 0);
+    expect(batch.byteLength).toBe(initialCredit);
+    connection.receive(batch);
+    await expect(stoppedIterator.next()).resolves.toMatchObject({
+      done: false,
+    });
+    await stopped.cancel();
+    await expect(stopped.completion).rejects.toMatchObject({
+      status: QWP_STATUS.CANCELLED,
+    } satisfies Partial<QwpEgressQueryError>);
+    expect(creditsSent(connection)).toEqual([1n, BigInt(batch.byteLength)]);
+
+    const following = await session.query("select 2");
+    connection.receive(resultEnd(following.requestId, 0n, 0n));
+    await following.completion;
+    await session.close();
+  });
+
+  it("drains a cancelled result the server streams to its end while the consumer has stopped", async () => {
+    // Without flow control QuestDB reads no CANCEL while it streams, so it
+    // sends the rest of the result first. Delivery used to continue after
+    // cancel(): the slot pool filled, the receive loop parked, and the end of
+    // the stream behind it was never read.
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection, {
+      cancelDrainTimeoutMs: 1_000,
+    });
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x");
+    const iterator = query[Symbol.asyncIterator]();
+    for (let sequence = 0; sequence < 6; sequence++) {
+      connection.receive(emptyResultBatch(query.requestId, sequence));
+    }
+    // Four batches fill the pool, and the receive loop parks on the fifth.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await query.cancel();
+    for (let sequence = 6; sequence < 64; sequence++) {
+      connection.receive(emptyResultBatch(query.requestId, sequence));
+    }
+    connection.receive(resultEnd(query.requestId, 0n, 63n));
+
+    // Rows were withheld, so the stream's end reports the cancellation.
+    await expect(query.completion).rejects.toMatchObject({
+      name: "QwpEgressQueryError",
+      status: QWP_STATUS.CANCELLED,
+      requestId: query.requestId,
+    } satisfies Partial<QwpEgressQueryError>);
+    await expect(iterator.next()).rejects.toBeInstanceOf(QwpEgressQueryError);
+    // Nothing flows under credit, so the CANCEL goes alone.
+    expect(sentKinds(connection)).toEqual([
+      QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+      QWP_EGRESS_MESSAGE.CANCEL,
+    ]);
+
+    const following = await session.query("select 2");
+    connection.receive(resultEnd(following.requestId, 0n, 0n));
+    await following.completion;
+    await session.close();
+  });
+
+  it("completes a cancelled query whose outcome the server settled first", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    // The consumer already holds every row when it cancels, so the end of
+    // the stream completes the result.
+    const query = await session.query("select * from x");
+    const iterator = query[Symbol.asyncIterator]();
+    connection.receive(firstResultBatch(query.requestId));
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    await query.cancel();
+    connection.receive(resultEnd(query.requestId));
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+      totalRows: 3n,
+    });
+
+    // A statement that completed has taken effect.
+    const statement = await session.query("insert into t select * from s");
+    await statement.cancel();
+    connection.receive(execDone(statement.requestId, 42n));
+    await expect(statement.completion).resolves.toMatchObject({
+      kind: "exec-done",
+      rowsAffected: 42n,
+    });
+    await session.close();
+  });
+
+  it("delivers no view decoded ahead of an application cancel", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      let releaseHandler!: () => void;
+      const handlerReleased = new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      const seen: bigint[] = [];
+      const query = await session.queryViews(
+        "select * from x",
+        async (batch, control) => {
+          seen.push(batch.batchSequence);
+          await handlerReleased;
+          await control.cancel();
+        },
+        { initialCredit: 4096 },
+      );
+      const first = emptyResultBatch(query.requestId, 0);
+      const second = emptyResultBatch(query.requestId, 1);
+      connection.receive(first);
+      connection.receive(second);
+      await vi.advanceTimersByTimeAsync(0);
+      // The first view is in the callback; the second is decoded ahead and
+      // queued behind it. A callback that cancelled at once instead left the
+      // second batch to be dropped before it was decoded.
+      expect(seen).toEqual([0n]);
+
+      releaseHandler();
+      await vi.advanceTimersByTimeAsync(0);
+      // The view decoded ahead never reaches the callback. Every credit
+      // follows the CANCEL: a single byte, as the cancel itself dropped
+      // nothing, then the cancelling callback's own view, then the one
+      // behind it.
+      expect(seen).toEqual([0n]);
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+        QWP_EGRESS_MESSAGE.CREDIT,
+        QWP_EGRESS_MESSAGE.CREDIT,
+        QWP_EGRESS_MESSAGE.CREDIT,
+      ]);
+      expect(creditsSent(connection)).toEqual([
+        1n,
+        BigInt(first.byteLength),
+        BigInt(second.byteLength),
+      ]);
+
+      connection.receive(
+        queryError(
+          query.requestId,
+          "cancelled by client",
+          QWP_STATUS.CANCELLED,
+        ),
+      );
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+      } satisfies Partial<QwpEgressQueryError>);
+      expect(seen).toEqual([0n]);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails a session without reconnect when a cancelled query cannot drain", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection, {
+        cancelDrainTimeoutMs: 50,
+      });
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x");
+      const completion = query.completion.catch((error: unknown) => error);
+      await query.cancel();
+
+      await vi.advanceTimersByTimeAsync(50);
+      // A fixed connection has no replacement, so the session gives up.
+      await expect(completion).resolves.toMatchObject({
+        name: "QwpEgressQueryCancelTimeoutError",
+        requestId: query.requestId,
+        timeoutMs: 50,
+      } satisfies Partial<QwpEgressQueryCancelTimeoutError>);
+      expect(connection.closeCalls).toEqual([
+        { code: 1011, reason: "QWP cancellation drain timed out" },
+      ]);
+      await expect(session.query("select 2")).rejects.toBeInstanceOf(
+        QwpEgressQueryCancelTimeoutError,
+      );
       await session.close();
     } finally {
       vi.useRealTimers();
