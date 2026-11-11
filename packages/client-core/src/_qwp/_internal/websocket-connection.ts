@@ -194,11 +194,11 @@ async function normalizeBinaryMessage(data: unknown): Promise<Uint8Array> {
  * A WHATWG WebSocket -- every browser's, and undici's in Node -- accepts only
  * 1000 and 3000-4999 from a script and throws InvalidAccessError for 1001, 1002
  * and 1011, the codes this client closes with on shutdown and on failures.
- * `ws` accepts them, so they still reach a Node server. A refused close used to
- * fall through to terminate(), which a browser socket lacks, and the socket
- * stayed open behind a connection already settled as closed: pooled query
- * sockets outlived QwpClient.close(), and a cancelled query that never drained
- * went on streaming into the page.
+ * `ws` accepts them, so from Node they still reach the server. A refused close
+ * used to fall through to terminate(), which a browser socket lacks, and the
+ * socket stayed open behind a connection already settled as closed: pooled
+ * query sockets outlived QwpClient.close(), and a cancelled query that never
+ * drained went on streaming into the page.
  *
  * A socket without terminate() can only be closed by close(), and a WHATWG one
  * validates its arguments before it changes any state, so a refused close is
