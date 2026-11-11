@@ -199,7 +199,34 @@ class FakeBrowserCloseWebSocket extends FakeWebSocket {
       this.refusedCloseCalls.push({ code, reason });
       throw new DOMException("reason is too long", "SyntaxError");
     }
+    this.acceptClose(code, reason);
+  }
+
+  /** Answers an accepted close at once, as a server that reads does. */
+  protected acceptClose(code?: number, reason?: string): void {
     super.close(code, reason);
+  }
+}
+
+/**
+ * A browser socket whose server has not read the client's close yet: an
+ * accepted close leaves the socket CLOSING until answerClose().
+ */
+class FakeBrowserStuckCloseWebSocket extends FakeBrowserCloseWebSocket {
+  protected acceptClose(code?: number, reason?: string): void {
+    this.closeCalls.push({ code, reason });
+    if (this.readyState === 1) this.readyState = 2;
+  }
+
+  /** Delivers the server's reply, echoing the close the client sent. */
+  answerClose(): void {
+    const sent = this.closeCalls[this.closeCalls.length - 1];
+    this.readyState = 3;
+    this.emit("close", {
+      code: sent?.code ?? 1005,
+      reason: sent?.reason ?? "",
+      wasClean: true,
+    });
   }
 }
 
@@ -1187,6 +1214,59 @@ describe("QWP WebSocket adapters", () => {
       url: "ws://localhost:9000/write/v4",
     } satisfies Partial<QwpDurableAckUnavailableError>);
   });
+
+  it.each([
+    {
+      path: "a raw connection",
+      connect: (factory: () => QwpWebSocketLike) =>
+        connectQwpBrowserWebSocket({
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: true,
+          connectTimeoutMs: 1_000,
+          webSocketFactory: factory,
+        }),
+    },
+    {
+      path: "the sender connection factory",
+      connect: (factory: () => QwpWebSocketLike) =>
+        createQwpBrowserConnectionFactory({
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: true,
+          connectTimeoutMs: 1_000,
+          webSocketFactory: factory,
+        })(),
+    },
+  ])(
+    "reports browser durable ACK unavailable without waiting for the close reply, through $path",
+    async ({ connect }) => {
+      // A browser refuses the 1002 this failure closes with, so the close is
+      // retried with 1000 and then waits for the server's reply. Waiting for
+      // it before the rethrow let the connect deadline win against a server
+      // slow to answer, and the capability verdict, which is terminal,
+      // surfaced as a retryable upgrade timeout.
+      const socket = new FakeBrowserStuckCloseWebSocket();
+      socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+      const connecting = connect(() => asQwpSocket(socket));
+      socket.open();
+      socket.message(ingressServerInfo(1_048_576, false));
+
+      await expect(connecting).rejects.toMatchObject({
+        name: "QwpDurableAckUnavailableError",
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+        retryable: false,
+      } satisfies Partial<QwpDurableAckUnavailableError>);
+      // The close still went out, with a code the browser accepts.
+      expect(socket.refusedCloseCalls).toEqual([
+        { code: 1002, reason: "invalid QWP ingress SERVER_INFO" },
+      ]);
+      expect(socket.closeCalls).toEqual([
+        { code: 1000, reason: "invalid QWP ingress SERVER_INFO" },
+      ]);
+      // It completes in the background once the server answers.
+      socket.answerClose();
+      expect(socket.listenerCount()).toBe(0);
+    },
+  );
 
   it("waits for durable upload in a browser sender's flushAndWait()", async () => {
     const socket = new FakeWebSocket();
