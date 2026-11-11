@@ -188,6 +188,52 @@ async function normalizeBinaryMessage(data: unknown): Promise<Uint8Array> {
   throw new QwpProtocolError("QWP WebSocket received a non-binary message");
 }
 
+/**
+ * Starts the closing handshake, and returns false when the socket refused it.
+ *
+ * A WHATWG WebSocket -- every browser's, and undici's in Node -- accepts only
+ * 1000 and 3000-4999 from a script and throws InvalidAccessError for 1001, 1002
+ * and 1011, the codes this client closes with on shutdown and on failures.
+ * `ws` accepts them, so from Node they still reach the server. A refused close
+ * used to fall through to terminate(), which a browser socket lacks, and the
+ * socket stayed open behind a connection already settled as closed: pooled
+ * query sockets outlived QwpClient.close(), and a cancelled query that never
+ * drained went on streaming into the page.
+ *
+ * A socket without terminate() can only be closed by close(), and a WHATWG one
+ * validates its arguments before it changes any state, so a refused close is
+ * retried: with 1000, since a private-use code would mean nothing to the
+ * server, and then with no code at all, which also covers a reason the socket
+ * refuses, one over 123 UTF-8 bytes. `ws` enters CLOSING before it validates
+ * and then ignores another close(), so a refused one is terminated instead.
+ */
+function startClosingHandshake(
+  socket: QwpWebSocketLike,
+  code: number,
+  reason: string,
+): boolean {
+  try {
+    socket.close(code, reason);
+    return true;
+  } catch {
+    if (socket.terminate) return false;
+  }
+  if (code !== 1000) {
+    try {
+      socket.close(1000, reason);
+      return true;
+    } catch {
+      // The reason may be what the socket refuses.
+    }
+  }
+  try {
+    socket.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Wraps a WHATWG-style WebSocket and resolves once its opening handshake succeeds. */
 /** Absorbs a socket `error` raised before the real listeners are attached. */
 const ignoreSocketError = (): void => undefined;
@@ -291,21 +337,17 @@ export function openQwpWebSocket(
       if (opened) failSends(new QwpSendClosedError(requestedInfo));
       if (socket.readyState === WEBSOCKET_CLOSED) {
         settleClosed(requestedInfo);
-      } else {
+      } else if (!startClosingHandshake(socket, code, reason)) {
         try {
-          socket.close(code, reason);
+          socket.terminate?.();
         } catch {
-          try {
-            socket.terminate?.();
-          } catch {
-            // The synthetic close below still releases local resources.
-          }
-          settleClosed({
-            code: 1006,
-            reason: "QWP WebSocket close failed",
-            wasClean: false,
-          });
+          // The synthetic close below still releases local resources.
         }
+        settleClosed({
+          code: 1006,
+          reason: "QWP WebSocket close failed",
+          wasClean: false,
+        });
       }
       if (!closeSettled) {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -317,6 +359,9 @@ export function openQwpWebSocket(
         ]);
         if (timer) clearTimeout(timer);
         if (timedOut && !closeSettled) {
+          // A browser socket has no terminate(): the browser keeps waiting for
+          // the peer's close until its own closing-handshake timeout, 60s in
+          // Chromium, and only then drops the connection.
           try {
             socket.terminate?.();
           } catch {
