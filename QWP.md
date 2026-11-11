@@ -1553,7 +1553,11 @@ client discards, and ends a round trip after that. Without flow control
 (`initialCredit: 0`, the default) QuestDB does not read the connection while it
 streams a result: it sends the rest of the result before it sees the `CANCEL`, and
 the client discards it. If the server does not terminate the query within the bound,
-its connection is closed, which is what ends the query on the server. A query ended
+its connection is closed, which is what ends the query on the server. A browser
+cannot drop a connection itself, only send a close and wait for the server's reply.
+Without flow control QuestDB reads that close only once the query has finished or
+failed, so in a browser closing does not stop such a query until the browser abandons
+the closing handshake, after 60 seconds in Chromium. A query ended
 with `query.cancel()` then fails with `QwpEgressQueryCancelTimeoutError`; one already
 released by its timeout or by breaking out of `for await` keeps the error it was
 released with. A reconnecting session, the default, opens a new connection for the

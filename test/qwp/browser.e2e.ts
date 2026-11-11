@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { AddressInfo } from "node:net";
 import path from "node:path";
 import { Browser, chromium } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import {
   encodeQwpFrame,
@@ -114,10 +114,10 @@ function browserIngressServerInfo(
     .toUint8Array();
 }
 
-function browserEmptyResultBatch(requestId: bigint): Uint8Array {
+function browserEmptyResultBatch(requestId: bigint, sequence = 0): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_BATCH).writeBigUint64(requestId);
-  writeQwpVarint(payload, 0); // batch sequence
+  writeQwpVarint(payload, sequence); // batch sequence
   writeQwpVarint(payload, 0); // table name
   writeQwpVarint(payload, 0); // row count
   writeQwpVarint(payload, 0); // column count
@@ -868,6 +868,175 @@ describe("QWP in a real browser", () => {
       defaultCreditRequest.readBytes(sqlLength);
       expect(readQwpVarint(defaultCreditRequest)).toBe(
         BigInt(QWP_DEFAULT_EGRESS_INITIAL_CREDIT),
+      );
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  // A browser's WebSocket.close() throws for 1001, 1002 and 1011, the codes
+  // the client closes with on shutdown and on failures. The client used to
+  // treat the connection as closed while the native socket stayed open.
+  it("closes pooled query sockets when the client closes, in a real browser", async () => {
+    const closes: { code: number; reason: string }[] = [];
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("connection", (socket) => {
+      socket.on("close", (code, reason) => {
+        closes.push({ code, reason: reason.toString() });
+      });
+      socket.send(browserServerInfo());
+      socket.on("message", (data) => {
+        const reader = new QwpByteReader(new Uint8Array(data as Buffer));
+        if (reader.readUint8() === QWP_EGRESS_MESSAGE.QUERY_REQUEST) {
+          socket.send(browserResultEnd(reader.readBigUint64()));
+        }
+      });
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const readyStates = await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const sockets: WebSocket[] = [];
+          const client = qwp.createQwpBrowserClient({
+            cluster: { url },
+            egress: {
+              webSocketFactory: (
+                endpoint: string | URL,
+                protocols?: string | string[],
+              ) => {
+                const socket = new WebSocket(endpoint, protocols);
+                sockets.push(socket);
+                return socket;
+              },
+            },
+          });
+          const lease = await client.borrowQuery();
+          const query = await lease.query("select 1");
+          await query.completion;
+          await lease.close();
+          await client.close();
+          return sockets.map((socket) => socket.readyState);
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}`,
+        },
+      );
+
+      // CLOSED already: close() waits for the server's close. A literal, as
+      // Node 20 has no global WebSocket to read the constant from.
+      expect(readyStates).toEqual([3]);
+      await vi.waitFor(() =>
+        expect(closes).toEqual([
+          { code: 1000, reason: "QWP client shutting down" },
+        ]),
+      );
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
+  it("closes the socket of an undrained cancel without reconnect, in a real browser", async () => {
+    // The server streams a long result and never answers the CANCEL, like
+    // QuestDB streaming without flow control, so the session fails when the
+    // drain bound expires and has to close the only connection it has.
+    const closes: { code: number; reason: string }[] = [];
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("connection", (socket) => {
+      let stream: ReturnType<typeof setInterval> | undefined;
+      socket.on("close", (code, reason) => {
+        clearInterval(stream);
+        closes.push({ code, reason: reason.toString() });
+      });
+      socket.send(browserServerInfo());
+      socket.on("message", (data) => {
+        const reader = new QwpByteReader(new Uint8Array(data as Buffer));
+        if (reader.readUint8() !== QWP_EGRESS_MESSAGE.QUERY_REQUEST) return;
+        const requestId = reader.readBigUint64();
+        let sequence = 0;
+        stream = setInterval(() => {
+          if (socket.readyState !== socket.OPEN) return;
+          socket.send(browserEmptyResultBatch(requestId, sequence++));
+        }, 5);
+      });
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const result = await page.evaluate(
+        async ({ moduleUrl, url }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const sockets: WebSocket[] = [];
+          const session = await qwp.connectQwpBrowserEgress({
+            url,
+            reconnect: false,
+            cancelDrainTimeoutMs: 100,
+            webSocketFactory: (
+              endpoint: string | URL,
+              protocols?: string | string[],
+            ) => {
+              const socket = new WebSocket(endpoint, protocols);
+              sockets.push(socket);
+              return socket;
+            },
+          });
+          try {
+            const query = await session.query(
+              "select x from long_sequence(500000000)",
+            );
+            await query[Symbol.asyncIterator]().next();
+            await query.cancel();
+            const failure = await query.completion.then(
+              () => undefined,
+              (error: Error) => error.name,
+            );
+            // The failure closes the socket without waiting for the server,
+            // so wait for it here, without closing the session.
+            const deadline = Date.now() + 5_000;
+            while (
+              sockets.some(
+                (socket) => socket.readyState !== WebSocket.CLOSED,
+              ) &&
+              Date.now() < deadline
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            return {
+              failure,
+              readyStates: sockets.map((socket) => socket.readyState),
+            };
+          } finally {
+            await session.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/read/v1`,
+        },
+      );
+
+      expect(result).toEqual({
+        failure: "QwpEgressQueryCancelTimeoutError",
+        readyStates: [3], // CLOSED
+      });
+      await vi.waitFor(() =>
+        expect(closes).toEqual([
+          { code: 1000, reason: "QWP cancellation drain timed out" },
+        ]),
       );
     } finally {
       await page.close();
