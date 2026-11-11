@@ -2427,29 +2427,34 @@ describe("QWP WebSocket adapters", () => {
   });
 
   it("terminates a Node WebSocket that refuses its close instead of retrying it", async () => {
-    const socket = new FakeRefusingCloseNodeWebSocket();
-    const connecting = connectQwpNodeWebSocket({
-      url: "ws://localhost:9000/write/v4",
-      closeTimeoutMs: 50,
-      webSocketFactory: (_url, options) => {
-        options.onUpgrade({});
-        return asQwpSocket(socket);
-      },
-    });
-    socket.open();
-    const connection = await connecting;
-
     // `ws` ignores a second close() once it is CLOSING, so a retry would only
-    // have postponed terminate() by the whole close deadline.
-    await connection.close(1000, "x".repeat(124));
-    expect(socket.closeCalls).toHaveLength(1);
-    expect(socket.terminateCalls).toBe(1);
-    await expect(connection.closed).resolves.toEqual({
-      code: 1006,
-      reason: "QWP WebSocket close failed",
-      wasClean: false,
-    });
-    expect(socket.listenerCount()).toBe(0);
+    // have postponed terminate() by the whole close deadline. 1011 is the case
+    // that matters: a code other than 1000 is the one a browser socket retries
+    // with 1000 first, and 1000 itself never reaches that retry.
+    const reason = "x".repeat(124);
+    for (const code of [1000, 1011]) {
+      const socket = new FakeRefusingCloseNodeWebSocket();
+      const connecting = connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        closeTimeoutMs: 50,
+        webSocketFactory: (_url, options) => {
+          options.onUpgrade({});
+          return asQwpSocket(socket);
+        },
+      });
+      socket.open();
+      const connection = await connecting;
+
+      await connection.close(code, reason);
+      expect(socket.closeCalls).toEqual([{ code, reason }]);
+      expect(socket.terminateCalls).toBe(1);
+      await expect(connection.closed).resolves.toEqual({
+        code: 1006,
+        reason: "QWP WebSocket close failed",
+        wasClean: false,
+      });
+      expect(socket.listenerCount()).toBe(0);
+    }
   });
 
   it("closes a browser client's pooled query socket on close()", async () => {
