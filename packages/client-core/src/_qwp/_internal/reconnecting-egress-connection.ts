@@ -4,6 +4,7 @@ import {
   QwpProtocolError,
   QwpServerInfoMessage,
 } from "../_core";
+import { decodeQwpEgressEnvelope } from "../_core/egress";
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
@@ -653,7 +654,10 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         // the close times out; left unread, all of it piled up in the old
         // connection's queue.
         if (this.closing || this.connection !== connection) continue;
-        const message = decodeQwpEgressMessage(next.value);
+        // Only the kind and request ID are needed here. The trailers of a
+        // terminal response depend on the query_flags its request was sent
+        // with, which only the session knows; it decodes and validates them.
+        const message = decodeQwpEgressEnvelope(next.value);
         if (message.kind === "server-info") {
           throw new QwpProtocolError("received duplicate QWP SERVER_INFO");
         } else if (

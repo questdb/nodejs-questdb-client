@@ -545,6 +545,16 @@ reusable buffer pool. Views are invalid when their callback returns; copy a byte
 view with `.slice()` or call `batch.materialize()` inside the callback to retain
 data. Tune the default four-slot pool with the session's `bufferPoolSize`.
 
+A query can also ask for what `/exec` reports besides the rows. With
+`errorPosition: true` a `QwpEgressQueryError` carries `position`, the offset into
+the SQL string the error points at; `stats: true` adds compile, execution and
+client-wait times and JIT use to the completion as `stats`; and `countRows: true`
+adds the size of the whole result as `rowCount`. `skipRows` and `maxRows` read a
+result one page at a time, like SQL `LIMIT`. These options need a server that
+advertises the `QUERY_DETAILS` capability; see
+[QWP.md](QWP.md#error-positions-statistics-row-counts-and-paging) for how older
+servers are handled.
+
 `queryTimeoutMs` (connect-string key `query_timeout_ms`) sets the session's
 default query timeout; a per-query `timeoutMs` overrides it, and zero disables
 it. The timeout runs from the `query()` call and covers the whole query. When it

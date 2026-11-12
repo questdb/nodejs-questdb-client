@@ -65,7 +65,11 @@ import type {
   QwpClientPoolOptions,
   QwpEgressQueryOptions,
   QwpEgressSession,
+  QwpEgressQueryError,
+  QwpEgressRowWindowUnsupportedError,
   QwpEgressViewQuery,
+  QwpQueryCompletion,
+  QwpQueryStats,
   QwpSenderError,
   QwpQueryLease,
   QwpResultBatchView,
@@ -171,7 +175,40 @@ const queryOptionsContract: QwpEgressQueryOptions = {
   timeoutMs: 30_000,
   resetDictionary: true,
   binds: (binds) => binds.setVarchar(0, "ETH-USD"),
+  errorPosition: true,
+  stats: true,
+  countRows: true,
+  skipRows: 100,
+  maxRows: 50n,
 };
+
+// What the query-details options report: the error's position, and the
+// statistics and whole-result row count on the completion.
+function queryDetailsContract(
+  completion: QwpQueryCompletion,
+  error: QwpEgressQueryError,
+  unsupported: QwpEgressRowWindowUnsupportedError,
+): void {
+  const stats: QwpQueryStats | undefined = completion.stats;
+  const rowCount: bigint | undefined =
+    completion.kind === "result-end" ? completion.rowCount : undefined;
+  const timings: readonly bigint[] = stats
+    ? [
+        stats.compileNanos,
+        stats.executeNanos,
+        stats.countNanos,
+        stats.clientWaitNanos,
+      ]
+    : [];
+  const jitCompiled: boolean | undefined = stats?.jitCompiled;
+  const position: number | undefined = error.position;
+  const unsupportedRequestId: bigint = unsupported.requestId;
+  void rowCount;
+  void timings;
+  void jitCompiled;
+  void position;
+  void unsupportedRequestId;
+}
 
 // The query session's own options travel in each runtime's egress options.
 const egressSessionOptionsContract: QwpNodeEgressOptions = {
@@ -607,6 +644,7 @@ void poolOptionsContract;
 void nodeOrphanRetrySignature;
 void nodeStoreAndForwardContract;
 void queryOptionsContract;
+void queryDetailsContract;
 void egressSessionOptionsContract;
 void fixedConnectionIngressContract;
 void fixedConnectionEgressContract;

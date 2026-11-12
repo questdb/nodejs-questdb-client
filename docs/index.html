@@ -308,6 +308,15 @@ credit is replenished, while the receive loop decodes ahead through the bounded
 reusable buffer pool. Views are invalid when their callback returns; copy a byte
 view with <code>.slice()</code> or call <code>batch.materialize()</code> inside the callback to retain
 data. Tune the default four-slot pool with the session's <code>bufferPoolSize</code>.</p>
+<p>A query can also ask for what <code>/exec</code> reports besides the rows. With
+<code>errorPosition: true</code> a <code>QwpEgressQueryError</code> carries <code>position</code>, the offset into
+the SQL string the error points at; <code>stats: true</code> adds compile, execution and
+client-wait times and JIT use to the completion as <code>stats</code>; and <code>countRows: true</code>
+adds the size of the whole result as <code>rowCount</code>. <code>skipRows</code> and <code>maxRows</code> read a
+result one page at a time, like SQL <code>LIMIT</code>. These options need a server that
+advertises the <code>QUERY_DETAILS</code> capability; see
+<a href="media/QWP.md#error-positions-statistics-row-counts-and-paging">QWP.md</a> for how older
+servers are handled.</p>
 <p><code>queryTimeoutMs</code> (connect-string key <code>query_timeout_ms</code>) sets the session's
 default query timeout; a per-query <code>timeoutMs</code> overrides it, and zero disables
 it. The timeout runs from the <code>query()</code> call and covers the whole query. When it

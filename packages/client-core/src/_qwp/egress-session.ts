@@ -6,7 +6,12 @@ import {
   encodeQwpQueryRequest,
   QWP_COMPRESSION_CODEC,
   QWP_EGRESS_CAPABILITY,
+  QWP_QUERY_FLAG_COUNT_ROWS,
+  QWP_QUERY_FLAG_ERROR_POSITION,
+  QWP_QUERY_FLAG_MAX_ROWS,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
+  QWP_QUERY_FLAG_SKIP_ROWS,
+  QWP_QUERY_FLAG_STATS,
   QWP_RESET_MASK_DICTIONARY,
   QWP_STATUS,
   QwpBindSetter,
@@ -20,6 +25,7 @@ import {
   QwpResultEndMessage,
   QwpServerInfoMessage,
 } from "./_core";
+import { validateQwpRowWindowBound } from "./_core/egress";
 import { QwpAsyncQueue } from "./_internal/async-queue";
 import { validateQwpMaxBatchRows } from "./_internal/egress-limits";
 import { monotonicNowMs } from "./_internal/monotonic-clock";
@@ -173,6 +179,52 @@ export interface QwpEgressQueryOptions {
    * Silently omitted when the server lacks QUERY_FLAGS for rolling upgrades.
    */
   resetDictionary?: boolean;
+  /**
+   * Ask the server where in the SQL text a query error points. A
+   * {@link QwpEgressQueryError} then carries `position`, the UTF-16 offset
+   * into `sql` -- a JavaScript string index -- and the bare message, without
+   * the `[n]` prefix, a position or an error number, that QuestDB otherwise
+   * adds. Errors that do not point into the SQL text, such as a cancellation,
+   * carry no position.
+   *
+   * Silently omitted, like `stats` and `countRows`, when the server does not
+   * advertise QUERY_DETAILS, so it is safe during a rolling upgrade.
+   */
+  errorPosition?: boolean;
+  /**
+   * Ask the server for execution statistics -- compile, execution, counting
+   * and client-wait times, and JIT use -- which the completion then carries
+   * as `stats`, for a result and for a statement alike. Silently omitted when
+   * the server does not advertise QUERY_DETAILS.
+   */
+  stats?: boolean;
+  /**
+   * Ask the server for the number of rows in the whole result set, which the
+   * result's completion then carries as `rowCount`, whatever `skipRows` and
+   * `maxRows` leave out of the stream. When `maxRows` ends the stream first,
+   * the server counts the remaining rows without sending them. Ignored by
+   * statements, and silently omitted when the server does not advertise
+   * QUERY_DETAILS.
+   */
+  countRows?: boolean;
+  /**
+   * Rows to leave out at the start of the result set, like the offset of SQL
+   * `LIMIT`. Zero, the default, leaves out none. A non-negative safe integer,
+   * or a bigint no greater than 2^63 - 1. Ignored by statements.
+   *
+   * A row window cannot be dropped the way the reports above are: a server
+   * without QUERY_DETAILS would stream the whole result. The query fails with
+   * {@link QwpEgressRowWindowUnsupportedError} instead, at once, or when
+   * failover would replay it on such a server.
+   */
+  skipRows?: number | bigint;
+  /**
+   * The most rows to stream, after `skipRows`. Zero streams only the schema,
+   * in one empty batch. Unbounded by default. A non-negative safe integer, or
+   * a bigint no greater than 2^63 - 1. Ignored by statements. Like
+   * `skipRows`, it requires QUERY_DETAILS.
+   */
+  maxRows?: number | bigint;
 }
 
 interface QwpValidatedEgressSessionOptions {
@@ -192,6 +244,12 @@ interface QwpReplayableQueryRequest {
   readonly bindCount?: number;
   readonly bindPayload?: Uint8Array;
   readonly resetDictionary: boolean;
+  readonly errorPosition: boolean;
+  readonly stats: boolean;
+  readonly countRows: boolean;
+  /** Absent rather than zero when no rows are skipped. */
+  readonly skipRows?: number | bigint;
+  readonly maxRows?: number | bigint;
   readonly onFailoverReset?: QwpEgressQueryOptions["onFailoverReset"];
 }
 
@@ -290,6 +348,27 @@ function validateCredit(value: number | bigint, name: string): number | bigint {
   return value;
 }
 
+/**
+ * A `skipRows` or `maxRows` option. Unset when undefined or null, as the other
+ * options are through `??`.
+ */
+function validateRowWindowOption(
+  value: number | bigint | undefined,
+  name: string,
+): number | bigint | undefined {
+  return value === undefined || value === null
+    ? undefined
+    : validateQwpRowWindowBound(value, name);
+}
+
+function supportsQueryDetails(serverInfo: QwpServerInfoMessage): boolean {
+  return (serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_DETAILS) !== 0;
+}
+
+function hasRowWindow(request: QwpReplayableQueryRequest): boolean {
+  return request.skipRows !== undefined || request.maxRows !== undefined;
+}
+
 function validatePositiveTimeout(value: number, name: string): number {
   if (!Number.isFinite(value) || value <= 0 || exceedsQwpTimerCeiling(value)) {
     throw new RangeError(
@@ -306,9 +385,33 @@ export class QwpEgressQueryError extends Error {
     readonly requestId: bigint,
     readonly status: number,
     message: string,
+    /**
+     * UTF-16 offset into the query's SQL text the error points at: an index
+     * into the JavaScript string the query was issued with. Present when the
+     * query asked for it with `errorPosition` and the error points into the
+     * SQL text.
+     */
+    readonly position?: number,
   ) {
     super(message);
     this.name = "QwpEgressQueryError";
+  }
+}
+
+/**
+ * The query asked for a row window -- `skipRows` or `maxRows` -- and the
+ * endpoint does not advertise the QUERY_DETAILS capability it needs. Such a
+ * server would stream the whole result, so the query is not sent to it:
+ * `query()` rejects at once, and a query that failover would replay on such
+ * an endpoint fails instead of being replayed. Use SQL `LIMIT` with servers
+ * that predate the capability.
+ */
+export class QwpEgressRowWindowUnsupportedError extends Error {
+  constructor(readonly requestId: bigint) {
+    super(
+      `QWP endpoint does not advertise QUERY_DETAILS, which skipRows and maxRows require [requestId=${requestId}]`,
+    );
+    this.name = "QwpEgressRowWindowUnsupportedError";
   }
 }
 
@@ -1194,6 +1297,17 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    */
   private manualCreditEpoch = 0;
   private replayedCredit: { requestId?: bigint; epoch: number } = { epoch: 0 };
+  /**
+   * The query_flags of the QUERY_REQUEST encoded last, which is the one on
+   * the wire: an encode precedes every send, and a replay that re-encodes the
+   * request waits until the old connection's terminal response, if any, has
+   * been decoded. They decide the trailers of the terminal response.
+   *
+   * Kept after the query leaves the session rather than cleared with it, so a
+   * terminal response still queued when the session closes decodes, and is
+   * reported as the closed session it is rather than as a protocol fault.
+   */
+  private responseQueryFlags = 0;
   /** Initial SERVER_INFO; use serverInfo for the current post-failover snapshot. */
   readonly ready: Promise<QwpServerInfoMessage>;
 
@@ -1389,6 +1503,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     ) {
       throw new TypeError("onFailoverReset must be a function");
     }
+    const skipRows = validateRowWindowOption(options.skipRows, "skipRows");
+    const maxRows = validateRowWindowOption(options.maxRows, "maxRows");
     const start = this.beginQueryStart();
     try {
       await this.waitToStart(timeoutMs, deadline, start.abandoned);
@@ -1441,6 +1557,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       bindCount: encodedBinds?.count ?? options.bindCount,
       bindPayload: (encodedBinds?.payload ?? options.bindPayload)?.slice(),
       resetDictionary: options.resetDictionary === true,
+      errorPosition: options.errorPosition === true,
+      stats: options.stats === true,
+      countRows: options.countRows === true,
+      // Skipping no rows is no row window, so it needs no capability.
+      skipRows: skipRows === 0 || skipRows === 0n ? undefined : skipRows,
+      maxRows,
       onFailoverReset: options.onFailoverReset,
     };
     this.decoder.resetQuerySchema();
@@ -1449,6 +1571,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     if (deadline !== undefined) query.armDeadline(remainingMs);
     let sending: Promise<void>;
     try {
+      // Throws QwpEgressRowWindowUnsupportedError, before anything is sent,
+      // for a row window the endpoint does not support.
       sending = this.sendQueryRequest(
         this.encodeQueryRequest(request, this.currentServerInfo!),
         () => this.active !== query,
@@ -1817,7 +1941,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     try {
       for await (const payload of this.connection.messages) {
         try {
-          const message = decodeQwpEgressMessage(payload);
+          const message = decodeQwpEgressMessage(
+            payload,
+            this.responseQueryFlags,
+          );
           switch (message.kind) {
             case "server-info":
               if (this.currentServerInfo) {
@@ -1903,6 +2030,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
                   message.requestId,
                   message.status,
                   message.message,
+                  message.position,
                 ),
               );
               this.clearCancelDrain(message.requestId);
@@ -2016,9 +2144,43 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       await query.resetForReplay();
       // Its timeout may have expired while the callback ran.
       if (this.activeDetached) this.clearActive(query);
+      else this.withdrawUnreplayable(query, serverInfo);
     }
     this.decoder.applyCacheReset(QWP_RESET_MASK_DICTIONARY);
     this.decoder.resetQuerySchema();
+  }
+
+  /**
+   * Fails the active query rather than replaying it on an endpoint that cannot
+   * run it as asked. A row window needs QUERY_DETAILS, and a server without it
+   * would stream the whole result. A request still waiting for its first send
+   * is withdrawn the same way, before it leaves.
+   */
+  private withdrawUnreplayable(
+    query: QwpEgressQuery,
+    serverInfo: QwpServerInfoMessage,
+  ): void {
+    const request = this.activeRequest;
+    if (
+      this.active !== query ||
+      !request ||
+      !hasRowWindow(request) ||
+      supportsQueryDetails(serverInfo)
+    ) {
+      return;
+    }
+    // A no-op for a consumer that has already retired. A cancellation the
+    // application asked for first is still reported as its own.
+    query.retire(
+      query.cancelledByUser
+        ? query.cancelledError()
+        : new QwpEgressRowWindowUnsupportedError(query.requestId),
+    );
+    this.clearCancelDrain(query.requestId);
+    if (this.connection instanceof QwpReconnectingEgressConnection) {
+      this.connection.dropReplay(query.requestId);
+    }
+    this.clearActive(query);
   }
 
   /**
@@ -2120,30 +2282,56 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         `QWP egress replay references inactive request ID ${requestId}`,
       );
     }
-    // Recorded synchronously with the read below: every manual grant folded
+    const payload = this.encodeQueryRequest(request, serverInfo);
+    // Recorded synchronously with the encode above: every manual grant folded
     // into this request before now travels with the replay, so its own CREDIT
     // frame must not also reach the replacement connection.
     this.replayedCredit = { requestId, epoch: this.manualCreditEpoch };
-    return this.encodeQueryRequest(request, serverInfo);
+    return payload;
   }
 
+  /**
+   * Encodes the request for one endpoint, with the flags its capabilities
+   * allow. Each encode records them, as the request then sent carries them.
+   */
   private encodeQueryRequest(
     request: QwpReplayableQueryRequest,
     serverInfo: QwpServerInfoMessage,
   ): Uint8Array {
     const supportsQueryFlags =
       (serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_FLAGS) !== 0;
-    return encodeQwpQueryRequest({
+    let queryFlags =
+      request.resetDictionary && supportsQueryFlags
+        ? QWP_QUERY_FLAG_RESET_DICTIONARY
+        : 0;
+    if (supportsQueryDetails(serverInfo)) {
+      if (request.errorPosition) queryFlags |= QWP_QUERY_FLAG_ERROR_POSITION;
+      if (request.stats) queryFlags |= QWP_QUERY_FLAG_STATS;
+      if (request.countRows) queryFlags |= QWP_QUERY_FLAG_COUNT_ROWS;
+      if (request.skipRows !== undefined) {
+        queryFlags |= QWP_QUERY_FLAG_SKIP_ROWS;
+      }
+      if (request.maxRows !== undefined) queryFlags |= QWP_QUERY_FLAG_MAX_ROWS;
+    } else if (hasRowWindow(request)) {
+      // The reports above are dropped on such an endpoint, as the dictionary
+      // reset is without QUERY_FLAGS, so they stay safe in a rolling upgrade.
+      // A row window cannot be: the server would stream every row. A replay
+      // never gets here, see withdrawUnreplayable().
+      throw new QwpEgressRowWindowUnsupportedError(request.requestId);
+    }
+    const payload = encodeQwpQueryRequest({
       requestId: request.requestId,
       sql: request.sql,
       initialCredit: request.initialCredit,
       bindCount: request.bindCount,
       bindPayload: request.bindPayload,
-      queryFlags:
-        request.resetDictionary && supportsQueryFlags
-          ? QWP_QUERY_FLAG_RESET_DICTIONARY
-          : undefined,
+      queryFlags,
+      // Each is set exactly when its flag is, as the encoder requires.
+      skipRows: request.skipRows,
+      maxRows: request.maxRows,
     });
+    this.responseQueryFlags = queryFlags;
+    return payload;
   }
 
   /**

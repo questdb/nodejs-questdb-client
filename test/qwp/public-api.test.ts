@@ -46,7 +46,12 @@ const sharedRuntimeContract = [
   "QWP_MAX_TABLES_PER_FRAME",
   "QWP_MAX_TABLE_NAME_LENGTH",
   "QWP_MAX_ZSTD_DECOMPRESSED_SIZE",
+  "QWP_QUERY_FLAG_COUNT_ROWS",
+  "QWP_QUERY_FLAG_ERROR_POSITION",
+  "QWP_QUERY_FLAG_MAX_ROWS",
   "QWP_QUERY_FLAG_RESET_DICTIONARY",
+  "QWP_QUERY_FLAG_SKIP_ROWS",
+  "QWP_QUERY_FLAG_STATS",
   "QWP_RECONNECT_EVENT_KIND",
   "QWP_RESET_MASK_DICTIONARY",
   "QWP_SENDER_ERROR_CATEGORY",
@@ -71,6 +76,7 @@ const sharedRuntimeContract = [
   "QwpEgressQueryCancelTimeoutError",
   "QwpEgressQueryError",
   "QwpEgressQueryTimeoutError",
+  "QwpEgressRowWindowUnsupportedError",
   "QwpEgressSession",
   "QwpEgressSessionClosedError",
   "QwpFailoverError",
@@ -365,6 +371,21 @@ describe("QWP public API contract", () => {
       expect(() => new construct({})).toThrow(
         /must be created by connectQwpNodeEgress\(\)/,
       );
+    }
+  });
+
+  it("keeps the egress codec's transport and session helpers internal", () => {
+    // The reconnecting transport reads each message's envelope without the
+    // trailers only the session can interpret, and the session validates its
+    // row-window options with the encoder's own check. Both live in the egress
+    // codec, whose public names the barrel lists one by one.
+    for (const api of [shared, browser, node]) {
+      for (const name of [
+        "decodeQwpEgressEnvelope",
+        "validateQwpRowWindowBound",
+      ]) {
+        expect(api, `${name} must stay internal`).not.toHaveProperty(name);
+      }
     }
   });
 

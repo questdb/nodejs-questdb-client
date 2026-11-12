@@ -36,7 +36,12 @@ import {
   QWP_EGRESS_CAPABILITY,
   QWP_FLAG_DEFER_COMMIT,
   QWP_EGRESS_MESSAGE,
+  QWP_QUERY_FLAG_COUNT_ROWS,
+  QWP_QUERY_FLAG_ERROR_POSITION,
+  QWP_QUERY_FLAG_MAX_ROWS,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
+  QWP_QUERY_FLAG_SKIP_ROWS,
+  QWP_QUERY_FLAG_STATS,
   QWP_SERVER_ROLE,
   QWP_STATUS,
   QWP_SENDER_ERROR_CATEGORY,
@@ -48,6 +53,8 @@ import {
   QwpDurableAckUnavailableError,
   QwpFailoverError,
   type QwpSenderError,
+  QwpEgressQueryError,
+  QwpEgressRowWindowUnsupportedError,
   QwpEgressSessionClosedError,
   QWP_INGRESS_PROGRESS_KIND,
   QwpIngressAckAbandonedError,
@@ -7920,6 +7927,306 @@ describe("QWP egress reconnect and replay", () => {
       kind: "result-end",
     });
     await session.close();
+  });
+
+  describe("query details", () => {
+    const DETAILS =
+      QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QWP_EGRESS_CAPABILITY.QUERY_DETAILS;
+    const RECONNECT_ONCE = {
+      failoverMaxAttempts: 1,
+      failoverBackoffInitialMs: 0,
+      failoverBackoffMaxMs: 0,
+    };
+
+    /** RESULT_END with the trailers of QWP_QUERY_FLAG_COUNT_ROWS and _STATS. */
+    function detailedResultEnd(
+      requestId: bigint,
+      rowCount: number,
+      executeNanos: number,
+    ): Uint8Array {
+      const payload = new QwpByteWriter()
+        .writeUint8(QWP_EGRESS_MESSAGE.RESULT_END)
+        .writeBigUint64(requestId);
+      writeQwpVarint(payload, 0); // final sequence
+      writeQwpVarint(payload, 0); // total rows
+      writeQwpVarint(payload, rowCount);
+      for (const nanos of [10, executeNanos, 0, 0]) {
+        writeQwpVarint(payload, nanos);
+      }
+      payload.writeUint8(0x01); // stats_flags: JIT-compiled
+      return encodeQwpFrame(payload.toUint8Array());
+    }
+
+    /** Opens a session whose endpoints advertise the given capabilities. */
+    async function failoverSession(
+      capabilities: readonly number[],
+      onFailoverReset?: (requestId: bigint) => void,
+    ): Promise<{
+      session: Awaited<ReturnType<typeof connectQwpEgressSession>>;
+      connections: FakeConnection[];
+      opened: () => number;
+    }> {
+      const connections = capabilities.map(
+        (_, index) => new FakeConnection(`node-${index}`),
+      );
+      let opened = 0;
+      const session = await connectQwpEgressSession(
+        async () => {
+          const index = opened++;
+          const connection = connections[index];
+          if (!connection) throw new Error("no connection available");
+          queueMicrotask(() =>
+            connection.receive(
+              serverInfo(
+                connection.endpoint,
+                QWP_SERVER_ROLE.STANDALONE,
+                undefined,
+                capabilities[index],
+              ),
+            ),
+          );
+          return connection;
+        },
+        {
+          reconnect: RECONNECT_ONCE,
+          onFailoverReset: (event) => onFailoverReset?.(event.requestId),
+        },
+      );
+      return { session, connections, opened: () => opened };
+    }
+
+    it("passes terminal trailers through the reconnecting transport", async () => {
+      // The transport reads every message before the session does. Decoded
+      // without the request's flags, a RESULT_END with trailers looked
+      // malformed, and each replay of the query met the same frame until the
+      // recovery budget ran out.
+      const {
+        session,
+        connections: [connection],
+        opened,
+      } = await failoverSession([DETAILS]);
+      const query = await session.query("select x from t", {
+        countRows: true,
+        stats: true,
+      });
+      connection.receive(emptyResultBatch(query.requestId));
+      connection.receive(detailedResultEnd(query.requestId, 42, 99));
+      await expect(query.completion).resolves.toMatchObject({
+        kind: "result-end",
+        rowCount: 42n,
+        stats: { compileNanos: 10n, executeNanos: 99n, jitCompiled: true },
+      });
+
+      const failing = await session.query("select nope from t", {
+        errorPosition: true,
+      });
+      const message = new TextEncoder().encode("Invalid column: nope");
+      connection.receive(
+        encodeQwpFrame(
+          new QwpByteWriter()
+            .writeUint8(QWP_EGRESS_MESSAGE.QUERY_ERROR)
+            .writeBigUint64(failing.requestId)
+            .writeUint8(QWP_STATUS.PARSE_ERROR)
+            .writeUint16(message.length)
+            .writeBytes(message)
+            .writeInt32(7)
+            .toUint8Array(),
+        ),
+      );
+      const error = await failing.completion.catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(QwpEgressQueryError);
+      expect(error).toMatchObject({
+        message: "Invalid column: nope",
+        position: 7,
+      });
+      // No reconnect: the one connection served both queries.
+      expect(opened()).toBe(1);
+      expect(connection.sent).toHaveLength(2);
+      await session.close();
+    });
+
+    it("asks a replacement endpoint for the details it supports", async () => {
+      // From an endpoint with QUERY_DETAILS to one without: the reports are
+      // dropped, and the baseline RESULT_END the replacement sends decodes.
+      {
+        const {
+          session,
+          connections: [first, second],
+        } = await failoverSession([DETAILS, QWP_EGRESS_CAPABILITY.QUERY_FLAGS]);
+        const query = await session.query("select 1", {
+          errorPosition: true,
+          stats: true,
+          countRows: true,
+        });
+        expect(first.sent[0].at(-1)).toBe(
+          QWP_QUERY_FLAG_ERROR_POSITION |
+            QWP_QUERY_FLAG_STATS |
+            QWP_QUERY_FLAG_COUNT_ROWS,
+        );
+        first.drop();
+        await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+        expect(second.sent[0]).toEqual(
+          encodeQwpQueryRequest({ requestId: 0n, sql: "select 1" }),
+        );
+        second.receive(resultEnd(query.requestId));
+        const completion = await query.completion;
+        expect(completion).toMatchObject({ kind: "result-end" });
+        expect(completion).not.toHaveProperty("rowCount");
+        expect(completion).not.toHaveProperty("stats");
+        await session.close();
+      }
+      // And back: the replay asks for them, and the trailers decode.
+      {
+        const {
+          session,
+          connections: [first, second],
+        } = await failoverSession([QWP_EGRESS_CAPABILITY.QUERY_FLAGS, DETAILS]);
+        const query = await session.query("select 1", {
+          stats: true,
+          countRows: true,
+        });
+        expect(first.sent[0]).toEqual(
+          encodeQwpQueryRequest({ requestId: 0n, sql: "select 1" }),
+        );
+        first.drop();
+        await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+        expect(second.sent[0]).toEqual(
+          encodeQwpQueryRequest({
+            requestId: 0n,
+            sql: "select 1",
+            queryFlags: QWP_QUERY_FLAG_STATS | QWP_QUERY_FLAG_COUNT_ROWS,
+          }),
+        );
+        second.receive(detailedResultEnd(query.requestId, 5, 1_000));
+        await expect(query.completion).resolves.toMatchObject({
+          rowCount: 5n,
+          stats: { executeNanos: 1_000n },
+        });
+        await session.close();
+      }
+    });
+
+    it("fails a row-window query rather than replay it without QUERY_DETAILS", async () => {
+      // The replacement would ignore the window and stream every row.
+      const resets: bigint[] = [];
+      const {
+        session,
+        connections: [first, second],
+      } = await failoverSession(
+        [DETAILS, QWP_EGRESS_CAPABILITY.QUERY_FLAGS],
+        (requestId) => resets.push(requestId),
+      );
+      const query = await session.query("select x from t", {
+        skipRows: 100,
+        maxRows: 50,
+        countRows: true,
+      });
+      expect(first.sent).toHaveLength(1);
+      expect(first.sent[0].slice(-3)).toEqual(
+        Uint8Array.of(
+          QWP_QUERY_FLAG_COUNT_ROWS |
+            QWP_QUERY_FLAG_SKIP_ROWS |
+            QWP_QUERY_FLAG_MAX_ROWS,
+          100,
+          50,
+        ),
+      );
+
+      first.drop();
+      const error = await query.completion.catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(QwpEgressRowWindowUnsupportedError);
+      expect(error).toMatchObject({ requestId: query.requestId });
+
+      // The session carries on with the replacement, which was never sent the
+      // windowed request nor asked to reset for it.
+      const next = await session.query("select 1");
+      await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+      expect(second.sent).toEqual([
+        encodeQwpQueryRequest({ requestId: next.requestId, sql: "select 1" }),
+      ]);
+      second.receive(resultEnd(next.requestId));
+      await expect(next.completion).resolves.toMatchObject({
+        kind: "result-end",
+      });
+      expect(resets).toEqual([]);
+      await session.close();
+    });
+
+    it("reports a cancelled row-window query it does not replay as cancelled", async () => {
+      const {
+        session,
+        connections: [first, second],
+      } = await failoverSession([DETAILS, QWP_EGRESS_CAPABILITY.QUERY_FLAGS]);
+      const query = await session.query("select x from t", { maxRows: 50 });
+      // The CANCEL is sent, but the connection goes before the server answers.
+      await query.cancel();
+      expect(first.sent.map((payload) => payload[0])).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+      ]);
+      first.drop();
+      await expect(query.completion).rejects.toMatchObject({
+        name: "QwpEgressQueryError",
+        status: QWP_STATUS.CANCELLED,
+      });
+      const next = await session.query("select 1");
+      await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+      expect(second.sent[0][0]).toBe(QWP_EGRESS_MESSAGE.QUERY_REQUEST);
+      second.receive(resultEnd(next.requestId));
+      await next.completion;
+      await session.close();
+    });
+
+    it("withdraws a queued row-window query when the replacement lacks QUERY_DETAILS", async () => {
+      const first = new FakeConnection("primary");
+      const second = new FakeConnection("secondary");
+      const connections = [first, second];
+      let releaseSecondInfo!: () => void;
+      const secondInfoReady = new Promise<void>((resolve) => {
+        releaseSecondInfo = resolve;
+      });
+      const session = await connectQwpEgressSession(
+        async () => {
+          const connection = connections.shift();
+          if (!connection) throw new Error("no connection available");
+          if (connection === second) await secondInfoReady;
+          queueMicrotask(() =>
+            connection.receive(
+              serverInfo(
+                connection.endpoint,
+                QWP_SERVER_ROLE.STANDALONE,
+                undefined,
+                connection === first
+                  ? DETAILS
+                  : QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+              ),
+            ),
+          );
+          return connection;
+        },
+        { reconnect: RECONNECT_ONCE },
+      );
+
+      first.drop();
+      await vi.waitFor(() => expect(connections).toHaveLength(0));
+      // Issued during the outage, against the capable endpoint's SERVER_INFO,
+      // so it waits for the replacement -- which cannot run it.
+      const querying = session.query("select 1", { maxRows: 10 });
+      releaseSecondInfo();
+      const query = await querying;
+      await expect(query.completion).rejects.toBeInstanceOf(
+        QwpEgressRowWindowUnsupportedError,
+      );
+
+      const next = await session.query("select 2");
+      await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+      expect(second.sent).toEqual([
+        encodeQwpQueryRequest({ requestId: next.requestId, sql: "select 2" }),
+      ]);
+      second.receive(resultEnd(next.requestId));
+      await next.completion;
+      await session.close();
+    });
   });
 
   it("discards queued batches, invokes reset, and replays an opted-in query", async () => {

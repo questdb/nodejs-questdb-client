@@ -289,6 +289,12 @@ try {
 Use `queryViews()` instead of `query()` for reusable, allocation-conscious
 column and row views.
 
+Query options `errorPosition`, `stats` and `countRows` report where an error
+points in the SQL string, the query's timings, and the size of the whole
+result; `skipRows` and `maxRows` read it one page at a time. They need a server
+that advertises the `QUERY_DETAILS` capability; see the
+[QWP guide](https://github.com/questdb/nodejs-questdb-client/blob/main/QWP.md#error-positions-statistics-row-counts-and-paging).
+
 ## Persistent store-and-forward
 
 Node.js can journal QWP frames to disk before sending them. The producer can

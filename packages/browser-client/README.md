@@ -349,6 +349,12 @@ try {
 Use `queryViews()` for reusable zero-copy result views in allocation-sensitive
 applications. Copy any view that must outlive its batch callback.
 
+Query options `errorPosition`, `stats` and `countRows` report where an error
+points in the SQL string, the query's timings, and the size of the whole
+result; `skipRows` and `maxRows` read it one page at a time. They need a server
+that advertises the `QUERY_DETAILS` capability; see the
+[QWP guide](https://github.com/questdb/nodejs-questdb-client/blob/main/QWP.md#error-positions-statistics-row-counts-and-paging).
+
 ## Combined ingestion and query client
 
 `connectQwpBrowserClient()` creates bounded sender and query pools for an

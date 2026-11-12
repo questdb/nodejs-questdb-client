@@ -21,6 +21,7 @@ export {
   QwpEgressQueryCancelTimeoutError,
   QwpEgressQueryError,
   QwpEgressQueryTimeoutError,
+  QwpEgressRowWindowUnsupportedError,
   QwpEgressSession,
   QwpEgressSessionClosedError,
 } from "../_qwp/egress-session";
