@@ -178,12 +178,12 @@ and dispatch only the first again. The second then ships under the newer
 version.
 
 `check-release-versions.mjs` decides *whether* to bump, never by how much.
-Pick the level from the changes the release carries: a change that alters the
-behaviour of a published API, its emitted wire bytes, or the errors it throws
-is breaking and needs a major bump, even when the new behaviour is a fix. The
-signal comes from the commits, so mark a breaking change where Conventional
-Commits puts it (see below) rather than leaving it for the release to
-rediscover.
+Pick the level from the changes the release carries: a breaking change, as
+described under "Breaking Changes" below, needs a major bump. A bug fix that
+brings an API back to its contract does not, even when callers can observe
+the difference. The signal comes from the commits, so mark a breaking change
+where Conventional Commits puts it (see below) rather than leaving it for the
+release to rediscover.
 
 ### npm authentication
 
@@ -257,7 +257,8 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/) speci
 A commit that breaks a published API marks it, either as `!` after the
 type/scope (`feat(qwp)!: ...`) or as a `BREAKING CHANGE:` footer. That marker
 is what tells a release it has to be a major one, so a pull request carrying
-such a change needs it on the pull request title too.
+such a change needs it on the pull request title too. "Breaking Changes" below
+describes what counts as one.
 
 3. Push your changes to your fork:
 
@@ -266,6 +267,41 @@ git push origin feature/your-feature-name
 ```
 
 4. Create a Pull Request from your fork to the main repository.
+
+## Breaking Changes
+
+A change is breaking when code that relies on a published API's contract --
+its documentation, its types, and what it evidently promises -- has to change
+to keep working. Whether a caller can observe a difference does not decide
+it. Breaking changes include:
+
+- removing or renaming an export, option or connect-string key, changing a
+  default, or narrowing a signature or type;
+- changing documented behaviour, such as the error class a documented failure
+  raises, or refusing input the documentation accepts;
+- making the client send something a supported server version rejects.
+
+A bug fix that brings the implementation back to its contract is not
+breaking, even though callers can observe the difference. Commit it as a
+plain `fix:`, without `!` or a `BREAKING CHANGE:` footer, and describe what
+callers will notice in the commit body and the pull request. Such fixes
+include:
+
+- a method that returns a promise but threw synchronously, and now rejects or
+  resolves instead;
+- a crash, hang, unhandled rejection or uncaught exception that becomes an
+  ordinary result or an error the caller can catch;
+- an error raised for something the contract does not treat as a failure,
+  such as cancelling a query that has already ended, or an error whose class
+  names the wrong cause;
+- input the documentation accepts that the code refused or mishandled, such
+  as data that fits within `max_buf_size`.
+
+The wording of an error message is not part of the contract; the error's
+class, and the conditions documented for it, are. A fix that also changes
+documented behaviour is breaking all the same. If it is unclear whether the
+old behaviour belonged to the contract, say so in the pull request and let
+the reviewers decide.
 
 ## Pull Request Guidelines
 

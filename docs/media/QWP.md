@@ -1533,7 +1533,11 @@ statement that completed anyway, or a result that ended with nothing withheld,
 succeeds. A query sends at most one `CANCEL`. `cancel()` settles once its `CANCEL`
 has been sent, or once a reconnect has taken it over: the frame then follows the
 replayed request, so a callback that awaits `cancel()` does not hold up the
-reconnect that has to drain it first.
+reconnect that has to drain it first. Once a query has ended, `cancel()` and
+`grantCredit()` resolve without sending anything, even if the session has since
+closed or failed, so a timer or an `AbortSignal` listener that fires after
+completion may still call them. Neither throws: every failure, such as an invalid
+credit amount, rejects the promise it returns.
 
 `await query.awaitCompletion(timeoutMs)` bounds only the caller's wait and returns
 `false` without cancelling when the timeout expires, matching Java
