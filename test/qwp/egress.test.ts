@@ -4609,6 +4609,23 @@ describe("QwpEgressSession query details", () => {
         jitCompiled: true,
       },
     });
+
+    // The next query asks for nothing, so it is sent without flags and its
+    // baseline RESULT_END is read without trailers.
+    const plain = await session.query("select * from x");
+    expect(
+      requestTail(connection.sent[1], plain.requestId, "select * from x"),
+    ).toEqual([]);
+    // The connection's dictionary already holds the first query's two symbols.
+    connection.receive(symbolDeltaBatch(plain.requestId, 0, 2, [], 1));
+    connection.receive(resultEnd(plain.requestId, 1n, 0n));
+    const symbols: unknown[] = [];
+    for await (const batch of plain) symbols.push(batch.get(0, 0));
+    expect(symbols).toEqual(["beta"]);
+    const plainDone = await plain.completion;
+    expect(plainDone).toMatchObject({ kind: "result-end", totalRows: 1n });
+    expect(plainDone).not.toHaveProperty("rowCount");
+    expect(plainDone).not.toHaveProperty("stats");
     await session.close();
   });
 
@@ -4703,7 +4720,45 @@ describe("QwpEgressSession query details", () => {
         queryError(requestId, "incomplete varint: buffer underflow"),
       ),
     ).resolves.toBeUndefined();
+    // Zero is the start of the statement, and reported as such.
+    await expect(
+      positionOf("COPY t FROM stdin", (requestId) =>
+        queryError(
+          requestId,
+          "COPY ... FROM is not supported on egress",
+          QWP_STATUS.PARSE_ERROR,
+          0,
+        ),
+      ),
+    ).resolves.toBe(0);
     await session.close();
+  });
+
+  it("reports a detailed response queued at close as the closed session", async () => {
+    // The flags a terminal response is decoded with outlive its query. A
+    // RESULT_END still queued when the session closes therefore decodes, and
+    // is reported as the closed session it is -- not as a malformed frame,
+    // which would also close the connection a second time, as a protocol
+    // violation.
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection, { bufferPoolSize: 1 });
+    connection.receive(serverInfo(DETAILS));
+    const query = await session.query("select * from x", { stats: true });
+    connection.receive(emptyResultBatch(query.requestId, 0));
+    connection.receive(emptyResultBatch(query.requestId, 1));
+    connection.receive(
+      resultEnd(query.requestId, 0n, 1n, queryStats([1, 2, 0, 0], false)),
+    );
+    // The first batch fills the one-slot pool, so the receive loop waits on
+    // the second, with the RESULT_END queued behind it, until close() ends
+    // the query.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await session.close();
+    await expect(query.completion).rejects.toMatchObject({
+      name: "QwpEgressSessionClosedError",
+    });
+    expect(connection.closeCalls).toEqual([{ code: 1000, reason: "" }]);
   });
 
   it("rejects a row window the server cannot honour before sending anything", async () => {

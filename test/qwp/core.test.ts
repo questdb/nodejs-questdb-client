@@ -1525,6 +1525,17 @@ describe("QWP egress codec", () => {
           new RangeError("queryFlags must fit in uint64"),
         );
       }
+      // Values of neither numeric type are rejected, not coerced.
+      expect(() =>
+        windowed(QWP_QUERY_FLAG_SKIP_ROWS, { skipRows: "5" as never }),
+      ).toThrow(RangeError);
+      expect(() => windowed("16" as never, {})).toThrow(RangeError);
+      // The request ID keeps its own uint64 bound.
+      for (const requestId of [-1n, 1n << 64n]) {
+        expect(() => encodeQwpCancel(requestId)).toThrow(
+          new RangeError("requestId must fit in uint64"),
+        );
+      }
     });
 
     it("decodes the RESULT_END row count and statistics in their order", () => {
@@ -1634,13 +1645,24 @@ describe("QWP egress codec", () => {
         message: "table does not exist [table=t]",
         position: 14,
       });
-      // -1 marks an error that does not point into the SQL text.
-      const nowhere = decodeQwpEgressMessage(
-        queryError((writer) => writer.writeInt32(-1)),
-        flags,
-      );
-      expect(nowhere).toMatchObject({ kind: "query-error" });
-      expect(nowhere).not.toHaveProperty("position");
+      // Zero is the start of the SQL text, not the absence of a position:
+      // QuestDB reports it for an error that names no position of its own.
+      expect(
+        decodeQwpEgressMessage(
+          queryError((writer) => writer.writeInt32(0)),
+          flags,
+        ),
+      ).toHaveProperty("position", 0);
+      // -1 marks an error that does not point into the SQL text, and no
+      // other negative value points anywhere either.
+      for (const position of [-1, -2_147_483_648]) {
+        const nowhere = decodeQwpEgressMessage(
+          queryError((writer) => writer.writeInt32(position)),
+          flags,
+        );
+        expect(nowhere).toMatchObject({ kind: "query-error" });
+        expect(nowhere).not.toHaveProperty("position");
+      }
       // A request the server rejects before reading its flags gets the
       // baseline frame even though it asked for the position.
       const baselineFrame = decodeQwpEgressMessage(queryError(), flags);

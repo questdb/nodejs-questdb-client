@@ -8106,6 +8106,48 @@ describe("QWP egress reconnect and replay", () => {
       }
     });
 
+    it("replays a row-window query with its window where QUERY_DETAILS is", async () => {
+      // The ordinary failover of a paged query: the replacement is sent the
+      // same window, flags and values alike, and its trailers decode.
+      const resets: bigint[] = [];
+      const {
+        session,
+        connections: [first, second],
+      } = await failoverSession([DETAILS, DETAILS], (requestId) =>
+        resets.push(requestId),
+      );
+      const query = await session.query("select x from t", {
+        skipRows: 300,
+        maxRows: 50,
+        countRows: true,
+        stats: true,
+      });
+      expect(first.sent[0].slice(-4)).toEqual(
+        Uint8Array.of(
+          QWP_QUERY_FLAG_STATS |
+            QWP_QUERY_FLAG_COUNT_ROWS |
+            QWP_QUERY_FLAG_SKIP_ROWS |
+            QWP_QUERY_FLAG_MAX_ROWS,
+          0xac, // 300, in two varint bytes
+          0x02,
+          50,
+        ),
+      );
+
+      first.drop();
+      await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+      expect(second.sent[0]).toEqual(first.sent[0]);
+      expect(resets).toEqual([query.requestId]);
+      second.receive(emptyResultBatch(query.requestId));
+      second.receive(detailedResultEnd(query.requestId, 1_000, 77));
+      await expect(query.completion).resolves.toMatchObject({
+        kind: "result-end",
+        rowCount: 1_000n,
+        stats: { executeNanos: 77n, jitCompiled: true },
+      });
+      await session.close();
+    });
+
     it("fails a row-window query rather than replay it without QUERY_DETAILS", async () => {
       // The replacement would ignore the window and stream every row.
       const resets: bigint[] = [];
