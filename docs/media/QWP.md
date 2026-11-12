@@ -1749,8 +1749,10 @@ The low-level `encodeQwpQueryRequest()` takes the raw flags
 (`QWP_QUERY_FLAG_ERROR_POSITION`, `QWP_QUERY_FLAG_STATS`,
 `QWP_QUERY_FLAG_COUNT_ROWS`, `QWP_QUERY_FLAG_SKIP_ROWS` and
 `QWP_QUERY_FLAG_MAX_ROWS`) together with the `skipRows` and `maxRows` values the
-last two require, and `decodeQwpEgressMessage(bytes, queryFlags)` reads the
-trailers those flags add to `RESULT_END`, `EXEC_DONE` and `QUERY_ERROR`.
+last two require, and `decodeQwpEgressMessageWithQueryFlags(bytes, queryFlags)`
+reads the trailers those flags add to `RESULT_END`, `EXEC_DONE` and
+`QUERY_ERROR`. `decodeQwpEgressMessage(bytes)` keeps its single parameter, so it
+stays safe to pass straight to `map()`, and rejects those trailers.
 
 ## Combined pooled client
 

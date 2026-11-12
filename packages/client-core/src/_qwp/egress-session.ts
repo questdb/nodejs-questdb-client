@@ -1,5 +1,5 @@
 import {
-  decodeQwpEgressMessage,
+  decodeQwpEgressMessageWithQueryFlags,
   encodeQwpBinds,
   encodeQwpCancel,
   encodeQwpCredit,
@@ -1941,7 +1941,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     try {
       for await (const payload of this.connection.messages) {
         try {
-          const message = decodeQwpEgressMessage(
+          const message = decodeQwpEgressMessageWithQueryFlags(
             payload,
             this.responseQueryFlags,
           );

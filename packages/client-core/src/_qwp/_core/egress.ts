@@ -359,17 +359,31 @@ function readQueryStats(reader: QwpByteReader): QwpQueryStats {
 }
 
 /**
- * Decodes one QWP-framed server-to-client egress message.
- *
- * `queryFlags` are the `query_flags` the answered QUERY_REQUEST was sent with.
- * They decide the trailers RESULT_END, EXEC_DONE and QUERY_ERROR end with --
- * the row count, the statistics and the error position -- which are read into
- * the message and must be the last bytes of the frame. Leave it at zero for a
- * request sent without flags. Other messages do not depend on it.
+ * Decodes one QWP-framed server-to-client egress message. RESULT_END, EXEC_DONE
+ * and QUERY_ERROR are read without the trailers that query-details flags add,
+ * and rejected if they carry any: decode the responses to a request sent with
+ * those flags with {@link decodeQwpEgressMessageWithQueryFlags}.
  */
-export function decodeQwpEgressMessage(
+export function decodeQwpEgressMessage(bytes: Uint8Array): QwpEgressMessage {
+  // One parameter, as published: `map()` and `Array.from()` pass the index as
+  // a second argument, which a second parameter would read as query flags,
+  // rejecting valid frames.
+  return decodeEgressMessage(bytes, 0n, true);
+}
+
+/**
+ * Decodes one QWP-framed server-to-client egress message answering a
+ * QUERY_REQUEST sent with `queryFlags`.
+ *
+ * The flags decide the trailers RESULT_END, EXEC_DONE and QUERY_ERROR end with
+ * -- the row count, the statistics and the error position -- which are read
+ * into the message and must be the last bytes of the frame. Other messages do
+ * not depend on them, and with no flags set this decodes as
+ * {@link decodeQwpEgressMessage} does.
+ */
+export function decodeQwpEgressMessageWithQueryFlags(
   bytes: Uint8Array,
-  queryFlags: number | bigint = 0,
+  queryFlags: number | bigint,
 ): QwpEgressMessage {
   return decodeEgressMessage(bytes, queryFlagBits(queryFlags), true);
 }

@@ -14,6 +14,7 @@ export {
 // public API of either package.
 export {
   decodeQwpEgressMessage,
+  decodeQwpEgressMessageWithQueryFlags,
   encodeQwpCancel,
   encodeQwpCredit,
   encodeQwpQueryRequest,

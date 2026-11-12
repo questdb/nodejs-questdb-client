@@ -2,6 +2,7 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   decodeQwpEgressMessage,
+  decodeQwpEgressMessageWithQueryFlags,
   decodeQwpContentEncoding,
   decodeQwpFrame,
   decodeQwpIngressResponse,
@@ -1540,7 +1541,7 @@ describe("QWP egress codec", () => {
 
     it("decodes the RESULT_END row count and statistics in their order", () => {
       expect(
-        decodeQwpEgressMessage(
+        decodeQwpEgressMessageWithQueryFlags(
           resultEnd((writer) => writeQwpVarint(writer, 1_000_000)),
           QWP_QUERY_FLAG_COUNT_ROWS,
         ),
@@ -1552,7 +1553,7 @@ describe("QWP egress codec", () => {
         }),
       );
 
-      const both = decodeQwpEgressMessage(
+      const both = decodeQwpEgressMessageWithQueryFlags(
         resultEnd((writer) => {
           writeQwpVarint(writer, 9); // the row count comes first
           statsBlock([1_500, 2_000_000_000, 250, 300_000_000], 0x01)(writer);
@@ -1581,7 +1582,7 @@ describe("QWP egress codec", () => {
       });
 
       // The durations are unsigned varints, read in full.
-      const extreme = decodeQwpEgressMessage(
+      const extreme = decodeQwpEgressMessageWithQueryFlags(
         resultEnd(
           statsBlock([0, (1n << 63n) - 1n, 1n << 63n, 2n ** 64n - 1n], 0),
         ),
@@ -1606,7 +1607,7 @@ describe("QWP egress codec", () => {
         [0xfe, false],
         [0xff, true],
       ] as const) {
-        const done = decodeQwpEgressMessage(
+        const done = decodeQwpEgressMessageWithQueryFlags(
           execDone(statsBlock([1, 2, 3, 4], statsFlags)),
           QWP_QUERY_FLAG_STATS,
         );
@@ -1625,7 +1626,7 @@ describe("QWP egress codec", () => {
       }
       // EXEC_DONE carries no row count: statements produce no rows.
       expect(
-        decodeQwpEgressMessage(
+        decodeQwpEgressMessageWithQueryFlags(
           execDone(),
           QWP_QUERY_FLAG_COUNT_ROWS | QWP_QUERY_FLAG_ERROR_POSITION,
         ),
@@ -1635,7 +1636,7 @@ describe("QWP egress codec", () => {
     it("decodes the QUERY_ERROR position, which a baseline frame omits", () => {
       const flags = QWP_QUERY_FLAG_ERROR_POSITION;
       expect(
-        decodeQwpEgressMessage(
+        decodeQwpEgressMessageWithQueryFlags(
           queryError((writer) => writer.writeInt32(14)),
           flags,
         ),
@@ -1648,7 +1649,7 @@ describe("QWP egress codec", () => {
       // Zero is the start of the SQL text, not the absence of a position:
       // QuestDB reports it for an error that names no position of its own.
       expect(
-        decodeQwpEgressMessage(
+        decodeQwpEgressMessageWithQueryFlags(
           queryError((writer) => writer.writeInt32(0)),
           flags,
         ),
@@ -1656,7 +1657,7 @@ describe("QWP egress codec", () => {
       // -1 marks an error that does not point into the SQL text, and no
       // other negative value points anywhere either.
       for (const position of [-1, -2_147_483_648]) {
-        const nowhere = decodeQwpEgressMessage(
+        const nowhere = decodeQwpEgressMessageWithQueryFlags(
           queryError((writer) => writer.writeInt32(position)),
           flags,
         );
@@ -1665,7 +1666,10 @@ describe("QWP egress codec", () => {
       }
       // A request the server rejects before reading its flags gets the
       // baseline frame even though it asked for the position.
-      const baselineFrame = decodeQwpEgressMessage(queryError(), flags);
+      const baselineFrame = decodeQwpEgressMessageWithQueryFlags(
+        queryError(),
+        flags,
+      );
       expect(baselineFrame).toMatchObject({
         message: "table does not exist [table=t]",
       });
@@ -1718,12 +1722,39 @@ describe("QWP egress codec", () => {
         ],
       ];
       for (const [frame, queryFlags, error] of cases) {
-        expect(() => decodeQwpEgressMessage(frame, queryFlags)).toThrow(
-          QwpProtocolError,
-        );
-        expect(() => decodeQwpEgressMessage(frame, queryFlags)).toThrow(error);
+        expect(() =>
+          decodeQwpEgressMessageWithQueryFlags(frame, queryFlags),
+        ).toThrow(QwpProtocolError);
+        expect(() =>
+          decodeQwpEgressMessageWithQueryFlags(frame, queryFlags),
+        ).toThrow(error);
       }
-      expect(() => decodeQwpEgressMessage(resultEnd(), -1)).toThrow(RangeError);
+      expect(() =>
+        decodeQwpEgressMessageWithQueryFlags(resultEnd(), -1),
+      ).toThrow(RangeError);
+    });
+
+    it("keeps decodeQwpEgressMessage safe to pass straight to map", () => {
+      // map() and Array.from() hand their callback the index as a second
+      // argument. Read as query flags, index 4 set STATS, and a valid frame
+      // failed to decode as truncated.
+      const frames = Array.from({ length: 16 }, (_, index) =>
+        index % 2 === 0 ? resultEnd() : execDone(),
+      );
+      const decoded = frames.map((_, index) =>
+        expect.objectContaining({
+          kind: index % 2 === 0 ? "result-end" : "exec-done",
+          requestId: 11n,
+        }),
+      );
+      expect(frames.map(decodeQwpEgressMessage)).toEqual(decoded);
+      expect(Array.from(frames, decodeQwpEgressMessage)).toEqual(decoded);
+      // It still reads no trailers, so a frame that carries one is rejected.
+      expect(() =>
+        decodeQwpEgressMessage(
+          resultEnd((writer) => writeQwpVarint(writer, 9)),
+        ),
+      ).toThrow(/RESULT_END has 1 unexpected trailing byte/);
     });
 
     it("leaves the trailers to the session in the transport's envelope view", () => {

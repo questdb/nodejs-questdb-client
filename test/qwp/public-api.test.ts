@@ -126,6 +126,7 @@ const sharedRuntimeContract = [
   "decimal64",
   "decodeQwpContentEncoding",
   "decodeQwpEgressMessage",
+  "decodeQwpEgressMessageWithQueryFlags",
   "decodeQwpFrame",
   "decodeQwpIngressResponse",
   "decodeQwpIngressServerInfo",
