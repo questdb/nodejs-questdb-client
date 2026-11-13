@@ -122,8 +122,10 @@ export interface QwpQueryErrorMessage extends QwpFrameHeader {
   /**
    * UTF-16 offset into the SQL text the error points at: an index into the
    * JavaScript string the query was issued with. Present when the query asked
-   * for it (`QWP_QUERY_FLAG_ERROR_POSITION`) and the error points into the SQL
-   * text, which a protocol error, a cancellation or an oversized row does not.
+   * for it (`QWP_QUERY_FLAG_ERROR_POSITION`) and the SQL engine raised the
+   * error, which it does not for a protocol error, a CANCEL the client sent or
+   * an oversized row. It is 0 when the engine named no position, as for a
+   * query timeout on the server or `CANCEL QUERY`.
    */
   position?: number;
 }

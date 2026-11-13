@@ -184,8 +184,11 @@ export interface QwpEgressQueryOptions {
    * {@link QwpEgressQueryError} then carries `position`, the UTF-16 offset
    * into `sql` -- a JavaScript string index -- and the bare message, without
    * the `[n]` prefix, a position or an error number, that QuestDB otherwise
-   * adds. Errors that do not point into the SQL text, such as a cancellation,
-   * carry no position.
+   * adds. An error the SQL engine raises without a position of its own
+   * reports 0, the start of the text, as `/exec` does: a query timeout on the
+   * server, or a query cancelled there with `CANCEL QUERY`. Errors that do not
+   * come from the SQL engine, such as the cancellation `cancel()` sends, carry
+   * no position.
    *
    * Silently omitted, like `stats` and `countRows`, when the server does not
    * advertise QUERY_DETAILS, so it is safe during a rolling upgrade.
@@ -388,8 +391,9 @@ export class QwpEgressQueryError extends Error {
     /**
      * UTF-16 offset into the query's SQL text the error points at: an index
      * into the JavaScript string the query was issued with. Present when the
-     * query asked for it with `errorPosition` and the error points into the
-     * SQL text.
+     * query asked for it with `errorPosition` and the SQL engine raised the
+     * error, and 0 when the engine named no position, as for a query timeout
+     * on the server or `CANCEL QUERY`.
      */
     readonly position?: number,
   ) {

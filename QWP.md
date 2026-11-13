@@ -1711,10 +1711,13 @@ try {
   JavaScript string the query was issued with, so `sql.slice(error.position)`
   starts where the error does, whatever non-ASCII text precedes it. The message is
   then bare, without the `[n]` prefix, a position or an error number, that QuestDB
-  otherwise puts in front of it. An error that does not point into the SQL text,
-  such as a cancellation or a row too large for the server's send buffer, carries
-  no position, and neither does the error for a request the server rejected
-  before reading its options.
+  otherwise puts in front of it. An error the SQL engine raises without a position
+  of its own reports 0, the start of the text, as `/exec` does: a query timeout on
+  the server and a query cancelled there with `CANCEL QUERY` are among them. An
+  error that does not come from the SQL engine, such as a protocol error, a row
+  too large for the server's send buffer or the cancellation `cancel()` sends,
+  carries no position, and neither does the error for a request the server
+  rejected before reading its options.
 - `stats: true` adds `stats` to the completion of a result (`RESULT_END`) and of a
   statement (`EXEC_DONE`), as `QwpQueryStats`: `compileNanos`, zero when the
   server reused a cached plan; `executeNanos`, from the server receiving the
