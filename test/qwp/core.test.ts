@@ -1736,8 +1736,8 @@ describe("QWP egress codec", () => {
 
     it("keeps decodeQwpEgressMessage safe to pass straight to map", () => {
       // map() and Array.from() hand their callback the index as a second
-      // argument. Read as query flags, index 4 set STATS, and a valid frame
-      // failed to decode as truncated.
+      // argument. Read as query flags, indexes 8 to 15 set STATS (0x08), and
+      // each of those valid frames failed to decode as truncated.
       const frames = Array.from({ length: 16 }, (_, index) =>
         index % 2 === 0 ? resultEnd() : execDone(),
       );
