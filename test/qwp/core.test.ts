@@ -1432,7 +1432,7 @@ describe("QWP egress codec", () => {
             { skipRows: 300, maxRows: 0 },
           ),
         ),
-      ).toEqual([0x38, 0xac, 0x02, 0x00]);
+      ).toEqual([0x70, 0xac, 0x02, 0x00]);
       expect(
         afterBinds(windowed(QWP_QUERY_FLAG_SKIP_ROWS, { skipRows: 7 })),
       ).toEqual([QWP_QUERY_FLAG_SKIP_ROWS, 7]);
@@ -1470,7 +1470,7 @@ describe("QWP egress codec", () => {
             {},
           ),
         ),
-      ).toEqual([0x0e]);
+      ).toEqual([0x1c]);
     });
 
     it("requires a row-window value exactly when its flag is set", () => {

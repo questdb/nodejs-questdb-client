@@ -4492,6 +4492,11 @@ describe("QwpEgressSession", () => {
 describe("QwpEgressSession query details", () => {
   const DETAILS =
     QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QWP_EGRESS_CAPABILITY.QUERY_DETAILS;
+  // Per-query timeouts own capability 0x08 and flag 0x02 in released clients
+  // (c-questdb-client 7.2.0 and the Python client built on it), which send the
+  // flag, followed by timeout_ms, to a server that advertises the capability.
+  const QUERY_TIMEOUT_CAPABILITY = 0x08;
+  const QUERY_TIMEOUT_FLAG = 0x02;
   const ALL_REPORTS: QwpEgressQueryOptions = {
     errorPosition: true,
     stats: true,
@@ -4538,6 +4543,7 @@ describe("QwpEgressSession query details", () => {
     ]);
     // The window values follow the flags, skip_rows first; 300 takes two
     // varint bytes.
+    // Every flag bit but 0x02, which per-query timeouts own.
     expect(
       await capture(DETAILS, {
         ...ALL_REPORTS,
@@ -4545,7 +4551,7 @@ describe("QwpEgressSession query details", () => {
         skipRows: 300,
         maxRows: 0n,
       }),
-    ).toEqual([0x3f, 0xac, 0x02, 0x00]);
+    ).toEqual([0x7d, 0xac, 0x02, 0x00]);
     // Skipping no rows is no row window.
     expect(await capture(DETAILS, { skipRows: 0, maxRows: 5 })).toEqual([
       QWP_QUERY_FLAG_MAX_ROWS,
@@ -4564,7 +4570,40 @@ describe("QwpEgressSession query details", () => {
         resetDictionary: true,
       }),
     ).toEqual([QWP_QUERY_FLAG_RESET_DICTIONARY]);
+    // So is a server with per-query timeouts but without the query details.
+    expect(
+      await capture(
+        QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QUERY_TIMEOUT_CAPABILITY,
+        { ...ALL_REPORTS, resetDictionary: true },
+      ),
+    ).toEqual([QWP_QUERY_FLAG_RESET_DICTIONARY]);
     expect(await capture(0, { ...ALL_REPORTS, skipRows: 0 })).toEqual([]);
+  });
+
+  it("leaves the per-query timeout bits of released clients free", () => {
+    const capabilities = [
+      ...Object.values(QWP_EGRESS_CAPABILITY),
+      QUERY_TIMEOUT_CAPABILITY,
+    ];
+    const flags = [
+      QWP_QUERY_FLAG_RESET_DICTIONARY,
+      QUERY_TIMEOUT_FLAG,
+      QWP_QUERY_FLAG_ERROR_POSITION,
+      QWP_QUERY_FLAG_STATS,
+      QWP_QUERY_FLAG_COUNT_ROWS,
+      QWP_QUERY_FLAG_SKIP_ROWS,
+      QWP_QUERY_FLAG_MAX_ROWS,
+    ];
+    for (const bits of [capabilities, flags]) {
+      let union = 0;
+      for (const bit of bits) {
+        // a single bit, taken once
+        expect(bit).toBeGreaterThan(0);
+        expect(bit & (bit - 1)).toBe(0);
+        expect(union & bit).toBe(0);
+        union |= bit;
+      }
+    }
   });
 
   it("reports the row count and statistics on a result's completion", async () => {
@@ -4762,6 +4801,17 @@ describe("QwpEgressSession query details", () => {
   });
 
   it("rejects a row window the server cannot honour before sending anything", async () => {
+    // A server with per-query timeouts but without the query details would
+    // stream every row too.
+    const timeoutsOnly = await openSession(
+      QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QUERY_TIMEOUT_CAPABILITY,
+    );
+    await expect(
+      timeoutsOnly.session.query("select 1", { maxRows: 10 }),
+    ).rejects.toBeInstanceOf(QwpEgressRowWindowUnsupportedError);
+    expect(timeoutsOnly.connection.sent).toEqual([]);
+    await timeoutsOnly.session.close();
+
     const { connection, session } = await openSession(
       QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
     );
