@@ -213,19 +213,22 @@ export interface QwpEgressQueryOptions {
   /**
    * Rows to leave out at the start of the result set, like the offset of SQL
    * `LIMIT`. Zero, the default, leaves out none. A non-negative safe integer,
-   * or a bigint no greater than 2^63 - 1. Ignored by statements.
+   * or a bigint no greater than 2^63 - 1. A server with QUERY_DETAILS ignores
+   * it for statements.
    *
    * A row window cannot be dropped the way the reports above are: a server
    * without QUERY_DETAILS would stream the whole result. The query fails with
    * {@link QwpEgressRowWindowUnsupportedError} instead, at once, or when
-   * failover would replay it on such a server.
+   * failover would replay it on such a server. A statement fails the same
+   * way, since the client cannot tell it from a query before sending it.
    */
   skipRows?: number | bigint;
   /**
    * The most rows to stream, after `skipRows`. Zero streams only the schema,
    * in one empty batch. Unbounded by default. A non-negative safe integer, or
-   * a bigint no greater than 2^63 - 1. Ignored by statements. Like
-   * `skipRows`, it requires QUERY_DETAILS.
+   * a bigint no greater than 2^63 - 1. A server with QUERY_DETAILS ignores it
+   * for statements. Like `skipRows`, it requires that capability, statements
+   * included.
    */
   maxRows?: number | bigint;
 }
@@ -407,8 +410,9 @@ export class QwpEgressQueryError extends Error {
  * endpoint does not advertise the QUERY_DETAILS capability it needs. Such a
  * server would stream the whole result, so the query is not sent to it:
  * `query()` rejects at once, and a query that failover would replay on such
- * an endpoint fails instead of being replayed. Use SQL `LIMIT` with servers
- * that predate the capability.
+ * an endpoint fails instead of being replayed. Statements are refused the same
+ * way, as the client cannot tell them from queries before sending them. Use
+ * SQL `LIMIT` with servers that predate the capability.
  */
 export class QwpEgressRowWindowUnsupportedError extends Error {
   constructor(readonly requestId: bigint) {

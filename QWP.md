@@ -1734,16 +1734,18 @@ try {
   `LIMIT skipRows, skipRows + maxRows` around it: the first `skipRows` rows are
   left out, and at most `maxRows` follow. `maxRows: 0` streams only the schema, in
   one empty batch. Both take a non-negative safe integer or a `bigint` up to
-  2^63 - 1. Statements ignore the window and the row count.
+  2^63 - 1. A server with `QUERY_DETAILS` ignores the window and the row count
+  for statements.
 
 The client drops `errorPosition`, `stats` and `countRows` on an endpoint without
 `QUERY_DETAILS`, as it drops `resetDictionary` on one without `QUERY_FLAGS`, so
 they are safe during a rolling upgrade: the reports are simply absent. A row
 window cannot be dropped that way, because such a server would stream the whole
 result. A query with a positive `skipRows` or any `maxRows` therefore rejects with
-`QwpEgressRowWindowUnsupportedError` before anything is sent. Failover applies the
-same rules: a replay asks the endpoint it reaches for the details that endpoint
-supports, and a query whose row window it cannot honour fails with
+`QwpEgressRowWindowUnsupportedError` before anything is sent, and so does a
+statement: the client cannot tell the two apart before sending them. Failover
+applies the same rules: a replay asks the endpoint it reaches for the details that
+endpoint supports, and a query whose row window it cannot honour fails with
 `QwpEgressRowWindowUnsupportedError` instead of being replayed. Check
 `session.serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_DETAILS` to choose
 between a row window and SQL `LIMIT` in advance.
