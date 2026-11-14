@@ -8976,6 +8976,251 @@ describe("QWP egress reconnect and replay", () => {
     await session.close();
   });
 
+  describe("terminal validation delayed by a full batch pool", () => {
+    async function openSession(replacementReady?: Promise<void>) {
+      const connections: FakeConnection[] = [];
+      const session = await connectQwpEgressSession(
+        async () => {
+          const connection = new FakeConnection(`node-${connections.length}`);
+          connections.push(connection);
+          if (connections.length > 1 && replacementReady) {
+            await replacementReady;
+          }
+          queueMicrotask(() =>
+            connection.receive(serverInfo(connection.endpoint)),
+          );
+          return connection;
+        },
+        {
+          bufferPoolSize: 1,
+          reconnect: {
+            failoverMaxAttempts: 1,
+            failoverMaxDurationMs: 0,
+            failoverBackoffInitialMs: 0,
+            failoverBackoffMaxMs: 0,
+          },
+        },
+      );
+      return { session, connections };
+    }
+
+    function endWithMalformedTrailer(
+      connection: FakeConnection,
+      requestId: bigint,
+      duplicateTerminal = false,
+    ): void {
+      // With no consumer yet, the first batch fills the pool and the second
+      // parks the session before it can validate the terminal. The transport
+      // still reads its envelope and observes the socket loss.
+      connection.receive(emptyResultBatch(requestId, 0));
+      connection.receive(emptyResultBatch(requestId, 1));
+      const payload = new QwpByteWriter()
+        .writeUint8(QWP_EGRESS_MESSAGE.RESULT_END)
+        .writeBigUint64(requestId);
+      writeQwpVarint(payload, 1); // final sequence matches both batches
+      writeQwpVarint(payload, 0); // total rows matches both empty batches
+      payload.writeUint8(0); // an unrequested trailer inside the framed payload
+      const terminal = encodeQwpFrame(payload.toUint8Array());
+      connection.receive(terminal);
+      if (duplicateTerminal) connection.receive(terminal);
+      connection.drop();
+    }
+
+    it.each([false, true])(
+      "reuses socket-loss recovery after a buffered terminal rejection (duplicate terminal: %s)",
+      async (duplicateTerminal) => {
+        vi.useFakeTimers();
+        let releaseReplacement!: () => void;
+        const replacementReady = new Promise<void>((resolve) => {
+          releaseReplacement = resolve;
+        });
+        try {
+          const { session, connections } = await openSession(replacementReady);
+          try {
+            const query = await session.query("select * from x");
+            endWithMalformedTrailer(
+              connections[0],
+              query.requestId,
+              duplicateTerminal,
+            );
+            // Reconnect has removed the installed connection, but cannot replay
+            // until the session accepts or rejects the queued terminal.
+            await vi.advanceTimersByTimeAsync(0);
+            expect(connections).toHaveLength(2);
+            expect(connections[1].sent).toEqual([]);
+            const draining = (async () => {
+              for await (const _batch of query) void _batch;
+            })();
+            void draining.catch(() => undefined);
+
+            // Let validation run while opening is held. A duplicate queued
+            // behind the bad terminal must be discarded now, not charged as
+            // another recovery while we wait for the replacement to open.
+            await vi.advanceTimersByTimeAsync(0);
+            releaseReplacement();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(connections[1].sent).toEqual(connections[0].sent);
+            connections[1].receive(emptyResultBatch(query.requestId));
+            connections[1].receive(resultEnd(query.requestId));
+            await expect(draining).resolves.toBeUndefined();
+            await expect(query.completion).resolves.toMatchObject({
+              kind: "result-end",
+              finalSequence: 0n,
+              totalRows: 0n,
+            });
+
+            // The recovery must not leave a failure latched on the session.
+            const next = await session.query("select 2");
+            expect(connections[1].sent).toEqual([
+              connections[0].sent[0],
+              encodeQwpQueryRequest({
+                requestId: next.requestId,
+                sql: "select 2",
+              }),
+            ]);
+            connections[1].receive(resultEnd(next.requestId));
+            await expect(next.completion).resolves.toMatchObject({
+              kind: "result-end",
+            });
+            expect(connections).toHaveLength(2);
+          } finally {
+            releaseReplacement();
+            await session.close();
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it("charges delayed terminal rejections to the query recovery budget", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session, connections } = await openSession();
+        try {
+          const query = await session.query("select * from x");
+          const iterator = query[Symbol.asyncIterator]();
+          for (let attempt = 0; attempt < 2; attempt++) {
+            endWithMalformedTrailer(connections[attempt], query.requestId);
+            await vi.advanceTimersByTimeAsync(0);
+            expect(connections).toHaveLength(attempt + 2);
+            expect(connections[attempt + 1].sent).toEqual([]);
+
+            // Resume only after socket-loss recovery has started, on each
+            // attempt. A successful reconnect must not reset this budget.
+            await expect(iterator.next()).resolves.toMatchObject({
+              done: false,
+            });
+            await vi.advanceTimersByTimeAsync(0);
+            if (attempt === 0) {
+              expect(connections[1].sent).toEqual(connections[0].sent);
+              expect(query.isDone()).toBe(false);
+            }
+          }
+
+          expect(query.isDone()).toBe(true);
+          await expect(query.completion).rejects.toMatchObject({
+            name: "QwpReconnectExhaustedError",
+            attempts: 2,
+            cause: expect.any(QwpProtocolError),
+          });
+          // Already decoded batches precede the failure in iteration.
+          await expect(iterator.next()).resolves.toMatchObject({
+            done: false,
+            value: { batchSequence: 1n },
+          });
+          await expect(iterator.next()).rejects.toBeInstanceOf(
+            QwpReconnectExhaustedError,
+          );
+          // The second rejection exhausts the single allowed recovery before
+          // another replay can leave on the already-opened candidate.
+          expect(connections[2].sent).toEqual([]);
+        } finally {
+          await session.close();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps recovery moving when the consumer retires before the replacement opens", async () => {
+      vi.useFakeTimers();
+      let releaseReplacement!: () => void;
+      const replacementReady = new Promise<void>((resolve) => {
+        releaseReplacement = resolve;
+      });
+      try {
+        const { session, connections } = await openSession(replacementReady);
+        try {
+          const query = await session.query("select * from x");
+          const iterator = query[Symbol.asyncIterator]();
+          endWithMalformedTrailer(connections[0], query.requestId);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(connections).toHaveLength(2);
+          await expect(iterator.next()).resolves.toMatchObject({ done: false });
+          await vi.advanceTimersByTimeAsync(0);
+
+          // Validation has rejected the terminal, but opening is still held.
+          // Retiring now withdraws the replay. An idle reconnect waits for the
+          // session's receive loop to cross its queue barrier, so that loop
+          // must not await the very reconnect it needs to unblock.
+          await iterator.return!();
+          await expect(query.completion).rejects.toMatchObject({
+            name: "QwpEgressQueryAbandonedError",
+          });
+          releaseReplacement();
+          const starting = session.query("select 2");
+          void starting.catch(() => undefined);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(connections[1].sent).toEqual([
+            encodeQwpQueryRequest({ requestId: 1n, sql: "select 2" }),
+          ]);
+          const next = await starting;
+          connections[1].receive(resultEnd(next.requestId));
+          await expect(next.completion).resolves.toMatchObject({
+            kind: "result-end",
+          });
+        } finally {
+          releaseReplacement();
+          await session.close();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("reports a replay failure from the ongoing reconnect", async () => {
+      const { session, connections } = await openSession();
+      try {
+        const query = await session.query("select * from x");
+        endWithMalformedTrailer(connections[0], query.requestId);
+        await vi.waitFor(() => expect(connections).toHaveLength(2));
+        const failure = new Error("replacement replay failed");
+        connections[1].onSend = async () => {
+          throw failure;
+        };
+        const draining = (async () => {
+          for await (const _batch of query) void _batch;
+        })();
+        await expect(draining).rejects.toMatchObject({
+          name: "QwpReconnectExhaustedError",
+          attempts: 1,
+          cause: failure,
+        });
+        await expect(query.completion).rejects.toMatchObject({
+          name: "QwpReconnectExhaustedError",
+          cause: failure,
+        });
+        expect(connections[1].sent).toEqual(connections[0].sent);
+        await expect(connections[1].closed).resolves.toMatchObject({
+          code: 1000,
+        });
+      } finally {
+        await session.close();
+      }
+    });
+  });
+
   it("rotates endpoints after a malformed egress frame", async () => {
     const attempts: string[] = [];
     const connections = new Map<string, FakeConnection>();
