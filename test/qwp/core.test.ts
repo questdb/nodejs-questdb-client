@@ -2,6 +2,7 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   decodeQwpEgressMessage,
+  decodeQwpEgressMessageWithQueryFlags,
   decodeQwpContentEncoding,
   decodeQwpFrame,
   decodeQwpIngressResponse,
@@ -32,6 +33,12 @@ import {
   QWP_HEADER_SIZE,
   QWP_INGRESS_SERVER_INFO_CAPABILITY,
   QWP_MAGIC,
+  QWP_QUERY_FLAG_COUNT_ROWS,
+  QWP_QUERY_FLAG_ERROR_POSITION,
+  QWP_QUERY_FLAG_MAX_ROWS,
+  QWP_QUERY_FLAG_RESET_DICTIONARY,
+  QWP_QUERY_FLAG_SKIP_ROWS,
+  QWP_QUERY_FLAG_STATS,
   QWP_STATUS,
   QwpByteReader,
   QwpByteWriter,
@@ -40,6 +47,7 @@ import {
   QwpTableBuffer,
   type QwpColumnBuffer,
   type QwpColumnType,
+  type QwpQueryRequest,
   qwpGorillaSize,
   qwpVarintSize,
   readQwpVarint,
@@ -59,6 +67,8 @@ import {
   utf8Length,
 } from "../../packages/client-core/src/_qwp/_core/bytes";
 import { measureQwpIngressFrame } from "../../packages/client-core/src/_qwp/_core/ingress";
+// Internal: the reconnecting transport's view of a frame, not exported.
+import { decodeQwpEgressEnvelope } from "../../packages/client-core/src/_qwp/_core/egress";
 import { readQwpVarintSmall } from "../../packages/client-core/src/_qwp/_core/varint-number";
 
 function dataView(bytes: Uint8Array): DataView {
@@ -1346,6 +1356,440 @@ describe("QWP egress codec", () => {
         encodeQwpFrame(Uint8Array.of(QWP_EGRESS_MESSAGE.QUERY_ERROR)),
       ),
     ).toThrow(/truncated/i);
+  });
+
+  describe("query details", () => {
+    const baseline = encodeQwpQueryRequest({ requestId: 9n, sql: "select 42" });
+    const windowed = (
+      queryFlags: number | bigint,
+      window: Pick<QwpQueryRequest, "skipRows" | "maxRows">,
+    ): Uint8Array =>
+      encodeQwpQueryRequest({
+        requestId: 9n,
+        sql: "select 42",
+        queryFlags,
+        ...window,
+      });
+    /** The bytes a request carries after its bind section. */
+    const afterBinds = (request: Uint8Array): number[] => {
+      expect(request.subarray(0, baseline.length)).toEqual(baseline);
+      return Array.from(request.subarray(baseline.length));
+    };
+
+    function terminal(
+      kind: number,
+      body: (writer: QwpByteWriter) => void,
+    ): Uint8Array {
+      const payload = new QwpByteWriter();
+      payload.writeUint8(kind).writeBigUint64(11n);
+      body(payload);
+      return encodeQwpFrame(payload.toUint8Array());
+    }
+
+    function resultEnd(trailer?: (writer: QwpByteWriter) => void) {
+      return terminal(QWP_EGRESS_MESSAGE.RESULT_END, (writer) => {
+        writeQwpVarint(writer, 4); // final sequence
+        writeQwpVarint(writer, 123); // total rows
+        trailer?.(writer);
+      });
+    }
+
+    function execDone(trailer?: (writer: QwpByteWriter) => void) {
+      return terminal(QWP_EGRESS_MESSAGE.EXEC_DONE, (writer) => {
+        writer.writeUint8(2); // operation type
+        writeQwpVarint(writer, 7); // rows affected
+        trailer?.(writer);
+      });
+    }
+
+    function queryError(trailer?: (writer: QwpByteWriter) => void) {
+      return terminal(QWP_EGRESS_MESSAGE.QUERY_ERROR, (writer) => {
+        writer.writeUint8(QWP_STATUS.PARSE_ERROR);
+        writeU16String(writer, "table does not exist [table=t]");
+        trailer?.(writer);
+      });
+    }
+
+    function statsBlock(
+      nanos: readonly (number | bigint)[],
+      statsFlags: number,
+    ): (writer: QwpByteWriter) => void {
+      return (writer) => {
+        for (const value of nanos) writeQwpVarint(writer, value);
+        writer.writeUint8(statsFlags);
+      };
+    }
+
+    it("encodes the row window after the flags in ascending bit order", () => {
+      // 300 is a two-byte varint, so a reader that took only its first byte
+      // would read the next field from the middle of this one.
+      expect(
+        afterBinds(
+          windowed(
+            QWP_QUERY_FLAG_SKIP_ROWS |
+              QWP_QUERY_FLAG_MAX_ROWS |
+              QWP_QUERY_FLAG_COUNT_ROWS,
+            { skipRows: 300, maxRows: 0 },
+          ),
+        ),
+      ).toEqual([0x70, 0xac, 0x02, 0x00]);
+      expect(
+        afterBinds(windowed(QWP_QUERY_FLAG_SKIP_ROWS, { skipRows: 7 })),
+      ).toEqual([QWP_QUERY_FLAG_SKIP_ROWS, 7]);
+      expect(
+        afterBinds(windowed(QWP_QUERY_FLAG_MAX_ROWS, { maxRows: 5 })),
+      ).toEqual([QWP_QUERY_FLAG_MAX_ROWS, 5]);
+      // The largest window QuestDB accepts, spelled as a bigint and with the
+      // flags as one too.
+      expect(
+        afterBinds(
+          windowed(BigInt(QWP_QUERY_FLAG_MAX_ROWS), {
+            maxRows: (1n << 63n) - 1n,
+          }),
+        ),
+      ).toEqual([QWP_QUERY_FLAG_MAX_ROWS, ...new Array(8).fill(0xff), 0x7f]);
+      // Both spellings of a value encode one frame.
+      expect(
+        windowed(QWP_QUERY_FLAG_SKIP_ROWS | QWP_QUERY_FLAG_MAX_ROWS, {
+          skipRows: 12n,
+          maxRows: 34n,
+        }),
+      ).toEqual(
+        windowed(QWP_QUERY_FLAG_SKIP_ROWS | QWP_QUERY_FLAG_MAX_ROWS, {
+          skipRows: 12,
+          maxRows: 34,
+        }),
+      );
+      // The report flags carry no field of their own.
+      expect(
+        afterBinds(
+          windowed(
+            QWP_QUERY_FLAG_ERROR_POSITION |
+              QWP_QUERY_FLAG_STATS |
+              QWP_QUERY_FLAG_COUNT_ROWS,
+            {},
+          ),
+        ),
+      ).toEqual([0x1c]);
+    });
+
+    it("requires a row-window value exactly when its flag is set", () => {
+      // A flag without its value made the server read the end of the frame as
+      // the value; a value without its flag would silently not be sent.
+      expect(() => windowed(QWP_QUERY_FLAG_SKIP_ROWS, {})).toThrow(
+        "QWP_QUERY_FLAG_SKIP_ROWS in queryFlags requires skipRows",
+      );
+      expect(() =>
+        windowed(QWP_QUERY_FLAG_SKIP_ROWS | QWP_QUERY_FLAG_MAX_ROWS, {
+          skipRows: 1,
+        }),
+      ).toThrow("QWP_QUERY_FLAG_MAX_ROWS in queryFlags requires maxRows");
+      expect(() =>
+        windowed(QWP_QUERY_FLAG_MAX_ROWS, { skipRows: 1, maxRows: 1 }),
+      ).toThrow("skipRows requires QWP_QUERY_FLAG_SKIP_ROWS in queryFlags");
+      expect(() => windowed(0, { maxRows: 0 })).toThrow(
+        "maxRows requires QWP_QUERY_FLAG_MAX_ROWS in queryFlags",
+      );
+      // Null is unset, as it is for the other optional fields.
+      const unset = { skipRows: null, maxRows: null } as unknown as Pick<
+        QwpQueryRequest,
+        "skipRows" | "maxRows"
+      >;
+      expect(windowed(0, unset)).toEqual(baseline);
+    });
+
+    it("range-checks row-window values and query flags", () => {
+      for (const value of [-1, 1.5, Number.NaN, 2 ** 53]) {
+        expect(() =>
+          windowed(QWP_QUERY_FLAG_SKIP_ROWS, { skipRows: value }),
+        ).toThrow(
+          new RangeError("skipRows must be a non-negative safe integer"),
+        );
+      }
+      // QuestDB reads both into a signed long and rejects 2^63 and above.
+      for (const value of [-1n, 1n << 63n, (1n << 64n) - 1n]) {
+        expect(() =>
+          windowed(QWP_QUERY_FLAG_MAX_ROWS, { maxRows: value }),
+        ).toThrow(
+          new RangeError(
+            "maxRows must be a bigint between 0 and 9223372036854775807",
+          ),
+        );
+      }
+      for (const queryFlags of [-1, 0.5, 2 ** 53]) {
+        expect(() => windowed(queryFlags, {})).toThrow(
+          new RangeError("queryFlags must be a non-negative safe integer"),
+        );
+      }
+      for (const queryFlags of [-1n, 1n << 64n]) {
+        expect(() => windowed(queryFlags, {})).toThrow(
+          new RangeError("queryFlags must fit in uint64"),
+        );
+      }
+      // Values of neither numeric type are rejected, not coerced.
+      expect(() =>
+        windowed(QWP_QUERY_FLAG_SKIP_ROWS, { skipRows: "5" as never }),
+      ).toThrow(RangeError);
+      expect(() => windowed("16" as never, {})).toThrow(RangeError);
+      // The request ID keeps its own uint64 bound.
+      for (const requestId of [-1n, 1n << 64n]) {
+        expect(() => encodeQwpCancel(requestId)).toThrow(
+          new RangeError("requestId must fit in uint64"),
+        );
+      }
+    });
+
+    it("decodes the RESULT_END row count and statistics in their order", () => {
+      expect(
+        decodeQwpEgressMessageWithQueryFlags(
+          resultEnd((writer) => writeQwpVarint(writer, 1_000_000)),
+          QWP_QUERY_FLAG_COUNT_ROWS,
+        ),
+      ).toEqual(
+        expect.objectContaining({
+          kind: "result-end",
+          totalRows: 123n,
+          rowCount: 1_000_000n,
+        }),
+      );
+
+      const both = decodeQwpEgressMessageWithQueryFlags(
+        resultEnd((writer) => {
+          writeQwpVarint(writer, 9); // the row count comes first
+          statsBlock([1_500, 2_000_000_000, 250, 300_000_000], 0x01)(writer);
+        }),
+        // Flag order on the wire does not depend on the bits that are set
+        // besides them, nor on their spelling.
+        BigInt(
+          QWP_QUERY_FLAG_STATS |
+            QWP_QUERY_FLAG_COUNT_ROWS |
+            QWP_QUERY_FLAG_RESET_DICTIONARY |
+            QWP_QUERY_FLAG_MAX_ROWS,
+        ),
+      );
+      expect(both).toMatchObject({
+        kind: "result-end",
+        finalSequence: 4n,
+        totalRows: 123n,
+        rowCount: 9n,
+        stats: {
+          compileNanos: 1_500n,
+          executeNanos: 2_000_000_000n,
+          countNanos: 250n,
+          clientWaitNanos: 300_000_000n,
+          jitCompiled: true,
+        },
+      });
+
+      // The durations are unsigned varints, read in full.
+      const extreme = decodeQwpEgressMessageWithQueryFlags(
+        resultEnd(
+          statsBlock([0, (1n << 63n) - 1n, 1n << 63n, 2n ** 64n - 1n], 0),
+        ),
+        QWP_QUERY_FLAG_STATS,
+      );
+      expect(extreme).toMatchObject({
+        stats: {
+          compileNanos: 0n,
+          executeNanos: (1n << 63n) - 1n,
+          countNanos: 1n << 63n,
+          clientWaitNanos: 2n ** 64n - 1n,
+          jitCompiled: false,
+        },
+      });
+      expect(extreme).not.toHaveProperty("rowCount");
+    });
+
+    it("reads only the JIT bit of the statistics flags", () => {
+      for (const [statsFlags, jitCompiled] of [
+        [0x00, false],
+        [0x01, true],
+        [0xfe, false],
+        [0xff, true],
+      ] as const) {
+        const done = decodeQwpEgressMessageWithQueryFlags(
+          execDone(statsBlock([1, 2, 3, 4], statsFlags)),
+          QWP_QUERY_FLAG_STATS,
+        );
+        expect(done).toMatchObject({
+          kind: "exec-done",
+          operationType: 2,
+          rowsAffected: 7n,
+          stats: {
+            compileNanos: 1n,
+            executeNanos: 2n,
+            countNanos: 3n,
+            clientWaitNanos: 4n,
+            jitCompiled,
+          },
+        });
+      }
+      // EXEC_DONE carries no row count: statements produce no rows.
+      expect(
+        decodeQwpEgressMessageWithQueryFlags(
+          execDone(),
+          QWP_QUERY_FLAG_COUNT_ROWS | QWP_QUERY_FLAG_ERROR_POSITION,
+        ),
+      ).not.toHaveProperty("rowCount");
+    });
+
+    it("decodes the QUERY_ERROR position, which a baseline frame omits", () => {
+      const flags = QWP_QUERY_FLAG_ERROR_POSITION;
+      expect(
+        decodeQwpEgressMessageWithQueryFlags(
+          queryError((writer) => writer.writeInt32(14)),
+          flags,
+        ),
+      ).toMatchObject({
+        kind: "query-error",
+        status: QWP_STATUS.PARSE_ERROR,
+        message: "table does not exist [table=t]",
+        position: 14,
+      });
+      // Zero is the start of the SQL text, not the absence of a position:
+      // QuestDB reports it for an error that names no position of its own.
+      expect(
+        decodeQwpEgressMessageWithQueryFlags(
+          queryError((writer) => writer.writeInt32(0)),
+          flags,
+        ),
+      ).toHaveProperty("position", 0);
+      // -1 marks an error that does not point into the SQL text, and no
+      // other negative value points anywhere either.
+      for (const position of [-1, -2_147_483_648]) {
+        const nowhere = decodeQwpEgressMessageWithQueryFlags(
+          queryError((writer) => writer.writeInt32(position)),
+          flags,
+        );
+        expect(nowhere).toMatchObject({ kind: "query-error" });
+        expect(nowhere).not.toHaveProperty("position");
+      }
+      // A request the server rejects before reading its flags gets the
+      // baseline frame even though it asked for the position.
+      const baselineFrame = decodeQwpEgressMessageWithQueryFlags(
+        queryError(),
+        flags,
+      );
+      expect(baselineFrame).toMatchObject({
+        message: "table does not exist [table=t]",
+      });
+      expect(baselineFrame).not.toHaveProperty("position");
+    });
+
+    it("rejects trailers the request did not ask for, or cut short", () => {
+      const cases: [Uint8Array, number, RegExp][] = [
+        // trailers nobody asked for
+        [
+          resultEnd((writer) => writeQwpVarint(writer, 9)),
+          0,
+          /RESULT_END has 1 unexpected trailing byte/,
+        ],
+        [
+          resultEnd((writer) => writeQwpVarint(writer, 9)),
+          QWP_QUERY_FLAG_RESET_DICTIONARY |
+            QWP_QUERY_FLAG_SKIP_ROWS |
+            QWP_QUERY_FLAG_MAX_ROWS |
+            QWP_QUERY_FLAG_ERROR_POSITION,
+          /RESULT_END has 1 unexpected trailing byte/,
+        ],
+        [
+          execDone(statsBlock([1, 2, 3, 4], 0)),
+          QWP_QUERY_FLAG_COUNT_ROWS,
+          /EXEC_DONE has 5 unexpected trailing byte/,
+        ],
+        [
+          queryError((writer) => writer.writeInt32(14)),
+          QWP_QUERY_FLAG_STATS,
+          /QUERY_ERROR has 4 unexpected trailing byte/,
+        ],
+        // trailers that end too soon, or run on
+        [resultEnd(), QWP_QUERY_FLAG_COUNT_ROWS, /truncated/],
+        [
+          resultEnd(statsBlock([1, 2, 3, 4], 0)),
+          QWP_QUERY_FLAG_COUNT_ROWS | QWP_QUERY_FLAG_STATS,
+          /truncated QWP payload while reading query statistics flags/,
+        ],
+        [execDone(), QWP_QUERY_FLAG_STATS, /truncated/],
+        [
+          queryError((writer) => writer.writeUint16(14)),
+          QWP_QUERY_FLAG_ERROR_POSITION,
+          /truncated QWP payload while reading query error position/,
+        ],
+        [
+          queryError((writer) => writer.writeInt32(14).writeUint8(0)),
+          QWP_QUERY_FLAG_ERROR_POSITION,
+          /QUERY_ERROR has 1 unexpected trailing byte/,
+        ],
+      ];
+      for (const [frame, queryFlags, error] of cases) {
+        expect(() =>
+          decodeQwpEgressMessageWithQueryFlags(frame, queryFlags),
+        ).toThrow(QwpProtocolError);
+        expect(() =>
+          decodeQwpEgressMessageWithQueryFlags(frame, queryFlags),
+        ).toThrow(error);
+      }
+      expect(() =>
+        decodeQwpEgressMessageWithQueryFlags(resultEnd(), -1),
+      ).toThrow(RangeError);
+    });
+
+    it("keeps decodeQwpEgressMessage safe to pass straight to map", () => {
+      // map() and Array.from() hand their callback the index as a second
+      // argument. Read as query flags, indexes 8 to 15 set STATS (0x08), and
+      // each of those valid frames failed to decode as truncated.
+      const frames = Array.from({ length: 16 }, (_, index) =>
+        index % 2 === 0 ? resultEnd() : execDone(),
+      );
+      const decoded = frames.map((_, index) =>
+        expect.objectContaining({
+          kind: index % 2 === 0 ? "result-end" : "exec-done",
+          requestId: 11n,
+        }),
+      );
+      expect(frames.map(decodeQwpEgressMessage)).toEqual(decoded);
+      expect(Array.from(frames, decodeQwpEgressMessage)).toEqual(decoded);
+      // It still reads no trailers, so a frame that carries one is rejected.
+      expect(() =>
+        decodeQwpEgressMessage(
+          resultEnd((writer) => writeQwpVarint(writer, 9)),
+        ),
+      ).toThrow(/RESULT_END has 1 unexpected trailing byte/);
+    });
+
+    it("leaves the trailers to the session in the transport's envelope view", () => {
+      // The reconnecting transport only needs each message's kind and request
+      // ID; it cannot know the flags the trailers depend on.
+      for (const frame of [
+        resultEnd((writer) => {
+          writeQwpVarint(writer, 9);
+          statsBlock([1, 2, 3, 4], 1)(writer);
+        }),
+        execDone(statsBlock([1, 2, 3, 4], 1)),
+        queryError((writer) => writer.writeInt32(14)),
+      ]) {
+        const envelope = decodeQwpEgressEnvelope(frame);
+        expect(envelope).toMatchObject({ requestId: 11n });
+        expect(envelope).not.toHaveProperty("rowCount");
+        expect(envelope).not.toHaveProperty("stats");
+        expect(envelope).not.toHaveProperty("position");
+      }
+      // Everything before the trailers is validated as before.
+      expect(() =>
+        decodeQwpEgressEnvelope(
+          terminal(QWP_EGRESS_MESSAGE.RESULT_END, (writer) =>
+            writeQwpVarint(writer, 4),
+          ),
+        ),
+      ).toThrow(/truncated/);
+      expect(() =>
+        decodeQwpEgressEnvelope(
+          encodeQwpFrame(
+            Uint8Array.of(QWP_EGRESS_MESSAGE.CACHE_RESET, 1, /* extra */ 0),
+          ),
+        ),
+      ).toThrow(/CACHE_RESET has 1 unexpected trailing byte/);
+    });
   });
 });
 

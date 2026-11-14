@@ -7,6 +7,7 @@ import {
   decodeQwpEgressMessage,
   encodeQwpFrame,
   encodeQwpGorilla,
+  encodeQwpQueryRequest,
   QWP_COLUMN_TYPE,
   QWP_EGRESS_CAPABILITY,
   QWP_EGRESS_MESSAGE,
@@ -19,7 +20,12 @@ import {
   QWP_MAX_CELLS_PER_BATCH,
   QWP_MAX_COLUMNS_PER_TABLE,
   QWP_MAX_ZSTD_DECOMPRESSED_SIZE,
+  QWP_QUERY_FLAG_COUNT_ROWS,
+  QWP_QUERY_FLAG_ERROR_POSITION,
+  QWP_QUERY_FLAG_MAX_ROWS,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
+  QWP_QUERY_FLAG_SKIP_ROWS,
+  QWP_QUERY_FLAG_STATS,
   QWP_RESET_MASK_DICTIONARY,
   QWP_STATUS,
   QwpByteReader,
@@ -30,6 +36,7 @@ import {
   QwpEgressQueryCancelTimeoutError,
   QwpEgressQueryError,
   QwpEgressQueryTimeoutError,
+  QwpEgressRowWindowUnsupportedError,
   QwpEgressSession,
   QwpEgressSessionClosedError,
   QwpProtocolError,
@@ -39,6 +46,10 @@ import {
   QwpResultRowView,
   readQwpVarint,
   writeQwpVarint,
+} from "../../packages/client-core/src/qwp";
+import type {
+  QwpEgressQueryOptions,
+  QwpEgressViewCallbackControl,
 } from "../../packages/client-core/src/qwp";
 // Internal: neither package root exports these.
 import {
@@ -187,6 +198,9 @@ function emptyResultBatch(
   );
 }
 
+/** Writes the trailers a query-details flag adds to a terminal response. */
+type TerminalTrailer = (writer: QwpByteWriter) => void;
+
 function resultEnd(
   requestId = 0n,
   totalRows = 3n,
@@ -194,20 +208,45 @@ function resultEnd(
   // a one-batch response ends at zero. QuestDB numbers batches from zero and
   // sends that same number in RESULT_END.
   finalSequence = 0n,
+  trailer?: TerminalTrailer,
 ): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.RESULT_END).writeBigUint64(requestId);
   writeQwpVarint(payload, finalSequence);
   writeQwpVarint(payload, totalRows);
+  trailer?.(payload);
   return encodeQwpFrame(payload.toUint8Array());
 }
 
-function execDone(requestId: bigint, rowsAffected = 1n): Uint8Array {
+function execDone(
+  requestId: bigint,
+  rowsAffected = 1n,
+  trailer?: TerminalTrailer,
+): Uint8Array {
   const payload = new QwpByteWriter();
   payload.writeUint8(QWP_EGRESS_MESSAGE.EXEC_DONE).writeBigUint64(requestId);
   payload.writeUint8(2); // operation type
   writeQwpVarint(payload, rowsAffected);
+  trailer?.(payload);
   return encodeQwpFrame(payload.toUint8Array());
+}
+
+/** The statistics block QWP_QUERY_FLAG_STATS appends. */
+function queryStats(
+  [compile, execute, count, clientWait]: readonly [
+    number,
+    number,
+    number,
+    number,
+  ],
+  jitCompiled: boolean,
+): TerminalTrailer {
+  return (writer) => {
+    for (const nanos of [compile, execute, count, clientWait]) {
+      writeQwpVarint(writer, nanos);
+    }
+    writer.writeUint8(jitCompiled ? 0x01 : 0x00);
+  };
 }
 
 function cacheReset(mask: number): Uint8Array {
@@ -733,6 +772,8 @@ function queryError(
   requestId: bigint,
   message: string,
   status: number = QWP_STATUS.PARSE_ERROR,
+  /** The position trailer of QWP_QUERY_FLAG_ERROR_POSITION, when sent. */
+  position?: number,
 ): Uint8Array {
   const bytes = new TextEncoder().encode(message);
   const payload = new QwpByteWriter();
@@ -742,6 +783,7 @@ function queryError(
     .writeUint8(status)
     .writeUint16(bytes.length)
     .writeBytes(bytes);
+  if (position !== undefined) payload.writeInt32(position);
   return encodeQwpFrame(payload.toUint8Array());
 }
 
@@ -3731,6 +3773,243 @@ describe("QwpEgressSession", () => {
     }
   });
 
+  it.each([false, undefined] as const)(
+    "settles cancel() and grantCredit() on a query that has ended (reconnect: %s)",
+    async (reconnect) => {
+      const connection = new FakeConnection();
+      connection.receive(serverInfo());
+      const session = await connectQwpEgressSession(async () => connection, {
+        reconnect,
+      });
+      try {
+        const query = await session.query("select * from x");
+        connection.receive(firstResultBatch(query.requestId));
+        connection.receive(resultEnd(query.requestId));
+        for await (const _batch of query) {
+          // Consume the whole result.
+        }
+        await query.completion;
+        expect(query.isDone()).toBe(true);
+        const sent = connection.sent.length;
+
+        // The session has handled RESULT_END, so the query has left it. Both
+        // calls used to throw QwpProtocolError synchronously here, before any
+        // promise existed, so a .catch() on their result never ran.
+        await expect(query.cancel()).resolves.toBeUndefined();
+        await expect(query.grantCredit(1)).resolves.toBeUndefined();
+
+        // An abort that arrives after completion is the usual way to get
+        // here. A listener that throws surfaces as an uncaught exception,
+        // which ends a Node process.
+        const controller = new AbortController();
+        const thrown: unknown[] = [];
+        const settling: Promise<void>[] = [];
+        controller.signal.addEventListener("abort", () => {
+          try {
+            settling.push(query.cancel(), query.grantCredit(1));
+          } catch (error) {
+            thrown.push(error);
+          }
+        });
+        controller.abort();
+        expect(thrown).toEqual([]);
+        await expect(Promise.all(settling)).resolves.toEqual([
+          undefined,
+          undefined,
+        ]);
+
+        // The session's own control calls treat a request that has left it
+        // the same way, whether the session is idle or has started the next
+        // query: nothing is left to cancel, abandon, credit or reject, and the
+        // query running now is not touched either.
+        const lateCalls = [
+          () => session.cancel(query.requestId),
+          () => session.grantCredit(query.requestId, 1),
+          () => session.abandon(query.requestId),
+          () => session.rejectView(query.requestId, new Error("late")),
+        ];
+        for (const call of lateCalls) {
+          await expect(call()).resolves.toBeUndefined();
+        }
+        const next = await session.query("select 2");
+        for (const call of lateCalls) {
+          await expect(call()).resolves.toBeUndefined();
+        }
+        expect(next.isDone()).toBe(false);
+
+        // An invalid grant is still reported, as a rejection.
+        await expect(query.grantCredit(-1)).rejects.toBeInstanceOf(RangeError);
+        await expect(
+          session.grantCredit(query.requestId, -1),
+        ).rejects.toBeInstanceOf(RangeError);
+
+        // Nothing was queued behind the session's send tail either: the next
+        // query's request is the only frame that follows.
+        connection.receive(resultEnd(next.requestId, 0n, 0n));
+        await next.completion;
+        expect(sentKinds(connection).slice(sent)).toEqual([
+          QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        ]);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  it("settles the queryViews() handles' cancel() and grantCredit() once the query has ended", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    let kept: QwpEgressViewCallbackControl | undefined;
+    const query = await session.queryViews(
+      "select * from x",
+      (_batch, control) => {
+        kept = control;
+      },
+    );
+    connection.receive(firstResultBatch(query.requestId));
+    connection.receive(resultEnd(query.requestId));
+    await query.completion;
+    expect(query.isDone()).toBe(true);
+    expect(kept).toBeDefined();
+    const sent = connection.sent.length;
+
+    // The handle queryViews() returned, and the control a callback kept past
+    // its own return, as a timer or an abort listener would.
+    const controls = [query, kept];
+    for (const control of controls) {
+      await expect(control.cancel()).resolves.toBeUndefined();
+      await expect(control.grantCredit(1)).resolves.toBeUndefined();
+    }
+    expect(connection.sent).toHaveLength(sent);
+
+    // Neither asks the session, so they settle the same way once it has
+    // closed.
+    await session.close();
+    for (const control of controls) {
+      await expect(control.cancel()).resolves.toBeUndefined();
+      await expect(control.grantCredit(1)).resolves.toBeUndefined();
+    }
+  });
+
+  it("sends no credit for a query whose consumer has already retired", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+      autoCredit: false,
+    });
+    connection.receive(firstResultBatch(query.requestId));
+    for await (const _batch of query) break;
+    // Leaving the loop retired the query: CANCEL, then the credit it held.
+    await vi.waitFor(() =>
+      expect(sentKinds(connection)).toEqual([
+        QWP_EGRESS_MESSAGE.QUERY_REQUEST,
+        QWP_EGRESS_MESSAGE.CANCEL,
+        QWP_EGRESS_MESSAGE.CREDIT,
+      ]),
+    );
+    expect(query.isDone()).toBe(true);
+
+    // It is still draining, and the session credits whatever arrives
+    // meanwhile on its own. The application owes it nothing more.
+    await expect(query.grantCredit(64)).resolves.toBeUndefined();
+    await expect(query.cancel()).resolves.toBeUndefined();
+    expect(connection.sent).toHaveLength(3);
+
+    connection.receive(
+      queryError(query.requestId, "cancelled by client", QWP_STATUS.CANCELLED),
+    );
+    await expect(query.completion).rejects.toBeInstanceOf(
+      QwpEgressQueryAbandonedError,
+    );
+    const following = await session.query("select 2");
+    connection.receive(resultEnd(following.requestId, 0n, 0n));
+    await following.completion;
+    expect(connection.sent).toHaveLength(4);
+    await session.close();
+  });
+
+  it("settles a query's control calls once its session has closed or failed", async () => {
+    const open = async () => {
+      const connection = new FakeConnection();
+      const session = createQwpEgressSession(connection);
+      connection.receive(serverInfo());
+      const query = await session.query("select * from x");
+      return { connection, session, query };
+    };
+    const closed = await open();
+    await closed.session.close();
+    const failed = await open();
+    // A second SERVER_INFO is a protocol fault, which fails the session.
+    failed.connection.receive(serverInfo());
+
+    for (const [{ session, query }, reason] of [
+      [closed, QwpEgressSessionClosedError],
+      [failed, QwpProtocolError],
+    ] as const) {
+      await expect(query.completion).rejects.toBeInstanceOf(reason);
+      // The query ended with its session and reports that through its
+      // completion. Nothing is left to cancel or credit.
+      await expect(query.cancel()).resolves.toBeUndefined();
+      await expect(query.grantCredit(1)).resolves.toBeUndefined();
+      // The session's own control calls report its state, but through the
+      // promise they return, never by throwing past a .catch() on it.
+      for (const call of [
+        () => session.cancel(query.requestId),
+        () => session.grantCredit(query.requestId, 1),
+        () => session.abandon(query.requestId),
+        () => session.rejectView(query.requestId, new Error("late")),
+      ]) {
+        let settled: Promise<void> | undefined;
+        expect(() => {
+          settled = call();
+        }).not.toThrow();
+        await expect(settled).rejects.toBeInstanceOf(reason);
+      }
+    }
+    await failed.session.close();
+  });
+
+  it("rejects an invalid grantCredit() on a running query without sending it", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo());
+    const query = await session.query("select * from x", {
+      initialCredit: 64,
+      autoCredit: false,
+    });
+    const sent = connection.sent.length;
+
+    // The amount is checked first, whatever the query's state, so a running
+    // query reports a bad one exactly as an ended query does: as a RangeError
+    // rejection, never a synchronous throw. A numeric string is refused as
+    // well, not coerced into a CREDIT frame.
+    for (const amount of [
+      -1,
+      1.5,
+      Number.NaN,
+      2 ** 53,
+      2n ** 64n,
+      "64",
+      undefined,
+    ]) {
+      let granted: Promise<void> | undefined;
+      expect(() => {
+        granted = query.grantCredit(amount as never);
+      }).not.toThrow();
+      await expect(granted).rejects.toBeInstanceOf(RangeError);
+    }
+    expect(connection.sent).toHaveLength(sent);
+
+    // The query keeps running, and a valid grant still goes out.
+    expect(query.isDone()).toBe(false);
+    await query.grantCredit(64);
+    expect(creditsSent(connection)).toEqual([64n]);
+    await session.close();
+  });
+
   it("reports cancellation when only queued rows are withheld before RESULT_END", async () => {
     vi.useFakeTimers();
     try {
@@ -4208,4 +4487,420 @@ describe("QwpEgressSession", () => {
     await expect(query.completion).rejects.toBeInstanceOf(QwpEgressQueryError);
     await session.close();
   });
+});
+
+describe("QwpEgressSession query details", () => {
+  const DETAILS =
+    QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QWP_EGRESS_CAPABILITY.QUERY_DETAILS;
+  // Per-query timeouts own capability 0x08 and flag 0x02 in released clients
+  // (c-questdb-client 7.2.0 and the Python client built on it), which send the
+  // flag, followed by timeout_ms, to a server that advertises the capability.
+  const QUERY_TIMEOUT_CAPABILITY = 0x08;
+  const QUERY_TIMEOUT_FLAG = 0x02;
+  const ALL_REPORTS: QwpEgressQueryOptions = {
+    errorPosition: true,
+    stats: true,
+    countRows: true,
+  };
+
+  async function openSession(
+    capabilities: number = DETAILS,
+  ): Promise<{ connection: FakeConnection; session: QwpEgressSession }> {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    connection.receive(serverInfo(capabilities));
+    await session.ready;
+    return { connection, session };
+  }
+
+  /** The bytes a QUERY_REQUEST carries after its bind section. */
+  function requestTail(
+    request: Uint8Array,
+    requestId: bigint,
+    sql: string,
+  ): number[] {
+    const baseline = encodeQwpQueryRequest({ requestId, sql });
+    expect(request.subarray(0, baseline.length)).toEqual(baseline);
+    return Array.from(request.subarray(baseline.length));
+  }
+
+  it("asks for the query details only where SERVER_INFO advertises them", async () => {
+    const capture = async (
+      capabilities: number,
+      options: QwpEgressQueryOptions = {},
+    ): Promise<number[]> => {
+      const { connection, session } = await openSession(capabilities);
+      const query = await session.query("select 1", options);
+      await session.close();
+      await query.completion.catch(() => undefined);
+      return requestTail(connection.sent[0], query.requestId, "select 1");
+    };
+
+    expect(await capture(DETAILS, ALL_REPORTS)).toEqual([
+      QWP_QUERY_FLAG_ERROR_POSITION |
+        QWP_QUERY_FLAG_STATS |
+        QWP_QUERY_FLAG_COUNT_ROWS,
+    ]);
+    // The window values follow the flags, skip_rows first; 300 takes two
+    // varint bytes.
+    // Every flag bit but 0x02, which per-query timeouts own.
+    expect(
+      await capture(DETAILS, {
+        ...ALL_REPORTS,
+        resetDictionary: true,
+        skipRows: 300,
+        maxRows: 0n,
+      }),
+    ).toEqual([0x7d, 0xac, 0x02, 0x00]);
+    // Skipping no rows is no row window.
+    expect(await capture(DETAILS, { skipRows: 0, maxRows: 5 })).toEqual([
+      QWP_QUERY_FLAG_MAX_ROWS,
+      5,
+    ]);
+    expect(await capture(DETAILS, { skipRows: 0n })).toEqual([]);
+    expect(await capture(DETAILS)).toEqual([]);
+    // A server without the capability is sent the request it understands,
+    // as one without QUERY_FLAGS is for resetDictionary.
+    expect(
+      await capture(QWP_EGRESS_CAPABILITY.QUERY_FLAGS, ALL_REPORTS),
+    ).toEqual([]);
+    expect(
+      await capture(QWP_EGRESS_CAPABILITY.QUERY_FLAGS, {
+        ...ALL_REPORTS,
+        resetDictionary: true,
+      }),
+    ).toEqual([QWP_QUERY_FLAG_RESET_DICTIONARY]);
+    // So is a server with per-query timeouts but without the query details.
+    expect(
+      await capture(
+        QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QUERY_TIMEOUT_CAPABILITY,
+        { ...ALL_REPORTS, resetDictionary: true },
+      ),
+    ).toEqual([QWP_QUERY_FLAG_RESET_DICTIONARY]);
+    expect(await capture(0, { ...ALL_REPORTS, skipRows: 0 })).toEqual([]);
+  });
+
+  it("leaves the per-query timeout bits of released clients free", () => {
+    const capabilities = [
+      ...Object.values(QWP_EGRESS_CAPABILITY),
+      QUERY_TIMEOUT_CAPABILITY,
+    ];
+    const flags = [
+      QWP_QUERY_FLAG_RESET_DICTIONARY,
+      QUERY_TIMEOUT_FLAG,
+      QWP_QUERY_FLAG_ERROR_POSITION,
+      QWP_QUERY_FLAG_STATS,
+      QWP_QUERY_FLAG_COUNT_ROWS,
+      QWP_QUERY_FLAG_SKIP_ROWS,
+      QWP_QUERY_FLAG_MAX_ROWS,
+    ];
+    for (const bits of [capabilities, flags]) {
+      let union = 0;
+      for (const bit of bits) {
+        // a single bit, taken once
+        expect(bit).toBeGreaterThan(0);
+        expect(bit & (bit - 1)).toBe(0);
+        expect(union & bit).toBe(0);
+        union |= bit;
+      }
+    }
+  });
+
+  it("reports the row count and statistics on a result's completion", async () => {
+    const { connection, session } = await openSession();
+    const query = await session.query("select * from x", {
+      countRows: true,
+      stats: true,
+      skipRows: 10,
+      maxRows: 3,
+    });
+    expect(
+      requestTail(connection.sent[0], query.requestId, "select * from x"),
+    ).toEqual([
+      QWP_QUERY_FLAG_STATS |
+        QWP_QUERY_FLAG_COUNT_ROWS |
+        QWP_QUERY_FLAG_SKIP_ROWS |
+        QWP_QUERY_FLAG_MAX_ROWS,
+      10,
+      3,
+    ]);
+    connection.receive(firstResultBatch(query.requestId));
+    connection.receive(
+      resultEnd(query.requestId, 3n, 0n, (writer) => {
+        writeQwpVarint(writer, 1_000); // rows in the whole result set
+        queryStats([1_500, 9_000_000, 250, 42], true)(writer);
+      }),
+    );
+
+    const rows: number[] = [];
+    for await (const batch of query) rows.push(batch.rowCount);
+    expect(rows).toEqual([3]);
+    // totalRows still counts the streamed rows, checked against the batches.
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+      totalRows: 3n,
+      rowCount: 1_000n,
+      stats: {
+        compileNanos: 1_500n,
+        executeNanos: 9_000_000n,
+        countNanos: 250n,
+        clientWaitNanos: 42n,
+        jitCompiled: true,
+      },
+    });
+
+    // The next query asks for nothing, so it is sent without flags and its
+    // baseline RESULT_END is read without trailers.
+    const plain = await session.query("select * from x");
+    expect(
+      requestTail(connection.sent[1], plain.requestId, "select * from x"),
+    ).toEqual([]);
+    // The connection's dictionary already holds the first query's two symbols.
+    connection.receive(symbolDeltaBatch(plain.requestId, 0, 2, [], 1));
+    connection.receive(resultEnd(plain.requestId, 1n, 0n));
+    const symbols: unknown[] = [];
+    for await (const batch of plain) symbols.push(batch.get(0, 0));
+    expect(symbols).toEqual(["beta"]);
+    const plainDone = await plain.completion;
+    expect(plainDone).toMatchObject({ kind: "result-end", totalRows: 1n });
+    expect(plainDone).not.toHaveProperty("rowCount");
+    expect(plainDone).not.toHaveProperty("stats");
+    await session.close();
+  });
+
+  it("reports statistics on result views and on a statement's completion", async () => {
+    const { connection, session } = await openSession();
+    const views = await session.queryViews("select * from x", () => undefined, {
+      stats: true,
+    });
+    connection.receive(firstResultBatch(views.requestId));
+    connection.receive(
+      resultEnd(views.requestId, 3n, 0n, queryStats([1, 2, 0, 0], false)),
+    );
+    const viewsDone = await views.completion;
+    expect(viewsDone).toMatchObject({
+      stats: { compileNanos: 1n, executeNanos: 2n, jitCompiled: false },
+    });
+    expect(viewsDone).not.toHaveProperty("rowCount");
+
+    // A statement ignores the row count and the window, and reports its
+    // statistics on EXEC_DONE.
+    const insert = await session.query("insert into x values (1)", {
+      ...ALL_REPORTS,
+      maxRows: 5,
+    });
+    connection.receive(
+      execDone(insert.requestId, 1n, queryStats([3, 4, 0, 0], false)),
+    );
+    const insertDone = await insert.completion;
+    expect(insertDone).toMatchObject({
+      kind: "exec-done",
+      rowsAffected: 1n,
+      stats: {
+        compileNanos: 3n,
+        executeNanos: 4n,
+        countNanos: 0n,
+        clientWaitNanos: 0n,
+        jitCompiled: false,
+      },
+    });
+    expect(insertDone).not.toHaveProperty("rowCount");
+    await session.close();
+  });
+
+  it("reports where a query error points, as an index into the SQL string", async () => {
+    const { connection, session } = await openSession();
+    // QuestDB counts UTF-16 code units, as JavaScript indexes a string: the
+    // emoji is two of them, and the accented letters and euro sign one each,
+    // although they take 9 UTF-8 bytes between them.
+    const sql = "SELECT 'é€😀' s FROM missing";
+    const query = await session.query(sql, { errorPosition: true });
+    connection.receive(
+      queryError(
+        query.requestId,
+        "table does not exist [table=missing]",
+        QWP_STATUS.PARSE_ERROR,
+        21,
+      ),
+    );
+    const error = (await query.completion.catch(
+      (caught: unknown) => caught,
+    )) as QwpEgressQueryError;
+    expect(error).toBeInstanceOf(QwpEgressQueryError);
+    expect(error).toMatchObject({
+      requestId: query.requestId,
+      status: QWP_STATUS.PARSE_ERROR,
+      // The bare message: the position is no longer folded into it.
+      message: "table does not exist [table=missing]",
+      position: 21,
+    });
+    expect(sql.slice(error.position)).toBe("missing");
+
+    const positionOf = async (
+      sql: string,
+      reply: (requestId: bigint) => Uint8Array,
+    ): Promise<number | undefined> => {
+      const query = await session.query(sql, { errorPosition: true });
+      connection.receive(reply(query.requestId));
+      const failure = await query.completion.catch((caught: unknown) => caught);
+      expect(failure).toBeInstanceOf(QwpEgressQueryError);
+      return (failure as QwpEgressQueryError).position;
+    };
+    // -1: the error does not point into the SQL text.
+    await expect(
+      positionOf("select 2", (requestId) =>
+        queryError(requestId, "cancelled by client", QWP_STATUS.CANCELLED, -1),
+      ),
+    ).resolves.toBeUndefined();
+    // A request the server cannot decode is answered with the baseline frame,
+    // flags or not.
+    await expect(
+      positionOf("select 3", (requestId) =>
+        queryError(requestId, "incomplete varint: buffer underflow"),
+      ),
+    ).resolves.toBeUndefined();
+    // Zero is the start of the statement, and reported as such.
+    await expect(
+      positionOf("COPY t FROM stdin", (requestId) =>
+        queryError(
+          requestId,
+          "COPY ... FROM is not supported on egress",
+          QWP_STATUS.PARSE_ERROR,
+          0,
+        ),
+      ),
+    ).resolves.toBe(0);
+    await session.close();
+  });
+
+  it("reports a detailed response queued at close as the closed session", async () => {
+    // The flags a terminal response is decoded with outlive its query. A
+    // RESULT_END still queued when the session closes therefore decodes, and
+    // is reported as the closed session it is -- not as a malformed frame,
+    // which would also close the connection a second time, as a protocol
+    // violation.
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection, { bufferPoolSize: 1 });
+    connection.receive(serverInfo(DETAILS));
+    const query = await session.query("select * from x", { stats: true });
+    connection.receive(emptyResultBatch(query.requestId, 0));
+    connection.receive(emptyResultBatch(query.requestId, 1));
+    connection.receive(
+      resultEnd(query.requestId, 0n, 1n, queryStats([1, 2, 0, 0], false)),
+    );
+    // The first batch fills the one-slot pool, so the receive loop waits on
+    // the second, with the RESULT_END queued behind it, until close() ends
+    // the query.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await session.close();
+    await expect(query.completion).rejects.toMatchObject({
+      name: "QwpEgressSessionClosedError",
+    });
+    expect(connection.closeCalls).toEqual([{ code: 1000, reason: "" }]);
+  });
+
+  it("rejects a row window the server cannot honour before sending anything", async () => {
+    // A server with per-query timeouts but without the query details would
+    // stream every row too.
+    const timeoutsOnly = await openSession(
+      QWP_EGRESS_CAPABILITY.QUERY_FLAGS | QUERY_TIMEOUT_CAPABILITY,
+    );
+    await expect(
+      timeoutsOnly.session.query("select 1", { maxRows: 10 }),
+    ).rejects.toBeInstanceOf(QwpEgressRowWindowUnsupportedError);
+    expect(timeoutsOnly.connection.sent).toEqual([]);
+    await timeoutsOnly.session.close();
+
+    const { connection, session } = await openSession(
+      QWP_EGRESS_CAPABILITY.QUERY_FLAGS,
+    );
+    for (const options of [
+      { maxRows: 10 },
+      { skipRows: 5 },
+      { ...ALL_REPORTS, skipRows: 1n, maxRows: 0 },
+    ] satisfies QwpEgressQueryOptions[]) {
+      const error = await session
+        .query("select 1", options)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(QwpEgressRowWindowUnsupportedError);
+      expect(error).toMatchObject({
+        name: "QwpEgressRowWindowUnsupportedError",
+        message: expect.stringContaining("does not advertise QUERY_DETAILS"),
+      });
+    }
+    expect(connection.sent).toEqual([]);
+
+    // The session stays usable, and skipping no rows needs no capability.
+    const query = await session.query("select 1", { skipRows: 0 });
+    expect(
+      requestTail(connection.sent[0], query.requestId, "select 1"),
+    ).toEqual([]);
+    connection.receive(resultEnd(query.requestId, 0n, 0n));
+    await expect(query.completion).resolves.toMatchObject({
+      kind: "result-end",
+    });
+    await session.close();
+  });
+
+  it("validates the row window before waiting for SERVER_INFO", async () => {
+    const connection = new FakeConnection();
+    const session = createQwpEgressSession(connection);
+    for (const [options, message] of [
+      [{ skipRows: -1 }, "skipRows must be a non-negative safe integer"],
+      [{ maxRows: 1.5 }, "maxRows must be a non-negative safe integer"],
+      [{ skipRows: 2 ** 53 }, "skipRows must be a non-negative safe integer"],
+      [
+        { maxRows: 1n << 63n },
+        "maxRows must be a bigint between 0 and 9223372036854775807",
+      ],
+      [
+        { skipRows: -1n },
+        "skipRows must be a bigint between 0 and 9223372036854775807",
+      ],
+    ] as const) {
+      await expect(session.query("select 1", options)).rejects.toThrow(
+        new RangeError(message),
+      );
+    }
+
+    connection.receive(serverInfo(DETAILS));
+    // Null leaves an option unset, as it does the others.
+    const query = await session.query("select 1", {
+      skipRows: null as unknown as number,
+      maxRows: (1n << 63n) - 1n,
+    });
+    expect(connection.sent).toHaveLength(1);
+    expect(
+      requestTail(connection.sent[0], query.requestId, "select 1"),
+    ).toEqual([QWP_QUERY_FLAG_MAX_ROWS, ...new Array(8).fill(0xff), 0x7f]);
+    await session.close();
+    await query.completion.catch(() => undefined);
+  });
+
+  it.each([
+    ["omits a row count that was asked for", { countRows: true }, undefined],
+    [
+      "adds statistics nobody asked for",
+      { countRows: false },
+      queryStats([1, 2, 3, 4], false),
+    ],
+  ] as const)(
+    "fails a session whose RESULT_END %s",
+    async (_label, options, trailer) => {
+      const { connection, session } = await openSession();
+      const query = await session.query("select * from x", options);
+      connection.receive(firstResultBatch(query.requestId));
+      connection.receive(resultEnd(query.requestId, 3n, 0n, trailer));
+
+      await expect(query.completion).rejects.toBeInstanceOf(QwpProtocolError);
+      await vi.waitFor(() =>
+        expect(connection.closeCalls).toContainEqual({
+          code: 1002,
+          reason: "invalid QWP egress message",
+        }),
+      );
+      await session.close();
+    },
+  );
 });

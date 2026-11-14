@@ -1533,7 +1533,11 @@ statement that completed anyway, or a result that ended with nothing withheld,
 succeeds. A query sends at most one `CANCEL`. `cancel()` settles once its `CANCEL`
 has been sent, or once a reconnect has taken it over: the frame then follows the
 replayed request, so a callback that awaits `cancel()` does not hold up the
-reconnect that has to drain it first.
+reconnect that has to drain it first. Once a query has ended, `cancel()` and
+`grantCredit()` resolve without sending anything, even if the session has since
+closed or failed, so a timer or an `AbortSignal` listener that fires after
+completion may still call them. Neither throws: every failure, such as an invalid
+credit amount, rejects the promise it returns.
 
 `await query.awaitCompletion(timeoutMs)` bounds only the caller's wait and returns
 `false` without cancelling when the timeout expires, matching Java
@@ -1553,8 +1557,12 @@ client discards, and ends a round trip after that. Without flow control
 (`initialCredit: 0`, the default) QuestDB does not read the connection while it
 streams a result: it sends the rest of the result before it sees the `CANCEL`, and
 the client discards it. If the server does not terminate the query within the bound,
-its connection is closed, which is what ends the query on the server. A query ended
-with `query.cancel()` then fails with `QwpEgressQueryCancelTimeoutError`; one already
+its connection is closed, which is what ends the query on the server. A browser
+cannot drop a connection itself, only send a close and wait for the server's reply.
+Without flow control QuestDB reads that close only once the query has finished or
+failed, so in a browser closing does not stop such a query until the browser abandons
+the closing handshake, after 60 seconds in Chromium. When the bound expires, a query
+ended with `query.cancel()` fails with `QwpEgressQueryCancelTimeoutError`; one already
 released by its timeout or by breaking out of `for await` keeps the error it was
 released with. A reconnecting session, the default, opens a new connection for the
 next query instead of failing. This client-initiated replacement emits `disconnected`
@@ -1662,6 +1670,92 @@ const session = await connectQwpBrowserEgress({
   },
 });
 ```
+
+### Error positions, statistics, row counts and paging
+
+Per-query options ask QuestDB for what `/exec` reports besides the rows: where an
+error points in the SQL text, how long the query took, and how many rows a result
+has while it is read one page at a time. They need a server whose `SERVER_INFO`
+advertises the `QUERY_DETAILS` capability (`QWP_EGRESS_CAPABILITY.QUERY_DETAILS`).
+
+```typescript
+import { QwpEgressQueryError } from "@questdb/browser-client";
+
+const pageSize = 100;
+const offset = 2 * pageSize;
+try {
+  const page = await session.query(sql, {
+    skipRows: offset,
+    maxRows: pageSize,
+    countRows: true,
+    stats: true,
+    errorPosition: true,
+  });
+  for await (const batch of page) render(batch);
+  const completion = await page.completion;
+  if (completion.kind === "result-end") {
+    // totalRows counts the rows of this page, rowCount those of the result.
+    showPager(offset, completion.totalRows, completion.rowCount);
+  }
+  showTimings(completion.stats);
+} catch (error) {
+  if (error instanceof QwpEgressQueryError && error.position !== undefined) {
+    highlight(sql, error.position, error.message);
+  }
+  throw error;
+}
+```
+
+- `errorPosition: true` makes a `QwpEgressQueryError` carry `position`, the UTF-16
+  offset into the SQL text the error points at. That is an index into the
+  JavaScript string the query was issued with, so `sql.slice(error.position)`
+  starts where the error does, whatever non-ASCII text precedes it. The message is
+  then bare, without the `[n]` prefix, a position or an error number, that QuestDB
+  otherwise puts in front of it. An error the SQL engine raises without a position
+  of its own reports 0, the start of the text, as `/exec` does: a query timeout on
+  the server and a query cancelled there with `CANCEL QUERY` are among them. An
+  error that does not come from the SQL engine, such as a protocol error, a row
+  too large for the server's send buffer or the cancellation `cancel()` sends,
+  carries no position, and neither does the error for a request the server
+  rejected before reading its options.
+- `stats: true` adds `stats` to the completion of a result (`RESULT_END`) and of a
+  statement (`EXEC_DONE`), as `QwpQueryStats`: `compileNanos`, zero when the
+  server reused a cached plan; `executeNanos`, from the server receiving the
+  request to its terminal response, the other durations included; `countNanos`,
+  spent counting rows for `countRows`; `clientWaitNanos`, the time the query
+  waited for this client to read results or grant credit; and `jitCompiled`,
+  whether its filter ran as JIT-compiled native code. Errors carry no statistics.
+- `countRows: true` adds `rowCount` to a result's completion: the rows in the
+  whole result set, whatever `skipRows` and `maxRows` leave out, while
+  `totalRows` still counts the rows the stream carried. When `maxRows` ends the
+  stream first, the server counts the remaining rows without sending them, which
+  can take as long as reading them and runs under the server's query timeout.
+- `skipRows` and `maxRows` bound the rows a query streams, like SQL
+  `LIMIT skipRows, skipRows + maxRows` around it: the first `skipRows` rows are
+  left out, and at most `maxRows` follow. `maxRows: 0` streams only the schema, in
+  one empty batch. Both take a non-negative safe integer or a `bigint` up to
+  2^63 - 1. Statements ignore the window and the row count.
+
+The client drops `errorPosition`, `stats` and `countRows` on an endpoint without
+`QUERY_DETAILS`, as it drops `resetDictionary` on one without `QUERY_FLAGS`, so
+they are safe during a rolling upgrade: the reports are simply absent. A row
+window cannot be dropped that way, because such a server would stream the whole
+result. A query with a positive `skipRows` or any `maxRows` therefore rejects with
+`QwpEgressRowWindowUnsupportedError` before anything is sent. Failover applies the
+same rules: a replay asks the endpoint it reaches for the details that endpoint
+supports, and a query whose row window it cannot honour fails with
+`QwpEgressRowWindowUnsupportedError` instead of being replayed. Check
+`session.serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_DETAILS` to choose
+between a row window and SQL `LIMIT` in advance.
+
+The low-level `encodeQwpQueryRequest()` takes the raw flags
+(`QWP_QUERY_FLAG_ERROR_POSITION`, `QWP_QUERY_FLAG_STATS`,
+`QWP_QUERY_FLAG_COUNT_ROWS`, `QWP_QUERY_FLAG_SKIP_ROWS` and
+`QWP_QUERY_FLAG_MAX_ROWS`) together with the `skipRows` and `maxRows` values the
+last two require, and `decodeQwpEgressMessageWithQueryFlags(bytes, queryFlags)`
+reads the trailers those flags add to `RESULT_END`, `EXEC_DONE` and
+`QUERY_ERROR`. `decodeQwpEgressMessage(bytes)` keeps its single parameter, so it
+stays safe to pass straight to `map()`, and rejects those trailers.
 
 ## Combined pooled client
 
@@ -1990,6 +2084,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpEgressQueryAbandonedError`          | Result iteration ended before the server completed the query                                                |
 | `QwpEgressQueryTimeoutError`            | The query ran past its timeout and was cancelled                                                            |
 | `QwpEgressQueryCancelTimeoutError`      | A cancelled query did not produce a terminal server response before the drain deadline                      |
+| `QwpEgressRowWindowUnsupportedError`    | A query asked an endpoint without the `QUERY_DETAILS` capability for a row window (`skipRows`, `maxRows`)   |
 
 Always close senders and sessions in `finally`. For a standalone sender, publication
 plus ACK draining is bounded by `closeFlushTimeoutMs`; the subsequent WebSocket closing

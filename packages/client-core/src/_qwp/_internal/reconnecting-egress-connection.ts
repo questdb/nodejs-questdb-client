@@ -4,6 +4,7 @@ import {
   QwpProtocolError,
   QwpServerInfoMessage,
 } from "../_core";
+import { decodeQwpEgressEnvelope } from "../_core/egress";
 import {
   QWP_RECONNECT_EVENT_KIND,
   QWP_UPGRADE_ERROR_KIND,
@@ -653,7 +654,10 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         // the close times out; left unread, all of it piled up in the old
         // connection's queue.
         if (this.closing || this.connection !== connection) continue;
-        const message = decodeQwpEgressMessage(next.value);
+        // Only the kind and request ID are needed here. The trailers of a
+        // terminal response depend on the query_flags its request was sent
+        // with, which only the session knows; it decodes and validates them.
+        const message = decodeQwpEgressEnvelope(next.value);
         if (message.kind === "server-info") {
           throw new QwpProtocolError("received duplicate QWP SERVER_INFO");
         } else if (
@@ -692,9 +696,9 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
         // reconnect succeeds, so connectLoop's own budget never runs out.
         // Charge it to the same per-query recovery budget. A queued terminal
         // awaiting the session's verdict is exempt: if accepted, nothing is
-        // replayed. If rejected, recoverProtocolFailure() finds the reconnect
-        // this starts already under way and fails the query rather than
-        // replaying it, so this path cannot repeat without a charge either.
+        // replayed. If rejected, recoverProtocolFailure() charges the rejection
+        // even when a reconnect is already under way, so this path cannot
+        // repeat without a charge either.
         const exhausted = this.chargeProtocolRecovery(error);
         if (exhausted) {
           this.failTerminal(exhausted);
@@ -924,11 +928,20 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     this.rejectPendingTerminal();
     this.throwIfUnavailable();
     const connection = this.connection;
-    if (!connection) throw new QwpSendClosedError();
+    if (!connection && !this.reconnectTask) throw new QwpSendClosedError();
     const exhausted = this.chargeProtocolRecovery(error);
     if (exhausted) {
       this.failTerminal(exhausted);
       throw exhausted;
+    }
+    if (!connection) {
+      // A full batch pool can delay terminal validation past socket loss.
+      // Rejecting the verdict releases the reconnect already under way; its
+      // owner reports any later failure. Drop stale messages, but do not await
+      // it here: if the consumer retires and withdraws the replay, reconnect
+      // needs this receive loop to cross the now-idle queue's barrier.
+      this.messagesQueue.clear();
+      return;
     }
     try {
       await this.requestReconnect(

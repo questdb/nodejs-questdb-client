@@ -1,12 +1,17 @@
 import {
-  decodeQwpEgressMessage,
+  decodeQwpEgressMessageWithQueryFlags,
   encodeQwpBinds,
   encodeQwpCancel,
   encodeQwpCredit,
   encodeQwpQueryRequest,
   QWP_COMPRESSION_CODEC,
   QWP_EGRESS_CAPABILITY,
+  QWP_QUERY_FLAG_COUNT_ROWS,
+  QWP_QUERY_FLAG_ERROR_POSITION,
+  QWP_QUERY_FLAG_MAX_ROWS,
   QWP_QUERY_FLAG_RESET_DICTIONARY,
+  QWP_QUERY_FLAG_SKIP_ROWS,
+  QWP_QUERY_FLAG_STATS,
   QWP_RESET_MASK_DICTIONARY,
   QWP_STATUS,
   QwpBindSetter,
@@ -20,6 +25,7 @@ import {
   QwpResultEndMessage,
   QwpServerInfoMessage,
 } from "./_core";
+import { validateQwpRowWindowBound } from "./_core/egress";
 import { QwpAsyncQueue } from "./_internal/async-queue";
 import { validateQwpMaxBatchRows } from "./_internal/egress-limits";
 import { monotonicNowMs } from "./_internal/monotonic-clock";
@@ -173,6 +179,55 @@ export interface QwpEgressQueryOptions {
    * Silently omitted when the server lacks QUERY_FLAGS for rolling upgrades.
    */
   resetDictionary?: boolean;
+  /**
+   * Ask the server where in the SQL text a query error points. A
+   * {@link QwpEgressQueryError} then carries `position`, the UTF-16 offset
+   * into `sql` -- a JavaScript string index -- and the bare message, without
+   * the `[n]` prefix, a position or an error number, that QuestDB otherwise
+   * adds. An error the SQL engine raises without a position of its own
+   * reports 0, the start of the text, as `/exec` does: a query timeout on the
+   * server, or a query cancelled there with `CANCEL QUERY`. Errors that do not
+   * come from the SQL engine, such as the cancellation `cancel()` sends, carry
+   * no position.
+   *
+   * Silently omitted, like `stats` and `countRows`, when the server does not
+   * advertise QUERY_DETAILS, so it is safe during a rolling upgrade.
+   */
+  errorPosition?: boolean;
+  /**
+   * Ask the server for execution statistics -- compile, execution, counting
+   * and client-wait times, and JIT use -- which the completion then carries
+   * as `stats`, for a result and for a statement alike. Silently omitted when
+   * the server does not advertise QUERY_DETAILS.
+   */
+  stats?: boolean;
+  /**
+   * Ask the server for the number of rows in the whole result set, which the
+   * result's completion then carries as `rowCount`, whatever `skipRows` and
+   * `maxRows` leave out of the stream. When `maxRows` ends the stream first,
+   * the server counts the remaining rows without sending them. Ignored by
+   * statements, and silently omitted when the server does not advertise
+   * QUERY_DETAILS.
+   */
+  countRows?: boolean;
+  /**
+   * Rows to leave out at the start of the result set, like the offset of SQL
+   * `LIMIT`. Zero, the default, leaves out none. A non-negative safe integer,
+   * or a bigint no greater than 2^63 - 1. Ignored by statements.
+   *
+   * A row window cannot be dropped the way the reports above are: a server
+   * without QUERY_DETAILS would stream the whole result. The query fails with
+   * {@link QwpEgressRowWindowUnsupportedError} instead, at once, or when
+   * failover would replay it on such a server.
+   */
+  skipRows?: number | bigint;
+  /**
+   * The most rows to stream, after `skipRows`. Zero streams only the schema,
+   * in one empty batch. Unbounded by default. A non-negative safe integer, or
+   * a bigint no greater than 2^63 - 1. Ignored by statements. Like
+   * `skipRows`, it requires QUERY_DETAILS.
+   */
+  maxRows?: number | bigint;
 }
 
 interface QwpValidatedEgressSessionOptions {
@@ -192,6 +247,12 @@ interface QwpReplayableQueryRequest {
   readonly bindCount?: number;
   readonly bindPayload?: Uint8Array;
   readonly resetDictionary: boolean;
+  readonly errorPosition: boolean;
+  readonly stats: boolean;
+  readonly countRows: boolean;
+  /** Absent rather than zero when no rows are skipped. */
+  readonly skipRows?: number | bigint;
+  readonly maxRows?: number | bigint;
   readonly onFailoverReset?: QwpEgressQueryOptions["onFailoverReset"];
 }
 
@@ -239,7 +300,7 @@ function validateEgressSessionOptions(
   }
   return {
     serverInfoTimeoutMs,
-    initialCredit: validateInitialCredit(
+    initialCredit: validateCredit(
       options.initialCredit ?? QWP_DEFAULT_EGRESS_INITIAL_CREDIT,
       "initialCredit",
     ),
@@ -277,10 +338,7 @@ function validateBufferPoolSize(value: number): number {
   return value;
 }
 
-function validateInitialCredit(
-  value: number | bigint,
-  name: string,
-): number | bigint {
+function validateCredit(value: number | bigint, name: string): number | bigint {
   if (typeof value === "number") {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new RangeError(`${name} must be a non-negative safe integer`);
@@ -291,6 +349,27 @@ function validateInitialCredit(
     throw new RangeError(`${name} must fit in uint64`);
   }
   return value;
+}
+
+/**
+ * A `skipRows` or `maxRows` option. Unset when undefined or null, as the other
+ * options are through `??`.
+ */
+function validateRowWindowOption(
+  value: number | bigint | undefined,
+  name: string,
+): number | bigint | undefined {
+  return value === undefined || value === null
+    ? undefined
+    : validateQwpRowWindowBound(value, name);
+}
+
+function supportsQueryDetails(serverInfo: QwpServerInfoMessage): boolean {
+  return (serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_DETAILS) !== 0;
+}
+
+function hasRowWindow(request: QwpReplayableQueryRequest): boolean {
+  return request.skipRows !== undefined || request.maxRows !== undefined;
 }
 
 function validatePositiveTimeout(value: number, name: string): number {
@@ -309,9 +388,34 @@ export class QwpEgressQueryError extends Error {
     readonly requestId: bigint,
     readonly status: number,
     message: string,
+    /**
+     * UTF-16 offset into the query's SQL text the error points at: an index
+     * into the JavaScript string the query was issued with. Present when the
+     * query asked for it with `errorPosition` and the SQL engine raised the
+     * error, and 0 when the engine named no position, as for a query timeout
+     * on the server or `CANCEL QUERY`.
+     */
+    readonly position?: number,
   ) {
     super(message);
     this.name = "QwpEgressQueryError";
+  }
+}
+
+/**
+ * The query asked for a row window -- `skipRows` or `maxRows` -- and the
+ * endpoint does not advertise the QUERY_DETAILS capability it needs. Such a
+ * server would stream the whole result, so the query is not sent to it:
+ * `query()` rejects at once, and a query that failover would replay on such
+ * an endpoint fails instead of being replayed. Use SQL `LIMIT` with servers
+ * that predate the capability.
+ */
+export class QwpEgressRowWindowUnsupportedError extends Error {
+  constructor(readonly requestId: bigint) {
+    super(
+      `QWP endpoint does not advertise QUERY_DETAILS, which skipRows and maxRows require [requestId=${requestId}]`,
+    );
+    this.name = "QwpEgressRowWindowUnsupportedError";
   }
 }
 
@@ -371,6 +475,12 @@ export class QwpEgressSessionClosedError extends Error {
   }
 }
 
+/**
+ * What a query asks of its session. The operations returning a promise never
+ * throw: every failure, including a session that has failed or closed, rejects
+ * that promise. On a session still open, one naming a request that has left it
+ * resolves without doing anything, since nothing is left to act on.
+ */
 interface QwpEgressQueryControl {
   cancel(requestId: bigint): Promise<void>;
   abandon(requestId: bigint): Promise<void>;
@@ -412,9 +522,15 @@ export interface QwpEgressViewQuery {
   /**
    * Cancels the query: no further batch reaches the callback, and the outcome
    * follows the server's terminal response, as for
-   * {@link QwpEgressQuery.cancel}.
+   * {@link QwpEgressQuery.cancel}. Once the query has ended, it resolves
+   * without sending anything.
    */
   cancel(): Promise<void>;
+  /**
+   * Grants the server more send-ahead credit for this query, as
+   * {@link QwpEgressQuery.grantCredit} does. A query that has ended is owed
+   * none: the grant resolves without sending anything.
+   */
   grantCredit(additionalBytes: number | bigint): Promise<void>;
   isDone(): boolean;
 }
@@ -568,12 +684,43 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
    * reconnect has taken it over: it then follows the replayed request, and a
    * later failure reaches the query and the session. A query sends at most
    * one `CANCEL`.
+   *
+   * A query that has already ended, as `isDone()` reports, has nothing left
+   * to cancel: the returned promise resolves and nothing is sent, even if the
+   * session has since closed or failed. A timer or an `AbortSignal` listener
+   * that fires after the query completes may therefore still call it. This
+   * method never throws: every failure rejects the returned promise.
    */
   cancel(): Promise<void> {
+    // An ended query has nothing left to cancel, so its session is not asked:
+    // one that has failed or closed since rejects every call. Asked once it
+    // had handled the terminal response, the session used to throw
+    // QwpProtocolError synchronously, past any .catch() on this promise.
+    if (this.terminal) return Promise.resolve();
     return this.control.cancel(this.requestId);
   }
 
+  /**
+   * Grants the server `additionalBytes` more send-ahead credit for this
+   * query. Use it to replenish credit by hand on a query run with
+   * `autoCredit: false`.
+   *
+   * A query that has already ended is owed no credit: the returned promise
+   * resolves and nothing is sent, even if the session has since closed or
+   * failed. `additionalBytes` must be a non-negative safe integer or a
+   * `bigint` that fits in uint64, whatever the query's state; any other value
+   * rejects with a `RangeError`. This method never throws: every failure
+   * rejects the returned promise.
+   */
   grantCredit(additionalBytes: number | bigint): Promise<void> {
+    try {
+      validateCredit(additionalBytes, "additionalBytes");
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    // An ended query takes no further batches, so it is owed no credit, and
+    // its session is not asked, for the same reasons as in cancel().
+    if (this.terminal) return Promise.resolve();
     // Replayable, and accepted as soon as a reconnect owns it. Both arguments
     // matter: the grant is recorded in the replayable request before its frame
     // is sent, so without the replay-supersession handling the replacement
@@ -994,13 +1141,11 @@ export class QwpEgressQuery implements AsyncIterable<QwpResultBatch> {
   }
 
   private returnCredit(creditBytes: number): void {
-    try {
-      void this.control
-        .grantCredit(this.requestId, creditBytes, false)
-        .catch(() => undefined);
-    } catch {
-      // The query is no longer active on the session; nothing is owed.
-    }
+    // The session send tail owns failures, and a query no longer active on
+    // the session is owed nothing: the grant then resolves without a frame.
+    void this.control
+      .grantCredit(this.requestId, creditBytes, false)
+      .catch(() => undefined);
   }
 
   private discardBufferedResults(): number {
@@ -1156,6 +1301,17 @@ export class QwpEgressSession implements QwpEgressQueryControl {
    */
   private manualCreditEpoch = 0;
   private replayedCredit: { requestId?: bigint; epoch: number } = { epoch: 0 };
+  /**
+   * The query_flags of the QUERY_REQUEST encoded last, which is the one on
+   * the wire: an encode precedes every send, and a replay that re-encodes the
+   * request waits until the old connection's terminal response, if any, has
+   * been decoded. They decide the trailers of the terminal response.
+   *
+   * Kept after the query leaves the session rather than cleared with it, so a
+   * terminal response still queued when the session closes decodes, and is
+   * reported as the closed session it is rather than as a protocol fault.
+   */
+  private responseQueryFlags = 0;
   /** Initial SERVER_INFO; use serverInfo for the current post-failover snapshot. */
   readonly ready: Promise<QwpServerInfoMessage>;
 
@@ -1335,7 +1491,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     // The timeout runs from this call: waiting for SERVER_INFO, for a previous
     // query to drain and for the request to leave all count against it.
     const deadline = timeoutMs > 0 ? monotonicNowMs() + timeoutMs : undefined;
-    const initialCredit = validateInitialCredit(
+    const initialCredit = validateCredit(
       options.initialCredit ?? this.defaultInitialCredit,
       "initialCredit",
     );
@@ -1351,6 +1507,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     ) {
       throw new TypeError("onFailoverReset must be a function");
     }
+    const skipRows = validateRowWindowOption(options.skipRows, "skipRows");
+    const maxRows = validateRowWindowOption(options.maxRows, "maxRows");
     const start = this.beginQueryStart();
     try {
       await this.waitToStart(timeoutMs, deadline, start.abandoned);
@@ -1403,6 +1561,12 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       bindCount: encodedBinds?.count ?? options.bindCount,
       bindPayload: (encodedBinds?.payload ?? options.bindPayload)?.slice(),
       resetDictionary: options.resetDictionary === true,
+      errorPosition: options.errorPosition === true,
+      stats: options.stats === true,
+      countRows: options.countRows === true,
+      // Skipping no rows is no row window, so it needs no capability.
+      skipRows: skipRows === 0 || skipRows === 0n ? undefined : skipRows,
+      maxRows,
       onFailoverReset: options.onFailoverReset,
     };
     this.decoder.resetQuerySchema();
@@ -1411,6 +1575,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     if (deadline !== undefined) query.armDeadline(remainingMs);
     let sending: Promise<void>;
     try {
+      // Throws QwpEgressRowWindowUnsupportedError, before anything is sent,
+      // for a row window the endpoint does not support.
       sending = this.sendQueryRequest(
         this.encodeQueryRequest(request, this.currentServerInfo!),
         () => this.active !== query,
@@ -1499,31 +1665,45 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   }
 
   cancel(requestId: bigint): Promise<void> {
-    const query = this.requireActive(requestId);
-    // Past its timeout, with its consumer gone, or cancelled already, the
-    // query is already being cancelled, and the server would ignore a second
-    // CANCEL.
-    if (query.isDone() || query.pastDeadline || query.cancelledByUser) {
-      return Promise.resolve();
+    try {
+      const query = this.controlledQuery(requestId);
+      // A query that has left the session has ended. Past its timeout, with
+      // its consumer gone, or cancelled already, the query is already being
+      // cancelled, and the server would ignore a second CANCEL.
+      if (
+        !query ||
+        query.isDone() ||
+        query.pastDeadline ||
+        query.cancelledByUser
+      ) {
+        return Promise.resolve();
+      }
+      // No further batch reaches the consumer, exactly as at a timeout. The
+      // cancel used to leave delivery running, so the terminal response queued
+      // behind every batch still in flight: a consumer that stopped iterating
+      // parked the receive loop on a full slot pool short of it, until the
+      // CANCEL drain gave up on the connection.
+      const discardedCredit = query.cancelByUser();
+      // Without a connection the CANCEL follows the replayed request, and its
+      // drain bound starts with the replacement connection.
+      if (!this.connectionLost) this.armCancelDrain(requestId);
+      return this.releasedByReconnect(this.sendCancel(query, discardedCredit));
+    } catch (error) {
+      return Promise.reject(error);
     }
-    // No further batch reaches the consumer, exactly as at a timeout. The
-    // cancel used to leave delivery running, so the terminal response queued
-    // behind every batch still in flight: a consumer that stopped iterating
-    // parked the receive loop on a full slot pool short of it, until the
-    // CANCEL drain gave up on the connection.
-    const discardedCredit = query.cancelByUser();
-    // Without a connection the CANCEL follows the replayed request, and its
-    // drain bound starts with the replacement connection.
-    if (!this.connectionLost) this.armCancelDrain(requestId);
-    return this.releasedByReconnect(this.sendCancel(query, discardedCredit));
   }
 
   abandon(requestId: bigint): Promise<void> {
-    const query = this.requireActive(requestId);
-    const discardedCredit = query.retire(
-      new QwpEgressQueryAbandonedError(requestId),
-    );
-    return this.drainRetired(query, discardedCredit);
+    try {
+      const query = this.controlledQuery(requestId);
+      if (!query) return Promise.resolve();
+      const discardedCredit = query.retire(
+        new QwpEgressQueryAbandonedError(requestId),
+      );
+      return this.drainRetired(query, discardedCredit);
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   grantCredit(
@@ -1532,29 +1712,35 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     replayOnReconnect = true,
     acceptWhenReconnectStarts = false,
   ): Promise<void> {
-    this.requireActive(requestId);
-    const payload = encodeQwpCredit(requestId, additionalBytes);
-    if (!replayOnReconnect) {
-      return this.sendWhileActive(requestId, payload);
+    try {
+      const payload = encodeQwpCredit(requestId, additionalBytes);
+      // A query that has left the session is owed no credit.
+      if (!this.controlledQuery(requestId)) return Promise.resolve();
+      if (!replayOnReconnect) {
+        return this.sendWhileActive(requestId, payload);
+      }
+      const additional = BigInt(additionalBytes);
+      return this.sendWhileActive(
+        requestId,
+        payload,
+        () => {
+          const request = this.activeRequest;
+          if (!request || request.requestId !== requestId) return;
+          this.manualCreditEpoch++;
+          const total = BigInt(request.initialCredit) + additional;
+          // QUERY_REQUEST carries one uint64 initial-credit field. Saturating
+          // is lossless for any representable result stream and avoids
+          // dropping all successfully granted manual credit merely because
+          // several grants were used before a failover. Apply before the
+          // physical CREDIT send: that send itself may be what starts the
+          // replay.
+          request.initialCredit = total > MAX_UINT64 ? MAX_UINT64 : total;
+        },
+        acceptWhenReconnectStarts,
+      );
+    } catch (error) {
+      return Promise.reject(error);
     }
-    const additional = BigInt(additionalBytes);
-    return this.sendWhileActive(
-      requestId,
-      payload,
-      () => {
-        const request = this.activeRequest;
-        if (!request || request.requestId !== requestId) return;
-        this.manualCreditEpoch++;
-        const total = BigInt(request.initialCredit) + additional;
-        // QUERY_REQUEST carries one uint64 initial-credit field. Saturating is
-        // lossless for any representable result stream and avoids dropping all
-        // successfully granted manual credit merely because several grants
-        // were used before a failover. Apply before the physical CREDIT send:
-        // that send itself may be what starts the replay.
-        request.initialCredit = total > MAX_UINT64 ? MAX_UINT64 : total;
-      },
-      acceptWhenReconnectStarts,
-    );
   }
 
   /**
@@ -1611,7 +1797,8 @@ export class QwpEgressSession implements QwpEgressQueryControl {
   }
 
   async rejectView(requestId: bigint, error: Error): Promise<void> {
-    const query = this.requireActive(requestId);
+    const query = this.controlledQuery(requestId);
+    if (!query) return;
     const discardedCredit = query.retire(error);
     await this.drainRetired(query, discardedCredit);
   }
@@ -1758,7 +1945,10 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     try {
       for await (const payload of this.connection.messages) {
         try {
-          const message = decodeQwpEgressMessage(payload);
+          const message = decodeQwpEgressMessageWithQueryFlags(
+            payload,
+            this.responseQueryFlags,
+          );
           switch (message.kind) {
             case "server-info":
               if (this.currentServerInfo) {
@@ -1844,6 +2034,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
                   message.requestId,
                   message.status,
                   message.message,
+                  message.position,
                 ),
               );
               this.clearCancelDrain(message.requestId);
@@ -1886,6 +2077,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     }
   }
 
+  /** The active query a server message names; any other is a protocol fault. */
   private requireActive(requestId: bigint): QwpEgressQuery {
     this.throwIfUnavailable();
     if (!this.active || this.active.requestId !== requestId) {
@@ -1894,6 +2086,22 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       );
     }
     return this.active;
+  }
+
+  /**
+   * The active query an application's control call names, or undefined once
+   * that query has left the session. Throws if the session has failed or is
+   * closing; the control calls turn that into a rejection.
+   *
+   * Unlike a server message, an application names an ended request simply by
+   * acting late -- a timer or an `AbortSignal` listener that fires after the
+   * terminal response -- and nothing is left to act on then. requireActive()
+   * reported that as a protocol fault, thrown before any promise existed.
+   */
+  private controlledQuery(requestId: bigint): QwpEgressQuery | undefined {
+    this.throwIfUnavailable();
+    const query = this.active;
+    return query?.requestId === requestId ? query : undefined;
   }
 
   /**
@@ -1940,9 +2148,43 @@ export class QwpEgressSession implements QwpEgressQueryControl {
       await query.resetForReplay();
       // Its timeout may have expired while the callback ran.
       if (this.activeDetached) this.clearActive(query);
+      else this.withdrawUnreplayable(query, serverInfo);
     }
     this.decoder.applyCacheReset(QWP_RESET_MASK_DICTIONARY);
     this.decoder.resetQuerySchema();
+  }
+
+  /**
+   * Fails the active query rather than replaying it on an endpoint that cannot
+   * run it as asked. A row window needs QUERY_DETAILS, and a server without it
+   * would stream the whole result. A request still waiting for its first send
+   * is withdrawn the same way, before it leaves.
+   */
+  private withdrawUnreplayable(
+    query: QwpEgressQuery,
+    serverInfo: QwpServerInfoMessage,
+  ): void {
+    const request = this.activeRequest;
+    if (
+      this.active !== query ||
+      !request ||
+      !hasRowWindow(request) ||
+      supportsQueryDetails(serverInfo)
+    ) {
+      return;
+    }
+    // A no-op for a consumer that has already retired. A cancellation the
+    // application asked for first is still reported as its own.
+    query.retire(
+      query.cancelledByUser
+        ? query.cancelledError()
+        : new QwpEgressRowWindowUnsupportedError(query.requestId),
+    );
+    this.clearCancelDrain(query.requestId);
+    if (this.connection instanceof QwpReconnectingEgressConnection) {
+      this.connection.dropReplay(query.requestId);
+    }
+    this.clearActive(query);
   }
 
   /**
@@ -2044,30 +2286,56 @@ export class QwpEgressSession implements QwpEgressQueryControl {
         `QWP egress replay references inactive request ID ${requestId}`,
       );
     }
-    // Recorded synchronously with the read below: every manual grant folded
+    const payload = this.encodeQueryRequest(request, serverInfo);
+    // Recorded synchronously with the encode above: every manual grant folded
     // into this request before now travels with the replay, so its own CREDIT
     // frame must not also reach the replacement connection.
     this.replayedCredit = { requestId, epoch: this.manualCreditEpoch };
-    return this.encodeQueryRequest(request, serverInfo);
+    return payload;
   }
 
+  /**
+   * Encodes the request for one endpoint, with the flags its capabilities
+   * allow. Each encode records them, as the request then sent carries them.
+   */
   private encodeQueryRequest(
     request: QwpReplayableQueryRequest,
     serverInfo: QwpServerInfoMessage,
   ): Uint8Array {
     const supportsQueryFlags =
       (serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_FLAGS) !== 0;
-    return encodeQwpQueryRequest({
+    let queryFlags =
+      request.resetDictionary && supportsQueryFlags
+        ? QWP_QUERY_FLAG_RESET_DICTIONARY
+        : 0;
+    if (supportsQueryDetails(serverInfo)) {
+      if (request.errorPosition) queryFlags |= QWP_QUERY_FLAG_ERROR_POSITION;
+      if (request.stats) queryFlags |= QWP_QUERY_FLAG_STATS;
+      if (request.countRows) queryFlags |= QWP_QUERY_FLAG_COUNT_ROWS;
+      if (request.skipRows !== undefined) {
+        queryFlags |= QWP_QUERY_FLAG_SKIP_ROWS;
+      }
+      if (request.maxRows !== undefined) queryFlags |= QWP_QUERY_FLAG_MAX_ROWS;
+    } else if (hasRowWindow(request)) {
+      // The reports above are dropped on such an endpoint, as the dictionary
+      // reset is without QUERY_FLAGS, so they stay safe in a rolling upgrade.
+      // A row window cannot be: the server would stream every row. A replay
+      // never gets here, see withdrawUnreplayable().
+      throw new QwpEgressRowWindowUnsupportedError(request.requestId);
+    }
+    const payload = encodeQwpQueryRequest({
       requestId: request.requestId,
       sql: request.sql,
       initialCredit: request.initialCredit,
       bindCount: request.bindCount,
       bindPayload: request.bindPayload,
-      queryFlags:
-        request.resetDictionary && supportsQueryFlags
-          ? QWP_QUERY_FLAG_RESET_DICTIONARY
-          : undefined,
+      queryFlags,
+      // Each is set exactly when its flag is, as the encoder requires.
+      skipRows: request.skipRows,
+      maxRows: request.maxRows,
     });
+    this.responseQueryFlags = queryFlags;
+    return payload;
   }
 
   /**

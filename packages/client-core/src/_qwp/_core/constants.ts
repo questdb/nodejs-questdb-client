@@ -84,10 +84,19 @@ export const QWP_EGRESS_MESSAGE = {
   SERVER_INFO: 0x18,
 } as const;
 
+// Capability 0x00000008 belongs to per-query timeouts, which this client does
+// not send: released clients (c-questdb-client 7.2.0 and later, and the Python
+// client built on it) read it as "the server honours a per-query timeout".
 export const QWP_EGRESS_CAPABILITY = {
   ZONE: 0x00000001,
   QUERY_FLAGS: 0x00000002,
   COMPRESSION: 0x00000004,
+  /**
+   * The server honours the query-details bits of `query_flags`: error
+   * positions, execution statistics, row counts and row windows. A server
+   * without it ignores those bits and answers with the baseline frames.
+   */
+  QUERY_DETAILS: 0x00000010,
 } as const;
 
 export const QWP_COMPRESSION_CODEC = {
@@ -96,6 +105,44 @@ export const QWP_COMPRESSION_CODEC = {
 } as const;
 
 export const QWP_QUERY_FLAG_RESET_DICTIONARY = 0x01;
+// Bit 0x02 belongs to per-query timeouts, which this client does not send:
+// released clients (c-questdb-client 7.2.0 and later, and the Python client
+// built on it) set it, followed by `timeout_ms:varint`, for a server that
+// advertises capability 0x00000008. A flag that carries a field appends it
+// after `query_flags` in ascending order of the flag bits, so `timeout_ms`
+// goes ahead of `skip_rows` and `max_rows`.
+// The query-details bits below take effect only where SERVER_INFO advertises
+// QWP_EGRESS_CAPABILITY.QUERY_DETAILS.
+/**
+ * `query_flags` bit: QUERY_ERROR carries the bare message, without the `[n]`
+ * prefix of the baseline frame, and ends with `position:i32`, the UTF-16
+ * offset into the SQL text the error points at, or -1. A request the server
+ * rejects before reading its flags is still answered with the baseline frame.
+ */
+export const QWP_QUERY_FLAG_ERROR_POSITION = 0x04;
+/**
+ * `query_flags` bit: RESULT_END and EXEC_DONE end with the statistics block
+ * `compile_ns, execute_ns, count_ns, client_wait_ns` (varints) and
+ * `stats_flags:u8`, after `row_count` when QWP_QUERY_FLAG_COUNT_ROWS is set too.
+ */
+export const QWP_QUERY_FLAG_STATS = 0x08;
+/**
+ * `query_flags` bit: RESULT_END carries `row_count:varint` after `total_rows`,
+ * the number of rows in the whole result set, whatever the row window leaves
+ * out of the stream.
+ */
+export const QWP_QUERY_FLAG_COUNT_ROWS = 0x10;
+/**
+ * `query_flags` bit: QUERY_REQUEST carries `skip_rows:varint` after
+ * `query_flags`, the rows to leave out at the start of the result set.
+ */
+export const QWP_QUERY_FLAG_SKIP_ROWS = 0x20;
+/**
+ * `query_flags` bit: QUERY_REQUEST carries `max_rows:varint`, the most rows to
+ * stream, after `query_flags` and after `skip_rows` when
+ * QWP_QUERY_FLAG_SKIP_ROWS is set too. Zero streams only the schema.
+ */
+export const QWP_QUERY_FLAG_MAX_ROWS = 0x40;
 export const QWP_RESET_MASK_DICTIONARY = 0x01;
 
 export const QWP_SERVER_ROLE = {
