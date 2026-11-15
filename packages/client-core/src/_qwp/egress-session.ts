@@ -2053,6 +2053,14 @@ export class QwpEgressSession implements QwpEgressQueryControl {
             this.connection instanceof QwpReconnectingEgressConnection
           ) {
             await this.connection.recoverProtocolFailure(error);
+            // A terminal response rejected after the connection was lost no
+            // longer decides the query, which settleLostQuery() left to it
+            // while it waited. Settle again, so a query that no longer needs
+            // a server -- its consumer retired, its timeout expired -- leaves
+            // the replay rather than running again only to be cancelled, as
+            // it does when the rejection itself starts the reconnect. Once
+            // reconnected, this does nothing.
+            this.settleLostQuery();
             continue;
           }
           throw error;
@@ -2239,6 +2247,7 @@ export class QwpEgressSession implements QwpEgressQueryControl {
     }
     if (!query.isDone() && !query.pastDeadline) return;
     // Its terminal response arrived before the connection went, and decides.
+    // If the session rejects it, consumeMessages() settles the query again.
     if (connection.hasPendingTerminal(query.requestId)) return;
     // A no-op for a consumer that has already retired.
     query.retire(query.timeoutError());

@@ -937,9 +937,11 @@ export class QwpReconnectingEgressConnection implements QwpBinaryConnection {
     if (!connection) {
       // A full batch pool can delay terminal validation past socket loss.
       // Rejecting the verdict releases the reconnect already under way; its
-      // owner reports any later failure. Drop stale messages, but do not await
-      // it here: if the consumer retires and withdraws the replay, reconnect
-      // needs this receive loop to cross the now-idle queue's barrier.
+      // owner reports any later failure, and the session withdraws a query
+      // that no longer needs a server from the replay. Drop stale messages,
+      // but do not await it here: if the consumer retires and withdraws the
+      // replay, reconnect needs this receive loop to cross the now-idle
+      // queue's barrier.
       this.messagesQueue.clear();
       return;
     }

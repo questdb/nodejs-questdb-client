@@ -9189,6 +9189,71 @@ describe("QWP egress reconnect and replay", () => {
       }
     });
 
+    it.each(["abandoned", "timed out"] as const)(
+      "does not replay a query %s before its terminal is rejected",
+      async (how) => {
+        vi.useFakeTimers();
+        let releaseReplacement!: () => void;
+        const replacementReady = new Promise<void>((resolve) => {
+          releaseReplacement = resolve;
+        });
+        try {
+          const { session, connections } = await openSession(replacementReady);
+          try {
+            const query = await session.query(
+              "select * from x",
+              how === "timed out" ? { timeoutMs: 1_000 } : {},
+            );
+            let outcome: unknown;
+            query.completion.catch((error: unknown) => {
+              outcome = error;
+            });
+            const iterator = query[Symbol.asyncIterator]();
+            endWithMalformedTrailer(connections[0], query.requestId);
+            await vi.advanceTimersByTimeAsync(0);
+            expect(connections).toHaveLength(2);
+
+            // The query stops needing a server while its terminal still waits
+            // behind the full pool, so the pending verdict holds it in the
+            // replay. Retiring or expiring it frees the pool, and the session
+            // then rejects the terminal with the socket already gone.
+            if (how === "abandoned") await iterator.return!();
+            else await vi.advanceTimersByTimeAsync(1_000);
+            await vi.advanceTimersByTimeAsync(0);
+            // A timed-out query reports its timeout at the deadline, not one
+            // grace period later.
+            expect(outcome).toMatchObject({
+              name:
+                how === "abandoned"
+                  ? "QwpEgressQueryAbandonedError"
+                  : "QwpEgressQueryTimeoutError",
+            });
+
+            // The replacement receives the next query alone: no request or
+            // CANCEL for the old one, and no drain for the next to wait out.
+            releaseReplacement();
+            const starting = session.query("select 2");
+            void starting.catch(() => undefined);
+            await vi.advanceTimersByTimeAsync(0);
+            expect(connections[1].sent).toEqual([
+              encodeQwpQueryRequest({ requestId: 1n, sql: "select 2" }),
+            ]);
+            const next = await starting;
+            connections[1].receive(resultEnd(next.requestId));
+            await expect(next.completion).resolves.toMatchObject({
+              kind: "result-end",
+            });
+            expect(connections).toHaveLength(2);
+          } finally {
+            releaseReplacement();
+            await session.close();
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("reports a replay failure from the ongoing reconnect", async () => {
       const { session, connections } = await openSession();
       try {
