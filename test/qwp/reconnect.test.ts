@@ -8148,51 +8148,61 @@ describe("QWP egress reconnect and replay", () => {
       await session.close();
     });
 
-    it("fails a row-window query rather than replay it without QUERY_DETAILS", async () => {
-      // The replacement would ignore the window and stream every row.
-      const resets: bigint[] = [];
-      const {
-        session,
-        connections: [first, second],
-      } = await failoverSession(
-        [DETAILS, QWP_EGRESS_CAPABILITY.QUERY_FLAGS],
-        (requestId) => resets.push(requestId),
-      );
-      const query = await session.query("select x from t", {
-        skipRows: 100,
-        maxRows: 50,
-        countRows: true,
-      });
-      expect(first.sent).toHaveLength(1);
-      expect(first.sent[0].slice(-3)).toEqual(
-        Uint8Array.of(
+    it.each([
+      [
+        "row-window",
+        { skipRows: 100, maxRows: 50, countRows: true },
+        [
           QWP_QUERY_FLAG_COUNT_ROWS |
             QWP_QUERY_FLAG_SKIP_ROWS |
             QWP_QUERY_FLAG_MAX_ROWS,
           100,
           50,
-        ),
-      );
+        ],
+      ],
+      // maxRows: 0 is a row window too, one that asks for no rows at all.
+      ["schema-only", { maxRows: 0 }, [QWP_QUERY_FLAG_MAX_ROWS, 0]],
+    ] as const)(
+      "fails a %s query rather than replay it without QUERY_DETAILS",
+      async (_kind, options, tail) => {
+        // The replacement would ignore the window and stream every row.
+        const resets: bigint[] = [];
+        const {
+          session,
+          connections: [first, second],
+        } = await failoverSession(
+          [DETAILS, QWP_EGRESS_CAPABILITY.QUERY_FLAGS],
+          (requestId) => resets.push(requestId),
+        );
+        const query = await session.query("select x from t", options);
+        expect(first.sent).toHaveLength(1);
+        expect(first.sent[0].slice(-tail.length)).toEqual(
+          Uint8Array.of(...tail),
+        );
 
-      first.drop();
-      const error = await query.completion.catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(QwpEgressRowWindowUnsupportedError);
-      expect(error).toMatchObject({ requestId: query.requestId });
+        first.drop();
+        const error = await query.completion.catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(QwpEgressRowWindowUnsupportedError);
+        expect(error).toMatchObject({ requestId: query.requestId });
 
-      // The session carries on with the replacement, which was never sent the
-      // windowed request nor asked to reset for it.
-      const next = await session.query("select 1");
-      await vi.waitFor(() => expect(second.sent).toHaveLength(1));
-      expect(second.sent).toEqual([
-        encodeQwpQueryRequest({ requestId: next.requestId, sql: "select 1" }),
-      ]);
-      second.receive(resultEnd(next.requestId));
-      await expect(next.completion).resolves.toMatchObject({
-        kind: "result-end",
-      });
-      expect(resets).toEqual([]);
-      await session.close();
-    });
+        // Only the query fails. The session carries on with the replacement,
+        // which was never sent the windowed request nor asked to reset for it.
+        const next = await session.query("select 1");
+        await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+        expect(second.sent).toEqual([
+          encodeQwpQueryRequest({
+            requestId: next.requestId,
+            sql: "select 1",
+          }),
+        ]);
+        second.receive(resultEnd(next.requestId));
+        await expect(next.completion).resolves.toMatchObject({
+          kind: "result-end",
+        });
+        expect(resets).toEqual([]);
+        await session.close();
+      },
+    );
 
     it("reports a cancelled row-window query it does not replay as cancelled", async () => {
       const {

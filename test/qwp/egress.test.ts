@@ -4834,6 +4834,10 @@ describe("QwpEgressSession query details", () => {
       { maxRows: 10 },
       { skipRows: 5 },
       { ...ALL_REPORTS, skipRows: 1n, maxRows: 0 },
+      // maxRows: 0 is a window on its own, unlike skipRows: 0 below: such a
+      // server would stream every row of a query that asked for none.
+      { maxRows: 0 },
+      { maxRows: 0n },
     ] satisfies QwpEgressQueryOptions[]) {
       const error = await session
         .query("select 1", options)
