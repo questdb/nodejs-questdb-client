@@ -1748,7 +1748,12 @@ result. A query with a positive `skipRows` or any `maxRows` therefore rejects wi
 statement: the client cannot tell the two apart before sending them. Failover
 applies the same rules: a replay asks the endpoint it reaches for the details that
 endpoint supports, and a query whose row window it cannot honour fails with
-`QwpEgressRowWindowUnsupportedError` instead of being replayed. Check
+`QwpEgressRowWindowUnsupportedError` instead of being replayed. A query issued
+while the session is reconnecting is checked twice: against `session.serverInfo`,
+which still describes the lost endpoint, and then against the endpoint the
+reconnect reaches. If only the second lacks `QUERY_DETAILS`, nothing is sent and
+`query()` still resolves, but the query's `completion` and iteration reject with
+`QwpEgressRowWindowUnsupportedError`. Check
 `session.serverInfo.capabilities & QWP_EGRESS_CAPABILITY.QUERY_DETAILS` to choose
 between a row window and SQL `LIMIT` in advance.
 
