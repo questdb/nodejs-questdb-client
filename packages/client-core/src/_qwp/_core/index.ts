@@ -2,8 +2,8 @@ export * from "./bytes";
 export * from "./binds";
 export * from "./compression";
 export * from "./constants";
-// Named, unlike its neighbours: the credential subprotocol helpers in this
-// module are browser-adapter internals, not public API of either package.
+// Named: the credential subprotocol helpers in this module are
+// browser-adapter internals, not public API of either package.
 export {
   addQwpDurableAckWebSocketProtocol,
   isQwpDurableAckWebSocketProtocol,
