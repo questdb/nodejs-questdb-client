@@ -1722,9 +1722,11 @@ try {
   statement (`EXEC_DONE`), as `QwpQueryStats`: `compileNanos`, zero when the
   server reused a cached plan; `executeNanos`, from the server receiving the
   request to its terminal response, the other durations included; `countNanos`,
-  spent counting rows for `countRows`; `clientWaitNanos`, the time the query
-  waited for this client to read results or grant credit; and `jitCompiled`,
-  whether its filter ran as JIT-compiled native code. Errors carry no statistics.
+  spent counting the rows past the end of the row window for `countRows`, which
+  is zero unless `maxRows` ended the stream first; `clientWaitNanos`, the time
+  the query waited for this client to read results or grant credit; and
+  `jitCompiled`, whether its filter ran as JIT-compiled native code. Errors carry
+  no statistics.
 - `countRows: true` adds `rowCount` to a result's completion: the rows in the
   whole result set, whatever `skipRows` and `maxRows` leave out, while
   `totalRows` still counts the rows the stream carried. When `maxRows` ends the

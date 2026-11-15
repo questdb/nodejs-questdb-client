@@ -61,8 +61,10 @@ export interface QwpQueryStats {
    */
   readonly executeNanos: bigint;
   /**
-   * Nanoseconds spent counting the rows a row window left out, for
-   * `QWP_QUERY_FLAG_COUNT_ROWS`.
+   * Nanoseconds spent counting the rows past the end of the row window, for
+   * `QWP_QUERY_FLAG_COUNT_ROWS`. Zero when the stream read every row, as it
+   * does unless `maxRows` ends it first: the rows `skipRows` leaves out are
+   * counted as they are skipped, within `executeNanos`.
    */
   readonly countNanos: bigint;
   /**
