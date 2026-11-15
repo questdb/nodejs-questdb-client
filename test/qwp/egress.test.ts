@@ -4606,6 +4606,21 @@ describe("QwpEgressSession query details", () => {
     }
   });
 
+  it("pins the query-details bits to the server's values", () => {
+    // QwpEgressMsgKind in questdb/questdb#8356 uses these values. Every other
+    // test names the constants on both sides of its assertion, or ORs a whole
+    // pair into one literal byte. A swap within a pair passed them all, though
+    // swapping SKIP_ROWS and MAX_ROWS makes the server skip the rows maxRows
+    // asks for, and so did any other QUERY_DETAILS bit, with which the client
+    // drops every detail and refuses every row window.
+    expect(QWP_EGRESS_CAPABILITY.QUERY_DETAILS).toBe(0x10);
+    expect(QWP_QUERY_FLAG_ERROR_POSITION).toBe(0x04);
+    expect(QWP_QUERY_FLAG_STATS).toBe(0x08);
+    expect(QWP_QUERY_FLAG_COUNT_ROWS).toBe(0x10);
+    expect(QWP_QUERY_FLAG_SKIP_ROWS).toBe(0x20);
+    expect(QWP_QUERY_FLAG_MAX_ROWS).toBe(0x40);
+  });
+
   it("reports the row count and statistics on a result's completion", async () => {
     const { connection, session } = await openSession();
     const query = await session.query("select * from x", {
