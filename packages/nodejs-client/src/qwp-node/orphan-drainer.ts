@@ -32,6 +32,7 @@ import {
 import {
   QwpCatchUpCapGapError,
   QwpDurableAckPersistentFailureError,
+  QwpOwnedByPersistentFailureError,
 } from "../../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { QwpNotificationDispatcher } from "../../../client-core/src/_qwp/_internal/notification-dispatcher";
 import {
@@ -855,8 +856,9 @@ function delay(milliseconds: number): Promise<void> {
  * Only failures that are terminal by design quarantine a slot behind its
  * `.failed` sentinel and report the abandoned bytes as data loss: a rejected
  * authentication, a protocol violation, a head the server will not accept, an
- * exhausted durable-ACK or symbol catch-up capability-gap episode, and a
- * corrupt journal.
+ * exhausted capability-gap episode -- a durable ACK or an `ownedBy` owner no
+ * endpoint confirmed -- or symbol catch-up cap-gap episode, and a corrupt
+ * journal.
  * Everything else -- an unreachable server, an ACK timeout, EMFILE, ENOSPC --
  * is transient, and the slot is left intact for a later scan.
  *
@@ -883,6 +885,7 @@ function isTerminalDrainFailure(error: Error): boolean {
   if (error instanceof QwpReplayRejectedError) return true;
   if (error instanceof QwpCatchUpCapGapError) return true;
   if (error instanceof QwpDurableAckPersistentFailureError) return true;
+  if (error instanceof QwpOwnedByPersistentFailureError) return true;
   if (error instanceof QwpUpgradeError) {
     return error.kind === QWP_UPGRADE_ERROR_KIND.AUTHENTICATION;
   }

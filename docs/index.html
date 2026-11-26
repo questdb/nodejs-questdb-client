@@ -127,6 +127,13 @@ forms of each field.</p>
 the pooled Node client. Use comma-separated or repeated <code>addr</code> values for
 failover; standalone ingress validates but otherwise ignores egress- and
 pool-only keys.</p>
+<p>With QuestDB Enterprise, <code>owned_by=&lt;name&gt;</code> (the <code>ownedBy</code> ingress option) names
+the user, group, or service account that owns the tables and columns a sender
+auto-creates, as <code>OWNED BY</code> does in SQL. An external user, such as one that
+authenticates with an OpenID Connect token, must name one of its groups to have
+anything auto-created. Node.js fails the connection with <code>QwpOwnedByMismatchError</code>
+when the server does not confirm the owner; a browser sends the owner too but
+cannot confirm it. See <a href="media/QWP.md#owner-of-auto-created-tables">QWP.md</a>.</p>
 <p>Node.js also supports fire-and-forget QWP-over-UDP through the same API:</p>
 <pre><code class="typescript"><span class="hl-4">const</span><span class="hl-2"> </span><span class="hl-7">sender</span><span class="hl-2"> = </span><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">Sender</span><span class="hl-2">.</span><span class="hl-1">fromConfig</span><span class="hl-2">(</span><br/><span class="hl-2">  </span><span class="hl-3">&quot;udp::addr=239.1.2.3:9007;max_datagram_size=1400;multicast_ttl=1&quot;</span><span class="hl-2">,</span><br/><span class="hl-2">);</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">connect</span><span class="hl-2">();</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><br/><span class="hl-2">  .</span><span class="hl-1">table</span><span class="hl-2">(</span><span class="hl-3">&quot;trades&quot;</span><span class="hl-2">)</span><br/><span class="hl-2">  .</span><span class="hl-1">symbol</span><span class="hl-2">(</span><span class="hl-3">&quot;symbol&quot;</span><span class="hl-2">, </span><span class="hl-3">&quot;ETH-USD&quot;</span><span class="hl-2">)</span><br/><span class="hl-2">  .</span><span class="hl-1">floatColumn</span><span class="hl-2">(</span><span class="hl-3">&quot;price&quot;</span><span class="hl-2">, </span><span class="hl-8">2615.54</span><span class="hl-2">)</span><br/><span class="hl-2">  .</span><span class="hl-1">atNow</span><span class="hl-2">();</span><br/><span class="hl-5">await</span><span class="hl-2"> </span><span class="hl-6">sender</span><span class="hl-2">.</span><span class="hl-1">close</span><span class="hl-2">();</span>
 </code><button type="button">Copy</button></pre>

@@ -1226,6 +1226,68 @@ describe("QWP unified Node client configuration", () => {
     expect(shared.egress).not.toHaveProperty("requestDurableAck");
   });
 
+  it("keeps ownedBy on ingress", () => {
+    // An owner is named on /write/v4 only: a query session creates nothing,
+    // and the Java client's query client accepts the key as an ingress one.
+    const fromString = parseQwpNodeClientConfig(
+      "ws::addr=localhost:9000;owned_by=café team;",
+    );
+    expect(fromString.ingress.ownedBy).toBe("café team");
+    expect(fromString.egress).not.toHaveProperty("ownedBy");
+    const sides = resolveQwpNodeClientSides(fromString);
+    expect(sides.ingress.ownedBy).toBe("café team");
+    expect(sides.egress).not.toHaveProperty("ownedBy");
+
+    // A typed value wins over the key, as every typed one does.
+    expect(
+      parseQwpNodeClientConfig("ws::addr=localhost:9000;owned_by=team_a;", {
+        ingress: { ownedBy: "team_b" },
+      }).ingress.ownedBy,
+    ).toBe("team_b");
+
+    // The key, taken verbatim, must still name an owner.
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost:9000;owned_by=  ;"),
+    ).toThrow("owned_by must not be empty or blank");
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost:9000;owned_by=;"),
+    ).toThrow("value is not set for 'owned_by'");
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost:9000;", {
+        ingress: { ownedBy: " " },
+      }),
+    ).toThrow("ingress.ownedBy must not be empty or blank");
+    expect(() =>
+      createQwpNodeClient({
+        cluster: { url: "ws://localhost:9000" },
+        ingress: { ownedBy: "" },
+      }),
+    ).toThrow("ingress.ownedBy must not be empty or blank");
+  });
+
+  it("routes a Sender's owned_by and typed ownedBy to ingress", async () => {
+    expect(
+      qwpConfig(
+        await SenderOptions.fromConfig(
+          "wss::addr=localhost:9000;owned_by=team_a;",
+        ),
+      )?.ownedBy,
+    ).toBe("team_a");
+    expect(
+      qwpConfig(
+        await SenderOptions.fromConfig("ws::addr=localhost:9000;", {
+          qwp: { webSocket: { ownedBy: "team_b" } },
+        }),
+      )?.ownedBy,
+    ).toBe("team_b");
+    // A Sender is an ingress client, so the key raises no ignored-key warning.
+    const log = vi.fn();
+    await SenderOptions.fromConfig("ws::addr=localhost:9000;owned_by=t;", {
+      log,
+    });
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it("routes a Sender's typed requestDurableAck to ingress", async () => {
     // qwp.webSocket is a Sender's ingress section, so it may carry the
     // request. Spread into the transport settings both sides share, it would

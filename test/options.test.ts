@@ -1243,6 +1243,19 @@ describe("Configuration string parser suite", function () {
     }
   });
 
+  it("accepts owned_by on ws/wss only", async function () {
+    // The owner of auto-created tables travels in the WebSocket upgrade, so
+    // every other transport rejects the key, as the Java client does.
+    await expect(
+      SenderOptions.fromConfig("wss::addr=host:9000;owned_by=team_a;"),
+    ).resolves.toMatchObject({ protocol: "wss" });
+    for (const schema of ["http", "https", "tcp", "tcps", "udp"]) {
+      await expect(
+        SenderOptions.fromConfig(`${schema}::addr=host:9000;owned_by=team_a;`),
+      ).rejects.toThrow("Unknown configuration key: 'owned_by'");
+    }
+  });
+
   it("can parse auto_flush_interval config", async function () {
     let options = await SenderOptions.fromConfig(
       "http::addr=host:9000;protocol_version=2;auto_flush_interval=30",

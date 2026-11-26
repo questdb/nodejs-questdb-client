@@ -52,8 +52,8 @@ export function orphanIngressSessionOptions<
     // failures and cap-gap quarantine are selected by orphanStoreAndForward.
     initialConnectMode: QWP_INITIAL_CONNECT_MODE.ASYNC,
     orphanStoreAndForward: true,
-    // Java also bounds an orphan's durable-ACK gap by
-    // reconnect_max_duration_millis.
+    // Java also bounds an orphan's capability gap -- a durable ACK or an
+    // owned_by owner left unconfirmed -- by reconnect_max_duration_millis.
     orphanDurableAckMismatchMaxDurationMs:
       options.orphanDurableAckMismatchMaxDurationMs ??
       configuredReconnect?.reconnectMaxDurationMs ??

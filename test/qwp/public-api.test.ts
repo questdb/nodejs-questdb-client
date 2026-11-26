@@ -195,6 +195,8 @@ const nodeRuntimeContract = [
   "QWP_ORPHAN_FAILED_SENTINEL",
   "QWP_SF_BACKPRESSURE_POLICY",
   "QWP_SF_DURABILITY",
+  // Only Node.js can read the upgrade response that confirms an owner.
+  "QwpOwnedByMismatchError",
   "QwpReplayStoreAppendTimeoutError",
   "QwpReplayStoreBatchTooLargeError",
   "QwpReplayStoreCheckpointError",

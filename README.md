@@ -216,6 +216,14 @@ the pooled Node client. Use comma-separated or repeated `addr` values for
 failover; standalone ingress validates but otherwise ignores egress- and
 pool-only keys.
 
+With QuestDB Enterprise, `owned_by=<name>` (the `ownedBy` ingress option) names
+the user, group, or service account that owns the tables and columns a sender
+auto-creates, as `OWNED BY` does in SQL. An external user, such as one that
+authenticates with an OpenID Connect token, must name one of its groups to have
+anything auto-created. Node.js fails the connection with `QwpOwnedByMismatchError`
+when the server does not confirm the owner; a browser sends the owner too but
+cannot confirm it. See [QWP.md](QWP.md#owner-of-auto-created-tables).
+
 Node.js also supports fire-and-forget QWP-over-UDP through the same API:
 
 ```typescript

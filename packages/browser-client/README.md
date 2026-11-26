@@ -302,6 +302,26 @@ credential.
 - The server must support `qwp.browser.allowed.origins`. The allowlist covers
   only the QWP routes; it does not enable CORS for REST.
 
+### Owner of auto-created tables
+
+An external user, such as one that authenticates with an OIDC token, cannot own
+the tables and columns QuestDB auto-creates for it, whichever way it
+authenticates. With QuestDB Enterprise, set `ownedBy` on the sender to name one
+of its groups as their owner, as `OWNED BY` does in SQL:
+
+```typescript
+const sender = await connectQwpBrowserSender({
+  url: "wss://questdb.example.com:9000/write/v4",
+  auth: { type: "bearer", token: oidcAccessToken },
+  ownedBy: "web_ingest",
+});
+```
+
+The client sends the owner in the `qwp_owned_by` URL parameter of every
+upgrade, but a browser cannot read the upgrade response to confirm it: a server
+that predates the option ignores it. See
+[Owner of auto-created tables](https://github.com/questdb/nodejs-questdb-client/blob/main/QWP.md#owner-of-auto-created-tables).
+
 ## Stream query results
 
 QWP egress streams typed result batches. A session runs one active query at a

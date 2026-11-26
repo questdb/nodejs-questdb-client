@@ -344,6 +344,33 @@ export type BrowserSharedIngressNegotiation = ExpectNone<
   >
 >;
 
+// An owner of auto-created tables is named on /write/v4 only: a query session
+// creates nothing. Only the ingress options carry it, and only the Node root,
+// which can read the upgrade that confirms it, exports the failure.
+export type NodeSharedOwnedBy = ExpectNone<
+  Extract<
+    | keyof NodeRoot.QwpNodeWebSocketOptions
+    | keyof NodeRoot.QwpNodeEgressOptions,
+    "ownedBy"
+  >
+>;
+export type BrowserSharedOwnedBy = ExpectNone<
+  Extract<
+    | keyof BrowserRoot.QwpBrowserWebSocketOptions
+    | keyof BrowserRoot.QwpBrowserEgressOptions,
+    "ownedBy"
+  >
+>;
+export type NodeIngressOwnedBy = ExpectNone<
+  Exclude<"ownedBy", keyof NodeRoot.QwpNodeIngressOptions>
+>;
+export type BrowserIngressOwnedBy = ExpectNone<
+  Exclude<"ownedBy", keyof BrowserRoot.QwpBrowserIngressOptions>
+>;
+export type NodeOwnedByMismatch = NodeRoot.QwpOwnedByMismatchError;
+// @ts-expect-error QwpOwnedByMismatchError is Node-only.
+export type BrowserOwnedByMismatch = BrowserRoot.QwpOwnedByMismatchError;
+
 // The endpoints and WebSocket deadlines both runtimes read are a non-exported
 // base, published only through the runtime options that extend it -- so those
 // must keep every one of its fields.

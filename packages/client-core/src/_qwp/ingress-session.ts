@@ -323,7 +323,9 @@ export interface QwpIngressSessionInternalOptions
   /** Orphan sessions may quarantine persistent catch-up cap gaps. */
   orphanStoreAndForward?: boolean;
   /**
-   * Consecutive durable-ACK gap budget retained for orphan SF.
+   * Consecutive capability-gap budget retained for orphan SF: endpoints that
+   * leave a requested durable ACK or `ownedBy` owner unconfirmed. Named for
+   * the durable-ACK gap it first bounded.
    * Not capped at the host timer ceiling: compared against elapsed time only.
    */
   orphanDurableAckMismatchMaxDurationMs?: number;
