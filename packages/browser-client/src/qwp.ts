@@ -972,6 +972,24 @@ function browserIngressHandshake(
   return { qwpVersion: QWP_VERSION };
 }
 
+/**
+ * Starts closing a connection whose ingress negotiation failed, without
+ * waiting for the close to finish.
+ *
+ * The caller rethrows the negotiation failure, and that failure is the verdict.
+ * A browser refuses the 1002 used here, so the connection retries the close
+ * with 1000 and then waits for the server's reply. Waiting for it raced the
+ * connect deadline armed when the attempt began: a server slow to answer the
+ * close turned QwpDurableAckUnavailableError, which is terminal, into a
+ * retryable upgrade timeout. Node's upgrade-validation failures do not wait
+ * for their close either.
+ */
+function closeFailedIngressNegotiation(connection: QwpBinaryConnection): void {
+  void connection
+    .close(1002, "invalid QWP ingress SERVER_INFO")
+    .catch(() => undefined);
+}
+
 function connectQwpBrowserRawEndpoint(
   options: QwpBrowserIngressConnectionOptions,
   endpoint: string | URL,
@@ -1007,9 +1025,7 @@ function connectQwpBrowserRawEndpoint(
               endpoint,
             );
           } catch (error) {
-            await connection
-              .close(1002, "invalid QWP ingress SERVER_INFO")
-              .catch(() => undefined);
+            closeFailedIngressNegotiation(connection);
             throw error;
           }
         }
@@ -1171,9 +1187,7 @@ async function connectQwpBrowserIngressEndpoint(
           endpoint,
         );
       } catch (error) {
-        await connection
-          .close(1002, "invalid QWP ingress SERVER_INFO")
-          .catch(() => undefined);
+        closeFailedIngressNegotiation(connection);
         throw error;
       }
     },

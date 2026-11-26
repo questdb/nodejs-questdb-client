@@ -179,6 +179,70 @@ class FakeStuckCloseNodeWebSocket extends FakeStuckCloseWebSocket {
   }
 }
 
+/**
+ * Validates close() as a browser does, before it changes any state: a code
+ * other than 1000 or 3000-4999 throws InvalidAccessError, and a reason over
+ * 123 UTF-8 bytes throws SyntaxError. It has no terminate().
+ */
+class FakeBrowserCloseWebSocket extends FakeWebSocket {
+  readonly refusedCloseCalls: { code?: number; reason?: string }[] = [];
+
+  close(code?: number, reason?: string): void {
+    if (code !== undefined && code !== 1000 && (code < 3000 || code > 4999)) {
+      this.refusedCloseCalls.push({ code, reason });
+      throw new DOMException(`invalid code ${code}`, "InvalidAccessError");
+    }
+    if (
+      reason !== undefined &&
+      new TextEncoder().encode(reason).byteLength > 123
+    ) {
+      this.refusedCloseCalls.push({ code, reason });
+      throw new DOMException("reason is too long", "SyntaxError");
+    }
+    this.acceptClose(code, reason);
+  }
+
+  /** Answers an accepted close at once, as a server that reads does. */
+  protected acceptClose(code?: number, reason?: string): void {
+    super.close(code, reason);
+  }
+}
+
+/**
+ * A browser socket whose server has not read the client's close yet: an
+ * accepted close leaves the socket CLOSING until answerClose().
+ */
+class FakeBrowserStuckCloseWebSocket extends FakeBrowserCloseWebSocket {
+  protected acceptClose(code?: number, reason?: string): void {
+    this.closeCalls.push({ code, reason });
+    if (this.readyState === 1) this.readyState = 2;
+  }
+
+  /** Delivers the server's reply, echoing the close the client sent. */
+  answerClose(): void {
+    const sent = this.closeCalls[this.closeCalls.length - 1];
+    this.readyState = 3;
+    this.emit("close", {
+      code: sent?.code ?? 1005,
+      reason: sent?.reason ?? "",
+      wasClean: true,
+    });
+  }
+}
+
+/**
+ * Refuses close() the way `ws` refuses a code or reason it rejects: it enters
+ * CLOSING first, throws after, and then ignores every later close().
+ */
+class FakeRefusingCloseNodeWebSocket extends FakeStuckCloseNodeWebSocket {
+  close(code?: number, reason?: string): void {
+    this.closeCalls.push({ code, reason });
+    if (this.readyState !== 1) return;
+    this.readyState = 2;
+    throw new RangeError("The message must not be greater than 123 bytes");
+  }
+}
+
 class FakeBackpressuredWebSocket extends FakeWebSocket {
   send(payload: Uint8Array): void {
     this.bufferedAmount += payload.byteLength;
@@ -1150,6 +1214,59 @@ describe("QWP WebSocket adapters", () => {
       url: "ws://localhost:9000/write/v4",
     } satisfies Partial<QwpDurableAckUnavailableError>);
   });
+
+  it.each([
+    {
+      path: "a raw connection",
+      connect: (factory: () => QwpWebSocketLike) =>
+        connectQwpBrowserWebSocket({
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: true,
+          connectTimeoutMs: 1_000,
+          webSocketFactory: factory,
+        }),
+    },
+    {
+      path: "the sender connection factory",
+      connect: (factory: () => QwpWebSocketLike) =>
+        createQwpBrowserConnectionFactory({
+          url: "ws://localhost:9000/write/v4",
+          requestDurableAck: true,
+          connectTimeoutMs: 1_000,
+          webSocketFactory: factory,
+        })(),
+    },
+  ])(
+    "reports browser durable ACK unavailable without waiting for the close reply, through $path",
+    async ({ connect }) => {
+      // A browser refuses the 1002 this failure closes with, so the close is
+      // retried with 1000 and then waits for the server's reply. Waiting for
+      // it before the rethrow let the connect deadline win against a server
+      // slow to answer, and the capability verdict, which is terminal,
+      // surfaced as a retryable upgrade timeout.
+      const socket = new FakeBrowserStuckCloseWebSocket();
+      socket.protocol = QWP_DURABLE_ACK_WEBSOCKET_PROTOCOL;
+      const connecting = connect(() => asQwpSocket(socket));
+      socket.open();
+      socket.message(ingressServerInfo(1_048_576, false));
+
+      await expect(connecting).rejects.toMatchObject({
+        name: "QwpDurableAckUnavailableError",
+        kind: QWP_UPGRADE_ERROR_KIND.CAPABILITY_MISMATCH,
+        retryable: false,
+      } satisfies Partial<QwpDurableAckUnavailableError>);
+      // The close still went out, with a code the browser accepts.
+      expect(socket.refusedCloseCalls).toEqual([
+        { code: 1002, reason: "invalid QWP ingress SERVER_INFO" },
+      ]);
+      expect(socket.closeCalls).toEqual([
+        { code: 1000, reason: "invalid QWP ingress SERVER_INFO" },
+      ]);
+      // It completes in the background once the server answers.
+      socket.answerClose();
+      expect(socket.listenerCount()).toBe(0);
+    },
+  );
 
   it("waits for durable upload in a browser sender's flushAndWait()", async () => {
     const socket = new FakeWebSocket();
@@ -2308,6 +2425,175 @@ describe("QWP WebSocket adapters", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("closes a browser WebSocket with 1000 when it refuses the requested code", async () => {
+    // The client closes with 1001 on shutdown, 1002 on a protocol failure and
+    // 1011 on a failed send or an undrained cancel, and a browser throws for
+    // all three. The connection used to settle as closed with its socket open.
+    for (const code of [1001, 1002, 1011]) {
+      const socket = new FakeBrowserCloseWebSocket();
+      const connecting = connectQwpBrowserWebSocket({
+        url: "ws://localhost:9000/read/v1",
+        webSocketFactory: () => asQwpSocket(socket),
+      });
+      socket.open();
+      const connection = await connecting;
+
+      await connection.close(code, "QWP test close");
+      expect(socket.refusedCloseCalls).toEqual([
+        { code, reason: "QWP test close" },
+      ]);
+      expect(socket.closeCalls).toEqual([
+        { code: 1000, reason: "QWP test close" },
+      ]);
+      expect(socket.readyState).toBe(3);
+      // The peer's close, not a synthetic one: the socket really closed.
+      await expect(connection.closed).resolves.toEqual({
+        code: 1000,
+        reason: "QWP test close",
+        wasClean: true,
+      });
+      expect(socket.listenerCount()).toBe(0);
+    }
+  });
+
+  it("closes a browser WebSocket without a code when it refuses the reason", async () => {
+    const socket = new FakeBrowserCloseWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/read/v1",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const connection = await connecting;
+    const reason = "x".repeat(124);
+
+    await connection.close(1011, reason);
+    expect(socket.refusedCloseCalls).toEqual([
+      { code: 1011, reason },
+      { code: 1000, reason },
+    ]);
+    expect(socket.closeCalls).toEqual([{ code: undefined, reason: undefined }]);
+    expect(socket.readyState).toBe(3);
+  });
+
+  it("settles a browser connection whose socket refuses every close", async () => {
+    class FakeUnclosableWebSocket extends FakeWebSocket {
+      close(code?: number, reason?: string): void {
+        this.closeCalls.push({ code, reason });
+        throw new Error("close is broken");
+      }
+    }
+    const socket = new FakeUnclosableWebSocket();
+    const connecting = connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/read/v1",
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    const connection = await connecting;
+
+    await connection.close(1011, "QWP test close");
+    expect(socket.closeCalls).toEqual([
+      { code: 1011, reason: "QWP test close" },
+      { code: 1000, reason: "QWP test close" },
+      { code: undefined, reason: undefined },
+    ]);
+    await expect(connection.closed).resolves.toEqual({
+      code: 1006,
+      reason: "QWP WebSocket close failed",
+      wasClean: false,
+    });
+    expect(socket.listenerCount()).toBe(0);
+  });
+
+  it("terminates a Node WebSocket that refuses its close instead of retrying it", async () => {
+    // `ws` ignores a second close() once it is CLOSING, so a retry would only
+    // have postponed terminate() by the whole close deadline. 1011 is the case
+    // that matters: a code other than 1000 is the one a browser socket retries
+    // with 1000 first, and 1000 itself never reaches that retry.
+    const reason = "x".repeat(124);
+    for (const code of [1000, 1011]) {
+      const socket = new FakeRefusingCloseNodeWebSocket();
+      const connecting = connectQwpNodeWebSocket({
+        url: "ws://localhost:9000/write/v4",
+        closeTimeoutMs: 50,
+        webSocketFactory: (_url, options) => {
+          options.onUpgrade({});
+          return asQwpSocket(socket);
+        },
+      });
+      socket.open();
+      const connection = await connecting;
+
+      await connection.close(code, reason);
+      expect(socket.closeCalls).toEqual([{ code, reason }]);
+      expect(socket.terminateCalls).toBe(1);
+      await expect(connection.closed).resolves.toEqual({
+        code: 1006,
+        reason: "QWP WebSocket close failed",
+        wasClean: false,
+      });
+      expect(socket.listenerCount()).toBe(0);
+    }
+  });
+
+  it("closes a browser client's pooled query socket on close()", async () => {
+    const sockets: FakeBrowserCloseWebSocket[] = [];
+    const client = createQwpBrowserClient({
+      cluster: {
+        url: "ws://localhost:9000",
+        webSocketFactory: () => {
+          const socket = new FakeBrowserCloseWebSocket();
+          sockets.push(socket);
+          queueMicrotask(() => {
+            socket.open();
+            socket.message(serverInfoFrame());
+          });
+          return asQwpSocket(socket);
+        },
+      },
+    });
+    const lease = await client.borrowQuery();
+    await lease.close();
+
+    await client.close();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].refusedCloseCalls).toEqual([
+      { code: 1001, reason: "QWP client shutting down" },
+    ]);
+    expect(sockets[0].closeCalls).toEqual([
+      { code: 1000, reason: "QWP client shutting down" },
+    ]);
+    expect(sockets[0].readyState).toBe(3);
+  });
+
+  it("closes a browser session's socket when a cancelled query does not drain", async () => {
+    const socket = new FakeBrowserCloseWebSocket();
+    const connecting = connectQwpBrowserEgress({
+      url: "ws://localhost:9000/read/v1",
+      reconnect: false,
+      cancelDrainTimeoutMs: 25,
+      webSocketFactory: () => asQwpSocket(socket),
+    });
+    socket.open();
+    socket.message(serverInfoFrame());
+    const session = await connecting;
+    const query = await session.query("select * from long_sequence(1000000)");
+
+    // The server never answers the CANCEL, so the session fails once the
+    // drain bound expires, and closes the only connection it has.
+    await query.cancel();
+    await expect(query.completion).rejects.toMatchObject({
+      name: "QwpEgressQueryCancelTimeoutError",
+    });
+    await session.close().catch(() => undefined);
+    expect(socket.refusedCloseCalls).toEqual([
+      { code: 1011, reason: "QWP cancellation drain timed out" },
+    ]);
+    expect(socket.closeCalls).toEqual([
+      { code: 1000, reason: "QWP cancellation drain timed out" },
+    ]);
+    expect(socket.readyState).toBe(3);
   });
 
   it("serializes browser sends until buffered bytes drain", async () => {
