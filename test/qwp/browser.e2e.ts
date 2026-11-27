@@ -692,6 +692,56 @@ describe("QWP in a real browser", () => {
     }
   });
 
+  it("names the sender's owner in the upgrade URL of a real browser", async () => {
+    // A browser cannot set X-QWP-Owned-By, so the owner travels in the
+    // qwp_owned_by parameter, which QuestDB decodes as a form-encoded UTF-8
+    // query parameter, '+' as a space, as URLSearchParams does below.
+    const requested: string[] = [];
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("connection", (socket, request) => {
+      requested.push(request.url ?? "");
+      socket.send(browserIngressServerInfo(1_048_576));
+    });
+    await waitForWebSocketServer(server);
+    const address = server.address() as AddressInfo;
+    const owner = "café team+%1 表";
+    const page = await browser.newPage();
+    try {
+      await page.goto(assetUrl);
+      const connected = await page.evaluate(
+        async ({ moduleUrl, url, owner }) => {
+          const importModule = new Function("url", "return import(url)") as (
+            url: string,
+          ) => Promise<Record<string, any>>;
+          const qwp = await importModule(moduleUrl);
+          const sender = await qwp.connectQwpBrowserSender({
+            url,
+            ownedBy: owner,
+          });
+          try {
+            return sender.metrics.connected as boolean;
+          } finally {
+            await sender.close();
+          }
+        },
+        {
+          moduleUrl: assetUrl,
+          url: `ws://127.0.0.1:${address.port}/write/v4`,
+          owner,
+        },
+      );
+
+      expect(connected).toBe(true);
+      expect(requested).toHaveLength(1);
+      const query = new URL(requested[0], "http://localhost").searchParams;
+      expect(query.get("qwp_owned_by")).toBe(owner);
+      expect(query.get("qwp_browser_handshake")).toBe("v1");
+    } finally {
+      await page.close();
+      await closeWebSocketServer(server);
+    }
+  });
+
   it("negotiates Zstd through the real browser WebSocket API", async () => {
     let requestedPath: string | undefined;
     const server = new WebSocketServer({

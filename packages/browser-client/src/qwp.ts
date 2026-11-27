@@ -47,6 +47,7 @@ import {
   QWP_AUTHORIZATION_WEBSOCKET_PROTOCOL_PREFIX,
   qwpBrowserWebSocketProtocols,
 } from "../../client-core/src/_qwp/_core/durable-ack";
+import { validateQwpOwnedBy } from "../../client-core/src/_qwp/owned-by";
 import {
   QwpDurableAckUnavailableError,
   QwpRoutingOptions,
@@ -496,10 +497,14 @@ function serviceAccountSql(serviceAccount: string | undefined): string {
 const QWP_BROWSER_HANDSHAKE_PARAM = "qwp_browser_handshake";
 const QWP_ACCEPT_ENCODING_PARAM = "qwp_accept_encoding";
 const QWP_MAX_BATCH_ROWS_PARAM = "qwp_max_batch_rows";
+/** The browser carrier of `X-QWP-Owned-By`, which a browser cannot set. */
+const QWP_OWNED_BY_PARAM = "qwp_owned_by";
+/** The upgrade parameters this client adds, none of which REST reads. */
 const QWP_NEGOTIATION_PARAMS = [
   QWP_BROWSER_HANDSHAKE_PARAM,
   QWP_ACCEPT_ENCODING_PARAM,
   QWP_MAX_BATCH_ROWS_PARAM,
+  QWP_OWNED_BY_PARAM,
 ] as const;
 
 function defaultBootstrapUrl(endpoint: string | URL): URL {
@@ -641,6 +646,24 @@ export interface QwpBrowserIngressOptions
    */
   requestDurableAck?: boolean;
   /**
+   * Names the owner of the tables and columns this sender auto-creates, the
+   * way `OWNED BY` does in SQL: QuestDB Enterprise grants them to this user,
+   * group or service account instead of the authenticated principal. A
+   * principal may name itself or one of its groups. An external user, such as
+   * one authenticated with an OpenID Connect token, cannot own anything
+   * itself, so it must name one of its groups to have tables or columns
+   * auto-created at all.
+   *
+   * A browser cannot set the `X-QWP-Owned-By` upgrade header, so the owner
+   * travels in the `qwp_owned_by` URL parameter of every `/write/v4` upgrade.
+   * Nor can it read the upgrade response, so unlike Node.js it cannot confirm
+   * that the server set the owner: a server that predates the option ignores
+   * the parameter and creates tables owned by the principal, and a refused
+   * owner fails the upgrade as an opaque `QwpUpgradeError`. Needs QuestDB
+   * Enterprise with access control enabled.
+   */
+  ownedBy?: string;
+  /**
    * Time allowed for the optional ingress SERVER_INFO message. Defaults to
    * 250ms; zero disables the initial wait while retaining late negotiation.
    * Capped at 2,147,483,647ms (the host timer ceiling); a larger value throws
@@ -716,7 +739,7 @@ interface QwpResolvedBrowserClientOptions {
 type QwpBrowserIngressConnectionOptions = QwpBrowserWebSocketOptions &
   Pick<
     QwpBrowserIngressOptions,
-    "requestDurableAck" | "ingressNegotiationTimeoutMs"
+    "requestDurableAck" | "ingressNegotiationTimeoutMs" | "ownedBy"
   >;
 
 const DEFAULT_BROWSER_CONNECT_TIMEOUT_MS = 15_000;
@@ -756,13 +779,10 @@ function composeBrowserAbortSignals(
  * connections. Tests use it to drive the upgrade directly.
  */
 export function connectQwpBrowserWebSocket(
-  options: QwpBrowserWebSocketOptions &
-    Pick<
-      QwpBrowserIngressOptions,
-      "requestDurableAck" | "ingressNegotiationTimeoutMs"
-    >,
+  options: QwpBrowserIngressConnectionOptions,
 ): Promise<QwpBinaryConnection> {
   validateBrowserAuthOptions(options);
+  validateQwpOwnedBy(options.ownedBy);
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
@@ -779,13 +799,10 @@ export function connectQwpBrowserWebSocket(
  * package root does not export it.
  */
 export function createQwpBrowserConnectionFactory(
-  options: QwpBrowserWebSocketOptions &
-    Pick<
-      QwpBrowserIngressOptions,
-      "requestDurableAck" | "ingressNegotiationTimeoutMs"
-    >,
+  options: QwpBrowserIngressConnectionOptions,
 ): QwpConnectionFactory {
   validateBrowserAuthOptions(options);
+  validateQwpOwnedBy(options.ownedBy);
   return createQwpFailoverConnectionFactory(
     options.url,
     options.failoverUrls,
@@ -948,6 +965,29 @@ function browserNegotiationUrl(
 }
 
 /**
+ * The `/write/v4` endpoint with the `qwp_owned_by` parameter that names
+ * `ownedBy`, URL-encoded as UTF-8, or the endpoint itself when it names no
+ * owner. QuestDB reads the parameter only from an upgrade that carries no
+ * `X-QWP-Owned-By` header, which no browser upgrade can.
+ */
+function browserOwnedByUrl(
+  options: QwpBrowserIngressConnectionOptions,
+  endpoint: string | URL,
+): string | URL {
+  let ownedBy: string | undefined;
+  try {
+    ownedBy = validateQwpOwnedBy(options.ownedBy);
+  } catch (error) {
+    // Inside the per-attempt connection callback, where a retry cannot fix an
+    // option.
+    throw qwpNonRetryable(error as TypeError);
+  }
+  return ownedBy === undefined
+    ? endpoint
+    : browserNegotiationUrl(endpoint, QWP_OWNED_BY_PARAM, ownedBy);
+}
+
+/**
  * Reads the upgrade's own durable-ACK signal.
  *
  * The subprotocol echo confirms that the server speaks the browser durable-ACK
@@ -1004,9 +1044,10 @@ function connectQwpBrowserRawEndpoint(
   // callback rejected an unusable option only after a WebSocket had been
   // opened for it.
   const negotiationTimeoutMs = ingressNegotiationTimeoutMs(options);
+  const ownedByEndpoint = browserOwnedByUrl(options, endpoint);
   const requestEndpoint = requestDurableAck
-    ? browserNegotiationUrl(endpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1")
-    : endpoint;
+    ? browserNegotiationUrl(ownedByEndpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1")
+    : ownedByEndpoint;
   return connectQwpBrowserEndpoint(
     options,
     endpoint,
@@ -1173,7 +1214,11 @@ async function connectQwpBrowserIngressEndpoint(
   return connectQwpBrowserEndpoint(
     options,
     endpoint,
-    browserNegotiationUrl(endpoint, QWP_BROWSER_HANDSHAKE_PARAM, "v1"),
+    browserNegotiationUrl(
+      browserOwnedByUrl(options, endpoint),
+      QWP_BROWSER_HANDSHAKE_PARAM,
+      "v1",
+    ),
     options.requestDurableAck === true,
     signal,
     (selectedProtocol) =>
@@ -1273,9 +1318,10 @@ export function createQwpBrowserSender(
   // The browser ingress factory never routes, so target and zone would be
   // dropped without a word; Node's createQwpNodeSender() rejects them too.
   assertNoQwpIngressRouting(options, "", "set it on the egress options");
-  // The sender connects lazily; without this a bad `auth` would surface only
-  // from the first connect() or flush().
+  // The sender connects lazily; without this a bad `auth` or `ownedBy` would
+  // surface only from the first connect() or flush().
   validateBrowserAuthOptions(options);
+  validateQwpOwnedBy(options.ownedBy);
   return createQwpSender(
     (signal) => connectQwpBrowserIngress(options, signal),
     options,
@@ -1401,6 +1447,7 @@ function resolveQwpBrowserClientOptions(
   // `auth` only here.
   validateBrowserAuthOptions(ingress);
   validateBrowserAuthOptions(egress);
+  validateQwpOwnedBy(ingress.ownedBy, "ingress.ownedBy");
   return { ingress, egress, pool: options.pool };
 }
 

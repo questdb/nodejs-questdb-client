@@ -39,6 +39,10 @@ import {
   QWP_MAX_SEGMENT_BYTES,
   QWP_SF_DEFAULTS,
 } from "./file-replay-store";
+import {
+  assertNoQwpOwnedByHeaderConflict,
+  validateQwpOwnedBy,
+} from "../../../client-core/src/_qwp/owned-by";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 import {
@@ -113,6 +117,7 @@ export const QWP_SUPPORTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "reconnect_max_backoff_millis",
   "reconnect_max_duration_millis",
   "request_durable_ack",
+  "owned_by",
   "sf_append_deadline_millis",
   "sf_dir",
   "sf_durability",
@@ -514,6 +519,9 @@ export function resolveQwpNodeClientConfig(
       value("request_durable_ack"),
       "request_durable_ack",
     ),
+    // Ingress only, as in the Java client: a query session creates nothing,
+    // and /read/v1 is never asked to name an owner.
+    ownedBy: validateQwpOwnedBy(value("owned_by"), "owned_by"),
     storeAndForward,
     senderId: validateSenderId(value("sender_id") ?? QWP_DEFAULT_SENDER_ID),
     ...buffering,
@@ -1123,6 +1131,17 @@ export function normalizeQwpNodeClientOptions(
   validateQwpInitialConnectMode(
     initialConnectMode,
     "ingress.initialConnectMode",
+  );
+  // Checked here, as the mode above is, so a pooled client reports it when it
+  // is created rather than at its first sender's connect.
+  validateQwpOwnedBy(options.ingress?.ownedBy, "ingress.ownedBy");
+  // Against the headers ingress ends up with: resolveQwpNodeClientSides()
+  // lets the ingress section's headers replace the cluster's, not merge.
+  assertNoQwpOwnedByHeaderConflict(
+    options.ingress?.ownedBy,
+    options.ingress?.headers !== undefined
+      ? options.ingress.headers
+      : options.cluster?.headers,
   );
   if (!options.lazyConnect) return options;
   if (

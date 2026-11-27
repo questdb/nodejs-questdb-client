@@ -47,6 +47,8 @@ import {
   connectQwpNodeSender,
   connectQwpNodeUdpSender,
   parseQwpNodeClientConfig,
+  QwpOwnedByMismatchError,
+  QwpUpgradeError,
   retryQwpNodeOrphanSlot,
 } from "../../packages/nodejs-client/src";
 import type {
@@ -307,6 +309,7 @@ const browserClientOptionsContract: QwpBrowserClientOptions = {
   cluster: browserClusterOptionsContract,
   ingress: {
     requestDurableAck: true,
+    ownedBy: "ingest_team",
     ingressNegotiationTimeoutMs: 1_000,
     autoFlushRows: 1_000,
     ackTimeoutMs: 30_000,
@@ -339,6 +342,7 @@ const nodeClientOptionsContract: QwpNodeClientOptions = {
   },
   ingress: {
     requestDurableAck: true,
+    ownedBy: "ingest_team",
     autoFlushRows: 1_000,
     initialConnectMode: "async",
     storeAndForward: { directory: "/tmp/qwp-public-api-contract" },
@@ -375,6 +379,50 @@ const nodeEgressDurableAckContract: QwpNodeEgressOptions = {
   // @ts-expect-error requestDurableAck is ingress-only.
   requestDurableAck: true,
 };
+
+// A query session creates nothing, so only ingress names an owner, on either
+// runtime, and neither runtime shares it between the sides.
+const nodeEgressOwnedByContract: QwpNodeEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  // @ts-expect-error ownedBy is ingress-only.
+  ownedBy: "ingest_team",
+};
+
+const browserEgressOwnedByContract: QwpBrowserEgressOptions = {
+  url: "wss://node-1.example/read/v1",
+  // @ts-expect-error ownedBy is ingress-only.
+  ownedBy: "ingest_team",
+};
+
+const nodeClusterOwnedByContract: QwpNodeClientOptions = {
+  // @ts-expect-error ownedBy is an ingress option.
+  cluster: { url: "wss://node-1.example", ownedBy: "ingest_team" },
+};
+
+const nodeIngressOwnedByContract: QwpNodeIngressOptions = {
+  url: "wss://node-1.example/write/v4",
+  ownedBy: "ingest_team",
+};
+
+const browserIngressOwnedByContract: QwpBrowserIngressOptions = {
+  url: "wss://node-1.example/write/v4",
+  ownedBy: "ingest_team",
+};
+
+// Node.js confirms the owner on the upgrade, and reports a server that does
+// not as a capability mismatch naming the owner; any rejected upgrade carries
+// the reason the server gave.
+function ownedByFailureContract(
+  mismatch: QwpOwnedByMismatchError,
+  rejected: QwpUpgradeError,
+): void {
+  const upgradeFailure: QwpUpgradeError = mismatch;
+  const ownedBy: string = mismatch.ownedBy;
+  const reason: string | undefined = rejected.reason;
+  void upgradeFailure;
+  void ownedBy;
+  void reason;
+}
 
 // Only the primary accepts writes, and ingress reaches it through the 421 each
 // replica answers the upgrade with, so target and zone route queries alone.
@@ -427,6 +475,7 @@ const nodeEgressOptionsContract: QwpNodeEgressOptions = {
 const qwpExtraOptionsContract: QwpExtraOptions = {
   webSocket: {
     requestDurableAck: true,
+    ownedBy: "ingest_team",
     initialConnectMode: "sync",
     storeAndForward: {
       directory: "/tmp/qwp-public-api-contract",
@@ -658,6 +707,12 @@ void nodeClusterOwnedContract;
 void nodeStoreStartupContract;
 void browserEgressDurableAckContract;
 void nodeEgressDurableAckContract;
+void nodeEgressOwnedByContract;
+void browserEgressOwnedByContract;
+void nodeClusterOwnedByContract;
+void nodeIngressOwnedByContract;
+void browserIngressOwnedByContract;
+void ownedByFailureContract;
 void nodeIngressRoutingContract;
 void browserIngressRoutingContract;
 void nodeClientIngressRoutingContract;

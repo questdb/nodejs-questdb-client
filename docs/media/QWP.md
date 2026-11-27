@@ -121,6 +121,7 @@ empty `qwp: {}` remains valid for callers that build the object conditionally.
 | `transaction`                           | `on`, `off`      | off       | Group each flush into a per-table transaction.                         |
 | `request_durable_ack`                   | `on`, `off`      | off       | Require durable ACKs; fails if the server cannot confirm them.         |
 | `durable_ack_keepalive_interval_millis` | integer ms       | `200`     | Durable-ACK poll interval; ignored unless `request_durable_ack=on`.    |
+| `owned_by`                              | string           | —         | Owner of the tables and columns the sender auto-creates (Enterprise).  |
 | `max_name_len`                          | integer          | `127`     | Maximum table and column name length, in UTF-8 bytes.                  |
 | `sender_id`                             | string           | `default` | Names this producer's journal slot on disk. Not sent to the server.    |
 | `max_frame_rejections`                  | integer          | `4`       | Consecutive suspect outcomes for one frame before terminal escalation. |
@@ -626,16 +627,21 @@ reports a typed `data-loss` sender error. Callback exceptions cannot interrupt
 recovery.
 
 Blocking (`off` or `sync`) foreground startup fails immediately if every usable
-endpoint lacks durable-ACK support. Asynchronous foreground startup and steady-state
-store-and-forward reconnects retain their records and retry through rolling upgrades.
-An orphan slot retries a consecutive durable-ACK capability-gap episode until it has
+endpoint lacks durable-ACK support, or leaves the `ownedBy` owner unconfirmed (see
+[Owner of auto-created tables](#owner-of-auto-created-tables)). Asynchronous
+foreground startup and steady-state store-and-forward reconnects retain their records
+and retry through rolling upgrades. An orphan slot retries a consecutive
+capability-gap episode, sweeps in which every endpoint lacked a durable ACK or left
+the owner unconfirmed, the two counted together, until it has
 lasted both 16 connection sweeps and the configured `reconnectMaxDurationMs`, then it
 is quarantined behind `.failed` (with `reconnectMaxDurationMs: 0` the time half is
 spent at once, so the 16 sweeps decide). A transport outage or an all-replica window resets both halves of this
 orphan budget; neither transient condition can itself quarantine persisted data. The
 `durable-ack-unavailable`,
 `durable-ack-persistent-failure`, and `primary-unavailable` orphan events expose the
-distinction to operators.
+distinction to operators. The durable-ACK events report durable ACK alone; a slot
+quarantined because no endpoint confirmed its owner is reported by the `failed`
+event.
 
 A foreground sender retries a symbol-dictionary catch-up entry that is too large for
 the current target forever because a larger-cap node may return. An orphan drainer
@@ -1152,6 +1158,64 @@ ignore the query parameter; after a bounded 250 ms negotiation window the client
 continues in unknown-cap mode. Set `ingressNegotiationTimeoutMs` to tune that window,
 or keep using `maxBatchSizeBytes` as a local compatibility limit.
 
+### Owner of auto-created tables
+
+QuestDB creates the tables and columns a batch names that do not exist yet, and
+QuestDB Enterprise grants their creator every permission on them. Set `ownedBy`
+on the ingress options (`owned_by=<name>` in a connect string) to have them
+granted to another user, group, or service account instead, the way `OWNED BY`
+does in SQL:
+
+```typescript
+const sender = await Sender.fromConfig(
+  "wss::addr=questdb.example:9000;token=OIDC_ACCESS_TOKEN;owned_by=fx_ingest",
+);
+```
+
+A principal may name itself or one of its groups. An external user, one that
+authenticates with an OpenID Connect token, cannot hold permissions itself, so it
+must name one of its groups for the server to auto-create anything for it at all.
+Writing to existing tables and columns needs no owner. The option is ingress-only:
+a query session creates nothing and never sends it, and the connect strings of the
+ILP and UDP transports reject the key. It needs QuestDB Enterprise with access
+control.
+
+Node.js sends the owner in the `X-QWP-Owned-By` upgrade header, as percent-encoded
+UTF-8, on every `/write/v4` upgrade -- reconnects, failovers and orphan drains
+included -- and checks it there:
+
+- A server that accepts the owner echoes it in the `101` response. A server that
+  predates the option ignores the header, and the tables it auto-created would not
+  get the owner, so a missing or different echo fails the connection with
+  `QwpOwnedByMismatchError`.
+- An owner the principal may not name is refused with `403`, and so is any owner
+  when the server cannot set one: QuestDB open source, or Enterprise with access
+  control disabled. The refusal holds on every node, so it is handled as a rejected
+  credential is (see [Reconnect, failover, and roles](#reconnect-failover-and-roles)):
+  it ends the endpoint sweep, and only a sender that retries a rejected credential
+  retries it. QuestDB explains it in the response body, which the client reports as
+  `QwpUpgradeError.reason` and appends to the message, as in
+  `[reason=owned_by refused: fx_ingest does not exist]`.
+
+An endpoint that does not confirm the owner lacks the feature, as one that does not
+confirm a requested durable ACK lacks that, and a rolling upgrade clears both, so
+`QwpOwnedByMismatchError` is handled as that durable-ACK gap is. The sweep goes on
+to the next endpoint. When every endpoint it reaches leaves the owner unconfirmed, a
+blocking (`off` or `sync`) startup fails at once rather than retry, and so does a
+reconnect of a sender with neither a journal nor an `"async"` startup, while a
+store-and-forward sender that has connected, or one started with `"async"`, keeps its
+rows and retries until an endpoint confirms the owner. An orphan drainer counts such
+sweeps toward the same capability-gap budget as a missing durable ACK, and
+quarantines the slot once that runs out. A sweep that also met an endpoint that was
+offline or not the primary stays an ordinary retryable failure.
+
+A browser can neither set the header nor read the upgrade response. The browser
+client sends the owner in the `qwp_owned_by` URL parameter instead, which QuestDB
+reads when the header is absent, but it cannot confirm it: a server that predates
+the option ignores the parameter and creates the tables owned by the principal, and
+a refused owner fails the upgrade with the same opaque `QwpUpgradeError` as any
+rejected browser upgrade.
+
 ### Reconnect, failover, and roles
 
 The preferred URL and `failoverUrls` form one endpoint set. Endpoints are ranked by
@@ -1239,9 +1303,14 @@ endpoints ranked after it are never tried, and unless one of the exemptions belo
 applies, the reconnect loop rethrows it without retrying, so no reconnect setting
 extends it. A credential is cluster-wide, so a node rejecting it reports a
 configuration error that walking on to a peer would only mask; the Java client applies
-the same rule. Every other rejected status keeps the sweep walking, including `404`,
+the same rule. QuestDB also answers `403` to an `ownedBy` owner it refuses, which holds
+on every node as well; the error's `reason` then carries the server's explanation, so
+the two can be told apart. Every other rejected status keeps the sweep walking, including `404`,
 which one node can return mid-deploy while its peers are healthy, and a sweep mixing
-such attempts stays retryable if any one of them was.
+such attempts stays retryable if any one of them was. Node.js reports the plain-text
+body of any rejected upgrade as `QwpUpgradeError.reason` when the whole body arrives
+with the response headers, with control and other invisible characters removed and
+cut to 256 characters.
 
 Note how this composes with health ranking. A non-orderly close demotes the endpoint
 it happened on, so a peer that answers `401` can rank ahead of the endpoint that just
@@ -2058,6 +2127,7 @@ The public error classes preserve enough context for policy decisions:
 | `QwpPoolResourceError`                  | Creating a new pooled sender or query connection failed                                                     |
 | `QwpClientClosedError`                  | The pooled client or an individual returned lease is already closed                                         |
 | `QwpDurableAckUnavailableError`         | Durable acknowledgement was required but not negotiated                                                     |
+| `QwpOwnedByMismatchError`               | Node.js only: the server completed the upgrade without confirming the `ownedBy` owner                       |
 | `QwpProtocolError`                      | A QWP payload is malformed, truncated, or unsupported                                                       |
 | `QwpSendError`                          | Base class for a frame that could not be handed to the transport                                            |
 | `QwpSendClosedError`                    | The WebSocket was closed, or not open, when a frame was sent                                                |

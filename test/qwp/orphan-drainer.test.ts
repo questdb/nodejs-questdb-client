@@ -24,6 +24,8 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   type QwpSenderError,
 } from "../../packages/client-core/src/qwp";
+import { QwpOwnedByMismatchError } from "../../packages/client-core/src/_qwp/owned-by";
+import { QwpOwnedByPersistentFailureError } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 
 class FakeDrainSession implements QwpNodeOrphanDrainSession {
   pendingReplayFrames = 1;
@@ -718,6 +720,49 @@ describe("QWP Node orphan drainer", () => {
     // Quarantined, so a later scan leaves it for the operator instead of
     // adopting it again.
     await expect(scanQwpNodeOrphanSlots(rootDirectory)).resolves.toEqual([]);
+    await drainer.close();
+  });
+
+  it("quarantines a slot only once its producer's owner stayed unconfirmed", async () => {
+    // One endpoint that leaves the owner unconfirmed is a capability gap the
+    // session rides out, so it leaves the slot for a later scan. An exhausted
+    // gap is terminal: replaying the slot anywhere would auto-create tables
+    // without the owner its producer named.
+    const rootDirectory = await root();
+    const directory = await recordSlot(rootDirectory, "unconfirmed-owner");
+    const gap = new QwpOwnedByMismatchError(
+      "ws://primary/write/v4",
+      "team_a",
+      undefined,
+    );
+    let failure: Error = gap;
+    const senderErrors: QwpSenderError[] = [];
+    const drainer = new QwpNodeOrphanDrainer({
+      rootDirectory,
+      scanIntervalMs: 0,
+      createSession: async () => {
+        const session = new FakeDrainSession();
+        queueMicrotask(() => session.fail(failure));
+        return session;
+      },
+      onSenderError: (error) => senderErrors.push(error),
+    });
+    drainer.start();
+    await vi.waitFor(() => expect(drainer.metrics.retrying).toBe(1));
+    expect(drainer.metrics.failed).toBe(0);
+    expect(await readdir(directory)).not.toContain(QWP_ORPHAN_FAILED_SENTINEL);
+
+    failure = new QwpOwnedByPersistentFailureError(16, 300_000, gap);
+    drainer.scanNow();
+    await vi.waitFor(() => expect(drainer.metrics.failed).toBe(1));
+    expect(await readdir(directory)).toContain(QWP_ORPHAN_FAILED_SENTINEL);
+    await vi.waitFor(() => expect(senderErrors).toHaveLength(1));
+    expect(senderErrors[0]).toMatchObject({
+      category: QWP_SENDER_ERROR_CATEGORY.DATA_LOSS,
+      appliedPolicy: QWP_SENDER_ERROR_POLICY.ABANDONED,
+      quarantinedPath: directory,
+      serverMessage: failure.message,
+    });
     await drainer.close();
   });
 

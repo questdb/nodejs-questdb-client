@@ -407,6 +407,8 @@ export interface QwpUpgradeErrorDetails {
   url?: string | URL;
   statusCode?: number;
   statusMessage?: string;
+  /** The rejection's plain-text body, sanitized for display. */
+  reason?: string;
   serverRole?: string;
   serverZone?: string;
   closeCode?: number;
@@ -446,6 +448,16 @@ export class QwpUpgradeError extends Error {
   readonly url?: string | URL;
   readonly statusCode?: number;
   readonly statusMessage?: string;
+  /**
+   * The plain-text body of a rejected upgrade, when the server sent one:
+   * QuestDB explains some refusals there, such as an `ownedBy` owner the
+   * principal may not name, which it answers with 403 like a rejected
+   * credential. Node.js only, and only when the whole `text/plain` body
+   * arrived with the response headers. Sanitized for display: control and
+   * other invisible characters are removed, and it is cut to at most 256
+   * characters.
+   */
+  readonly reason?: string;
   readonly serverRole?: string;
   readonly serverZone?: string;
   readonly closeCode?: number;
@@ -465,6 +477,7 @@ export class QwpUpgradeError extends Error {
       details.url === undefined ? undefined : redactQwpEndpoint(details.url);
     this.statusCode = details.statusCode;
     this.statusMessage = details.statusMessage;
+    this.reason = details.reason;
     this.serverRole = details.serverRole;
     this.serverZone = details.serverZone;
     this.closeCode = details.closeCode;

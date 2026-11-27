@@ -7,7 +7,7 @@
 export * from "../../client-core/src/qwp";
 
 import type { Agent } from "node:http";
-import type { IncomingHttpHeaders } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -39,6 +39,13 @@ import { validateQwpMaxBatchRows } from "../../client-core/src/_qwp/_internal/eg
 import { selectsQwpSyncInitialConnect } from "../../client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback";
 import { assertNoQwpIngressRouting } from "../../client-core/src/_qwp/_internal/option-sections";
+import { sanitizeQwpDisplayText } from "../../client-core/src/_qwp/_internal/display-text";
+import {
+  assertNoQwpOwnedByHeaderConflict,
+  encodeQwpOwnedBy,
+  QwpOwnedByMismatchError,
+  validateQwpOwnedBy,
+} from "../../client-core/src/_qwp/owned-by";
 import {
   normalizeQwpNodeClientOptions,
   QWP_DEFAULT_SENDER_ID,
@@ -153,6 +160,9 @@ export type {
 } from "./qwp-node/orphan-drainer";
 
 export type { QwpWebSocketLike } from "../../client-core/src/_qwp/_internal/websocket-connection";
+// Node.js alone reads the upgrade response that confirms an owner, so only
+// this package root exports the failure.
+export { QwpOwnedByMismatchError } from "../../client-core/src/_qwp/owned-by";
 
 /**
  * Default `X-QWP-Client-Id`, which QuestDB records in server-side diagnostics.
@@ -188,7 +198,16 @@ export interface QwpNodeUpgradeRejection {
   statusCode: number;
   statusMessage?: string;
   headers: IncomingHttpHeaders;
+  /**
+   * The response body as UTF-8 text, when the whole of it arrived together
+   * with the headers; at most its first 4,096 bytes. A `text/plain` body is
+   * the reason the error reports.
+   */
+  body?: string;
 }
+
+/** Body bytes of a rejected upgrade read for its reason. */
+const MAX_REJECTED_UPGRADE_BODY_BYTES = 4_096;
 
 function classifyUpgradeRejection(
   url: string | URL,
@@ -204,8 +223,14 @@ function classifyUpgradeRejection(
         ? QWP_UPGRADE_ERROR_KIND.ROLE_REJECTED
         : QWP_UPGRADE_ERROR_KIND.HTTP_REJECTED;
   const suffix = statusMessage ? ` ${statusMessage}` : "";
+  // QuestDB explains some refusals in the body, and one of them answers 403
+  // without rejecting a credential: an ownedBy owner the principal may not
+  // name. Without the reason, that read like a bad password.
+  const reason = rejectionReason(rejection);
   return new QwpUpgradeError(
-    `QWP WebSocket upgrade rejected with HTTP ${statusCode}${suffix}`,
+    `QWP WebSocket upgrade rejected with HTTP ${statusCode}${suffix}${
+      reason === undefined ? "" : ` [reason=${reason}]`
+    }`,
     {
       kind,
       // A 5xx or a 429 is what a proxy, a load balancer, or a rolling restart
@@ -220,10 +245,68 @@ function classifyUpgradeRejection(
       url,
       statusCode,
       statusMessage,
+      reason,
       serverRole,
       serverZone,
     },
   );
+}
+
+/**
+ * The reason a rejected upgrade gives: its `text/plain` body, sanitized for
+ * display, or undefined when it has none, or another kind of body, such as a
+ * proxy's HTML error page. Whoever answers the upgrade writes it, a proxy
+ * included, so it reaches messages and logs only as display-safe text.
+ */
+function rejectionReason(
+  rejection: QwpNodeUpgradeRejection,
+): string | undefined {
+  if (rejection.body === undefined) return undefined;
+  const mediaType = headerValue(rejection.headers, "content-type")
+    ?.split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (mediaType !== "text/plain") return undefined;
+  const reason = sanitizeQwpDisplayText(rejection.body.trim()).trim();
+  return reason || undefined;
+}
+
+/**
+ * Hands over the body of a rejected upgrade as UTF-8 text, when all of it
+ * arrived together with the headers -- QuestDB writes a refusal's reason in
+ * the same packet -- and undefined otherwise. Best effort, as in the Java
+ * client: it waits for no further bytes, so a body still in flight, or one
+ * that never ends, costs the rejection its reason rather than its prompt
+ * report. Keeps at most the first 4,096 bytes.
+ */
+function readRejectedUpgradeBody(
+  response: IncomingMessage,
+  done: (body: string | undefined) => void,
+): void {
+  const chunks: Buffer[] = [];
+  let length = 0;
+  const collect = (chunk: Buffer): void => {
+    if (length >= MAX_REJECTED_UPGRADE_BODY_BYTES) return;
+    chunks.push(chunk);
+    length += chunk.byteLength;
+  };
+  response.on("data", collect);
+  // A peer that drops the connection mid-body errors the response, and the
+  // rejection is still reported, just without a reason.
+  response.on("error", () => undefined);
+  // The bytes that came with the headers are parsed after this event returns,
+  // within the same socket read, and reach `collect` before the check phase.
+  setImmediate(() => {
+    response.off("data", collect);
+    response.resume();
+    done(
+      response.complete
+        ? Buffer.concat(chunks)
+            .subarray(0, MAX_REJECTED_UPGRADE_BODY_BYTES)
+            .toString("utf8")
+        : undefined,
+    );
+  });
 }
 
 function headerValue(
@@ -311,6 +394,24 @@ export interface QwpNodeIngressOptions
    * durableAckKeepaliveMs takes effect only alongside it.
    */
   requestDurableAck?: boolean;
+  /**
+   * Names the owner of the tables and columns this sender auto-creates, the
+   * way `OWNED BY` does in SQL: QuestDB Enterprise grants them to this user,
+   * group or service account instead of the authenticated principal. A
+   * principal may name itself or one of its groups. An external user, such as
+   * one authenticated with an OpenID Connect token, cannot own anything
+   * itself, so it must name one of its groups to have tables or columns
+   * auto-created at all. The `owned_by` connect-string key.
+   *
+   * Sent as `X-QWP-Owned-By` on every `/write/v4` upgrade, reconnects,
+   * failovers and orphan drains included, and checked there. A server that
+   * refuses the owner answers 403, which fails the connection like a rejected
+   * credential, with the server's explanation in `QwpUpgradeError.reason`. A
+   * server that does not confirm the owner, because it predates the option,
+   * fails it with QwpOwnedByMismatchError rather than auto-create tables
+   * without the owner. Needs QuestDB Enterprise with access control enabled.
+   */
+  ownedBy?: string;
   /**
    * Upgrades the default in-memory ingress replay to persistent Node
    * store-and-forward, journalled in this sender's `senderId` slot below the
@@ -562,8 +663,8 @@ function egressTransportOptions(
 
 /**
  * Opens one Node QWP WebSocket with the upgrade headers required by QuestDB,
- * walking `failoverUrls` as a session would. Set `requestDurableAck` only for
- * an ingress (`/write/v4`) endpoint.
+ * walking `failoverUrls` as a session would. Set `requestDurableAck` and
+ * `ownedBy` only for an ingress (`/write/v4`) endpoint.
  *
  * @internal A raw connection with no session over it. The package root does
  * not export it: the senders and connectQwpNodeEgress() open their own
@@ -571,7 +672,7 @@ function egressTransportOptions(
  */
 export function connectQwpNodeWebSocket(
   options: QwpNodeWebSocketOptions &
-    Pick<QwpNodeIngressOptions, "requestDurableAck">,
+    Pick<QwpNodeIngressOptions, "requestDurableAck" | "ownedBy">,
 ): Promise<QwpBinaryConnection> {
   return createQwpNodeConnectionFactory(options)();
 }
@@ -579,7 +680,7 @@ export function connectQwpNodeWebSocket(
 /** Creates a stateful Node endpoint walker suitable for session reconnects. */
 function createQwpNodeConnectionFactory(
   options: QwpNodeWebSocketOptions &
-    Pick<QwpNodeIngressOptions, "requestDurableAck">,
+    Pick<QwpNodeIngressOptions, "requestDurableAck" | "ownedBy">,
   healthTracker?: QwpFailoverHealthTracker,
   resetClassificationsAfterExhaustion = true,
 ): QwpConnectionFactory {
@@ -592,6 +693,7 @@ function createQwpNodeConnectionFactory(
         endpoint,
         signal,
         options.requestDurableAck === true,
+        options.ownedBy,
       ),
     {
       // No target or zone. Only the primary accepts a write upgrade: a
@@ -630,8 +732,18 @@ function connectQwpNodeEndpoint(
   // A parameter rather than an options field: the egress path passes false,
   // so no shared options object can ask /read/v1 for durable ACK.
   requestDurableAck: boolean,
+  // Likewise: /read/v1 creates nothing, so egress names no owner.
+  ownedBy?: string,
 ): Promise<QwpBinaryConnection> {
   validateQwpWebSocketTimeouts(options);
+  let owner: string | undefined;
+  let ownedByHeader: string | undefined;
+  try {
+    owner = validateQwpOwnedBy(ownedBy);
+    ownedByHeader = owner === undefined ? undefined : encodeQwpOwnedBy(owner);
+  } catch (error) {
+    return Promise.reject(qwpNonRetryable(error as TypeError));
+  }
   let endpointUrl: URL;
   try {
     endpointUrl = new URL(endpoint);
@@ -702,6 +814,16 @@ function connectQwpNodeEndpoint(
   if (requestDurableAck) {
     headers["X-QWP-Request-Durable-Ack"] = "true";
   }
+  if (ownedByHeader !== undefined) {
+    // The senders and the pooled client reject this when they are created; a
+    // caller of the raw connector meets it here.
+    try {
+      assertNoQwpOwnedByHeaderConflict(owner, headers);
+    } catch (error) {
+      return Promise.reject(qwpNonRetryable(error as Error));
+    }
+    headers["X-QWP-Owned-By"] = ownedByHeader;
+  }
 
   const factory =
     options.webSocketFactory ??
@@ -742,12 +864,14 @@ function connectQwpNodeEndpoint(
         : new WebSocket(url, wsOptions);
       socket.once("upgrade", (response) => init.onUpgrade(response.headers));
       socket.once("unexpected-response", (_request, response) => {
-        init.onUpgradeRejected({
-          statusCode: response.statusCode ?? 0,
-          statusMessage: response.statusMessage,
-          headers: response.headers,
+        readRejectedUpgradeBody(response, (body) => {
+          init.onUpgradeRejected({
+            statusCode: response.statusCode ?? 0,
+            statusMessage: response.statusMessage,
+            headers: response.headers,
+            body,
+          });
         });
-        response.resume();
       });
       const qwpSocket = socket as unknown as QwpWebSocketLike;
       qwpSocket.sendWithCallback = (data, callback) => {
@@ -817,6 +941,16 @@ function connectQwpNodeEndpoint(
           clientMaxVersion,
           endpoint,
         );
+      }
+      if (owner !== undefined) {
+        // A server that accepts the owner echoes it in the canonical encoding
+        // this client sent, and one that refuses it answers 403 instead. No
+        // echo is a server that does not know the header and ignored it: the
+        // tables this connection auto-creates would not get the owner.
+        const echo = headerValue(upgradeHeaders, "x-qwp-owned-by");
+        if (echo !== ownedByHeader) {
+          throw new QwpOwnedByMismatchError(endpoint, owner, echo);
+        }
       }
       const durableAckEnabled =
         headerValue(upgradeHeaders, "x-qwp-durable-ack")?.toLowerCase() ===
@@ -1099,6 +1233,8 @@ export function createQwpNodeSender(options: QwpNodeIngressOptions): QwpSender {
   // belongs with the other construction-time rejections.
   assertUniformQwpEndpointScheme(options.url, options.failoverUrls);
   assertNoQwpIngressRouting(options, "", "set it on the egress options");
+  validateQwpOwnedBy(options.ownedBy);
+  assertNoQwpOwnedByHeaderConflict(options.ownedBy, options.headers);
   return createQwpSender(
     (signal) => connectQwpNodeIngress(options, signal),
     options,

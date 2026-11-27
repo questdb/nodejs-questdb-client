@@ -1217,6 +1217,22 @@ describe("Configuration string parser suite", function () {
     ).toThrow(
       "qwp.webSocket.initialConnectMode must be 'off', 'sync', or 'async'",
     );
+
+    const blankOwner = { ownedBy: " " };
+    await expect(
+      SenderOptions.fromConfig("ws::addr=localhost:9000;", {
+        qwp: { webSocket: blankOwner },
+      }),
+    ).rejects.toThrow("qwp.webSocket.ownedBy must not be empty or blank");
+    expect(
+      () =>
+        new Sender({
+          protocol: "ws",
+          host: "localhost",
+          port: 9000,
+          qwp: { webSocket: blankOwner },
+        } as SenderOptions),
+    ).toThrow("qwp.webSocket.ownedBy must not be empty or blank");
   });
 
   it("leaves QWP-only keys to the QWP schema", async function () {
@@ -1240,6 +1256,19 @@ describe("Configuration string parser suite", function () {
       ).rejects.toThrow(
         `Unknown configuration key: '${key.slice(0, key.indexOf("="))}'`,
       );
+    }
+  });
+
+  it("accepts owned_by on ws/wss only", async function () {
+    // The owner of auto-created tables travels in the WebSocket upgrade, so
+    // every other transport rejects the key, as the Java client does.
+    await expect(
+      SenderOptions.fromConfig("wss::addr=host:9000;owned_by=team_a;"),
+    ).resolves.toMatchObject({ protocol: "wss" });
+    for (const schema of ["http", "https", "tcp", "tcps", "udp"]) {
+      await expect(
+        SenderOptions.fromConfig(`${schema}::addr=host:9000;owned_by=team_a;`),
+      ).rejects.toThrow("Unknown configuration key: 'owned_by'");
     }
   });
 

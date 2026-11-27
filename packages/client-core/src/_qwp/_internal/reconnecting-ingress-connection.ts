@@ -34,6 +34,7 @@ import {
   QwpUnrecoverableReplayDictionaryError,
   QwpUpgradeError,
 } from "../transport";
+import { QwpOwnedByMismatchError } from "../owned-by";
 import type {
   QwpBinaryConnection,
   QwpConnectionFactory,
@@ -132,8 +133,14 @@ export function validateQwpInitialConnectMode(
 
 const DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS = 300_000;
 const MAX_CATCH_UP_CAP_GAP_ATTEMPTS = 16;
-const DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS = 300_000;
-const MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS = 16;
+/**
+ * Bounds of an orphan's capability-gap episode: consecutive sweeps that found
+ * only writable endpoints lacking a capability the slot's replay needs, a
+ * durable ACK or a confirmed owner (see capabilityGapCause()). Both bounds
+ * have to be reached before the slot is quarantined.
+ */
+const DEFAULT_ORPHAN_CAPABILITY_GAP_MAX_DURATION_MS = 300_000;
+const MAX_ORPHAN_CAPABILITY_GAP_ATTEMPTS = 16;
 const DEFAULT_MEMORY_REPLAY_MAX_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MEMORY_REPLAY_APPEND_DEADLINE_MS = 30_000;
 /**
@@ -217,11 +224,33 @@ export class QwpDurableAckPersistentFailureError extends Error {
     readonly cause: QwpDurableAckUnavailableError,
   ) {
     super(
-      `QWP durable ACK remained unavailable for an orphan replay slot [attempts=${attempts}/${MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS}, episodeMs=${episodeMs}]: ${cause.message}`,
+      `QWP durable ACK remained unavailable for an orphan replay slot [attempts=${attempts}/${MAX_ORPHAN_CAPABILITY_GAP_ATTEMPTS}, episodeMs=${episodeMs}]: ${cause.message}`,
     );
     this.name = "QwpDurableAckPersistentFailureError";
   }
 }
+
+/**
+ * An orphan slot's capability-gap episode ran out on an endpoint set that
+ * still did not confirm its sender's `ownedBy`. The orphan drainer quarantines
+ * the slot, as it does for a durable ACK that stays unavailable: replaying it
+ * anywhere else would auto-create tables without the owner.
+ */
+export class QwpOwnedByPersistentFailureError extends Error {
+  constructor(
+    readonly attempts: number,
+    readonly episodeMs: number,
+    readonly cause: QwpOwnedByMismatchError,
+  ) {
+    super(
+      `QWP owned_by remained unconfirmed for an orphan replay slot [attempts=${attempts}/${MAX_ORPHAN_CAPABILITY_GAP_ATTEMPTS}, episodeMs=${episodeMs}]: ${cause.message}`,
+    );
+    this.name = "QwpOwnedByPersistentFailureError";
+  }
+}
+
+/** A writable endpoint without a capability the session asked for. */
+type QwpCapabilityGap = QwpDurableAckUnavailableError | QwpOwnedByMismatchError;
 
 interface ReplayFrame extends Omit<QwpIngressReplayReference, "frameSequence"> {
   // Assigned inside send()'s serialized tail, immediately before the journal
@@ -638,6 +667,10 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private readonly maxFrameRejections: number;
   private readonly poisonMinEscalationWindowMs: number;
   private readonly catchUpCapGapMinEscalationWindowMs: number;
+  /**
+   * The duration half of an orphan's capability-gap budget. Named for the
+   * durable-ACK gap it first bounded, it bounds an unconfirmed owner too.
+   */
   private readonly orphanDurableAckMismatchMaxDurationMs: number;
   private readonly localMaxBatchSizeBytes?: number;
   private readonly connectionDispatcher?: QwpNotificationDispatcher<QwpReconnectEvent>;
@@ -690,8 +723,8 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
   private poisonOutageStartedMs = 0;
   private catchUpCapGapAttempts = 0;
   private catchUpCapGapFirstMs = 0;
-  private durableAckMismatchAttempts = 0;
-  private durableAckMismatchFirstMs = 0;
+  private capabilityGapAttempts = 0;
+  private capabilityGapFirstMs = 0;
   private progressAtLastExemptRecycle = -1n;
   private zeroProgressRecycles = 0;
   private recoveredDiscardTail?: RecoveredDiscardTail;
@@ -734,7 +767,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     localMaxBatchSizeBytes?: number,
     private readonly backgroundStoreAndForward = false,
     private readonly orphanStoreAndForward = false,
-    orphanDurableAckMismatchMaxDurationMs = DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS,
+    orphanDurableAckMismatchMaxDurationMs = DEFAULT_ORPHAN_CAPABILITY_GAP_MAX_DURATION_MS,
     catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
     connectionListenerInboxCapacity = 64,
     errorInboxCapacity = 256,
@@ -854,7 +887,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       ? QWP_INITIAL_CONNECT_MODE.ASYNC
       : QWP_INITIAL_CONNECT_MODE.SYNC,
     orphanStoreAndForward = false,
-    orphanDurableAckMismatchMaxDurationMs = DEFAULT_ORPHAN_DURABLE_ACK_MISMATCH_MAX_DURATION_MS,
+    orphanDurableAckMismatchMaxDurationMs = DEFAULT_ORPHAN_CAPABILITY_GAP_MAX_DURATION_MS,
     catchUpCapGapMinEscalationWindowMs = DEFAULT_CATCH_UP_CAP_GAP_MIN_ESCALATION_WINDOW_MS,
     initialConnection?: Promise<QwpBinaryConnection>,
     connectionListenerInboxCapacity = 64,
@@ -1531,7 +1564,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           // The server is reachable again, so the escalation window resumes.
           this.endPoisonOutage();
           this.resetCatchUpCapGapEpisode();
-          this.resetDurableAckMismatchEpisode();
+          this.resetCapabilityGapEpisode();
           this.connectingCandidate = undefined;
           if (reconnecting) {
             this.totalReconnectsSucceeded++;
@@ -1600,22 +1633,28 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
           ) {
             throw capGapError.error;
           }
-          const durableAckMismatch = durableAckUnavailableCause(error);
+          // A missing durable ACK and an unconfirmed owner are one class of
+          // failure: writable endpoints without a capability this session
+          // asked for, which a rolling upgrade clears. A blocking startup
+          // fails with it at once, and so does a reconnect without background
+          // replay; background replay rides it out, an orphan within one
+          // budget that both kinds draw on.
+          const capabilityGap = capabilityGapCause(error);
           if (
-            durableAckMismatch &&
+            capabilityGap &&
             (!this.backgroundStoreAndForward || attemptPolicy !== "unbounded")
           ) {
-            this.resetDurableAckMismatchEpisode();
-            throw durableAckMismatch;
+            this.resetCapabilityGapEpisode();
+            throw capabilityGap;
           }
-          const durableAckPolicy =
-            durableAckMismatch &&
+          const capabilityGapPolicy =
+            capabilityGap &&
             this.backgroundStoreAndForward &&
             attemptPolicy === "unbounded"
-              ? this.applyDurableAckMismatchPolicy(durableAckMismatch)
+              ? this.applyCapabilityGapPolicy(capabilityGap)
               : undefined;
-          if (!durableAckPolicy) this.resetDurableAckMismatchEpisode();
-          if (durableAckPolicy?.exhausted) throw durableAckPolicy.error;
+          if (!capabilityGapPolicy) this.resetCapabilityGapEpisode();
+          if (capabilityGapPolicy?.exhausted) throw capabilityGapPolicy.error;
           if (
             this.orphanStoreAndForward &&
             attemptPolicy === "unbounded" &&
@@ -1629,7 +1668,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
               cause: error,
             });
           }
-          if (!durableAckPolicy && !this.isRetryableReconnectError(error)) {
+          if (!capabilityGapPolicy && !this.isRetryableReconnectError(error)) {
             throw error;
           }
           // A single-attempt startup -- the Node store-and-forward default --
@@ -1724,16 +1763,26 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     this.catchUpCapGapFirstMs = 0;
   }
 
-  private applyDurableAckMismatchPolicy(error: QwpDurableAckUnavailableError): {
+  /**
+   * Counts one sweep of a capability-gap episode. A missing durable ACK and an
+   * unconfirmed owner draw on one budget, as in the Java client: each is a
+   * sweep that found the cluster still short of a capability this session's
+   * replay needs, so sweeps that alternate between the two are one episode.
+   * The durable-ACK events report durable ACK only.
+   */
+  private applyCapabilityGapPolicy(error: QwpCapabilityGap): {
     exhausted: boolean;
-    error: QwpDurableAckUnavailableError | QwpDurableAckPersistentFailureError;
+    error:
+      | QwpCapabilityGap
+      | QwpDurableAckPersistentFailureError
+      | QwpOwnedByPersistentFailureError;
   } {
     const now = monotonicNowMs();
-    if (this.durableAckMismatchAttempts === 0) {
-      this.durableAckMismatchFirstMs = now;
+    if (this.capabilityGapAttempts === 0) {
+      this.capabilityGapFirstMs = now;
     }
-    this.durableAckMismatchAttempts++;
-    const episodeMs = Math.max(0, now - this.durableAckMismatchFirstMs);
+    this.capabilityGapAttempts++;
+    const episodeMs = Math.max(0, now - this.capabilityGapFirstMs);
     // Both bounds, like the capability-gap episode above. As a disjunction the
     // fixed 16-attempt cap always fired first -- roughly 26s at the default
     // backoff -- so the configured duration ceiling, 300s by default, could
@@ -1745,18 +1794,31 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
       episodeMs >= this.orphanDurableAckMismatchMaxDurationMs;
     const exhausted =
       this.orphanStoreAndForward &&
-      this.durableAckMismatchAttempts >=
-        MAX_ORPHAN_DURABLE_ACK_MISMATCH_ATTEMPTS &&
+      this.capabilityGapAttempts >= MAX_ORPHAN_CAPABILITY_GAP_ATTEMPTS &&
       durationExhausted;
+    // Tested this way round: a durable-ACK gap carries no field the owner gap
+    // lacks, so the owner gap is a structural subtype of it.
+    if (error instanceof QwpOwnedByMismatchError) {
+      return exhausted
+        ? {
+            exhausted: true,
+            error: new QwpOwnedByPersistentFailureError(
+              this.capabilityGapAttempts,
+              episodeMs,
+              error,
+            ),
+          }
+        : { exhausted: false, error };
+    }
     if (exhausted) {
       const persistent = new QwpDurableAckPersistentFailureError(
-        this.durableAckMismatchAttempts,
+        this.capabilityGapAttempts,
         episodeMs,
         error,
       );
       this.emitEvent({
         kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
-        attempt: this.durableAckMismatchAttempts,
+        attempt: this.capabilityGapAttempts,
         previousEndpoint: this.lastEndpoint,
         cause: persistent,
         episodeMs,
@@ -1765,7 +1827,7 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     }
     this.emitEvent({
       kind: QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE,
-      attempt: this.durableAckMismatchAttempts,
+      attempt: this.capabilityGapAttempts,
       previousEndpoint: this.lastEndpoint,
       cause: error,
       episodeMs,
@@ -1773,9 +1835,9 @@ export class QwpReconnectingIngressConnection implements QwpBinaryConnection {
     return { exhausted: false, error };
   }
 
-  private resetDurableAckMismatchEpisode(): void {
-    this.durableAckMismatchAttempts = 0;
-    this.durableAckMismatchFirstMs = 0;
+  private resetCapabilityGapEpisode(): void {
+    this.capabilityGapAttempts = 0;
+    this.capabilityGapFirstMs = 0;
   }
 
   private isRetryableReconnectError(error: unknown): boolean {
@@ -3339,17 +3401,25 @@ function hasClusterWideUpgradeRejection(error: unknown): boolean {
   );
 }
 
-/** Returns a durable-ACK gap only when it accounts for the whole failure. */
-function durableAckUnavailableCause(
-  error: unknown,
-): QwpDurableAckUnavailableError | undefined {
-  if (error instanceof QwpDurableAckUnavailableError) return error;
+/**
+ * Returns the first capability gap -- a missing durable ACK or an unconfirmed
+ * owner -- only when gaps account for the whole failure. A sweep that also met
+ * a transport error or a role reject may yet reach an endpoint with the
+ * capability, so it is not a gap but an ordinary retryable failure.
+ */
+function capabilityGapCause(error: unknown): QwpCapabilityGap | undefined {
+  if (
+    error instanceof QwpDurableAckUnavailableError ||
+    error instanceof QwpOwnedByMismatchError
+  ) {
+    return error;
+  }
   if (!(error instanceof QwpFailoverError) || error.attempts.length === 0) {
     return undefined;
   }
-  let cause: QwpDurableAckUnavailableError | undefined;
+  let cause: QwpCapabilityGap | undefined;
   for (const attempt of error.attempts) {
-    const attemptCause = durableAckUnavailableCause(attempt.error);
+    const attemptCause = capabilityGapCause(attempt.error);
     if (!attemptCause) return undefined;
     cause ??= attemptCause;
   }

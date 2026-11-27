@@ -31,6 +31,7 @@ export {
   QWP_ORPHAN_FAILED_SENTINEL,
   QWP_SF_BACKPRESSURE_POLICY,
   QWP_SF_DURABILITY,
+  QwpOwnedByMismatchError,
   QwpReplayStoreAppendTimeoutError,
   QwpReplayStoreBatchTooLargeError,
   QwpReplayStoreCheckpointError,

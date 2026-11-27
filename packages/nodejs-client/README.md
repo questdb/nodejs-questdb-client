@@ -198,6 +198,14 @@ transactions, reconnect, failover, compiled row writers, and metrics. See the
 [QWP guide](https://github.com/questdb/nodejs-questdb-client/blob/main/QWP.md)
 for the delivery semantics of each option.
 
+With QuestDB Enterprise, `owned_by=<name>` (the `ownedBy` option) names the
+user, group, or service account that owns the tables and columns the sender
+auto-creates, as `OWNED BY` does in SQL. An external user, such as one that
+authenticates with an OpenID Connect token, must name one of its groups to have
+anything auto-created. A server that does not confirm the owner fails the
+connection with `QwpOwnedByMismatchError`; see
+[Owner of auto-created tables](https://github.com/questdb/nodejs-questdb-client/blob/main/QWP.md#owner-of-auto-created-tables).
+
 ### Type-safe object rows
 
 For repeated object-shaped rows, compile a table schema once. TypeScript then

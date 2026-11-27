@@ -802,7 +802,7 @@ describe("QWP WebSocket adapters", () => {
     const socket = new FakeWebSocket();
     const events: string[] = [];
     const connecting = connectQwpBrowserWebSocket({
-      url: "wss://questdb.example/proxy/write/v4?tenant=blue&query=stale&session=false&qwp_browser_handshake=v1&qwp_accept_encoding=zstd&qwp_max_batch_rows=10",
+      url: "wss://questdb.example/proxy/write/v4?tenant=blue&query=stale&session=false&qwp_browser_handshake=v1&qwp_accept_encoding=zstd&qwp_max_batch_rows=10&qwp_owned_by=team",
       sessionBootstrap: {
         authentication: { type: "bearer", token: "rest-token" },
         fetch: async (input) => {
@@ -827,6 +827,7 @@ describe("QWP WebSocket adapters", () => {
     expect(bootstrapUrl.searchParams.has("qwp_browser_handshake")).toBe(false);
     expect(bootstrapUrl.searchParams.has("qwp_accept_encoding")).toBe(false);
     expect(bootstrapUrl.searchParams.has("qwp_max_batch_rows")).toBe(false);
+    expect(bootstrapUrl.searchParams.has("qwp_owned_by")).toBe(false);
     expect(events[1]).toBe("websocket");
     await connection.close();
   });
@@ -3539,6 +3540,97 @@ describe("QWP browser credential authentication", () => {
         await sender.close().catch(() => undefined);
       }
     }
+  });
+});
+
+describe("QWP browser owned_by", () => {
+  // A name the URL must encode: UTF-8, a space, '+' and '%'.
+  const owner = "café team+%1";
+
+  it("names the owner in the qwp_owned_by parameter of every ingress upgrade", async () => {
+    // A browser cannot set X-QWP-Owned-By, so the owner travels in the URL,
+    // which QuestDB reads when the header is absent and decodes as UTF-8,
+    // '+' as a space.
+    const urls: string[] = [];
+    const factory = (url: string | URL, protocols?: string | string[]) => {
+      urls.push(String(url));
+      return asQwpSocket(questDbBrowserSocket(url, protocols));
+    };
+    const connection = await createQwpBrowserConnectionFactory({
+      url: "ws://localhost:9000/write/v4?tenant=blue",
+      ownedBy: owner,
+      webSocketFactory: factory,
+    })();
+    await connection.close();
+    // The raw path asks for no SERVER_INFO without durable ACK, but still
+    // names the owner.
+    const raw = await connectQwpBrowserWebSocket({
+      url: "ws://localhost:9000/write/v4",
+      ownedBy: owner,
+      webSocketFactory: factory,
+    });
+    await raw.close();
+
+    expect(urls).toHaveLength(2);
+    const [ingress, rawIngress] = urls.map((url) => new URL(url));
+    expect(ingress.searchParams.get("tenant")).toBe("blue");
+    expect(ingress.searchParams.get("qwp_browser_handshake")).toBe("v1");
+    expect(ingress.searchParams.get("qwp_owned_by")).toBe(owner);
+    expect(ingress.search).toContain("qwp_owned_by=caf%C3%A9+team%2B%251");
+    expect(rawIngress.searchParams.get("qwp_owned_by")).toBe(owner);
+    expect(rawIngress.searchParams.has("qwp_browser_handshake")).toBe(false);
+  });
+
+  it("names no owner on a query session or a REST bootstrap", async () => {
+    const urls: string[] = [];
+    const client = await connectQwpBrowserClient({
+      cluster: {
+        url: "ws://localhost:9000",
+        sessionBootstrap: {
+          authentication: { type: "bearer", token: "rest-token" },
+          fetch: async (input) => {
+            urls.push(String(input));
+            return new Response("{}", { status: 200 });
+          },
+        },
+        webSocketFactory: (url, protocols) => {
+          urls.push(String(url));
+          return asQwpSocket(questDbBrowserSocket(url, protocols));
+        },
+      },
+      ingress: { ownedBy: "team_a" },
+      pool: { senderPoolMin: 1, queryPoolMin: 1 },
+    });
+    await client.close();
+    const named = (path: string) =>
+      urls
+        .map((url) => new URL(url))
+        .filter((url) => url.pathname === path)
+        .map((url) => url.searchParams.get("qwp_owned_by"));
+    expect(named("/write/v4")).toEqual(["team_a"]);
+    expect(named("/read/v1")).toEqual([null]);
+    expect(named("/exec")).toEqual([null, null]);
+  });
+
+  it("rejects an owner that names nobody before connecting", () => {
+    expect(() =>
+      createQwpBrowserSender({
+        url: "ws://localhost:9000/write/v4",
+        ownedBy: " ",
+      }),
+    ).toThrow("ownedBy must not be empty or blank");
+    expect(() =>
+      createQwpBrowserClient({
+        cluster: { url: "ws://localhost:9000" },
+        ingress: { ownedBy: "" },
+      }),
+    ).toThrow("ingress.ownedBy must not be empty or blank");
+    expect(() =>
+      createQwpBrowserConnectionFactory({
+        url: "ws://localhost:9000/write/v4",
+        ownedBy: "team\uDC00",
+      }),
+    ).toThrow("ownedBy must not contain a lone surrogate");
   });
 });
 

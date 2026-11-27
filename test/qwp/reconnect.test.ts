@@ -28,6 +28,7 @@ import {
   QwpReplayStoreLockedError,
   QwpReplayStoreLockLostError,
   QwpReplayStoreSegmentTooLargeError,
+  QwpOwnedByMismatchError,
   type QwpNodeReplayDataLossReport,
 } from "../../packages/nodejs-client/src";
 import {
@@ -112,6 +113,7 @@ import type {
 import { QwpAsyncQueue } from "../../packages/client-core/src/_qwp/_internal/async-queue";
 import {
   QWP_MEMORY_REPLAY_RECORD_OVERHEAD_BYTES,
+  QwpOwnedByPersistentFailureError,
   QwpReconnectingIngressConnection,
 } from "../../packages/client-core/src/_qwp/_internal/reconnecting-ingress-connection";
 import { validateQwpWebSocketTimeouts } from "../../packages/client-core/src/_qwp/_internal/websocket-connection";
@@ -4582,6 +4584,322 @@ describe("QWP ingress reconnect and replay", () => {
           QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
       ),
     ).toBe(false);
+    await session.close();
+  });
+
+  it("keeps an unconfirmed owner fail-fast for a blocking startup", async () => {
+    // Like a missing durable ACK: a writable endpoint without the feature is
+    // the caller's to see when it starts, with a journal or without one.
+    for (const backgroundStoreAndForward of [false, true]) {
+      for (const initialConnectMode of ["off", "sync"] as const) {
+        let factoryCalls = 0;
+        await expect(
+          QwpIngressSession.connect(
+            async () => {
+              factoryCalls++;
+              throw new QwpOwnedByMismatchError(
+                "ws://primary/write/v4",
+                "team_a",
+                undefined,
+              );
+            },
+            {
+              backgroundStoreAndForward,
+              initialConnectMode,
+              // Room for many retries, so a retried gap would show.
+              reconnect: {
+                reconnectMaxDurationMs: 200,
+                reconnectInitialBackoffMs: 0,
+                reconnectMaxBackoffMs: 0,
+              },
+              replayStore: backgroundStoreAndForward
+                ? new TrackingReplayStore()
+                : undefined,
+            },
+          ),
+        ).rejects.toBeInstanceOf(QwpOwnedByMismatchError);
+        expect(factoryCalls).toBe(1);
+      }
+    }
+  });
+
+  it("rides out an unconfirmed owner during asynchronous foreground startup", async () => {
+    const connection = new FakeConnection("primary");
+    const events: QwpReconnectEvent[] = [];
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls <= 2) {
+          throw new QwpOwnedByMismatchError(
+            "ws://primary/write/v4",
+            "team_a",
+            undefined,
+          );
+        }
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+          onEvent: (event) => events.push(event),
+        },
+        replayStore: new TrackingReplayStore(),
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(7));
+    await vi.waitFor(() => expect(connection.sent).toEqual([Uint8Array.of(7)]));
+    expect(factoryCalls).toBe(3);
+    // Each refused sweep is reported with the gap as its cause, but the
+    // durable-ACK events report durable ACK only.
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.kind === QWP_RECONNECT_EVENT_KIND.ALL_ENDPOINTS_UNREACHABLE,
+        )
+        .map((event) => event.cause),
+    ).toEqual([
+      expect.any(QwpOwnedByMismatchError),
+      expect.any(QwpOwnedByMismatchError),
+    ]);
+    expect(
+      events.some(
+        (event) =>
+          event.kind === QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE ||
+          event.kind ===
+            QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+      ),
+    ).toBe(false);
+    await session.close();
+  });
+
+  it("rides out an unconfirmed owner once foreground SF connected", async () => {
+    // A rolling upgrade, or a failover to a node it has not reached yet, must
+    // not strand a running producer's journal.
+    const first = new FakeConnection("primary");
+    const replacement = new FakeConnection("primary");
+    const replayStore = new TrackingReplayStore();
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return first;
+        if (factoryCalls <= 4) {
+          throw new QwpOwnedByMismatchError(
+            "ws://primary/write/v4",
+            "team_a",
+            "other",
+          );
+        }
+        return replacement;
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "off",
+        reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+        replayStore,
+      },
+    );
+
+    await session.publishFrame(Uint8Array.of(7));
+    await vi.waitFor(() => expect(first.sent).toEqual([Uint8Array.of(7)]));
+    first.drop();
+    await vi.waitFor(() => {
+      expect(factoryCalls).toBe(5);
+      expect(replacement.sent).toEqual([Uint8Array.of(7)]);
+    });
+    replacement.receive(ingressResponse(QWP_STATUS.OK, 0n));
+    await vi.waitFor(() => expect(replayStore.records.size).toBe(0));
+    expect(session.metrics.lastError).toBeUndefined();
+    await session.close();
+  });
+
+  it("ends a memory-replay sender on an unconfirmed owner, as on a missing durable ACK", async () => {
+    // Without a journal or an asynchronous startup, a reconnect fails on a
+    // capability gap as it fails on any rejection that is not retryable.
+    const first = new FakeConnection("primary");
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return first;
+        throw new QwpOwnedByMismatchError(
+          "ws://primary/write/v4",
+          "team_a",
+          undefined,
+        );
+      },
+      {
+        initialConnectMode: "off",
+        reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+      },
+    );
+
+    first.drop();
+    await session.closed;
+    expect(factoryCalls).toBe(2);
+    expect(session.metrics.lastError).toBeInstanceOf(QwpOwnedByMismatchError);
+    await session.close();
+  });
+
+  it("bounds an orphan's unconfirmed owner like a missing durable ACK", async () => {
+    // The writable endpoints lack the feature, which a rolling upgrade clears,
+    // so an orphan rides the gap out within the settle budget and quarantines
+    // the slot only once it runs out: replaying it elsewhere would auto-create
+    // tables without the owner its producer named.
+    const events: QwpReconnectEvent[] = [];
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        throw new QwpOwnedByMismatchError(
+          "ws://primary/write/v4",
+          "team_a",
+          undefined,
+        );
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        orphanStoreAndForward: true,
+        orphanDurableAckMismatchMaxDurationMs: 0,
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+          onEvent: (event) => events.push(event),
+        },
+        replayStore: new TrackingReplayStore(),
+      },
+    );
+
+    await session.closed;
+    expect(factoryCalls).toBe(16);
+    const failure = session.metrics.lastError;
+    expect(failure).toBeInstanceOf(QwpOwnedByPersistentFailureError);
+    expect(failure).toMatchObject({
+      attempts: 16,
+      cause: expect.any(QwpOwnedByMismatchError),
+    });
+    expect(failure?.message).toMatch(
+      /^QWP owned_by remained unconfirmed for an orphan replay slot \[attempts=16\/16, episodeMs=[\d.]+\]: QWP server did not confirm owned_by/,
+    );
+    // The durable-ACK events report durable ACK only.
+    expect(
+      events.some(
+        (event) =>
+          event.kind === QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE ||
+          event.kind ===
+            QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+      ),
+    ).toBe(false);
+    await session.close();
+  });
+
+  it("shares one orphan capability-gap budget between durable ACK and owned_by", async () => {
+    // Either gap is a sweep that found the cluster short of a capability the
+    // replay needs, so sweeps that alternate between them are one uninterrupted
+    // episode, not two budgets of their own.
+    const events: QwpReconnectEvent[] = [];
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        throw factoryCalls % 2 === 1
+          ? new QwpOwnedByMismatchError(
+              "ws://primary/write/v4",
+              "team_a",
+              undefined,
+            )
+          : new QwpDurableAckUnavailableError("ws://primary/write/v4");
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        orphanStoreAndForward: true,
+        orphanDurableAckMismatchMaxDurationMs: 0,
+        reconnect: {
+          reconnectInitialBackoffMs: 0,
+          reconnectMaxBackoffMs: 0,
+          onEvent: (event) => events.push(event),
+        },
+        replayStore: new TrackingReplayStore(),
+      },
+    );
+
+    await session.closed;
+    expect(factoryCalls, "the two gaps must share one budget").toBe(16);
+    // Only the durable-ACK sweeps, the even ones, report durable ACK, numbered
+    // within the shared episode. The last sweep is one of them, so it reports
+    // the persistent failure instead of the unavailability.
+    await vi.waitFor(() =>
+      expect(
+        events
+          .filter(
+            (event) =>
+              event.kind ===
+              QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_PERSISTENT_FAILURE,
+          )
+          .map((event) => event.attempt),
+      ).toEqual([16]),
+    );
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.kind === QWP_RECONNECT_EVENT_KIND.DURABLE_ACK_UNAVAILABLE,
+        )
+        .map((event) => event.attempt),
+    ).toEqual([2, 4, 6, 8, 10, 12, 14]);
+    expect(session.metrics.lastError).toMatchObject({
+      name: "QwpDurableAckPersistentFailureError",
+      attempts: 16,
+    });
+    await session.close();
+  });
+
+  it("does not count a sweep that also met a transport failure as an owner gap", async () => {
+    // The offline endpoint may come back with the feature, so the sweep is an
+    // ordinary retryable failure that spends none of the orphan's budget.
+    const connection = new FakeConnection("primary");
+    let factoryCalls = 0;
+    const session = await QwpIngressSession.connect(
+      async () => {
+        factoryCalls++;
+        if (factoryCalls <= 16) {
+          throw new QwpFailoverError([
+            {
+              endpoint: "ws://old-primary/write/v4",
+              error: new QwpOwnedByMismatchError(
+                "ws://old-primary/write/v4",
+                "team_a",
+                undefined,
+              ),
+            },
+            {
+              endpoint: "ws://offline/write/v4",
+              error: new Error("connection refused"),
+            },
+          ]);
+        }
+        return connection;
+      },
+      {
+        backgroundStoreAndForward: true,
+        initialConnectMode: "async",
+        orphanStoreAndForward: true,
+        orphanDurableAckMismatchMaxDurationMs: 0,
+        reconnect: { reconnectInitialBackoffMs: 0, reconnectMaxBackoffMs: 0 },
+        replayStore: new TrackingReplayStore(),
+      },
+    );
+
+    await vi.waitFor(() => expect(factoryCalls).toBe(17));
+    expect(session.metrics.lastError).toBeUndefined();
     await session.close();
   });
 
