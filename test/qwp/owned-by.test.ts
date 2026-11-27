@@ -20,6 +20,7 @@ import {
   QwpOwnedByMismatchError,
   QwpUpgradeError,
   Sender,
+  type SenderOptions,
 } from "../../packages/nodejs-client/src";
 // Internal: the package root exports neither the ingress-session factory nor
 // the raw WebSocket connector, nor the store-and-forward journal.
@@ -317,9 +318,11 @@ describe("QWP owned_by encoding", () => {
 
   it("makes server text safe to display", () => {
     // Controls, CR/LF, bidirectional overrides, zero-width and other format
-    // characters, line separators and lone surrogates.
+    // characters, line and paragraph separators, and lone surrogates.
     expect(
-      sanitizeQwpDisplayText("a\r\n\u0007b\u202Ec\u200Bd\u2028e\uFEFF\uD800f"),
+      sanitizeQwpDisplayText(
+        "a\r\n\u0007b\u202Ec\u200Bd\u2028\u2029e\uFEFF\uD800f",
+      ),
     ).toBe("abcdef");
     expect(sanitizeQwpDisplayText("x".repeat(256))).toBe("x".repeat(256));
     // Cut to 256 characters, the last three of which mark the cut.
@@ -568,6 +571,46 @@ describe("QWP owned_by sender", () => {
       { path: "/write/v4", ownedBy: OWNER_ENCODED },
       { path: "/write/v4", ownedBy: "team_a" },
     ]);
+  });
+
+  it("rejects an owner also spelled as a header when the sender is created", async () => {
+    // A configuration error, like a blank owner: the lazy factories report it
+    // rather than leave it to the first connect() or flush().
+    const conflict =
+      "an X-QWP-Owned-By header cannot be combined with the 'ownedBy' option; set exactly one of them";
+    expect(() =>
+      createQwpNodeSender({
+        url: "ws://127.0.0.1:1/write/v4",
+        ownedBy: "team_a",
+        headers: { "x-qwp-owned-by": "team_b" },
+      }),
+    ).toThrow(conflict);
+    await expect(
+      Sender.fromConfig("ws::addr=127.0.0.1:1;owned_by=team_a;", {
+        qwp: { webSocket: { headers: { "X-QWP-Owned-By": "team_b" } } },
+      }),
+    ).rejects.toThrow(conflict);
+    expect(
+      () =>
+        new Sender({
+          protocol: "ws",
+          host: "127.0.0.1",
+          port: 1,
+          qwp: {
+            webSocket: {
+              ownedBy: "team_a",
+              headers: { "X-QWP-Owned-By": "team_b" },
+            },
+          },
+        } as SenderOptions),
+    ).toThrow(conflict);
+
+    // The header on its own is still the caller's escape hatch.
+    const sender = createQwpNodeSender({
+      url: "ws://127.0.0.1:1/write/v4",
+      headers: { "X-QWP-Owned-By": "team_b" },
+    });
+    await sender.close();
   });
 
   it("fails its first connect when the owner is not confirmed", async () => {

@@ -1226,7 +1226,7 @@ describe("QWP unified Node client configuration", () => {
     expect(shared.egress).not.toHaveProperty("requestDurableAck");
   });
 
-  it("keeps ownedBy on ingress", () => {
+  it("keeps ownedBy on ingress", async () => {
     // An owner is named on /write/v4 only: a query session creates nothing,
     // and the Java client's query client accepts the key as an ingress one.
     const fromString = parseQwpNodeClientConfig(
@@ -1263,6 +1263,35 @@ describe("QWP unified Node client configuration", () => {
         ingress: { ownedBy: "" },
       }),
     ).toThrow("ingress.ownedBy must not be empty or blank");
+
+    // Spelled again through the headers escape hatch, whichever section
+    // carries the header, it is rejected when the client is created.
+    const conflict =
+      "an X-QWP-Owned-By header cannot be combined with the 'ownedBy' option";
+    expect(() =>
+      createQwpNodeClient({
+        cluster: {
+          url: "ws://localhost:9000",
+          headers: { "x-qwp-owned-by": "team_b" },
+        },
+        ingress: { ownedBy: "team_a" },
+      }),
+    ).toThrow(conflict);
+    expect(() =>
+      parseQwpNodeClientConfig("ws::addr=localhost:9000;owned_by=team_a;", {
+        ingress: { headers: { "X-QWP-Owned-By": "team_b" } },
+      }),
+    ).toThrow(conflict);
+    // Ingress headers replace the cluster's, so ingress never sends a header
+    // they leave out.
+    const client = createQwpNodeClient({
+      cluster: {
+        url: "ws://localhost:9000",
+        headers: { "X-QWP-Owned-By": "team_b" },
+      },
+      ingress: { ownedBy: "team_a", headers: { "X-Trace": "1" } },
+    });
+    await client.close();
   });
 
   it("routes a Sender's owned_by and typed ownedBy to ingress", async () => {

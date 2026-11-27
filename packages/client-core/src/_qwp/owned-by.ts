@@ -87,6 +87,27 @@ export function validateQwpOwnedBy(
 }
 
 /**
+ * @internal Rejects an `ownedBy` owner that the `headers` escape hatch also
+ * names, as an `X-QWP-Owned-By` entry in any letter case: depending on which
+ * one won, the owner would go unconfirmed or never reach the wire. The same
+ * rule as for `authorization` and an `Authorization` header. The header on its
+ * own stays the caller's to send, unconfirmed.
+ */
+export function assertNoQwpOwnedByHeaderConflict(
+  ownedBy: string | undefined,
+  headers: Readonly<Record<string, string>> | undefined,
+): void {
+  if (ownedBy === undefined || !headers) return;
+  if (
+    Object.keys(headers).some((name) => name.toLowerCase() === "x-qwp-owned-by")
+  ) {
+    throw new Error(
+      "an X-QWP-Owned-By header cannot be combined with the 'ownedBy' option; set exactly one of them",
+    );
+  }
+}
+
+/**
  * @internal The `X-QWP-Owned-By` encoding of a validated owner name: its UTF-8
  * bytes, with the RFC 3986 unreserved characters (`A`-`Z`, `a`-`z`, `0`-`9`,
  * `-`, `.`, `_` and `~`) as they are and every other byte as `%XX` with

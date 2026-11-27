@@ -39,7 +39,10 @@ import {
   QWP_MAX_SEGMENT_BYTES,
   QWP_SF_DEFAULTS,
 } from "./file-replay-store";
-import { validateQwpOwnedBy } from "../../../client-core/src/_qwp/owned-by";
+import {
+  assertNoQwpOwnedByHeaderConflict,
+  validateQwpOwnedBy,
+} from "../../../client-core/src/_qwp/owned-by";
 import type { QwpIngressSessionOptions } from "../../../client-core/src/_qwp/ingress-session";
 import type { QwpSenderOptions } from "../../../client-core/src/_qwp/sender";
 import {
@@ -1132,6 +1135,14 @@ export function normalizeQwpNodeClientOptions(
   // Checked here, as the mode above is, so a pooled client reports it when it
   // is created rather than at its first sender's connect.
   validateQwpOwnedBy(options.ingress?.ownedBy, "ingress.ownedBy");
+  // Against the headers ingress ends up with: resolveQwpNodeClientSides()
+  // lets the ingress section's headers replace the cluster's, not merge.
+  assertNoQwpOwnedByHeaderConflict(
+    options.ingress?.ownedBy,
+    options.ingress?.headers !== undefined
+      ? options.ingress.headers
+      : options.cluster?.headers,
+  );
   if (!options.lazyConnect) return options;
   if (
     initialConnectMode !== undefined &&

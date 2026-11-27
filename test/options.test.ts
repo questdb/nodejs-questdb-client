@@ -1217,6 +1217,22 @@ describe("Configuration string parser suite", function () {
     ).toThrow(
       "qwp.webSocket.initialConnectMode must be 'off', 'sync', or 'async'",
     );
+
+    const blankOwner = { ownedBy: " " };
+    await expect(
+      SenderOptions.fromConfig("ws::addr=localhost:9000;", {
+        qwp: { webSocket: blankOwner },
+      }),
+    ).rejects.toThrow("qwp.webSocket.ownedBy must not be empty or blank");
+    expect(
+      () =>
+        new Sender({
+          protocol: "ws",
+          host: "localhost",
+          port: 9000,
+          qwp: { webSocket: blankOwner },
+        } as SenderOptions),
+    ).toThrow("qwp.webSocket.ownedBy must not be empty or blank");
   });
 
   it("leaves QWP-only keys to the QWP schema", async function () {

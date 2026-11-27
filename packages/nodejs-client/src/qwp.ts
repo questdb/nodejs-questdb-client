@@ -41,6 +41,7 @@ import { safelyInvoke } from "../../client-core/src/_qwp/_internal/safe-callback
 import { assertNoQwpIngressRouting } from "../../client-core/src/_qwp/_internal/option-sections";
 import { sanitizeQwpDisplayText } from "../../client-core/src/_qwp/_internal/display-text";
 import {
+  assertNoQwpOwnedByHeaderConflict,
   encodeQwpOwnedBy,
   QwpOwnedByMismatchError,
   validateQwpOwnedBy,
@@ -814,21 +815,12 @@ function connectQwpNodeEndpoint(
     headers["X-QWP-Request-Durable-Ack"] = "true";
   }
   if (ownedByHeader !== undefined) {
-    // The same rule as for Authorization: an owner the caller also spelled
-    // through the headers escape hatch would otherwise go unconfirmed, or
-    // never reach the wire, depending on which one won.
-    if (
-      Object.keys(headers).some(
-        (name) => name.toLowerCase() === "x-qwp-owned-by",
-      )
-    ) {
-      return Promise.reject(
-        qwpNonRetryable(
-          new Error(
-            "an X-QWP-Owned-By header cannot be combined with the 'ownedBy' option; set exactly one of them",
-          ),
-        ),
-      );
+    // The senders and the pooled client reject this when they are created; a
+    // caller of the raw connector meets it here.
+    try {
+      assertNoQwpOwnedByHeaderConflict(owner, headers);
+    } catch (error) {
+      return Promise.reject(qwpNonRetryable(error as Error));
     }
     headers["X-QWP-Owned-By"] = ownedByHeader;
   }
@@ -1242,6 +1234,7 @@ export function createQwpNodeSender(options: QwpNodeIngressOptions): QwpSender {
   assertUniformQwpEndpointScheme(options.url, options.failoverUrls);
   assertNoQwpIngressRouting(options, "", "set it on the egress options");
   validateQwpOwnedBy(options.ownedBy);
+  assertNoQwpOwnedByHeaderConflict(options.ownedBy, options.headers);
   return createQwpSender(
     (signal) => connectQwpNodeIngress(options, signal),
     options,
